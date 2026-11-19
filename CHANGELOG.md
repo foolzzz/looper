@@ -18,6 +18,46 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.16] - 2026-11-19
+
+### Changed
+
+- **Group chats: no wait or concurrency notices, short schedule replies.** ([#1419](https://github.com/foolzzz/looper/pull/1419), fixes [#1412](https://github.com/foolzzz/looper/issues/1412))
+  - A Lark or Telegram group no longer gets the notice that a task's wait timed out or that the Planner changed its concurrency; both stay in the dashboard and the journal. The Planner's concurrency tool answers `user_told: false` for a group task.
+  - A schedule update in a group is answered with one line naming the schedule, its project and the changed settings (no values, directories or fire times). Enabling or running a schedule, raising a cap and editing an enabled command ask one short question without the schedule's settings.
+  - Direct chats and the dashboard are unchanged. The group's schedule update reply is model-visible content.
+
+### Fixed
+
+- **Tests: the scheduled installed-runtime tests are green again.** ([#1416](https://github.com/foolzzz/looper/pull/1416)) Tests lagged earlier deliberate product changes; test only, no behavior change.
+
+### Documentation
+
+- **Message stream and subscriptions RFC.** ([#1415](https://github.com/foolzzz/looper/pull/1415)) A design proposal only; no code or behavior change.
+
+## [2.15.15] - 2026-11-18
+
+### Added
+
+- **Group chats: a task's end notice carries the whole conclusion.** ([#1411](https://github.com/foolzzz/looper/pull/1411))
+  - In a Lark or Telegram group the end notice has the whole summary, not the first section cut at about 300 characters. A notice over 4,000 characters is sent as ordered messages, cut between lines. Direct chats are unchanged.
+  - The task link is attached only when `public_url` is configured; the wait, concurrency and gate messages drop the link likewise.
+  - New column `tasks.chat_group` (additive migration `task_chat_group`); tasks from before it count as direct chats.
+
+### Changed
+
+- **Group chats: no task configuration and no process messages.** ([#1410](https://github.com/foolzzz/looper/pull/1410))
+  - After a task or schedule is created in a group, the Manager's answer carries only the question whether to start (or enable) it, not the directory, profiles, review policy, spend cap or concurrency. The group no longer gets the task breakdown, progress updates or phase reports; the end notice, gates and the Manager's own answers stay. Direct chats and the dashboard are unchanged. A group task already running keeps posting progress until it ends.
+  - The Manager's tool contract and default prompt gain a short "in a group chat only the question" clause (model-visible).
+
+### Fixed
+
+- **Lark: a reply to a thread's first message reads the thread.** ([#1409](https://github.com/foolzzz/looper/pull/1409))
+  - Such a reply used to be read as a plain reply, so the Manager saw the first message but none of the thread's recent replies. It now gets the first message and the latest 10, like any reply in a thread.
+- **Lark: reading a quoted message is faster.** ([#1409](https://github.com/foolzzz/looper/pull/1409))
+  - The batch read now runs beside the single read and answers first when it can; a read of one message went from about 4.3 s to about 3.7 s (median). The rendered quote is unchanged. The `lark_quote` log line now ends with `read=… names=… files=…` timings.
+- **Tests: ticker-gap tests no longer flake on loaded runners.** ([#1408](https://github.com/foolzzz/looper/pull/1408), [#1413](https://github.com/foolzzz/looper/pull/1413)) Test only; no behavior change.
+
 ## [2.15.14] - 2026-11-18
 
 ### Added

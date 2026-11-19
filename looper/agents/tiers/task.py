@@ -562,7 +562,7 @@ class TaskRouter:
         name = db_tasks.task_name(title=task.title, goal_id=task.goal_id, requirement=task.requirement,
                                   task_id=task.task_id)
         text = notice_text(task.task_id, name, status, summary, channel=channel, dashboard_url=self._dashboard_url,
-                           extra=branch_line, delivery_summary=delivery_summary)
+                           extra=branch_line, delivery_summary=delivery_summary, group=task.notify.group)
         return Notice(channel, task.notify, text, channel_id=task.origin_channel_id)
 
     async def _finish_workspace(self, task: Task) -> str | None:

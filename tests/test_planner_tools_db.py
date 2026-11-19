@@ -527,6 +527,17 @@ def test_the_planner_changes_its_tasks_limits_at_once_and_the_chat_is_told(
         assert answer["user_told"] is False and "the user is told" not in answer["note"]
         assert len(await _journal(pool, "task-web", "concurrency_change")) == 1
         assert _notices(bus, "lark") == [] and _notices(bus, "web") == []
+
+        # A task from a group chat: the group is told the task's end, not its process; the journal records it.
+        await tasks.create_task(task_id="task-group", requirement="build calc", project_id=project["id"],
+                                work_dir="/w", status="running", origin_channel_id="channel-lark", chat_id="oc_1",
+                                chat_kind="chat", chat_mention="ou_1", chat_group=True, title="计算器", pool=pool)
+        group = _Planner(ops, "task-group")
+        answer = (await group("looper_task_concurrency", {"limits": {"worker": 2}, "reason": "one database"}))[
+            "result"]
+        assert answer["user_told"] is False and "the user is told" not in answer["note"]
+        assert len(await _journal(pool, "task-group", "concurrency_change")) == 1
+        assert _notices(bus, "lark") == []
         await bus.shutdown()
 
     run_db(test, monkeypatch)

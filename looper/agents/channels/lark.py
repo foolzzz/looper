@@ -33,7 +33,7 @@ from ..message import (
     manager_address,
     parse_channel_id,
 )
-from ..task_notice import Notice, NotifyTarget, TargetKind
+from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
@@ -373,9 +373,14 @@ class LarkChannelAdapter(ChannelAdapter):
                 r'(^## Process record\n\n)((?:- (?:Roles|Reviews|Verification|Escalations): .*\n?)+)',
                 lambda block: block[1] + re.sub(r'([\\`*_~\[\]<>])', r'\\\1', block[2]),
                 text, flags=re.MULTILINE)
-            await self._send_target(target, rendered)
+            # A group notice carries the whole summary: several messages in order, the first @-mentioning the
+            # requester. A part that fails ends the notice; the parts before it are not sent again.
+            parts = split_message(rendered) if target.group else [rendered]
+            for number, part in enumerate(parts):
+                await self._send_target(target if number == 0 else replace(target, mention=None), part)
         except LarkCliError as exc:
-            logger.warning("%s: a task's end notice to %s failed: %s", self.channel_id, target.id, exc)
+            logger.warning("%s: a task's end notice to %s failed%s: %s", self.channel_id, target.id,
+                           f" at part {number + 1} of {len(parts)}" if len(parts) > 1 else "", exc)
             return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
         return DeliveryReceipt(channel=self.channel_type, success=True)
 
