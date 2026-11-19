@@ -60,7 +60,7 @@ from .llmrec import control as llmrec
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
 from . import single_run
-from .agent_settings import AgentType, Launch, load_agent_settings
+from .agent_settings import Access, AgentType, Launch, load_agent_settings
 from .drain import DrainState
 from .runtimes import ReadOnly
 from .runtimes.channel import Fork, RunHandle, RunStartError
@@ -339,7 +339,7 @@ class ConsultService:
             raise _Failed(FallbackReason.RUNTIME_CANNOT, "the seat's Agent Profile now runs on another runtime or "
                                                          "provider than its session")
         budget = min(limits.consult_budget_usd, settings.max_budget_usd or limits.consult_budget_usd)
-        launch = Launch(replace(settings, max_budget_usd=budget), role=agent, consult=True)
+        launch = Launch(replace(settings, max_budget_usd=budget), role=agent, access=Access.CONSULT)
         launch = await llmrec.attach(launch, agent_id=run_id, task_id=task_id)
         from .profile_registry import cost_basis
 

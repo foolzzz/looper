@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
@@ -121,7 +121,7 @@ def test_a_consult_forks_one_session_into_a_home_of_its_own_and_takes_no_credent
     assert GROK.kept_session_dir(ran) == home
     before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file() and not p.is_symlink()}
     fork = root / ".local" / "grok" / "consult-sessions" / "task-1" / "consult-1"
-    launch = dataclasses.replace(_launch(), role=AgentType.WORKER, consult=True)
+    launch = dataclasses.replace(_launch(), role=AgentType.WORKER, access=Access.CONSULT)
     command = GROK.consult_command("grok", cwd=tmp_path, prompt_file=_prompt_file(root, "THE CONSULT RULES"),
                                    launch=launch, session_id="sess-1", session_dir=home, fork_dir=fork, max_turns=20)
 
@@ -371,7 +371,7 @@ def test_the_config_keeps_the_operators_and_other_tools_directories_out(
 def test_only_a_read_only_run_is_cut_down_to_the_reading_tools(
     role: AgentType | None, consult: bool, read_only: bool, tmp_path: Path,
 ) -> None:
-    launch = dataclasses.replace(_launch(), role=role, consult=consult)
+    launch = dataclasses.replace(_launch(), role=role, access=Access.CONSULT if consult else None)
     assert launch.read_only is read_only and GROK.read_only is ReadOnly.TOOLS
     for command in (GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch),
                     GROK.resident_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)):

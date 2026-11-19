@@ -10,6 +10,7 @@ import pytest
 
 from looper.agents import claude_cli
 from looper.agents.agent_settings import (
+    Access,
     BUILTIN_SETTINGS, BUILTIN_SYSTEM_PROMPT_MODE, AgentSettings, AgentType, Launch, Layer, LayerValues, SettingsError,
     layer_update, resolve, role_system_prompt_mode, system_prompt_mode_choice,
 )
@@ -131,7 +132,7 @@ def test_every_other_claude_code_launch_appends(kind: str) -> None:
     role = {"worker": AgentType.WORKER, "reviewer": AgentType.REVIEWER}.get(kind.split("-")[-1])
     layers = _task_role_layers(role) if kind.startswith("task-role") and role else {}
     launch = Launch(replace(resolve(role, layers), profile=builtin_resolved_profile()), role=role,
-                    consult=kind.startswith("consult"))
+                    access=Access.CONSULT if kind.startswith("consult") else None)
     runtime = adapter("claude-code")
     command = runtime.run_command(runtime.default_executable, cwd=Path("."), prompt_file=Path("prompt.md"),
                                   launch=launch)
@@ -190,7 +191,7 @@ def test_a_consult_appends_whatever_the_seats_mode() -> None:
     layers = {(Layer.TASK, AgentType.WORKER): LayerValues(system_prompt_mode=REPLACE)}
     settings = resolve(AgentType.WORKER, layers)
     assert Launch(settings, role=AgentType.WORKER).system_prompt_mode is REPLACE
-    assert Launch(settings, role=AgentType.WORKER, consult=True).system_prompt_mode is APPEND
+    assert Launch(settings, role=AgentType.WORKER, access=Access.CONSULT).system_prompt_mode is APPEND
 
 
 @pytest.mark.parametrize("role", list(AgentType))

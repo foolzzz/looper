@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch, profile_launch_problem
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch, profile_launch_problem
 from looper.agents.profile_registry import (
     Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
 )
@@ -93,7 +93,7 @@ def test_ttadk_prefix_preserves_every_codex_command(builder: str, tmp_path: Path
             return CODEX.resident_command(executable, **args) + CODEX.resume_args("thread-1")
         if builder == "steer":
             return CODEX.steer_command(executable, **args)
-        return CODEX.consult_command(executable, **{**args, "launch": replace(launch, consult=True)},
+        return CODEX.consult_command(executable, **{**args, "launch": replace(launch, access=Access.CONSULT)},
             session_id="thread-1", session_dir=kept, fork_dir=tmp_path / f"fork-{launcher.value}")
 
     native, wrapped = command(Launcher.NATIVE), command(Launcher.TTADK)
