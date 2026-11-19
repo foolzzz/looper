@@ -106,7 +106,7 @@ def test_serve_enables_each_opted_in_runner(tmp_path, monkeypatch, pi_choice, ds
             kwargs["ownership"].push_async_callback(stopped, "agents")
         raise serve.StartupCheckFailed("fixture startup failure")
 
-    monkeypatch.setattr(pi_runner, "enable", lambda root: enable("pi", root))
+    monkeypatch.setattr(pi_runner, "enable", lambda root, executable="pi": enable("pi", root))
     monkeypatch.setattr(dsh_runner, "enable", lambda root: enable("dsh", root))
     monkeypatch.setattr(serve, "_run_agent_system_owned", owned)
     monkeypatch.setattr("looper.db.close_pool", lambda: stopped("database"))
@@ -130,7 +130,7 @@ def test_serve_continues_with_unavailable_dsh_and_owns_pi(tmp_path, monkeypatch,
         stopped.append(name)
 
     pi = SimpleNamespace(stop=lambda: stop("pi"))
-    monkeypatch.setattr(pi_runner, "enable", lambda root: pi)
+    monkeypatch.setattr(pi_runner, "enable", lambda root, executable="pi": pi)
     monkeypatch.setattr("looper.db.close_pool", lambda: stop("database"))
     if failure == "unsafe_state":
         (tmp_path / "runners").mkdir()

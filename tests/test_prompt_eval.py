@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import shutil
 import os
 import re
 import shlex
@@ -1612,6 +1613,8 @@ def test_run_metadata_projects_model_names_from_current_profiles(
     monkeypatch.setattr(module, "install_claude", lambda *_, **__: None)
     monkeypatch.setattr(module, "_git", lambda: {})
     monkeypatch.setattr(module, "select_agent", lambda *_, **__: profile("sonnet"))
+    real_which = shutil.which  # real mode needs a `claude` on PATH; CI has none and these tests never run it
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: "/usr/bin/claude" if name == "claude" else real_which(name, *a, **k))
     if suite == "tasks":
         monkeypatch.setattr(runner, "run_task", lambda _api, task, *_a, **_kw: {
             "id": task.id, "outcome": "pass", "cost_usd": 0.0})

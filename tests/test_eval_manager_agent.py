@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,8 @@ def test_manager_spec_registers_once_per_case_and_only_selects_the_manager(runti
         assert api.roles == [{"role": "manager", "values": {"profile_id": "agent-1", "run_budget_usd": expected_budget}}]
         return {"id": dialog.id, "outcome": "pass", "success": True, "turns": [], "problems": []}
 
+    real_which = shutil.which  # real mode needs a `claude` on PATH; CI has none and these tests never run it
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: "/usr/bin/claude" if name == "claude" else real_which(name, *a, **k))
     monkeypatch.setenv("LOOPER_EVAL_API_KEY", "test-key")
     monkeypatch.setattr(dialogs, "fresh_database", database)
     monkeypatch.setattr(dialogs, "running_server", server)
