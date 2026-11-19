@@ -77,3 +77,31 @@ async def for_step(step_id: str, *, pool: asyncpg.Pool | None = None) -> list[di
     pool = pool or get_pool()
     return [_row(r) for r in await pool.fetch(
         "SELECT * FROM advisor_advice WHERE step_id = $1 ORDER BY spawn_id", step_id)]
+
+
+async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The task's consults of the advisor, oldest first, as its page shows them: where each came from and for which
+    attempt, how it ended (its state and why it failed), its rounds, returns and spend, the advisor's conclusions,
+    what the Planner took of them and whether the attempt passed. Never the request's text."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """SELECT s.id, s.step_id, s.state, s.rounds, s.returns, s.spent_usd, s.brief, s.result->>'failure' AS failure,
+                  s.created_at, s.finished_at, a.kind, a.attempt, a.advice, a.adoption, a.unlocked
+             FROM agent_spawns s LEFT JOIN advisor_advice a ON a.spawn_id = s.id
+            WHERE s.task_id = $1 AND s.kind = 'advisor' ORDER BY s.id""", task_id)
+    consults = []
+    for row in rows:
+        brief = json.loads(row["brief"]) if isinstance(row["brief"], str) else (row["brief"] or {})
+        advice = json.loads(row["advice"]) if isinstance(row["advice"], str) else (row["advice"] or {})
+        consults.append({
+            "id": row["id"], "step_id": row["step_id"], "source": brief.get("source"), "kind": row["kind"],
+            "attempt": row["attempt"] if row["attempt"] is not None else brief.get("attempt"),
+            "state": row["state"], "failure": row["failure"], "rounds": row["rounds"], "returns": row["returns"],
+            "spent_usd": float(row["spent_usd"]), "status": advice.get("status"),
+            "answers": [{"question_id": a["question_id"], "conclusion": a["conclusion"],
+                         "confidence": a.get("confidence")} for a in advice.get("answers", [])],
+            "adoption": row["adoption"], "unlocked": row["unlocked"],
+            "created_at": row["created_at"].isoformat(),
+            "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None,
+        })
+    return consults

@@ -35,6 +35,7 @@ import { Markdown } from "@/components/markdown";
 import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref, runRoleLabel } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
+import { StepConsults } from "@/components/task-advice";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { TaskRoleEditor } from "@/components/role-editor";
 import { RoleStatsLine } from "@/components/role-stats";
@@ -948,6 +949,7 @@ function OverviewTab({
                       )}
                     </div>
                     <p className="mt-1 text-sm">{step.instruction}</p>
+                    <StepConsults consults={(task.advisor?.consults ?? []).filter((c) => c.step_id === step.id)} />
                     {step.target_files && step.target_files.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">
                         {step.target_files.map((f) => (

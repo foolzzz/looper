@@ -23,7 +23,7 @@ import {
   type ProjectRole,
   type ProjectKnowledge,
 } from "@/lib/api";
-import { ROOM_LIMITS } from "@/lib/room";
+import { ADVISOR_LIMITS, ROOM_LIMITS } from "@/lib/room";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useProjects } from "@/lib/use-projects";
 import { profileName } from "@/lib/use-registry";
@@ -292,6 +292,11 @@ function executionRows(project: Project): [string, string][] {
   const roomLimits = ROOM_LIMITS.filter(({ field }) => project[field] != null)
     .map(({ field, label }) => `${label} ${project[field]!.toLocaleString()}`);
   if (roomLimits.length) rows.push(["Agent room limits", roomLimits.join(" · ")]);
+  if (project.advisor === "on") {
+    const limits = ADVISOR_LIMITS.filter(({ field }) => project[field] != null)
+      .map(({ field, label }) => `${label} ${project[field]!.toLocaleString()}`);
+    rows.push(["Advisor", limits.length ? `On · ${limits.join(" · ")}` : "On"]);
+  }
   if (project.distill_lessons !== "off")
     rows.push([
       "Lessons",

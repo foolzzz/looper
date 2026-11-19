@@ -185,6 +185,11 @@ export interface ProjectExecution {
   room_consult_budget_usd: number | null;
   room_consult_timeout_seconds: number | null;
   room_consults_per_task: number | null;
+  advisor: "off" | "on" | null;
+  advisor_consult_budget_usd: number | null;
+  advisor_budget_usd: number | null;
+  advisor_consults_per_task: number | null;
+  advisor_consults_per_step: number | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -1925,6 +1930,27 @@ export async function setTaskAgents(
   return { agents: data.agents, note: data.note };
 }
 
+/** A consult of the advisor about one step (the advisor RFC): where it came from and for which attempt, how it
+ * ended, the advisor's conclusions, what the Planner took of them, and whether that attempt passed. */
+export interface AdvisorConsult {
+  id: number;
+  step_id: string | null;
+  source: "checkpoint" | "optional" | "ladder" | null;
+  kind: string | null;
+  attempt: number | null;
+  state: "drafting" | "linting" | "asking" | "needs_info" | "answered" | "blocked" | "failed" | "over_budget";
+  failure: string | null;
+  rounds: number;
+  returns: number;
+  spent_usd: number;
+  status: "answered" | "needs_info" | "out_of_scope" | null;
+  answers: { question_id: string; conclusion: string; confidence: string | null }[];
+  adoption: "adopted" | "partial" | "rejected" | null;
+  unlocked: boolean | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
 export interface TaskDetail extends TaskInfo {
   workflow?: Workflow | null;
   /** The task template the task was created from, as it said then; null for none. */
@@ -1986,6 +2012,8 @@ export interface TaskDetail extends TaskInfo {
   waits?: TaskWait[];
   /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
   run_roles?: Record<string, RunRole>;
+  /** Its Planner's consults of the advisor, oldest first; only in a task with some. */
+  advisor?: { consults: AdvisorConsult[] };
   /** Its steps' git worktrees, in a project whose parallel steps work in worktrees of their own; null (or absent)
    * when it had none. */
   step_workspaces?: TaskWorkspaces | null;
@@ -3941,7 +3969,7 @@ export type LibraryKind = "plugin" | "skill" | "mcp";
 /** How an item was acquired: imported from this machine, uploaded, taken from git, written in Settings ("ui": a skill
  * or an MCP server) or in a project. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
-export type AgentRole = "manager" | "planner" | "worker" | "reviewer" | "processor";
+export type AgentRole = "manager" | "planner" | "worker" | "reviewer" | "processor" | "advisor" | "advice_check";
 /** The roles whose runs have tools: every role but the processor, which runs with none. */
 export const TOOL_ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
 /** An install's roles: the built-in ones with tools, and "task_role", the roles a task's Planner defines: such an
