@@ -4,6 +4,7 @@
 - **需求：** 维护者希望 Looper 读取自己的聊天消息并据此做事：每小时向自己的私聊推一份速报，之后是抽取成记忆候选、消息唤醒任务的等待步骤。现在这需要一个外部脚本轮询、落文件、调用模型命令行，调度、告警和模型选择都在 Looper 之外，运行记录也看不到。
 - **相关：** [定时任务 RFC](scheduled-tasks-v0.zh-CN.md)、[命令型定时任务 RFC](command-schedules-v0.zh-CN.md)（新增定时任务类型的先例）、[等待步骤 RFC](plan-wait-step-v0.zh-CN.md)、[多运行时 RFC](multi-runtime-agents-v0.zh-CN.md)、[LLM 模型层 RFC](llm-models-v0.zh-CN.md)、[Agent 办公台 RFC](agent-room-v0.zh-CN.md)（咨询：有界的单次运行）；[开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 1 节和第 5 节；`docs/architecture/agent-system.md` 的 "Harness, profile and environment"、"Schedules: tasks on a time rule"、"Channels"。
 - **核对基线：** `main` `262f6de53`。本文只读了代码，没有启动服务。
+- **里程碑命名：** 按维护者的设计文档，本 RFC 是 M7a（消息流与订阅）。后续只列一句，设计仍在和维护者讨论：M7b 从消息抽取（记忆候选，依赖 M6b）；M7c 主动建议；M7d `kind: message` 的 `task_waits`。
 - **术语：**
   - **来源（source）：** Looper 用操作者自己的身份读取消息的账号。v0 只有一种 `lark_user`：本机某个 `lark-cli` profile 的飞书用户身份。
   - **事件（event）：** 来源里的一条消息，连同原始内容存一份。
@@ -37,7 +38,7 @@
 | D1 | 原始消息存哪 | PostgreSQL 行；外部采集器的文件只作迁移期输入 |
 | D2 | 订阅做成什么 | 定时任务的新类型 `kind: subscription`（照命令型定时任务的先例） |
 | D3 | 迁移顺序 | 先桥接，再切订阅，再让其他消费者改读 Looper，最后切采集；不先切采集。**修改：不做影子运行**：桥接、processor、订阅三个 PR 合入后，吃瓜订阅直接开启并通过 Looper 的飞书渠道推到操作者私聊；外部采集器自己的吃瓜在同一个小时改成只运行、不推送（dry-run），保留一天用于对照，之后移除 |
-| D4 | 历史导入 | 不导全量；需要时按天数一次性导入 |
+| D4 | 历史导入 | 默认不导全量：来源有类型化设置 `start_from`（`end` 或 `beginning`，默认 `end`），新来源从每个文件当前的末尾开始；需要历史时 `looper msgflow import --days N` 按天数一次性导入。维护者随后批准全量导入：本机把 `start_from` 设为 `beginning`，首次扫描分批导入全部历史（每批一个事务、可中断续读、按文件出对账报告），机器人消息超过 30 天的只存正文 |
 | D5 | 保留期 | 人发的原文永久；机器人消息原文 30 天后只留正文；可按会话排除并删除 |
 | D6 | processor 用什么模型 | 在 Settings → Roles 给 processor 选 Profile（预期是 `claude-code/sonnet`），是配置，不进代码 |
 | D7 | 速报推到哪 | Looper 现有飞书渠道的私聊；嫌和管家对话混在一起，就在 Channels 页加一个专门推送的机器人 |
@@ -106,7 +107,7 @@
 - 比偏移小、inode 变了、或偏移前那行的 message_id 对不上：文件被改写过，整个文件重扫，按 message_id 去重；
 - 其余情况从偏移开始读，只读完整行（末行没有换行符的等下一轮）。
 
-行序不等于发送时序，文件里也可能有重复行，两者分别由 `seq` 和唯一键处理。名字取自采集器的名字目录（有的话）。同一个读取器就是 `looper msgflow import`，从偏移 0 开始，`origin = import`。
+行序不等于发送时序，文件里也可能有重复行，两者分别由 `seq` 和唯一键处理。名字取自采集器的名字目录（有的话）。同一个读取器就是 `looper msgflow import`，从偏移 0 开始，`origin = import`。新来源的起点由 `event_sources.bridge_start_from` 决定：`end`（默认）从每个文件当前的末尾开始，只存之后追加的行；`beginning` 首次扫描从头读，全部标 `import`，分批提交（每批一个事务，批间状态落库，被打断后接着读不重复），并按文件给出对账：读到的行数、不同 message_id 数、新入库、重复、跳过、不完整的行、整文件重扫次数。导入时按保留期写：机器人消息发送时间早于保留期的只存正文。
 
 桥接读取时排除 Looper 自己机器人的消息：`sender_type` 为 `app` 且 app_id 等于 Looper 飞书渠道配置里的 app_id 的行不入库。app_id 只从渠道配置读取，不出现在代码里。
 
