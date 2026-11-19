@@ -299,7 +299,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     title TEXT,
     client_id TEXT,
     continues_schedule_session BOOLEAN NOT NULL DEFAULT false,
-    chat_kind TEXT CHECK (chat_kind IN ('user', 'chat'))
+    chat_kind TEXT CHECK (chat_kind IN ('user', 'chat')),
+    chat_group BOOLEAN NOT NULL DEFAULT false
 );
 
 CREATE TABLE IF NOT EXISTS activity (

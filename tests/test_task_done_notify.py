@@ -31,8 +31,10 @@ from looper.agents.message import (
     channel_address,
     planner_address,
 )
+from looper.agents.ops.tasks import GROUP_START_QUESTION, START_QUESTION
 from looper.agents.task_notice import (
-    LEAD_CHARS, Notice, NotifyChannel, NotifyTarget, TargetKind, ends_task, lead, notice_text, notify_target,
+    LEAD_CHARS, Notice, NotifyChannel, NotifyTarget, TargetKind, ends_task, lead, notice_text, notify_channel,
+    notify_target,
 )
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.agents.tiers.planner import closing_note
@@ -57,7 +59,7 @@ def _status(task_id: str, status: str, summary: str) -> MessageEnvelope:
 
 TELEGRAM_CHAT = NotifyTarget(TargetKind.CHAT, "1000001")
 LARK_USER = NotifyTarget(TargetKind.USER, OPEN_ID)
-LARK_GROUP = NotifyTarget(TargetKind.CHAT, "oc_team", mention=OPEN_ID)
+LARK_GROUP = NotifyTarget(TargetKind.CHAT, "oc_team", mention=OPEN_ID, group=True)
 
 
 def _task(router: TaskRouter, *, channel: str, notify: NotifyTarget | None, title: str = "给 calc 加上除法",
@@ -176,7 +178,7 @@ def test_the_notice_links_relative_without_a_dashboard_address() -> None:
 @pytest.mark.parametrize(("channel", "sender", "chat", "group", "expected"), [
     ("channel-lark", OPEN_ID, "oc_dm", False, LARK_USER),  # a Lark direct message: the user
     ("channel-lark", OPEN_ID, "oc_team", True, LARK_GROUP),  # a Lark group: the group, @-mentioning the requester
-    ("channel-telegram", "7", "-1001234", True, NotifyTarget(TargetKind.CHAT, "-1001234")),  # Telegram: the chat
+    ("channel-telegram", "7", "-1001234", True, NotifyTarget(TargetKind.CHAT, "-1001234", group=True)),  # Telegram: the chat
     ("channel-telegram", "7", "7", False, NotifyTarget(TargetKind.CHAT, "7")),
     ("channel-web", None, "sess-1", False, None),
     (None, None, None, False, None),
@@ -186,13 +188,29 @@ def test_the_target_a_task_records(channel: str | None, sender: str | None, chat
     target = notify_target(channel, sender=sender, chat=chat, group=group)
     assert target == expected
     if target is not None:  # kept in the tasks table, and read back from it
+        assert target.columns()["chat_group"] is group
         assert NotifyTarget.from_columns(target.columns()) == target
+        if channel is not None and channel != "channel-web":  # and in a notice
+            notice = Notice(notify_channel(channel), target, "done", channel_id=channel)
+            assert Notice.from_payload(notice.payload()) == notice
 
 
 @pytest.mark.parametrize("row", [{}, {"chat_id": "1000001"}, {"chat_id": "1000001", "chat_kind": "bot"},
                                  {"chat_id": "", "chat_kind": "chat"}])
 def test_a_task_without_a_whole_target_has_none(row: dict[str, Any]) -> None:
     assert NotifyTarget.from_columns(row) is None
+
+
+TELEGRAM_GROUP = NotifyTarget(TargetKind.CHAT, "-1001234", group=True)
+
+
+def test_a_target_recorded_without_the_group_flag_is_no_group() -> None:
+    # A task or a notice from before tasks recorded it: as a direct chat, so its chat still sees its progress.
+    assert NotifyTarget.from_columns({"chat_id": "-1001234", "chat_kind": "chat"}) == NotifyTarget(
+        TargetKind.CHAT, "-1001234", group=False)
+    payload = Notice(NotifyChannel.TELEGRAM, TELEGRAM_GROUP, "done", channel_id="channel-telegram").payload()
+    del payload["group"]
+    assert Notice.from_payload(payload).target.group is False
 
 
 @pytest.mark.parametrize(("status", "ends"), [
@@ -259,6 +277,49 @@ def test_the_manager_sends_the_notice_instead_of_the_end(tmp_path: Path, origin:
     assert [(queue, kind) for queue, kind, _ in out] == sent
     if notice:
         assert out[0][2] == notice.payload()
+
+
+def _report(kind: MessageType, channel: str, **payload: Any) -> MessageEnvelope:
+    """What task-n1's Planner reports to the TaskRouter, as it sends it: with the task's origin channel."""
+    return MessageEnvelope.create(source=planner_address("task-n1"), target=TASK_ROUTER_ADDRESS, message_type=kind,
+                                  payload={"task_id": "task-n1", **payload}, correlation_id="c1",
+                                  metadata={"origin_channel_id": channel})
+
+
+@pytest.mark.usefixtures("agent_db")
+@pytest.mark.parametrize(("channel", "target", "group"), [
+    ("channel-lark", LARK_GROUP, True), ("channel-telegram", TELEGRAM_GROUP, True),
+    ("channel-lark", LARK_USER, False), ("channel-telegram", TELEGRAM_CHAT, False),
+])
+def test_a_group_chat_is_told_a_tasks_end_but_not_its_progress(tmp_path: Path, channel: str, target: NotifyTarget,
+                                                               group: bool) -> None:
+    """The TaskRouter passes on what the task recorded, and the Manager posts no breakdown, no progress and no phase
+    report to a group; a direct chat gets them as before. Both get the end notice."""
+    router = _router(tmp_path)
+    _task(router, channel=channel, notify=target)
+    asyncio.run(router._handle_task_accepted(_report(MessageType.TASK_ACCEPTED, channel, step_count=1)))
+    for payload in ({"status": "executing", "summary": "进度更新: 0/1 完成"},
+                    {"status": "executing", "summary": "进度更新: 0/1 完成", "phase_text": "📋 计划已生成"},
+                    {"status": "completed", "summary": "## Delivered\ncalc"}):
+        asyncio.run(router._handle_planner_status(_report(MessageType.GOAL_STATUS, channel, **payload)))
+    passed = [call.args[0] for call in router._bus.publish.await_args_list]
+
+    async def main() -> list[tuple[MessageType, str]]:
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        for envelope in passed:
+            await manager._handle(envelope)
+        queue = bus.get_queue(channel)
+        sent = [queue.get_nowait() for _ in range(queue.qsize())]
+        await bus.shutdown()
+        return [(e.message_type, e.payload["text"]) for e in sent]
+
+    sent = asyncio.run(main())
+    progress = [(MessageType.STATUS_UPDATE, "任务已分解为 1 个步骤，开始执行..."),
+                (MessageType.STATUS_UPDATE, "进度更新: 0/1 完成"), (MessageType.STATUS_UPDATE, "📋 计划已生成")]
+    assert sent[:-1] == ([] if group else progress)
+    assert sent[-1][0] is MessageType.CHAT_NOTICE and sent[-1][1].startswith("✅ 任务完成 · 给 calc 加上除法")
 
 
 # --- The channels: the notice like an answer, to who the task recorded ---
@@ -471,13 +532,19 @@ def test_a_lark_group_task_is_answered_and_told_in_the_group(
     replies = [argv for argv in calls if "+messages-reply" in argv]
     assert {argv[5] for argv in replies} == {"om_in1", "om_in2"}
     assert [argv[6] for argv in replies] == ["--text", "--markdown", "--text", "--markdown"]
-    # Everything else the bot posts goes to the group: the task's progress, then its end, @-mentioning the requester.
+    # The answers show the group the question whether to start the task, never its configuration; once it started,
+    # nothing is added.
+    answers = {argv[5]: argv[7] for argv in replies if argv[6] == "--markdown"}
+    assert answers["om_in1"].endswith(f"\n\n{GROUP_START_QUESTION}")
+    assert not any(word in answer for answer in answers.values()
+                   for word in ("任务已创建", "- 目录：", "- 项目：", "- Planner：", START_QUESTION))
+    assert GROUP_START_QUESTION not in answers["om_in2"]
+    # Else the bot posts only the task's end into the group, @-mentioning the requester: no breakdown, no progress.
     sends = [argv for argv in calls if "+messages-send" in argv]
-    assert sends and all(argv[4:6] == ["--chat-id", "oc_team"] for argv in sends)
-    assert any(argv[-1].startswith("进度更新") for argv in sends[:-1])
+    assert all(argv[4:6] == ["--chat-id", "oc_team"] for argv in sends)
     link = f"{DASHBOARD}/#tasks/{task_id}"
-    assert sends[-1][-1] == (f'<at user_id="{OPEN_ID}"></at> ✅ 任务完成 · 给 calc 加上加法\n## Delivered\n'
-                             f"calc.py with add and its tests\n[{link}]({link})")
+    assert [argv[-1] for argv in sends] == [(f'<at user_id="{OPEN_ID}"></at> ✅ 任务完成 · 给 calc 加上加法\n'
+                                             f"## Delivered\ncalc.py with add and its tests\n[{link}]({link})")]
     # The group's turns are stored, under the group, without the @-mention.
     turns = [(call.kwargs["session_id"], call.kwargs["role"], call.kwargs["content"])
              for call in stored.await_args_list]

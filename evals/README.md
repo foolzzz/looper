@@ -883,6 +883,33 @@ outcome, its tool calls per turn (a refused one with its error code) and its
 cost; the JSON keeps what each refused call was told and the arguments it came
 with.
 
+## Lark group chats (`evals/lark_group.py`)
+
+What a Lark group chat and a direct chat see of a task they ask for, on the real path: the same stand-in
+`looper serve` as the quotes below, a project `eval-group`, and in each conversation two messages, one asking for a
+small task and confirming it (the Manager creates it ready), one starting it; the task then runs to its end. Each
+conversation and rep has a new database, server and runtime root, and costs a Manager turn per message plus the
+task's Planner and Worker.
+
+| check | group | direct |
+|---|---|---|
+| `configuration_shown` (Looper's configuration block in an answer) | never | yes |
+| `start_question` (the first answer asks whether to start) | the group's @-mention question | the usual one |
+| `work_dir_in_answers` (the project's directory in any answer, Claude's words included) | never | not scored |
+| `progress_posts` (breakdown and progress messages) | 0 | at least 1 |
+| `notice_last` (the end notice is the last post, and the task completed) | yes | yes |
+
+```bash
+uv run --extra test python -m evals.lark_group --model sonnet --reps 2 \
+  --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres
+```
+
+`--claude PATH` names the Claude Code binary (default: `claude` on PATH), `--manager-model opus --manager-effort
+xhigh` puts the Manager alone on opus at xhigh, `--conversations group`
+runs one kind, and `--no-text` leaves what was posted out of the JSON. A checkout without this module is measured
+as for the quotes (`--checkout .`, then `--baseline <run.json>`). Run it when what Looper adds to a chat's answers,
+or what it posts to a chat about a task, changes.
+
 ## Lark quotes (`evals/lark_quote.py`)
 
 What the Manager sees of a Lark message's quote ([Lark](../docs/architecture/agent-system.md#channels)), on

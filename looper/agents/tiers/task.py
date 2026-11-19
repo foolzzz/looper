@@ -479,10 +479,13 @@ class TaskRouter:
 
     @staticmethod
     def _report_metadata(envelope: MessageEnvelope, task: Task | None) -> dict[str, Any]:
+        """What the Manager needs to route a task's report: its web chat thread, title, original chat and message,
+        and ``origin_group`` when it was asked for in a group chat, which is told only its end (``task_notice``)."""
         if task is None:
             return envelope.metadata
         return {**envelope.metadata, "origin_thread": task.origin_thread, "task_title": task.title,
-                **({"reply_route": task.origin_reply_route} if task.origin_reply_route else {})}
+                **({"reply_route": task.origin_reply_route} if task.origin_reply_route else {}),
+                **({"origin_group": True} if task.notify is not None and task.notify.group else {})}
 
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None

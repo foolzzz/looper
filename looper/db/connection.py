@@ -126,6 +126,7 @@ _PROVIDER_ENABLED = "provider_enabled"
 _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
+_TASK_CHAT_GROUP = "task_chat_group"
 _GATEWAY_ALIASES = "gateway_aliases"
 _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
@@ -538,6 +539,15 @@ async def _schedule_deferred_by_drain_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _task_chat_group_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _TASK_CHAT_GROUP):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('tasks') AND attname = 'chat_group' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _dependency_conditions_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
                            _DEPENDENCY_CONDITIONS):
@@ -773,6 +783,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _schedule_deferred_by_drain_pending(conn):
             await conn.execute("ALTER TABLE schedule_runs ADD COLUMN deferred_by_drain BOOLEAN NOT NULL DEFAULT false")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_DEFERRED_BY_DRAIN)
+        if await _task_chat_group_pending(conn):
+            await conn.execute("ALTER TABLE tasks ADD COLUMN chat_group BOOLEAN NOT NULL DEFAULT false")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_CHAT_GROUP)
         if await _llm_requests_pending(conn):
             await conn.execute(_LLM_REQUESTS_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS)
@@ -915,4 +928,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
             or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
-            or await _verification_paths_pending(conn)))
+            or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)))

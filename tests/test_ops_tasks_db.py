@@ -8,6 +8,8 @@ disposable database.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,7 +20,7 @@ from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, channel_address
 from looper.agents.ops import Turn
 from looper.agents.ops.service import ManagerOps, Platform
-from looper.agents.ops.tasks import START_QUESTION
+from looper.agents.ops.tasks import GROUP_START_QUESTION, START_QUESTION
 from tests.db_support import DSN, run_db
 from tests.test_usage_api_db import _get
 
@@ -106,7 +108,7 @@ def test_a_task_is_created_ready_in_its_project_and_its_configuration_shown(
         assert (row["status"], row["requirement"], row["title"], row["work_dir"], row["project_id"]) == (
             "init", "build a calculator", "计算器", "/w", project["id"])
         # The end notice goes to the Lark sender; progress to the chat the task was asked for in.
-        assert (row["chat_id"], row["chat_kind"], row["chat_mention"]) == ("ou_1", "user", None)
+        assert (row["chat_id"], row["chat_kind"], row["chat_mention"], row["chat_group"]) == ("ou_1", "user", None, False)
         assert (row["origin_channel_id"], row["correlation_id"], row["original_user_text"]) == (
             "channel-lark", "corr-0", "确认")
         assert (await agent_setting_layers.profile_overrides(task_id, pool=pool))["worker"]["id"] == "agent-sonnet"
@@ -143,8 +145,82 @@ def test_a_task_asked_for_in_a_lark_group_tells_the_group_and_its_requester(
         (answer,) = await chat.say("确认", ("looper_task_create", {"requirement": "build a calculator",
                                                                   "title": "计算器", "project": "calc"}))
         row = await tasks.get_task(answer["result"]["task_id"], pool=pool)
-        assert (row["chat_id"], row["chat_kind"], row["chat_mention"]) == ("oc_1", "chat", "ou_1")
-        assert NotifyTarget.from_columns(row) == NotifyTarget(TargetKind.CHAT, "oc_1", mention="ou_1")
+        assert (row["chat_id"], row["chat_kind"], row["chat_mention"], row["chat_group"]) == ("oc_1", "chat", "ou_1", True)
+        assert NotifyTarget.from_columns(row) == NotifyTarget(TargetKind.CHAT, "oc_1", mention="ou_1", group=True)
+
+    run_db(test, monkeypatch)
+
+
+# A turn in each kind of conversation: (channel, the bot, chat, sender, whether it is a group chat).
+CONVERSATIONS = {
+    "lark group": ("lark", "channel-lark", "oc_1", "ou_1", True),
+    "telegram group": ("telegram", "channel-telegram", "-1001234", "7", True),
+    "lark direct": ("lark", "channel-lark", "oc_1", "ou_1", False),
+    "telegram direct": ("telegram", "channel-telegram", "7", "7", False),
+    "dashboard": ("web", "channel-web", "sess-1", None, False),
+}
+
+
+@contextlib.asynccontextmanager
+async def _turn_in(conversation: str, ops: ManagerOps) -> AsyncIterator[Turn]:
+    """A turn of ``conversation``, its calls made while the context is open."""
+    channel, channel_id, chat, sender, group = CONVERSATIONS[conversation]
+    context = {"chat_id": chat, **({"session_id": chat} if channel == "web" else {}),
+               **({"sender_id": sender, "chat_type": "group" if group else "p2p"} if channel == "lark" else {}),
+               **({"user_id": sender} if channel == "telegram" else {})}
+    source = channel_address(channel, channel_id)
+    envelope = MessageEnvelope.create(source=source, target=source, message_type=MessageType.USER_MESSAGE,
+                                      payload={"text": "确认", "channel_context": context},
+                                      metadata={"origin_channel_id": channel_id})
+    turn = Turn(channel=channel, chat=chat, message_id=envelope.message_id, envelope=envelope, sender=sender,
+                group=group, channel_id=channel_id)
+    ops.begin_turn(turn)
+    try:
+        yield turn
+    finally:
+        ops.end_turn(turn)
+
+
+@pytest.mark.parametrize("conversation", list(CONVERSATIONS))
+@pytest.mark.parametrize("start", [False, True])
+def test_a_group_chat_is_asked_whether_to_start_a_task_without_its_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, conversation: str, start: bool,
+) -> None:
+    """A group's members are not shown the operator's configuration (directories, budgets, profiles): only the
+    question whether to start the task, and nothing once this turn started it. Direct chats and the dashboard see
+    the configuration as before."""
+    from looper.db import tasks
+
+    async def test(pool: Any) -> None:
+        await _project(pool)
+        group = CONVERSATIONS[conversation][-1]
+        ops = ManagerOps(Platform(bus=MessageBus(runtime_root=tmp_path),
+                                  task_router=SimpleNamespace(has_planner=lambda task_id: False)),
+                         url="http://127.0.0.1:9", token="tok")
+        async with _turn_in(conversation, ops) as turn:
+            created = await ops.call("looper_task_create", {"requirement": "build a calculator", "title": "计算器",
+                                                            "project": "calc"})
+            assert created["status"] == "ok", created
+            task_id = created["result"]["task_id"]
+            if start:
+                started = await ops.call("looper_task_control", {"task_id": task_id, "action": "start"})
+                assert started["status"] == "ok", started
+        shown = created["result"]["shown_to_user"]
+        if group:
+            assert turn.blocks == ([] if start else [GROUP_START_QUESTION])
+            assert shown == ("In this group chat Looper adds only the question whether to start it now after your "
+                             "reply, not the task's configuration; do not repeat the question or list the "
+                             "configuration.")
+        else:
+            assert shown == ("Looper adds the task's configuration and the question whether to start it now after "
+                             "your reply; do not repeat them.")
+            (block,) = turn.blocks
+            head = "任务已创建：\n" if start else "任务已创建，还没有开始（Ready — not started）：\n"
+            assert block.startswith(f"{head}- 任务：计算器（{task_id}）\n- 项目：calc（已有）\n- 目录：/w\n")
+            assert block.endswith("\n- 并发：这个任务同时最多运行 16 个 Worker、8 个 Reviewer"
+                                  + ("" if start else f"\n\n{START_QUESTION}"))
+        # The task keeps whether it came from a group: its progress is not posted there either.
+        assert (await tasks.get_task(task_id, pool=pool))["chat_group"] is group
 
     run_db(test, monkeypatch)
 
