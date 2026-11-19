@@ -143,6 +143,8 @@ def test_real_profile_switch_keeps_the_manager_binding_unless_explicitly_overrid
         return original_post(path, body)
 
     monkeypatch.setattr(api, "post", post)
+    real_which = shutil.which  # real mode needs a `claude` on PATH; CI has none and these tests never run it
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: "/usr/bin/claude" if name == "claude" else real_which(name, *a, **k))
     monkeypatch.setenv("LOOPER_EVAL_API_KEY", "test-key")
     monkeypatch.setattr(dialogs, "fresh_database", database)
     monkeypatch.setattr(dialogs, "running_server", server)
