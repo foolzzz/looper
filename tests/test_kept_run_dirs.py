@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents import housekeeping, keeper, kept_dirs, proc_tree
+from tests.leak_guard import PollingProcess, reap_group
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,12 +33,8 @@ def tmp_path():
 async def running_keeper(runtime_root):
     directory = runtime_root / keeper.RUNS_DIR / "worker-leftover"
     directory.mkdir(parents=True, mode=0o700)
-    process = await asyncio.create_subprocess_exec(
-        *keeper.boot_argv(sys.executable, ROOT, directory, runtime_root, str(runtime_root),
-                          [sys.executable, "-c", "import time; time.sleep(60)"]),
-        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
-    )
+    process = PollingProcess(keeper.boot_argv(sys.executable, ROOT, directory, runtime_root, str(runtime_root),
+                                              [sys.executable, "-c", "import time; time.sleep(60)"]))
     state = {}
     try:
         async with asyncio.timeout(10):
@@ -48,8 +45,8 @@ async def running_keeper(runtime_root):
                 await asyncio.sleep(0.03)
         yield directory, process, state
     finally:
-        if process.returncode is None:
-            process.kill()
+        # Whatever happened to the test, SIGKILL the keeper's whole process group (SIGTERM is ignored by design).
+        reap_group(process.pid)
         await asyncio.wait_for(process.wait(), 5)
         # Also find a child if the test failed during startup, before reading keeper.json.
         records = [keeper.read_json(path) or {} for path in
@@ -113,11 +110,7 @@ def test_exited_keeper_is_released(tmp_path, argv):
     async def run():
         directory = tmp_path / keeper.RUNS_DIR / "worker-short-lived"
         directory.mkdir(parents=True, mode=0o700)
-        process = await asyncio.create_subprocess_exec(
-            *keeper.boot_argv(sys.executable, ROOT, directory, tmp_path, str(tmp_path), argv),
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
-        )
+        process = PollingProcess(keeper.boot_argv(sys.executable, ROOT, directory, tmp_path, str(tmp_path), argv))
         try:
             assert await asyncio.wait_for(process.wait(), 10) == (0 if argv == ["/usr/bin/true"] else 3)
             state = keeper.read_json(directory / keeper.STATE)
@@ -129,8 +122,7 @@ def test_exited_keeper_is_released(tmp_path, argv):
             assert scan.released == 1 and not scan.ended and scan.unidentified == 0
             assert not directory.exists()
         finally:
-            if process.returncode is None:
-                process.kill()
+            reap_group(process.pid)
             await asyncio.wait_for(process.wait(), 5)
 
     asyncio.run(run())
