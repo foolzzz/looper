@@ -35,11 +35,10 @@ from ..db import activity as db_activity, projects as db_projects, tasks as db_t
 from . import proc_tree, waits
 from .bus import MessageBus
 from .drain import DrainState
-from .links import task_link
 from .message import AgentAddress, MessageEnvelope, MessageType, channel_address, planner_address
 from .project_execution import ProjectExecution
 from .projects import RequestError
-from .task_notice import Notice, NotifyTarget, link_line, notify_channel
+from .task_notice import Notice, NotifyTarget, notify_channel, task_link_line
 from .tiers.journal import clip
 from .waits import (
     CHECK_TIMEOUT_SEC, OUTPUT_MAX_BYTES, CheckResult, CommandCheck, GithubPrCheck, ReadyWhen,
@@ -549,9 +548,10 @@ class WaitService:
                 waited = f"{seconds // 3600} 小时"
             else:
                 waited = f"{max(1, seconds // 60)} 分钟"
+            link = task_link_line(self._dashboard_url, task_id, channel, group=target.group)
             text = "\n".join([f"⏳ 等待超时 · {clip(name, 40)}", row["topic"],
                                f"等了 {waited}，条件一直没有满足；规划者接下来决定怎么做。",
-                               link_line(task_link(self._dashboard_url, task_id), channel)])
+                               *([link] if link else [])])
             try:
                 await self._bus.publish(MessageEnvelope.create(
                     source=planner_address(task_id), target=channel_address(channel.value, task["origin_channel_id"]),

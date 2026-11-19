@@ -25,11 +25,13 @@ from enum import Enum
 from typing import Any
 
 from ..db import tasks as db_tasks
-from .links import task_link
+from .links import is_public, task_link
 from .message import builtin_channel_id, is_lark, parse_channel_id
 
 NAME_CHARS = 40
 LEAD_CHARS = 300
+# A group notice is sent in messages of at most this many characters (Telegram's own limit is 4,096).
+GROUP_MESSAGE_CHARS = 4000
 # The start of the second section of a Markdown summary: a heading line after the first line.
 _NEXT_SECTION = re.compile(r"\n(?=#{1,6} )")
 
@@ -160,22 +162,71 @@ def lead(summary: str | None) -> str:
 
 
 def notice_text(task_id: str, name: str, status: str, summary: str | None, *, channel: NotifyChannel,
-                dashboard_url: str = "", extra: str | None = None, delivery_summary: str | None = None) -> str:
+                dashboard_url: str = "", extra: str | None = None, delivery_summary: str | None = None,
+                group: bool = False) -> str:
     """What ended and how, the start of its summary (or closing note), ``extra`` (where a worktree task's work is),
     and the link to the task, as Markdown for ``channel``. ``name`` is what the user asked for, else the
-    requirement; the task id when both are empty."""
+    requirement; the task id when both are empty. In a group chat (``group``) the whole summary, which the people
+    there cannot open the task page to read, and the link only to a public dashboard (``task_link_line``)."""
     flat = " ".join(name.split())
     shown = (flat if len(flat) <= NAME_CHARS else f"{flat[:NAME_CHARS]}…") or task_id
     head = "✅ 任务完成" if db_tasks.task_group(status) is db_tasks.TaskGroup.COMPLETED else "❌ 任务失败"
     lines = [f"{head} · {shown}"]
-    if text := lead(summary):
+    if group:
+        # The persisted summary already ends with the delivery summary, which follows once below.
+        whole = (summary or "").strip()
+        text = whole.removesuffix(delivery_summary).rstrip() if delivery_summary else whole
+    else:
+        text = lead(summary)
+    if text:
         lines.append(text)
     if delivery_summary:
         lines.append(delivery_summary)
     if extra:
         lines.append(extra)
-    lines.append(link_line(task_link(dashboard_url, task_id), channel))
+    if link := task_link_line(dashboard_url, task_id, channel, group=group):
+        lines.append(link)
     return "\n".join(lines)
+
+
+def task_link_line(base: str, task_id: str, channel: NotifyChannel, *, group: bool) -> str | None:
+    """The line linking ``task_id``'s page in a message to ``channel``; None in a group chat when ``base`` is not a
+    public address: the people there cannot open the server's own."""
+    if group and not is_public(base):
+        return None
+    return link_line(task_link(base, task_id), channel)
+
+
+def split_message(text: str, limit: int = GROUP_MESSAGE_CHARS) -> list[str]:
+    """``text`` as messages of at most ``limit`` characters, in order, cut between lines (a single line longer than
+    ``limit`` is cut where it must be). A cut inside a code fence closes the fence and reopens it in the next
+    message, so each renders on its own."""
+    if len(text) <= limit:
+        return [text]
+    room = limit - len("\n```")  # for the fence a cut inside one closes
+    parts: list[str] = []
+    current: list[str] = []
+    size = 0
+    fence: str | None = None  # the opening line of the fence the next line is in
+
+    def flush() -> None:
+        nonlocal current, size
+        if fence is not None:
+            current.append("```")
+        parts.append("\n".join(current))
+        current, size = ([fence] if fence is not None else []), (len(fence) if fence is not None else 0)
+
+    for line in text.split("\n"):
+        for piece in [line[i:i + room] for i in range(0, len(line), room)] or [""]:
+            if current and size + 1 + len(piece) > room:
+                flush()
+            size += len(piece) + (1 if current else 0)
+            current.append(piece)
+        if line.lstrip().startswith("```"):
+            fence = None if fence is not None else line.strip()
+    if current and (len(current) > 1 or current[0] != fence):
+        parts.append("\n".join(current))
+    return parts
 
 
 def link_line(link: str, channel: NotifyChannel) -> str:
