@@ -62,6 +62,7 @@ environment, the settings' or the provider's variables say.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 import subprocess
 from collections.abc import AsyncIterator, Mapping
@@ -74,8 +75,8 @@ from ... import child_env
 from .. import claude_cli
 from ..llmrec import TRANSLATED_BACKEND_ENV
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
-    RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
+    ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, ManagedHooks, Probe, PromptBlock, ProviderBinding,
+    ReadOnly, RunCost, RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
 )
 from .instructions import InstructionFile
 
@@ -103,6 +104,11 @@ TRANSLATED_ENV = (
     ("ENABLE_TOOL_SEARCH", "false"),
     ("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1"),
 )
+# Where Claude Code reads the administrator's managed settings (macOS, then Linux), which no setting source or
+# disableAllHooks turns off (verified against 2.1.328: a hook in them ran under --setting-sources "" and
+# disableAllHooks).
+MANAGED_SETTINGS = (Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
+                    Path("/etc/claude-code/managed-settings.json"))
 # Anthropic's own API: the endpoint Claude Code uses without a base URL.
 ANTHROPIC_HOSTS = frozenset({"api.anthropic.com"})
 
@@ -469,6 +475,24 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         # Redact the complete diagnostic before whitespace normalization and clipping.
         detail = safe_error(detail, secrets=(launch.profile.provider.api_key or "",), limit=None)
         return " ".join(detail.split())[:300] or None
+
+    def managed_hooks(self) -> ManagedHooks | None:
+        """The hook events of the first managed settings file that sets any (``MANAGED_SETTINGS``); one that cannot
+        be read counts as setting hooks it cannot name."""
+        for path in MANAGED_SETTINGS:
+            try:
+                hooks = json.loads(path.read_text(encoding="utf-8")).get("hooks")
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, AttributeError):
+                return ManagedHooks(str(path), (), readable=False)
+            if not isinstance(hooks, dict):
+                if hooks is not None:
+                    return ManagedHooks(str(path), (), readable=False)
+                continue
+            if events := tuple(sorted(name for name, matchers in hooks.items() if matchers)):
+                return ManagedHooks(str(path), events)
+        return None
 
     def permission_denials(self, result_event: dict[str, Any] | None) -> list[dict[str, str]]:
         return claude_cli.permission_denials(result_event)

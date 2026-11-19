@@ -257,6 +257,19 @@ TOOL_ROLES = ("manager", "planner", "worker", "reviewer")
 
 
 @dataclass(frozen=True)
+class ManagedHooks:
+    """Hooks the machine's administrator set for a runtime (its managed settings), which no launch flag turns off: they
+    run in every run, a processor's too, and see what it is given (a UserPromptSubmit hook gets the prompt)."""
+
+    source: str  # the managed settings file
+    events: tuple[str, ...]  # the hook events it sets; () when the file could not be read
+    readable: bool = True
+
+    def view(self) -> dict[str, Any]:
+        return {"source": self.source, "events": list(self.events), "readable": self.readable}
+
+
+@dataclass(frozen=True)
 class RunCost:
     """A run's tokens and dollars, and where the dollars come from."""
 
@@ -642,6 +655,11 @@ class RuntimeAdapter(ABC):
         """The tool calls the runtime refused in a run, as its result reports them (``{tool, input}``); none unless
         the adapter says otherwise."""
         return []
+
+    def managed_hooks(self) -> ManagedHooks | None:
+        """The hooks the machine's administrator set for this runtime, which run whatever a launch says; None when
+        it sets none (or the adapter cannot tell)."""
+        return None
 
     def result_notes(self, result_event: dict[str, Any] | None) -> dict[str, Any]:
         """Runtime-specific metadata to retain with the finished run's record."""

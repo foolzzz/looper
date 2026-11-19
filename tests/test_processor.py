@@ -78,6 +78,27 @@ def test_a_processor_runs_cost_is_its_records_or_its_runtimes_own_figure(source:
     assert run_cost(recorded, {"total_cost_usd": reported}, CostSource(source)) == cost
 
 
+@pytest.mark.parametrize(("content", "found"), [
+    ('{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "x"}]}], "PreToolUse": []}}',
+     ("UserPromptSubmit",)),
+    ('{"permissions": {}}', None),
+    (None, None),
+    ("not json", ()),  # unreadable: present, events unknown
+])
+def test_claude_code_reads_the_hooks_its_managed_settings_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                              content: str | None, found: tuple[str, ...] | None) -> None:
+    from looper.agents.runtimes import CLAUDE_CODE, claude_code
+
+    managed = tmp_path / "managed-settings.json"
+    if content is not None:
+        managed.write_text(content)
+    monkeypatch.setattr(claude_code, "MANAGED_SETTINGS", (tmp_path / "elsewhere.json", managed))
+    hooks = CLAUDE_CODE.managed_hooks()
+    assert (None if hooks is None else hooks.events) == found
+    if hooks is not None:
+        assert (hooks.source, hooks.readable) == (str(managed), content != "not json")
+
+
 def test_the_batch_cannot_close_its_messages_block() -> None:
     from looper.agents.processor import user_turn
 
