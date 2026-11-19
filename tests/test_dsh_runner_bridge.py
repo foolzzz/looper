@@ -26,15 +26,15 @@ def test_old_authorization_reply_cannot_interrupt_resumed_turn(tmp_path, monkeyp
                 waiting, release, delivered = asyncio.Event(), asyncio.Event(), asyncio.Event()
                 write, enqueue = bridge._write, bridge._enqueue
 
-                async def delay_reply(message, entry=None):
+                async def delay_reply(message, entry=None, **kwargs):
                     if isinstance(message, p.Response) and message.result.get("trace_id") == "old":
                         held.append(message)
                         waiting.set()
                         await release.wait()
-                        await write(message, entry)
+                        await write(message, entry, **kwargs)
                         delivered.set()
                     else:
-                        await write(message, entry)
+                        await write(message, entry, **kwargs)
 
                 def record_update(update):
                     updates.append(update)
