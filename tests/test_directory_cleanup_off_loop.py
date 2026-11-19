@@ -22,17 +22,21 @@ from tests.runtime_model_helpers import builtin_launch
 async def _responsive(operation):
     gaps = []
     running = True
+    warm = asyncio.Event()
 
     async def tick():
         previous = time.monotonic()
         while running:
             await asyncio.sleep(0.01)
             current = time.monotonic()
-            gaps.append(current - previous)
+            # The first wake-up is task start-up, not the code under test: measure from the second.
+            if warm.is_set():
+                gaps.append(current - previous)
+            warm.set()
             previous = current
 
     ticker = asyncio.create_task(tick())
-    await asyncio.sleep(0)
+    await warm.wait()
     try:
         await operation
     finally:
@@ -164,19 +168,23 @@ def test_startup_session_sweep_keeps_loop_responsive(tmp_path, monkeypatch):
         gaps = []
         ticking = True
         ticker = None
+        warm = asyncio.Event()
 
         async def tick():
             previous = time.monotonic()
             while ticking:
                 await asyncio.sleep(0.01)
                 current = time.monotonic()
-                gaps.append(current - previous)
+                # The first wake-up is task start-up, not the code under test: measure from the second.
+                if warm.is_set():
+                    gaps.append(current - previous)
+                warm.set()
                 previous = current
 
         async def keeping_sessions(**kwargs):
             nonlocal ticker
             ticker = asyncio.create_task(tick())
-            await asyncio.sleep(0)
+            await warm.wait()
             return []
 
         original_measure = serve._StartupSteps.measure

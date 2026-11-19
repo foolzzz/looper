@@ -117,6 +117,13 @@ def message_command(message_id: str, *, profile: str | None = None) -> list[str]
     return [*_base(profile), "api", "GET", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}", "--as", "bot"]
 
 
+def batch_message_command(message_id: str, *, profile: str | None = None) -> list[str]:
+    """Read one message as the bot through the batch read (``GET /open-apis/im/v1/messages/mget``): the same raw
+    item as ``message_command``, without a merged forward's children."""
+    return [*_base(profile), "api", "GET", "/open-apis/im/v1/messages/mget", "--as", "bot",
+            "--params", json.dumps({"message_ids": message_id})]
+
+
 def mget_command(message_id: str, *, profile: str | None = None) -> list[str]:
     """Read one message as the bot through lark-cli's shortcut, which renders it (a merged forward as one block)."""
     return [*_base(profile), "im", "+messages-mget", "--as", "bot", "--no-reactions", "--message-ids", message_id]
