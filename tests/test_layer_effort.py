@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents.agent_settings import AgentType, Layer, LayerValues, resolve
+from looper.agents.agent_settings import SPAWN_ROLES, AgentType, Layer, LayerValues, resolve
 from looper.agents.layer_effort import Before, Derived, convert
 from looper.agents.profile_registry import (
     BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, ResolvedAgentProfile, builtin_resolved_profile,
@@ -23,7 +23,8 @@ from looper.agents.profile_registry import (
 from tests.runtime_model_helpers import resolved_profile
 
 S = (Layer.SYSTEM, None, None)
-ROLES = tuple(AgentType)
+# The roles whose layers predate Agent Profiles' efforts: the advisor's roles came after, with layers of their own.
+ROLES = tuple(role for role in AgentType if role not in SPAWN_ROLES)
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 P = "proj-a"
 

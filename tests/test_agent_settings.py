@@ -22,7 +22,7 @@ import pytest
 from looper import child_env
 from looper.agents import agent_settings
 from looper.agents.profile_registry import (
-    BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, ResolvedAgentProfile,
+    BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, ResolvedAgentProfile, builtin_profile,
     builtin_resolved_profile,
 )
 from looper.agents.runtimes.pricing import PRICES_AS_OF
@@ -142,7 +142,8 @@ class TestPrecedence:
 
     def test_nothing_set_is_the_builtin_default(self) -> None:
         for role in AgentType:
-            assert resolve(role, {}, "proj-a") == replace(BUILTIN_SETTINGS,
+            # The advisor and its judge have built-in profiles of their own.
+            assert resolve(role, {}, "proj-a") == replace(BUILTIN_SETTINGS, profile=builtin_profile(role.value),
                                                          system_prompt_mode=BUILTIN_SYSTEM_PROMPT_MODE[role])
         assert (BUILTIN_SETTINGS.harness.text, BUILTIN_SETTINGS.profile, BUILTIN_SETTINGS.model,
                 BUILTIN_SETTINGS.effort) == (DEFAULT_HARNESS_PROMPT, BUILTIN_PROFILE, "opus", "")
@@ -471,11 +472,12 @@ class TestSettingsApi:
         assert status == 200
         assert body["limits"]["builtin_harness_prompt"] == DEFAULT_HARNESS_PROMPT
         assert body["system"]["values"] == UNSET and set(body["roles"]) == {r.value for r in AgentType}
-        for view in (body["system"], *body["roles"].values()):
+        for role, view in (("", body["system"]), *body["roles"].items()):
             effective = view["effective"]
             assert effective["harness_prompt"] == {"value": DEFAULT_HARNESS_PROMPT, "source": "builtin"}
-            assert effective["profile"] == _now(BUILTIN_PROFILE, "builtin")
-            assert (effective["effort"], effective["env"]) == ({"value": None, "source": "builtin"}, [])
+            assert effective["profile"] == _now(builtin_profile(role), "builtin")
+            effort = {"value": "high", "source": "profile"} if role == "advisor" else {"value": None, "source": "builtin"}
+            assert (effective["effort"], effective["env"]) == (effort, [])
 
     def test_each_page_edits_its_layer_and_shows_what_applies(self, layers: _Layers) -> None:
         sonnet, haiku, opus_1m = PROFILES["agent-sonnet"], PROFILES["agent-haiku"], PROFILES["agent-opus[1m]"]

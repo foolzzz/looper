@@ -77,9 +77,22 @@ VALUES
     ('model-e2ecc5e8-32c7-5019-b66a-71fe6ff243d6', 'prov-cursor-login', 'gpt-5.3-codex', 'openai-responses', 1, true),
     ('model-808ddb80-2937-5334-acb1-d7995fe76a43', 'prov-cursor-login', 'gpt-5.6-sol-high', 'openai-responses', 2, true),
     ('model-624c577e-0484-5d3a-98dc-262aea3b5bd3', 'prov-cursor-login', 'composer-2.5', 'openai-responses', 3, true),
-    ('model-8914386b-758a-55e5-a3b1-9d0b9ae97c04', 'prov-cursor-login', 'gemini-3.7-flash-high', 'openai-responses', 4, true)
+    ('model-8914386b-758a-55e5-a3b1-9d0b9ae97c04', 'prov-cursor-login', 'gemini-3.7-flash-high', 'openai-responses', 4, true),
+    -- The advisor's and its judge's models (the advisor RFC, section 8), named in full: an alias can map to another.
+    ('model-5b413173-8c0d-5117-88cc-81d3af0763b9', 'prov-claude-subscription', 'claude-fable-5-2', 'anthropic-messages', 3, true),
+    ('model-20c51a64-3a6f-5426-a696-69533dc11e72', 'prov-claude-subscription', 'claude-haiku-5-5', 'anthropic-messages', 4, true)
 ON CONFLICT (provider_id, name, protocol) DO NOTHING;
 INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams)
 SELECT 'agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', id, true, true
 FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'opus' AND protocol = 'anthropic-messages'
+ON CONFLICT DO NOTHING;
+-- The built-in profiles of the advisor and its judge (profile_registry.BUILTIN_ROLE_PROFILES): each role runs its own
+-- when its role layer chooses none.
+INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, builtin, agent_teams)
+SELECT 'agent-claude-code-fable-5-2', 'claude-code/fable-5-2', 'rt-claude-code', id, 'high', true, false
+FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'claude-fable-5-2' AND protocol = 'anthropic-messages'
+ON CONFLICT DO NOTHING;
+INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams)
+SELECT 'agent-claude-code-haiku-5-5', 'claude-code/haiku-5-5', 'rt-claude-code', id, true, false
+FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'claude-haiku-5-5' AND protocol = 'anthropic-messages'
 ON CONFLICT DO NOTHING;

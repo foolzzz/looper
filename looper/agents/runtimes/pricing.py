@@ -101,7 +101,10 @@ def _p(input_usd: float, output_usd: float, cache_read_usd: float, cache_write_u
 
 # Model -> (input, output, cache read, cache write), USD per million tokens, as of PRICES_AS_OF.
 BUILTIN_PRICES: Mapping[str, ModelPrice] = {
-    # Anthropic: a 5-minute cache write is 1.25x input.
+    # Anthropic: a 5-minute cache write is 1.25x input. (Claude Code also writes one-hour cache entries, at 2x input,
+    # which this table cannot tell apart: a run priced here counts them at the 5-minute rate.)
+    # Matches Claude Code 2.1.328's own figure for its runs (checked 2026-11-19).
+    "claude-fable-5-2": _p(8.00, 40.00, 0.20, 10.00),
     "claude-fable-5-1": _p(10.00, 50.00, 0.25, 12.50),
     "claude-opus-5-5": _p(4.00, 20.00, 0.20, 5.00),
     "claude-sonnet-5-5": _p(2.00, 10.00, 0.20, 2.50),
@@ -139,6 +142,7 @@ BUILTIN_PRICES: Mapping[str, ModelPrice] = {
 # The model each of Claude Code's aliases runs with Claude Code's own login, as of PRICES_AS_OF (what its runs
 # report).
 CLAUDE_CODE_ALIASES: Mapping[str, str] = {
+    "fable": "claude-fable-5-2",
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",
     "haiku": "claude-haiku-4-5",
