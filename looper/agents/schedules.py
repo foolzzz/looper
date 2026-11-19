@@ -336,8 +336,8 @@ async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None
     return {"schedule": view}
 
 
-async def notify_targets(*, manager_id: str | None = None) -> list[dict[str, Any]]:
-    """Built-in bots' allowlisted direct chats and explicitly Manager-bound chats."""
+async def _allowlisted_targets() -> list[dict[str, Any]]:
+    """The built-in bots' allowlisted direct chats."""
     targets = []
     for row in await db_channel_configs.list_configs():
         channel = row["channel_type"]
@@ -350,6 +350,22 @@ async def notify_targets(*, manager_id: str | None = None) -> list[dict[str, Any
         label = "Telegram" if channel == "telegram" else "Lark"
         targets += [{"channel": channel, "chat": chat, "label": f"{label} · {chat}",
                      "channel_enabled": bool(row.get("enabled"))} for chat in chats]
+    return targets
+
+
+async def notify_target_kind(channel: str, chat: str) -> str | None:
+    """What a schedule's notification target is: ``dm`` (an allowlisted direct chat), ``group`` (a chat bound to a
+    Manager), or None for neither (the target is gone)."""
+    if any((t["channel"], t["chat"]) == (channel, chat) for t in await _allowlisted_targets()):
+        return "dm"
+    if any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
+        return "group"
+    return None
+
+
+async def notify_targets(*, manager_id: str | None = None) -> list[dict[str, Any]]:
+    """Built-in bots' allowlisted direct chats and explicitly Manager-bound chats."""
+    targets = await _allowlisted_targets()
     offered = {(target["channel"], target["chat"]) for target in targets}
     bindings = await db_chat_bindings.notification_targets()
     for binding in bindings:

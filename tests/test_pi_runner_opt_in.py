@@ -68,8 +68,8 @@ def test_serve_reads_opt_in_before_ownership_and_cleans_partial_start(tmp_path, 
 
     supervisor = SimpleNamespace(stop=lambda: stopped("runner stopped"))
 
-    def enable(root):
-        assert root == tmp_path
+    def enable(root, executable="pi"):
+        assert root == tmp_path and executable == "pi"
         calls.append("enabled")
         return supervisor
 
@@ -359,3 +359,13 @@ def test_planner_launch_failure_records_run_and_fails_task(tmp_path, monkeypatch
             await agent._claude.stop()
 
     asyncio.run(run())
+
+
+def test_serve_refuses_to_start_when_in_use_pi_runtimes_differ(tmp_path, monkeypatch):
+    async def conflict(url):
+        raise pi_runner.PiRuntimeConflict("Pi runtimes with different executables (/a/pi, /b/pi)")
+
+    monkeypatch.setattr(pi_runner, "configured_executable", conflict)
+    config = ops.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops.FILE, pi_runtime="runner", dsh_runtime="cli")
+    with pytest.raises(serve.StartupCheckFailed, match="/a/pi, /b/pi"):
+        asyncio.run(serve._run_agent_system(ops=config, runtime_root=tmp_path, work_dir=tmp_path))

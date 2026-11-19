@@ -79,7 +79,7 @@ async def _running(pool: Any, monkeypatch: pytest.MonkeyPatch, root: Path, *, ke
     check = serve.self_check.Check("test", "Test", serve.self_check.OK, "isolated test")
     for name in ("codex_login_check", "grok_login_check", "ttadk_check"):
         monkeypatch.setattr(serve.self_check, name, AsyncMock(return_value=check))
-    monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [])
+    monkeypatch.setattr(serve.self_check, "check_claude", lambda *_: [])
     monkeypatch.setattr(serve.self_check, "check_lark_cli", lambda _: check)
     monkeypatch.setattr(serve.self_check, "check_git", lambda: check)
     real_start, real_fence = serve.AgentHTTPServer.start, serve.Fence

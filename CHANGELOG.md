@@ -18,6 +18,36 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.18] - 2026-11-19
+
+### Added
+
+- **Task ends are recorded as completion events.** ([#1431](https://github.com/foolzzz/looper/pull/1431)) Additive migration `manager_events`; each task end that produces a notice (Manager task-end handler, scheduled-run message sent to a chat) writes one row with the notice it stands for, state `skipped`, reason `off`. Nothing sent changes. New operator-only operation `manager_events.summary`.
+
+### Changed
+
+- **Agent runtimes are chosen only through configuration.** ([#1417](https://github.com/foolzzz/looper/pull/1417)) `looper doctor`, startup checks and `system/status` check the Claude Code CLI and login only while an Agent Profile in use runs on Claude Code; the Pi runner starts the executable of the in-use Pi runtime; real-mode evals take runtime and model through profile flags.
+
+### Fixed
+
+- **A replayed bus message no longer resends a task-end notice.** ([#1431](https://github.com/foolzzz/looper/pull/1431)) A replay is recorded once and sends nothing, unless the earlier send did not complete, in which case it is retried.
+- **Tests: parallel Lark message read tests no longer depend on process start-up time.** ([#1429](https://github.com/foolzzz/looper/pull/1429)) Test only, no behavior change.
+
+## [2.15.17] - 2026-11-19
+
+### Added
+
+- **Message stream bridge (default off).** ([#1425](https://github.com/foolzzz/looper/pull/1425)) Additive migration `message_stream` (`event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`); `ingest_mode = bridge` reads an existing collector's per-chat files into PostgreSQL, a Message stream dashboard page shows its state, and `looper msgflow import --days N [--dry-run] [--per-file] [--source ID]` imports history. Enabling the bridge with `start_from = beginning` imports all history; the default `end` stores only what comes later.
+- **`processor` role and `no_tools` capability (default off).** ([#1424](https://github.com/foolzzz/looper/pull/1424)) Additive migration `processor_role`; a tool-less Claude Code run configured by an Agent Profile, with a Processor row in Settings → Roles. Nothing starts a processor run yet.
+
+### Fixed
+
+- **Tests: no leaked launchd job or keeper processes, no macOS hang.** ([#1427](https://github.com/foolzzz/looper/pull/1427)) Test only, no behavior change.
+
+### Documentation
+
+- **Manager completion, ledger and briefing RFC.** ([#1426](https://github.com/foolzzz/looper/pull/1426), [#1428](https://github.com/foolzzz/looper/pull/1428)) Design proposal and its decided questions; no code or behavior change.
+
 ## [2.15.16] - 2026-11-19
 
 ### Changed

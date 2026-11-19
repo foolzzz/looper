@@ -37,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -214,12 +214,37 @@ class Api:
         return self.request("PUT", path, body)
 
 
+CLAUDE_CODE = "claude-code"  # the runtime type that needs the `claude` binary
+
+
+def planned_runtime_types(*, register: dict[str, Any] | None = None, agent: str | None = None,
+                          model: str | None = None, manager_model: str | None = None,
+                          specs: Iterable[dict[str, Any] | None] = ()) -> set[str]:
+    """The runtime types a run's flags choose before its server starts: the spec's (``register`` and any of
+    ``specs``), Claude Code for ``model``, a provider preset, ``manager_model`` or no choice at all (the built-in
+    agent). An ``agent`` named alone has the runtime of the server's registry, known only once it runs
+    (``require_claude`` again then)."""
+    types = {(spec.get("runtime") or {}).get("type") for spec in (register, *specs) if spec}
+    if register is None and agent is None or manager_model:
+        types.add(CLAUDE_CODE)
+    types.discard(None)
+    return types
+
+
+def require_claude(mode: str, claude: str | None, runtime_types: Iterable[str]) -> None:
+    """Real mode runs the `claude` binary only for Claude Code agents: refuse to start without it then."""
+    if mode == "real" and not claude and CLAUDE_CODE in runtime_types:
+        raise EvalError("a Claude Code agent needs the `claude` CLI, and there is none on PATH (choose another "
+                        "runtime with --agent or --register-agent)")
+
+
 def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
                    max_budget_usd: float | None = None, real_claude: str | None = None,
-                   real_reviewer: bool = False) -> Path:
-    """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget. With
-    ``real_reviewer`` installs the role-selective stand-in in real mode. Each task script chooses
-    real Reviewers or a real Planner (``fake_claude.REAL_CLAUDE_ENV``); other tasks remain fully real."""
+                   real_reviewer: bool = False) -> Path | None:
+    """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget (none when
+    no agent runs it: ``real_claude`` None). With ``real_reviewer`` installs the role-selective stand-in in real
+    mode. Each task script chooses real Reviewers or a real Planner (``fake_claude.REAL_CLAUDE_ENV``); other tasks
+    remain fully real."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     prefix = ""
     if mode == "fake":
@@ -227,7 +252,7 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
         target = [sys.executable, str(FAKE_CLAUDE), str(scenarios)]
     else:
         if not real_claude:
-            raise EvalError("real mode needs Claude Code: no 'claude' on PATH")
+            return None
         target = [real_claude]
         if real_reviewer:
             assert scenarios is not None
@@ -1008,6 +1033,7 @@ def run(
     if jobs > 1 and total_cap_usd is not None and case_budget_usd is None:
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
+    require_claude(mode, real_claude, planned_runtime_types(register=register, agent=agent, model=model))
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1055,6 +1081,7 @@ def run(
             if register is not None:
                 agent = register_agent(api, register)["name"]
             chosen = select_agent(api, agent=agent, model=model, provider=provider, run_budget_usd=max_budget_usd)
+            require_claude(mode, real_claude, [chosen.get("runtime_type")])
             if register is not None:
                 api.post("/api/v1/agent_settings/update_system", {"values": {
                     "profile_id": chosen["profile_id"], "run_budget_usd": max_budget_usd}})["result"]

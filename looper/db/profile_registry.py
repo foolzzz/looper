@@ -318,6 +318,54 @@ async def login_profile_count(runtime_type: str, *, pool: asyncpg.Pool | asyncpg
         "WHERE p.auth = 'oauth' AND p.oauth_runtime_type = $1", runtime_type))
 
 
+# Every place that selects an Agent Profile for runs: layers, Managers and their sessions, tasks, schedules, task
+# roles and templates, and the lists of profiles a project lets its Planners choose from. (An empty list lets a
+# Planner choose any profile; that possibility selects none, so it does not count.)
+_PROFILE_SELECTIONS = (
+    "SELECT profile_id FROM agent_setting_layers", "SELECT profile_id FROM managers",
+    "SELECT selected_profile_id FROM agent_sessions", "SELECT profile_id FROM task_profile_overrides",
+    "SELECT profile_id FROM task_planner_profiles", "SELECT profile_id FROM task_roles",
+    "SELECT profile_id FROM project_role_templates", "SELECT profile_id FROM schedule_profile_overrides",
+    "SELECT planner_profile_id FROM manager_task_templates", "SELECT worker_profile_id FROM manager_task_templates",
+    "SELECT reviewer_profile_id FROM manager_task_templates",
+    "SELECT profile_id FROM project_allowed_profiles",
+)
+# Workflow presets name profiles in ``profiles`` (role -> profile) and in each custom role's ``profile_id``.
+_WORKFLOW_SELECTIONS = (
+    "SELECT value FROM workflows w, jsonb_each_text(COALESCE(w.definition->'profiles', '{}'::jsonb))",
+    "SELECT r->>'profile_id' FROM workflows w, jsonb_array_elements(COALESCE(w.definition->'roles', '[]'::jsonb)) r",
+)
+
+
+async def runtimes_in_use(builtin_profile_id: str, roles: Sequence[str], *,
+                          pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, str]]:
+    """The runtimes (``type`` and ``executable``) of the Agent Profiles runs can use: those a layer, Manager,
+    session, task, schedule, task role, template, workflow preset or project allow-list selects, the profiles they
+    fall back to, and ``builtin_profile_id`` while the system layer and some role in ``roles`` have no profile of
+    their own (so that role runs the built-in one)."""
+    pool = pool or get_pool()
+    selected = " UNION ".join([
+        *(f"{select} WHERE {select.split()[1]} IS NOT NULL" for select in _PROFILE_SELECTIONS),
+        *(f"SELECT p FROM ({select}) AS s(p) WHERE p IS NOT NULL" for select in _WORKFLOW_SELECTIONS)])
+    rows = await pool.fetch(
+        f"WITH RECURSIVE base(id) AS ({selected} UNION SELECT $1 WHERE "
+        "NOT EXISTS (SELECT 1 FROM agent_setting_layers WHERE scope = 'system' AND profile_id IS NOT NULL) "
+        "AND EXISTS (SELECT 1 FROM unnest($2::text[]) AS r(role) WHERE NOT EXISTS ("
+        "SELECT 1 FROM agent_setting_layers l WHERE l.scope = 'role' AND l.role = r.role "
+        "AND l.profile_id IS NOT NULL))), "
+        "used(id) AS (SELECT id FROM base UNION SELECT a.fallback_profile_id FROM agent_profiles a "
+        "JOIN used u ON u.id = a.id WHERE a.fallback_profile_id IS NOT NULL) "
+        "SELECT DISTINCT r.type, r.executable FROM used u JOIN agent_profiles a ON a.id = u.id "
+        "JOIN agent_runtimes r ON r.id = a.runtime_id ORDER BY r.type, r.executable", builtin_profile_id, list(roles))
+    return [{"type": row["type"], "executable": row["executable"]} for row in rows]
+
+
+async def runtime_types_in_use(builtin_profile_id: str, roles: Sequence[str], *,
+                               pool: asyncpg.Pool | asyncpg.Connection | None = None) -> set[str]:
+    """The runtime types of ``runtimes_in_use``."""
+    return {row["type"] for row in await runtimes_in_use(builtin_profile_id, roles, pool=pool)}
+
+
 async def launcher_profile_count(launcher: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> int:
     """How many Agent Profiles use a runtime with ``launcher``."""
     pool = pool or get_pool()

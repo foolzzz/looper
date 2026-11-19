@@ -34,6 +34,8 @@
 
 | 阶段 | 主题 | 状态 | 依赖 |
 |---|---|---|---|
+| 2026-11-19 | 发布 v2.15.17：包含消息流桥接与 `message_stream` 迁移（#1425）、processor 角色与 `no_tools` 能力及 `processor_role` 迁移（#1424）、测试泄漏与 macOS 卡死修复（#1427）、Manager 收尾 / 账本 / 晨报 RFC（#1426）。 |
+| 2026-11-19 | Manager 收尾、账本与晨报 RFC 的待定问题定稿（#1428，只改文档）：Q1–Q9 按推荐答案决定，第 11 节改为「已定的问题」；操作员 id 不预填，开启账本时列出未设操作员 id 的机器人；命令行写入保持 `via = cli` 并在账本页和晨报里标出；收尾回合沿用 Manager 角色已有的单次预算。 |
 | M0 | 项目背景；四类 agent 的 prompt 分层；记录并展示 system prompt | ✅ 已交付（looper #13） | — |
 | M1 | 上下文隔离与可复现 | ✅ 已交付（looper #17） | M0 |
 | M1.5 | harness 与 role 分层；harness 继承链 | ✅ 已交付（looper #19） | M1 |
@@ -556,6 +558,10 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-19 | 发布 v2.15.18：包含不写死运行时（#1417）、任务结束事件入库与 `manager_events` 迁移（#1431）、飞书引用并行读取测试稳定化（#1429）。 |
+| 2026-11-19 | Manager 收尾 M8 C1：任务结束事件入库（#1431，已合入）：新增 `manager_events` 表（迁移 `manager_events`），Manager 的任务结束处理（dashboard、私聊、群聊，只记 `completed`、`failed`）和定时任务发到聊天的运行消息各写一行，状态 `skipped`、原因 `off`，通知照旧发送并记 `sent_at`；同一 `dedupe_key` 重放只记一行且不再重发，`sent_at` 为空时补发；写库失败只记日志、通知照发。housekeeping 删 30 天前的事件，仅操作员的 `manager_events.summary` 给出近 24 小时按状态与原因的计数。没有改动提示词、工具列表和命令行。 |
+| 2026-11-19 | 飞书引用并行读取测试稳定化（#1429，已合入，只改测试）：两个并行读取测试原来从替身的日志推断调用，被提前杀掉的单条读取在解释器启动前不留日志；改为用 `launched` fixture 在 Looper 启动子进程时记录，并把首次尝试放宽到 2 秒。30 次顺序和 30 次 `-n 8` 并行全部通过。 |
+| 2026-11-18 | 运行时和模型只经 Agent Profile 配置（运营规则：平台里不写死运行时 + 模型，本分支未合入）：`looper doctor`、启动自检和 `system/status` 只在「在用」的 Agent Profile 里有 `claude-code` 运行时时才检查 Claude Code CLI 和登录（任一层的选择：系统、角色、项目、任务、Planner/Manager/会话/定时任务的选择，回退档案，任务角色和模板，以及系统层与某个角色都没配档案时的内置 `claude-code/opus`），没有时两项跳过且不再写「Agents cannot run」，读不到档案时和以前一样检查；Pi runner 启动时用已登记 Pi 运行时的可执行文件（取第一个在用的，没有则 PATH 上的 `pi`），不再固定 `which("pi")`，登记在别处的 pi 不再在启动后被拒；评测里真实模式只在跑 Claude Code 档案时才要求 `claude`（`prompt_regression` run/dialogs、`lark_quote` 新增 `--agent`/`--register-agent`，`stop_realpath` 新增 `--register-agent`/`--claude-model`，`dsh_consult_replay` 新增 `--model`/`--effort`，默认值都是原来写死的选择）。验证：新增测试在 main 上全部失败、本分支通过；真实路径用一次性库跑 `looper doctor`，系统层为 codex 档案时 Claude 两项 skip、退出 0，加一个项目层的 claude-code 档案后 Claude CLI fail、退出 1。未改：内置默认档案 `claude-code/opus`、模型目录与价格表、内置 `rt-claude-code` 的可执行文件仍是 PATH 上的 `claude`；`dsh_runner` 启动同样用 `which("dsh")`，未改，另记。 |
 | 2026-11-18 | 消息流 P1：事件表与桥接（本分支未合入，默认关闭）：新增 `event_sources`、`source_chats`、`source_threads`、`source_people`、`source_runs`、`source_events`；serve 里的 `SourceService` 按来源的 cron 读已有采集器的按会话 NDJSON（偏移、大小、inode、mtime 与偏移前最后一个 id 判断增量和改写，只读完整行，按 message_id 去重，每个文件一个事务并推进 `committed_seq`，PG 咨询锁保证单写入者，被打断的运行记为 `interrupted`）；Looper 自己机器人的消息不入库；`looper msgflow import --days N [--dry-run]`；只读操作 `message_stream.status`、`message_stream.runs` 和面板开关用的 `message_stream.configure`；Dashboard 新增「Message stream」页（状态卡、最近运行、开关）。来源有类型化设置 `bridge_start_from`：`end`（默认）新文件从当前末尾开始，`beginning` 首次读从头导入全部（分块读、每块一个事务、被杀后接着读不重不漏、按文件对账）；导入时机器人消息超过 30 天只存正文。保留期清理任务、按会话删除、采集、订阅仍未做。 |
 | 2026-11-19 | 测试泄漏与整套测试卡住（#1420，本分支未合入，只改测试）：卡住的根因是 macOS + Python 3.14 下 asyncio 的子进程监视线程把被 `SIGSTOP` 的子进程当成已退出，事件循环随后在 `waitpid` 里永远阻塞，`test_an_unresponsive_keeper_and_its_child_are_ended` 因此卡死（Linux CI 不受影响）；keeper 测试改用轮询的 `PollingProcess`。keeper 进程组在 fixture 收尾时无论成败都被 SIGKILL，并登记到临时目录，下一次 pytest 启动时清掉已死会话遗留的 keeper；launchd 升级测试需要 `LOOPER_TEST_LAUNCHD=1` 才运行，job 在收尾里卸载，启动时清掉 plist 已不存在的 `com.looper.test-upgrade-*`。 |
 | 2026-11-19 | Manager 收尾、账本与晨报的 RFC（设计文档的 M8，[RFC](../architecture/rfcs/manager-completion-ledger-v0.zh-CN.md)，本分支未合入，只改文档）：任务结束的完成事件入库（`manager_events`），私聊和控制台里由只读的 `[COMPLETION]` 回合替换代码通知，失败、超时或群聊照旧发代码通知，开关默认关闭；账本（`ledger_items`、`ledger_events`）只存关卡、待确认操作和任务的引用，「只有你本人能确认」由复合外键和事件约束保证；晨报是 `input_kind = briefing` 的订阅。第 5 节队列新增第 26 项。 |
@@ -879,7 +885,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：组件指纹、升级计划、排空、`looper service upgrade` 与重启恢复已交付；Claude Code 看护与启动接管已交付，默认关闭。`CONTROL_PLANE` 安全规划、分级排空期限、接管报告与 P1/P2 状态检查已交付；本分支验证 macOS launchd 替身链路并补齐启动结束原因、截断轮次和 systemd 生效配置检查，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍未验证（[证据](../validation/kept-runs/README.md)），S2、S3 待做。#909 仍待默认开启与无条件单实例锁一并关闭。
 25. **消息流与订阅**（2026-11-18 维护者定方向，设计见[消息流与订阅 RFC](../architecture/rfcs/message-stream-v0.zh-CN.md)，未开始；PR 顺序见 RFC 第 13 节，各 PR 默认关闭、可独立回滚）：P0 RFC；P1 事件表与桥接（`ingest_mode = bridge`、`SourceService`、`looper msgflow import`、最小消息流页）；P2 `processor` 角色与不带工具的运行（`Capability.NO_TOOLS`）；P3 订阅类型（`schedules.kind = 'subscription'`）；P4 `looper msgflow export`；P5 Looper 自己采集与对账；P6 消息流页的会话、保留期与删除；P7 管家工具。吃瓜订阅不做影子运行：P1–P3 合入后直接开启，外部采集器的吃瓜同一小时改为 dry-run 对照一天。
-26. **Manager 收尾、账本与晨报**（设计文档的 M8，2026-11-19 维护者逐条确认方向，设计见[Manager 收尾、账本与晨报 RFC](../architecture/rfcs/manager-completion-ledger-v0.zh-CN.md)，未开始；PR 顺序与测试见 RFC 第 9 节，各 PR 默认关闭、可独立回滚）：C1 完成事件表与记录（关闭时也记 `skipped` 行，发出的内容不变）；C2 `[COMPLETION]` 回合、契约与兜底；C3 60 秒合并窗口、队列时限、定时任务来源与设置页；L1 账本表与 `looper ledger` 命令行；L2 `looper_ledger_add`、`looper_ledger_update`、操作者 ID 与自动登记；L3 待办页；L4 账本契约；B1 晨报输入与快照；B2 晨报模板与 processor 说明；B3 回「确认 L-xxxx」；B4 随 M7a ④⑤ 接入承诺与意图。C1 与 L1 和 M7a ②③ 并行，等 #1420 的修复合入后开工；晨报等 M7a P3 与 L1、L2 合入。RFC 第 11 节的 Q1–Q9 待维护者答复。
+26. **Manager 收尾、账本与晨报**（设计文档的 M8，2026-11-19 维护者逐条确认方向，设计见[Manager 收尾、账本与晨报 RFC](../architecture/rfcs/manager-completion-ledger-v0.zh-CN.md)，未开始；PR 顺序与测试见 RFC 第 9 节，各 PR 默认关闭、可独立回滚）：C1 完成事件表与记录（关闭时也记 `skipped` 行，发出的内容不变）；C2 `[COMPLETION]` 回合、契约与兜底；C3 60 秒合并窗口、队列时限、定时任务来源与设置页；L1 账本表与 `looper ledger` 命令行；L2 `looper_ledger_add`、`looper_ledger_update`、操作者 ID 与自动登记；L3 待办页；L4 账本契约；B1 晨报输入与快照；B2 晨报模板与 processor 说明；B3 回「确认 L-xxxx」；B4 随 M7a ④⑤ 接入承诺与意图。C1 与 L1 和 M7a ②③ 并行，等 #1420 的修复合入后开工；晨报等 M7a P3 与 L1、L2 合入。RFC 第 11 节的 Q1–Q9 已于 2026-11-19 按推荐答案定下。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 

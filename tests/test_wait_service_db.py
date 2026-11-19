@@ -770,7 +770,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         check = SimpleNamespace(status=serve.self_check.OK, to_dict=lambda: {})
         for name in ("check_database", "codex_login_check", "grok_login_check"):
             monkeypatch.setattr(serve.self_check, name, AsyncMock(return_value=check))
-        monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [])
+        monkeypatch.setattr(serve.self_check, "check_claude", lambda *_: [])
         for name in ("check_lark_cli", "check_git"):
             monkeypatch.setattr(serve.self_check, name, lambda *args: check)
         monkeypatch.setattr(serve.self_check, "log_problems", lambda _: None)

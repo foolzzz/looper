@@ -24,8 +24,9 @@ from typing import Any
 
 import asyncpg
 
-from ..db import connection as db_connection, projects as db_projects, schedules as db_schedules
-from . import cron
+from ..db import (connection as db_connection, managers as db_managers, projects as db_projects,
+                  schedules as db_schedules, tasks as db_tasks)
+from . import completion_events, cron
 from .links import run_link, schedule_link, task_link
 from .message import builtin_channel_id
 from .project_execution import format_usd
@@ -270,8 +271,11 @@ class Notifier:
         # A subscription's successful run already pushed (or kept) its output: the message is the output itself.
         if wants_run_message(schedule["notify"], status) and not (
                 schedule["kind"] == "subscription" and status in db_schedules.SUCCESS):
-            await self._deliver(schedule, Kind.RUN, run_text(schedule, project_name, run, base=self._base),
-                                run_id=run_id)
+            text = run_text(schedule, project_name, run, base=self._base)
+            recorded = await self._record_end(schedule, run, text)
+            if recorded is None or recorded.send_fallback:
+                if await self._deliver(schedule, Kind.RUN, text, run_id=run_id) != "failed":
+                    await completion_events.mark_sent(recorded)
         now = self._clock()
         if status in db_schedules.FAILURES and schedule["consecutive_failures"] >= alert_policy(schedule).failures_after:
             if await self._switch(schedule["id"], "failures_alert_at", now):
@@ -289,6 +293,26 @@ class Notifier:
             await self._deliver(schedule, Kind.DEADLINE_RECOVERED,
                                 recovered_text(schedule, project_name, run, Kind.DEADLINE_RECOVERED, base=self._base),
                                 run_id=run_id)
+
+    @staticmethod
+    async def _record_end(schedule: Mapping[str, Any], run: Mapping[str, Any], text: str):
+        """The completion event of a run that ended its task and whose message goes to a chat; None for any other
+        run (its message is sent as before)."""
+        from .schedules import notify_target_kind
+
+        channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
+        if not (channel and chat and run.get("task_id") and run["status"] in db_tasks.PLANNER_END_STATUSES):
+            return None
+        try:
+            target = await notify_target_kind(channel, chat)
+        except Exception:
+            logger.exception("schedule %s: could not tell who its notification target is", schedule["id"])
+            return None
+        if target is None:
+            return None
+        return await completion_events.record_schedule_run(
+            db_managers.DEFAULT_MANAGER_ID, task_id=run["task_id"], run_id=run["id"], target=target,
+            channel_id=builtin_channel_id(channel), chat=chat, text=text, name=schedule["name"], status=run["status"])
 
     async def check_stale(self, now: datetime) -> None:
         """Start the stale alert of each enabled schedule past its deadline. A schedule whose run is in progress
@@ -392,7 +416,8 @@ class Notifier:
     async def _switch(schedule_id: str, column: str, at: datetime | None) -> bool:
         return await db_schedules.set_alert(db_connection.get_pool(), schedule_id, column, at)
 
-    async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> None:
+    async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> str:
+        """Send and record the message; its status: ``sent``, ``failed`` (not handed to a channel) or ``dashboard``."""
         from .schedules import notify_targets
 
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
@@ -424,3 +449,4 @@ class Notifier:
         except asyncpg.ForeignKeyViolationError:
             # Deleted since the message was written: its outbox went with it.
             logger.info("schedule %s was deleted: its %s message is not recorded", schedule["id"], kind.value)
+        return status

@@ -2909,6 +2909,19 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   step's Worker is told of an earlier branch only while it exists). Removing a
   worktree drops only its own record in the repository (`git worktree remove
   --force`, never `prune`, which would drop the user's stale ones too).
+- **Claude Code check.** `looper doctor`, the startup checks and `POST /api/v1/system/status` check the Claude
+  Code CLI and its login (`claude_cli`, `claude_login`) only while an Agent Profile in use runs on a
+  `claude-code` runtime, as the other runtimes' logins are: a profile any layer (system, role, project, task and
+  the Planner's, Manager, session and schedule choices) selects, a profile it falls back to, a task role or
+  template, a workflow preset's profiles, a project's list of profiles its Planners may choose from, or the
+  built-in `claude-code/opus` while the system layer and some role have no profile of their own (an empty
+  list, which lets a Planner choose any profile, counts none). With none, both are skipped and nothing says
+  that agents cannot run; when the profiles cannot be read the CLI is checked as before. `system/status`
+  runs the CLI and login probes again when this answer changes, so switching to or from a Claude Code profile
+  after startup shows in the next poll. The built-in runtime's executable stays `claude` on PATH.
+- **Pi runner executable.** With `[runtimes] pi = "runner"` the runner starts the executable of the Pi runtime
+  that the profiles in use launch (the same set as above), `pi` on PATH when none is; Pi runtimes with different
+  executables in use at once stop the start with a message naming them.
 - **`looper doctor`** warns when git is missing or older than 2.40 (`looper
   serve` too, in `POST /api/v1/system/status`'s `checks`), and checks the default directory
   of each project set to `worktree` as the Planner would, with the paths it
@@ -4116,6 +4129,23 @@ chat session (for example through the CLI or a direct API call) records no
 `origin_thread` and keeps its existing channel behavior; it posts no web chat
 message. When a Manager is disabled, its queued and in-flight reports are handed
 to the default Manager instead of being dropped.
+
+**Completion events.** The end of a task (`completed` or `failed`) that has a
+chat to tell is also a `manager_events` row (`kind = task_end`), written where
+the code notice is made: the Manager's `GOAL_STATUS` handler for a dashboard
+chat session (`target_kind = web`), a Telegram or Lark direct chat (`dm`) and a
+group chat (`group`), and the scheduler's run message for a schedule that sends
+it to a chat (`origin = schedule`, `dm` for an allowlisted direct chat, `group`
+for a bound chat; only a run that ended its task, and only when `notify` sends
+that run's message). The row keeps the notice it stands for (`fallback`) and a
+`dedupe_key` (the `GOAL_STATUS` message's id, or `schedule_run:<run id>`).
+Until the completion turn exists every row is `skipped` with reason `off`: the
+notice is sent exactly as before and `sent_at` records that it was handed to
+the channel. A replayed message finds its row and sends nothing, unless
+`sent_at` is empty; a database that cannot be written logs the failure and
+sends the notice anyway. Rows older than 30 days are deleted by housekeeping,
+and a deleted task takes its rows with it. The operator-only operation
+`manager_events.summary` counts the last 24 hours by state and reason.
 
 ### Task templates
 
@@ -5340,6 +5370,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
 | `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
+| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, and `sent_at`; kept 30 days |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
