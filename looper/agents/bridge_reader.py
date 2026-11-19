@@ -63,6 +63,10 @@ class Scan:
     unchanged: bool = False
     rescanned: bool = False
     bad_lines: int = 0
+    # Bytes remain past what this scan read (it stopped at ``max_bytes``): scan again from ``state``.
+    more: bool = False
+    # An unterminated last line waits past ``state.offset``.
+    incomplete_tail: bool = False
 
 
 def _microseconds(stat: os.stat_result) -> datetime:
@@ -156,6 +160,26 @@ def _last_id_before(handle: Any, offset: int) -> str | None:
     return None
 
 
+def baseline_file(path: Path) -> FileState:
+    """The state of a file read to its current end without reading it into a message: what a source that starts from
+    ``end`` saves for a file it sees for the first time, so only lines appended later are read."""
+    with path.open("rb") as handle:
+        stat = os.fstat(handle.fileno())
+        offset, window = 0, 4096
+        # The offset is the end of the last complete line; an unterminated tail waits for its newline.
+        while True:
+            start = max(0, stat.st_size - window)
+            handle.seek(start)
+            chunk = handle.read(stat.st_size - start)
+            cut = chunk.rfind(b"\n")
+            if cut >= 0 or start == 0:
+                offset = start + cut + 1
+                break
+            window *= 4
+        return FileState(offset=offset, size=stat.st_size, inode=str(stat.st_ino), mtime=_microseconds(stat),
+                         last_id=_last_id_before(handle, offset) if offset else None)
+
+
 def scan_file(path: Path, state: FileState | None, *, max_bytes: int = DEFAULT_MAX_BYTES) -> Scan:
     """What is new in ``path`` since ``state`` (None: never read). ``Scan.state`` is the state to save."""
     with path.open("rb") as handle:
@@ -174,9 +198,10 @@ def scan_file(path: Path, state: FileState | None, *, max_bytes: int = DEFAULT_M
         while b"\n" not in data and (more := handle.read(_EXTEND)):
             data += more
         end = data.rfind(b"\n") + 1
+        more = bool(handle.read(1))
         scan = Scan(state=FileState(offset=start + end, size=start + len(data), inode=inode, mtime=mtime,
                                     last_id=state.last_id if state is not None and not rescanned else None),
-                    rescanned=rescanned)
+                    rescanned=rescanned, more=more, incomplete_tail=end < len(data) and not more)
         last_id = scan.state.last_id if not rescanned and end == 0 else None
         for line in data[:end].split(b"\n")[:-1]:
             if not line.strip():

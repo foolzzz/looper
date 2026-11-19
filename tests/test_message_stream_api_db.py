@@ -36,11 +36,12 @@ def test_the_switch_creates_the_source_and_status_counts_what_was_read(monkeypat
         sup.append(tmp_path, "oc_a", sup.message("m1", text="a secret plan"), sup.message("m2"))
         async with v1_api(tmp_path / "api", pool) as call:
             status, answer = await call("message_stream.configure",
-                                        {"ingest_mode": "bridge", "bridge_dir": str(tmp_path), "user_open_id": sup.ME})
+                                        {"ingest_mode": "bridge", "bridge_dir": str(tmp_path), "user_open_id": sup.ME,
+                                         "start_from": "beginning"})
             assert status == 200, answer
             source = answer["result"]
-            assert (source["source_id"], source["ingest_mode"], source["cron"]) == (
-                "lark-user", "bridge", source_service.BRIDGE_CRON)
+            assert (source["source_id"], source["ingest_mode"], source["cron"], source["start_from"]) == (
+                "lark-user", "bridge", source_service.BRIDGE_CRON, "beginning")
             await source_service.run_bridge_pass(await store.get_source("lark-user", db=pool), db=pool, now=sup.NOW)
             status, answer = await call("message_stream.status")
             (view,) = answer["result"]["sources"]
@@ -60,6 +61,7 @@ def test_the_switch_creates_the_source_and_status_counts_what_was_read(monkeypat
     {"ingest_mode": "bridge", "bridge_dir": "{tmp}/missing"},
     {"ingest_mode": "collect"},
     {"cron": "every minute"},
+    {"start_from": "middle"},
     {"timezone": "Mars/Base"},
     {"user_open_id": "has space"},
     {"name": "  "},

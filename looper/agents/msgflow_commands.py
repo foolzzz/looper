@@ -15,21 +15,34 @@ from typing import Any
 IMPORT_MAX_DAYS = 3650
 
 
-def format_report(report: Any, *, days: int, dry_run: bool) -> str:
+def format_report(report: Any, *, days: int, dry_run: bool, per_file: bool = False) -> str:
     verb = "would store" if dry_run else "stored"
+    files = [f for f in report.file_reports if not f.baselined]
+    total = {name: sum(getattr(f, name) for f in files) for name in
+             ("lines", "distinct", "new", "duplicates", "skipped", "bad_lines", "rescans")}
+    unreconciled = [f for f in files if not f.reconciled]
     lines = [
         f"{'dry run: ' if dry_run else ''}import of the last {days} day{'s' if days != 1 else ''}: {report.status}",
-        f"  files: {report.files} read, {report.files_failed} failed, {report.files_rescanned} read again",
-        f"  events: {verb} {report.events_new}, already stored {report.events_seen}, skipped {report.events_skipped}",
+        f"  files: {report.files} read, {report.files_failed} failed, {total['rescans']} read again, "
+        f"{sum(f.incomplete_tail for f in files)} with an unterminated last line",
+        f"  messages read: {total['lines']} ({total['distinct']} distinct ids)",
+        f"  {verb} {total['new']}, already stored or repeated {total['duplicates']}, skipped {total['skipped']} "
+        "(a Looper bot's own, an excluded chat, older than the days asked)",
+        f"  reconciliation: {'every file adds up (read = new + already stored + skipped)' if not unreconciled else str(len(unreconciled)) + ' files do not add up: ' + ', '.join(f.chat_id for f in unreconciled[:10])}",
     ]
-    if report.bad_lines:
-        lines.append(f"  lines that were not a message: {report.bad_lines}")
+    if total["bad_lines"]:
+        lines.append(f"  lines that were not a message: {total['bad_lines']}")
+    if per_file:
+        lines += [f"  {f.chat_id}: read {f.lines}, distinct {f.distinct}, new {f.new}, already stored {f.duplicates}, "
+                  f"skipped {f.skipped}, bad {f.bad_lines}, rescans {f.rescans}"
+                  f"{', unterminated tail' if f.incomplete_tail else ''}" for f in files]
     if report.error:
         lines.append(f"  error: {report.error}")
     return "\n".join(lines)
 
 
-async def _import(database_url: str, *, source_id: str | None, days: int, dry_run: bool) -> tuple[int, str]:
+async def _import(database_url: str, *, source_id: str | None, days: int, dry_run: bool,
+                  per_file: bool = False) -> tuple[int, str]:
     from ..db import message_stream as store
     from ..db.connection import close_pool, init_pool
     from .source_service import own_bot_app_ids, run_bridge_pass
@@ -50,13 +63,15 @@ async def _import(database_url: str, *, source_id: str | None, days: int, dry_ru
         report = await run_bridge_pass(source, days=days, dry_run=dry_run, own_apps=await own_bot_app_ids())
         if report.status == "skipped_busy":
             return 1, f"source {source['id']} is being written by another pass; try again in a moment"
-        return (0 if report.status in ("ok", "partial") else 1), format_report(report, days=days, dry_run=dry_run)
+        return (0 if report.status in ("ok", "partial") else 1), format_report(report, days=days, dry_run=dry_run, per_file=per_file)
     finally:
         await close_pool()
 
 
-def import_history(database_url: str, *, source_id: str | None, days: int, dry_run: bool) -> int:
-    code, text = asyncio.run(_import(database_url, source_id=source_id, days=days, dry_run=dry_run))
+def import_history(database_url: str, *, source_id: str | None, days: int, dry_run: bool,
+                   per_file: bool = False) -> int:
+    code, text = asyncio.run(_import(database_url, source_id=source_id, days=days, dry_run=dry_run,
+                                     per_file=per_file))
     print(text, file=sys.stderr if code else sys.stdout)
     return code
 
@@ -72,6 +87,7 @@ def add_parser(commands: Any) -> None:
                     "prints what it would store. If the server is writing the source at that moment it says so and exits; run it again.")
     imp.add_argument("--days", type=int, required=True, help=f"How many days back to import (1 to {IMPORT_MAX_DAYS}).")
     imp.add_argument("--dry-run", action="store_true", help="Count what would be stored; store nothing.")
+    imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
     imp.add_argument("--source", help="The source id (default: the only one).")
     imp.add_argument("--runtime-root", help="The state directory (default ~/.looper).")
     imp.add_argument("--config", help="The ops file (default <runtime root>/ops/server.toml).")
@@ -84,7 +100,8 @@ def run(args: Any, load_ops: Any) -> int:
     ops = load_ops(args)
     if ops is None:
         return 1
-    return import_history(ops.database_url, source_id=args.source, days=args.days, dry_run=args.dry_run)
+    return import_history(ops.database_url, source_id=args.source, days=args.days, dry_run=args.dry_run,
+                          per_file=args.per_file)
 
 
 __all__: Sequence[str] = ("add_parser", "run", "import_history")

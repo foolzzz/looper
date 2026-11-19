@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { LABEL } from "@/components/registry-ui";
+import { LABEL, SELECT } from "@/components/registry-ui";
 import {
   configureMessageStream, fetchMessageStream, fetchMessageStreamRuns,
   type MessageStreamRun, type MessageStreamSource,
@@ -46,17 +46,18 @@ function Fact({ label, value, hint }: { label: string; value: React.ReactNode; h
 
 function SetupForm({ source, busy, onStart }: {
   source: MessageStreamSource | null; busy: boolean;
-  onStart: (fields: { bridge_dir: string; user_open_id: string | null }) => void;
+  onStart: (fields: { bridge_dir: string; start_from: "end" | "beginning"; user_open_id: string | null }) => void;
 }) {
   const id = useId();
   const [dir, setDir] = useState(source?.bridge_dir ?? "");
   const [openId, setOpenId] = useState(source?.user_open_id ?? "");
+  const [startFrom, setStartFrom] = useState<"end" | "beginning">(source?.start_from ?? "end");
   return (
     <form
       className="space-y-4"
       onSubmit={(event) => {
         event.preventDefault();
-        if (dir.trim()) onStart({ bridge_dir: dir.trim(), user_open_id: openId.trim() || null });
+        if (dir.trim()) onStart({ bridge_dir: dir.trim(), start_from: startFrom, user_open_id: openId.trim() || null });
       }}
     >
       <p className="text-sm text-muted-foreground">
@@ -67,6 +68,17 @@ function SetupForm({ source, busy, onStart }: {
         <label htmlFor={`${id}-dir`} className={LABEL}>Collector directory (the one that holds chats/)</label>
         <Input id={`${id}-dir`} className="font-mono" placeholder="/path/to/collector" value={dir}
           onChange={(e) => setDir(e.target.value)} disabled={busy} />
+      </div>
+      <div className="space-y-1.5">
+        <label htmlFor={`${id}-from`} className={LABEL}>Start from</label>
+        <select id={`${id}-from`} value={startFrom} disabled={busy} onChange={(e) => setStartFrom(e.target.value as "end" | "beginning")}
+          className={SELECT}>
+          <option value="end">Now: only messages that arrive from here on</option>
+          <option value="beginning">The beginning: import everything the files hold</option>
+        </select>
+        <p className="text-xs text-muted-foreground">
+          Importing a large history takes a while and keeps raw messages in the database (a bot's after 30 days as text only).
+        </p>
       </div>
       <div className="space-y-1.5">
         <label htmlFor={`${id}-open`} className={LABEL}>Your Lark open id (optional)</label>

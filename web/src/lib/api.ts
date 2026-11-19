@@ -3001,6 +3001,7 @@ export interface MessageStreamSource {
   kind: string;
   ingest_mode: "off" | "bridge" | "collect";
   bridge_dir: string;
+  start_from: "end" | "beginning";
   cron: string;
   timezone: string;
   user_open_id: string | null;
@@ -3022,6 +3023,7 @@ export interface MessageStreamConfiguration {
   source_id?: string;
   ingest_mode?: "off" | "bridge";
   bridge_dir?: string;
+  start_from?: "end" | "beginning";
   user_open_id?: string | null;
 }
 

@@ -91,6 +91,26 @@ def test_reading_in_windows_resumes_where_the_last_one_ended(tmp_path):
     assert seen == [f"m{n}" for n in range(6)]
 
 
+def test_a_baseline_starts_a_file_at_its_end_and_the_next_scan_reads_only_what_follows(tmp_path):
+    whole = sup.line(sup.message("m3"))
+    path = sup.append(tmp_path, "oc_a", sup.message("m1"), sup.message("m2"), partial=whole[:10])
+    base = reader.baseline_file(path)
+    assert base.last_id == "m2" and base.offset < path.stat().st_size
+    with path.open("ab") as handle:
+        handle.write(whole[10:])
+    scan = read(path, base)
+    assert ids(scan) == ["m3"] and not scan.rescanned
+
+
+def test_a_scan_that_stopped_at_its_window_says_more_follows(tmp_path):
+    path = sup.append(tmp_path, "oc_a", *(sup.message(f"m{n}", text="y" * 200) for n in range(6)))
+    first = read(path, max_bytes=500)
+    assert first.more and not first.incomplete_tail
+    done = read(path, first.state, max_bytes=10**6)
+    assert not done.more
+    assert read(sup.append(tmp_path, "oc_b", sup.message("x"), partial=b"{").parent / "oc_b.ndjson").incomplete_tail
+
+
 def test_the_fields_of_an_event_come_from_the_message(tmp_path):
     raw = sup.message("m1", text="see", sender=sup.BOB, mentions=[(sup.ME, "Me"), (sup.ALICE, "Alice")],
                       thread_id="omt_1", root_id="om_root", parent_id="om_parent")

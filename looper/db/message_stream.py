@@ -25,7 +25,7 @@ _LOCK_CLASS = 0x6D736667  # "msfg"
 
 Db = asyncpg.Pool | asyncpg.Connection
 
-_SOURCE_COLUMNS = ("id", "kind", "name", "lark_profile", "user_open_id", "ingest_mode", "bridge_dir", "cron",
+_SOURCE_COLUMNS = ("id", "kind", "name", "lark_profile", "user_open_id", "ingest_mode", "bridge_dir", "bridge_start_from", "cron",
                    "timezone", "committed_seq", "last_run_at", "last_ok_at", "body_retention_days",
                    "app_body_retention_days", "created_at", "updated_at")
 
@@ -163,7 +163,7 @@ async def save_bridge_state(conn: asyncpg.Connection, source_id: str, chat_id: s
 async def insert_events(conn: asyncpg.Connection, source_id: str, run_id: int | None,
                         rows: Sequence[Mapping[str, Any]]) -> list[tuple[str, int]]:
     """Insert in the order given and keep the first copy of a message already stored: (external_id, seq) of the rows
-    that were new."""
+    that were new. A row whose ``body`` is None is stored without its raw JSON and marked dropped (retention)."""
     inserted: list[tuple[str, int]] = []
     for start in range(0, len(rows), _BATCH):
         batch = rows[start:start + _BATCH]
@@ -172,10 +172,10 @@ async def insert_events(conn: asyncpg.Connection, source_id: str, run_id: int | 
             return [row[name] for row in batch]
         found = await conn.fetch(
             """INSERT INTO source_events (source_id, external_id, chat_id, thread_id, root_id, parent_id, sender_id,
-                   sender_kind, sent_at, msg_type, mentions_me, mention_ids, text, body, body_bytes, origin, run_id)
+                   sender_kind, sent_at, msg_type, mentions_me, mention_ids, text, body, body_bytes, body_dropped_at, origin, run_id)
                SELECT $1, t.external_id, t.chat_id, t.thread_id, t.root_id, t.parent_id, t.sender_id, t.sender_kind,
                       t.sent_at, t.msg_type, t.mentions_me, COALESCE(string_to_array(NULLIF(t.mention_ids, ''), ','), '{}'), t.text,
-                      t.body::jsonb, t.body_bytes, t.origin, $2
+                      t.body::jsonb, t.body_bytes, CASE WHEN t.body IS NULL THEN now() END, t.origin, $2
                FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[],
                            $10::timestamptz[], $11::text[], $12::boolean[], $13::text[], $14::text[], $15::text[],
                            $16::int[], $17::text[])
@@ -187,7 +187,7 @@ async def insert_events(conn: asyncpg.Connection, source_id: str, run_id: int | 
             source_id, run_id, column("external_id"), column("chat_id"), column("thread_id"), column("root_id"),
             column("parent_id"), column("sender_id"), column("sender_kind"), column("sent_at"), column("msg_type"),
             column("mentions_me"), [",".join(r["mention_ids"]) for r in batch], column("text"),
-            [json.dumps(r["body"], ensure_ascii=False) for r in batch], column("body_bytes"), column("origin"))
+            [None if r["body"] is None else json.dumps(r["body"], ensure_ascii=False) for r in batch], column("body_bytes"), column("origin"))
         inserted.extend((row["external_id"], row["seq"]) for row in found)
     return inserted
 

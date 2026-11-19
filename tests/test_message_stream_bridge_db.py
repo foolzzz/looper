@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 def make_source(directory, **fields):
     async def setup(pool):
         await store.save_source("src", {"name": "Test", "ingest_mode": "bridge", "bridge_dir": str(directory),
-                                        "user_open_id": sup.ME, **fields}, db=pool)
+                                        "bridge_start_from": "beginning", "user_open_id": sup.ME, **fields}, db=pool)
     return setup
 
 
@@ -189,17 +189,111 @@ def test_origin_follows_the_first_read_and_the_age_of_a_line(monkeypatch, tmp_pa
     async def check(pool):
         old, recent = sup.NOW - timedelta(days=3), sup.NOW - timedelta(hours=2)
         sup.append(tmp_path, "oc_a", sup.message("first_old", sent_at=old), sup.message("first_recent", sent_at=recent))
-        report = await passes(pool, tmp_path)
-        # A first read keeps the last 24 hours only, all as an import.
-        assert await rows(pool, "external_id, origin") == [("first_recent", "import")]
-        assert report.events_skipped == 1
-        sup.append(tmp_path, "oc_a", sup.message("backfill", sent_at=old), sup.message("fresh", sent_at=sup.NOW),
-                   sup.message("ancient", sent_at=sup.NOW - timedelta(days=30)))
-        report = await passes(pool, tmp_path)
-        # Later reads keep a week back at most, so a rewritten file cannot bring its whole history in.
+        await passes(pool, tmp_path)
+        assert await rows(pool, "external_id, origin") == [("first_old", "import"), ("first_recent", "import")]
+        sup.append(tmp_path, "oc_a", sup.message("backfill", sent_at=old), sup.message("fresh", sent_at=sup.NOW))
+        await passes(pool, tmp_path)
         assert dict(await rows(pool, "external_id, origin")) == {
-            "first_recent": "import", "backfill": "history", "fresh": "live"}
-        assert report.events_skipped == 1
+            "first_old": "import", "first_recent": "import", "backfill": "history", "fresh": "live"}
+
+    run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
+
+
+def test_a_source_that_starts_from_the_end_stores_only_what_is_appended_later(monkeypatch, tmp_path):
+    async def check(pool):
+        whole = sup.line(sup.message("tail"))
+        sup.append(tmp_path, "oc_a", sup.message("before1"), sup.message("before2"), partial=whole[:25])
+        first = await passes(pool, tmp_path)
+        assert (first.events_new, first.files_baselined) == (0, 1)
+        assert await pool.fetchval("SELECT count(*) FROM source_events") == 0
+        path = tmp_path / "chats" / "oc_a.ndjson"
+        with path.open("ab") as handle:
+            handle.write(whole[25:])
+        sup.append(tmp_path, "oc_a", sup.message("after"))
+        await passes(pool, tmp_path)
+        # The line that was half written at the baseline is the first line after it.
+        assert await rows(pool, "external_id, origin") == [("tail", "live"), ("after", "live")]
+        # A rewrite does not bring the older history in: a later read keeps a week back at most.
+        path.write_bytes(sup.line(sup.message("ancient", sent_at=sup.NOW - timedelta(days=30)))
+                         + sup.line(sup.message("recentish", sent_at=sup.NOW - timedelta(days=3))) + path.read_bytes())
+        again = await passes(pool, tmp_path)
+        assert again.files_rescanned == 1
+        assert "ancient" not in await rows(pool) and "recentish" in await rows(pool)
+
+    run_db(check, monkeypatch, setup=make_source(tmp_path, bridge_start_from="end"), timeout=30)
+
+
+def test_a_long_file_is_read_in_chunks_that_resume_after_an_interruption(monkeypatch, tmp_path):
+    async def check(pool):
+        monkeypatch.setattr(service, "CHUNK_BYTES", 2000)
+        sup.append(tmp_path, "oc_a", *(sup.message(f"m{n:03d}", text="z" * 100) for n in range(40)))
+        real, calls = store.insert_events, []
+
+        async def dying(conn, source_id, run_id, batch):
+            calls.append(1)
+            if len(calls) == 3:
+                raise RuntimeError("the pass died in the third chunk")
+            return await real(conn, source_id, run_id, batch)
+
+        monkeypatch.setattr(store, "insert_events", dying)
+        broken = await passes(pool, tmp_path)
+        assert broken.status == "failed"
+        done = await pool.fetchval("SELECT count(*) FROM source_events")
+        assert 0 < done < 40
+        offset = await pool.fetchval("SELECT bridge_offset FROM source_chats WHERE chat_id = 'oc_a'")
+        assert 0 < offset < (tmp_path / "chats" / "oc_a.ndjson").stat().st_size
+        monkeypatch.setattr(store, "insert_events", real)
+        healed = await passes(pool, tmp_path)
+        assert healed.status == "ok" and healed.events_new == 40 - done
+        assert await rows(pool) == [f"m{n:03d}" for n in range(40)]
+
+    run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
+
+
+def test_a_dry_run_counts_across_its_own_chunks_and_stores_nothing(monkeypatch, tmp_path):
+    async def check(pool):
+        monkeypatch.setattr(service, "CHUNK_BYTES", 2000)
+        sup.append(tmp_path, "oc_a", *(sup.message(f"m{n}", text="z" * 100) for n in range(30)),
+                   sup.message("m3", text="a repeat in a later chunk"))
+        dry = await passes(pool, tmp_path, days=7, dry_run=True)
+        assert (dry.events_new, dry.events_seen) == (30, 1)
+        assert await pool.fetchval("SELECT count(*) FROM source_events") == 0
+
+    run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
+
+
+def test_the_import_reconciles_every_file(monkeypatch, tmp_path):
+    async def check(pool):
+        monkeypatch.setattr(service, "CHUNK_BYTES", 1500)
+        sup.append(tmp_path, "oc_a", *(sup.message(f"a{n}", text="y" * 80) for n in range(20)),
+                   sup.message("a1"), sup.message("own", sender=sup.LOOPER_APP, sender_type="app"),
+                   sup.message("far", sent_at=sup.NOW - timedelta(days=40)), partial=b'{"message_id": "half')
+        sup.append(tmp_path, "oc_b", sup.message("b1"), partial=b"\nnot json\n")
+        report = await passes(pool, tmp_path, days=7, own_apps={sup.LOOPER_APP})
+        by_chat = {f.chat_id: f for f in report.file_reports}
+        a = by_chat["oc_a"]
+        assert (a.lines, a.distinct, a.new, a.duplicates, a.skipped) == (23, 22, 20, 1, 2)
+        assert a.incomplete_tail and a.reconciled
+        b = by_chat["oc_b"]
+        assert (b.lines, b.new, b.bad_lines) == (1, 1, 1) and b.reconciled
+        assert report.events_new == 21 and report.events_seen == 1
+
+    run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
+
+
+def test_a_body_past_its_retention_is_stored_as_text_only(monkeypatch, tmp_path):
+    async def check(pool):
+        old, recent = sup.NOW - timedelta(days=45), sup.NOW - timedelta(days=2)
+        sup.append(tmp_path, "oc_a", sup.message("bot_old", sent_at=old, sender=sup.OTHER_APP, sender_type="app", text="old bot"),
+                   sup.message("bot_new", sent_at=recent, sender=sup.OTHER_APP, sender_type="app"),
+                   sup.message("human_old", sent_at=old, text="old human"))
+        await passes(pool, tmp_path)
+        got = {r["external_id"]: r for r in await pool.fetch(
+            "SELECT external_id, text, body IS NULL AS dropped, body_dropped_at IS NOT NULL AS marked, body_bytes "
+            "FROM source_events")}
+        assert (got["bot_old"]["dropped"], got["bot_old"]["marked"], got["bot_old"]["text"]) == (True, True, "old bot")
+        assert got["bot_old"]["body_bytes"] > 0
+        assert not got["bot_new"]["dropped"] and not got["human_old"]["dropped"]
 
     run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
 

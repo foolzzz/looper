@@ -20,7 +20,8 @@ _RUN = _object({
     "error": _NULL_STR}, closed=True)
 _SOURCE = _object({
     "source_id": _STR, "name": _STR, "kind": _STR, "ingest_mode": {"type": "string", "enum": ["off", "bridge", "collect"]},
-    "bridge_dir": _STR, "cron": _STR, "timezone": _STR, "user_open_id": _NULL_STR,
+    "bridge_dir": _STR, "start_from": {"type": "string", "enum": ["end", "beginning"]}, "cron": _STR,
+    "timezone": _STR, "user_open_id": _NULL_STR,
     "health": {"type": "string", "enum": ["off", "healthy", "degraded", "stale"]},
     "last_run_at": _NULL_STR, "last_ok_at": _NULL_STR, "committed_seq": _INT,
     "events": _INT, "events_last_hour": _INT, "newest_sent_at": _NULL_STR, "body_bytes": _INT,
@@ -44,9 +45,11 @@ OPERATIONS = (
     Operation("message_stream.configure", "POST", "/api/v1/message_stream/configure",
               "Create the message source, point it at an outside collector's directory, or turn bridging on or off.",
               "Create the message source, point it at an outside collector's directory, or turn bridging on or off. "
-              "A bridged source reads the collector's per-chat files into Looper's event store on its time rule; "
-              "off stops reading and keeps what was stored.",
-              _object({"source_id": _STR, "name": _STR, "ingest_mode": _MODES, "bridge_dir": _STR, "cron": _STR,
+              "A bridged source reads the collector's per-chat files into Looper's event store on its time rule, from "
+              "the files' current end (start_from end, the default) or from their beginning; off stops reading and "
+              "keeps what was stored.",
+              _object({"source_id": _STR, "name": _STR, "ingest_mode": _MODES, "bridge_dir": _STR,
+                       "start_from": {"type": "string", "enum": ["end", "beginning"]}, "cron": _STR,
                        "timezone": _STR, "user_open_id": _NULL_STR}, [], closed=True),
               _SOURCE, risk="write", operator_only=True, audit_operator=False),
 )
@@ -64,7 +67,8 @@ async def _source_view(source):
     last = runs[0] if runs else None
     return {
         "source_id": source["id"], "name": source["name"], "kind": source["kind"],
-        "ingest_mode": source["ingest_mode"], "bridge_dir": source["bridge_dir"], "cron": source["cron"],
+        "ingest_mode": source["ingest_mode"], "bridge_dir": source["bridge_dir"],
+        "start_from": source["bridge_start_from"], "cron": source["cron"],
         "timezone": source["timezone"], "user_open_id": source["user_open_id"],
         "health": source_service.health(source, last["status"] if last else None, stats["now"]),
         "last_run_at": source["last_run_at"], "last_ok_at": source["last_ok_at"],
@@ -78,6 +82,8 @@ def _check_configuration(arguments, existing):
     """The fields to store, or an OpError that says what to fix."""
     fields = {key: arguments[key] for key in ("name", "ingest_mode", "bridge_dir", "cron", "timezone", "user_open_id")
               if key in arguments}
+    if "start_from" in arguments:
+        fields["bridge_start_from"] = arguments["start_from"]
     if "name" in fields and not fields["name"].strip():
         raise OpError(ErrorCode.INVALID, "name must not be empty")
     for key in ("cron", "timezone"):

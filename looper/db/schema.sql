@@ -1444,6 +1444,7 @@ CREATE TABLE IF NOT EXISTS event_sources (
     user_open_id            TEXT,
     ingest_mode             TEXT NOT NULL DEFAULT 'off' CHECK (ingest_mode IN ('off', 'bridge', 'collect')),
     bridge_dir              TEXT NOT NULL DEFAULT '',
+    bridge_start_from       TEXT NOT NULL DEFAULT 'end' CHECK (bridge_start_from IN ('end', 'beginning')),
     cron                    TEXT NOT NULL DEFAULT '*/10 * * * *',
     timezone                TEXT NOT NULL DEFAULT 'UTC',
     watermark_at            TIMESTAMPTZ,

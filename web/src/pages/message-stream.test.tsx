@@ -15,7 +15,7 @@ vi.mock("@/lib/api", async (original) => ({
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const source = (extra: Partial<MessageStreamSource> = {}): MessageStreamSource => ({
-  source_id: "lark-user", name: "Lark messages", kind: "lark_user", ingest_mode: "bridge", bridge_dir: "/srv/collector",
+  source_id: "lark-user", name: "Lark messages", kind: "lark_user", ingest_mode: "bridge", bridge_dir: "/srv/collector", start_from: "end",
   cron: "*/2 * * * *", timezone: "UTC", user_open_id: null, health: "healthy", last_run_at: "2026-11-18T11:58:00Z",
   last_ok_at: "2026-11-18T11:58:00Z", committed_seq: 40, events: 1234, events_last_hour: 56,
   newest_sent_at: "2026-11-18T11:57:00Z", body_bytes: 2048, chats: 12, chats_excluded: 1, chats_failing: 0,
@@ -64,7 +64,7 @@ describe("MessageStreamPage", () => {
       }
     });
     await act(async () => { container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
-    expect(configureMessageStream).toHaveBeenCalledWith({ ingest_mode: "bridge", bridge_dir: "/srv/collector", user_open_id: "ou_x" });
+    expect(configureMessageStream).toHaveBeenCalledWith({ ingest_mode: "bridge", bridge_dir: "/srv/collector", start_from: "end", user_open_id: "ou_x" });
   });
 
   it("shows the state in words, the counts, and every run with its error", async () => {

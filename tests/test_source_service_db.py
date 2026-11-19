@@ -17,7 +17,7 @@ T0 = datetime(2026, 11, 18, 12, 0, 30, tzinfo=timezone.utc)
 
 async def sources(pool, directory):
     await store.save_source("bridged", {"name": "B", "ingest_mode": "bridge", "bridge_dir": str(directory),
-                                        "cron": "*/2 * * * *", "timezone": "UTC"}, db=pool)
+                                        "cron": "*/2 * * * *", "timezone": "UTC", "bridge_start_from": "beginning"}, db=pool)
     await store.save_source("idle", {"name": "I"}, db=pool)
 
 

@@ -5,10 +5,16 @@ one transaction per file holds the file's events, its saved offset and ``committ
 only the file in flight. A PostgreSQL advisory lock keeps one writer per source, across servers and ``looper msgflow
 import``. ``SourceService`` runs a pass for every bridged source on the source's cron rule, inside ``looper serve``.
 
-``origin`` of a stored event: a file read for the first time (or by an import) is ``import``; a line of a known file
-that was sent more than 24 hours before it was ingested is ``history``; the rest are ``live``. A first read keeps
-only the last 24 hours (an import: ``days``) and a later read nothing older than seven days, so neither switching the
-bridge on nor a collector rewriting a file pulls its whole history in.
+A file is read in chunks, one transaction per chunk (its events, its saved state, ``committed_seq``), so an interrupted
+pass resumes at the last chunk without a duplicate. ``bridge_start_from`` decides where a new source starts: ``end``
+(the default) saves every file's current end and stores only what is appended later; ``beginning`` reads each file
+from its start on its first read, marking those events ``import``. ``looper msgflow import --days N`` reads every file
+from its start for the last N days either way.
+
+``origin`` of a stored event: a first read (or an import) is ``import``; a line of a known file that was sent more
+than 24 hours before it was ingested is ``history``; the rest are ``live``. A source that starts from the end keeps
+nothing older than seven days from a later read, so a collector rewriting a file brings no history in. Retention is
+applied at the door: a body older than its source's days (apps: 30 by default) is stored as text only.
 Messages sent by one of Looper's own bots are never stored, and a direct chat that holds one is excluded.
 """
 
@@ -25,13 +31,13 @@ from typing import Any
 
 from ..db import message_stream as store
 from . import cron
-from .bridge_reader import BridgeMessage, FileState, scan_file
+from .bridge_reader import BridgeMessage, FileState, baseline_file, scan_file
 from .drain import DrainState
 
 logger = logging.getLogger(__name__)
 
 TICK_SECONDS = 15.0
-FIRST_SCAN_DAYS = 1
+CHUNK_BYTES = 8 * 1024 * 1024
 HISTORY_AFTER = timedelta(hours=24)
 # A pass that is not a first read or an import keeps nothing older: a collector that rewrites a file must not bring
 # its whole history in through the door a first read keeps shut.
@@ -49,6 +55,7 @@ class PassReport:
     files: int = 0
     files_unchanged: int = 0
     files_rescanned: int = 0
+    files_baselined: int = 0
     files_failed: int = 0
     events_new: int = 0
     events_seen: int = 0
@@ -56,6 +63,7 @@ class PassReport:
     bad_lines: int = 0
     error: str | None = None
     failed_chats: list[str] = field(default_factory=list)
+    file_reports: list[FileReport] = field(default_factory=list)
 
 
 class _DryRun(Exception):
@@ -108,76 +116,158 @@ def _state_of(chat: Mapping[str, Any]) -> FileState | None:
                      mtime=chat["bridge_mtime"], last_id=chat["bridge_last_id"])
 
 
+@dataclass
+class FileReport:
+    """What one file gave, for the import's reconciliation: ``lines`` (messages read) is ``new`` + ``duplicates`` +
+    ``skipped``; ``distinct`` counts the message ids among them."""
+
+    chat_id: str
+    lines: int = 0
+    distinct: int = 0
+    new: int = 0
+    duplicates: int = 0
+    skipped: int = 0
+    bad_lines: int = 0
+    incomplete_tail: bool = False
+    rescans: int = 0
+    baselined: bool = False
+
+    @property
+    def reconciled(self) -> bool:
+        return self.lines == self.new + self.duplicates + self.skipped
+
+
+def _body_dropped(message: BridgeMessage, source: Mapping[str, Any], now: datetime) -> bool:
+    """Retention at the door: a body past its source's keep-for days is stored as text only."""
+    days = source["app_body_retention_days"] if message.sender_kind == "app" else source["body_retention_days"]
+    return days is not None and message.sent_at < now - timedelta(days=days)
+
+
+async def _chunk(conn: Any, source: Mapping[str, Any], path: Path, run_id: int | None, file: FileReport,
+                 scan: Any, *, first: bool, floor: datetime | None, own_apps: Collection[str], seen_ids: set[str],
+                 users: Mapping[str, Any], entry: Any, now: datetime) -> None:
+    source_id, chat_id = source["id"], path.stem
+    chat = await store.chat_for_update(conn, source_id, chat_id, kind="unknown", name="")
+    kind = _chat_kind(entry) or chat["kind"]
+    own = [m for m in scan.messages if m.sender_kind == "app" and m.sender_id in own_apps]
+    looper_chat = bool(own) and kind == "p2p"
+    if looper_chat:
+        await store.exclude_chat(conn, source_id, chat_id, "looper_channel", now=now)
+    rows: list[dict[str, Any]] = []
+    kept: list[BridgeMessage] = []
+    skipped = repeats = 0
+    in_chunk: set[str] = set()
+    user_open_id = source["user_open_id"]
+    for message in scan.messages:
+        file.lines += 1
+        seen_ids.add(message.external_id)
+        if looper_chat or (message.sender_kind == "app" and message.sender_id in own_apps) or (
+                floor is not None and message.sent_at < floor):
+            skipped += 1
+            continue
+        if message.external_id in in_chunk:
+            repeats += 1
+            continue
+        in_chunk.add(message.external_id)
+        origin = "import" if first else "history" if message.sent_at < now - HISTORY_AFTER else "live"
+        kept.append(message)
+        rows.append({
+            "external_id": message.external_id, "chat_id": chat_id, "thread_id": message.thread_id,
+            "root_id": message.root_id, "parent_id": message.parent_id, "sender_id": message.sender_id,
+            "sender_kind": message.sender_kind, "sent_at": message.sent_at, "msg_type": message.msg_type,
+            "mentions_me": bool(user_open_id) and user_open_id in message.mention_ids,
+            "mention_ids": message.mention_ids, "text": message.text,
+            "body": None if _body_dropped(message, source, now) else message.body,
+            "body_bytes": message.body_bytes, "origin": origin})
+    inserted = await store.insert_events(conn, source_id, run_id, rows)
+    if inserted:
+        await store.advance_committed(conn, source_id, max(seq for _, seq in inserted))
+    await store.upsert_people(conn, source_id, _people(kept, users), now=now)
+    await store.save_bridge_state(
+        conn, source_id, chat_id, offset=scan.state.offset, size=scan.state.size, inode=scan.state.inode,
+        last_id=scan.state.last_id, mtime=scan.state.mtime, now=now,
+        newest=max((m.sent_at for m in kept), default=None))
+    new = len(inserted)
+    seen = len(rows) - new + repeats
+    file.new, file.duplicates, file.skipped = file.new + new, file.duplicates + seen, file.skipped + skipped
+    if run_id is not None:
+        await store.add_run_counts(conn, run_id, new=new, seen=seen, skipped=skipped)
+
+
 async def _ingest_file(source: Mapping[str, Any], path: Path, run_id: int | None, report: PassReport, *,
-                       names: tuple[dict[str, Any], dict[str, Any]], own_apps: Collection[str], first_since: datetime,
-                       force_first: bool, now: datetime, dry_run: bool, db: Any) -> None:
+                       names: tuple[dict[str, Any], dict[str, Any]], own_apps: Collection[str],
+                       import_since: datetime | None, force_first: bool, now: datetime, dry_run: bool,
+                       db: Any, chunk_bytes: int) -> FileReport:
+    """Read one file to its end in chunks. A real run commits each chunk and its saved state in one transaction, so
+    an interrupted pass resumes at the last chunk; a dry run keeps one transaction for the whole file and rolls it
+    back, so its counts include what its own earlier chunks would have stored."""
     chat_id, source_id = path.stem, source["id"]
     chats, users = names
     entry = chats.get(chat_id)
-    try:
-        async with store.transaction(db) as conn:
-            chat = await store.chat_for_update(conn, source_id, chat_id, kind=_chat_kind(entry) or "unknown",
-                                               name=str(entry.get("name") or "") if isinstance(entry, Mapping) else "")
-            if chat["inclusion"] == "excluded":
-                report.files_unchanged += 1
-                return
+    file = FileReport(chat_id)
+    seen_ids: set[str] = set()
+    state: FileState | None = None
+    first = False
+    started = False
+
+    async def step(conn: Any) -> bool:
+        """One chunk (or the baseline or the skip); whether the file has more."""
+        nonlocal state, first, started
+        chat = await store.chat_for_update(conn, source_id, chat_id, kind=_chat_kind(entry) or "unknown",
+                                           name=str(entry.get("name") or "") if isinstance(entry, Mapping) else "")
+        if chat["inclusion"] == "excluded":
+            report.files_unchanged += 1
+            return False
+        if not started:
+            started = True
             state = None if force_first else _state_of(chat)
-            scan = await asyncio.to_thread(scan_file, path, state)
-            if scan.unchanged:
-                report.files_unchanged += 1
-                return
             first = state is None
-            report.bad_lines += scan.bad_lines
-            report.files_rescanned += scan.rescanned
             await store.set_chat_directory(conn, source_id, chat_id, kind=_chat_kind(entry),
                                            name=str(entry.get("name") or "") if isinstance(entry, Mapping) else None)
-            kind = _chat_kind(entry) or chat["kind"]
-            own = [m for m in scan.messages if m.sender_kind == "app" and m.sender_id in own_apps]
-            looper_chat = bool(own) and kind == "p2p"
-            if looper_chat:
-                await store.exclude_chat(conn, source_id, chat_id, "looper_channel", now=now)
-            rows: list[dict[str, Any]] = []
-            kept: list[BridgeMessage] = []
-            skipped = scan.bad_lines
-            seen_here: set[str] = set()
-            repeats = 0
-            user_open_id = source["user_open_id"]
-            for message in scan.messages:
-                if looper_chat or (message.sender_kind == "app" and message.sender_id in own_apps) or (
-                        message.sent_at < (first_since if first else now - BRIDGE_MAX_AGE)):
-                    skipped += 1
-                    continue
-                if message.external_id in seen_here:
-                    repeats += 1
-                    continue
-                seen_here.add(message.external_id)
-                origin = "import" if first else "history" if message.sent_at < now - HISTORY_AFTER else "live"
-                kept.append(message)
-                rows.append({
-                    "external_id": message.external_id, "chat_id": chat_id, "thread_id": message.thread_id,
-                    "root_id": message.root_id, "parent_id": message.parent_id, "sender_id": message.sender_id,
-                    "sender_kind": message.sender_kind, "sent_at": message.sent_at, "msg_type": message.msg_type,
-                    "mentions_me": bool(user_open_id) and user_open_id in message.mention_ids,
-                    "mention_ids": message.mention_ids, "text": message.text, "body": message.body,
-                    "body_bytes": message.body_bytes, "origin": origin})
-            inserted = await store.insert_events(conn, source_id, run_id, rows)
-            if inserted:
-                await store.advance_committed(conn, source_id, max(seq for _, seq in inserted))
-            await store.upsert_people(conn, source_id, _people(kept, users), now=now)
-            await store.save_bridge_state(
-                conn, source_id, chat_id, offset=scan.state.offset, size=scan.state.size, inode=scan.state.inode,
-                last_id=scan.state.last_id, mtime=scan.state.mtime, now=now,
-                newest=max((m.sent_at for m in kept), default=None))
-            new = len(inserted)
-            report.events_new += new
-            report.events_seen += len(rows) - new + repeats
-            report.events_skipped += skipped
-            if run_id is not None:
-                await store.add_run_counts(conn, run_id, new=new, seen=len(rows) - new + repeats, skipped=skipped)
-            if dry_run:
+            if first and not force_first and source["bridge_start_from"] == "end":
+                base = await asyncio.to_thread(baseline_file, path)
+                await store.save_bridge_state(conn, source_id, chat_id, offset=base.offset, size=base.size,
+                                              inode=base.inode, last_id=base.last_id, mtime=base.mtime, now=now,
+                                              newest=None)
+                file.baselined = True
+                report.files_baselined += 1
+                return False
+        scan = await asyncio.to_thread(scan_file, path, state, max_bytes=chunk_bytes)
+        if scan.unchanged:
+            report.files_unchanged += 1
+            return False
+        file.bad_lines += scan.bad_lines
+        file.rescans += scan.rescanned
+        file.incomplete_tail = scan.incomplete_tail
+        report.bad_lines += scan.bad_lines
+        report.files_rescanned += scan.rescanned
+        # Which messages a read keeps: an import its days; a first read from the beginning all of them; a later
+        # read of a source that starts from the end a week back at most, so a rewritten file brings no history in.
+        floor = (import_since if force_first else None if first or source["bridge_start_from"] == "beginning"
+                 else now - BRIDGE_MAX_AGE)
+        await _chunk(conn, source, path, run_id, file, scan, first=first, floor=floor, own_apps=own_apps,
+                     seen_ids=seen_ids, users=users, entry=entry, now=now)
+        state = scan.state
+        return scan.more
+
+    if dry_run:
+        try:
+            async with store.transaction(db) as conn:
+                while await step(conn):
+                    pass
                 raise _DryRun
-    except _DryRun:
-        pass
+        except _DryRun:
+            pass
+    else:
+        more = True
+        while more:
+            async with store.transaction(db) as conn:
+                more = await step(conn)
+    file.distinct = len(seen_ids)
+    report.events_new += file.new
+    report.events_seen += file.duplicates
+    report.events_skipped += file.skipped
+    return file
 
 
 async def run_bridge_pass(source: Mapping[str, Any], *, trigger: str = "scheduled", days: int | None = None,
@@ -209,7 +299,7 @@ async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: 
         run_id = report.run_id = await store.start_run(pool, source["id"], mode, "manual" if days is not None else trigger,
                                                        now=now)
     names = (_load_names(directory / "chats.json"), _load_names(directory / "users.json"))
-    first_since = now - timedelta(days=days if days is not None else FIRST_SCAN_DAYS)
+    import_since = now - timedelta(days=days) if days is not None else None
     files: list[Path] = []
     if (directory / "chats").is_dir():
         files = sorted((directory / "chats").glob("*.ndjson"))
@@ -220,9 +310,9 @@ async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: 
         for path in files:
             report.files += 1
             try:
-                await _ingest_file(source, path, run_id, report, names=names, own_apps=own_apps,
-                                   first_since=first_since, force_first=days is not None, now=now, dry_run=dry_run,
-                                   db=pool)
+                report.file_reports.append(await _ingest_file(
+                    source, path, run_id, report, names=names, own_apps=own_apps, import_since=import_since,
+                    force_first=days is not None, now=now, dry_run=dry_run, db=pool, chunk_bytes=CHUNK_BYTES))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

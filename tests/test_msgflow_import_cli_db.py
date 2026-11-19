@@ -47,13 +47,13 @@ def test_import_reports_stores_and_is_safe_to_repeat(tmp_path, capsys):
         asyncio.run(add_source(url, tmp_path / "collector"))
         assert run_cli(tmp_path, url, "--days", "3", "--dry-run") == 0
         dry = capsys.readouterr().out
-        assert "would store 1" in dry and "skipped 1" in dry
+        assert "would store 1" in dry and "skipped 1" in dry and "every file adds up" in dry
         assert asyncio.run(query(url, "SELECT count(*) AS n FROM source_events"))[0]["n"] == 0
         assert run_cli(tmp_path, url, "--days", "3") == 0
         assert "stored 1" in capsys.readouterr().out
         assert [r["external_id"] for r in asyncio.run(query(url, "SELECT external_id FROM source_events"))] == ["recent"]
         assert run_cli(tmp_path, url, "--days", "3") == 0
-        assert "already stored 1" in capsys.readouterr().out
+        assert "already stored or repeated 1" in capsys.readouterr().out
 
 
 def test_import_refuses_while_the_server_holds_the_source(tmp_path, capsys):
