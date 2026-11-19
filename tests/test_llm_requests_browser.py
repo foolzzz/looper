@@ -109,12 +109,18 @@ def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path,
     thread = Thread(target=upstream.serve_forever)
     thread.start()
     try:
+        base_url = f"http://127.0.0.1:{upstream.server_port}"
         route = RouteFile(id=secrets.token_urlsafe(16), agent_id=agent_id, role="worker",
-            upstream=f"http://127.0.0.1:{upstream.server_port}", protocol="anthropic-messages", model="example-model",
+            upstream=base_url, protocol="anthropic-messages", model="example-model",
             created_at=datetime.now(timezone.utc).isoformat(), record_id=record_id)
         if translated:
+            # A translated route authorizes the client with its local token; the upstream key comes from the registry.
+            provider = api.post("/api/v1/provider_accounts/create", {"name": "Recorded chat account",
+                "vendor_type": "custom", "api_key": "synthetic",
+                "endpoints": [{"protocol": "openai-chat", "base_url": base_url}]})["result"]["provider"]
             route = replace(route, kind="translate", record=True, api="openai-chat", dialect="openai",
-                            models={"example-model": "upstream-model"})
+                            models={"example-model": "upstream-model"}, local_token="synthetic",
+                            provider_id=provider["provider_id"])
         route_path = runtime / ROUTES_DIR / f"{route.id}.json"
         body = {"model": "example-model", "system": [{"type": "text", "text": "Explain calculations clearly."}],
             "tools": [{"name": "calculator", "description": "Calculator documentation " * 3000,

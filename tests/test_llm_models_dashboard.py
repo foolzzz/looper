@@ -1189,7 +1189,7 @@ def test_disabled_provider_refuses_manager_turn_and_can_be_enabled_again(dashboa
 @pytest.mark.installed
 @pytest.mark.parametrize("width", [1280, 768])
 def test_profile_form_chooses_model_protocol_and_enabled_provider(dashboard_page, dashboard_server, width):
-    """Real form save/readback with two accounts, protocols and an unavailable pairing."""
+    """Real form save/readback with two accounts, protocols and a runtime that cannot take the model."""
     expect = pytest.importorskip("playwright.sync_api").expect
     page, server = dashboard_page, dashboard_server
     page.set_viewport_size({"width": width, "height": 900})
@@ -1240,10 +1240,15 @@ def test_profile_form_chooses_model_protocol_and_enabled_provider(dashboard_page
         enabled = models["Enabled account", "openai-chat"]
         assert providers.locator("option").evaluate_all("ns => ns.map(n => n.value).filter(Boolean)") == [enabled["provider_id"]]
         expect(providers).to_have_value(enabled["provider_id"])
-        claude = form.get_by_label("Runtime", exact=True).locator('option[value="rt-claude-code"]')
-        expect(claude).to_be_disabled()
-        expect(claude).to_contain_text("speaks Anthropic Messages")
-        expect(form.get_by_role("alert")).to_contain_text("No runtime here can run this model.")
+        runtime = form.get_by_label("Runtime", exact=True)
+        claude = runtime.locator('option[value="rt-claude-code"]')
+        # Claude Code reaches a chat model through the local gateway; the SDK runtime speaks only Responses.
+        expect(claude).to_be_enabled()
+        expect(claude).to_contain_text("via local gateway")
+        expect(runtime.locator('option[value="rt-api"]')).to_be_disabled()
+        expect(runtime.locator('option[value="rt-api"]')).to_contain_text("speaks OpenAI Responses")
+        expect(form).to_contain_text("Runtimes that reach it through the local gateway: Claude Code")
+        expect(form.get_by_role("alert")).to_have_count(0)
         screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
         if screenshot:
             destination = Path(screenshot).resolve()

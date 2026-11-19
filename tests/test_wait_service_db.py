@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from looper.agents.links import DashboardUrl
 
 from looper.agents import wait_service as service, waits
 from looper.agents.message import MessageType, channel_address, planner_address
@@ -414,19 +413,21 @@ def test_ready_wins_over_deadline_in_same_tick(monkeypatch: pytest.MonkeyPatch, 
     run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize(("channel", "fail", "notice"), [
-    ("telegram", False, "sent"), (None, False, "dashboard"), ("telegram", True, "failed"),
+@pytest.mark.parametrize(("channel", "fail", "notice", "group"), [
+    ("telegram", False, "sent", False), (None, False, "dashboard", False), ("telegram", True, "failed", False),
+    # A group chat is told the task's end, not its process: the timeout stays on the dashboard.
+    ("telegram", False, "dashboard", True), ("lark", False, "dashboard", True),
 ])
 def test_timeout_notice_and_activity_precede_planner_event(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-    channel: str | None, fail: bool, notice: str,
+    channel: str | None, fail: bool, notice: str, group: bool,
 ) -> None:
     async def test(pool: Any) -> None:
         await _open(pool, earliest=7200, maximum=3600)
         if channel:
             await pool.execute("UPDATE tasks SET origin_channel_id = $2, chat_kind = 'chat', chat_id = 'chat-1', "
-                               "chat_mention = 'requester', title = $3 WHERE id = $1", "task-a",
-                               channel_address(channel).agent_id, "长" * 50)
+                               "chat_mention = 'requester', title = $3, chat_group = $4 WHERE id = $1", "task-a",
+                               channel_address(channel).agent_id, "长" * 50, group)
         bus = Bus(fail=fail)
         loop = _loop(bus, dashboard_url="https://looper.example.com")
         assert await loop.run_once(clock=lambda: NOW + timedelta(hours=1)) == 1
@@ -843,21 +844,3 @@ def test_wait_checks_finish_but_new_checks_hold(monkeypatch: pytest.MonkeyPatch)
             await asyncio.gather(job, return_exceptions=True)
 
     run_db(test, monkeypatch, timeout=20)
-
-
-@pytest.mark.parametrize(("base", "linked"), [
-    (DashboardUrl("http://127.0.0.1:8767"), False),  # the people in a group cannot open the server's own address
-    (DashboardUrl("https://looper.example.com", public=True), True),
-])
-def test_a_group_is_linked_to_the_task_only_on_a_public_dashboard(monkeypatch: pytest.MonkeyPatch,
-                                                                 base: DashboardUrl, linked: bool) -> None:
-    async def test(pool: Any) -> None:
-        await _open(pool, earliest=7200, maximum=3600)
-        await pool.execute("UPDATE tasks SET origin_channel_id = 'channel-telegram', chat_kind = 'chat', "
-                           "chat_id = '-1001', chat_group = true WHERE id = 'task-a'")
-        bus = Bus()
-        assert await _loop(bus, dashboard_url=base).run_once(clock=lambda: NOW + timedelta(hours=1)) == 1
-        (message,) = [m for m in bus.messages if m.message_type is MessageType.CHAT_NOTICE]
-        assert ("#tasks/task-a" in message.payload["text"]) is linked and message.payload["group"] is True
-
-    run_db(test, monkeypatch)

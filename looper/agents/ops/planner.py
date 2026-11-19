@@ -599,9 +599,10 @@ async def _task_concurrency(call: PlannerCall) -> dict[str, Any]:
 
 
 async def _notify(call: PlannerCall, task: Mapping[str, Any], lines: list[str], reason: str) -> bool:
-    """Tell the chat a Telegram or Lark task came from about the change; whether there was one to tell."""
+    """Tell the chat a Telegram or Lark task came from about the change; whether there was one to tell. A group chat
+    is told the task's end, not its process (``task_notice``)."""
     channel, target = notify_channel(task.get("origin_channel_id")), NotifyTarget.from_columns(task)
-    if channel is None or target is None:
+    if channel is None or target is None or target.group:
         return False
     name = db_tasks.task_name(title=task.get("title"), goal_id=task.get("goal_id"),
                               requirement=task.get("requirement"), task_id=call.task_id)

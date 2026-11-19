@@ -1,6 +1,7 @@
 """Real-path check of what a Lark group chat and a direct chat see of a task they ask for: a disposable
 ``looper serve`` with the lark-cli stand-in (``tests/lark_cli_stand_in.py``) first on PATH and its Lark channel
-configured, a task created, started and run to its end in each conversation.
+configured, a task created, started and run to its end in each conversation (and in ``group-schedule`` a
+schedule created and then changed in a group).
 
 Run from a checkout's root (it needs a disposable PostgreSQL server and Claude Code; it costs money)::
 
@@ -13,7 +14,9 @@ To measure a checkout without this module (the baseline), run this file with tha
 Each conversation is two messages: one asking for a small task and confirming it (the Manager creates it ready),
 then one starting it. A group must see the Manager's answers with only the question whether to start (never the
 task's configuration, and no project directory in any answer), no breakdown or progress, and the end notice; a
-direct chat sees the configuration, the progress and the notice, as before. The stand-in's ``event consume``
+direct chat sees the configuration, the progress and the notice, as before. In ``group-schedule`` the group asks
+for a schedule, then changes its time: no answer may show a setting's value (no before → after, directory, budget or
+requirement), and the change must be made. The stand-in's ``event consume``
 delivers the conversation's messages so far each time it starts; every answer goes to the stand-in's log, never
 to Lark. Each conversation and rep has its own database, server and runtime root. The JSON goes to
 ``evals/runs/`` (ignored by git), without the posts' text when ``--no-text`` is given.
@@ -48,7 +51,15 @@ START_QUESTION = "现在开始吗？回复「开始」就会启动"
 GROUP_START_QUESTION = "现在开始吗？@我回复「开始」就会启动。"
 PROGRESS = ("任务已分解", "进度更新")
 NOTICE = ("✅ 任务完成 · ", "❌ 任务失败 · ")
-CHATS = {"group": "oc_group", "direct": "oc_dm"}
+CHATS = {"group": "oc_group", "direct": "oc_dm", "group-schedule": "oc_group"}
+SCHEDULE_ASK = (f"在 {PROJECT} 项目里建一个定时任务 deps：每个工作日早上 9 点（Asia/Shanghai 时区）检查依赖有没有新版本，"
+                "把结果写进 deps.md。目录用项目默认的。")
+SCHEDULE_CHANGE = "把定时任务 deps 改成每个工作日上午 10 点。"
+# What Looper writes of a schedule's settings in a direct chat (``ops.schedules``): values, a change's before → after.
+SCHEDULE_VALUES = ("→", "$", "- 需求：", "- 目录：", "- 花费上限：")
+TASK_COLUMNS = ("passed", "configuration_shown", "start_question", "work_dir_in_answers", "progress_posts",
+                "notice_last")
+SCHEDULE_COLUMNS = ("passed", "settings_shown", "changed")
 
 
 def _calls(log: Path) -> list[list[str]]:
@@ -95,8 +106,16 @@ def score(conversation: str, posts: list[dict[str, str]], work_dir: str, status:
     return {**checks, "passed": passed and checks["notice_last"] and status == "completed"}
 
 
+def score_schedule(posts: list[dict[str, str]], work_dir: str, cron: str | None) -> dict[str, Any]:
+    """The checks of a group's schedule conversation: no setting's value in any answer, and the change made."""
+    answers = [p["text"] for p in posts if p["kind"] == "answer"]
+    shown = any(word in answer for answer in answers for word in (*SCHEDULE_VALUES, work_dir))
+    changed = cron is not None and cron.split()[:2] == ["0", "10"]
+    return {"settings_shown": shown, "changed": changed, "cron": cron, "passed": not shown and changed}
+
+
 def _event(stand_in: Any, conversation: str, message_id: str, text: str) -> dict[str, Any]:
-    group = conversation == "group"
+    group = conversation != "direct"
     return {"type": "im.message.receive_v1", "chat_id": CHATS[conversation], "chat_type": "group" if group else "p2p",
             "message_id": message_id, "message_type": "text", "sender_type": "user", "sender_id": stand_in.OPEN_ID,
             "content": f"@HelperBot {text}" if group else text, "mentions": [stand_in.BOT_MENTION] if group else []}
@@ -139,6 +158,7 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
                 row = await conn.fetchval("SELECT to_jsonb(t)::text FROM tasks t ORDER BY created_at DESC LIMIT 1")
                 return {"tasks": await conn.fetchval("SELECT count(*) FROM tasks"),
                         "task": json.loads(row) if row is not None else None,
+                        "cron": await conn.fetchval("SELECT cron FROM schedules ORDER BY created_at DESC LIMIT 1"),
                         "cost_usd": float(await conn.fetchval("SELECT coalesce(sum(cost_usd), 0) FROM llm_records"))}
             finally:
                 await conn.close()
@@ -162,11 +182,18 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
                 from evals.prompt_regression.dialogs import _manager_profile
                 _manager_profile(api, args.manager_model, args.manager_effort)
             api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work)})
-            events = [_event(stand_in, conversation, "om_g1", ASK)]
+            schedule = conversation == "group-schedule"
+            events = [_event(stand_in, conversation, "om_g1", SCHEDULE_ASK if schedule else ASK)]
             world_file.write_text(json.dumps({**world, "events": events}), encoding="utf-8")
-            answered = wait(lambda: asyncio.run(state())["tasks"] > 0
+            answered = wait(lambda: (asyncio.run(state())["cron"] is not None if schedule
+                                     else asyncio.run(state())["tasks"] > 0)
                             and any(p["kind"] == "answer" for p in _posts(_calls(log))), args.timeout / 3)
-            if answered:
+            if answered and schedule:
+                time.sleep(3)
+                events.append(_event(stand_in, conversation, "om_g2", SCHEDULE_CHANGE))
+                world_file.write_text(json.dumps({**world, "events": events}), encoding="utf-8")
+                wait(lambda: sum(p["kind"] == "answer" for p in _posts(_calls(log))) >= 2, args.timeout / 3)
+            elif answered:
                 time.sleep(3)  # the answer's last edit
                 events.append(_event(stand_in, conversation, "om_g2", START))
                 world_file.write_text(json.dumps({**world, "events": events}), encoding="utf-8")
@@ -176,7 +203,9 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
         final = asyncio.run(state())
     posts = _posts(_calls(log))
     task = final["task"] or {}
-    result = {"conversation": conversation, **score(conversation, posts, str(work), task.get("status")),
+    checks = (score_schedule(posts, str(work), final["cron"]) if conversation == "group-schedule"
+              else score(conversation, posts, str(work), task.get("status")))
+    result = {"conversation": conversation, **checks,
               "chat_group": task.get("chat_group"), "seconds": round(time.monotonic() - started, 1),
               "cost_usd": final["cost_usd"], "posts": [{k: v for k, v in p.items() if k != "text" or not args.no_text}
                                                        for p in posts]}
@@ -184,9 +213,6 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
 
 
 def table(run: dict[str, Any], base: dict[str, Any] | None) -> str:
-    columns = ("passed", "configuration_shown", "start_question", "work_dir_in_answers", "progress_posts",
-               "notice_last")
-
     def cell(data: dict[str, Any], conversation: str, column: str) -> str:
         reps = [rep for rep in data["reps"] if rep["conversation"] == conversation]
         values = [rep[column] for rep in reps]
@@ -194,14 +220,19 @@ def table(run: dict[str, Any], base: dict[str, Any] | None) -> str:
             return "/".join(str(value) for value in values)
         return f"{sum(bool(value) for value in values)}/{len(values)}"
 
-    head = "| conversation | " + " | ".join(columns) + " |\n|---|" + "---|" * len(columns)
-    lines = [head]
-    for conversation in CHATS:
-        lines.append(f"| {conversation} (this run) | " + " | ".join(cell(run, conversation, c) for c in columns) + " |")
-        if base:
-            lines.append(f"| {conversation} (base) | " + " | ".join(cell(base, conversation, c) for c in columns)
-                         + " |")
-    return "\n".join(lines)
+    tables = []
+    for columns, conversations in ((TASK_COLUMNS, ("group", "direct")), (SCHEDULE_COLUMNS, ("group-schedule",))):
+        ran = [c for c in conversations if any(rep["conversation"] == c for rep in run["reps"])]
+        if not ran:
+            continue
+        lines = ["| conversation | " + " | ".join(columns) + " |\n|---|" + "---|" * len(columns)]
+        for conversation in ran:
+            for label, data in (("this run", run), ("base", base)):
+                if data is not None:
+                    lines.append(f"| {conversation} ({label}) | "
+                                 + " | ".join(cell(data, conversation, c) for c in columns) + " |")
+        tables.append("\n".join(lines))
+    return "\n\n".join(tables)
 
 
 def main() -> int:
@@ -211,7 +242,8 @@ def main() -> int:
     parser.add_argument("--manager-model")
     parser.add_argument("--manager-effort")
     parser.add_argument("--reps", type=int, default=1)
-    parser.add_argument("--conversations", default="group,direct", help="comma-separated: group, direct")
+    parser.add_argument("--conversations", default="group,direct",
+                        help="comma-separated: group, direct, group-schedule")
     parser.add_argument("--max-budget-usd", type=float, default=2.0, help="each Claude Code run's cap")
     parser.add_argument("--claude", default=shutil.which("claude"), help="the Claude Code binary")
     parser.add_argument("--timeout", type=float, default=900, help="seconds a conversation waits for its task's end")
