@@ -5147,7 +5147,8 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   its decision again.
 - **Where they show.** A task's detail has `advisor.consults` (only in a task with some;
   `advisor_advice.consults_view`): each consult's source, attempt, state and why it failed, rounds, returns, spend,
-  the advisor's conclusions, the adoption and `unlocked`, never the request's text. The task page shows them in
+  the checks its request failed (stage, category and count), the advisor's conclusions, the adoption and
+  `unlocked`; never the request's text, nor where a check matched. The task page shows them in
   their step's card; Settings → Roles lists the Advisor and Advice check roles, and a project's settings its
   `advisor` switch and limits.
 
