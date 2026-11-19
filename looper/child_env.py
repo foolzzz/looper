@@ -55,6 +55,9 @@ NAMES = frozenset((*SYSTEM, *NETWORK, *RUNTIMES))
 BACKUP_PREFIXES = ("PG",)
 BACKUP_NAMES = frozenset({"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"})
 
+# Set by Looper on every agent run it starts, to the run's role; ``looper ledger`` refuses to write when it is set.
+AGENT_RUN_ENV = "LOOPER_AGENT_RUN"
+
 _allowed: set[str] = set(NAMES)
 
 

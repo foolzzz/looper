@@ -69,6 +69,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from .. import child_env
 from .llmrec import LlmrecRoute, LlmrecSkip, SkipReason
 from .model_names import MODEL_MAX_CHARS, MODEL_NAME
 
@@ -1033,7 +1034,8 @@ class Launch:
         """The subprocess environment: ``child_env.inherited()`` with the run's own variables; never the server's whole
         environment."""
         self._check_binding()
-        return self.runtime.environment(self)
+        # Marks the process as an agent's: ``looper ledger`` refuses a write inside it (a speed bump, not isolation).
+        return {**self.runtime.environment(self), child_env.AGENT_RUN_ENV: self.role.value if self.role else "agent"}
 
     def _check_binding(self) -> None:
         from .runtimes import RuntimeUnsupported

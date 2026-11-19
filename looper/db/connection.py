@@ -131,6 +131,7 @@ _PROCESSOR_ROLE = "processor_role"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _PROJECT_ACTIVITY = "project_activity"
+_LEDGER = "ledger"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
@@ -230,6 +231,17 @@ def _message_stream_ddl() -> str:
     found = _MESSAGE_STREAM_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its message stream block")
+    return found.group(1)
+
+
+_LEDGER_BLOCK = re.compile(r"-- ledger begin\n(.*?)-- ledger end", re.S)
+
+
+def _ledger_ddl() -> str:
+    """The ledger tables as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _LEDGER_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its ledger block")
     return found.group(1)
 
 
@@ -483,6 +495,12 @@ async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_STREAM):
         return False
     return not await conn.fetchval("SELECT to_regclass('event_sources') IS NOT NULL")
+
+
+async def _ledger_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
 
 
 async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
@@ -857,6 +875,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _message_stream_pending(conn):
             await conn.execute(_message_stream_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM)
+        if await _ledger_pending(conn):
+            await conn.execute(_ledger_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -971,6 +992,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
+            or await _ledger_pending(conn)
             or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)

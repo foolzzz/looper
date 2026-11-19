@@ -76,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_location_flags(init_ops)
     _add_service_parser(commands)
     _add_msgflow_parser(commands)
+    _add_ledger_parser(commands)
     commands.add_parser(
         "mcp-server",
         allow_abbrev=False,
@@ -103,6 +104,49 @@ def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
     imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
     imp.add_argument("--source", help="The source id (default: the only one).")
     _add_location_flags(imp)
+
+
+def _add_ledger_parser(commands: argparse._SubParsersAction) -> None:
+    ledger = commands.add_parser(
+        "ledger", allow_abbrev=False, help="Read and write the Manager's ledger.",
+        description="The ledger lists what waits for you, what was decided and who does what. It reads and writes the "
+                    "database directly, so it works with the service stopped. A write is yours: it is recorded as "
+                    "you, from the session named by --session, and is refused inside an agent Looper started. "
+                    "Exit codes: 0 done, 1 nothing listed, 2 usage, 3 ledger not enabled, 4 refused, 5 no such item, "
+                    "6 database unusable.")
+    sub = ledger.add_subparsers(dest="ledger_command", required=True)
+    listing = sub.add_parser("list", allow_abbrev=False, help="List items (default: the open ones).")
+    listing.add_argument("--status", default="open",
+                         choices=["open", "all", "done", "cancelled", "expired", "superseded"])
+    listing.add_argument("--kind", choices=["pending", "decision", "work_item"])
+    listing.add_argument("--owner", help="user, manager, chat, or task:<id>.")
+    listing.add_argument("--project", help="A project's id or name.")
+    listing.add_argument("--limit", type=int, default=20, help="1 to 50 (default 20).")
+    listing.add_argument("--json", action="store_true")
+    show = sub.add_parser("show", allow_abbrev=False, help="An item with all its events.")
+    show.add_argument("item", help="L-0012, L-12 or 12.")
+    show.add_argument("--json", action="store_true")
+    add = sub.add_parser("add", allow_abbrev=False, help="Add an item as yourself.")
+    add.add_argument("--kind", required=True, choices=["pending", "decision", "work_item"])
+    add.add_argument("--title", required=True, help="Up to 200 characters; it must make sense alone.")
+    add.add_argument("--detail")
+    add.add_argument("--quote", help="The words that were said, kept on the event.")
+    add.add_argument("--due", help="YYYY-MM-DD, or an ISO 8601 time (this machine's zone when none is given).")
+    add.add_argument("--project", help="A project's id or name.")
+    add.add_argument("--ref", action="append", help="L-<number> or <kind>:<ref> (task, gate, pr, doc, vault, url); "
+                                                    "up to 10.")
+    close = sub.add_parser("close", allow_abbrev=False, help="Close an own pending or work item as done.")
+    close.add_argument("item")
+    close.add_argument("--cancel", action="store_true", help="Cancel it instead (any kind).")
+    confirm = sub.add_parser("confirm", allow_abbrev=False, help="Confirm a decision that was only relayed.")
+    confirm.add_argument("item")
+    for command in (add, close, confirm):
+        command.add_argument("--session", help="Required: the interactive session this is run from, such as "
+                                               "'<tool> <date> <topic>'.")
+    for command in (close, confirm):
+        command.add_argument("--note")
+    for command in (listing, show, add, close, confirm):
+        _add_location_flags(command)
 
 
 def _add_location_flags(command: argparse.ArgumentParser) -> None:
@@ -210,6 +254,10 @@ def main(argv: list[str] | None = None) -> int:
         from .agents import msgflow_commands
 
         return msgflow_commands.run(args, _load_ops)
+    if args.command == "ledger":
+        from .agents import ledger_commands
+
+        return ledger_commands.run(args, _load_ops)
     if args.command == "mcp-server":
         from .agents import mcp_server
 
