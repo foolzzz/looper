@@ -29,7 +29,10 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
         def slow_claude(*_):
             loop.call_soon_threadsafe(started.set)
             try:
-                time.sleep(3)
+                # Longer than the readiness assertions below. Those run only after this
+                # probe starts, and a loaded database can spend the first part of the
+                # sleep on work that is already in flight (the profiles query, resume).
+                time.sleep(8)
                 if check_fails:
                     raise RuntimeError("advisory probe crashed")
                 return [serve.self_check.Check("claude_cli", "Claude CLI", "warn", "slow probe problem")]
@@ -56,7 +59,10 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
             api_v1.validate_arguments(api_v1.find("POST", "/api/v1/system/status").result, result)
 
         async def check_readiness(_):
-            await asyncio.wait_for(started.wait(), 1)
+            # claude_check queries the runtimes in use before check_claude. On a loaded
+            # database that query can take longer than a second; the wait ends when the
+            # probe starts, and the probe is still asleep for the assertions below.
+            await asyncio.wait_for(started.wait(), 10)
             # The prompt eval uses this readiness route; it must work while the check is sleeping.
             response = await client.post("/api/v1/system/status", json={})
             assert response.status_code == 200
@@ -64,7 +70,7 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
             assert next(c for c in response.json()["result"]["checks"] if c["id"] == "claude_cli")["status"] == "pending"
             assert any(c["id"] == "test" and c["status"] == "ok" for c in response.json()["result"]["checks"])
             assert "slow probe problem" not in caplog.text
-            await asyncio.wait_for(finished.wait(), 4)
+            await asyncio.wait_for(finished.wait(), 10)
             message = "advisory probe crashed" if check_fails else "slow probe problem"
             await until(lambda: message in caplog.text, f"logged {message}", timeout=1)
             response = await client.post("/api/v1/system/status", json={})
