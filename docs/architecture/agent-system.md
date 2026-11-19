@@ -2801,9 +2801,15 @@ for 300), `room_ping_pong_rounds` (2 to 50, null for 6) and
 `room_consult_budget_usd` (0.01 to 5, null for 0.50),
 `room_consult_timeout_seconds` (30 to 1,800, null for 300) and
 `room_consults_per_task` (0 to 100, null for 10) ([A task's agent
-room](#a-tasks-agent-room)); and `vault` (`off`, also when null, or `on`),
+room](#a-tasks-agent-room)); `vault` (`off`, also when null, or `on`),
 whether the project's agents get the knowledge vault's tools ([The knowledge
-vault](#the-knowledge-vault-the-operators-notes-read-and-written-through-looper)).
+vault](#the-knowledge-vault-the-operators-notes-read-and-written-through-looper));
+and `advisor` (`off`, also when null, or `on`), whether its Planners consult the
+advisor, with `advisor_consult_budget_usd` (0.01 to 5, null for 1),
+`advisor_budget_usd` (a task's consults in all, 0.01 to 50, null for 5),
+`advisor_consults_per_task` (0 to 100, null for 10) and
+`advisor_consults_per_step` (0 to 10, null for 2) ([Consults of the
+advisor](#consults-of-the-advisor)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -5092,8 +5098,21 @@ will.
 ### Consults of the advisor
 
 A consult (`looper/agents/advisor.py`; [advisor RFC](rfcs/advisor-v0.zh-CN.md)) asks a stronger model about one
-step, through an abstract request that code checks first. Nothing starts one yet: the Planner's side comes behind
-the project switch `advisor` (RFC section 11).
+step, through an abstract request that code checks first. Only the Planner asks, and only in a project with
+`advisor` on; with it off, the reply contract, every DECISION message, the contract's refusals and the Worker's
+first turn stay as they were (`tests/test_advisor_off.py` hashes them).
+
+- **When.** Before the first Worker of a step its PLAN marks `"difficulty": "critical"` starts, a [DECISION] turn
+  may only advise (a checkpoint, kind `plan_review`); its answer's decision proceeds (the step starts, the advice
+  it took given to its Worker), replans or fails. A checkpoint that gets no answer (blocked, failed, over budget,
+  withdrawn) starts the step as planned. A [DECISION] where a retry is allowed after a failed Worker or review
+  offers advise (`planner_advice.OFFER`) while the step and the task have consults and budget left
+  (`advisor_*` settings); the decision after the answer allows what that decision allowed but advise.
+- **The turns.** A request that fails a check comes back in a [DECISION] turn with what to fix (at most twice);
+  the advisor's questions come in an [ADVICE] turn, answered (`supplement`, checked again) or withdrawn. The
+  decision after an answer must carry `advice_adoption` (refused without it), recorded on `advisor_advice`; the
+  points taken (not rejected) reach the step's next Worker in its first turn, and whether that attempt passed (its
+  review, or its acceptance without one) is `unlocked`.
 
 - **Two roles with no tools.** `advisor` answers; `advice_check` judges a request before it is sent. Their
   runtime needs `run` and `no_tools` (`ROLE_CAPABILITIES`). Only their role layer (Settings → Roles) chooses their
@@ -5124,7 +5143,8 @@ the project switch `advisor` (RFC section 11).
   than 0.10 USD left, the consult is `over_budget`.
 - **Records.** Every run's record has `run_kind` `advisor` or `advice_check` and the Planner's turn as its
   `parent_record_id`. Its cost is the task's, counted in the Planner's share of `task_costs`.
-- **Restarts.** At startup, a consult a stopped server left `linting` or `asking` fails (`interrupted`).
+- **Restarts.** At startup, every consult a stopped server left unfinished fails (`interrupted`); the Planner takes
+  its decision again.
 
 ### Turns Claude runs on its own
 
@@ -5305,7 +5325,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), the execution settings (`project_execution`), and nullable `default_workflow` |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `chat_group` (that chat is a group chat, told only the task's end; false for a task from before it), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)); `manager_id` (the Manager that created it, which hears of its progress and end), `template` (JSON snapshot of the task template it came from, NULL without one), `workflow` (immutable workflow snapshot, NULL without one) and `origin_thread` (the web chat thread it was asked for in) |
 | `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
-| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column); `difficulty` (`routine`, `hard`, `critical`, null when unset; nothing reads it yet: [Advisor RFC](rfcs/advisor-v0.zh-CN.md)) |
+| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column); `difficulty` (`routine`, `hard`, `critical`, null when unset; a critical step's plan is reviewed by the advisor before it starts: [Consults of the advisor](#consults-of-the-advisor)) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
@@ -5318,8 +5338,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
 | `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, and `sent_at`; kept 30 days |
-| `agent_spawns` | A run another run starts ([Advisor RFC](rfcs/advisor-v0.zh-CN.md), section 5.2; nothing starts one yet): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
-| `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at`; nothing writes it yet |
+| `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
+| `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
