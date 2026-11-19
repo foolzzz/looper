@@ -895,6 +895,10 @@ task's Planner and Worker.
 | `progress_posts` (breakdown and progress messages) | 0 | at least 1 |
 | `notice_last` (the end notice is the last post, and the task completed) | yes | yes |
 
+`--conversations group-schedule` runs a third conversation in a group: it asks for a schedule, then changes its
+time. It passes when no answer shows a setting's value (`settings_shown`: a before → after, the directory, a budget
+or the requirement) and the change was made (`changed`).
+
 ```bash
 uv run --extra test python -m evals.lark_group --model sonnet --reps 2 \
   --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres
