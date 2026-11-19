@@ -34,8 +34,7 @@ from typing import Any
 from ..db import activity as db_activity, tasks as db_tasks, user_gates as db_user_gates
 from .channels.base import PostReceipt
 from .gate_service import GateChat, _offered, dashboard_target, gate_chat
-from .links import task_link
-from .task_notice import NAME_CHARS, link_line
+from .task_notice import NAME_CHARS, task_link_line
 from .user_gates import RETRY_WAIT_SEC, GateState, MessageKind
 
 logger = logging.getLogger(__name__)
@@ -112,7 +111,7 @@ def message_text(row: Mapping[str, Any], chat: GateChat, *, dashboard_url: str =
         return None
     waiting = GateState(row["state"]).waiting
     group = [GROUP_LINE] if chat.lark_group and waiting else []
-    link = link_line(task_link(dashboard_url, row["task_id"]), chat.channel)
+    link = task_link_line(dashboard_url, row["task_id"], chat.channel, group=chat.in_group) or ""
     agenda = row.get("agenda") or []
     findings = [f"目前的发现：{_clip(row['findings'], FINDINGS_CHARS)}"] if row.get("findings") else []
     match kind:
@@ -155,7 +154,8 @@ def _task_columns(row: Mapping[str, Any]) -> dict[str, Any]:
     """The task's columns ``gate_chat`` reads, from a message's row."""
     return {"origin_channel_id": row.get("origin_channel_id"), "schedule_id": row.get("schedule_id"),
             "chat_id": row.get("task_chat_id"), "chat_kind": row.get("chat_kind"),
-            "chat_mention": row.get("chat_mention"), "schedule_notify_channel": row.get("schedule_notify_channel"),
+            "chat_mention": row.get("chat_mention"), "chat_group": row.get("chat_group"),
+            "schedule_notify_channel": row.get("schedule_notify_channel"),
             "schedule_notify_chat": row.get("schedule_notify_chat")}
 
 
