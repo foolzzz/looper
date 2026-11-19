@@ -7,7 +7,7 @@ INSERT INTO managers (id, name, tools, task_scope, idle_timeout_seconds)
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
 VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
         ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'mcp',
-              'resident_session', 'resume', 'run'], true)
+              'no_tools', 'resident_session', 'resume', 'run'], true)
 ON CONFLICT DO NOTHING;
 INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)
 VALUES ('prov-claude-subscription', 'claude-subscription', 'claude-subscription', 'oauth', 'claude-code', true),

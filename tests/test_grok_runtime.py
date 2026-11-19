@@ -30,7 +30,7 @@ from looper.agents.profile_registry import (
     Endpoint, ModelSpec, ProviderSpec, RegistryError, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
 )
 from looper.agents.run_usage import Usage, request_context, run_usage
-from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType, adapter, grok_login
+from looper.agents.runtimes import ROLE_CAPABILITIES, TOOL_ROLES, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType, adapter, grok_login
 from looper.agents.runtimes import CostSource, ReadOnly, StopMethod
 from looper.agents.runtimes.grok import (
     COMPAT_VARS, DIRECTORY_VARS, RESTORED_VARS, RULES_FILE, GrokRuntime, GrokStream, ResidentGrok, write_home,
@@ -585,8 +585,8 @@ def test_the_probe_reads_only_the_version_with_an_empty_home(tmp_path: Path, mon
     assert GROK.probe(str(tmp_path / "nothing")).error == f"{str(tmp_path / 'nothing')!r} was not found"
 
 
-def test_its_capabilities_cover_every_role() -> None:
-    assert all(needs <= GROK.capabilities for needs in ROLE_CAPABILITIES.values())
+def test_its_capabilities_cover_every_role_with_tools() -> None:
+    assert all(ROLE_CAPABILITIES[role] <= GROK.capabilities for role in TOOL_ROLES)
     assert GROK.protocols == {ApiProtocol.OPENAI_RESPONSES} and GROK.auth_kinds == {AuthKind.OAUTH}
     assert GROK.login_models[0] == "grok-4.7"
     # Its own figure is the run's cost, which it reports only when a run ends: no per-run cap stops a run.

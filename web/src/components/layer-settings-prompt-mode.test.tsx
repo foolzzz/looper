@@ -65,7 +65,7 @@ describe("the role layer's system prompt mode", () => {
 
   it.each(["layer", "project", "role"])("shows the registered account, model and protocol in %s summaries", async (view) => {
     const state = { values: VALUES, effective: EFFECTIVE };
-    const roles = { manager: state, planner: state, worker: state, reviewer: state };
+    const roles = { manager: state, planner: state, worker: state, reviewer: state, processor: state };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       const result = url === "/api/v1/registry/view" ? SUMMARY_REGISTRY

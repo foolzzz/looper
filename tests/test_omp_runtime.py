@@ -871,8 +871,10 @@ def test_a_failed_probe_cannot_restrict_the_tools(monkeypatch: pytest.MonkeyPatc
     assert OMP.read_only_for(probe.capabilities) is ReadOnly.CHECK
 
 
-def test_its_capabilities_cover_every_role() -> None:
-    assert all(needs <= OMP.capabilities for needs in ROLE_CAPABILITIES.values())
+def test_its_capabilities_cover_every_role_with_tools() -> None:
+    from looper.agents.runtimes import TOOL_ROLES
+
+    assert all(ROLE_CAPABILITIES[role] <= OMP.capabilities for role in TOOL_ROLES)
     assert OMP.protocols == {ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT, ApiProtocol.ANTHROPIC_MESSAGES}
 
 

@@ -1,0 +1,15 @@
+{
+  "runtime": {
+    "type": "claude-code"
+  },
+  "provider": {
+    "provider_id": "prov-claude-subscription"
+  },
+  "model": {
+    "name": "sonnet",
+    "protocol": "anthropic-messages"
+  },
+  "agent": {
+    "name": "eval/claude-login-sonnet"
+  }
+}

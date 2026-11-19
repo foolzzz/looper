@@ -129,6 +129,7 @@ function AgentTask({ taskId, name, project }: { taskId: string; name: string; pr
 
 const ROLE_LABEL: Record<AgentProcess["role"], string> = {
   manager: "Manager", planner: "Planner", worker: "Worker", reviewer: "Reviewer", consult: "Consult",
+  processor: "Processor",
 };
 
 /** A figure whose breakdown is its hover text, reachable by keyboard. */

@@ -127,6 +127,7 @@ _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _TASK_CHAT_GROUP = "task_chat_group"
+_PROCESSOR_ROLE = "processor_role"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _PROJECT_ACTIVITY = "project_activity"
@@ -290,6 +291,31 @@ _COMMAND_SCHEDULES_DDL: tuple[str, ...] = (
             'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered'))""",
     "CREATE INDEX IF NOT EXISTS idx_schedule_runs_finished ON schedule_runs (finished_at) WHERE finished_at IS NOT NULL",
 )
+
+
+# The processor role: its layers, its schedule's choice of profile, and the no_tools capability. No runtime row
+# changes here: startup refreshes the built-in Claude Code runtime's capabilities (``register_found_runtimes``), and a
+# runtime the operator registered gets it when probed again.
+_PROCESSOR_ROLE_DDL = """
+ALTER TABLE agent_runtimes DROP CONSTRAINT agent_runtimes_capabilities_check,
+    ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume',
+        'structured_output', 'claude_plugins', 'mcp', 'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
+        'read_tools', 'steer', 'no_tools']);
+ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check,
+    ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor'));
+ALTER TABLE schedule_profile_overrides DROP CONSTRAINT schedule_profile_overrides_role_check,
+    ADD CONSTRAINT schedule_profile_overrides_role_check CHECK (role IN ('planner', 'worker', 'reviewer', 'processor'));
+"""
+
+
+async def _processor_role_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROCESSOR_ROLE):
+        return False
+    # Fresh baselines already admit the processor; only the released CHECK needs widening.
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_setting_layers') "
+        "AND conname = 'agent_setting_layers_role_check' "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'processor'")
 
 
 _CURSOR_LOGIN_DDL = """
@@ -804,6 +830,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _task_chat_group_pending(conn):
             await conn.execute("ALTER TABLE tasks ADD COLUMN chat_group BOOLEAN NOT NULL DEFAULT false")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_CHAT_GROUP)
+        if await _processor_role_pending(conn):
+            await conn.execute(_PROCESSOR_ROLE_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROCESSOR_ROLE)
         if await _llm_requests_pending(conn):
             await conn.execute(_LLM_REQUESTS_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS)
@@ -950,4 +979,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
             or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
-            or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)))
+            or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
+            or await _processor_role_pending(conn)))

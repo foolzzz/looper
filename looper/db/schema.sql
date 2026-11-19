@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     capabilities  TEXT[] NOT NULL DEFAULT '{}'
         CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
                                      'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
-                                     'read_tools', 'steer']),
+                                     'read_tools', 'steer', 'no_tools']),
     probed_at     TIMESTAMPTZ,
     probe_error   TEXT,
     builtin       BOOLEAN NOT NULL DEFAULT false,
@@ -535,7 +535,8 @@ CREATE TABLE IF NOT EXISTS manager_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_manager_actions_task ON manager_actions (task_id, id) WHERE task_id IS NOT NULL;
 
--- Each role's own settings: its display name, role prompt and timeout (manager, planner, worker, reviewer).
+-- Each role's own settings: its display name, role prompt and timeout (manager, planner, worker, reviewer,
+-- processor).
 CREATE TABLE IF NOT EXISTS role_configs (
     role             TEXT PRIMARY KEY,
     display_name     TEXT NOT NULL DEFAULT '',
@@ -676,14 +677,14 @@ CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (pro
 
 -- Agent settings by layer: system default -> role -> project -> role in a
 -- project, a later layer winning. The Manager spans every project and has only
--- the first two. A NULL field is not set at its layer (it inherits); env is an
+-- the first two; the processor (runs with no tools) has all four. A NULL field is not set at its layer (it inherits); env is an
 -- ordered list of {"key", "value"}, where a null value unsets a key an earlier
 -- layer set (never at the system layer). profile_id is the Agent Profile the
 -- layer's roles run (its model and effort with it). Code owns the validation and the resolution
 -- (looper/agents/agent_settings.py). One row per layer and place.
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
-    role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer')),
+    role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
     profile_id      TEXT REFERENCES agent_profiles(id),
@@ -1134,10 +1135,11 @@ CREATE INDEX IF NOT EXISTS idx_schedules_manager ON schedules (manager_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_project_name ON schedules (project_id, lower(name));
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules (next_fire_at) WHERE enabled;
 -- The Agent Profile a schedule's tasks run for some of their roles, copied into each task's
--- task_profile_overrides when it fires; a profile a schedule chose cannot be deleted.
+-- task_profile_overrides when it fires, or its processor runs with (over the processor's layers); a profile a
+-- schedule chose cannot be deleted.
 CREATE TABLE IF NOT EXISTS schedule_profile_overrides (
     schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
-    role        TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer')),
+    role        TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer', 'processor')),
     profile_id  TEXT NOT NULL REFERENCES agent_profiles(id),
     PRIMARY KEY (schedule_id, role)
 );

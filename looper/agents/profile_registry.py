@@ -807,7 +807,7 @@ def check_roles(profile: AgentProfile | LegacyAgentProfile, roles: Iterable[str]
 
 
 # The roles a layer of each scope, or a task's choice, selects a profile for.
-_SCOPE_ROLES = {"system": tuple(runtimes.ROLE_CAPABILITIES), "project": ("planner", "worker", "reviewer")}
+_SCOPE_ROLES = {"system": runtimes.TOOL_ROLES, "project": ("planner", "worker", "reviewer")}
 
 
 async def check_selection(profile_id: str, roles: Iterable[str], *, pool: Any = None) -> AgentProfile:
@@ -1304,14 +1304,15 @@ async def _detect(adapter: runtimes.RuntimeAdapter, launcher: Launcher = Launche
 
 async def register_found_runtimes() -> list[str]:
     """Register a built-in runtime for each runtime type other than Claude Code whose default executable is on
-    PATH; existing rows retain their operator fields. Cursor's built-in capabilities are refreshed from its
-    adapter. Claude Code's built-in runtime comes with the schema. Probe concurrently, then write in
-    adapter/launcher order. Returns the names registered."""
+    PATH; existing rows retain their operator fields. Cursor's and Claude Code's built-in capabilities are refreshed
+    from their adapters (Claude Code's built-in runtime comes with the schema, and an installation from before one of
+    its capabilities gets it here). Probe concurrently, then write in adapter/launcher order. Returns the names
+    registered."""
     from ..db import profile_registry as db
 
     started = time.monotonic()
-    cursor = runtimes.adapter("cursor-agent")
-    await db.refresh_builtin_capabilities(builtin_runtime_id(cursor), sorted(c.value for c in cursor.capabilities))
+    for owned in (runtimes.adapter("cursor-agent"), runtimes.CLAUDE_CODE):
+        await db.refresh_builtin_capabilities(builtin_runtime_id(owned), sorted(c.value for c in owned.capabilities))
     pairs = [(adapter, launcher) for adapter in runtimes.ADAPTERS.values()
              for launcher in sorted(adapter.launchers, key=lambda item: item.value)
              if not (adapter is runtimes.CLAUDE_CODE and launcher is Launcher.NATIVE)]
@@ -1814,7 +1815,9 @@ async def _check_fallbacks(conn: Any, candidate: AgentProfile) -> None:
             target = profiles.get(target_id)
             if target is None:
                 raise RegistryError(f"no fallback Agent Profile {target_id!r}")
-            check_roles(target, servable_roles(current.runtime.capabilities, current.runtime.type))
+            # The processor checks its fallback when it launches, as it does an inherited profile.
+            check_roles(target, [role for role in servable_roles(current.runtime.capabilities, current.runtime.type)
+                                 if role in runtimes.TOOL_ROLES])
             seen.add(target_id)
             current = target
 

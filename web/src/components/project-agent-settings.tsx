@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { AgentProfileSelect } from "@/components/agent-profiles";
 import { CollapsibleRow } from "@/components/collapsible-row";
 import { LayerSettingsForm } from "@/components/layer-settings";
+import { cannotRun } from "@/components/role-settings";
 import { LABEL } from "@/components/registry-ui";
 import {
   fetchAllowedProfiles,
@@ -27,7 +28,10 @@ import { errorText, useAction } from "@/lib/use-action";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
 import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 
+/** The roles of the project's tasks, whose profile the project layer's must run. */
 const ROLES: ProjectRole[] = ["planner", "worker", "reviewer"];
+/** A row each: the task roles, then the processor of the project's schedules (it inherits the project layer too). */
+const ROWS: ProjectRole[] = [...ROLES, "processor"];
 
 /** The project layer's row: its id, and its link #projects/<id>/profiles/project. */
 const PROJECT_ROW = "project";
@@ -220,8 +224,8 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        Which Agent Profile this project&apos;s Planner, Workers and Reviewers run, and their other overrides, over
-        the shared defaults in{" "}
+        Which Agent Profile this project&apos;s Planner, Workers, Reviewers and processor run, and their other
+        overrides, over the shared defaults in{" "}
         <a href={settingsHref("roles", "shared")} className="text-primary underline-offset-2 hover:underline">
           Settings → Roles
         </a>
@@ -252,8 +256,8 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
             {(dirty) => (
               <>
                 <p className="text-xs text-muted-foreground">
-                  For this project&apos;s Planner, Workers and Reviewers, over Settings → Roles. Empty fields inherit;
-                  each role&apos;s row shows what applies to it.
+                  For this project&apos;s Planner, Workers, Reviewers and processor, over Settings → Roles. Empty fields
+                  inherit; each role&apos;s row shows what applies to it.
                 </p>
                 <LayerSettingsForm
                   idPrefix={`${id}-project`}
@@ -274,20 +278,23 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
             )}
           </CollapsibleRow>
 
-          {ROLES.map((role) => (
+          {ROWS.map((role) => (
             <CollapsibleRow
               key={role}
               id={`project-profiles-${role}`}
               {...row(role)}
               name={roleLabel(role)}
-              summary={profileText(settings.roles[role].effective, registry)}
+              summary={[profileText(settings.roles[role].effective, registry),
+                        cannotRun(role, settings.roles[role].effective, registry)].filter(Boolean).join(" · ")}
               marks={overridden(settings.roles[role].values)}
             >
               {(dirty) => (
                 <>
                   <p className="text-xs text-muted-foreground">
-                    The {roleLabel(role)} of this project&apos;s tasks, over &ldquo;All roles in this project&rdquo; and
-                    Settings → Roles. Empty fields inherit.
+                    {role === "processor"
+                      ? "The processor of this project's schedules (runs with no tools)"
+                      : `The ${roleLabel(role)} of this project's tasks`}, over &ldquo;All roles in this project&rdquo;
+                    and Settings → Roles. Empty fields inherit.
                     {role === "reviewer" && " Without a harness of its own, a Reviewer uses the Worker's."}
                   </p>
                   <LayerSettingsForm
