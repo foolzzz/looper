@@ -539,7 +539,8 @@ class WaitService:
             return
         channel, target = notify_channel(task.get("origin_channel_id")), NotifyTarget.from_columns(task)
         notice = "dashboard"
-        if channel is not None and target is not None:
+        # A group chat is told the task's end, not its process (``task_notice``): its timeout stays on the dashboard.
+        if channel is not None and target is not None and not target.group:
             name = db_tasks.task_name(title=task.get("title"), goal_id=task.get("goal_id"),
                                       requirement=task.get("requirement"), task_id=task_id)
             if seconds >= 86400:
