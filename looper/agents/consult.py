@@ -34,10 +34,8 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
   A provider-priced model without a full price cannot run a consult (``budget_unavailable``): time and turn
   limits do not establish a spend cap. The question and reason go to the Planner, and its asker gets the reason
   too. The source run's report and session stay intact; no answer or delivery receipt is invented.
-  One deadline covers writing the prompt, reading the reply and waiting for exit; stderr is drained with a short
-  tail kept for errors, and the process tree is ended on success too. The tree is read every ``TREE_WATCH_SEC`` and
-  again before the result is recorded, and the consult's own process group is signalled; a child that calls
-  ``setsid`` between two reads and whose parent then exits is not found (a known limit).
+  The run itself is ``single_run.run_once``: one deadline covers writing the prompt, reading the reply and waiting
+  for exit, stderr is drained with a short tail kept for errors, and the process tree is ended on success too.
 - **Delivery.** Its end state, answers and unanswered questions for the Planner commit together, once. If its
   task's room was turned off, it ends ``failed`` (``room_off``), without messages or notifications.
 - **Restarts.** Shutdown leaves consults queued or running; killing a run gives its questions to the Planner.
@@ -61,6 +59,7 @@ from .. import child_env
 from .llmrec import control as llmrec
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
+from . import single_run
 from .agent_settings import AgentType, Launch, load_agent_settings
 from .drain import DrainState
 from .runtimes import ReadOnly
@@ -77,7 +76,6 @@ CONSULT_MAX_TURNS = 20
 # The question bodies share this many characters in a consult prompt.
 CONSULT_QUESTIONS_MAX_CHARS = 20_000
 GIT_TIMEOUT_SEC = 30
-TREE_WATCH_SEC = 0.2  # how often a running consult's process tree is read
 # The runtimes with their own read-only restriction, so a consult runs where its step ran; the others run in a
 # throwaway checkout.
 RUNTIME_READ_ONLY = ("claude-code", "codex", "grok", "dsh", "pi")
@@ -135,13 +133,8 @@ class _Failed(Exception):
         self.reason = reason
 
 
-def _unsuccessful(result: Mapping[str, Any]) -> str | None:
-    """Why a result must not be delivered as an answer, e.g. a runtime that kept a valid final from a failed exit."""
-    if result.get("is_error"):
-        return "its run ended in error: " + "; ".join(str(e) for e in result.get("errors") or []) [:300]
-    if result.get("subtype") not in (None, "success"):
-        return f"its run ended as {result.get('subtype')}, not success"
-    return None
+# Why a result must not be delivered as an answer.
+_unsuccessful = single_run.unsuccessful
 
 
 class ConsultService:
@@ -489,96 +482,19 @@ class ConsultService:
     async def _execute(self, task_id: str, step: Mapping[str, Any], run_id: str, command: list[str], cwd: str,
                        prompt: str, system_prompt: SystemPrompt, launch: Launch, timeout: int
                        ) -> tuple[dict[str, Any] | None, bool, bool]:
-        """Run the consult's command: its last result (None when it gave none), whether its session started (Claude
-        names it in its init event) and whether it ran over ``timeout``."""
-        from . import proc_tree
+        """Run the consult's command (``single_run.run_once``): its last result (None when it gave none), whether its
+        session started (Claude names it in its init event) and whether it ran over ``timeout``."""
         from .claude_cli import ClaudeRunRecorder
 
-        runtime = launch.runtime
         recorder = ClaudeRunRecorder(agent_id=run_id, task_id=task_id, command=command, cwd=cwd, input_text=prompt,
                                      step_id=str(step["id"]), system_prompt=system_prompt, launch=launch,
                                      whole_process=True)
         await recorder.start()
         try:
-            process = await proc_tree.spawn(*command, cwd=cwd, env=launch.environment(),
-                                            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                                            stderr=asyncio.subprocess.PIPE)
-        except OSError as exc:
-            await recorder.finish(output_text=None, result_event=None, error=f"cannot start the consult: {exc}")
+            return await single_run.run_once(recorder, command, cwd=cwd, prompt=prompt, launch=launch,
+                                             timeout=timeout, what="the consult", label=f"consult {run_id}")
+        except single_run.StartFailed as exc:
             raise _Failed(FallbackReason.RUNTIME_CANNOT, f"its runtime does not start: {exc}") from None
-        recorder.track_pid(lambda: process.pid)
-        assert process.stdin is not None and process.stdout is not None and process.stderr is not None
-        result: dict[str, Any] | None = None
-        started = False
-        known: proc_tree.Tree = {}
-        stderr_tail = ""
-
-        async def stderr() -> None:
-            nonlocal stderr_tail
-            while chunk := await process.stderr.read(8192):
-                stderr_tail = (stderr_tail + chunk.decode(errors="replace"))[-2000:]
-
-        draining = asyncio.create_task(stderr())
-
-        async def watch_tree() -> None:
-            # A parent that exits re-parents its children and nothing then links them to it, so the tree is kept
-            # current while it runs.
-            while process.returncode is None:
-                known.update(await asyncio.to_thread(proc_tree.tree_of, process))
-                await asyncio.sleep(TREE_WATCH_SEC)
-
-        watching = asyncio.create_task(watch_tree())
-
-        async def read() -> None:
-            nonlocal result, started, known
-            async for event in runtime.parse_process(process, model=launch.model, launch=launch):
-                if event.get("type") == "result":
-                    # Read before the record is awaited, which a stop may cut short.
-                    known.update(await asyncio.to_thread(proc_tree.tree_of, process))
-                await recorder.record(event)
-                if (capped := recorder.cap_stop) is not None:
-                    result = capped.result_event
-                    await proc_tree.end(process, label=f"consult {run_id}")
-                    return
-                if event.get("type") == "system" and event.get("subtype") == "init":
-                    started = True
-                if event.get("type") == "result":
-                    result = event
-                    known.update(await proc_tree.begin_end(process))
-                    if not process.stdin.is_closing():
-                        process.stdin.close()
-
-        async def run() -> None:
-            try:
-                await runtime.write_turn(process.stdin, prompt)
-            except (BrokenPipeError, ConnectionResetError, RuntimeError):
-                pass
-            await read()
-            await process.wait()
-
-        error: str | None = None
-        try:
-            await asyncio.wait_for(run(), timeout=timeout)
-            if result is None or result.get("is_error"):
-                error = "the consult gave no result"
-        except asyncio.TimeoutError:
-            error = f"the consult ran over {timeout} s"
-            return None, started, True
-        except BaseException:
-            error = "the consult was stopped"
-            raise
-        finally:
-            try:
-                await proc_tree.end(process, label=f"consult {run_id}", known=known)
-            finally:
-                for background in (draining, watching):
-                    if not background.done():
-                        background.cancel()
-                await asyncio.gather(draining, watching, return_exceptions=True)
-                await recorder.finish(output_text=str((result or {}).get("result") or "") or None,
-                                      result_event=result, error=(error + "\n" + stderr_tail if stderr_tail else error)
-                                      if error else None)
-        return result, started, False
 
     async def _execute_hosted(self, handle: RunHandle, task_id: str, step: Mapping[str, Any], run_id: str,
                               cwd: str, prompt: str, system_prompt: SystemPrompt, launch: Launch, timeout: int
