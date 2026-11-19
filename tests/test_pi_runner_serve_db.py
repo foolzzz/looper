@@ -495,7 +495,9 @@ def test_pi_runner_task_with_every_role(isolated_pi, tmp_path):
             if n == 2:
                 return call_item('{"wait_seconds":60}', name="looper_room_inbox", call_id="inbox-two")
             if n == 3:
-                assert "STEER-TOKEN" in body["input"][-1]["output"]
+                # The inbox call reports the delivery; the answer itself arrives as a separate user message.
+                assert "delivered_message_ids" in body["input"][-2]["output"]
+                assert "STEER-TOKEN" in body["input"][-1]["content"][0]["text"]
                 return call_item('{"path":"two.txt","content":"STEER-TOKEN"}', name="write", call_id="write-two")
             assert n == 4
             return report("two.txt")

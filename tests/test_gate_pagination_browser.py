@@ -334,6 +334,12 @@ def test_retry_replaces_expired_boundary_and_ignores_older_refresh(dashboard):
     with page.expect_request(lambda r: urlsplit(r.url).path == "/api/v1/ops/gates/list"
                              and "waiting_on" not in r.post_data_json):
         refresh(page)
+    # The route handler parks that request; the fault must not be set before it has run.
+    for _ in range(100):
+        if "pending_gate" in model:
+            break
+        page.wait_for_timeout(50)
+    assert "pending_gate" in model
     before_retry = len(model["requests"])
     model["fault"] = "unavailable"
     page.get_by_role("button", name="Retry", exact=True).click()
@@ -349,7 +355,9 @@ def test_retry_replaces_expired_boundary_and_ignores_older_refresh(dashboard):
     expect(page.locator('main a[href="#tasks/t0"]')).to_have_count(0)
     expect(page.get_by_text("70 open · 67 waiting for you", exact=True)).to_be_visible()
     # The real API adapter requests only the fresh 50-row window plus its successor.
-    assert model["requests"][before_retry:] == [{"state": "open", "limit": 51, "offset": 0}] * 2
+    # (The sidebar badge's own poll, which asks for waiting_on, may land in between.)
+    assert [r for r in model["requests"][before_retry:] if "waiting_on" not in r] == [
+        {"state": "open", "limit": 51, "offset": 0}] * 2
 
     pending, result = model["pending_gate"]
     assert pending.request.post_data_json == {"state": "open", "limit": 200, "offset": 0}
