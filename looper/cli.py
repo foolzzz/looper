@@ -75,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_location_flags(init_ops)
     _add_service_parser(commands)
+    _add_msgflow_parser(commands)
     commands.add_parser(
         "mcp-server",
         allow_abbrev=False,
@@ -84,6 +85,24 @@ def build_parser() -> argparse.ArgumentParser:
     version = commands.add_parser("version", allow_abbrev=False, help="Print the installed Looper version.")
     version.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format.")
     return parser
+
+
+def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
+    # Only argparse here: `looper version` must not import the agent system (its code is loaded when the command runs).
+    msgflow = commands.add_parser("msgflow", allow_abbrev=False, help="Work on the message stream.",
+                                  description="One-off work on the message stream.")
+    sub = msgflow.add_subparsers(dest="msgflow_command", required=True)
+    imp = sub.add_parser(
+        "import", allow_abbrev=False, help="Import the last N days from an outside collector's files.",
+        description="Read the source's bridge directory from the start of every file and store the messages sent in "
+                    "the last N days (a message already stored is left as it is). --dry-run stores nothing and "
+                    "prints what it would store. If the server is writing the source at that moment it says so and "
+                    "exits; run it again.")
+    imp.add_argument("--days", type=int, required=True, help="How many days back to import (1 to 3650).")
+    imp.add_argument("--dry-run", action="store_true", help="Count what would be stored; store nothing.")
+    imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
+    imp.add_argument("--source", help="The source id (default: the only one).")
+    _add_location_flags(imp)
 
 
 def _add_location_flags(command: argparse.ArgumentParser) -> None:
@@ -187,6 +206,10 @@ def main(argv: list[str] | None = None) -> int:
         return _init_ops(args)
     if args.command == "service":
         return _service(args)
+    if args.command == "msgflow":
+        from .agents import msgflow_commands
+
+        return msgflow_commands.run(args, _load_ops)
     if args.command == "mcp-server":
         from .agents import mcp_server
 
