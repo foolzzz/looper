@@ -97,6 +97,39 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     return d
 
 
+# What kind of run a record is (``llm_records.run_kind``), and the agent ids that say it: every record but a spawned
+# run's (an advisor's or a judge's, which names its kind) takes its kind from these, and the run tree migration
+# backfilled older rows by them. An agent id none of them matches leaves the kind NULL.
+RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check")
+_RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    # (kind, exact ids, id prefixes)
+    ("manager", ("manager",), ("manager-",)),
+    ("planner", (), ("planner-",)),
+    ("worker", (), ("worker-",)),
+    ("reviewer", (), ("reviewer-",)),
+    ("processor", (), ("processor:",)),
+    ("consult", (), ("consult-",)),
+)
+
+
+def run_kind_of(agent_id: str) -> str | None:
+    """The kind of a run recorded as ``agent_id`` (``_RUN_KIND_IDS``); None when its id does not say."""
+    return next((kind for kind, exact, prefixes in _RUN_KIND_IDS
+                 if agent_id in exact or agent_id.startswith(prefixes)), None)
+
+
+def run_kind_case(column: str) -> str:
+    """``run_kind_of`` as SQL over ``column``."""
+    def like(prefix: str) -> str:
+        return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    whens = []
+    for kind, exact, prefixes in _RUN_KIND_IDS:
+        tests = [f"{column} = '{value}'" for value in exact] + [f"{column} LIKE '{like(value)}'" for value in prefixes]
+        whens.append(f"WHEN {' OR '.join(tests)} THEN '{kind}'")
+    return f"CASE {' '.join(whens)} END"
+
+
 async def start_record(
     *,
     agent_id: str,
@@ -104,20 +137,26 @@ async def start_record(
     session_id: str | None = None,
     input_text: str | None = None,
     metadata: dict[str, Any] | None = None,
+    run_kind: str | None = None,
+    parent_record_id: int | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> int:
-    """Open a ``running`` record for one Claude invocation; returns its id."""
+    """Open a ``running`` record for one Claude invocation; returns its id. Its kind is ``run_kind``, else what its
+    agent id says (``run_kind_of``); ``parent_record_id`` is the run that started it."""
+    if run_kind is not None and run_kind not in RUN_KINDS:
+        raise ValueError(f"unknown run kind {run_kind!r}")
     pool = pool or get_pool()
     row = await pool.fetchrow(
         """
         INSERT INTO llm_records
-            (agent_id, task_id, session_id, input_summary, input_text, metadata, status)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'running')
+            (agent_id, task_id, session_id, input_summary, input_text, metadata, status, run_kind, parent_record_id)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'running', $7, $8)
         RETURNING id
         """,
         agent_id, task_id, session_id,
         input_text[:500] if input_text else None, input_text,
         json.dumps(metadata) if metadata else None,
+        run_kind or run_kind_of(agent_id), parent_record_id,
     )
     return row["id"]
 

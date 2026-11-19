@@ -131,6 +131,9 @@ _PROCESSOR_ROLE = "processor_role"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _MANAGER_EVENTS = "manager_events"
+_RUN_TREE = "run_tree"
+_AGENT_SPAWNS = "agent_spawns"
+_STEP_DIFFICULTY = "step_difficulty"
 _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
@@ -225,6 +228,7 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
+_AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 
 
 def _message_stream_ddl() -> str:
@@ -233,6 +237,29 @@ def _message_stream_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its message stream block")
     return found.group(1)
+
+
+def _agent_spawns_ddl() -> str:
+    """The spawn and advice tables as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _AGENT_SPAWNS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its agent spawns block")
+    return found.group(1)
+
+
+def _run_tree_ddl() -> tuple[str, ...]:
+    """The run tree columns of llm_records, as schema.sql defines them, and their backfill: a row's run kind from its
+    agent id where that says it (``llm_records.run_kind_case``); no older row has a parent."""
+    from .llm_records import RUN_KINDS, run_kind_case
+
+    kinds = ", ".join(f"'{kind}'" for kind in RUN_KINDS)
+    return (
+        "ALTER TABLE llm_records ADD COLUMN parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL, "
+        f"ADD COLUMN run_kind TEXT CHECK (run_kind IN ({kinds}))",
+        f"UPDATE llm_records SET run_kind = {run_kind_case('agent_id')} WHERE run_kind IS NULL",
+        "CREATE INDEX IF NOT EXISTS idx_llm_records_parent ON llm_records(parent_record_id) "
+        "WHERE parent_record_id IS NOT NULL",
+    )
 
 
 def _manager_events_ddl() -> str:
@@ -493,6 +520,30 @@ async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_STREAM):
         return False
     return not await conn.fetchval("SELECT to_regclass('event_sources') IS NOT NULL")
+
+
+async def _column_pending(conn: asyncpg.Connection, marker: str, table: str, column: str) -> bool:
+    """An unmarked database whose ``table`` lacks ``column`` needs its additive upgrade; recorded upgrades never
+    repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", marker):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2 "
+        "AND attnum > 0 AND NOT attisdropped)", table, column)
+
+
+async def _run_tree_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _RUN_TREE, "llm_records", "run_kind")
+
+
+async def _step_difficulty_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _STEP_DIFFICULTY, "task_steps", "difficulty")
+
+
+async def _agent_spawns_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _AGENT_SPAWNS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('agent_spawns') IS NOT NULL")
 
 
 async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
@@ -876,6 +927,17 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _manager_events_pending(conn):
             await conn.execute(_manager_events_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
+        if await _run_tree_pending(conn):
+            for ddl in _run_tree_ddl():
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _RUN_TREE)
+        if await _step_difficulty_pending(conn):
+            await conn.execute("ALTER TABLE task_steps ADD COLUMN difficulty TEXT "
+                               "CHECK (difficulty IN ('routine', 'hard', 'critical'))")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _STEP_DIFFICULTY)
+        if await _agent_spawns_pending(conn):
+            await conn.execute(_agent_spawns_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _AGENT_SPAWNS)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -991,6 +1053,8 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
             or await _manager_events_pending(conn)
+            or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
+            or await _agent_spawns_pending(conn)
             or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)
