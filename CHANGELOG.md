@@ -18,6 +18,21 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.18] - 2026-11-19
+
+### Added
+
+- **Task ends are recorded as completion events.** ([#1431](https://github.com/foolzzz/looper/pull/1431)) Additive migration `manager_events`; each task end that produces a notice (Manager task-end handler, scheduled-run message sent to a chat) writes one row with the notice it stands for, state `skipped`, reason `off`. Nothing sent changes. New operator-only operation `manager_events.summary`.
+
+### Changed
+
+- **Agent runtimes are chosen only through configuration.** ([#1417](https://github.com/foolzzz/looper/pull/1417)) `looper doctor`, startup checks and `system/status` check the Claude Code CLI and login only while an Agent Profile in use runs on Claude Code; the Pi runner starts the executable of the in-use Pi runtime; real-mode evals take runtime and model through profile flags.
+
+### Fixed
+
+- **A replayed bus message no longer resends a task-end notice.** ([#1431](https://github.com/foolzzz/looper/pull/1431)) A replay is recorded once and sends nothing, unless the earlier send did not complete, in which case it is retried.
+- **Tests: parallel Lark message read tests no longer depend on process start-up time.** ([#1429](https://github.com/foolzzz/looper/pull/1429)) Test only, no behavior change.
+
 ## [2.15.17] - 2026-11-19
 
 ### Added
