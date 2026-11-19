@@ -1,6 +1,7 @@
 """The Claude Code CLI and login are required only when an Agent Profile in use runs on Claude Code."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -104,5 +105,30 @@ def test_runtime_types_in_use_follow_every_layer_and_fallback(monkeypatch):
         await pool.execute("DELETE FROM agent_setting_layers")
         await pool.execute("INSERT INTO agent_setting_layers (scope, profile_id) VALUES ('system', $1)", codex)
         assert await _types(pool) == {"codex"}
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytestmark_db
+def test_runtime_types_in_use_include_workflow_presets_and_project_allow_lists(monkeypatch):
+    async def test(pool):
+        codex = await _codex_profile(pool, "agent-codex")
+        await pool.execute("INSERT INTO agent_setting_layers (scope, profile_id) VALUES ('system', $1)", codex)
+        assert await _types(pool) == {"codex"}
+        claude = BUILTIN_PROFILE.id
+        # A workflow preset's per-role profile, and a custom role's profile.
+        await pool.execute("INSERT INTO workflows (key, name, definition) VALUES ('w1', 'w1', $1::jsonb)",
+                           json.dumps({"profiles": {"worker": claude}}))
+        assert await _types(pool) == {"codex", "claude-code"}
+        await pool.execute("UPDATE workflows SET definition = $1::jsonb",
+                           json.dumps({"roles": [{"key": "r", "kind": "worker", "profile_id": claude}]}))
+        assert await _types(pool) == {"codex", "claude-code"}
+        await pool.execute("DELETE FROM workflows")
+        assert await _types(pool) == {"codex"}
+        # A project that lets its Planners choose among profiles names them; an empty list names none.
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('p1', 'p1'), ('p2', 'p2')")
+        assert await _types(pool) == {"codex"}
+        await pool.execute("INSERT INTO project_allowed_profiles (project_id, profile_id) VALUES ('p1', $1)", claude)
+        assert await _types(pool) == {"codex", "claude-code"}
 
     run_db(test, monkeypatch, timeout=30)
