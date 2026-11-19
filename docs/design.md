@@ -152,7 +152,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 3. Manager 调用 Claude Code 理解意图
 4. Manager 发 TASK_REQUEST → Bus → TaskRouter，TaskRouter 创建 ready 的 Task；
    任务的项目还不存在时，先由代码问用户确认新建，确认后才建项目和任务。
-   Manager 的回复附上代码生成的任务配置，并问是否现在开始
+   Manager 的回复附上代码生成的任务配置，并问是否现在开始（群聊里只问是否开始，不附配置）
 5. 用户开始任务（聊天里说「开始」，Manager 输出 `task_start`；或在 Tasks 页面点 Start）→ TASK_START →
    TaskRouter 按项目并发上限创建 Planner 实例
 6. Planner 启动常驻 Claude，[PLAN] turn 拆出步骤，发 TASK_ACCEPTED
@@ -256,7 +256,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 
 ### Lark（lark-cli）
 
-- 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它；处理私聊（`p2p`），群聊（`group`）里只处理 @ 机器人的消息（按事件 `mentions` 里有没有机器人自己的 open_id 判断），其余群消息完全忽略：不加表情、不存储、不交给 Manager；群里的状态消息和回答回复触发它的那条消息（`lark-cli im +messages-reply`），在群里发起的任务结束时通知发回该群并 @ 发起人
+- 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它；处理私聊（`p2p`），群聊（`group`）里只处理 @ 机器人的消息（按事件 `mentions` 里有没有机器人自己的 open_id 判断），其余群消息完全忽略：不加表情、不存储、不交给 Manager；群里的状态消息和回答回复触发它的那条消息（`lark-cli im +messages-reply`），在群里发起的任务结束时通知发回该群并 @ 发起人；群里不发任务的分解、进度和阶段报告，也不附任务和定时任务的配置（私聊和控制台照旧）
 - 文本命令原样交给 Manager：`/profile` 作为文本消息就能用（群聊里要 @ 机器人），同 Telegram，由 Looper 自己回答，不经 Claude
 - 已准入的文字和富文本 `post` 交给 Manager；富文本保留 lark-cli 渲染的标题、段落、链接和代码缩进，提及显示为 `@名字`，移除机器人自己的提及。内联图片、图片消息和文件消息显示为编号的 `[image N]` / `[file N: name]`，以机器人身份下载后作为附件交给 Manager；`lark_bot` 也先渲染为相同格式。下载需要应用权限 `im:message:readonly`，准入、路由、Manager 开关检查通过并加表情后才开始；每条最多 10 个，每个最多 30 秒、整条最多 60 秒，图片和文件各限 20 MB，按内容只收图片、文本、PDF、Office 文档。文件在 runtime root 的 `chat-attachments/<channel-id>/<message-id>/` 私有目录保留 7 天；未收下的附件统一回复一行，已告知的状态随附件交给 Manager。出站回答、进度和通知中的附件路径替换为 `[attachment]`，文件名含空格和 Unicode 也完整替换
 - 其他类型回复「暂不支持这类飞书消息（<type>），请发文字、富文本、图片或文件。」（群里回复原消息，私聊直接发送），不加表情、不交给 Manager；静默路由不回复，Manager 关闭时只回复既有的关闭提示。机器人消息、交互卡片和空消息继续忽略
