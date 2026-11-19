@@ -313,7 +313,7 @@ def test_a_checkpoint_takes_only_a_plan_review_and_the_planner_may_withdraw(monk
     run_db(test, monkeypatch, setup=_setup)
 
 
-def test_consults_a_stopped_server_left_checking_or_asking_fail_at_the_next_start(
+def test_every_consult_a_stopped_server_left_unfinished_fails_at_the_next_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.agents import advisor
@@ -323,10 +323,13 @@ def test_consults_a_stopped_server_left_checking_or_asking_fail_at_the_next_star
     async def test(pool: Any) -> None:
         spawn, _ = await _consult(pool)
         other = await advisor.open_consult(advisor.Brief("task-a", None, 1, advisor.Source.OPTIONAL), budget_usd=1)
+        done = await advisor.open_consult(advisor.Brief("task-a", None, 1, advisor.Source.OPTIONAL), budget_usd=1)
         await agent_spawns.move(spawn, SpawnState.LINTING, expect=SpawnState.DRAFTING)
-        assert await advisor.fail_interrupted() == 1
-        rows = {r["id"]: r["state"] for r in await pool.fetch("SELECT id, state FROM agent_spawns")}
-        assert rows == {spawn: "failed", other: "drafting"}
+        await advisor.withdraw(done, "the plan changed")
+        assert await advisor.fail_interrupted() == 2
+        rows = {r["id"]: (r["state"], r["detail"]) for r in await pool.fetch("SELECT id, state, detail FROM agent_spawns")}
+        assert rows == {spawn: ("failed", "interrupted by a restart"), other: ("failed", "interrupted by a restart"),
+                        done: ("failed", "the plan changed")}
 
     run_db(test, monkeypatch, setup=_setup)
 

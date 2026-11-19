@@ -3168,6 +3168,10 @@ class WorkerPool:
         findings = str(payload.get("findings") or "")
         if findings:
             parts += ["", findings]
+        # The advice its Planner took from the advisor for this attempt (only when the Planner took some).
+        advice = str(payload.get("advice") or "")
+        if advice:
+            parts += ["", advice]
         return "\n".join(parts)
 
     def _build_verify_prompt(self, payload: dict[str, Any]) -> str:

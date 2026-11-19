@@ -265,7 +265,8 @@ async def _ask(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *, 
                               append=rounds, response=response)
         moved = await agent_spawns.move(row["id"], SpawnState.NEEDS_INFO, expect=SpawnState.ASKING,
                                         child_record_id=done.record_id, spent_usd=done.cost_usd or 0.0,
-                                        append=rounds, result={"status": response.status.value})
+                                        append=rounds, result={"status": response.status.value,
+                                                               "needs_info": list(response.needs_info)})
         return Ended(SpawnState.NEEDS_INFO, response, row=moved or {})
     await advisor_advice.record_advice(row["id"], response.fields)
     return await _end(row, SpawnState.ANSWERED, spent_usd=done.cost_usd or 0.0, child=done, append=rounds,
@@ -314,10 +315,10 @@ async def withdraw(spawn_id: int, reason: str) -> Ended | None:
 
 
 async def fail_interrupted() -> int:
-    """At the server's start: the consults a stopped server left checking or asking failed (their runs are gone);
-    how many."""
+    """At the server's start: every consult a stopped server left unfinished failed (its runs are gone, and the
+    Planner's turn that was writing its request with them; the Planner takes its decision again); how many."""
     count = 0
-    for state in (SpawnState.LINTING, SpawnState.ASKING):
+    for state in (SpawnState.DRAFTING, SpawnState.LINTING, SpawnState.ASKING, SpawnState.NEEDS_INFO):
         for spawn_id in await agent_spawns.ids_in(state):
             if await agent_spawns.move(spawn_id, SpawnState.FAILED, expect=state, result={"failure": "interrupted"},
                                        detail="interrupted by a restart") is not None:

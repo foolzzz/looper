@@ -133,3 +133,20 @@ async def move(spawn_id: int, to: SpawnState, *, expect: SpawnState, child_recor
             json.dumps(dict(inputs)) if inputs is not None else None, detail,
             1 if to is SpawnState.ASKING else 0, 1 if returned else 0, to in FINISHED)
     return _row(row)
+
+
+async def usage(task_id: str, step_id: str | None, *, kind: str = "advisor",
+                pool: asyncpg.Pool | None = None) -> tuple[int, int, float]:
+    """A task's spawns of ``kind``: how many it has, how many of them are about ``step_id``, and what they spent."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        "SELECT count(*) AS task, count(*) FILTER (WHERE step_id = $2) AS step, COALESCE(sum(spent_usd), 0) AS spent "
+        "FROM agent_spawns WHERE task_id = $1 AND kind = $3", task_id, step_id, kind)
+    return int(row["task"]), int(row["step"]), float(row["spent"])
+
+
+async def has_source(step_id: str, source: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Whether the step has a spawn that ``source`` started (a checkpoint's, whatever became of it)."""
+    pool = pool or get_pool()
+    return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM agent_spawns WHERE step_id = $1 "
+                                    "AND brief->>'source' = $2)", step_id, source))
