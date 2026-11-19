@@ -5,7 +5,7 @@ from .. import projects, workflows
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
-from ..project_execution import FIELDS, ROOM_LIMITS, ProjectExecution, format_usd
+from ..project_execution import ADVISOR_BUDGETS, ADVISOR_COUNTS, FIELDS, ROOM_LIMITS, ProjectExecution, format_usd
 
 WORKSPACE_MODE = {"type": "string", "enum": ["in_place", "worktree"]}
 WORKSPACE_WARNING = _object({
@@ -48,8 +48,9 @@ NEW_PROJECT_FIELDS = _object({
         "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room",
         "advisor")},
     **{field: _inherit("integer") for field in (
-        "supervise_interval_seconds", "max_step_retries", "role_text_max_chars", "gate_reminder_hours", *ROOM_LIMITS)},
-    "room_consult_budget_usd": _inherit("number")}, ["name"], closed=True)
+        "supervise_interval_seconds", "max_step_retries", "role_text_max_chars", "gate_reminder_hours", *ROOM_LIMITS,
+        *ADVISOR_COUNTS)},
+    **{field: _inherit("number") for field in ("room_consult_budget_usd", *ADVISOR_BUDGETS)}}, ["name"], closed=True)
 REQUEST = {**_object({
     "requirement": {"type": "string", "minLength": 1, "maxLength": 32_000, "pattern": r"\S"},
     "project_id": {"type": "string", "minLength": 1}, "project": NEW_PROJECT_FIELDS,
@@ -164,8 +165,6 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
     })
     lines = []
     for field in FIELDS:
-        if field.startswith("advisor") and not execution.advisor_on:
-            continue  # the advisor's lines only once it is on: off, the disclosure stays as it was
         label, value = values[field]
         if isinstance(value, bool):
             value = "on" if value else "off"

@@ -10,7 +10,7 @@ from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
 
 def _planner(tmp_path):
     agent = PlannerAgent(task_id="task-dispatch", runtime_root=tmp_path)
-    agent._execution = SimpleNamespace(isolate_steps=True)
+    agent._execution = SimpleNamespace(isolate_steps=True, advisor_on=False)
     step = PlanStep("step-work", 0, "Write a report")
     plan = TaskPlan("plan-dispatch", "goal", "Write a report", str(tmp_path),
                     steps=[step], status="executing", project_id="project-dispatch")
