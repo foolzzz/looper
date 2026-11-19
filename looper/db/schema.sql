@@ -1661,11 +1661,13 @@ CREATE TABLE IF NOT EXISTS ledger_events (
 CREATE INDEX IF NOT EXISTS idx_ledger_events_item ON ledger_events (item_id, id);
 
 DO $ledger$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ledger_items_confirm_fk') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'ledger_items'::regclass
+                      AND conname = 'ledger_items_confirm_fk') THEN
         ALTER TABLE ledger_items ADD CONSTRAINT ledger_items_confirm_fk
             FOREIGN KEY (confirmed_event_id, confirmed_actor) REFERENCES ledger_events (id, actor_kind);
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ledger_items_close_fk') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'ledger_items'::regclass
+                      AND conname = 'ledger_items_close_fk') THEN
         ALTER TABLE ledger_items ADD CONSTRAINT ledger_items_close_fk
             FOREIGN KEY (closed_event_id, closed_actor) REFERENCES ledger_events (id, actor_kind);
     END IF;

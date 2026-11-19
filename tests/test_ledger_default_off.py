@@ -6,7 +6,6 @@ import pytest
 from looper.agents import agent_settings
 from looper.agents.ops import clients, planner, room, service
 from looper.agents.tiers import manager, planner as planner_tier, worker
-from tests.runtime_model_helpers import builtin_launch
 
 TERMS = ("ledger", "looper_ledger")
 
@@ -25,13 +24,3 @@ def test_the_reads_are_not_agent_tools(name):
 
     operation = next(op for op in api_v1.operations() if op.operation_id == name)
     assert operation.tool is None and operation.risk == "read" and not operation.operator_only
-
-
-@pytest.mark.parametrize("role", list(agent_settings.AgentType) + [None])
-def test_a_launch_differs_only_by_the_agent_run_marker(role):
-    launch = builtin_launch(role=role)
-    plain = launch.runtime.environment(launch)
-    marked = launch.environment()
-    assert "LOOPER_AGENT_RUN" not in plain
-    assert marked == {**plain, "LOOPER_AGENT_RUN": role.value if role else "agent"}
-    assert launch.args() == launch.runtime.launch_args(launch)

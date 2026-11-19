@@ -29,7 +29,8 @@ RESULTS = {}
 OPERATIONS = (
     Operation("ledger.list", "POST", "/api/v1/ledger/list",
               "List ledger items: what waits for the user, what was decided, who does what.",
-              "List ledger items, newest first, with how many more match and the count of every status. Read-only. "
+              "List ledger items: what waits for the user, what was decided, who does what. Newest first, with how "
+              "many more match and the count of every status. Read-only. "
               "status defaults to open (all, done, cancelled, expired, superseded); a sourced item's status is its "
               "source's. Answers conflict while the ledger is off.",
               _object({"status": {"type": "string", "enum": ["all", *store.STATUSES]},
@@ -38,7 +39,7 @@ OPERATIONS = (
               LIST, risk="read"),
     Operation("ledger.get", "POST", "/api/v1/ledger/get",
               "Read one ledger item with its events.",
-              "Read one ledger item (L-0012, L-12 or 12) with its events, oldest first: who did what, through which "
+              "Read one ledger item with its events. The item is L-0012, L-12 or 12; events come oldest first: who did what, through which "
               "way, and the words said. Read-only. Answers conflict while the ledger is off.",
               _object({"item": _STR}, closed=True), GET, risk="read"),
 )

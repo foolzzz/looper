@@ -4610,9 +4610,9 @@ nothing registers items by itself, and no prompt or tool list mentions it.
 - **Command line** (`looper ledger list|show|add|close|confirm`): reads and
   writes the database directly, so it works with the service stopped. A write
   is recorded as the user, `via = cli`, with the `--session` label, and is
-  refused when `LOOPER_AGENT_RUN` is set, which `Launch.environment()` sets (to the
-  run's role) for the agent runs it starts. That is a speed bump, not isolation: an agent
-  runs as the same user. Exit codes: 0 done, 1 nothing listed, 2 usage, 3
+  refused when `LOOPER_AGENT_RUN` is set. Nothing sets it yet (pi's shell and dsh's
+  config refuse a `LOOPER_*` variable, so marking runs is a separate change),
+  and it would be a speed bump, not isolation: an agent runs as the same user. Exit codes: 0 done, 1 nothing listed, 2 usage, 3
   ledger not enabled, 4 refused, 5 no such item, 6 database unusable.
 - **Reads:** `ledger.list` and `ledger.get` (`/api/v1`, read-only, open to an
   API client and the operator, not Manager tools) answer `conflict` while the
