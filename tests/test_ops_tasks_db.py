@@ -106,7 +106,7 @@ def test_a_task_is_created_ready_in_its_project_and_its_configuration_shown(
         assert (row["status"], row["requirement"], row["title"], row["work_dir"], row["project_id"]) == (
             "init", "build a calculator", "计算器", "/w", project["id"])
         # The end notice goes to the Lark sender; progress to the chat the task was asked for in.
-        assert (row["chat_id"], row["chat_kind"], row["chat_mention"]) == ("ou_1", "user", None)
+        assert (row["chat_id"], row["chat_kind"], row["chat_mention"], row["chat_group"]) == ("ou_1", "user", None, False)
         assert (row["origin_channel_id"], row["correlation_id"], row["original_user_text"]) == (
             "channel-lark", "corr-0", "确认")
         assert (await agent_setting_layers.profile_overrides(task_id, pool=pool))["worker"]["id"] == "agent-sonnet"
@@ -143,8 +143,8 @@ def test_a_task_asked_for_in_a_lark_group_tells_the_group_and_its_requester(
         (answer,) = await chat.say("确认", ("looper_task_create", {"requirement": "build a calculator",
                                                                   "title": "计算器", "project": "calc"}))
         row = await tasks.get_task(answer["result"]["task_id"], pool=pool)
-        assert (row["chat_id"], row["chat_kind"], row["chat_mention"]) == ("oc_1", "chat", "ou_1")
-        assert NotifyTarget.from_columns(row) == NotifyTarget(TargetKind.CHAT, "oc_1", mention="ou_1")
+        assert (row["chat_id"], row["chat_kind"], row["chat_mention"], row["chat_group"]) == ("oc_1", "chat", "ou_1", True)
+        assert NotifyTarget.from_columns(row) == NotifyTarget(TargetKind.CHAT, "oc_1", mention="ou_1", group=True)
 
     run_db(test, monkeypatch)
 

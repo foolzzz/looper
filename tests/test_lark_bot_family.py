@@ -40,7 +40,7 @@ def test_lark_notification_targets_and_links(channel: NotifyChannel) -> None:
     assert notify_target(channel_id, sender="ou_requester123", chat="oc_dm", group=False) == \
         NotifyTarget(TargetKind.USER, "ou_requester123")
     assert notify_target(channel_id, sender="ou_requester123", chat="oc_group", group=True) == \
-        NotifyTarget(TargetKind.CHAT, "oc_group", mention="ou_requester123")
+        NotifyTarget(TargetKind.CHAT, "oc_group", mention="ou_requester123", group=True)
     assert notify_target(channel_id, sender=None, chat="oc_dm", group=False) is None
     assert notify_target(channel_id, sender="ou_requester123", chat=None, group=True) is None
     assert link_line("https://example.test/tasks/a", channel) == \

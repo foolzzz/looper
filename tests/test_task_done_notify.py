@@ -57,7 +57,7 @@ def _status(task_id: str, status: str, summary: str) -> MessageEnvelope:
 
 TELEGRAM_CHAT = NotifyTarget(TargetKind.CHAT, "1000001")
 LARK_USER = NotifyTarget(TargetKind.USER, OPEN_ID)
-LARK_GROUP = NotifyTarget(TargetKind.CHAT, "oc_team", mention=OPEN_ID)
+LARK_GROUP = NotifyTarget(TargetKind.CHAT, "oc_team", mention=OPEN_ID, group=True)
 
 
 def _task(router: TaskRouter, *, channel: str, notify: NotifyTarget | None, title: str = "给 calc 加上除法",
@@ -109,7 +109,7 @@ class TestTheNotice:
             "✅ 任务完成 · 给 calc 加上除法\n## Delivered\ncalc.py with add and its tests\n"
             f"{DASHBOARD}/#tasks/task-n1"), channel_id="channel-telegram")
 
-    @pytest.mark.parametrize("target", [LARK_USER, LARK_GROUP])
+    @pytest.mark.parametrize("target", [LARK_USER])
     def test_a_failed_lark_task_says_why_once_with_a_markdown_link(self, tmp_path: Path,
                                                                    target: NotifyTarget) -> None:
         router = _router(tmp_path)
@@ -176,7 +176,7 @@ def test_the_notice_links_relative_without_a_dashboard_address() -> None:
 @pytest.mark.parametrize(("channel", "sender", "chat", "group", "expected"), [
     ("channel-lark", OPEN_ID, "oc_dm", False, LARK_USER),  # a Lark direct message: the user
     ("channel-lark", OPEN_ID, "oc_team", True, LARK_GROUP),  # a Lark group: the group, @-mentioning the requester
-    ("channel-telegram", "7", "-1001234", True, NotifyTarget(TargetKind.CHAT, "-1001234")),  # Telegram: the chat
+    ("channel-telegram", "7", "-1001234", True, NotifyTarget(TargetKind.CHAT, "-1001234", group=True)),  # Telegram: the chat
     ("channel-telegram", "7", "7", False, NotifyTarget(TargetKind.CHAT, "7")),
     ("channel-web", None, "sess-1", False, None),
     (None, None, None, False, None),
@@ -463,7 +463,7 @@ def test_a_lark_group_task_is_answered_and_told_in_the_group(
     async def say(text: str, n: int) -> None:
         await lark._handle_lark_event(_lark_group_event(text, f"om_in{n}"))
 
-    ((task_id, target),) = _run_a_task(tmp_path, monkeypatch, planner_claude, agent_db, lark, say).items()
+    ((_, target),) = _run_a_task(tmp_path, monkeypatch, planner_claude, agent_db, lark, say).items()
     assert target == LARK_GROUP
     calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
     # Each message was seen at once, and its status message and answer reply to it.
@@ -475,9 +475,8 @@ def test_a_lark_group_task_is_answered_and_told_in_the_group(
     sends = [argv for argv in calls if "+messages-send" in argv]
     assert sends and all(argv[4:6] == ["--chat-id", "oc_team"] for argv in sends)
     assert any(argv[-1].startswith("进度更新") for argv in sends[:-1])
-    link = f"{DASHBOARD}/#tasks/{task_id}"
-    assert sends[-1][-1] == (f'<at user_id="{OPEN_ID}"></at> ✅ 任务完成 · 给 calc 加上加法\n## Delivered\n'
-                             f"calc.py with add and its tests\n[{link}]({link})")
+    # The whole summary, and no link: the dashboard here is not public, so the group cannot open it.
+    assert sends[-1][-1] == f'<at user_id="{OPEN_ID}"></at> ✅ 任务完成 · 给 calc 加上加法\n{FINAL_RESULT}'
     # The group's turns are stored, under the group, without the @-mention.
     turns = [(call.kwargs["session_id"], call.kwargs["role"], call.kwargs["content"])
              for call in stored.await_args_list]
