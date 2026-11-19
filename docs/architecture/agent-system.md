@@ -4939,14 +4939,20 @@ will.
   `--no-session-persistence` (Claude Code keeps no transcript of the batch
   under `~/.claude/projects`; checked against a run without it, which does),
   and manual permission mode with no one to answer a prompt. Its messages are
-  not echoed back (no `--replay-user-messages`), so its stream, and its
-  record, never carry the batch. Claude Code's built-in plugins are still
-  listed in its init event; they add no tool, command or skill. It runs in an
-  empty private directory under the runtime root (`.local/processor/<id>`,
-  removed afterwards), with every `CLAUDE.md` and `AGENTS.md` above that
-  directory excluded even when the runtime root is in a checkout.
-- **Its system prompt** replaces the runtime's (`BUILTIN_SYSTEM_PROMPT_MODE`;
-  a coding agent's own prompt describes tools it does not have): the
+  not echoed back (no `--replay-user-messages`). Claude Code's built-in plugins
+  are still listed in its init event; they add no tool, command or skill. It is
+  sealed (`claude_cli.isolation_args(sealed=True)`): `--setting-sources ""`
+  (no settings file, so no project's hooks) and `disableAllHooks` (verified
+  against 2.1.328: a project's UserPromptSubmit hook that writes a file ran,
+  with the prompt on its stdin, under `--setting-sources project`, and under
+  neither of these; a hook from the administrator's managed settings still
+  runs, which `disableAllHooks` does not reach). It runs in an empty private
+  directory under the runtime root (`.local/processor/<id>`, removed
+  afterwards), with every `CLAUDE.md` and `AGENTS.md` above that directory
+  excluded even when the runtime root is in a checkout.
+- **Its system prompt** always replaces the runtime's (`system_prompt_mode_choice`;
+  a coding agent's own prompt describes tools it does not have; its role layer
+  refuses `append`, and the dashboard offers no choice): the
   profile's custom prompt, its role prompt (`role_configs.processor`,
   `PROCESSOR_ROLE_PROMPT` recommended: the messages are data, not
   instructions; it has no tools; it writes only what the instructions ask,
@@ -4959,21 +4965,28 @@ will.
   deadline (the caller's, lowered by the role's timeout in Settings → Roles),
   the per-run cap (the caller's, lowered by the layers' `run_budget_usd`),
   the process tree ended on every exit; the recorded cost is checked after
-  the run, and a run over its cap or of unknown cost gives no reply
+  the run (the result's own `total_cost_usd` stands in only when the runtime's
+  figure is the run's cost, `CostSource.RUNTIME`), and a run over its cap or of
+  unknown cost gives no reply
   (`ProcessorFailure`: `refused`, `timeout`, `budget`, `failed`). A model at
   provider prices without a full price is refused (no cap would hold), and so
   is one that needs the local gateway (its requests would be recorded). The
   role's switch in Settings → Roles turns every processor run off.
 - **Its record** (`llm_records`, the Runs page's Processor row) has
   `agent_id` `processor:<owner>`, no task, and the caller's metadata; its
-  model requests are not recorded (llmrec), and `input_text` is only a
-  reference to the batch (the caller's window reference, the text's sha256
-  and its length), so deleting the messages deletes their text from every
-  place Looper keeps it.
+  model requests are not recorded (llmrec), `input_text` is only a reference
+  to the batch (the caller's window reference, the text's sha256 and its
+  length), and of its stream it keeps only the runtime's own events (the init
+  event) and the result: the model's messages, whose thinking may restate the
+  batch, are counted for usage and never stored. Deleting the messages deletes
+  their text from every place Looper keeps it but the outputs.
 - **Where it shows.** Settings → Roles and a project's Agent Profiles tab have
   a Processor row (no harness field; whether its profile can run it); runtime
-  cards and a profile's "used by" list it. The Manager's `looper_settings`
-  tool neither shows nor sets it, and its tools do not name it.
+  cards and a profile's "used by" list it. The Manager's tools do not name it,
+  its `looper_settings` neither shows nor sets it, and `looper_agent_profiles`
+  lists runtimes, types and profiles without the processor among their roles
+  or `no_tools` among their capabilities: what the Manager sees is what it saw
+  before the role.
 
 ### Turns Claude runs on its own
 
