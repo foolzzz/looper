@@ -527,6 +527,17 @@ def test_the_planner_changes_its_tasks_limits_at_once_and_the_chat_is_told(
         assert answer["user_told"] is False and "the user is told" not in answer["note"]
         assert len(await _journal(pool, "task-web", "concurrency_change")) == 1
         assert _notices(bus, "lark") == [] and _notices(bus, "web") == []
+
+        # A task from a group chat: the group is told the task's end, not its process; the journal records it.
+        await tasks.create_task(task_id="task-group", requirement="build calc", project_id=project["id"],
+                                work_dir="/w", status="running", origin_channel_id="channel-lark", chat_id="oc_1",
+                                chat_kind="chat", chat_mention="ou_1", chat_group=True, title="计算器", pool=pool)
+        group = _Planner(ops, "task-group")
+        answer = (await group("looper_task_concurrency", {"limits": {"worker": 2}, "reason": "one database"}))[
+            "result"]
+        assert answer["user_told"] is False and "the user is told" not in answer["note"]
+        assert len(await _journal(pool, "task-group", "concurrency_change")) == 1
+        assert _notices(bus, "lark") == []
         await bus.shutdown()
 
     run_db(test, monkeypatch)
@@ -576,25 +587,5 @@ def test_a_limit_the_planner_may_not_set_is_refused_and_nothing_changes(
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") == 0
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE max_concurrency IS NOT NULL") == 0
         assert await _journal(pool, "task-a", "concurrency_change") == []
-
-    run_db(test, monkeypatch)
-
-
-def test_a_group_is_told_of_a_limit_change_without_a_link_to_a_local_dashboard(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    from looper.db import tasks
-
-    async def test(pool: Any) -> None:
-        project = await _project(pool)
-        await tasks.create_task(task_id="task-a", requirement="build calc", project_id=project["id"], work_dir="/w",
-                                status="running", origin_channel_id="channel-lark", chat_id="oc_1", chat_kind="chat",
-                                chat_mention="ou_1", chat_group=True, title="计算器", pool=pool)
-        bus = MessageBus(runtime_root=tmp_path)
-        ops = _ops(bus, task_router=_Rechecks(), worker_pool=_Rechecks())
-        await _Planner(ops, "task-a")("looper_task_concurrency", {"limits": {"worker": 1}})
-        (notice,) = _notices(bus, "lark")
-        assert notice["group"] is True and "#tasks" not in notice["text"] and notice["text"].count("\n") == 1
-        await bus.shutdown()
 
     run_db(test, monkeypatch)

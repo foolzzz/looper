@@ -208,6 +208,60 @@ def test_a_schedule_made_in_a_group_chat_shows_only_the_question_whether_to_enab
     run_db(test, monkeypatch)
 
 
+def test_a_group_chat_is_shown_no_schedule_settings_when_one_is_changed_enabled_or_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """In a group chat a change, and what enabling, running or raising a cap asks, are one short line each: no
+    before and after values, directory, command, requirement or budget, which are the operator's. The change and the
+    confirmed enable take effect as from a direct chat."""
+    async def test(pool: Any) -> None:
+        project = await _project(pool, "calc", str(tmp_path))
+        await _schedule(project, "nightly", "0 2 * * *", daily_budget_usd=3)
+        await _schedule(project, "pull", kind="command", command="exit 0", requirement="")
+        await _schedule(project, "push", kind="command", command="exit 0", requirement="", enabled=True)
+        chat = _Chat(tmp_path, group=True)
+        private = (str(tmp_path), "Look at the alerts.", "exit 0", "exit 7", "$", "→")
+
+        (changed,) = await chat.say("改成每天 10 点", (TOOL, {"action": "update", "schedule": "nightly",
+                                                              "fields": {"cron": "0 10 * * *"}}))
+        assert changed["status"] == "ok", changed
+        assert changed["result"]["shown_to_user"] == (
+            "In this group chat Looper adds only one line after your reply: which settings changed (their names, "
+            "not their values) and whether the schedule is enabled; do not repeat it or list the values.")
+        assert chat.turns[-1].blocks == ["已修改定时任务「nightly」（项目 calc）：时间规则。它现在是停用的。"]
+        assert (await _view("nightly"))["cron"] == "0 10 * * *"
+
+        (asked,) = await chat.say("每日上限提到 5 美元", (TOOL, {"action": "update", "schedule": "nightly",
+                                                               "fields": {"daily_budget_usd": 5}}))
+        assert asked["status"] == "needs_confirmation", asked
+        (block,) = chat.turns[-1].blocks
+        assert "\n要修改定时任务「nightly」（项目 calc）吗？\n这会提高（或取消）它的花费上限。\n" in block
+        assert await _confirm(chat, asked) and chat.turns[-1].blocks == [
+            "已修改定时任务「nightly」（项目 calc）：每日花费上限。它现在是停用的。"]
+        assert (await _view("nightly"))["daily_budget_usd"] == 5.0
+
+        (asked,) = await chat.say("启用", (TOOL, {"action": "enable", "schedule": "nightly"}))
+        (block,) = chat.turns[-1].blocks
+        assert "要启用定时任务「nightly」（项目 calc）吗？启用后它按规则无人值守地运行。" in block
+        assert (await _confirm(chat, asked))["status"] == "ok" and (await _view("nightly"))["enabled"] is True
+
+        for action, question in (("enable", "要启用定时任务「pull」（项目 calc）吗？启用后它按规则无人值守地运行。"),
+                                 ("run", "要现在运行定时任务「pull」（项目 calc）一次吗？")):
+            (asked,) = await chat.say(action, (TOOL, {"action": action, "schedule": "pull"}))
+            assert asked["status"] == "needs_confirmation", asked
+            (block,) = chat.turns[-1].blocks
+            assert question in block
+        (asked,) = await chat.say("改命令", (TOOL, {"action": "update", "schedule": "push",
+                                                   "fields": {"command": "exit 7"}}))
+        assert asked["status"] == "needs_confirmation", asked
+        (block,) = chat.turns[-1].blocks
+        assert "\n要修改定时任务「push」（项目 calc）吗？\n它已启用：之后的运行都按修改后的设置无人值守地执行" in block
+        for block in (block for turn in chat.turns for block in turn.blocks):
+            assert not any(word in block for word in private), block
+
+    run_db(test, monkeypatch)
+
+
 def test_user_gates_are_configured_listed_changed_and_shown_before_enabling(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

@@ -349,12 +349,20 @@ async def _update(call: Call, row: Mapping[str, Any], expected: Mapping[str, str
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
     view = (await answered(schedules.update_schedule(row["id"], data, **expected)))["schedule"]
     changed = await _changes(before, view)
-    call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
-                                       *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
-                                       *(["不经过 agent，不花模型额度。"] if view["kind"] == "command" else []),
-                                       f"它现在{'已启用' if view['enabled'] else '是停用的'}。"]))
+    state = f"它现在{'已启用' if view['enabled'] else '是停用的'}。"
+    if call.turn.group:  # the values (directories, commands, caps) are the operator's
+        names = "、".join(FIELD_WORDS[key] for key in changed) or "没有变化"
+        call.turn.blocks.append(f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：{names}。{state}")
+        told = ("In this group chat Looper adds only one line after your reply: which settings changed (their "
+                "names, not their values) and whether the schedule is enabled; do not repeat it or list the values.")
+    else:
+        call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
+                                           *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
+                                           *(["不经过 agent，不花模型额度。"] if view["kind"] == "command" else []),
+                                           state]))
+        told = "Looper adds what changed, before and after, after your reply; do not repeat it."
     return {"schedule": _listed(await _in_scope(call, view)), "changed": [_ARGUMENT.get(key, key) for key in changed],
-            "shown_to_user": "Looper adds what changed, before and after, after your reply; do not repeat it."}
+            "shown_to_user": told}
 
 
 def _notify_manager_id(call: Call) -> str | None:
@@ -450,19 +458,20 @@ async def _confirming(call: Call) -> str | None:
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
     after = schedules.schedule_view(selected, default_timeout=await schedules.default_run_timeout())
     changes = await _changes(before, after)
+    question = f"要修改定时任务「{row['name']}」（项目 {row['project_name']}）吗？"
     if edit is None:
-        return "\n".join([f"要修改定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
-                          *changes.values(), "这会提高（或取消）它的花费上限。"])
+        return "\n".join([question, *([] if call.turn.group else changes.values()), "这会提高（或取消）它的花费上限。"])
     call.confirmation.update(schedule_id=row["id"], schedule_version=db_schedules.configuration_version(
         row, project_work_dir=project["work_dir"], changes=fields))
+    if call.turn.group:  # a group chat is not shown the command, its directory or its environment
+        return "\n".join([question, EDIT_WORDS[edit[0]]])
     def d(view: Mapping[str, Any]) -> str:
         return view["work_dir"] or f"项目的默认目录（{project['work_dir']}）"
     if "work_dir" in changes:
         changes["work_dir"] = f"- 目录：{d(before)} → {d(after)}"
     else:
         changes["work_dir"] = f"- 目录：{d(after)}"
-    return "\n".join([f"要修改定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
-                      *changes.values(), EDIT_WORDS[edit[0]]])
+    return "\n".join([question, *changes.values(), EDIT_WORDS[edit[0]]])
 
 
 async def _starting(call: Call) -> str | None:
@@ -478,9 +487,11 @@ async def _starting(call: Call) -> str | None:
         row, project_work_dir=project["work_dir"]))
     if action == "enable" and row["enabled"]:
         return None
+    head = f"定时任务「{row['name']}」（项目 {row['project_name']}）"
+    if call.turn.group:  # its requirement, command, directory and caps are the operator's
+        return f"要现在运行{head}一次吗？" if action == "run" else f"要启用{head}吗？启用后它按规则无人值守地运行。"
     view = await _in_scope(call, schedules.schedule_view(row, default_timeout=await schedules.default_run_timeout()))
     names = await _profile_names()
-    head = f"定时任务「{row['name']}」（项目 {row['project_name']}）"
     if view["kind"] == "command":
         lines = [f"- 命令：{_shown('command', view, names)}",
                  f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}"]

@@ -1,6 +1,7 @@
 """A review-panel task completes through a real server with isolated CLI stand-ins."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import time
 import pytest
 
 from evals.prompt_regression.runner import running_server
+from looper.agents.tiers.journal import JournalEntry, review_rounds
 from tests.db_support import DSN, fresh_database_without_recording
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -190,7 +192,11 @@ def test_panel_task_completes_on_serve_with_distinct_runtime_profiles(monkeypatc
                     assert target['result']['runtime_id'] == 'rt-claude-code'
                     runs = api.post('/api/v1/runs/for_task', {'task_id': task['task_id']})['result']['runs']
                     assert any(run.get('runtime', {}).get('type') == 'codex' for run in runs)
-                    assert [entry['kind'] for entry in detail['journal']].count('review_round') == 1
+                    # Each seat's arrival and the settled snapshot are entries of one round; the journal's
+                    # projection lists that round once, with both seats' verdicts.
+                    rounds = review_rounds([JournalEntry.from_row(entry) for entry in detail['journal']
+                                            if entry['kind'] == 'review_round'])
+                    assert len(rounds) == 1 and set(json.loads(rounds[0].summary)['reviews']) == {'s1/review_a', 's1/review_b'}
                     _pipeline_screenshot(api, task['task_id'])
             except BaseException:
                 print((root / 'serve.log').read_text(errors='replace')[-12000:])
