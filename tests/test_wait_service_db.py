@@ -412,19 +412,21 @@ def test_ready_wins_over_deadline_in_same_tick(monkeypatch: pytest.MonkeyPatch, 
     run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize(("channel", "fail", "notice"), [
-    ("telegram", False, "sent"), (None, False, "dashboard"), ("telegram", True, "failed"),
+@pytest.mark.parametrize(("channel", "fail", "notice", "group"), [
+    ("telegram", False, "sent", False), (None, False, "dashboard", False), ("telegram", True, "failed", False),
+    # A group chat is told the task's end, not its process: the timeout stays on the dashboard.
+    ("telegram", False, "dashboard", True), ("lark", False, "dashboard", True),
 ])
 def test_timeout_notice_and_activity_precede_planner_event(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-    channel: str | None, fail: bool, notice: str,
+    channel: str | None, fail: bool, notice: str, group: bool,
 ) -> None:
     async def test(pool: Any) -> None:
         await _open(pool, earliest=7200, maximum=3600)
         if channel:
             await pool.execute("UPDATE tasks SET origin_channel_id = $2, chat_kind = 'chat', chat_id = 'chat-1', "
-                               "chat_mention = 'requester', title = $3 WHERE id = $1", "task-a",
-                               channel_address(channel).agent_id, "长" * 50)
+                               "chat_mention = 'requester', title = $3, chat_group = $4 WHERE id = $1", "task-a",
+                               channel_address(channel).agent_id, "长" * 50, group)
         bus = Bus(fail=fail)
         loop = _loop(bus, dashboard_url="https://looper.example.com")
         assert await loop.run_once(clock=lambda: NOW + timedelta(hours=1)) == 1
