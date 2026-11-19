@@ -46,7 +46,9 @@ def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_take
                                           ("cc/off", "rt-claude-code", {"agent_teams": False}),
                                           ("si/default", other, {})]}
         listed = {p["name"]: p["agent_teams"] for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"]}
-        assert listed == {"claude-code/opus": True, "cc/default": True, "cc/off": False, "si/default": False}
+        assert listed == {"claude-code/opus": True, "cc/default": True, "cc/off": False, "si/default": False,
+                          # the advisor's and its judge's built-in profiles: their runs have no tools
+                          "claude-code/fable-5-2": False, "claude-code/haiku-5-5": False}
 
         off = created["cc/off"]["profile_id"]
         assert (await _ok("PUT", f"/api/agent-profiles/{off}", {"agent_teams": True}))["profile"]["agent_teams"]
