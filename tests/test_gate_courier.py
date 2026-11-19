@@ -10,10 +10,11 @@ import pytest
 
 from looper.agents.gate_courier import ANSWER_LINE, COMMANDS_LINE, GROUP_LINE, message_text
 from looper.agents.gate_service import GateChat
+from looper.agents.links import DashboardUrl
 from looper.agents.task_notice import NotifyChannel, NotifyTarget, TargetKind
 
 DM = GateChat(NotifyChannel.LARK, NotifyTarget(TargetKind.USER, "ou_1"))
-GROUP = GateChat(NotifyChannel.LARK, NotifyTarget(TargetKind.CHAT, "oc_1", "ou_1"))
+GROUP = GateChat(NotifyChannel.LARK, NotifyTarget(TargetKind.CHAT, "oc_1", "ou_1", group=True))
 TELEGRAM = GateChat(NotifyChannel.TELEGRAM, NotifyTarget(TargetKind.CHAT, "42"))
 AGENDA = [{"id": "q1", "question": "Which database?", "options": ["PostgreSQL", "SQLite"], "status": "open"},
           {"id": "q2", "question": "How long is history kept?", "options": [], "status": "resolved",
@@ -44,9 +45,25 @@ def test_each_kind_says_what_happened(row: dict[str, Any], chat: GateChat, expec
     assert message_text(row, chat) == expected
 
 
+@pytest.mark.parametrize(("chat", "base", "linked"), [
+    (GROUP, "http://127.0.0.1:8767", False),  # a group cannot open the server's own address
+    (GROUP, DashboardUrl("http://127.0.0.1:8767"), False),
+    (GROUP, DashboardUrl("https://looper.example.com", public=True), True),
+    (GateChat(NotifyChannel.TELEGRAM, NotifyTarget(TargetKind.CHAT, "-100", group=True)),
+     DashboardUrl("http://127.0.0.1:8767"), False),  # nor a Telegram group
+    (DM, DashboardUrl("http://127.0.0.1:8767"), True),  # a direct message does: the operator's own
+    (TELEGRAM, "http://127.0.0.1:8767", True),
+])
+def test_a_group_gets_the_task_link_only_when_the_dashboard_is_public(chat: GateChat, base: str,
+                                                                      linked: bool) -> None:
+    for kind in ("opened", "reminder"):
+        text = message_text(_row(kind, state="open"), chat, dashboard_url=base)
+        assert ("#tasks/task-a" in text) is linked and text.endswith(COMMANDS_LINE)
+
+
 def test_the_card_lists_the_open_questions_with_their_options_and_how_to_answer() -> None:
     card = message_text(_row("opened", state="open", findings="the service runs PostgreSQL 15"), GROUP,
-                        dashboard_url="http://looper.test")
+                        dashboard_url=DashboardUrl("http://looper.test", public=True))
     assert card == ("⏸ 需要你决定 · settings file\nstorage\n1. Which database?（选项：PostgreSQL / SQLite）\n"
                     f"目前的发现：the service runs PostgreSQL 15\n{ANSWER_LINE}\n{GROUP_LINE}\n"
                     f"[http://looper.test/#tasks/task-a](http://looper.test/#tasks/task-a)\n{COMMANDS_LINE}")

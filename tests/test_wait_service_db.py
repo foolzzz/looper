@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+from looper.agents.links import DashboardUrl
+
 from looper.agents import wait_service as service, waits
 from looper.agents.message import MessageType, channel_address, planner_address
 from looper.db import activity, projects, waits as db_waits
@@ -841,3 +843,21 @@ def test_wait_checks_finish_but_new_checks_hold(monkeypatch: pytest.MonkeyPatch)
             await asyncio.gather(job, return_exceptions=True)
 
     run_db(test, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize(("base", "linked"), [
+    (DashboardUrl("http://127.0.0.1:8767"), False),  # the people in a group cannot open the server's own address
+    (DashboardUrl("https://looper.example.com", public=True), True),
+])
+def test_a_group_is_linked_to_the_task_only_on_a_public_dashboard(monkeypatch: pytest.MonkeyPatch,
+                                                                 base: DashboardUrl, linked: bool) -> None:
+    async def test(pool: Any) -> None:
+        await _open(pool, earliest=7200, maximum=3600)
+        await pool.execute("UPDATE tasks SET origin_channel_id = 'channel-telegram', chat_kind = 'chat', "
+                           "chat_id = '-1001', chat_group = true WHERE id = 'task-a'")
+        bus = Bus()
+        assert await _loop(bus, dashboard_url=base).run_once(clock=lambda: NOW + timedelta(hours=1)) == 1
+        (message,) = [m for m in bus.messages if m.message_type is MessageType.CHAT_NOTICE]
+        assert ("#tasks/task-a" in message.payload["text"]) is linked and message.payload["group"] is True
+
+    run_db(test, monkeypatch)

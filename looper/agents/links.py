@@ -17,13 +17,31 @@ from typing import Any
 _ANY_ADDRESS = {"", "0.0.0.0", "::"}
 
 
-def dashboard_url(*, host: str, port: int, public_url: str = "") -> str:
+class DashboardUrl(str):
+    """The dashboard's address for links, and whether people outside this machine can open it: ``public`` is true
+    only for the ops file's ``server.public_url``, never for the server's own address. Any plain ``str`` base
+    (a test's, or none) is not public (``is_public``)."""
+
+    public: bool
+
+    def __new__(cls, value: str = "", *, public: bool = False) -> DashboardUrl:
+        self = super().__new__(cls, value)
+        self.public = public
+        return self
+
+
+def is_public(base: str) -> bool:
+    """Whether a link starting with ``base`` opens for the people in a group chat."""
+    return isinstance(base, DashboardUrl) and base.public
+
+
+def dashboard_url(*, host: str, port: int, public_url: str = "") -> DashboardUrl:
     """The dashboard's address for links, without a trailing slash: ``public_url`` (checked by ``ops_config``),
     else the server's own."""
     if public_url:
-        return public_url.rstrip("/")
+        return DashboardUrl(public_url.rstrip("/"), public=True)
     shown = "127.0.0.1" if host in _ANY_ADDRESS else host
-    return f"http://{f'[{shown}]' if ':' in shown else shown}:{port}"
+    return DashboardUrl(f"http://{f'[{shown}]' if ':' in shown else shown}:{port}")
 
 
 def task_link(base: str, task_id: str) -> str:

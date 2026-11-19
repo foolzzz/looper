@@ -293,7 +293,7 @@ async def record_reminder(step_id: str, task_id: str, text: str, *, pool: asyncp
 _UNPOSTED = """
 SELECT m.*, g.state, g.topic, g.agenda, g.findings, g.summary, g.resolution, g.plan_change, g.opened_at,
        g.failures, s.step_key, t.status AS task_status, t.title, t.goal_id, t.requirement, t.origin_channel_id,
-       t.chat_id AS task_chat_id, t.chat_kind, t.chat_mention, t.schedule_id,
+       t.chat_id AS task_chat_id, t.chat_kind, t.chat_mention, t.chat_group, t.schedule_id,
        sc.notify_channel AS schedule_notify_channel, sc.notify_chat AS schedule_notify_chat
 FROM task_user_gate_messages m
 JOIN task_user_gates g ON g.step_id = m.step_id
@@ -393,7 +393,7 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
     """The gates that wait for the user in the tasks not completed or cancelled (a stopped task's gate can still be
     answered: ``gate_service.post_message`` keeps the answer), the latest opened first, at most ``limit``, each with
     its step's label, its task's project, the chat its task came from (``origin_channel_id``, ``chat_id``,
-    ``chat_kind``, ``chat_mention``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``.
+    ``chat_kind``, ``chat_mention``, ``chat_group``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``.
     When ``chat`` is given (``(channel id, chat)``), filter before limiting; ``dashboard`` includes tasks from no channel; with
     ``manager_id``, only the gates of that Manager's tasks."""
     pool = pool or get_pool()
@@ -422,7 +422,7 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
     rows = await pool.fetch(
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
                        ", p.name AS project_name, t.title AS task_title, t.goal_id AS task_goal_id, "
-                       "t.requirement AS task_requirement, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
+                       "t.requirement AS task_requirement, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, t.chat_group, "
                        "t.schedule_id, sc.notify_channel AS schedule_notify_channel, sc.notify_chat AS schedule_notify_chat, "
                        "t.manager_id AS task_manager_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
                        "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id "
