@@ -75,6 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_location_flags(init_ops)
     _add_service_parser(commands)
+    from .agents import msgflow_commands
+
+    msgflow_commands.add_parser(commands)
     commands.add_parser(
         "mcp-server",
         allow_abbrev=False,
@@ -187,6 +190,10 @@ def main(argv: list[str] | None = None) -> int:
         return _init_ops(args)
     if args.command == "service":
         return _service(args)
+    if args.command == "msgflow":
+        from .agents import msgflow_commands
+
+        return msgflow_commands.run(args, _load_ops)
     if args.command == "mcp-server":
         from .agents import mcp_server
 

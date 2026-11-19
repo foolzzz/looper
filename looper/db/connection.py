@@ -128,6 +128,7 @@ _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _TASK_CHAT_GROUP = "task_chat_group"
 _GATEWAY_ALIASES = "gateway_aliases"
+_MESSAGE_STREAM = "message_stream"
 _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
@@ -219,6 +220,17 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
     "AND (task_scope = 'projects' OR cardinality(scope_project_ids) = 0))",
     "ALTER TABLE managers ADD CONSTRAINT managers_scope_tools_check CHECK (task_scope <> 'projects' OR tools = 'tasks')",
 )
+
+_MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
+
+
+def _message_stream_ddl() -> str:
+    """The message stream tables as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _MESSAGE_STREAM_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its message stream block")
+    return found.group(1)
+
 
 _GATEWAY_ALIASES_DDL = """
 CREATE TABLE IF NOT EXISTS gateway_aliases (
@@ -439,6 +451,12 @@ async def _gateway_aliases_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _GATEWAY_ALIASES):
         return False
     return not await conn.fetchval("SELECT to_regclass('gateway_aliases') IS NOT NULL")
+
+
+async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_STREAM):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('event_sources') IS NOT NULL")
 
 
 async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
@@ -807,6 +825,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _gateway_aliases_pending(conn):
             await conn.execute(_GATEWAY_ALIASES_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _GATEWAY_ALIASES)
+        if await _message_stream_pending(conn):
+            await conn.execute(_message_stream_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -920,7 +941,8 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
-            or await _project_activity_pending(conn) or await _llm_requests_pending(conn)
+            or await _project_activity_pending(conn) or await _message_stream_pending(conn)
+            or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)
             or await _chat_binding_senders_pending(conn) or await _chat_binding_sender_policy_pending(conn)

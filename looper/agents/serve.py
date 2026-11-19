@@ -56,6 +56,7 @@ from .gate_courier import GateCourier
 from .gate_service import GateReminders
 from .drain import DrainPhase, DrainScope, DrainState
 from .wait_service import WaitService
+from .source_service import SourceService, own_bot_app_ids
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
@@ -841,6 +842,7 @@ async def _run_agent_system_watched(
             task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                                      on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
             wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
+            source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
             supervisor.register(task_router)
 
             worker_config = WorkerConfig(claude_bin=claude_bin)
@@ -963,6 +965,8 @@ async def _run_agent_system_watched(
         await gate_reminders.start()
         # Check due waits only after the task router and HTTP API are ready.
         await wait_service.start()
+        # Sources that are off (the default) cost one query per tick.
+        await source_service.start()
         await gate_courier.start()
 
         logger.info(
@@ -1022,6 +1026,7 @@ async def _run_agent_system_watched(
             await gate_reminders.stop()
             # Cancel and reap in-flight wait checks before stopping agents and their bus.
             await wait_service.stop()
+            await source_service.stop()
             await gate_courier.stop()
             await scheduler.stop()
             await http_server.stop()
