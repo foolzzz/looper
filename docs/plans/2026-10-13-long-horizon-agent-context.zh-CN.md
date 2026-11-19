@@ -556,6 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-19 | Manager 收尾、账本与晨报的 RFC（设计文档的 M8，[RFC](../architecture/rfcs/manager-completion-ledger-v0.zh-CN.md)，本分支未合入，只改文档）：任务结束的完成事件入库（`manager_events`），私聊和控制台里由只读的 `[COMPLETION]` 回合替换代码通知，失败、超时或群聊照旧发代码通知，开关默认关闭；账本（`ledger_items`、`ledger_events`）只存关卡、待确认操作和任务的引用，「只有你本人能确认」由复合外键和事件约束保证；晨报是 `input_kind = briefing` 的订阅。第 5 节队列新增第 26 项。 |
 | 2026-11-19 | 群聊收尾（#1412，本分支未合入）：等待超时和规划者调整并发这两条直接发 `CHAT_NOTICE` 的路径检查 `NotifyTarget.group`，群聊任务不再发进群，等待的通知记为 `dashboard`、并发调整只记日志（`user_told` 为 false）；群聊回合里修改定时任务只附一行（改了哪些设置的名称和是否启用，不带取值），`shown_to_user` 同步说明，启用、立即运行、提高花费上限、修改已启用命令的确认各只有一句问话，不带需求、命令、目录、环境和预算。私聊和控制台不变。真实模式（`evals/lark_group.py --conversations group-schedule`，群里先建定时任务再改时间）：sonnet 分支 2/2、main 0/2，opus xhigh 管家分支 1/1、main 0/1（main 的回答带改前改后的取值和接下来 3 次触发时间）。 |
 | 2026-11-18 | 消息流与订阅的 RFC（[RFC](../architecture/rfcs/message-stream-v0.zh-CN.md)，本分支未合入，只改文档）：Looper 自己保存飞书消息原文、订阅作为 `kind: subscription` 的定时任务、新 `processor` 角色不带工具；确认 D1–D10，唯一的修改是吃瓜订阅不做影子运行；第 5 节队列新增第 25 项，列出 P0–P7。 |
 | 2026-11-18 | 群聊里的任务结束通知（本分支未合入）：任务记录新增类型化的 `tasks.chat_group`（来自回合的 `group`，Lark 群与 Telegram 群都记；旧任务按直聊读），`NotifyTarget.group` 随通知载荷传到渠道。群聊的结束通知带完整的总结或结案说明，不再只取首段 300 字；超过 4,000 字按行边界拆成多条按序发送（代码块被切开时关闭并在下一条重开，首条保留标题行和 Lark 的 @），某一条发送失败即停止、不重发已发的部分。任务链接只在仪表盘地址是公开的（`server.public_url` 已配置，类型化的 `DashboardUrl.public`）才附，否则群里没有链接；等待超时、Planner 并发调整、gate 卡片走同一个 `task_link_line`。直聊与仪表盘不变；定时任务消息没有群的类型化事实，本次不动。 |
@@ -875,6 +876,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：组件指纹、升级计划、排空、`looper service upgrade` 与重启恢复已交付；Claude Code 看护与启动接管已交付，默认关闭。`CONTROL_PLANE` 安全规划、分级排空期限、接管报告与 P1/P2 状态检查已交付；本分支验证 macOS launchd 替身链路并补齐启动结束原因、截断轮次和 systemd 生效配置检查，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍未验证（[证据](../validation/kept-runs/README.md)），S2、S3 待做。#909 仍待默认开启与无条件单实例锁一并关闭。
 25. **消息流与订阅**（2026-11-18 维护者定方向，设计见[消息流与订阅 RFC](../architecture/rfcs/message-stream-v0.zh-CN.md)，未开始；PR 顺序见 RFC 第 13 节，各 PR 默认关闭、可独立回滚）：P0 RFC；P1 事件表与桥接（`ingest_mode = bridge`、`SourceService`、`looper msgflow import`、最小消息流页）；P2 `processor` 角色与不带工具的运行（`Capability.NO_TOOLS`）；P3 订阅类型（`schedules.kind = 'subscription'`）；P4 `looper msgflow export`；P5 Looper 自己采集与对账；P6 消息流页的会话、保留期与删除；P7 管家工具。吃瓜订阅不做影子运行：P1–P3 合入后直接开启，外部采集器的吃瓜同一小时改为 dry-run 对照一天。
+26. **Manager 收尾、账本与晨报**（设计文档的 M8，2026-11-19 维护者逐条确认方向，设计见[Manager 收尾、账本与晨报 RFC](../architecture/rfcs/manager-completion-ledger-v0.zh-CN.md)，未开始；PR 顺序与测试见 RFC 第 9 节，各 PR 默认关闭、可独立回滚）：C1 完成事件表与记录（关闭时也记 `skipped` 行，发出的内容不变）；C2 `[COMPLETION]` 回合、契约与兜底；C3 60 秒合并窗口、队列时限、定时任务来源与设置页；L1 账本表与 `looper ledger` 命令行；L2 `looper_ledger_add`、`looper_ledger_update`、操作者 ID 与自动登记；L3 待办页；L4 账本契约；B1 晨报输入与快照；B2 晨报模板与 processor 说明；B3 回「确认 L-xxxx」；B4 随 M7a ④⑤ 接入承诺与意图。C1 与 L1 和 M7a ②③ 并行，等 #1420 的修复合入后开工；晨报等 M7a P3 与 L1、L2 合入。RFC 第 11 节的 Q1–Q9 待维护者答复。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
