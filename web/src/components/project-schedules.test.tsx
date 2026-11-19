@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ScheduleDetail } from "@/components/schedule-detail";
-import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge, RunHistory, LastRun } from "@/components/project-schedules";
+import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge, RunHistory, LastRun, SubscriptionStatus } from "@/components/project-schedules";
 import type { Project, ScheduleInfo, ScheduleRunInfo } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -760,5 +760,137 @@ describe("command run history", () => {
     await act(async () => root.render(<LastRun schedule={schedule} />));
     expect(container.textContent).toContain("Missed its success deadline since");
     expect(container.textContent).toContain("Skipping: the previous run is still going since");
+  });
+});
+
+describe("subscription schedules", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  const subscription = (confirmed: string | null): ScheduleInfo => ({
+    ...schedule(false), kind: "subscription", enabled: true, notify_target: { channel: "lark", chat: "ou_synthetic" },
+    description: "Every hour", next_fire_at: null, last_run: null, consecutive_failures: 0, requirement: "Pick the funny ones",
+    alerts: { failures_since: null, stale_since: null, deadline_since: null, overlap_since: null },
+    subscription: {
+      source_id: "stream", chat_kinds: ["group"], include_chats: [], exclude_chats: [], sender_kinds: ["user"],
+      exclude_mentions_me: true, include_history: false, max_age_minutes: 180, max_events: 500, text_max_chars: 200,
+      quiet_word: "SKIP", output_header: "", cursor_seq: 41, cursor_at: null, target_confirmed_at: confirmed,
+      confirmation: "确认推送目标：\n- 推送目标：Lark · ou_synthetic（私聊）\n- 本机有企业管理的 hooks，会看到处理的消息",
+    },
+  } as ScheduleInfo);
+
+  it("says the output stays on the dashboard until the target is confirmed, then shows the facts and confirms", async () => {
+    const fetch = vi.fn(async (url: RequestInfo | URL) => {
+      if (url === "/api/v1/schedule_admin/get") return Response.json({ status: "ok", result: { schedule: subscription(null) } });
+      if (url === "/api/v1/schedule_admin/confirm_target")
+        return Response.json({ status: "ok", result: { schedule: subscription("2026-11-19T10:00:00Z") } });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetch);
+    const onChange = vi.fn();
+    await act(async () => root.render(<SubscriptionStatus schedule={subscription(null)} onChange={onChange} />));
+    expect(container.textContent).toContain("Push target not confirmed: output stays on this page.");
+    expect(container.textContent).toContain("Cursor 41");
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
+    await act(async () => button("Confirm push target…").click());
+    expect(container.querySelector("pre")?.textContent).toContain("本机有企业管理的 hooks，会看到处理的消息");
+    expect(fetch).not.toHaveBeenCalledWith("/api/v1/schedule_admin/confirm_target", expect.anything());
+    await act(async () => button("Confirm").click());
+    expect(fetch).toHaveBeenLastCalledWith("/api/v1/schedule_admin/confirm_target", expect.objectContaining({
+      body: JSON.stringify({ schedule_id: "sched/a" }) }));
+    expect(onChange).toHaveBeenCalledWith(subscription("2026-11-19T10:00:00Z"));
+  });
+
+  it("shows a confirmed target without the button, and resets the cursor to a time with its offset", async () => {
+    const fetch = vi.fn(async () => Response.json({ status: "ok", result: {
+      schedule: subscription("2026-11-19T10:00:00Z"), cursor: { cursor_seq: 7, committed_seq: 20, events_after: 13 } } }));
+    vi.stubGlobal("fetch", fetch);
+    const onChange = vi.fn();
+    await act(async () => root.render(<SubscriptionStatus schedule={subscription("2026-11-19T10:00:00Z")} onChange={onChange} />));
+    expect(container.textContent).toContain("Pushes to lark · ou_synthetic, confirmed");
+    expect(container.textContent).not.toContain("Confirm push target");
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
+    await act(async () => button("Reset cursor…").click());
+    const input = container.querySelector<HTMLInputElement>('input[type="datetime-local"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "2026-11-19T08:00");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button("Reset").click());
+    const body = JSON.parse(String((fetch.mock.calls[0] as unknown[])[1] && ((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body)));
+    expect(body.schedule_id).toBe("sched/a");
+    expect(new Date(body.after).getTime()).toBe(new Date("2026-11-19T08:00").getTime());
+    expect(container.textContent).toContain("Cursor at 7: the next run reads the 13 events stored since.");
+  });
+
+  it("shows what a run read and made, with its output", async () => {
+    const run = {
+      run_id: "run-1", status: "completed", trigger: "scheduled", firings: 1, scheduled_for: "2026-11-19T10:05:00Z",
+      subscription: { from_seq: 10, to_seq: 31, events_in_window: 21, events_selected: 18, events_too_old: 2, events_over_cap: 1,
+        record_id: null, outcome: "dashboard_only", output_text: "- gossip", notification_id: null },
+    } as unknown as ScheduleRunInfo;
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
+      if (url === "/api/v1/schedule_admin/runs") return Response.json({ status: "ok", result: { runs: [run], next_before: null,
+        routine_skips: { skipped_gate: 0, skipped_overlap: 0 } } });
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    await act(async () => root.render(<RunHistory schedule={subscription(null)} open version={0} />));
+    expect(container.textContent).toContain("Kept here (target not confirmed)");
+    expect(container.textContent).toContain("18 of 21 messages read (2 too old, 1 over the cap)");
+    expect(container.textContent).toContain("events 11–31");
+    expect(container.querySelector("details pre")?.textContent).toBe("- gossip");
+  });
+
+  it("offers the subscription type for a new schedule and sends its stream with the create", async () => {
+    const writes: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      let result: unknown;
+      if (url === "/api/v1/schedule_admin/project_list") result = { schedules: [], limits: {
+        default_timezone: "UTC", name_max_chars: 80, requirement_max_chars: 10000, run_timeout_default_seconds: 60,
+        run_timeout_max_seconds: 2592000, roles: ["planner"], gate_command_max_chars: 2000, gate_timeout_default_seconds: 30,
+        gate_timeout_max_seconds: 300, max_parallel_runs_limit: 10, concurrency_max: 100,
+        notify_targets: [{ channel: "lark", chat: "ou_synthetic", label: "Lark · ou_synthetic", channel_enabled: true }],
+      } };
+      else if (url === "/api/v1/managers/list") result = { managers: [{ id: "manager", enabled: true }], max_enabled: 8 };
+      else if (url === "/api/v1/registry/view") result = { providers: [], profiles: [] };
+      else if (url === "/api/v1/schedule_admin/create") {
+        writes.push(JSON.parse(String(init?.body)).fields);
+        result = { schedule: { ...subscription(null), ...JSON.parse(String(init?.body)).fields } };
+      } else if (url === "/api/v1/schedule_admin/preview") result = { valid: true, next: [], description: "Every hour" };
+      else if (url === "/api/v1/schedule_admin/runs") result = { runs: [], next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 } };
+      else throw new Error(`Unexpected request: ${url}`);
+      return Response.json({ status: "ok", result });
+    }));
+    const project = { project_id: "project", name: "Example", work_dir: "/srv/example" } as Project;
+    await act(async () => root.render(<ProjectSchedulesSection project={project} linked="" onLink={() => {}} />));
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
+    await act(async () => button("New schedule").click());
+    await act(async () => container.querySelector<HTMLInputElement>('input[type="radio"][value="subscription"]')!.click());
+    const type = (suffix: string, value: string) => {
+      const input = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[id$="-${suffix}"]`)!;
+      const prototype = input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    await act(async () => { type("name", "Gossip"); type("cron", "5 * * * *"); type("requirement", "Pick the funny ones"); type("source", "stream"); type("budget", "0.5"); });
+    await act(async () => button("Create").click());
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      kind: "subscription", name: "Gossip", cron: "5 * * * *", requirement: "Pick the funny ones", run_budget_usd: 0.5,
+      subscription: { source_id: "stream", chat_kinds: ["group", "topic"], sender_kinds: ["user", "app"], exclude_mentions_me: true,
+        include_history: false, max_age_minutes: 180, max_events: 500, text_max_chars: 200, quiet_word: "SKIP" },
+    });
+    expect(writes[0]).not.toHaveProperty("work_dir");
+    expect(writes[0]).not.toHaveProperty("notify_target");
   });
 });
