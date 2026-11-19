@@ -227,8 +227,8 @@ async def configured_executable(database_url: str) -> str:
             rows = await profile_registry.list_runtimes(pool=conn)
         finally:
             await conn.close()
-    except Exception:
-        logger.info("cannot read the registered Pi runtime; using `pi` from PATH", exc_info=True)
+    except Exception as exc:
+        logger.info("cannot read the registered Pi runtime (%s); using `pi` from PATH", type(exc).__name__)
         return PiRuntime.default_executable
     return next((row["executable"] or PiRuntime.default_executable
                  for row in rows if row["type"] == "pi" and row["profile_count"]), PiRuntime.default_executable)

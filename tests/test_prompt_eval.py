@@ -2215,8 +2215,10 @@ def test_a_task_the_harness_cannot_follow_is_cancelled_with_its_cost(tmp_path: P
 def test_real_claude_gets_the_per_run_budget(tmp_path: Path) -> None:
     script = runner.install_claude(tmp_path, mode="real", max_budget_usd=0.25, real_claude="/opt/claude dir/claude")
     assert script.read_text().splitlines()[-1] == "exec '/opt/claude dir/claude' \"$@\" --max-budget-usd 0.25"
+    # No `claude` and no Claude Code agent: nothing is installed; a Claude Code agent is refused by require_claude.
+    assert runner.install_claude(tmp_path / "none", mode="real", max_budget_usd=0.25, real_claude=None) is None
     with pytest.raises(runner.EvalError):
-        runner.install_claude(tmp_path, mode="real", max_budget_usd=0.25, real_claude=None)
+        runner.require_claude("real", None, {"claude-code"})
 
 
 def test_with_a_real_reviewer_task_the_stand_in_hands_claude_code_every_run_but_that_tasks_others(
