@@ -1182,10 +1182,12 @@ class ManagerAgent:
             read = lark_quote.unread(ref, "internal error")
         errors = [quote.error for quote in read.quotes if quote.error]
         logger.info("lark_quote channel=%s message=%s kind=%s quoted=%s messages=%d chars=%d attachments=%d "
-                    "outcome=%s seconds=%.1f", ref.channel_id, ref.message_id, ref.kind.value,
-                    ",".join(quote.message_id for quote in read.quotes), sum(quote.messages for quote in read.quotes),
+                    "outcome=%s seconds=%.1f read=%.1f names=%.1f files=%.1f", ref.channel_id, ref.message_id,
+                    ref.kind.value, ",".join(quote.message_id for quote in read.quotes),
+                    sum(quote.messages for quote in read.quotes),
                     sum(len(line) for quote in read.quotes for line in quote.lines), len(read.attachments),
-                    ",".join(errors) or "read", time.monotonic() - started)
+                    ",".join(errors) or "read", time.monotonic() - started, read.read_seconds, read.names_seconds,
+                    read.files_seconds)
         return read
 
     async def _persist_user(self, envelope: MessageEnvelope, text: str) -> None:

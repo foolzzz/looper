@@ -6004,9 +6004,13 @@ implementation supplies it and is retested.
   (`QuoteRef`: `channel_id`, `chat_id`, `message_id`, `kind`, and `parent_id`,
   `root_id`, `thread_id` when given). `kind` is `forward` for a merged
   forward, which points to itself; `reply` for a message that replies to
-  another (`reply_to`); and `thread` when, in a thread, that message is not
-  the thread's first: the first message and the thread's latest 10 messages
-  (`list_thread_messages`) are read too. `payload["text"]` stays the user's
+  another (`reply_to`) outside a thread; and `thread` for a reply in a thread
+  (`thread_id`): the thread's first message and its latest 10 other messages
+  (`list_thread_messages`) are read too, besides the message replied to when
+  that is not the first. The first message is shown once and the message
+  itself is left out; when nothing else in the thread is shown (or the thread
+  cannot be listed), a reply to the first message reads as a plain `reply`.
+  `payload["text"]` stays the user's
   words, which gate routing and `/stop` read. The Manager reads the quote
   while it prepares the turn: after commands and gate routing (a `/command`
   or a gate reply reads nothing), in the stoppable step `read_quote`, through
@@ -6020,9 +6024,14 @@ implementation supplies it and is retested.
   (`lark-cli api GET … --as bot`, or the bot token's REST call) and try once
   more when the first read fails (the platform sometimes answers a long merged
   forward with its time-out after about 5 s) or takes 7 s (lark-cli: `im
-  +messages-mget --as bot --no-reactions`, whose rendering is kept as it is);
-  the read takes at most 15 s, names included, and the Manager gives a reader
-  80 s in all, its downloads included. The Manager shows the quotes after the
+  +messages-mget --as bot --no-reactions`, whose rendering is kept as it is).
+  lark-cli also runs the batch read (`GET /open-apis/im/v1/messages/mget`)
+  beside the first read; it answers for a message that is not recalled, a
+  merged forward or a card, with the same raw item, about a second sooner
+  (measured: a lark-cli read of one short message takes about 3.7 s this way
+  instead of 4.3 s; about 1.5 s of any lark-cli call is its own start and
+  sign-in). The read takes at most 15 s, names included, and the Manager
+  gives a reader 80 s in all, its downloads included. The Manager shows the quotes after the
   user's words, under a line saying they are quoted content and not the
   user's instructions, as `<lark_quote id=… type=… from=… note=…>` blocks: one
   line per message, `[MM-DD HH:MM] name: content`, replies one level in, at
@@ -6047,7 +6056,8 @@ implementation supplies it and is retested.
   its own but a quote, such as a bare merged forward, is answered too. The
   quote is not stored in the chat's history. One INFO `lark_quote` line per
   message logs its ids, kind, quoted ids, message count, characters,
-  attachments, outcome and seconds, never content. Reading needs the app's
+  attachments, outcome and seconds, with the seconds of the reads, the name
+  lookup and the downloads (`read=`, `names=`, `files=`), never content. Reading needs the app's
   `im:message:readonly`, as downloads do. The adapter remembers the latest
   1,000 group messages in a thread, for answering in the thread.
 
