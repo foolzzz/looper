@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 TEXT_MAX_CHARS = 16 * 1024
+# A longer line is not a message: it is skipped past without being held, and counted.
+MAX_LINE_BYTES = 8 * 1024 * 1024
 # One scan of one file reads at most this much beyond the offset (more only to finish the line it ends in).
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _EXTEND = 64 * 1024
@@ -122,9 +124,14 @@ def extract_text(raw: dict[str, Any]) -> str:
     return fallback
 
 
+def _refuse_constant(name: str) -> Any:
+    """``NaN`` and ``Infinity`` are not JSON; jsonb refuses them, so such a line is not stored."""
+    raise ValueError(name)
+
+
 def _parse(line: bytes) -> BridgeMessage | None:
     try:
-        raw = json.loads(line)
+        raw = json.loads(line, parse_constant=_refuse_constant)
         message_id = raw["message_id"]
         sent_at = _EPOCH + timedelta(milliseconds=int(raw["create_time"]))
     except (ValueError, KeyError, TypeError, OverflowError):
@@ -180,6 +187,24 @@ def baseline_file(path: Path) -> FileState:
                          last_id=_last_id_before(handle, offset) if offset else None)
 
 
+def _skip_line(handle: Any, start: int, held: int, state: FileState | None, rescanned: bool, inode: str,
+               mtime: datetime) -> Scan:
+    """The line at ``start`` is over ``MAX_LINE_BYTES`` and ``held`` bytes of it are read: read on without keeping
+    anything to its newline. One still being written (no newline at the end of the file) waits as an unterminated
+    tail."""
+    skipped = held
+    last_id = state.last_id if state is not None and not rescanned else None
+    while chunk := handle.read(_EXTEND):
+        found = chunk.find(b"\n")
+        if found >= 0:
+            offset = start + skipped + found + 1
+            return Scan(state=FileState(offset=offset, size=offset, inode=inode, mtime=mtime, last_id=last_id),
+                        rescanned=rescanned, bad_lines=1, more=True)
+        skipped += len(chunk)
+    return Scan(state=FileState(offset=start, size=start + skipped, inode=inode, mtime=mtime, last_id=last_id),
+                rescanned=rescanned, incomplete_tail=True)
+
+
 def scan_file(path: Path, state: FileState | None, *, max_bytes: int = DEFAULT_MAX_BYTES) -> Scan:
     """What is new in ``path`` since ``state`` (None: never read). ``Scan.state`` is the state to save."""
     with path.open("rb") as handle:
@@ -194,8 +219,13 @@ def scan_file(path: Path, state: FileState | None, *, max_bytes: int = DEFAULT_M
             start, rescanned = (0, True) if rewritten else (state.offset, False)
         handle.seek(start)
         data = handle.read(max(max_bytes, 1))
-        # A window that ends inside a line is extended to the line's end; a window of no complete line makes no progress.
-        while b"\n" not in data and (more := handle.read(_EXTEND)):
+        # A window that ends inside a line is extended to the line's end; a window of no complete line makes no
+        # progress, and a line over the cap is skipped past without being held.
+        while b"\n" not in data:
+            if len(data) > MAX_LINE_BYTES:
+                return _skip_line(handle, start, len(data), state, rescanned, inode, mtime)
+            if not (more := handle.read(_EXTEND)):
+                break
             data += more
         end = data.rfind(b"\n") + 1
         more = bool(handle.read(1))
@@ -206,7 +236,7 @@ def scan_file(path: Path, state: FileState | None, *, max_bytes: int = DEFAULT_M
         for line in data[:end].split(b"\n")[:-1]:
             if not line.strip():
                 continue
-            message = _parse(line)
+            message = _parse(line) if len(line) <= MAX_LINE_BYTES else None
             if message is None:
                 scan.bad_lines += 1
                 continue

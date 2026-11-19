@@ -1489,6 +1489,8 @@ CREATE TABLE IF NOT EXISTS source_chats (
     bridge_inode     TEXT,
     bridge_last_id   TEXT,
     bridge_mtime     TIMESTAMPTZ,
+    -- The file's first read is not finished: what is still to read is part of that import, not live news.
+    bridge_importing BOOLEAN NOT NULL DEFAULT false,
     excluded_at      TIMESTAMPTZ,
     purged_at        TIMESTAMPTZ,
     PRIMARY KEY (source_id, chat_id),
@@ -1572,5 +1574,6 @@ CREATE TABLE IF NOT EXISTS source_events (
 CREATE INDEX IF NOT EXISTS idx_source_events_seq ON source_events (source_id, seq);
 CREATE INDEX IF NOT EXISTS idx_source_events_chat ON source_events (source_id, chat_id, sent_at);
 CREATE INDEX IF NOT EXISTS idx_source_events_sent ON source_events (source_id, sent_at);
+CREATE INDEX IF NOT EXISTS idx_source_events_run ON source_events (run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_source_events_body ON source_events (sent_at) WHERE body IS NOT NULL;
 -- message stream end

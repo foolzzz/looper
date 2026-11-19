@@ -65,3 +65,12 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
         await source(pool)
 
     run_db(check, monkeypatch, timeout=20)
+
+
+def test_deleting_a_run_does_not_scan_the_events(monkeypatch):
+    async def check(pool):
+        index = await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE tablename = 'source_events' "
+                                    "AND indexdef LIKE '%(run_id)%'")
+        assert index and "WHERE" in index
+
+    run_db(check, monkeypatch, timeout=20)

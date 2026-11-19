@@ -151,3 +151,24 @@ def test_a_nul_character_never_reaches_the_database(tmp_path):
     path = sup.append(tmp_path, "oc_a", sup.message("m1", text="a\u0000b"))
     (message,) = read(path).messages
     assert "\x00" not in message.text and "\x00" not in json.dumps(message.body, ensure_ascii=False)
+
+
+def test_a_line_over_the_cap_is_skipped_and_counted_without_being_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "MAX_LINE_BYTES", 1000)
+    path = sup.append(tmp_path, "oc_a", sup.message("m1"), sup.message("huge", text="h" * 5000), sup.message("m2"))
+    seen, bad, state = [], 0, None
+    for _ in range(10):
+        scan = read(path, state, max_bytes=300)
+        seen += ids(scan)
+        bad += scan.bad_lines
+        state = scan.state
+        if not scan.more:
+            break
+    assert seen == ["m1", "m2"] and bad == 1
+
+
+def test_a_number_json_allows_but_the_database_refuses_makes_a_bad_line(tmp_path):
+    path = sup.append(tmp_path, "oc_a", sup.message("m1"),
+                      partial=b'{"message_id": "nan", "create_time": "1000", "sender": {}, "x": NaN}\n')
+    scan = read(path)
+    assert ids(scan) == ["m1"] and scan.bad_lines == 1

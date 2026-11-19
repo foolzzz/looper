@@ -64,10 +64,8 @@ class PassReport:
     error: str | None = None
     failed_chats: list[str] = field(default_factory=list)
     file_reports: list[FileReport] = field(default_factory=list)
-
-
-class _DryRun(Exception):
-    """Raised inside a file's transaction to roll it back after it has been counted."""
+    # Ids a dry run has counted, across files: a message in two files would be stored once.
+    dry_ids: set[str] = field(default_factory=set, repr=False)
 
 
 _name_cache: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
@@ -145,13 +143,15 @@ def _body_dropped(message: BridgeMessage, source: Mapping[str, Any], now: dateti
 
 async def _chunk(conn: Any, source: Mapping[str, Any], path: Path, run_id: int | None, file: FileReport,
                  scan: Any, *, first: bool, floor: datetime | None, own_apps: Collection[str], seen_ids: set[str],
-                 users: Mapping[str, Any], entry: Any, now: datetime) -> None:
+                 users: Mapping[str, Any], entry: Any, now: datetime, chat: Mapping[str, Any],
+                 dry_ids: set[str] | None) -> bool:
+    """Store one chunk (``dry_ids`` is not None: count what would be stored, writing nothing). Whether the chat is
+    a direct chat holding one of Looper's own bots' messages, which is excluded from now on."""
     source_id, chat_id = source["id"], path.stem
-    chat = await store.chat_for_update(conn, source_id, chat_id, kind="unknown", name="")
     kind = _chat_kind(entry) or chat["kind"]
     own = [m for m in scan.messages if m.sender_kind == "app" and m.sender_id in own_apps]
     looper_chat = bool(own) and kind == "p2p"
-    if looper_chat:
+    if looper_chat and dry_ids is None:
         await store.exclude_chat(conn, source_id, chat_id, "looper_channel", now=now)
     rows: list[dict[str, Any]] = []
     kept: list[BridgeMessage] = []
@@ -179,56 +179,72 @@ async def _chunk(conn: Any, source: Mapping[str, Any], path: Path, run_id: int |
             "mention_ids": message.mention_ids, "text": message.text,
             "body": None if _body_dropped(message, source, now) else message.body,
             "body_bytes": message.body_bytes, "origin": origin})
-    inserted = await store.insert_events(conn, source_id, run_id, rows)
-    if inserted:
-        await store.advance_committed(conn, source_id, max(seq for _, seq in inserted))
-    await store.upsert_people(conn, source_id, _people(kept, users), now=now)
-    await store.save_bridge_state(
-        conn, source_id, chat_id, offset=scan.state.offset, size=scan.state.size, inode=scan.state.inode,
-        last_id=scan.state.last_id, mtime=scan.state.mtime, now=now,
-        newest=max((m.sent_at for m in kept), default=None))
-    new = len(inserted)
+    if dry_ids is not None:
+        stored = await store.existing_ids(conn, source_id, [r["external_id"] for r in rows])
+        fresh = [r for r in rows if r["external_id"] not in stored and r["external_id"] not in dry_ids]
+        dry_ids.update(r["external_id"] for r in rows)
+        new = len(fresh)
+    else:
+        inserted = await store.insert_events(conn, source_id, run_id, rows)
+        if inserted:
+            await store.advance_committed(conn, source_id, max(seq for _, seq in inserted))
+        await store.upsert_people(conn, source_id, _people(kept, users), now=now)
+        await store.save_bridge_state(
+            conn, source_id, chat_id, offset=scan.state.offset, size=scan.state.size, inode=scan.state.inode,
+            last_id=scan.state.last_id, mtime=scan.state.mtime, now=now,
+            newest=max((m.sent_at for m in kept), default=None), importing=first and scan.more)
+        new = len(inserted)
     seen = len(rows) - new + repeats
     file.new, file.duplicates, file.skipped = file.new + new, file.duplicates + seen, file.skipped + skipped
     if run_id is not None:
         await store.add_run_counts(conn, run_id, new=new, seen=seen, skipped=skipped)
+    return looper_chat
 
 
 async def _ingest_file(source: Mapping[str, Any], path: Path, run_id: int | None, report: PassReport, *,
                        names: tuple[dict[str, Any], dict[str, Any]], own_apps: Collection[str],
                        import_since: datetime | None, force_first: bool, now: datetime, dry_run: bool,
-                       db: Any, chunk_bytes: int) -> FileReport:
-    """Read one file to its end in chunks. A real run commits each chunk and its saved state in one transaction, so
-    an interrupted pass resumes at the last chunk; a dry run keeps one transaction for the whole file and rolls it
-    back, so its counts include what its own earlier chunks would have stored."""
+                       conn: Any, chunk_bytes: int) -> FileReport:
+    """Read one file to its end in chunks, on the connection that holds the source's writer lock: a lost lock
+    session ends the writes with it. A real run commits each chunk and its saved state in one transaction, so an
+    interrupted pass resumes at the last chunk; a dry run reads and writes nothing."""
     chat_id, source_id = path.stem, source["id"]
     chats, users = names
     entry = chats.get(chat_id)
     file = FileReport(chat_id)
     seen_ids: set[str] = set()
     state: FileState | None = None
-    first = False
-    started = False
+    first = started = excluded_here = False
+    dry_ids: set[str] | None = report.dry_ids if dry_run else None
+    chat_name = str(entry.get("name") or "") if isinstance(entry, Mapping) else ""
 
-    async def step(conn: Any) -> bool:
+    async def step() -> bool:
         """One chunk (or the baseline or the skip); whether the file has more."""
-        nonlocal state, first, started
-        chat = await store.chat_for_update(conn, source_id, chat_id, kind=_chat_kind(entry) or "unknown",
-                                           name=str(entry.get("name") or "") if isinstance(entry, Mapping) else "")
-        if chat["inclusion"] == "excluded":
+        nonlocal state, first, started, excluded_here
+        if dry_run:
+            chat = await store.chat_row(conn, source_id, chat_id) or {
+                "inclusion": "included", "kind": "unknown", "bridge_offset": None, "bridge_inode": None,
+                "bridge_mtime": None, "bridge_importing": False}
+        else:
+            chat = await store.chat_for_update(conn, source_id, chat_id, kind=_chat_kind(entry) or "unknown",
+                                               name=chat_name)
+        if chat["inclusion"] == "excluded" or excluded_here:
             report.files_unchanged += 1
             return False
         if not started:
             started = True
             state = None if force_first else _state_of(chat)
-            first = state is None
-            await store.set_chat_directory(conn, source_id, chat_id, kind=_chat_kind(entry),
-                                           name=str(entry.get("name") or "") if isinstance(entry, Mapping) else None)
-            if first and not force_first and source["bridge_start_from"] == "end":
+            # A file whose first read was cut short is still in its first read: its rest is part of that import.
+            first = state is None or bool(chat["bridge_importing"])
+            if not dry_run:
+                await store.set_chat_directory(conn, source_id, chat_id, kind=_chat_kind(entry),
+                                               name=chat_name if isinstance(entry, Mapping) else None)
+            if state is None and not force_first and source["bridge_start_from"] == "end":
                 base = await asyncio.to_thread(baseline_file, path)
-                await store.save_bridge_state(conn, source_id, chat_id, offset=base.offset, size=base.size,
-                                              inode=base.inode, last_id=base.last_id, mtime=base.mtime, now=now,
-                                              newest=None)
+                if not dry_run:
+                    await store.save_bridge_state(conn, source_id, chat_id, offset=base.offset, size=base.size,
+                                                  inode=base.inode, last_id=base.last_id, mtime=base.mtime, now=now,
+                                                  newest=None)
                 file.baselined = True
                 report.files_baselined += 1
                 return False
@@ -245,24 +261,19 @@ async def _ingest_file(source: Mapping[str, Any], path: Path, run_id: int | None
         # read of a source that starts from the end a week back at most, so a rewritten file brings no history in.
         floor = (import_since if force_first else None if first or source["bridge_start_from"] == "beginning"
                  else now - BRIDGE_MAX_AGE)
-        await _chunk(conn, source, path, run_id, file, scan, first=first, floor=floor, own_apps=own_apps,
-                     seen_ids=seen_ids, users=users, entry=entry, now=now)
+        excluded_here = await _chunk(conn, source, path, run_id, file, scan, first=first, floor=floor,
+                                     own_apps=own_apps, seen_ids=seen_ids, users=users, entry=entry, now=now,
+                                     chat=chat, dry_ids=dry_ids) and dry_run
         state = scan.state
         return scan.more
 
-    if dry_run:
-        try:
-            async with store.transaction(db) as conn:
-                while await step(conn):
-                    pass
-                raise _DryRun
-        except _DryRun:
-            pass
-    else:
-        more = True
-        while more:
-            async with store.transaction(db) as conn:
-                more = await step(conn)
+    more = True
+    while more:
+        if dry_run:
+            more = await step()
+        else:
+            async with store.transaction(conn):
+                more = await step()
     file.distinct = len(seen_ids)
     report.events_new += file.new
     report.events_seen += file.duplicates
@@ -274,30 +285,35 @@ async def run_bridge_pass(source: Mapping[str, Any], *, trigger: str = "schedule
                           dry_run: bool = False, own_apps: Collection[str] = (), now: datetime | None = None,
                           db: Any = None, retention_days: int | None = None) -> PassReport:
     """One pass over the source's directory. ``days`` makes it an import: every file is read from its start and kept
-    back to ``days`` days ago. ``dry_run`` counts what would be stored and stores nothing (it needs the lock too)."""
+    back to ``days`` days ago. ``dry_run`` reads the same files and the stored ids and writes nothing; it takes the
+    lock too, so it never counts beside a pass that is writing."""
     from ..db.connection import get_pool
 
     pool = db if db is not None else get_pool()
     now = now or datetime.now(timezone.utc)
     mode = "import" if days is not None else "bridge"
     directory = Path(source["bridge_dir"]).expanduser()
+    # Every write of the pass goes through this connection, the one whose session holds the writer lock.
     async with pool.acquire() as lock:
         if not await store.try_lock(lock, source["id"]):
             return PassReport(status="skipped_busy")
         try:
-            return await _pass(source, directory, mode, trigger, days, dry_run, own_apps, now, pool, retention_days)
+            return await _pass(source, directory, mode, trigger, days, dry_run, own_apps, now, lock, retention_days)
         finally:
-            await store.unlock(lock, source["id"])
+            try:
+                await store.unlock(lock, source["id"])
+            except Exception:
+                logger.debug("the writer lock was already gone")
 
 
 async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: str, days: int | None, dry_run: bool,
-                own_apps: Collection[str], now: datetime, pool: Any, retention_days: int | None) -> PassReport:
+                own_apps: Collection[str], now: datetime, conn: Any, retention_days: int | None) -> PassReport:
     report = PassReport(status="running")
     run_id: int | None = None
     if not dry_run:
-        await store.interrupt_stale_runs(pool, source["id"])
-        run_id = report.run_id = await store.start_run(pool, source["id"], mode, "manual" if days is not None else trigger,
-                                                       now=now)
+        await store.interrupt_stale_runs(conn, source["id"])
+        run_id = report.run_id = await store.start_run(conn, source["id"], mode,
+                                                       "manual" if days is not None else trigger, now=now)
     names = (_load_names(directory / "chats.json"), _load_names(directory / "users.json"))
     import_since = now - timedelta(days=days) if days is not None else None
     files: list[Path] = []
@@ -312,17 +328,18 @@ async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: 
             try:
                 report.file_reports.append(await _ingest_file(
                     source, path, run_id, report, names=names, own_apps=own_apps, import_since=import_since,
-                    force_first=days is not None, now=now, dry_run=dry_run, db=pool, chunk_bytes=CHUNK_BYTES))
+                    force_first=days is not None, now=now, dry_run=dry_run, conn=conn, chunk_bytes=CHUNK_BYTES))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 # Name the failure by chat and kind, never by its text: a database error can quote a message.
                 logger.warning("bridge read of chat %s failed: %s", path.stem, type(exc).__name__)
-                logger.debug("bridge read failure", exc_info=True)
                 failures.append(f"{path.stem}: {type(exc).__name__}")
+                if conn.is_closed():
+                    break
         report.files_failed = len(failures)
         report.failed_chats = [item.split(":", 1)[0] for item in failures]
-        if report.error is not None or (failures and len(failures) == report.files):
+        if report.error is not None or (failures and len(failures) == report.files) or conn.is_closed():
             report.status = "failed"
         else:
             report.status = "partial" if failures else "ok"
@@ -330,26 +347,27 @@ async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: 
             report.error = report.error or f"{len(failures)} of {report.files} files failed; first {failures[0]}"
     except asyncio.CancelledError:
         if run_id is not None:
-            await asyncio.shield(store.finish_run(pool, run_id, "interrupted", now=datetime.now(timezone.utc),
+            await asyncio.shield(store.finish_run(conn, run_id, "interrupted", now=datetime.now(timezone.utc),
                                                   files_rescanned=report.files_rescanned))
         raise
-    if run_id is not None:
-        await store.finish_run(pool, run_id, report.status, now=datetime.now(timezone.utc), error=report.error,
+    if run_id is not None and not conn.is_closed():
+        await store.finish_run(conn, run_id, report.status, now=datetime.now(timezone.utc), error=report.error,
                                files_rescanned=report.files_rescanned,
                                ok_for=source["id"] if report.status in ("ok",) else None)
         if retention_days:
-            await store.prune_runs(pool, source["id"], before=now - timedelta(days=retention_days))
+            await store.prune_runs(conn, source["id"], before=now - timedelta(days=retention_days))
     return report
 
 
 async def own_bot_app_ids() -> set[str]:
-    """The Lark apps Looper's own enabled channel bots act as, read from the channel configuration."""
+    """The Lark apps of every Lark channel Looper has configured, enabled or not (one it no longer runs still sent
+    what it sent), read from the channel configuration."""
     from ..db.channel_configs import list_configs
     from .channels.bots import lark_app_id
 
     apps: set[str] = set()
     for row in await list_configs():
-        if row["enabled"] and row["channel_type"] in ("lark", "lark_bot"):
+        if row["channel_type"] in ("lark", "lark_bot"):
             app = await lark_app_id(row["channel_type"], row.get("config") or {})
             if app:
                 apps.add(app)

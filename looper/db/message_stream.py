@@ -153,11 +153,24 @@ async def exclude_chat(conn: asyncpg.Connection, source_id: str, chat_id: str, r
 
 async def save_bridge_state(conn: asyncpg.Connection, source_id: str, chat_id: str, *, offset: int, size: int,
                             inode: str, last_id: str | None, mtime: datetime, newest: datetime | None,
-                            now: datetime) -> None:
+                            now: datetime, importing: bool = False) -> None:
     await conn.execute(
         "UPDATE source_chats SET bridge_offset = $3, bridge_size = $4, bridge_inode = $5, bridge_last_id = $6, "
-        "bridge_mtime = $7, last_pulled_at = $8, last_message_at = GREATEST(last_message_at, $9) "
-        "WHERE source_id = $1 AND chat_id = $2", source_id, chat_id, offset, size, inode, last_id, mtime, now, newest)
+        "bridge_mtime = $7, last_pulled_at = $8, last_message_at = GREATEST(last_message_at, $9), "
+        "bridge_importing = $10 WHERE source_id = $1 AND chat_id = $2",
+        source_id, chat_id, offset, size, inode, last_id, mtime, now, newest, importing)
+
+
+async def chat_row(conn: asyncpg.Connection, source_id: str, chat_id: str) -> dict[str, Any] | None:
+    """The chat's row as it is, without creating or locking it (a dry run's read)."""
+    row = await conn.fetchrow("SELECT * FROM source_chats WHERE source_id = $1 AND chat_id = $2", source_id, chat_id)
+    return dict(row) if row else None
+
+
+async def existing_ids(conn: asyncpg.Connection, source_id: str, ids: Sequence[str]) -> set[str]:
+    return {r["external_id"] for r in await conn.fetch(
+        "SELECT external_id FROM source_events WHERE source_id = $1 AND external_id = ANY($2::text[])",
+        source_id, list(ids))}
 
 
 async def insert_events(conn: asyncpg.Connection, source_id: str, run_id: int | None,

@@ -246,6 +246,12 @@ def test_a_long_file_is_read_in_chunks_that_resume_after_an_interruption(monkeyp
         healed = await passes(pool, tmp_path)
         assert healed.status == "ok" and healed.events_new == 40 - done
         assert await rows(pool) == [f"m{n:03d}" for n in range(40)]
+        # The first import is one import however many passes it took: its recent half is not live news.
+        assert {r["origin"] for r in await pool.fetch("SELECT origin FROM source_events")} == {"import"}
+        assert await pool.fetchval("SELECT bridge_importing FROM source_chats WHERE chat_id = 'oc_a'") is False
+        sup.append(tmp_path, "oc_a", sup.message("after", sent_at=sup.NOW))
+        await passes(pool, tmp_path)
+        assert await pool.fetchval("SELECT origin FROM source_events WHERE external_id = 'after'") == "live"
 
     run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
 
@@ -370,5 +376,65 @@ def test_health_follows_the_runs(monkeypatch, tmp_path):
         assert service.health(source, "partial", source["updated_at"]) == "degraded"
         assert service.health(source, None, source["updated_at"] + timedelta(hours=2)) == "stale"
         assert service.health({**source, "ingest_mode": "off"}, None, later) == "off"
+
+    run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
+
+
+def test_a_lost_lock_session_stops_the_writes(monkeypatch, tmp_path):
+    async def check(pool):
+        monkeypatch.setattr(service, "CHUNK_BYTES", 2000)
+        sup.append(tmp_path, "oc_a", *(sup.message(f"m{n:03d}", text="z" * 100) for n in range(40)))
+        real, calls = store.insert_events, []
+
+        async def losing(conn, source_id, run_id, batch):
+            calls.append(1)
+            if len(calls) == 2:
+                # The session that holds the writer lock goes away; the writes must go with it.
+                holder = await pool.fetchval("SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                                             "AND classid = $1", store._LOCK_CLASS)
+                await pool.execute("SELECT pg_terminate_backend($1)", holder)
+            return await real(conn, source_id, run_id, batch)
+
+        monkeypatch.setattr(store, "insert_events", losing)
+        broken = await passes(pool, tmp_path)
+        assert broken.status == "failed"
+        stored = await pool.fetchval("SELECT count(*) FROM source_events")
+        assert 0 < stored < 40
+        await asyncio.sleep(0.3)
+        assert await pool.fetchval("SELECT count(*) FROM source_events") == stored
+        monkeypatch.setattr(store, "insert_events", real)
+        assert (await passes(pool, tmp_path)).status == "ok"
+        assert await pool.fetchval("SELECT count(*) FROM source_events") == 40
+
+    run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30, max_size=5)
+
+
+def test_a_dry_run_writes_nothing_at_all_and_counts_a_repeat_across_files_once(monkeypatch, tmp_path):
+    async def check(pool):
+        sup.append(tmp_path, "oc_a", sup.message("m1"), sup.message("shared"))
+        sup.append(tmp_path, "oc_b", sup.message("shared"), sup.message("m2"))
+        await pool.execute("SELECT nextval('source_events_seq_seq')")
+        before = await pool.fetchval("SELECT last_value FROM source_events_seq_seq")
+        dry = await passes(pool, tmp_path, days=7, dry_run=True)
+        assert (dry.events_new, dry.events_seen) == (3, 1)
+        assert await pool.fetchval("SELECT last_value FROM source_events_seq_seq") == before
+        assert await pool.fetchval("SELECT count(*) FROM source_chats") == 0
+        real = await passes(pool, tmp_path, days=7)
+        assert (real.events_new, real.events_seen) == (dry.events_new, dry.events_seen)
+
+    run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
+
+
+def test_a_log_line_about_a_failed_read_never_carries_the_exception_text(monkeypatch, tmp_path, caplog):
+    async def check(pool):
+        sup.append(tmp_path, "oc_a", sup.message("m1"))
+
+        async def failing(*args, **kwargs):
+            raise RuntimeError("Failing row contains (a secret plan)")
+
+        monkeypatch.setattr(store, "insert_events", failing)
+        with caplog.at_level("DEBUG"):
+            await passes(pool, tmp_path)
+        assert "secret" not in caplog.text and all(r.exc_info is None for r in caplog.records)
 
     run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
