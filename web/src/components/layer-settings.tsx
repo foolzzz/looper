@@ -199,6 +199,9 @@ export function LayerSettingsForm({
   const { registry } = useRegistry();
   const isSystem = layer === "system";
   const [only] = roles;
+  // The processor's own layers have no harness (its prompt is its role prompt and its instructions) and no prompt
+  // mode: it always replaces the runtime's prompt.
+  const processor = roles.length === 1 && only === "processor";
   const concurrencyRole: TaskLimitRole | null =
     layer === "role" && roles.length === 1 && (only === "worker" || only === "reviewer") ? only : null;
 
@@ -280,42 +283,44 @@ export function LayerSettingsForm({
       {profileFirst && (
         <h4 className="border-t border-border pt-4 text-xs font-semibold">More overrides</h4>
       )}
-      <div className="space-y-1">
-        <HarnessField
-          id={`${idPrefix}-harness`}
-          label="Harness prompt"
-          value={draft.harness}
-          onChange={(harness) => set({ harness })}
-          inherits={HARNESS_INHERITS[layer]}
-          rows={draft.harness.trim() ? 10 : 3}
-          hint={harnessHint}
-        />
-        {harness && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <Now>
-              Now: {harness.value.length} chars · {sourceText(harness.source, layer, harness.from_role)}
-            </Now>
-            {!draft.harness.trim() && (
-              <button
-                type="button"
-                onClick={() => set({ harness: harness.value })}
-                className="text-[11px] text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                Start from it
-              </button>
-            )}
-          </div>
-        )}
-        {!harness && isSystem && !draft.harness.trim() && (
-          <button
-            type="button"
-            onClick={() => set({ harness: limits.builtin_harness_prompt })}
-            className="text-[11px] text-primary underline-offset-2 hover:underline"
-          >
-            Start from the built-in text
-          </button>
-        )}
-      </div>
+      {!processor && (
+        <div className="space-y-1">
+          <HarnessField
+            id={`${idPrefix}-harness`}
+            label="Harness prompt"
+            value={draft.harness}
+            onChange={(harness) => set({ harness })}
+            inherits={HARNESS_INHERITS[layer]}
+            rows={draft.harness.trim() ? 10 : 3}
+            hint={harnessHint}
+          />
+          {harness && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Now>
+                Now: {harness.value.length} chars · {sourceText(harness.source, layer, harness.from_role)}
+              </Now>
+              {!draft.harness.trim() && (
+                <button
+                  type="button"
+                  onClick={() => set({ harness: harness.value })}
+                  className="text-[11px] text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Start from it
+                </button>
+              )}
+            </div>
+          )}
+          {!harness && isSystem && !draft.harness.trim() && (
+            <button
+              type="button"
+              onClick={() => set({ harness: limits.builtin_harness_prompt })}
+              className="text-[11px] text-primary underline-offset-2 hover:underline"
+            >
+              Start from the built-in text
+            </button>
+          )}
+        </div>
+      )}
 
       {isSystem && (
         <div className="space-y-1">
@@ -356,7 +361,7 @@ export function LayerSettingsForm({
           />
           <NowValue id={`${idPrefix}-budget-now`} setting={effective?.run_budget_usd} layer={layer} show={budgetText} />
         </div>
-        {layer === "role" && (
+        {layer === "role" && !processor && (
           <div className="space-y-1 sm:col-span-2">
             <label htmlFor={`${idPrefix}-prompt-mode`} className="text-xs font-medium text-muted-foreground">
               System prompt

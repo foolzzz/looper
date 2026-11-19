@@ -389,7 +389,7 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
         builtin = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-claude-code"}, claude=claude))["runtime"]
         assert (builtin["version"], builtin["probe_error"]) == ("2.1.285 (Claude Code)", None)
         assert builtin["probed_at"] and set(builtin["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
-        assert builtin["roles"] == ["manager", "planner", "worker", "reviewer"]
+        assert builtin["roles"] == ["manager", "planner", "worker", "reviewer", "processor"]
         assert (await _call("POST", "/api/v1/registry/view", {}, claude=claude))[1]["runtimes"][0]["path"] == claude
 
         # A type not on PATH has no runtime, and Re-detect says why; once it is on PATH, Re-detect adds it.
@@ -1330,7 +1330,7 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
                                                             "workflows": []}
         # What its runtime can run: the stand-in keeps no resident session.
         assert (profiles["claude-code/sonnet"]["roles"], profiles["si/sonnet"]["roles"]) == (
-            ["manager", "planner", "worker", "reviewer"], ["worker", "reviewer"])
+            ["manager", "planner", "worker", "reviewer", "processor"], ["worker", "reviewer"])
         # A profile's own answer has it too.
         changed = (await _ok("PUT", f"/api/agent-profiles/{one_off}", {"effort": "high"}))["profile"]
         assert changed["used_by"] == profiles["si/sonnet"]["used_by"]

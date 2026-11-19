@@ -20,7 +20,8 @@ _RUN = _object({
     ["agent_id", "role", "task_id", "task_name", "project_id", "project_name", "step", "instruction", "state", "elapsed_seconds"])
 _RATE = {kind: _INT for kind in ("total", "input", "output", "cache_read", "cache_creation")}
 _PROCESS = _object({
-    "agent_id": _STR, "role": {"type": "string", "enum": ["manager", "planner", "worker", "reviewer", "consult"]},
+    "agent_id": _STR, "role": {"type": "string", "enum": ["manager", "planner", "worker", "reviewer", "consult",
+                                                      "processor"]},
     "name": _NULL_STR, "task_id": _NULL_STR, "task_name": _NULL_STR, "project_id": _NULL_STR, "project_name": _NULL_STR,
     "step": _NULL_STR, "instruction": _NULL_STR, "task_role": _TASK_ROLE, "runtime": _NULL_STR, "model": _NULL_STR,
     "pid": {"type": ["integer", "null"]}, "state": {"type": "string", "enum": ["running", "waiting"]},

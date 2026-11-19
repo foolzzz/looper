@@ -262,7 +262,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 profile = next(p for p in self.profiles if p["profile_id"] == body["profile_id"])
                 chosen = profile_registry.ResolvedAgentProfile(profile["profile_id"], profile["name"], self.runtime,
                     profile["model_id"], resolved_model=self.models[profile["model_id"]])
-                profile_registry.check_roles(chosen, [role.value for role in agent_settings.AgentType])
+                profile_registry.check_roles(chosen, [role.value for role in agent_settings.TOOL_ROLES])
                 self.layers[agent_settings.Layer.SYSTEM, None] = agent_settings.LayerValues(profile=chosen)
                 return {"status": "ok", "result": {}}
             if path.startswith("/api/v1/runs/") or path in {"/api/v1/tasks/page", "/api/v1/tasks/detail"}:

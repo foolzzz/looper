@@ -33,7 +33,8 @@ def test_builtin_value_per_role(role: AgentType | None, expected: SystemPromptMo
     assert resolve(role, {}).system_prompt_mode is expected
 
 
-@pytest.mark.parametrize("role", list(AgentType))
+# The processor always replaces (tests/test_processor.py).
+@pytest.mark.parametrize("role", [role for role in AgentType if role is not AgentType.PROCESSOR])
 @pytest.mark.parametrize("mode", [APPEND, REPLACE])
 def test_role_layer_overrides_the_builtin_value(role: AgentType, mode: SystemPromptMode) -> None:
     assert resolve(role, _layers(role, mode)).system_prompt_mode is mode
