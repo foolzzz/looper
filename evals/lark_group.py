@@ -1,0 +1,260 @@
+"""Real-path check of what a Lark group chat and a direct chat see of a task they ask for: a disposable
+``looper serve`` with the lark-cli stand-in (``tests/lark_cli_stand_in.py``) first on PATH and its Lark channel
+configured, a task created, started and run to its end in each conversation.
+
+Run from a checkout's root (it needs a disposable PostgreSQL server and Claude Code; it costs money)::
+
+    uv run --extra test python -m evals.lark_group [--model sonnet] [--reps 2] [--claude PATH]
+        [--manager-model opus --manager-effort xhigh] [--pg-url URL] [--port N] [--baseline RUN.json]
+
+To measure a checkout without this module (the baseline), run this file with that checkout's interpreter and
+``--checkout``, as ``evals/lark_quote.py`` says.
+
+Each conversation is two messages: one asking for a small task and confirming it (the Manager creates it ready),
+then one starting it. A group must see the Manager's answers with only the question whether to start (never the
+task's configuration, and no project directory in any answer), no breakdown or progress, and the end notice; a
+direct chat sees the configuration, the progress and the notice, as before. The stand-in's ``event consume``
+delivers the conversation's messages so far each time it starts; every answer goes to the stand-in's log, never
+to Lark. Each conversation and rep has its own database, server and runtime root. The JSON goes to
+``evals/runs/`` (ignored by git), without the posts' text when ``--no-text`` is given.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import importlib.util
+import json
+import os
+import shlex
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+HERE = Path(__file__).resolve().parents[1]
+SCHEMA = "looper-lark-group/v1"
+PROJECT = "eval-group"
+ASK = (f"在 {PROJECT} 项目里建一个任务：在工作目录里创建 done.txt，内容是 done。目录用项目默认的。"
+       "不用再问我，我确认创建，先不要开始。")
+START = "开始这个任务。"
+# Lines only Looper's configuration block has (``projects.configuration_block``), and the start questions
+# (``ops.tasks``); the Manager's own words may well say 「目录」.
+CONFIGURATION = ("Ready — not started", "任务已创建：\n", "- Planner：", "- 评审：", "- 每个任务的花费上限：",
+                 "- 并发：这个任务同时最多运行")
+START_QUESTION = "现在开始吗？回复「开始」就会启动"
+GROUP_START_QUESTION = "现在开始吗？@我回复「开始」就会启动。"
+PROGRESS = ("任务已分解", "进度更新")
+NOTICE = ("✅ 任务完成 · ", "❌ 任务失败 · ")
+CHATS = {"group": "oc_group", "direct": "oc_dm"}
+
+
+def _calls(log: Path) -> list[list[str]]:
+    rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return [argv[2:] if argv[:1] == ["--profile"] else argv for argv in rows]
+
+
+def _posts(calls: list[list[str]]) -> list[dict[str, str]]:
+    """What the bot posted, in order: each answer, progress message and notice (status lines and edits left out)."""
+    posts = []
+    for argv in calls:
+        if "+messages-reply" not in argv and "+messages-send" not in argv:
+            continue
+        flag = "--markdown" if "--markdown" in argv else "--text"
+        body = argv[argv.index(flag) + 1]
+        if flag == "--text" and body.startswith("⏳"):
+            continue
+        kind = ("notice" if any(head in body for head in NOTICE) else
+                "progress" if body.startswith(PROGRESS) else "answer")
+        to = (f"reply:{argv[argv.index('--message-id') + 1]}" if "--message-id" in argv else
+              f"chat:{argv[argv.index('--chat-id') + 1]}" if "--chat-id" in argv else
+              f"user:{argv[argv.index('--user-id') + 1]}")
+        posts.append({"kind": kind, "to": to, "text": body})
+    return posts
+
+
+def score(conversation: str, posts: list[dict[str, str]], work_dir: str, status: str | None) -> dict[str, Any]:
+    """The checks of one conversation's run (what its chat was sent, and how the task ended)."""
+    answers = [p["text"] for p in posts if p["kind"] == "answer"]
+    first = answers[0] if answers else ""
+    checks = {
+        "configuration_shown": any(word in answer for answer in answers for word in CONFIGURATION),
+        "start_question": (GROUP_START_QUESTION if conversation == "group" else START_QUESTION) in first,
+        "work_dir_in_answers": any(work_dir in answer for answer in answers),
+        "progress_posts": sum(p["kind"] == "progress" for p in posts),
+        "notice_last": bool(posts) and posts[-1]["kind"] == "notice",
+        "task_status": status,
+    }
+    if conversation == "group":
+        passed = (not checks["configuration_shown"] and checks["start_question"] and not checks["work_dir_in_answers"]
+                  and checks["progress_posts"] == 0)
+    else:
+        passed = checks["configuration_shown"] and checks["start_question"] and checks["progress_posts"] > 0
+    return {**checks, "passed": passed and checks["notice_last"] and status == "completed"}
+
+
+def _event(stand_in: Any, conversation: str, message_id: str, text: str) -> dict[str, Any]:
+    group = conversation == "group"
+    return {"type": "im.message.receive_v1", "chat_id": CHATS[conversation], "chat_type": "group" if group else "p2p",
+            "message_id": message_id, "message_type": "text", "sender_type": "user", "sender_id": stand_in.OPEN_ID,
+            "content": f"@HelperBot {text}" if group else text, "mentions": [stand_in.BOT_MENTION] if group else []}
+
+
+def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: str) -> dict[str, Any]:
+    import asyncpg
+    from evals.prompt_regression import runner
+    from looper.agents.serve import seed_channel_configs
+    from looper.db import connection
+
+    runtime, bin_dir, work = root / "runtime", root / "bin", root / "work"
+    for path in (runtime, bin_dir, work):
+        path.mkdir(parents=True)
+    log, world_file = root / "lark-cli.jsonl", root / "world.json"
+    world = {**stand_in.WORLD, "events": []}
+    world_file.write_text(json.dumps(world), encoding="utf-8")
+    script = bin_dir / "lark-cli.py"
+    script.write_text(stand_in._STAND_IN.format(log=str(log), world=str(world_file), bot=stand_in.BOT_OPEN_ID))
+    (bin_dir / "lark-cli").write_text(f"#!/bin/sh\nexec {shlex.join([sys.executable, str(script)])} \"$@\"\n")
+    (bin_dir / "lark-cli").chmod(0o755)
+    runner.install_claude(bin_dir, mode="real", real_claude=args.claude, max_budget_usd=args.max_budget_usd)
+    with runner.fresh_database(args.pg_url) as (database_url, _):
+        async def seed() -> None:
+            pool = await asyncpg.create_pool(database_url, min_size=1, max_size=2)
+            try:
+                await connection.ensure_schema(pool)
+                await seed_channel_configs(pool)
+                await pool.execute("UPDATE channel_configs SET enabled=TRUE, config=$1::jsonb "
+                                   "WHERE channel_id='channel-lark'", json.dumps({
+                                       "profile": "cli_main", "allowed_open_ids": [stand_in.OPEN_ID],
+                                       "allowlist_app_id": "cli_main"}))
+            finally:
+                await pool.close()
+
+        async def state() -> dict[str, Any]:
+            conn = await asyncpg.connect(database_url)
+            try:
+                # Whatever columns the checkout's tasks table has (a baseline has no chat_group).
+                row = await conn.fetchval("SELECT to_jsonb(t)::text FROM tasks t ORDER BY created_at DESC LIMIT 1")
+                return {"tasks": await conn.fetchval("SELECT count(*) FROM tasks"),
+                        "task": json.loads(row) if row is not None else None,
+                        "cost_usd": float(await conn.fetchval("SELECT coalesce(sum(cost_usd), 0) FROM llm_records"))}
+            finally:
+                await conn.close()
+
+        def wait(condition: Any, seconds: float) -> bool:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if condition():
+                    return True
+                time.sleep(2)
+            return False
+
+        asyncio.run(seed())
+        if args.port:
+            runner.free_port = lambda: args.port
+        started = time.monotonic()
+        with runner.running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir,
+                                   log_path=root / "serve.log") as api:
+            runner.select_agent(api, agent=None, model=args.model)
+            if args.manager_model:
+                from evals.prompt_regression.dialogs import _manager_profile
+                _manager_profile(api, args.manager_model, args.manager_effort)
+            api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work)})
+            events = [_event(stand_in, conversation, "om_g1", ASK)]
+            world_file.write_text(json.dumps({**world, "events": events}), encoding="utf-8")
+            answered = wait(lambda: asyncio.run(state())["tasks"] > 0
+                            and any(p["kind"] == "answer" for p in _posts(_calls(log))), args.timeout / 3)
+            if answered:
+                time.sleep(3)  # the answer's last edit
+                events.append(_event(stand_in, conversation, "om_g2", START))
+                world_file.write_text(json.dumps({**world, "events": events}), encoding="utf-8")
+                wait(lambda: (asyncio.run(state())["task"] or {}).get("status") in ("completed", "failed", "cancelled")
+                     and any(p["kind"] == "notice" for p in _posts(_calls(log))), args.timeout)
+            time.sleep(3)
+        final = asyncio.run(state())
+    posts = _posts(_calls(log))
+    task = final["task"] or {}
+    result = {"conversation": conversation, **score(conversation, posts, str(work), task.get("status")),
+              "chat_group": task.get("chat_group"), "seconds": round(time.monotonic() - started, 1),
+              "cost_usd": final["cost_usd"], "posts": [{k: v for k, v in p.items() if k != "text" or not args.no_text}
+                                                       for p in posts]}
+    return result
+
+
+def table(run: dict[str, Any], base: dict[str, Any] | None) -> str:
+    columns = ("passed", "configuration_shown", "start_question", "work_dir_in_answers", "progress_posts",
+               "notice_last")
+
+    def cell(data: dict[str, Any], conversation: str, column: str) -> str:
+        reps = [rep for rep in data["reps"] if rep["conversation"] == conversation]
+        values = [rep[column] for rep in reps]
+        if column == "progress_posts":
+            return "/".join(str(value) for value in values)
+        return f"{sum(bool(value) for value in values)}/{len(values)}"
+
+    head = "| conversation | " + " | ".join(columns) + " |\n|---|" + "---|" * len(columns)
+    lines = [head]
+    for conversation in CHATS:
+        lines.append(f"| {conversation} (this run) | " + " | ".join(cell(run, conversation, c) for c in columns) + " |")
+        if base:
+            lines.append(f"| {conversation} (base) | " + " | ".join(cell(base, conversation, c) for c in columns)
+                         + " |")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--checkout", help="run this checkout's server (the baseline); default this one")
+    parser.add_argument("--model", default="sonnet")
+    parser.add_argument("--manager-model")
+    parser.add_argument("--manager-effort")
+    parser.add_argument("--reps", type=int, default=1)
+    parser.add_argument("--conversations", default="group,direct", help="comma-separated: group, direct")
+    parser.add_argument("--max-budget-usd", type=float, default=2.0, help="each Claude Code run's cap")
+    parser.add_argument("--claude", default=shutil.which("claude"), help="the Claude Code binary")
+    parser.add_argument("--timeout", type=float, default=900, help="seconds a conversation waits for its task's end")
+    parser.add_argument("--pg-url", default=os.environ.get("LOOPER_EVAL_DATABASE_URL"))
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--no-text", action="store_true", help="leave the posts' text out of the JSON")
+    parser.add_argument("--out", help="the run's JSON; default evals/runs/<time>-lark-group.json")
+    parser.add_argument("--baseline", help="a run's JSON to compare with")
+    args = parser.parse_args()
+    if not args.pg_url:
+        parser.error("give --pg-url or LOOPER_EVAL_DATABASE_URL (a disposable PostgreSQL server)")
+    if args.port == 8767:
+        parser.error("8767 is the operator's port")
+    conversations = [c for c in args.conversations.split(",") if c]
+    if not conversations or set(conversations) - CHATS.keys():
+        parser.error(f"--conversations: choose from {', '.join(CHATS)}")
+    if args.checkout:
+        sys.path.insert(0, str(Path(args.checkout).resolve()))
+    sys.path.insert(1, str(HERE / "tests"))
+    spec = importlib.util.spec_from_file_location("lark_cli_stand_in", HERE / "tests" / "lark_cli_stand_in.py")
+    stand_in = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(stand_in)
+    checkout = Path(args.checkout).resolve() if args.checkout else HERE
+    reps = []
+    for rep in range(1, args.reps + 1):
+        for conversation in conversations:
+            with tempfile.TemporaryDirectory(prefix="looper-lark-group-") as tmp:
+                reps.append({"rep": rep, **run_once(args, stand_in, Path(tmp), conversation)})
+            print(f"rep {rep} {conversation}: " + json.dumps({k: v for k, v in reps[-1].items() if k != "posts"},
+                                                             ensure_ascii=False), flush=True)
+    import subprocess
+    commit = subprocess.run(["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"], capture_output=True,
+                            text=True).stdout.strip()
+    run = {"schema": SCHEMA, "commit": commit, "model": args.model, "manager_model": args.manager_model,
+           "manager_effort": args.manager_effort, "reps": reps}
+    out = Path(args.out) if args.out else HERE / "evals" / "runs" / time.strftime("%Y%m%d-%H%M%S-lark-group.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    base = json.loads(Path(args.baseline).read_text(encoding="utf-8")) if args.baseline else None
+    print(f"Run written to {out}\n\n" + table(run, base))
+    return 0 if all(rep["passed"] for rep in reps) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

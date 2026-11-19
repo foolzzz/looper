@@ -201,6 +201,7 @@ async def create_task(
     chat_id: str | None = None,
     chat_kind: str | None = None,
     chat_mention: str | None = None,
+    chat_group: bool = False,
     original_user_text: str | None = None,
     title: str | None = None,
     schedule_id: str | None = None,
@@ -221,10 +222,10 @@ async def create_task(
     ``workspace_dir`` is the directory the user named for it (``work_dir`` until the task first starts), and
     ``workspace_mode`` and ``workspace_base`` how it runs there (``agents.task_workspaces``).
 
-    ``chat_id``, ``chat_kind`` and ``chat_mention`` are who to tell when the task ends (``agents.task_notice``): a
-    Telegram chat, a Lark sender's open_id, or a Lark group and the sender to @-mention there; None for a task that
-    did not come from either. ``original_user_text`` is the user's message the
-    Manager's task JSON answered (kept as history); ``title`` the few words the Manager names the task with.
+    ``chat_id``, ``chat_kind``, ``chat_mention`` and ``chat_group`` are who to tell when the task ends
+    (``agents.task_notice``): a Telegram chat, a Lark sender's open_id, or a Lark group and the sender to @-mention
+    there, ``chat_group`` saying the chat is a group chat; None for a task that did not come from either.
+    ``original_user_text`` is the user's message the Manager's task JSON answered (kept as history); ``title`` the few words the Manager names the task with.
     ``manager_id`` is the Manager the task belongs to, ``template`` what the task template it came from said then.
     ``origin_thread`` is the web chat thread it was asked in (None for a task from anywhere else), ``client_id``
     the API client it came through (None for none).
@@ -239,9 +240,9 @@ async def create_task(
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
                            workspace_dir, workspace_mode, workspace_base, manager_id, template, origin_thread,
-                           client_id, origin_reply_route, workflow)
+                           client_id, origin_reply_route, workflow, chat_group)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22::jsonb, $23, $24, $25::jsonb, $26::jsonb)
+                $21, $22::jsonb, $23, $24, $25::jsonb, $26::jsonb, $27)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
@@ -250,7 +251,7 @@ async def create_task(
         manager_id, json.dumps(dict(template)) if template is not None else None,
         origin_thread or None, client_id,
         json.dumps(dict(origin_reply_route)) if origin_reply_route is not None else None,
-        json.dumps(dict(workflow)) if workflow is not None else None,
+        json.dumps(dict(workflow)) if workflow is not None else None, chat_group,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 

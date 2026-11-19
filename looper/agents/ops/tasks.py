@@ -3,7 +3,8 @@
 Each tool calls the code the dashboard's API calls (``projects``, the
 TaskRouter's messages, ``db.task_changes``), so the two check alike. A task
 the Manager creates is ready, not started; Looper adds its configuration and
-the question whether to start it to the Manager's reply. A new project, and
+the question whether to start it to the Manager's reply (in a group chat only
+the question: the configuration is the operator's). A new project, and
 cancelling a task, are ``high``: the user confirms them first.
 """
 
@@ -46,6 +47,9 @@ TASKS_LISTED = 20
 TASKS_SEARCHED = 200
 # The existing projects a new-project confirmation offers instead.
 PROJECTS_OFFERED = 10
+# What a group chat is shown of a new task instead of its configuration: a member answers by @-mentioning the bot
+# (a Lark group hands over nothing else), and the dashboard's Tasks page is the operator's.
+GROUP_START_QUESTION = "现在开始吗？@我回复「开始」就会启动。"
 # The statuses a task can be run again from: "restart" goes on from its saved plan, as Start on the Tasks page does;
 # "start_over" plans it anew.
 RESTARTABLE = db_tasks.RESTARTABLE_STATUSES
@@ -418,7 +422,7 @@ async def _create(call: Call) -> dict[str, Any]:
             template_name=template.name if template is not None else None,
             lock_manager=True, named=placement.named, visible_to=call.scope.tasks.manager_id,
             task_filter=call.scope.tasks,
-            show_configuration=True, template_display=used)
+            show_configuration=not turn.group, template_display=used)
     except ProjectNameTaken:
         raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "
                                           "it") from None
@@ -426,15 +430,22 @@ async def _create(call: Call) -> dict[str, Any]:
         raise _request_error(exc) from None
     task_id, shown = result["task_id"], result["name"]
     project, created = result["project"], result["project_created"]
-    block = result["configuration"]
-    if fallbacks:
-        block = block.replace(f"\n\n{START_QUESTION}", f"\n- 模板角色回退：{clip('；'.join(fallbacks), 1000)}\n\n{START_QUESTION}")
+    if turn.group:
+        block = GROUP_START_QUESTION
+        told = ("In this group chat Looper adds only the question whether to start it now after your reply, not the "
+                "task's configuration; do not repeat the question or list the configuration.")
+    else:
+        block = result["configuration"]
+        if fallbacks:
+            block = block.replace(f"\n\n{START_QUESTION}",
+                                  f"\n- 模板角色回退：{clip('；'.join(fallbacks), 1000)}\n\n{START_QUESTION}")
+        told = ("Looper adds the task's configuration and the question whether to start it now after your reply; "
+                "do not repeat them.")
     turn.blocks.append(block)
     turn.created_task_blocks[task_id] = block
     return {"task_id": task_id, "name": shown, "status": "ready", "project": project["name"],
             "project_created": created, "work_dir": result["work_dir"], "workspace_mode": result["workspace"]["mode"],
-            "shown_to_user": "Looper adds the task's configuration and the question whether to start it now after "
-                             "your reply; do not repeat them."}
+            "shown_to_user": told}
 
 
 async def _profile_choices(raw: Any, *, clearing: bool) -> dict[str, str | None]:
@@ -496,8 +507,12 @@ async def _control(call: Call) -> dict[str, Any]:
             raise _request_error(exc) from None
         # TaskRouter may not have consumed the start yet; the successful request is enough to stop asking.
         if block := call.turn.created_task_blocks.pop(task_id, None):
-            configuration = block.partition("\n")[2].removesuffix(f"\n\n{START_QUESTION}")
-            call.turn.blocks[call.turn.blocks.index(block)] = f"任务已创建：\n{configuration}"
+            index = call.turn.blocks.index(block)
+            if call.turn.group:  # only the question was shown
+                del call.turn.blocks[index]
+            else:
+                configuration = block.partition("\n")[2].removesuffix(f"\n\n{START_QUESTION}")
+                call.turn.blocks[index] = f"任务已创建：\n{configuration}"
         return {"task_id": task_id, "started": True}
     try:
         await control_task(task_id, action, call.platform.bus, call.manager_address)
