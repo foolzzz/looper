@@ -34,9 +34,18 @@ const PROFILE = {
 const STATE = { values: VALUES, effective: EFFECTIVE };
 const ROLES = { manager: STATE, planner: STATE, worker: STATE, reviewer: STATE, processor: STATE };
 
+const posted: { url: string; body: unknown }[] = [];
+
 function serve() {
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+  posted.length = 0;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (init?.body) posted.push({ url, body: JSON.parse(String(init.body)) });
+    const managed = { source: "/managed/settings.json", events: ["UserPromptSubmit"], readable: true };
+    if (url.startsWith("/api/v1/processor_settings/")) {
+      const refuse = url.endsWith("/update") ? (JSON.parse(String(init?.body)).refuse_with_managed_hooks ?? false) : false;
+      return Response.json({ status: "ok", result: { refuse_with_managed_hooks: refuse, managed_hooks: managed } });
+    }
     const result = url === "/api/v1/registry/view" ? { profiles: [PROFILE], runtime_types: [], runtimes: [], providers: [], models: [] }
       : url === "/api/v1/allowed_profiles/get" ? { profiles: [], choosable: [] }
       : url.endsWith("/roles/list") ? { configs: [
@@ -71,6 +80,22 @@ describe("the processor's settings", () => {
       expect(panel.querySelector("[id$='-harness']")).toBeNull();
       expect(panel.querySelector("[id$='-prompt-mode']")).toBeNull();  // it always replaces the runtime's prompt
       if (view === "roles") expect(panel.textContent).toContain("No tools");
+    } finally {
+      done();
+    }
+  });
+
+  it("name the machine's managed hooks and can refuse to run while they are present", async () => {
+    serve();
+    const { container, done } = await rendered(<RolesSection sub="processor" />);
+    try {
+      const panel = container.querySelector("#roles-processor-panel")!;
+      expect(panel.textContent).toContain("UserPromptSubmit");
+      const toggle = panel.querySelector<HTMLButtonElement>("[role='switch'][aria-label^='Refuse']")!;
+      expect(toggle.getAttribute("aria-checked")).toBe("false");
+      await act(async () => toggle.click());
+      expect(posted.at(-1)).toEqual({ url: "/api/v1/processor_settings/update", body: { refuse_with_managed_hooks: true } });
+      expect(toggle.getAttribute("aria-checked")).toBe("true");
     } finally {
       done();
     }

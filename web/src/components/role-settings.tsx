@@ -8,8 +8,10 @@ import { CollapsibleRow } from "@/components/collapsible-row";
 import { LayerSettingsForm } from "@/components/layer-settings";
 import {
   fetchAgentSettings,
+  fetchProcessorSettings,
   fetchRoleConfigs,
   resetRolePrompt,
+  updateProcessorSettings,
   updateRoleConfig,
   updateRoleSettings,
   updateSystemSettings,
@@ -17,6 +19,7 @@ import {
   type AgentRole,
   type AgentSettings,
   type EffectiveSettings,
+  type ProcessorSettings,
   type RoleConfig,
   type Registry,
 } from "@/lib/api";
@@ -75,6 +78,46 @@ function RolePromptEditor({ id, value, onChange, processor }: {
         className="w-full resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         placeholder="What this kind of agent is responsible for..."
       />
+    </div>
+  );
+}
+
+// --- The processor and the machine's managed hooks ---
+
+/** The hooks the machine's administrator set for the processor's runtime, which no launch turns off, and the switch
+ * that refuses processor runs while they are present (saved at once). */
+function ManagedHooks() {
+  const [settings, setSettings] = useState<ProcessorSettings | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    fetchProcessorSettings().then(setSettings, (e: Error) => setError(e.message));
+  }, []);
+  const change = async (refuse: boolean) => {
+    setError("");
+    try {
+      setSettings(await updateProcessorSettings({ refuse_with_managed_hooks: refuse }));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  if (error) return <p role="alert" className="text-[11px] text-destructive">{error}</p>;
+  if (!settings) return null;
+  const hooks = settings.managed_hooks;
+  return (
+    <div className="space-y-2 rounded-md border border-border px-4 py-3">
+      <p className="text-[11px] text-muted-foreground">
+        {hooks
+          ? `This machine's managed hooks (${hooks.readable ? hooks.events.join(", ") : "unreadable"}, set in ${hooks.source}) run in every processor run and see the messages it processes; no setting here turns them off.`
+          : "This machine has no managed hooks for the processor's runtime."}
+      </p>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm">Refuse to run while managed hooks are present</span>
+        <Switch
+          checked={settings.refuse_with_managed_hooks}
+          onChange={change}
+          label="Refuse to run while managed hooks are present"
+        />
+      </div>
     </div>
   );
 }
@@ -160,6 +203,7 @@ function RoleConfigForm({
             It reads messages other people wrote and can only reply. Its Agent Profile needs a runtime that can run
             without tools.
           </p>
+          <ManagedHooks />
         </div>
       ) : (
         <div className="space-y-1">

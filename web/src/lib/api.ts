@@ -552,6 +552,25 @@ export async function updateChatSettings(body: { stop_enabled: boolean | null })
   return result;
 }
 
+/** The processor's system setting, and the hooks the machine's administrator set for its runtime (they run in every
+ * processor run and see the messages it processes; null for none). */
+export interface ProcessorSettings {
+  refuse_with_managed_hooks: boolean;
+  managed_hooks: { source: string; events: string[]; readable: boolean } | null;
+}
+
+export async function fetchProcessorSettings(): Promise<ProcessorSettings> {
+  const result = await callV1<ProcessorSettings>("/api/v1/processor_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateProcessorSettings(body: { refuse_with_managed_hooks: boolean | null }): Promise<ProcessorSettings> {
+  const result = await callV1<ProcessorSettings>("/api/v1/processor_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 /** The Manager's running turn that answers this web chat, or null when none is running. */
 export async function fetchChatTurn(sessionId: string): Promise<ChatTurn | null> {
   const result = await callV1<{ turn: ChatTurn | null }>("/api/v1/operator_chat/turn", { session_id: sessionId });
