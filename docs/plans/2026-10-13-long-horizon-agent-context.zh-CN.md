@@ -556,6 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-19 | 测试泄漏与整套测试卡住（#1420，本分支未合入，只改测试）：卡住的根因是 macOS + Python 3.14 下 asyncio 的子进程监视线程把被 `SIGSTOP` 的子进程当成已退出，事件循环随后在 `waitpid` 里永远阻塞，`test_an_unresponsive_keeper_and_its_child_are_ended` 因此卡死（Linux CI 不受影响）；keeper 测试改用轮询的 `PollingProcess`。keeper 进程组在 fixture 收尾时无论成败都被 SIGKILL，并登记到临时目录，下一次 pytest 启动时清掉已死会话遗留的 keeper；launchd 升级测试需要 `LOOPER_TEST_LAUNCHD=1` 才运行，job 在收尾里卸载，启动时清掉 plist 已不存在的 `com.looper.test-upgrade-*`。 |
 | 2026-11-19 | 群聊收尾（#1412，本分支未合入）：等待超时和规划者调整并发这两条直接发 `CHAT_NOTICE` 的路径检查 `NotifyTarget.group`，群聊任务不再发进群，等待的通知记为 `dashboard`、并发调整只记日志（`user_told` 为 false）；群聊回合里修改定时任务只附一行（改了哪些设置的名称和是否启用，不带取值），`shown_to_user` 同步说明，启用、立即运行、提高花费上限、修改已启用命令的确认各只有一句问话，不带需求、命令、目录、环境和预算。私聊和控制台不变。真实模式（`evals/lark_group.py --conversations group-schedule`，群里先建定时任务再改时间）：sonnet 分支 2/2、main 0/2，opus xhigh 管家分支 1/1、main 0/1（main 的回答带改前改后的取值和接下来 3 次触发时间）。 |
 | 2026-11-18 | 消息流与订阅的 RFC（[RFC](../architecture/rfcs/message-stream-v0.zh-CN.md)，本分支未合入，只改文档）：Looper 自己保存飞书消息原文、订阅作为 `kind: subscription` 的定时任务、新 `processor` 角色不带工具；确认 D1–D10，唯一的修改是吃瓜订阅不做影子运行；第 5 节队列新增第 25 项，列出 P0–P7。 |
 | 2026-11-18 | 群聊里的任务结束通知（本分支未合入）：任务记录新增类型化的 `tasks.chat_group`（来自回合的 `group`，Lark 群与 Telegram 群都记；旧任务按直聊读），`NotifyTarget.group` 随通知载荷传到渠道。群聊的结束通知带完整的总结或结案说明，不再只取首段 300 字；超过 4,000 字按行边界拆成多条按序发送（代码块被切开时关闭并在下一条重开，首条保留标题行和 Lark 的 @），某一条发送失败即停止、不重发已发的部分。任务链接只在仪表盘地址是公开的（`server.public_url` 已配置，类型化的 `DashboardUrl.public`）才附，否则群里没有链接；等待超时、Planner 并发调整、gate 卡片走同一个 `task_link_line`。直聊与仪表盘不变；定时任务消息没有群的类型化事实，本次不动。 |

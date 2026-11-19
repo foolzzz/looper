@@ -33,6 +33,11 @@ disposable database; they create and drop their own schemas. CI runs the same
 command against a PostgreSQL service on every pull request. Which tests a
 change needs is described in section 1 of the development plan.
 
+`tests/test_upgrade_kept_runs_serve_db.py` registers a job in your real
+per-user launchd domain, so it runs only with `LOOPER_TEST_LAUNCHD=1`. Tests
+that start keeper processes record them, and the next pytest session reaps
+what an aborted run left behind (`tests/leak_guard.py`).
+
 The dashboard's tests (`web/src/**/*.test.tsx`, run by Vitest) render
 components without a browser; run them with `cd web && npm test`. CI runs
 them on every pull request too.
