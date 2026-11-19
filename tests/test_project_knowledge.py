@@ -527,17 +527,21 @@ class TestLoad:
         async def run() -> None:
             gaps = []
             finished = asyncio.Event()
+            warm = asyncio.Event()
 
             async def tick() -> None:
                 previous = time.monotonic()
                 while not finished.is_set():
                     await asyncio.sleep(0.01)
                     now = time.monotonic()
-                    gaps.append(now - previous)
+                    # The first wake-up is task start-up, not the code under test: measure from the second.
+                    if warm.is_set():
+                        gaps.append(now - previous)
+                    warm.set()
                     previous = now
 
             ticker = asyncio.create_task(tick())
-            await asyncio.sleep(0)
+            await warm.wait()
             try:
                 loaded = await load_knowledge(tmp_path, project, str(tmp_path))
                 assert loaded.error is None and loaded.documents == 1

@@ -83,17 +83,21 @@ def test_slow_dsh_catalog_validation_keeps_loop_ticking(agent_db, tmp_path, monk
     async def check():
         gaps = []
         done = asyncio.Event()
+        warm = asyncio.Event()
 
         async def ticker():
             previous = time.monotonic()
             while not done.is_set():
                 await asyncio.sleep(0.01)
                 now = time.monotonic()
-                gaps.append(now - previous)
+                # The first wake-up is task start-up, not the code under test: measure from the second.
+                if warm.is_set():
+                    gaps.append(now - previous)
+                warm.set()
                 previous = now
 
         ticking = asyncio.create_task(ticker())
-        await asyncio.sleep(0)
+        await warm.wait()
         try:
             await exercise()
         finally:
