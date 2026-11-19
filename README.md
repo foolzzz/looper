@@ -161,8 +161,9 @@ chmod 600 ~/.looper/ops/server.toml
 
 Then run `looper doctor`. It checks PostgreSQL, Claude Code and the other
 runtimes' logins, the enabled channels, `pg_dump` and git, and prints the fix
-for anything missing. It reports Claude Code as failed when it is not on
-`PATH`, even if your roles use another runtime.
+for anything missing. Like the other runtimes, Claude Code is checked only
+while an Agent Profile in use runs on it: before you choose another profile
+in Settings → Roles, every role runs the built-in Claude Code one.
 
 > **Upgrading an old install only.** An install that still sets the
 > database URL as a variable (`LOOPER_DATABASE_URL`, or the older

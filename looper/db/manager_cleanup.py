@@ -121,5 +121,6 @@ async def purge(manager_id: str, retention_days: int = 30, *,
         result["counts"]["manager_actions"] = await conn.fetchval(
             "WITH removed AS (DELETE FROM manager_actions WHERE manager_id = $1 RETURNING id) "
             "SELECT count(*) FROM removed", manager_id)
+        await conn.execute("DELETE FROM manager_events WHERE manager_id = $1", manager_id)
         result["purged"] = True
         return result

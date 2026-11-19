@@ -18,7 +18,7 @@ from lark_cli_stand_in import BOT_MENTION, BOT_OPEN_ID, OPEN_ID
 from lark_platform_fake import FakeLarkPlatform
 from looper.agents import chat_attachments
 from looper.agents.bus import MessageBus
-from looper.agents.channels import lark, lark_quote, lark_transport
+from looper.agents.channels import lark, lark_cli, lark_quote, lark_transport
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.chat_routing import RouteAction, RouteDecision
 from looper.agents.channels.lark import LarkChannelAdapter
@@ -202,6 +202,37 @@ def _calls(log: Path) -> list[list[str]]:
 
 def _reads(log: Path) -> list[list[str]]:
     return [argv for argv in _calls(log) if argv[:2] == ["api", "GET"] or "+messages-mget" in argv]
+
+
+class _Launch:
+    """One lark-cli call as Looper started it: its arguments, its process, and whether every call started before it
+    was still running then."""
+
+    def __init__(self, argv: list[str], process: Any, overlapped: bool) -> None:
+        self.argv, self.process, self.overlapped = argv, process, overlapped
+
+    @property
+    def read(self) -> str:
+        """A read's path (``api GET``) or shortcut (``+messages-mget``), as ``_reads`` names it."""
+        return self.argv[2] if self.argv[0] == "api" else self.argv[1]
+
+
+@pytest.fixture
+def launched(monkeypatch: pytest.MonkeyPatch) -> list[_Launch]:
+    """Every lark-cli call Looper starts, recorded as it starts it. The stand-in's own log has a call only once the
+    call's interpreter runs, which a call killed at once never reaches: a single read that lost to the batch read, or
+    ran out of its first-try time, on a loaded machine."""
+    calls: list[_Launch] = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def recording(program: str, *args: str, **kwargs: Any) -> Any:
+        overlapped = all(call.process.returncode is None for call in calls)
+        process = await spawn(program, *args, **kwargs)
+        calls.append(_Launch(list(args), process, overlapped))
+        return process
+
+    monkeypatch.setattr(lark_cli.asyncio, "create_subprocess_exec", recording)
+    return calls
 
 
 def _cli_adapter(tmp_path: Path) -> LarkChannelAdapter:
@@ -395,7 +426,7 @@ def _thread_reply() -> QuoteRef:
 
 
 def test_a_reply_to_a_threads_first_message_reads_it_once_with_the_latest_replies(
-    tmp_path: Path, lark_cli_stand_in: Path,
+    tmp_path: Path, lark_cli_stand_in: Path, launched: list[_Launch],
 ) -> None:
     root = _item("om_root", content="start")
     replies = [_item(f"om_r{n}", content=f"reply {n}") for n in range(12, 0, -1)]  # newest first
@@ -404,7 +435,7 @@ def test_a_reply_to_a_threads_first_message_reads_it_once_with_the_latest_replie
     assert (thread.kind, thread.message_id, thread.messages) == (QuoteKind.THREAD, "om_root", lark_quote.THREAD_TAIL)
     assert _bodies(thread) == ["start", *(f"reply {n}" for n in range(3, 13))]  # not the message itself
     assert all(line.startswith("  [") for line in thread.lines[1:])
-    assert [argv[2] for argv in _reads(lark_cli_stand_in)].count("/open-apis/im/v1/messages/om_root") == 1
+    assert [call.read for call in launched].count("/open-apis/im/v1/messages/om_root") == 1
 
 
 @pytest.mark.parametrize("listing", ["only the message and the first", "fails"])
@@ -435,20 +466,25 @@ def test_a_reply_to_a_threads_first_message_with_no_other_reply_shown_reads_as_a
     ([], "rendered"),
 ])
 def test_a_message_read_takes_the_batch_read_only_for_a_message_on_its_own(
-    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch, batch: list[dict[str, Any]], said: str,
+    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch, launched: list[_Launch],
+    batch: list[dict[str, Any]], said: str,
 ) -> None:
-    monkeypatch.setattr(lark_transport, "READ_FIRST_SECONDS", 0.5)
+    # Both reads' first try: long enough for a lark-cli process to start on a loaded machine (the batch read has it
+    # too), shorter than the single read's 5 s here.
+    monkeypatch.setattr(lark_transport, "READ_FIRST_SECONDS", 2.0)
     _world(tmp_path, messages={"om_pslow": [_item("om_pslow", content="from the single read")]},
            batch={"om_pslow": batch},
            mget={"om_pslow": [{"message_id": "om_pslow", "msg_type": "text", "content": "rendered"}]})
     started = time.monotonic()
     (item,) = asyncio.run(lark_transport.CliTransport().get_message("om_pslow", timeout=15))
     assert said in (item["rendered"] if "rendered" in item else item["body"]["content"])
-    assert time.monotonic() - started < 3  # the single read (5 s here) was stopped, not waited for
-    reads = [argv[2] if argv[0] == "api" else argv[1] for argv in _reads(lark_cli_stand_in)]
-    assert reads[:2] in (["/open-apis/im/v1/messages/om_pslow", "/open-apis/im/v1/messages/mget"],
-                         ["/open-apis/im/v1/messages/mget", "/open-apis/im/v1/messages/om_pslow"])
-    assert reads[2:] == ([] if batch and said != "rendered" else ["+messages-mget"])
+    assert time.monotonic() - started < 5  # the single read (5 s here) was stopped, not waited for
+    # Both reads started together, the second while the first ran; the single read was killed, not waited for.
+    single, together = "/open-apis/im/v1/messages/om_pslow", "/open-apis/im/v1/messages/mget"
+    assert sorted(call.read for call in launched[:2]) == sorted([single, together])
+    assert all(call.overlapped for call in launched[:2])
+    assert next(call for call in launched if call.read == single).process.returncode < 0
+    assert [call.read for call in launched[2:]] == ([] if batch and said != "rendered" else ["+messages-mget"])
 
 
 def test_the_registry_reads_through_the_running_channel_the_reference_names(tmp_path: Path) -> None:

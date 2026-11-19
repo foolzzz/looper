@@ -154,6 +154,29 @@ def ends_task(status: str | None) -> bool:
     return isinstance(status, str) and status in db_tasks.PLANNER_END_STATUSES
 
 
+def web_end_text(status: str, title: str, summary: str, delivery_summary: str = "") -> str:
+    """What a web chat session is told when its task ended: the summary (clipped to 2,000 characters around a
+    marker that keeps its tail, the delivery summary appended once after it), or that the task was cancelled."""
+    if delivery_summary:
+        # The persisted result includes the appendix; append it once, outside the chat's result clip.
+        summary = summary.removesuffix("\n\n" + delivery_summary)
+    if len(summary) > 2000:
+        # Reserve marker space inside the existing budget, retaining the report's tail.
+        tail = summary[-600:]
+        marker = f'\n… ({len(summary)} characters omitted; full result on the task page)\n'
+        head_size = 2000 - len(tail) - len(marker)
+        omitted = len(summary) - head_size - len(tail)
+        marker = f'\n… ({omitted} characters omitted; full result on the task page)\n'
+        summary = summary[:head_size] + marker + tail
+    if delivery_summary:
+        summary += "\n\n" + delivery_summary
+    if status == "completed":
+        return f"任务「{title}」已完成：{summary}"
+    if status == "failed":
+        return f"任务「{title}」失败：{summary}"
+    return f"任务「{title}」已取消。"
+
+
 def lead(summary: str | None) -> str:
     """The start of a summary or closing note for a chat: its first section (up to the next heading: what was
     delivered, or why the task ended), its line breaks kept, at most ``LEAD_CHARS`` characters."""

@@ -72,7 +72,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import chat_attachments, chat_commands, chat_settings, gate_commands
+from .. import chat_attachments, chat_commands, chat_settings, completion_events, gate_commands
 from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
@@ -92,7 +92,7 @@ from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStop
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from ..ops import Turn
 from ..ops.service import tools_down_reply
-from ..task_notice import Notice, ends_task
+from ..task_notice import Notice, ends_task, web_end_text
 from ..message import (
     MANAGER_ADDRESS,
     AgentAddress,
@@ -1748,26 +1748,14 @@ class ManagerAgent:
             title = envelope.metadata.get("task_title") or ""
             summary = envelope.payload.get("summary") or ""
             delivery_summary = envelope.payload.get("delivery_summary") or ""
-            if delivery_summary:
-                # The persisted result includes the appendix; append it once, outside the chat's result clip.
-                summary = summary.removesuffix("\n\n" + delivery_summary)
-            if len(summary) > 2000:
-                # Reserve marker space inside the existing budget, retaining the report's tail.
-                tail = summary[-600:]
-                marker = f'\n… ({len(summary)} characters omitted; full result on the task page)\n'
-                head_size = 2000 - len(tail) - len(marker)
-                omitted = len(summary) - head_size - len(tail)
-                marker = f'\n… ({omitted} characters omitted; full result on the task page)\n'
-                summary = summary[:head_size] + marker + tail
-            if delivery_summary:
-                summary += "\n\n" + delivery_summary
-            if status == "completed":
-                text = f"任务「{title}」已完成：{summary}"
-            elif status == "failed":
-                text = f"任务「{title}」失败：{summary}"
-            else:
-                text = f"任务「{title}」已取消。"
+            text = web_end_text(status, title, summary, delivery_summary)
+            recorded = None
+            if ends_task(status):
+                recorded = await completion_events.record_web_end(self.agent_id, envelope, thread, text)
+            if recorded is not None and not recorded.send_fallback:
+                return  # a replay of an end that was already told
             await self._web_thread_reply(envelope, thread, text)
+            await completion_events.mark_sent(recorded)
         elif thread and (gate := envelope.payload.get("gate_opened")):
             text = gate_commands.web_notice(thread, envelope.payload['task_id'], gate,
                 name=envelope.metadata.get('task_title') or '', manager_id=self.agent_id, token=envelope.message_id)
@@ -1784,6 +1772,10 @@ class ManagerAgent:
         elif notice is not None:
             # A Telegram or Lark task's end goes to who it recorded, instead of its final summary, behind the
             # progress sent before it (``task_notice``).
+            recorded = await completion_events.record_notice_end(self.agent_id, envelope, notice) \
+                if ends_task(envelope.payload.get("status")) else None
+            if recorded is not None and not recorded.send_fallback:
+                return  # a replay of an end that was already told
             await self._bus.publish(MessageEnvelope.create(
                 source=self.agent_address,
                 target=channel_address(notice.channel.value, notice.channel_id),
@@ -1792,6 +1784,7 @@ class ManagerAgent:
                 correlation_id=envelope.correlation_id,
                 metadata={"origin_channel_id": origin},
             ))
+            await completion_events.mark_sent(recorded)
         elif origin and not _group_task(envelope):
             progress_text = envelope.payload.get("phase_text") or envelope.payload.get("summary", "")
             if progress_text:

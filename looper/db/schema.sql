@@ -1673,3 +1673,45 @@ DO $ledger$ BEGIN
     END IF;
 END $ledger$;
 -- ledger end
+-- Manager completion events (manager completion ledger RFC, C1): one row per task end that has a chat to tell.
+-- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
+-- manager events begin
+CREATE TABLE IF NOT EXISTS manager_events (
+    id              BIGSERIAL PRIMARY KEY,
+    manager_id      TEXT NOT NULL REFERENCES managers(id) ON DELETE RESTRICT,
+    kind            TEXT NOT NULL CHECK (kind IN ('task_end')),
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    origin          TEXT NOT NULL CHECK (origin IN ('chat', 'schedule')),
+    schedule_run_id TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
+    target_kind     TEXT NOT NULL CHECK (target_kind IN ('web', 'dm', 'group')),
+    channel_id      TEXT NOT NULL,
+    chat            TEXT NOT NULL,
+    session_key     TEXT,
+    dedupe_key      TEXT NOT NULL UNIQUE,
+    payload         JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    fallback        JSONB NOT NULL CHECK (jsonb_typeof(fallback) = 'array'),
+    state           TEXT NOT NULL CHECK (state IN ('pending', 'running', 'delivered', 'fallback', 'skipped')),
+    reason          TEXT CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', 'turn_timeout',
+                                           'turn_stopped', 'empty_reply', 'send_failed', 'queue_deadline',
+                                           'restart')),
+    batch           UUID,
+    record_id       BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    due_at          TIMESTAMPTZ,
+    started_at      TIMESTAMPTZ,
+    sent_at         TIMESTAMPTZ,
+    finished_at     TIMESTAMPTZ,
+    CONSTRAINT manager_events_reason CHECK ((state IN ('skipped', 'fallback')) = (reason IS NOT NULL)),
+    CONSTRAINT manager_events_turn_target CHECK (state NOT IN ('pending', 'running', 'delivered')
+                                                 OR target_kind IN ('web', 'dm')),
+    CONSTRAINT manager_events_batch CHECK (state NOT IN ('running', 'delivered') OR batch IS NOT NULL),
+    CONSTRAINT manager_events_due CHECK (state <> 'pending' OR due_at IS NOT NULL),
+    CONSTRAINT manager_events_schedule CHECK (origin = 'schedule' OR schedule_run_id IS NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_manager_events_open
+    ON manager_events (manager_id, channel_id, chat, id) WHERE state IN ('pending', 'running');
+CREATE INDEX IF NOT EXISTS idx_manager_events_task ON manager_events (task_id);
+CREATE INDEX IF NOT EXISTS idx_manager_events_created ON manager_events (created_at);
+CREATE INDEX IF NOT EXISTS idx_manager_events_schedule_run ON manager_events (schedule_run_id) WHERE schedule_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_manager_events_record ON manager_events (record_id) WHERE record_id IS NOT NULL;
+-- manager events end

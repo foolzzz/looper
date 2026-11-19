@@ -26,7 +26,7 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
         servers = []
         ok = serve.self_check.Check("test", "Test", "ok", "ready")
 
-        def slow_claude(_):
+        def slow_claude(*_):
             loop.call_soon_threadsafe(started.set)
             try:
                 time.sleep(3)
@@ -120,7 +120,7 @@ def test_advisory_checks_overlap_and_log_in_original_order(monkeypatch, caplog):
         def sync_check(name):
             return asyncio.run_coroutine_threadsafe(check(name), loop).result(timeout=2)
 
-        monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [sync_check("claude")])
+        monkeypatch.setattr(serve.self_check, "check_claude", lambda *_: [sync_check("claude")])
         for name in ("codex", "grok", "cursor", "ttadk", "llmrec", "gateway"):
             monkeypatch.setattr(serve.self_check, name + "_check" if name in ("ttadk", "llmrec", "gateway") else name + "_login_check",
                                 lambda name=name: check(name))

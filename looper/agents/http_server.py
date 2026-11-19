@@ -1197,13 +1197,43 @@ class AgentHTTPServer:
             except Exception:
                 return self._check_results.get(check_id, check)
 
+        async def claude_now():
+            # The Claude CLI and login answers follow which profiles are in use: switching to (or away from) a
+            # Claude Code profile after startup changes them.
+            previous = [self._check_results.get(check["id"], check) for check in self._self_checks
+                        if check.get("id") in self_check.CLAUDE_CHECK_IDS]
+            if not previous or any(check.get("status") == self_check.PENDING for check in previous):
+                return
+            task = self._check_tasks.get("claude")
+            if task is None:
+                task = self._check_tasks["claude"] = asyncio.create_task(
+                    self_check.refresh_claude(previous, self._claude_bin))
+                task.add_done_callback(lambda done: claude_finished(done))
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            except Exception:  # still running or failed: the previous answer stays
+                pass
+
+        def claude_finished(task):
+            self._check_tasks.pop("claude", None)
+            try:
+                for check in task.result() or ():
+                    self._check_results[check.id] = check.to_dict()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("status check failed: claude")
+
+        await claude_now()
         refreshable = [check for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS
                        and not (check.get("status") == self_check.PENDING
                                 and check.get("detail") == "Startup check in progress")]
         # A startup snapshot needs no work. Return it without yielding to blocking startup imports.
         now = dict(zip((check["id"] for check in refreshable),
                        await asyncio.gather(*(current(check) for check in refreshable)))) if refreshable else {}
-        checks = [now.get(check.get("id"), check) for check in self._self_checks]
+        checks = [now.get(check.get("id"), check) if check.get("id") in now else
+                  self._check_results.get(check.get("id"), check) if check.get("id") in self_check.CLAUDE_CHECK_IDS
+                  else check for check in self._self_checks]
         pool = self._worker_pool
         if pool is None or not (status := pool.keeper_status()):
             return checks
