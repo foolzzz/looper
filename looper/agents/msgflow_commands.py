@@ -76,23 +76,6 @@ def import_history(database_url: str, *, source_id: str | None, days: int, dry_r
     return code
 
 
-def add_parser(commands: Any) -> None:
-    msgflow = commands.add_parser("msgflow", allow_abbrev=False, help="Work on the message stream.",
-                                  description="One-off work on the message stream.")
-    sub = msgflow.add_subparsers(dest="msgflow_command", required=True)
-    imp = sub.add_parser(
-        "import", allow_abbrev=False, help="Import the last N days from an outside collector's files.",
-        description="Read the source's bridge directory from the start of every file and store the messages sent in "
-                    "the last N days (a message already stored is left as it is). --dry-run stores nothing and "
-                    "prints what it would store. If the server is writing the source at that moment it says so and exits; run it again.")
-    imp.add_argument("--days", type=int, required=True, help=f"How many days back to import (1 to {IMPORT_MAX_DAYS}).")
-    imp.add_argument("--dry-run", action="store_true", help="Count what would be stored; store nothing.")
-    imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
-    imp.add_argument("--source", help="The source id (default: the only one).")
-    imp.add_argument("--runtime-root", help="The state directory (default ~/.looper).")
-    imp.add_argument("--config", help="The ops file (default <runtime root>/ops/server.toml).")
-
-
 def run(args: Any, load_ops: Any) -> int:
     if not 1 <= args.days <= IMPORT_MAX_DAYS:
         print(f"error: --days is a whole number from 1 to {IMPORT_MAX_DAYS}", file=sys.stderr)
@@ -104,4 +87,4 @@ def run(args: Any, load_ops: Any) -> int:
                           per_file=args.per_file)
 
 
-__all__: Sequence[str] = ("add_parser", "run", "import_history")
+__all__: Sequence[str] = ("run", "import_history")
