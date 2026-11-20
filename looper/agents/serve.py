@@ -50,7 +50,7 @@ from .channels.registry import ChannelRegistry
 from .channels.chat_routing import ChatResolver, ChatStop
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
-from . import keeper, self_check
+from . import db_backup, keeper, self_check
 from .kept_run import KeeperSettings
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
@@ -445,7 +445,8 @@ async def _back_up_before_schema_change(pool: Any, ops: OpsConfig, runtime_root:
     if registry_upgrade:
         logger.info("registry migration version=%s phase=backup_verified elapsed_seconds=%.3f bytes=%d rollback=not_needed",
                     version, time.monotonic() - started, path.stat().st_size)
-    logger.info("backed up the database to %s (%d bytes, %s); restore only into a new isolated database, "
+    logger.info("backed up the database to %s (%d bytes, %s); this dump keeps the source_events schema and leaves "
+                "out its rows; restore only into a new isolated database, "
                 "preserving the migrated database and new writes: "
                 "pg_restore --no-owner --dbname '<isolated-database-url>' '%s'",
                 path, path.stat().st_size, checked, path)
@@ -863,7 +864,8 @@ async def _run_agent_system_watched(
             drain = DrainState()  # A new control plane always starts serving; drain is never stored.
             scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
-                                  claude_bin=claude_bin, own_apps=own_bot_app_ids)
+                                  claude_bin=claude_bin, own_apps=own_bot_app_ids,
+                                  message_backup=db_backup.message_backup_for(ops, runtime_root))
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts
             advisor_alerts.configure(registry.notify)
