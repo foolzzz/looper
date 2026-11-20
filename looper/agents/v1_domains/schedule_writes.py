@@ -185,9 +185,10 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
             {"profile_overrides": profiles} if "profile_overrides" in rest else {})})
         schedules._check_rule(fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"]), now,
                               gated=True)
-        await schedules.check_private_target({**row["subscription"], **(stream or {})},
-                                             fields.get("notify_channel", row["notify_channel"]),
-                                             fields.get("notify_chat", row["notify_chat"]))
+        if schedules.touches_target(row, fields, stream):  # disabling and renaming are always possible
+            await schedules.check_private_target({**row["subscription"], **(stream or {})},
+                                                 fields.get("notify_channel", row["notify_channel"]),
+                                                 fields.get("notify_chat", row["notify_chat"]))
     except schedules.RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     asked = {**fields, **({"enabled": data["enabled"]} if "enabled" in data else {})}

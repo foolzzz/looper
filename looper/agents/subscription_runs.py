@@ -116,14 +116,15 @@ class SubscriptionRuns:
         return {"from_seq": from_seq, "to_seq": to_seq, "window_mode": mode, "daily_date": daily_date, **picked,
                 "target": (schedule["notify_channel"], schedule["notify_chat"]) if confirmed else None,
                 "config_version": version if confirmed else None, "config": db_subs.snapshot(sub),
-                "config_epoch": sub["config_epoch"]}
+                "config_epoch": sub["config_epoch"], "match_timeouts": int(picked["match_timed_out"])}
 
     async def record(self, conn: asyncpg.Connection, run_id: str, window: Mapping[str, Any]) -> None:
         await db_subs.insert_run(conn, run_id, from_seq=window["from_seq"], to_seq=window["to_seq"],
                                  in_window=window["in_window"], selected=len(window["rows"]),
                                  too_old=window["too_old"], over_cap=window["over_cap"], target=window["target"],
                                  config_version=window["config_version"], window_mode=window["window_mode"],
-                                 daily_date=window["daily_date"], config=window["config"], config_epoch=window["config_epoch"])
+                                 daily_date=window["daily_date"], config=window["config"], config_epoch=window["config_epoch"],
+                                 match_timeouts=window["match_timeouts"])
 
     # --- Executing ---
 

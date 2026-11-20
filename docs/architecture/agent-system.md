@@ -4754,17 +4754,20 @@ Manager's `looper_schedules` cannot create or change one.
   `[time] 【label·area】《chat》 sender: text`. `output_header` may hold
   `{count}` and `{count:RULE NAME}`, filled from what the window kept only when
   `rules` is nonempty; without rules these placeholders remain literal text. A
-  `text_match` is an operator-owned regular expression: at most 500 characters,
-  no repeated group that holds a repeat, an alternation or a group that does
-  (`(a+)+`, `(a|aa)+`), at most two unbounded repeats (`+`, `*`, `{n,}`), run on the
-  first 1,000 characters of a message and within a 2 s budget for a window
-  (Python's `re` cannot be interrupted, so the shapes that take exponential time
-  are refused where the pattern is saved). When the processor answers
+  `text_match` is an operator-owned regular expression, checked on Python's own
+  parse tree where it is saved: at most 500 characters; no repeat whose body holds
+  a repeat or a branch (`(a+)+`, `(a|aa)+`, also as `{,n}` or under `(?x)`); at
+  most 2 repeats that can run long (unbounded, or a maximum over 10), 8 repeats
+  of any kind and 8 alternations. It runs on the first 1,000 characters of each
+  message in a separate process that is killed after 5 s (the match is inside
+  the firing transaction, so a window holds the schedule's row for at most that
+  long); past it no pattern takes anything in that window and the run's
+  `match_timeouts` is 1. When the processor answers
   the quiet word but the window holds a message of a `never_quiet` rule, code
   writes the list of those messages (per label, at most 30, 200 characters
   each, the same @ stripping) and it is pushed and delivered like the
   processor's output. A subscription that can select private content (a direct
-  chat, `mentions_me` `only`, or `never_quiet`) may target only the operator's own direct chat (a Lark chat with the user the
+  chat or a chat of unknown kind, `mentions_me` `only`, or `never_quiet`) may target only the operator's own direct chat (a Lark chat with the user the
   source is bound to, `user_open_id`; a colleague's direct chat, a group, Telegram
   and a source with no bound user are refused) when it is created, updated or
   confirmed and again before every message of a push, and its confirmation says it

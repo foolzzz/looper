@@ -16,8 +16,10 @@ writes the messages themselves) makes the subscription private: it may push only
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
-import time
+import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -25,8 +27,11 @@ MAX_RULES = 20
 NAME_MAX_CHARS = 40
 MATCH_MAX_CHARS = 500
 MATCH_TEXT_CHARS = 1000
-MATCH_BUDGET_SECONDS = 2.0  # what all the patterns of one window may spend in all
-MAX_UNBOUNDED = 2  # ``+``, ``*`` and ``{n,}`` in one pattern: with these, a match takes at most quadratic time
+REGEX_TIMEOUT_SECONDS = 5.0  # what the matching of one window may take: the process doing it is killed after
+MAX_UNBOUNDED = 2  # repeats that can run long in one pattern: with these, a match takes at most quadratic time
+MAX_BOUNDED_REPEAT = 10  # a bounded repeat with a larger maximum counts as unbounded
+MAX_VARIABLE = 8
+MAX_BRANCHES = 8
 MAX_AREAS = 200
 CHAT_KINDS = ("p2p", "group", "topic", "unknown")
 SENDER_KINDS = ("user", "app")
@@ -36,48 +41,69 @@ FALLBACK_TEXT_CHARS = 200
 
 _KEYS = ("name", "label", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds", "exclude_self",
          "mentions_me", "text_match", "never_quiet", "areas")
-_BOUNDS = re.compile(r"\{(\d+)(,(\d*))?\}")
+def _walk(tree: Any, found: dict[str, int], inside_repeat: bool) -> str | None:
+    """Count the repeats and branches of a parsed pattern and say why it is unsafe (None if it is not)."""
+    from re import _constants as const  # type: ignore[attr-defined]
+
+    repeats = (const.MAX_REPEAT, const.MIN_REPEAT, getattr(const, "POSSESSIVE_REPEAT", const.MAX_REPEAT))
+    for op, args in tree:
+        if op in repeats:
+            low, high, body = args
+            if inside_repeat:
+                return "text_match repeats a group that already repeats or branches (such as (a+)+ or (a|aa)+): rewrite it"
+            found["variable"] += low != high
+            found["unbounded"] += high == const.MAXREPEAT or high > MAX_BOUNDED_REPEAT
+            if (why := _walk(body, found, True)) is not None:
+                return why
+        elif op == const.BRANCH:
+            if inside_repeat:
+                return "text_match repeats a group that already repeats or branches (such as (a+)+ or (a|aa)+): rewrite it"
+            found["branches"] += 1
+            for alternative in args[1]:
+                if (why := _walk(alternative, found, inside_repeat)) is not None:
+                    return why
+        elif op == const.SUBPATTERN:
+            if (why := _walk(args[-1], found, inside_repeat)) is not None:
+                return why
+        elif op in (const.ASSERT, const.ASSERT_NOT):
+            if (why := _walk(args[1], found, inside_repeat)) is not None:
+                return why
+        elif op == getattr(const, "ATOMIC_GROUP", None):
+            if (why := _walk(args, found, inside_repeat)) is not None:
+                return why
+        elif op == const.GROUPREF_EXISTS:
+            for branch in args[1:]:
+                if branch is not None and (why := _walk(branch, found, inside_repeat)) is not None:
+                    return why
+    return None
 
 
 def unsafe(pattern: str) -> str | None:
-    """Why a pattern may backtrack without bound, or None. ``re`` cannot be interrupted, so the shapes that make it
-    take exponential time are refused where the pattern is saved: a group that is repeated and holds a repeat, an
-    alternation or a group that does (``(a+)+``, ``(a|aa)+``, ``((a|aa))*``), and more than ``MAX_UNBOUNDED``
-    unbounded repeats (``a*a*a*a*b`` is polynomial of a high degree)."""
-    frames: list[dict[str, bool]] = [{"quant": False, "alt": False}]
-    unbounded, i = 0, 0
-    while i < len(pattern):
-        char = pattern[i]
-        if char == "\\":
-            i += 2
-            continue
-        if char == "[":
-            i += 2 if pattern[i + 1:i + 2] in ("^", "]") else 1
-            while i < len(pattern) and pattern[i] != "]":
-                i += 2 if pattern[i] == "\\" else 1
-        elif char == "(":
-            frames.append({"quant": False, "alt": False})
-        elif char == "|":
-            frames[-1]["alt"] = True
-        elif char in "+*":
-            frames[-1]["quant"] = True
-            unbounded += 1
-        elif char == "{" and (found := _BOUNDS.match(pattern, i)):
-            frames[-1]["quant"] = True
-            unbounded += bool(found.group(2) and not found.group(3))
-            i = found.end() - 1
-        elif char == ")" and len(frames) > 1:
-            inner = frames.pop()
-            after = pattern[i + 1:i + 2]
-            repeated = after in ("+", "*") or (after == "{" and bool(_BOUNDS.match(pattern, i + 1)))
-            if repeated and (inner["quant"] or inner["alt"]):
-                return "text_match repeats a group that already repeats or branches (such as (a+)+ or (a|aa)+): rewrite it"
-            frames[-1]["quant"] |= inner["quant"] or repeated
-            frames[-1]["alt"] |= inner["alt"]
-        i += 1
-    if unbounded > MAX_UNBOUNDED:
-        return f"text_match has more than {MAX_UNBOUNDED} unbounded repeats (+, * or {{n,}}): use fewer"
+    """Why a pattern may backtrack without bound, or None. ``re`` cannot be interrupted in-process, so the shapes that
+    make it take exponential time are refused where the pattern is saved, on the pattern Python itself parsed (so
+    ``{,n}``, ``(?x)`` and comments are what they are, not what they look like): a repeat whose body holds a repeat or a
+    branch, more than ``MAX_UNBOUNDED`` repeats that can run long (unbounded, or with a maximum over
+    ``MAX_BOUNDED_REPEAT``), more than ``MAX_VARIABLE`` repeats of any kind (``a?a?a?...a{30}``), and more than
+    ``MAX_BRANCHES`` alternations. Matching is also done in a process that is killed at a deadline (``Matcher``)."""
+    from re import _parser  # type: ignore[attr-defined]
+
+    try:
+        tree = _parser.parse(pattern, re.IGNORECASE)
+    except (re.error, RecursionError, OverflowError) as exc:
+        return f"text_match is not a valid pattern: {exc}"
+    found = {"variable": 0, "unbounded": 0, "branches": 0}
+    if (why := _walk(tree, found, False)) is not None:
+        return why
+    if found["unbounded"] > MAX_UNBOUNDED:
+        return (f"text_match has more than {MAX_UNBOUNDED} repeats that can run long (+, *, {{n,}} or a maximum over "
+                f"{MAX_BOUNDED_REPEAT}): use fewer")
+    if found["variable"] > MAX_VARIABLE:
+        return f"text_match has more than {MAX_VARIABLE} repeats (including ?): use fewer"
+    if found["branches"] > MAX_BRANCHES:
+        return f"text_match has more than {MAX_BRANCHES} alternations: use fewer"
     return None
+
+
 _PLACEHOLDER = re.compile(r"\{count(?::([^{}]{1,%d}))?\}" % NAME_MAX_CHARS)
 
 
@@ -158,27 +184,69 @@ def check_header(header: str) -> str:
     return header
 
 
+# A chat the directory does not list yet (a new direct chat) is stored as ``unknown``: it may be one.
+PRIVATE_KINDS = ("p2p", "unknown")
+
+
 def is_private(sub: Mapping[str, Any]) -> bool:
     """Whether the subscription can select what only its operator should read: direct chats, messages that @-mention
     them, or a never_quiet fallback of the messages themselves."""
     rules = sub.get("rules") or []
     if not rules:
-        return "p2p" in (sub.get("chat_kinds") or ())
-    return any("p2p" in rule["chat_kinds"] or rule["mentions_me"] == "only" or rule["never_quiet"] for rule in rules)
+        return any(kind in PRIVATE_KINDS for kind in sub.get("chat_kinds") or ())
+    return any(any(kind in PRIVATE_KINDS for kind in rule["chat_kinds"]) or rule["mentions_me"] == "only"
+               or rule["never_quiet"] for rule in rules)
 
 
 PRIVATE_NOTE = "本订阅包含私聊、@我的消息或原文兜底清单（私密内容），只能推送到你自己的私聊"
 
 
+_WORKER = r'''
+import json, re, sys
+job = json.load(sys.stdin)
+out = []
+for pattern in job["patterns"]:
+    compiled = re.compile(pattern, re.IGNORECASE)
+    out.append([compiled.search(text) is not None for text in job["texts"]])
+json.dump(out, sys.stdout)
+'''
+
+
 class Matcher:
-    """The rules of one run, compiled; ``__call__`` gives the index of the first rule that takes an event row (its
-    ``chat_kind``, ``sender_kind``, ``sender_id``, ``chat_id``, ``mentions_me``, ``text``), or None."""
+    """The rules of one run, compiled; ``prepare`` runs every ``text_match`` over a window's rows in a process that
+    is killed at ``REGEX_TIMEOUT_SECONDS`` (a regular expression cannot be interrupted in this one); ``__call__`` then
+    gives the index of the first rule that takes an event row (its ``seq``, ``chat_kind``, ``sender_kind``,
+    ``sender_id``, ``chat_id``, ``mentions_me`` and ``text``), or None. Past the deadline (``timed_out``) every
+    pattern takes nothing."""
 
     def __init__(self, rules: Sequence[Mapping[str, Any]], *, me: str | None) -> None:
         self.rules = list(rules)
         self._me = me
-        self._patterns = [re.compile(rule["text_match"], re.IGNORECASE) if rule["text_match"] else None for rule in self.rules]
-        self._spent = 0.0
+        self._hits: dict[int, set[Any]] = {}
+        self.timed_out = False
+
+    async def prepare(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        indexes = [i for i, rule in enumerate(self.rules) if rule["text_match"]]
+        if not indexes or not rows:
+            return
+        job = {"patterns": [self.rules[i]["text_match"] for i in indexes],
+               "texts": [(row["text"] or "")[:MATCH_TEXT_CHARS] for row in rows]}
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-I", "-c", _WORKER, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(json.dumps(job).encode()),
+                                               timeout=REGEX_TIMEOUT_SECONDS)
+            answers = json.loads(stdout)
+        except (asyncio.TimeoutError, ValueError, OSError):
+            self.timed_out = True
+            return
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        for index, found in zip(indexes, answers):
+            self._hits[index] = {row["seq"] for row, hit in zip(rows, found) if hit}
 
     def __call__(self, row: Mapping[str, Any]) -> int | None:
         for index, rule in enumerate(self.rules):
@@ -190,22 +258,10 @@ class Matcher:
                 continue
             if (rule["mentions_me"] == "only") != bool(row["mentions_me"]) and rule["mentions_me"] != "any":
                 continue
-            pattern = self._patterns[index]
-            if pattern is not None and not self._search(pattern, row["text"] or ""):
+            if rule["text_match"] and row["seq"] not in self._hits.get(index, ()):
                 continue
             return index
         return None
-
-    def _search(self, pattern: re.Pattern[str], text: str) -> bool:
-        """Whether ``pattern`` is in the first ``MATCH_TEXT_CHARS`` of ``text``, within the window's time budget: past
-        it a pattern takes nothing (a saved pattern is checked, this is the second bound)."""
-        if self._spent > MATCH_BUDGET_SECONDS:
-            return False
-        started = time.perf_counter()
-        try:
-            return pattern.search(text[:MATCH_TEXT_CHARS]) is not None
-        finally:
-            self._spent += time.perf_counter() - started
 
     def tag(self, row: Mapping[str, Any]) -> str:
         """``【label·area】`` (or ``【label】``, or nothing) for a selected row."""
