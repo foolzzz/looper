@@ -467,14 +467,14 @@ class LarkChannelAdapter(ChannelAdapter):
             else:
                 message_id = await self._send_target(target, text, idempotency_key=idempotency_key, return_id=True)
         except LarkCliError as exc:
-            logger.warning("%s: a post to %s failed: %s", self.channel_id, target.id, exc)
+            # The error's text (lark-cli's own words, and whatever it printed) is in the receipt, not in the log.
+            logger.warning("%s: a post to %s failed: %s%s", self.channel_id, target.id, type(exc).__name__,
+                           f" (code {exc.code})" if exc.code is not None else "")
             return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
                                outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
-        if message_id is None:
-            problem = ("lark-cli" if isinstance(self._transport, CliTransport) else self.channel_type) + " did not say which message it sent"
-            logger.warning("%s: a post to %s: %s", self.channel_id, target.id, problem)
-            return PostReceipt(False, error=problem, outcome=PostOutcome.UNKNOWN)  # accepted, id not given
-        return PostReceipt(True, external_ids=(message_id,))
+        # Only a successful answer (lark-cli ``ok: true``, the Bot API's HTTP 200 with ``code`` 0) gets here: the message
+        # was sent, and replies to it just cannot be routed when its id was not given.
+        return PostReceipt(True, external_ids=(message_id,) if message_id else ())
 
     def healthcheck(self) -> dict[str, Any]:
         info = {

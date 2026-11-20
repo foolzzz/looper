@@ -443,6 +443,10 @@ class Notifier:
         """Send and record the message; its status: ``sent``, ``failed`` (not handed to a channel) or ``dashboard``."""
         from .schedules import notify_targets
 
+        if schedule.get("kind") == "subscription":
+            # Read afresh: the target, its confirmation and whether it notifies may have changed since the caller
+            # read the schedule (this run's end, an alert's check), and a notice goes only where it may now.
+            schedule = await db_schedules.get_schedule(schedule["id"]) or schedule
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
         status, error = "dashboard", None
         dashboard_alert = kind is not Kind.RUN and schedule.get("notify_format") == "deliverable"
@@ -461,8 +465,7 @@ class Notifier:
                     sent, error = False, f"{type(exc).__name__}: {exc}"
                 status = "sent" if sent else "failed"
             if status == "failed":
-                logger.warning("schedule %s: the %s message to %s could not be sent: %s", schedule["id"],
-                               kind.value, channel, error)
+                logger.warning("schedule %s: the %s message to %s could not be sent", schedule["id"], kind.value, channel)
         try:
             await db_schedules.insert_notification(
                 db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=kind.value, channel=channel,

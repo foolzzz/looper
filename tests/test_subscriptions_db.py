@@ -1197,3 +1197,135 @@ def test_an_in_place_edit_of_the_processors_profile_unconfirms_the_target(monkey
         assert poster.sent == [] and run["stream"]["outcome"] == "dashboard_only"
 
     scenario(check, monkeypatch, tmp_path)
+
+
+# --- Notices read the schedule when they are sent ---
+
+
+def test_a_notice_is_checked_against_the_schedule_as_it_is_when_it_is_sent_not_as_it_was_read(monkeypatch, tmp_path):
+    from looper.agents.schedule_notify import Kind
+
+    async def check(env, poster, fake):
+        sender = with_sender(env)
+        sid = await started(env)
+        await confirm(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        stale = await db_schedules.get_schedule(sid)  # what a caller read before the operator revoked
+        for revoke in ({"notify": "never"}, {"cron": "10 * * * *"}, {"notify_target": {"channel": "lark", "chat": GROUP}}):
+            await confirm(env, sid) if await confirmed_at(env, sid) is None else None
+            await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": revoke})
+            status = await env.scheduler._notifier._deliver(stale, Kind.FAILURES_ALERT, "alert", run_id=None)
+            assert status == "dashboard" and sender.sent == [], revoke
+            await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {
+                "notify": "failures", "cron": "5 * * * *", "notify_target": {"channel": "lark", "chat": DM}}})
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+# --- The confirmation binds the processor's non-credential configuration ---
+
+
+def _settings(*, api_key="sk-SECRET-KEY", env_value="ENV-SECRET", url="https://user:PASSWORD@proxy.example.test:8443/v1?key=QUERY-SECRET"):
+    from types import SimpleNamespace
+
+    provider = SimpleNamespace(id="prov-x", vendor_type="custom", auth="api_key", api_key=api_key, env=(("TOKEN_VAR", env_value),))
+    endpoint = SimpleNamespace(protocol="anthropic-messages", base_url=url, use_runtime_default=False)
+    model = SimpleNamespace(id="model-x", name="m", protocol="anthropic-messages")
+    runtime = SimpleNamespace(id="rt", type="claude-code", launcher="native", executable="")
+    profile = SimpleNamespace(id="p", effort=None, runtime=runtime,
+                              resolved_model=SimpleNamespace(provider=provider, endpoint=endpoint, model=model))
+    return SimpleNamespace(profile=profile)
+
+
+def test_the_processors_fingerprint_has_its_endpoint_and_model_and_never_a_credential():
+    import json
+
+    facts = processor.profile_facts(_settings(), None)
+    text = json.dumps(facts)
+    for secret in ("SECRET-KEY", "ENV-SECRET", "PASSWORD", "QUERY-SECRET", "user:"):
+        assert secret not in text, secret
+    assert facts["endpoint"]["url"] == "https://proxy.example.test:8443/v1" and facts["provider"]["env_keys"] == ["TOKEN_VAR"]
+    assert facts["model"]["name"] == "m" and facts["runtime"]["type"] == "claude-code"
+    # A rotated key or changed secret does not change it; another endpoint, model, runtime or effort does.
+    assert processor.profile_facts(_settings(api_key="sk-OTHER", env_value="OTHER"), None) == facts
+    assert processor.profile_facts(_settings(url="https://other.example.test/v1"), None) != facts
+    changed = _settings()
+    changed.profile.resolved_model.model.id = "model-y"
+    assert processor.profile_facts(changed, None) != facts
+
+
+def test_an_endpoint_change_unconfirms_the_target(monkeypatch, tmp_path):
+    settings = _settings()
+
+    async def facts(project_id, schedule_id):
+        return processor.profile_facts(settings, None)  # the Profile as it is in the registry now
+    monkeypatch.setattr(processor, "run_facts", facts)
+
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        before = await version_of(env, sid)
+        settings.profile.resolved_model.endpoint.base_url = "https://other-proxy.example.test/v1"
+        assert await version_of(env, sid) != before
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        assert poster.sent == [] and run["stream"]["outcome"] == "dashboard_only"
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+# --- What the logs say ---
+
+
+def test_the_logs_of_a_push_carry_error_types_and_ids_never_what_an_error_says(monkeypatch, tmp_path, caplog):
+    secret = "OUTPUT-FRAGMENT-IN-AN-ERROR"
+
+    async def check(env, poster, fake):
+        async def raises(*args: Any, **kwargs: Any) -> PostReceipt:
+            raise RuntimeError(f"channel echoed {secret}")
+        scheduler_with(env, poster=raises)
+        sid = await started(env)
+        await confirm(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        with caplog.at_level("DEBUG"):
+            run = await fire(env, sid)
+        assert run["stream"]["outcome"] == "uncertain"
+        assert secret not in caplog.text and "RuntimeError" in caplog.text and run["id"] in caplog.text
+        deliveries = await db_subs.list_deliveries(run["id"])
+        assert secret in deliveries[0]["error"]  # the raw error stays on the dashboard side
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_the_adapters_do_not_log_what_a_failed_post_said(
+        monkeypatch, tmp_path, lark_cli_stand_in, caplog):  # noqa: F811
+    import asyncio
+    import shutil
+    from types import SimpleNamespace
+
+    from telegram.error import BadRequest
+
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+    from looper.agents.task_notice import NotifyTarget
+
+    secret = "WORDS-OF-THE-DIGEST"
+    executable = Path(f"{shutil.which('lark-cli')}.py")
+    executable.write_text(executable.read_text().replace("print(json.dumps(value))", f"print({secret!r})"))
+
+    async def main():
+        lark = LarkChannelAdapter(runtime_root=tmp_path, allowlist=SenderAllowlist("channel-lark", frozenset({DM})))
+        assert not (await lark.post(NotifyTarget(TargetKind.USER, DM), "text")).success
+        await lark.stop()
+
+        async def send_message(**kwargs):
+            raise BadRequest(f"can't parse {secret}")
+        telegram = TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist("channel-telegram", frozenset({"1"})))
+        telegram._app = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+        receipt = await telegram.post(NotifyTarget(TargetKind.CHAT, "1"), "text")
+        assert not receipt.success and secret in (receipt.error or "")  # the receipt has it for the dashboard
+
+    with caplog.at_level("DEBUG"):
+        asyncio.run(main())
+    assert secret not in caplog.text and "LarkCliError" in caplog.text and "BadRequest" in caplog.text

@@ -80,7 +80,8 @@ def test_a_lark_post_that_lark_cli_refuses_says_why(
         receipt = asyncio.run(_lark(tmp_path).post(target, CARD, reply_to=reply_to))
     # Only a reply whose message is gone (the API's code for a recalled one) may be posted on its own.
     assert receipt == PostReceipt(False, error=error, parent_gone=reply_to == "om_gone", outcome=PostOutcome.REJECTED)
-    assert f"lark: a post to {target.id} failed: {error}" in caplog.text
+    # The log names the chat and the kind of error; what lark-cli said is in the receipt.
+    assert f"lark: a post to {target.id} failed: LarkCliError" in caplog.text and error not in caplog.text
 
 
 @pytest.mark.parametrize(("target", "reply_to", "command"), [
@@ -104,20 +105,32 @@ def test_a_lark_error_code_is_kept_and_an_idempotency_key_is_at_most_50_characte
         lark_cli.reply_command("om_1", text="x", idempotency_key="k" * 51)
 
 
-@pytest.mark.parametrize(("printed", "error"), [
-    # Sent, by its exit, but without the id a reply to it would be routed by.
-    (b'{"ok": true, "identity": "bot", "data": {"chat_id": "oc_group"}}', "lark-cli did not say which message it sent"),
-    (b'{"ok": true, "identity": "bot"}', "lark-cli did not say which message it sent"),
-    (b'{"ok": false, "error": {"message": "rate limited"}}', "rate limited"),
-    (b"sent!", "lark-cli printed something that is not JSON: b'sent!'"),
+@pytest.mark.parametrize("printed", [
+    b'{"ok": true, "identity": "bot", "data": {"chat_id": "oc_group"}}',
+    b'{"ok": true, "identity": "bot"}',
 ])
-def test_a_lark_post_without_a_message_id_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, printed: bytes,
-                                                 error: str) -> None:
+def test_a_lark_post_whose_answer_is_ok_was_sent_even_without_a_message_id(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, printed: bytes) -> None:
     async def run(argv: list[str], **_: Any) -> bytes:
         return printed
 
     monkeypatch.setattr(lark_cli, "run", run)
-    assert asyncio.run(_lark(tmp_path).post(LARK_USER, CARD)) == PostReceipt(False, error=error, outcome=PostOutcome.UNKNOWN)  # it may have been accepted
+    # Sent, by its answer; replies to it just cannot be routed.
+    assert asyncio.run(_lark(tmp_path).post(LARK_USER, CARD)) == PostReceipt(True, external_ids=())
+
+
+@pytest.mark.parametrize(("printed", "error"), [
+    (b'{"ok": false, "error": {"message": "rate limited"}}', "rate limited"),
+    (b"sent!", "lark-cli printed something that is not JSON: b'sent!'"),
+])
+def test_a_lark_post_that_says_no_or_cannot_be_read_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           printed: bytes, error: str) -> None:
+    async def run(argv: list[str], **_: Any) -> bytes:
+        return printed
+
+    monkeypatch.setattr(lark_cli, "run", run)
+    # It may have been accepted: an answer that is not a success is unknown, not a refusal.
+    assert asyncio.run(_lark(tmp_path).post(LARK_USER, CARD)) == PostReceipt(False, error=error, outcome=PostOutcome.UNKNOWN)
 
 
 # --- Telegram ---

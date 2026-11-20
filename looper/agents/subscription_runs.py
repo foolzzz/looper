@@ -113,7 +113,7 @@ class SubscriptionRuns:
         try:
             await self._execute(run_id)
         except Exception as exc:
-            logger.exception("subscription run %s failed", run_id)
+            logger.error("subscription run %s failed: %s", run_id, type(exc).__name__)
             stream = await db_subs.get_run(run_id)
             if stream is not None and stream["outcome"] == "delivering":
                 # Its push is under way: what was sent is not sent again, and the window is not read twice.
@@ -241,7 +241,7 @@ class SubscriptionRuns:
                 except _NoPoster:
                     await db_subs.mark_segment(run_id, segment, "failed", error="this server cannot send messages")
                 except Exception as exc:  # whether the channel sent it is not known: it is not sent again
-                    logger.warning("subscription run %s message %d: uncertain after %s", run_id, segment, exc)
+                    logger.warning("subscription run %s message %d: uncertain (%s)", run_id, segment, type(exc).__name__)
                     await db_subs.mark_segment(run_id, segment, "uncertain", error=f"{type(exc).__name__}: {exc}")
                 else:
                     if receipt.result is PostOutcome.SENT:
@@ -249,7 +249,7 @@ class SubscriptionRuns:
                     elif receipt.result is PostOutcome.REJECTED:  # the platform said no: asking again is safe
                         await db_subs.mark_segment(run_id, segment, "failed", error=receipt.error or "not sent")
                     else:  # it may have been accepted (a lost answer): it is never sent again
-                        logger.warning("subscription run %s message %d: uncertain, %s", run_id, segment, receipt.error)
+                        logger.warning("subscription run %s message %d: uncertain (no answer)", run_id, segment)
                         await db_subs.mark_segment(run_id, segment, "uncertain", error=receipt.error or "no answer")
             if refused is not None:
                 break

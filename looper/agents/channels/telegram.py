@@ -329,7 +329,8 @@ class TelegramChannelAdapter(ChannelAdapter):
                 sent.append(str(message.message_id))
         except Exception as exc:
             error = redact(str(exc))
-            logger.warning("telegram: a post to %s failed (%d of its messages sent): %s", target.id, len(sent), error)
+            logger.warning("telegram: a post to %s failed (%d of its messages sent): %s", target.id, len(sent),
+                           type(exc).__name__)
             return PostReceipt(False, external_ids=tuple(sent), error=error, outcome=_post_outcome(exc))
         return PostReceipt(True, external_ids=tuple(sent))
 
