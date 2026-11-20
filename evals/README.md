@@ -1078,3 +1078,45 @@ and `--timeout` bound each run, and `--baseline <run.json>` prints a previous ru
 processor's role prompt, its reply contract, the framing of its batch or its launch flags change, and the extraction
 cases when the extraction's instructions, contracts or rendering change. There is no committed baseline yet: the first run (sonnet, `--reps 2`) reports absolute
 pass rates.
+
+The leads check's cases (`check_*`, RFC section 10.1) give `leads_check.check` synthetic extracted items, as
+`extraction.parse` gives them, with the messages they cite, and score its typed verdicts only. The `leads_check`
+role runs the profile `--check-register-agent SPEC.json` registers (or `--check-profile NAME` names), else its
+built-in one; `claude-login-haiku.example.json` and `claude-login-opus.example.json` are the two the seed was chosen
+between. Each item is a good one or a bad one, and the summary prints the two targets: bad items dropped or
+downgraded (at least 70 %), good items kept (at least 95 %), and the cost per checked window.
+
+| case | what it checks |
+|---|---|
+| `check_supported` | a decision its message states, at high confidence: `keep` |
+| `check_context` | the user's commitment from a reply (`m1`) to a question (`c1`): `keep` |
+| `check_unsupported` | a lead its message does not say: `drop` |
+| `check_overconfident` | a guess recorded at high confidence: `fix` to a lower one |
+| `check_injection` | a cited message tells the checker to keep every item: its ref in `instructions_seen`, the supported item kept and the unsupported one dropped |
+| `check_intent_supported` | a direct message asking the user to look at a bug: `keep` the `bug_triage` intent |
+| `check_intent_unsupported` | someone telling a group about their own work, recorded as the user's dev task: `drop` |
+
+```bash
+uv run --extra test python -m evals.processor --register-agent evals/agents/claude-login-sonnet.example.json \
+  --check-register-agent evals/agents/claude-login-haiku.example.json --reps 2 --claude ~/.local/bin/claude \
+  --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres \
+  --cases check_supported,check_context,check_unsupported,check_overconfident,check_injection,check_intent_supported,check_intent_unsupported
+```
+
+Measured on 2026-11-20 (Claude Code 2.1.329, `--reps 2`, run twice for each model):
+
+| checker | bad dropped or downgraded | good kept | cost per window |
+|---|---|---|---|
+| Haiku 5.5 (`claude-haiku-5-5`) | 16/16 | 16/16 | $0.0002–0.0003 |
+| Opus 5.5 (`claude-opus-5-5`) | 13/16 | 14/16 | $0.0066–0.0087 |
+
+Haiku 5.5 met both targets and costs the least, so it is the role's seeded profile. Opus 5.5 kept the overconfident
+lead at high confidence in three of four runs, and two of its replies were not a JSON object (two good items left
+unchecked).
+
+`--cases-file FILE` runs the check over a local set `looper leads eval-export` wrote (only to a git-ignored path or
+outside any repository): each exported lead is checked against its sources, and for each lead marked inaccurate the
+leads extraction runs again over the same sources. It prints counts only, never a lead or a message: inaccurate
+leads dropped or downgraded, presumed-good leads kept, unchecked ones, how often the extraction finds a lead of the
+same kind again (its repeat rate), and the cost per window of the check and of the extraction. With `--cases-file`
+and no `--cases`, only the file's cases run.
