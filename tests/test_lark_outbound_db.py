@@ -19,11 +19,12 @@ def test_cli_deadline_after_delivery_retries_the_same_key_once(monkeypatch, lark
     from looper.agents.channels.outbound import ErrorClass
 
     async def check(pool):
+        monkeypatch.setattr(lark_cli, 'CALL_TIMEOUT_SECONDS', 1)
         monkeypatch.setattr(chat_settings, '_outbound_enabled', True)
         adapter = LarkChannelAdapter(allowlist=SenderAllowlist('lark', frozenset([OPEN_ID])))
         started = asyncio.get_running_loop().time()
         try:
-            # The stand-in delivers, then hangs: exercise the real subprocess deadline (20 s).
+            # The stand-in delivers, then hangs: exercise the real subprocess deadline with an accelerated timeout.
             receipt = await adapter._send_message('oc_synthetic_hangx1', 'answer')
             assert receipt.success
             assert asyncio.get_running_loop().time() - started >= lark_cli.CALL_TIMEOUT_SECONDS
@@ -59,7 +60,8 @@ def test_lark_keyed_delivery_and_replay(monkeypatch, lark_cli_stand_in: Path, su
         async def fast_sleep(_):
             await asyncio.sleep(0)
         adapter._gateway.sleep = fast_sleep
-        # Rate-limit delays are exercised independently under a fake clock.
+        # The persisted retry deadline also uses backoff; its schedule is covered with a fake clock.
+        monkeypatch.setattr('looper.agents.channels.outbound.backoff', lambda *args: 0)
         adapter._gateway = Gateway(adapter.channel_id, sleep=fast_sleep)
         adapter._channel_outbox.gateway = adapter._gateway
         chat = 'oc_synthetic_' + suffix
