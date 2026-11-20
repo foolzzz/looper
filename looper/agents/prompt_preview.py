@@ -6,7 +6,7 @@ from dataclasses import asdict, replace
 from ..db import profile_registry as db_profiles, projects as db_projects, role_configs as db_roles
 from ..db import agent_setting_layers, project_documents as db_documents
 from .agent_settings import (
-    AgentType, Launch, index_layers, profile_problem, resolve, system_prompt_mode_choice,
+    SPAWN_ROLES, AgentType, Launch, index_layers, profile_problem, resolve, system_prompt_mode_choice,
 )
 from .knowledge import AgentKnowledge, SourceKind, StoredSet, _entry, clipped_index
 from .profile_registry import AgentProfile, ResolvedAgentProfile, RegistryError, RegistryNotFound
@@ -41,6 +41,9 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
     if agent is AgentType.PROCESSOR:
         raise RegistryError("the processor's prompt is composed for each run from what it processes; its run "
                             "record (Runs) shows the whole prompt")
+    if agent in SPAWN_ROLES:
+        raise RegistryError(f"the {agent.value} role's prompt is its role prompt and its reply contract, and what "
+                            "it is given comes with each run; its run record (Runs) shows the whole prompt")
     row = await db_profiles.get_profile(profile_id)
     if row is None:
         raise RegistryNotFound(f"no Agent Profile {profile_id!r}")

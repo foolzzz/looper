@@ -323,6 +323,8 @@ async def seed_role_configs(pool: Any = None) -> None:
     recommendation; an edited one is kept (``role_configs.seed_defaults``).
     """
     from ..db.role_configs import seed_defaults
+    from .advice import ADVISOR_ROLE_PROMPT, JUDGE_ROLE_PROMPT
+    from .advisor import ADVISOR_TIMEOUT_SEC, JUDGE_TIMEOUT_SEC
     from .processor import PROCESSOR_ROLE_PROMPT, PROCESSOR_TIMEOUT_SEC
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
     from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
@@ -361,6 +363,20 @@ async def seed_role_configs(pool: Any = None) -> None:
             "timeout_seconds": PROCESSOR_TIMEOUT_SEC,  # at most, per run
             # Its instructions and reply contract follow it.
             "system_prompt": PROCESSOR_ROLE_PROMPT,
+        },
+        {
+            "role": "advisor",
+            "display_name": "Advisor",
+            "timeout_seconds": ADVISOR_TIMEOUT_SEC,  # at most, per round
+            # Its reply contract follows it.
+            "system_prompt": ADVISOR_ROLE_PROMPT,
+        },
+        {
+            "role": "advice_check",
+            "display_name": "Advice check",
+            "timeout_seconds": JUDGE_TIMEOUT_SEC,  # at most, per check
+            # Its reply contract follows it.
+            "system_prompt": JUDGE_ROLE_PROMPT,
         },
     ], pool=pool)
 
@@ -965,6 +981,11 @@ async def _run_agent_system_watched(
         # Listen before starting any of their consumers.
         try:
             await consults.resume_all()
+            # Before any Planner resumes: a consult of the advisor a stopped server left running cannot finish.
+            from .advisor import fail_interrupted
+
+            if interrupted := await fail_interrupted():
+                logger.warning("%d consult(s) of the advisor were interrupted by the restart and failed", interrupted)
             await supervisor.start_all()
             await fleet.sweep()
             await carry_on_tasks(task_router, left_running)

@@ -84,6 +84,12 @@ async def get(spawn_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, A
     return _row(await pool.fetchrow("SELECT * FROM agent_spawns WHERE id = $1", spawn_id))
 
 
+async def ids_in(state: SpawnState, *, pool: asyncpg.Pool | None = None) -> list[int]:
+    """The spawns in ``state``, oldest first."""
+    pool = pool or get_pool()
+    return [r["id"] for r in await pool.fetch("SELECT id FROM agent_spawns WHERE state = $1 ORDER BY id", state.value)]
+
+
 async def for_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The task's spawns, oldest first."""
     pool = pool or get_pool()

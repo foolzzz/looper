@@ -73,7 +73,7 @@ from .llmrec import LlmrecRoute, LlmrecSkip, SkipReason
 from .model_names import MODEL_MAX_CHARS, MODEL_NAME
 
 from .profile_registry import (
-    BUILTIN_PROFILE, PRICE_FIELDS, AgentProfile, ModelSpec, ResolvedAgentProfile, ResolvedModel,
+    BUILTIN_PROFILE, PRICE_FIELDS, AgentProfile, ModelSpec, ResolvedAgentProfile, ResolvedModel, builtin_profile,
     builtin_resolved_profile,
 )
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
@@ -147,9 +147,18 @@ class AgentType(str, Enum):
     WORKER = "worker"
     REVIEWER = "reviewer"
     PROCESSOR = "processor"
+    ADVISOR = "advisor"
+    ADVICE_CHECK = "advice_check"
 
 
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
+# The roles whose runs another run starts, with no tool (``spawn``, the advisor RFC): only their role layer chooses
+# their profile and environment (the shared defaults are for the roles with tools, and a project sets their limits in
+# its execution settings), each has a built-in profile of its own (``profile_registry.BUILTIN_ROLE_PROFILES``), and
+# their system prompt always replaces the runtime's, with no harness.
+SPAWN_ROLES = (AgentType.ADVISOR, AgentType.ADVICE_CHECK)
+# The roles with no harness and a replaced system prompt: the processor and the spawned roles.
+NO_HARNESS_ROLES = (AgentType.PROCESSOR, *SPAWN_ROLES)
 # The roles a project's layers apply to: its tasks' and the processor of its schedules.
 PROJECT_ROLES = (*TASK_ROLES, AgentType.PROCESSOR)
 # The roles whose runs have tools (``runtimes.TOOL_ROLES``): the shared defaults' profile is checked against these, and
@@ -169,6 +178,7 @@ BUILTIN_SYSTEM_PROMPT_MODE = {
     AgentType.WORKER: SystemPromptMode.APPEND, AgentType.REVIEWER: SystemPromptMode.APPEND,
     # The processor has no tools: the runtime's own prompt, which describes them, does not apply.
     AgentType.PROCESSOR: SystemPromptMode.REPLACE,
+    AgentType.ADVISOR: SystemPromptMode.REPLACE, AgentType.ADVICE_CHECK: SystemPromptMode.REPLACE,
 }
 
 
@@ -441,6 +451,9 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
             if role is AgentType.PROCESSOR:
                 raise SettingsError("the processor has no harness: its system prompt is its role prompt (Settings → "
                                     "Roles, Role prompt) and the instructions of what it processes")
+            if role in SPAWN_ROLES:
+                raise SettingsError(f"the {role.value} role has no harness: its system prompt is its role prompt "
+                                    "(Settings → Roles, Role prompt) and its reply contract")
             text = harness_prompt(raw)
             values[name] = None if not text or (scope is Layer.SYSTEM and _is_builtin_harness(text)) else text
         elif name == "profile_id":
@@ -465,9 +478,9 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
                 raise SettingsError("system_prompt_mode is set per role: set it on the role's layer "
                                     "(Settings → Roles), not on the shared defaults or in a project")
             mode = _stored_prompt_mode(raw)
-            if role is AgentType.PROCESSOR and mode is not SystemPromptMode.REPLACE:
-                raise SettingsError("the processor always replaces the runtime's prompt, which describes tools it "
-                                    "does not have")
+            if role in NO_HARNESS_ROLES and mode is not SystemPromptMode.REPLACE:
+                raise SettingsError(f"the {role.value} role always replaces the runtime's prompt, which describes "
+                                    "tools it does not have")
             values[name] = mode.value
         else:
             values[name] = budget_usd(raw)
@@ -598,6 +611,8 @@ def _chain(role: AgentType | None, project_id: str | None) -> list[Place]:
     are any, come last; the processor's last is its schedule's choice."""
     if role is None:
         return [(Layer.SYSTEM, None)]
+    if role in SPAWN_ROLES:
+        return [(Layer.ROLE, role)]
     chain: list[Place] = [(Layer.SYSTEM, None), (Layer.ROLE, role)]
     if project_id and role is not AgentType.MANAGER:
         chain += [(Layer.PROJECT, None), (Layer.ROLE_PROJECT, role)]
@@ -633,7 +648,7 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
     the system layer alone."""
     agent = AgentType(role) if role is not None else None
     harness = BUILTIN_SETTINGS.harness
-    chosen, chosen_source = BUILTIN_PROFILE, Layer.BUILTIN
+    chosen, chosen_source = builtin_profile(agent.value if agent else None), Layer.BUILTIN
     budget, budget_source = None, Layer.BUILTIN
     env: dict[str, tuple[str, Layer]] = {}
     boundaries = layers.get((Layer.SYSTEM, None), EMPTY_LAYER).boundaries
@@ -674,7 +689,7 @@ def system_prompt_mode_choice(role: AgentType | None, layers: Mapping[Place, Lay
     always replaces (a runtime's own prompt describes the tools it does not have), whatever a layer says."""
     if role is None:
         return SystemPromptMode.APPEND, Layer.BUILTIN
-    if role is AgentType.PROCESSOR:
+    if role in NO_HARNESS_ROLES:
         return SystemPromptMode.REPLACE, Layer.BUILTIN
     for layer in (Layer.TASK, Layer.ROLE):
         mode = layers.get((layer, role), EMPTY_LAYER).system_prompt_mode
@@ -781,6 +796,19 @@ async def load_agent_settings(
         if row is None:
             raise SettingsError(f"the run's Agent Profile {profile_id!r} no longer exists")
         settings = replace(settings, profile=_stored_profile(row), profile_error=None, pricing_catalog=())
+    elif settings.profile_source is Layer.BUILTIN and AgentType(role) in SPAWN_ROLES:
+        # A spawned role's own built-in profile, seeded with the schema; without it the role does not run (another
+        # model in its place would not be the one chosen for it).
+        builtin = builtin_profile(AgentType(role).value)
+        try:
+            row = await profile_registry.get_profile(builtin.id)
+        except Exception as exc:
+            return replace(settings, profile_error=f"cannot read the built-in model binding ({type(exc).__name__})")
+        if row is None:
+            return replace(settings, profile_error=f"the built-in Agent Profile {builtin.name!r} of the "
+                                                   f"{AgentType(role).value} role is missing; choose one in Settings → "
+                                                   "Roles")
+        settings = replace(settings, profile=ResolvedAgentProfile.from_row(row))
     elif settings.profile_source is Layer.BUILTIN:
         try:
             row = await profile_registry.get_profile(BUILTIN_PROFILE.id)
