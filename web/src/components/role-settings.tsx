@@ -24,7 +24,7 @@ import {
   type Registry,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
-import { historyHref } from "@/pages/agent-history";
+import { historyHref, isHistoryRole } from "@/pages/agent-history";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
 import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
@@ -454,9 +454,11 @@ export function RolesSection({ sub }: { sub: string }) {
         {configs.map((config) => {
           const role = isRole(config.role) ? config.role : null;
           const name = nameOf(config);
-          const runs = (
+          // History filters by the roles `runs.list` knows; the advisor's runs are under their task's Planner run.
+          const historyRole = isHistoryRole(config.role) ? config.role : null;
+          const runs = historyRole && (
             <a
-              href={historyHref("", null, isRole(config.role) ? config.role : null)}
+              href={historyHref("", null, historyRole)}
               className="flex shrink-0 items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
             >
               <History className="h-3.5 w-3.5" aria-hidden="true" />

@@ -133,14 +133,15 @@ export type AdvisorLimitField = Extract<
   "advisor_consult_budget_usd" | "advisor_budget_usd" | "advisor_consults_per_task" | "advisor_consults_per_step"
 >;
 
-/** The project's limits on consults of the advisor, with their ranges and defaults as the server checks them. */
-export const ADVISOR_LIMITS: { field: AdvisorLimitField; label: string; help: string; min: number; max: number; fallback: number }[] = [
+/** The project's limits on consults of the advisor, with their ranges and defaults as the server checks them; a
+ * null default is no limit (only the per-consult budget has one). */
+export const ADVISOR_LIMITS: { field: AdvisorLimitField; label: string; help: string; min: number; max: number; fallback: number | null }[] = [
   { field: "advisor_consult_budget_usd", label: "Budget per consult (USD)",
     help: "What one consult may spend, its judge and its rounds included.", min: 0.01, max: 5, fallback: 1 },
   { field: "advisor_budget_usd", label: "Budget per task (USD)", help: "What a task's consults may spend in all.",
-    min: 0.01, max: 50, fallback: 5 },
+    min: 0.01, max: 50, fallback: null },
   { field: "advisor_consults_per_task", label: "Consults per task", help: "How many consults a task may have.",
-    min: 0, max: 100, fallback: 10 },
+    min: 0, max: 100, fallback: null },
   { field: "advisor_consults_per_step", label: "Consults per step", help: "How many consults one step may have.",
-    min: 0, max: 10, fallback: 2 },
+    min: 0, max: 10, fallback: null },
 ];

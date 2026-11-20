@@ -190,6 +190,10 @@ export interface ProjectExecution {
   advisor_budget_usd: number | null;
   advisor_consults_per_task: number | null;
   advisor_consults_per_step: number | null;
+  /** The Agent Profile the advisor would fall back to (not used yet); null = none. */
+  advisor_fallback_profile: string | null;
+  /** The project's internal domains: the request check counts them and their subdomains as a URL. */
+  advisor_internal_domains: string[] | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -2021,8 +2025,41 @@ export interface AdvisorConsult {
   answers: { question_id: string; conclusion: string; confidence: string | null }[];
   adoption: "adopted" | "partial" | "rejected" | null;
   unlocked: boolean | null;
+  /** The request that was sent (only one that passed every check; never its bindings); null when none was. */
+  question: AdviceRequestView | null;
+  /** The advisor's last questions back. */
+  needs_info: { id: string; question: string; why?: string; blocking?: boolean }[];
+  /** The advisor's answer, as parsed; null when none came. */
+  advice: AdviceView | null;
+  /** What the Planner said of each point it took or left, and why. */
+  adoption_items: { ref: string | null; use: string | null; why: string }[];
   created_at: string;
   finished_at: string | null;
+  duration_s: number | null;
+}
+
+/** A request sent to the advisor (AdviceRequest v1), as the consult card shows it. */
+export interface AdviceRequestView {
+  kind?: string;
+  problem?: string;
+  goal?: string;
+  acceptance?: string[];
+  constraints?: string[];
+  stack?: string[];
+  attempts?: { approach: string; signal?: string; learned?: string }[];
+  artifacts?: { kind: string; lang?: string; content: string }[];
+  questions?: { id: string; text: string }[];
+  options?: { id: string; summary: string; pros?: string; cons?: string }[];
+  prior_rounds?: { needs_info_id: string; answer: string }[];
+}
+
+/** The advisor's answer (AdviceResponse v1), as the consult card shows it. */
+export interface AdviceView {
+  status: "answered" | "needs_info" | "out_of_scope";
+  answers: { question_id: string; conclusion: string; basis: string[]; confidence: string; assumptions: string[] }[];
+  options: { id: string; verdict: string; why: string }[];
+  next_steps: { id: string; action: string; verify: string }[];
+  risks: string[];
 }
 
 export interface TaskDetail extends TaskInfo {
@@ -2086,8 +2123,8 @@ export interface TaskDetail extends TaskInfo {
   waits?: TaskWait[];
   /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
   run_roles?: Record<string, RunRole>;
-  /** Its Planner's consults of the advisor, oldest first; only in a task with some. */
-  advisor?: { consults: AdvisorConsult[] };
+  /** Its Planner's consults of the advisor, oldest first, and their one-line summary; only in a task with some. */
+  advisor?: { consults: AdvisorConsult[]; summary: string };
   /** Its steps' git worktrees, in a project whose parallel steps work in worktrees of their own; null (or absent)
    * when it had none. */
   step_workspaces?: TaskWorkspaces | null;
@@ -2751,6 +2788,9 @@ export interface TaskRunRow {
   profile: { name: string | null; source: SettingSource | null };
   /** The role its task's Planner defined that it ran as; null for a built-in role's run. */
   task_role?: RunRole | null;
+  /** What kind of run it is (an advisor's or a judge's run among the Planner's), and the run that started it. */
+  kind?: string | null;
+  parent_record_id?: number | null;
 }
 
 /** A task's Planner, Worker and Reviewer runs, oldest first, in one compact request. */

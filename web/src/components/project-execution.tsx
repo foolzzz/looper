@@ -31,6 +31,8 @@ const FIELDS: (keyof ProjectExecution)[] = [
   ...ROOM_LIMITS.map((limit) => limit.field),
   "advisor",
   ...ADVISOR_LIMITS.map((limit) => limit.field),
+  "advisor_fallback_profile",
+  "advisor_internal_domains",
 ];
 const NUMBERS = new Set<keyof ProjectExecution>([
   "task_budget_usd",
@@ -42,7 +44,7 @@ const NUMBERS = new Set<keyof ProjectExecution>([
   ...ADVISOR_LIMITS.map((limit) => limit.field),
 ]);
 
-const LISTS = new Set<keyof ProjectExecution>(["workspace_links", "verification_paths"]);
+const LISTS = new Set<keyof ProjectExecution>(["workspace_links", "verification_paths", "advisor_internal_domains"]);
 
 export function executionDraft(project: Project): ExecutionDraft {
   const text = (value: unknown) => (value == null ? "" : Array.isArray(value) ? value.join("\n") : String(value));
@@ -419,8 +421,8 @@ export function ProjectExecutionFields({
           </select>
           <p id={`${idPrefix}-advisor-help`} className="text-xs text-muted-foreground">
             Lets the task&apos;s Planner ask an outside model, through an abstract request that is checked before it
-            is sent: before a step it marks critical starts, and after a failed attempt it may retry. Its model is the
-            Advisor role&apos;s (Settings → Roles); off by default.
+            is sent: when it plans and at its decisions, as it judges, and always before a step it marks critical
+            starts. Its model is the Advisor role&apos;s (Settings → Roles); off by default.
           </p>
         </div>
         {draft.advisor === "on" && (
@@ -436,13 +438,46 @@ export function ProjectExecutionFields({
                     value={draft[field]}
                     onChange={set(field)}
                     aria-describedby={`${idPrefix}-${field}-help`}
-                    placeholder={`${fallback.toLocaleString()} (${min.toLocaleString()}–${max.toLocaleString()})`}
+                    placeholder={`${fallback?.toLocaleString() ?? "No limit"} (${min.toLocaleString()}–${max.toLocaleString()})`}
                   />
                   <p id={`${idPrefix}-${field}-help`} className="text-xs text-muted-foreground">
-                    {help} {min.toLocaleString()}–{max.toLocaleString()}; default {fallback.toLocaleString()}.
+                    {help} {min.toLocaleString()}–{max.toLocaleString()}; default{" "}
+                    {fallback == null ? "no limit" : fallback.toLocaleString()}.
                   </p>
                 </div>
               ))}
+              <div className="space-y-1 sm:col-span-2">
+                {label("advisor_fallback_profile", "Fallback Agent Profile")}
+                <Input
+                  id={`${idPrefix}-advisor_fallback_profile`}
+                  value={draft.advisor_fallback_profile}
+                  onChange={set("advisor_fallback_profile")}
+                  aria-describedby={`${idPrefix}-advisor_fallback_profile-help`}
+                  placeholder="None"
+                  spellCheck={false}
+                />
+                <p id={`${idPrefix}-advisor_fallback_profile-help`} className="text-xs text-muted-foreground">
+                  An Agent Profile&apos;s name for the advisor when its own cannot run. Kept for later: consults do
+                  not use it yet.
+                </p>
+              </div>
+              <div className="space-y-1 sm:col-span-2">
+                {label("advisor_internal_domains", "Internal domains")}
+                <textarea
+                  id={`${idPrefix}-advisor_internal_domains`}
+                  value={draft.advisor_internal_domains}
+                  onChange={set("advisor_internal_domains")}
+                  aria-describedby={`${idPrefix}-advisor_internal_domains-help`}
+                  placeholder={"corp.example\nbuild.internal"}
+                  rows={3}
+                  spellCheck={false}
+                  className="flex w-full rounded-md border border-input bg-transparent px-3 py-1.5 font-mono text-sm text-foreground"
+                />
+                <p id={`${idPrefix}-advisor_internal_domains-help`} className="text-xs text-muted-foreground">
+                  One domain per line, at most 20: a request that names one of them or its subdomains is sent back
+                  before it reaches the advisor, as a URL would be.
+                </p>
+              </div>
             </div>
           </fieldset>
         )}

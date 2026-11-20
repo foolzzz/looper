@@ -2,6 +2,7 @@ import { Lightbulb } from "lucide-react";
 import type { AdvisorConsult } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { formatUsd } from "@/lib/usage";
+import { ADOPTION_TEXT as ADOPTION, CHECKPOINT_UNFINISHED, SOURCE_TEXT as SOURCE, checkText } from "@/lib/consults";
 
 /** How a consult ended, in words, with the badge colour that goes with it (the words always carry the state). */
 const STATE: Record<AdvisorConsult["state"], { text: string; variant: "success" | "warning" | "destructive" | "outline" }> = {
@@ -15,40 +16,11 @@ const STATE: Record<AdvisorConsult["state"], { text: string; variant: "success" 
   over_budget: { text: "Over budget", variant: "warning" },
 };
 
-const SOURCE: Record<string, string> = {
-  checkpoint: "Plan review before the step started",
-  optional: "Asked by the Planner after a failed attempt",
-  ladder: "Asked after a repeated failure",
-};
-
-const ADOPTION: Record<string, string> = {
-  adopted: "Planner adopted it",
-  partial: "Planner adopted part of it",
-  rejected: "Planner did not adopt it",
-};
-
-/** What a failed check of the request found, by its category (the format, code and judge checks). */
-const CHECK: Record<string, string> = {
-  format: "not in the request format",
-  secret: "a key, token or secret",
-  binding: "what an alias stands for",
-  local_path: "a local path",
-  url: "a URL",
-  identity: "an address, person or id",
-  person: "a person",
-  raw_log: "a raw log",
-  dangling: "a reference to what the request does not contain",
-  verbatim: "the local material copied word for word",
-  not_standalone: "it did not stand on its own",
-  unanswerable: "it was too vague to answer",
-  other: "something else private",
-};
-
 /** The checks a request failed, by category and how many times; never what they matched. */
 function checksText(consult: AdvisorConsult) {
   if (!consult.checks.length) return null;
   return consult.checks
-    .map(({ category, count }) => `${CHECK[category] ?? category.replaceAll("_", " ")}${count > 1 ? ` ×${count}` : ""}`)
+    .map(({ category, count }) => `${checkText(category)}${count > 1 ? ` ×${count}` : ""}`)
     .join(", ");
 }
 
@@ -60,15 +32,25 @@ function unlockedText(consult: AdvisorConsult) {
     : `Attempt ${consult.attempt ?? "?"} did not pass`;
 }
 
-/** One step's consults of the advisor: where each came from, how it ended, the advisor's conclusions, what the
- * Planner took of them and whether the attempt it was for passed. */
-export function StepConsults({ consults }: { consults: AdvisorConsult[] }) {
+/** The marker of a step whose checkpoint consult ended without an answer: the step went on without it. */
+export function CheckpointUnfinished() {
+  return (
+    <Badge variant="warning" title="Its checkpoint consult of the advisor ended without an answer; the step went on without it">
+      {CHECKPOINT_UNFINISHED}
+    </Badge>
+  );
+}
+
+/** One step's consults of the advisor (or the plan's, under `title`): where each came from, how it ended, the
+ * advisor's conclusions, what the Planner took of them and whether the attempt it was for passed. The whole of
+ * each is on its card in the Pipeline. */
+export function StepConsults({ consults, title = "Advisor" }: { consults: AdvisorConsult[]; title?: string }) {
   if (!consults.length) return null;
   return (
-    <section aria-label="Advisor consults" className="mt-2 space-y-2 rounded-md border border-border px-3 py-2">
+    <section aria-label={`${title}: consults`} className="mt-2 space-y-2 rounded-md border border-border px-3 py-2">
       <h4 className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
         <Lightbulb className="h-3.5 w-3.5" aria-hidden="true" />
-        Advisor
+        {title}
       </h4>
       {consults.map((consult) => {
         const state = STATE[consult.state];

@@ -295,6 +295,8 @@ function executionRows(project: Project): [string, string][] {
   if (project.advisor === "on") {
     const limits = ADVISOR_LIMITS.filter(({ field }) => project[field] != null)
       .map(({ field, label }) => `${label} ${project[field]!.toLocaleString()}`);
+    if (project.advisor_fallback_profile) limits.push(`Fallback ${project.advisor_fallback_profile}`);
+    if (project.advisor_internal_domains?.length) limits.push(`Internal domains ${project.advisor_internal_domains.join(", ")}`);
     rows.push(["Advisor", limits.length ? `On · ${limits.join(" · ")}` : "On"]);
   }
   if (project.distill_lessons !== "off")

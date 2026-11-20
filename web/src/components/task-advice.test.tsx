@@ -8,6 +8,7 @@ const ANSWERED: AdvisorConsult = {
   rounds: 2, returns: 1, spent_usd: 0.2104, status: "answered", checks: [{ stage: "code", category: "url", count: 1 }],
   answers: [{ question_id: "q1", conclusion: "Keep the old column until the switch is verified.", confidence: "high" }],
   adoption: "partial", unlocked: true, created_at: "2026-11-19T10:00:00+00:00", finished_at: "2026-11-19T10:01:00+00:00",
+  question: null, needs_info: [], advice: null, adoption_items: [], duration_s: 60,
 };
 
 const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
@@ -30,7 +31,7 @@ describe("StepConsults", () => {
       checks: [{ stage: "code", category: "local_path", count: 3 }, { stage: "judge", category: "not_standalone", count: 1 }] };
     const failed: AdvisorConsult = { ...blocked, id: 3, state: "failed", failure: "refused", checks: [] };
     const shown = text(renderToStaticMarkup(<StepConsults consults={[blocked, failed]} />));
-    expect(shown).toContain("Asked by the Planner after a failed attempt · for attempt 3");
+    expect(shown).toContain("Asked by the Planner · for attempt 3");
     expect(shown).toContain("Blocked: the request failed its checks");
     expect(shown).toContain("Failed (refused)");
     expect(shown).toContain("Checks the request failed: a local path ×3, it did not stand on its own");

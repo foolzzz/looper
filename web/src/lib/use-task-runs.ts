@@ -31,7 +31,7 @@ function asRecord(run: TaskRunRow): LlmRecord {
   } as unknown as LlmRecord;
 }
 
-/** The task's Planner, Worker and Reviewer runs, read again whenever a step or the Planner changes (a new run or a
+/** The task's Planner, Worker and Reviewer runs and its consults' runs, read again whenever a step or the Planner changes (a new run or a
  * run's end moves one); null until read. One compact request (`runs.for_task`). */
 export function useTaskRuns(task: TaskDetail | null): { runs: TaskRuns | null; error: string } {
   const [runs, setRuns] = useState<TaskRuns | null>(null);
@@ -55,8 +55,12 @@ export function useTaskRuns(task: TaskDetail | null): { runs: TaskRuns | null; e
     fetchTaskRuns(taskId, abort.signal).then(
       (rows) => {
         if (seq !== latest.current) return;
-        const by = (role: TaskRunRow["role"]) => rows.filter((r) => r.role === role).map(asRecord);
-        setRuns({ planner: by("planner"), worker: by("worker"), reviewer: by("reviewer") });
+        // The advisor's and its judge's runs are the Planner's role's, but no Planner turn: a tree of their own.
+        const consult = (r: TaskRunRow) => r.kind === "advisor" || r.kind === "advice_check";
+        const by = (role: TaskRunRow["role"]) => rows.filter((r) => r.role === role && !consult(r)).map(asRecord);
+        const consults = rows.filter(consult).map((r) => ({
+          record: asRecord(r), kind: r.kind as "advisor" | "advice_check", parentId: r.parent_record_id ?? null }));
+        setRuns({ planner: by("planner"), worker: by("worker"), reviewer: by("reviewer"), consults });
         setError("");
       },
       (err) => {
