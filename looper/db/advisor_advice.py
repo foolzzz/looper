@@ -51,3 +51,29 @@ async def record_advice(spawn_id: int, advice: Mapping[str, Any], *,
 async def get(spawn_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     pool = pool or get_pool()
     return _row(await pool.fetchrow("SELECT * FROM advisor_advice WHERE spawn_id = $1", spawn_id))
+
+
+async def adopt(spawn_id: int, adoption: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
+    """What the Planner took of the consult's answer (``advice_adoption``)."""
+    pool = pool or get_pool()
+    await pool.execute(
+        "UPDATE advisor_advice SET adoption = $2, adoption_detail = $3::jsonb, adopted_at = now() "
+        "WHERE spawn_id = $1 AND advice IS NOT NULL AND adoption IS NULL",
+        spawn_id, adoption["adoption"], json.dumps({"items": list(adoption.get("items", ()))}))
+
+
+async def unlock(task_id: str, step_id: str, attempt: int, passed: bool, *,
+                 pool: asyncpg.Pool | None = None) -> int:
+    """Whether the attempt the step's answered consults were for passed (``unlocked``), set once; how many."""
+    pool = pool or get_pool()
+    status = await pool.execute(
+        "UPDATE advisor_advice SET unlocked = $4, unlocked_at = now() WHERE task_id = $1 AND step_id = $2 "
+        "AND attempt = $3 AND advice IS NOT NULL AND unlocked IS NULL", task_id, step_id, attempt, passed)
+    return int(status.split()[-1])
+
+
+async def for_step(step_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The step's consults that sent a request, oldest first."""
+    pool = pool or get_pool()
+    return [_row(r) for r in await pool.fetch(
+        "SELECT * FROM advisor_advice WHERE step_id = $1 ORDER BY spawn_id", step_id)]

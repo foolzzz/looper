@@ -260,8 +260,11 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
             prefix = f"{REAL_CLAUDE_ENV}={shlex.quote(real_claude)} "
     extra = ["--max-budget-usd", f"{max_budget_usd:g}"] if mode == "real" and max_budget_usd else []
     script = bin_dir / "claude"
-    script.write_text("#!/bin/sh\n" + prefix + "exec " + " ".join(shlex.quote(part) for part in target) + ' "$@"'
-                      + "".join(f" {shlex.quote(part)}" for part in extra) + "\n")
+    run = prefix + "exec " + " ".join(shlex.quote(part) for part in target) + ' "$@"'
+    # A call that sets its own cap (a spawned run's: the advisor's consult budget) keeps it; the others get the
+    # eval's, which would otherwise override it (the last --max-budget-usd wins).
+    guard = f'case " $* " in *" --max-budget-usd "*) {run} ;; esac\n' if extra else ""
+    script.write_text("#!/bin/sh\n" + guard + run + "".join(f" {shlex.quote(part)}" for part in extra) + "\n")
     script.chmod(0o755)
     return script
 
@@ -566,6 +569,8 @@ def run_task(
         if vault_dir is None:
             raise EvalError(f"{task.id} needs the knowledge vault, and the server has no eval vault")
         project["vault"] = "on"
+    if task.advisor:
+        project["advisor"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
     workflow = {}

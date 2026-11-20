@@ -248,6 +248,7 @@ from ...db import user_gates as db_user_gates
 from ...db import schedules as db_schedules
 from ...db import waits as db_waits
 from ...db import room as db_room
+from ...db.agent_spawns import SpawnState
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
@@ -267,7 +268,7 @@ DEFAULT_SUPERVISE_INTERVAL_SEC = 300
 # A plan whose task still runs.
 _LIVE = ("executing", "verifying")
 # A step in flight: its Worker runs, a decision on its result is due, or it is in review.
-_IN_FLIGHT = ("dispatched", "deciding", "completed")
+_IN_FLIGHT = ("dispatched", "deciding", "completed", "consulting")
 # How long a task that only waits (a gate or an open wait, and no step is in flight) keeps its Planner's resident
 # Claude without a turn, and how often that is checked; the next turn resumes the session.
 GATE_IDLE_STOP_SEC = 900
@@ -452,7 +453,8 @@ class PlanStep:
     accept_when: dict | str | None = None
     reviews: str | None = None
     review: bool = False  # a Reviewer must pass the step before it is accepted
-    # "pending" | "dispatched" | "deciding" | "completed" (in review) | "verified" | "failed" | "skipped"
+    # "pending" | "dispatched" | "deciding" | "consulting" (waiting for the advisor) | "completed" (in review)
+    # | "verified" | "failed" | "skipped"
     status: str = "pending"
     result: dict[str, Any] | None = None
     worker_id: str | None = None
@@ -477,6 +479,11 @@ class PlanStep:
     # When its run was first dispatched; kept through its retries and reviews, gone when it is sent back to not
     # started (task_steps.started_at).
     started_at: datetime | None = None
+    # How hard its Planner says it is (with the advisor on): a critical step's plan is reviewed before it starts.
+    difficulty: str | None = None
+    # The consult of the advisor whose answer its next attempt follows (the Planner wrote what it took into that
+    # attempt's feedback); its Worker's record names it. Not kept over a restart.
+    consult: int | None = None
 
     @property
     def kind(self) -> str:
@@ -666,7 +673,38 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "review_position": step.review_position,
         "kind": step.kind,
         "started_at": step.started_at,
+        "difficulty": step.difficulty,
     }
+
+
+@dataclass
+class _Consult:
+    """A consult of the advisor going now: what it is about (a step, or the plan when ``step_id`` is None), the
+    decision it was asked in and that decision's report (a step's), the planning it was asked in (the plan's), the
+    local material its request is checked against, when it opened, and its latest outcome."""
+
+    step_id: str | None = None
+    context: DecisionContext | None = None
+    report: list[str] = field(default_factory=list)
+    checkpoint: bool = False
+    material: str = ""
+    changes: Any = None
+    envelope: Any = None
+    spawn_id: int = 0
+    started: float = field(default_factory=time.monotonic)
+    outcome: Any = None
+    task: asyncio.Task[None] | None = None
+
+    @classmethod
+    def about(cls, step: PlanStep, context: DecisionContext, report: Sequence[str], *, checkpoint: bool = False,
+              material: str = "") -> _Consult:
+        return cls(step.step_id, context, list(report), checkpoint, material)
+
+
+def _allowed_text(context: DecisionContext) -> str:
+    """The decisions ``context`` allows, as a DECISION message lists them (a retry with how many are left)."""
+    return ", ".join(f"retry ({context.max_retries - context.retries} left)" if d is Decision.RETRY else d.value
+                     for d in context.allowed())
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -814,6 +852,7 @@ def result_outcome(result: Mapping[str, Any]) -> str:
 
 # How a closing note names a step that is not done, by its status.
 _NOT_DONE = {"pending": "not started", "dispatched": "was running", "deciding": "awaiting a decision",
+             "consulting": "waiting for the advisor",
              "completed": "awaiting review", "failed": "failed", WAITING_USER: "a gate waiting for the user",
              waits.WAITING: "a wait not over"}
 
@@ -896,6 +935,9 @@ class PlannerAgent:
         self._task_id = task_id
         self._runtime_root = runtime_root
         self._claude_bin = claude_bin
+        self._last_record_id: int | None = None
+        self._checkpointed: set[str] = set()  # the steps whose checkpoint consult this Planner started
+        self._consults: dict[int, _Consult] = {}  # the consults of the advisor going now, by agent_spawns id
         # The Planner's own platform tools (``ops.planner.PlannerOps``), and the token they know it by while it runs;
         # without them it has none.
         self._ops = ops
@@ -1009,6 +1051,7 @@ class PlannerAgent:
         loop_task, self._loop_task = self._loop_task, None
         cancelled = False
         try:
+            await self._end_consults("the task's Planner stopped")
             if supervise_task:
                 await cancel_and_wait(supervise_task)
             # Stop the Workers this task still runs; otherwise they keep
@@ -1177,18 +1220,38 @@ class PlannerAgent:
         if problem:
             await self._fail_plan(plan, reason=f"Planning failed: {problem}")
             return
+        spend = await self._advice_offer(plan, None)
+        offer: list[str] = []
+        if spend is not None:
+            from .planner_advice import offer_lines
+
+            offer = [*offer_lines(spend, [], plan=True), "",
+                     "Local material for a request (it stays here; restate it, do not copy it):",
+                     self._plan_material(plan)]
         try:
-            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
-                                    lambda text: parse_plan(
-                                        text, self._roles, gate_policy=self._gate_policy,
-                                        wait_policy=self._wait_policy(), conditions=self._execution.conditions_on,
-                                        isolate_steps=self._execution.isolate_steps, review_panel=self._panel_on,
-                                        verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
-                                        work_role=(self._workflow or {}).get("work_role")))
+            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, [*await self._template_lines(plan), *offer]),
+                                    await self._asking(plan, None, self._plan_parser(advise=spend is not None)))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
             return
+        if reply.advice_request is not None:
+            await self._start_consult(plan, None, reply.advice_request, reply.advice_bindings,
+                                      _Consult(changes=changes, envelope=envelope))
+            return
+        await self._planned(plan, reply, changes, envelope)
 
+    def _plan_parser(self, *, advise: bool = False, answered: bool = False) -> Callable[[str], Any]:
+        return lambda text: parse_plan(
+            text, self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy(),
+            conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps,
+            review_panel=self._panel_on,
+            verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
+            work_role=(self._workflow or {}).get("work_role"), advisor=self._execution.advisor_on, advise=advise,
+            answered=answered)
+
+    async def _planned(self, plan: TaskPlan, reply: Any, changes: Any, envelope: MessageEnvelope) -> None:
+        """Start executing the plan of a PLAN reply."""
+        assert self._bus is not None
         steps = self._add_steps(plan, reply.steps)
         plan.status = "executing"
         await self._save(plan, *steps, plan_row=True)
@@ -1243,6 +1306,7 @@ class PlannerAgent:
                            and (spec.review or (self._execution.review_all and not self._is_verification(step)))
                            and not (self._panel_on and self._is_verification(step)))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
+            step.difficulty = spec.difficulty if spec.gate is None and spec.wait is None else None
             if spec.gate is not None:
                 step.gate = Gate(spec.gate.topic, spec.gate.agenda, spec.gate.findings, purpose=spec.gate.purpose)
             if spec.wait is not None:
@@ -1310,8 +1374,490 @@ class PlannerAgent:
     async def _dispatch_ready(self, plan: TaskPlan) -> None:
         from ..scheduler import project_dispatch
 
+        if self._execution.advisor_on:
+            # Before the project's dispatch lock: a consult takes a minute, and other tasks dispatch meanwhile.
+            await self._checkpoints(plan)
+            if plan.status not in _LIVE:
+                return
         async with project_dispatch(plan.project_id):
             await self._dispatch_ready_impl(plan)
+
+    # --- The advisor (the advisor RFC, sections 11 and 12): only with the project's advisor on ---
+    #
+    # A consult runs in the background (``_run_consult``): only its scope waits (a step, ``consulting``; or the
+    # plan, before there is one), and its outcome comes back as an ``advice`` event (``_consult_event``), whose
+    # turn sends a request back, answers the advisor's questions, or decides with the answer or without it.
+
+    async def _checkpoints(self, plan: TaskPlan) -> None:
+        """Before the first Worker of each ready critical work step starts, its plan is reviewed by the advisor."""
+        from ...db import agent_spawns
+
+        for step in plan.ready_steps(isolate_steps=self._execution.isolate_steps):
+            if (step.difficulty != "critical" or step.gate is not None or step.wait is not None or step.reviews
+                    or step.status != "pending" or step.retries or step.worker_id is not None
+                    or step.step_id in self._checkpointed):
+                continue
+            self._checkpointed.add(step.step_id)
+            if await agent_spawns.has_source(step.step_id, "checkpoint"):
+                continue  # reviewed before (or tried to be): its Worker starts as planned
+            if plan.status not in _LIVE:
+                return
+            await self._checkpoint(plan, step)
+
+    async def _advice_budget(self, step: PlanStep | None) -> Any:
+        from ...db import agent_spawns
+        from .planner_advice import budget
+
+        task_consults, step_consults, spent = await agent_spawns.usage(self._task_id, step.step_id if step else None)
+        return budget(self._execution.advisor_limits, step_consults=step_consults, task_consults=task_consults,
+                      task_spent=spent)
+
+    async def _evidence(self, plan: TaskPlan, step: PlanStep | None) -> Any:
+        """What is known now of ``step`` (None: the plan), as a consult about it records it (``Evidence``): with the
+        user's requirement edits and supplements, which a supplement does not show in ``plan.requirement``."""
+        from .planner_advice import Evidence, digest
+
+        try:
+            edited, supplement = await db_changes.versions(self._task_id)
+        except Exception:
+            logger.warning("planner %s cannot read its task's changes for a consult's evidence", self.agent_id,
+                           exc_info=True)
+            edited = supplement = 0
+        answered = sum(1 for s in plan.steps if s.gate is not None and s.gate.state.closed)
+        if step is None:
+            return Evidence("plan", digest(plan.requirement), answered, edited, supplement,
+                            steps=tuple((s.label, s.status) for s in plan.steps))
+        result = step.result or {}
+        return Evidence(step.step_id, digest(plan.requirement), answered, edited, supplement, attempt=step.retries,
+                        worker=step.worker_id or "", worker_outcome=str(result.get("outcome") or result.get("status")
+                                                                         or ""),
+                        reviewer=step.reviewer_id or "", review_outcome=str(result.get("verify_passed", "")),
+                        instruction=digest("\n".join([step.instruction, *step.acceptance_criteria])))
+
+    async def _advice_offer(self, plan: TaskPlan, step: PlanStep | None) -> Any:
+        """What a consult about ``step`` (None: the plan) may spend, when the Planner may ask for one now; None when
+        advise is not offered: the advisor off, a consult going about it, its last one failed with nothing new
+        known since (the RFC, section 12.2), or a limit the project set reached."""
+        from ...db import agent_spawns
+
+        if not self._execution.advisor_on:
+            return None
+        scope = step.step_id if step else None
+        if any(c.step_id == scope for c in self._consults.values()):
+            return None
+        if await agent_spawns.asked(self._task_id, scope, evidence=(await self._evidence(plan, step)).fingerprint(),
+                                    states=("failed", "blocked", "over_budget")):
+            return None
+        spend = await self._advice_budget(step)
+        return spend if spend.open else None
+
+    async def _asking(self, plan: TaskPlan, step: PlanStep | None, parse: Callable[[str], Any]) -> Callable[[str], Any]:
+        """``parse``, refusing a request about ``step`` (None: the plan) of a kind already asked with what is known
+        now: the same question needs something new first (the RFC, section 12.2)."""
+        from ...db import agent_spawns
+
+        if not self._execution.advisor_on:
+            return parse
+        evidence = (await self._evidence(plan, step)).fingerprint()
+        scope = step.step_id if step else None
+        asked = {kind for kind in ("diagnose", "design_choice", "plan_review", "unblock")
+                 if await agent_spawns.asked(self._task_id, scope, kind=kind, evidence=evidence)}
+
+        def checked(text: str) -> Any:
+            reply = parse(text)
+            request = getattr(reply, "advice_request", None)
+            if isinstance(request, Mapping) and request.get("kind") in asked:
+                raise ProtocolError(f"you asked the advisor a {request['kind']} about this already, and nothing new "
+                                    "is known since: decide without it, or ask once something new is known")
+            return reply
+
+        return checked
+
+    async def _checkpoint(self, plan: TaskPlan, step: PlanStep) -> None:
+        """The checkpoint of a critical step: a turn that may only ask the advisor (plan_review); the step waits for
+        the answer. A turn that fails starts the step as planned."""
+        from .planner_advice import checkpoint_message
+
+        spend = await self._advice_offer(plan, step)
+        if spend is None:
+            await self._activity("phase", f"Step {step.label} is critical, but the advisor cannot be asked now: it "
+                                          "starts without a review of its plan")
+            return
+        context = DecisionContext(step=step.label, result=ResultKind.WORK, succeeded=False, review_required=False,
+                                  retries=step.retries, max_retries=self._execution.step_retries, checkpoint=True)
+        local = self._advice_material(plan, step)
+        view = plan.view()
+        try:
+            reply = await self._ask(TurnKind.DECISION,
+                                    checkpoint_message(step.label, step.index + 1, PLAN_VIEW, local, spend),
+                                    lambda text: parse_decision(text, context, self._checked(view)))
+        except PlannerTurnError as exc:
+            await self._activity("error", f"The checkpoint of step {step.label} failed ({exc}); it starts as planned"
+                                 [:500])
+            return
+        await self._start_consult(plan, step, reply.advice_request, reply.advice_bindings,
+                                  _Consult.about(step, context, [], checkpoint=True, material=local))
+
+    async def _start_consult(self, plan: TaskPlan, step: PlanStep | None, request: Any, bindings: Any,
+                             consult: _Consult) -> None:
+        """Open a consult about ``step`` (None: the plan) and send its first request in the background: the step
+        waits (``consulting``), the others go on."""
+        from .. import advisor
+
+        spend = await self._advice_budget(step)
+        source = advisor.Source.CHECKPOINT if consult.checkpoint else advisor.Source.OPTIONAL
+        attempt = 1 if step is None else step.retries + (1 if consult.checkpoint else 2)
+        kind = request.get("kind") if isinstance(request, Mapping) and isinstance(request.get("kind"), str) else None
+        consult.spawn_id = await advisor.open_consult(
+            advisor.Brief(self._task_id, step.step_id if step else None, attempt, source, self._last_record_id,
+                          asked=kind, evidence=(await self._evidence(plan, step)).fingerprint()),
+            budget_usd=spend.consult_usd)
+        if not consult.material:
+            consult.material = self._plan_material(plan) if step is None else self._advice_material(
+                plan, step, consult.report)
+        self._consults[consult.spawn_id] = consult
+        if step is not None:
+            step.status = "consulting"
+            await self._save(plan, step)
+        what = "the plan" if step is None else f"Step {step.label}"
+        await self._activity("phase", f"{what}: asking the advisor ({source.value}"
+                                      + (f", {kind}" if kind else "") + ")")
+        self._resend(plan, consult, request, bindings)
+
+    def _resend(self, plan: TaskPlan, consult: _Consult, request: Any, bindings: Any) -> None:
+        consult.task = asyncio.create_task(self._run_consult(plan, consult, request, bindings),
+                                           name=f"consult-{consult.spawn_id}")
+
+    def _checks(self, plan: TaskPlan, consult: _Consult) -> Any:
+        from .. import advisor
+
+        return advisor.Context(material=consult.material, local_paths=self._local_paths(plan),
+                               ids=self._local_ids(plan), domains=self._execution.advisor_internal_domains or ())
+
+    async def _run_consult(self, plan: TaskPlan, consult: _Consult, request: Any, bindings: Any) -> None:
+        """Check ``request`` and run the advisor's round, within what is left of the consult's time, then tell the
+        Planner (an ``advice`` event)."""
+        from .. import advisor
+
+        deadline = consult.started + advisor.CONSULT_MAX_SEC  # one end for all of the consult's time
+        left = deadline - time.monotonic()
+        try:
+            if left <= 0:
+                consult.outcome = await advisor.expire(consult.spawn_id)
+            else:
+                consult.outcome = await asyncio.wait_for(advisor.submit(
+                    consult.spawn_id, request, bindings, context=self._checks(plan, consult),
+                    runtime_root=self._runtime_root, claude_bin=self._claude_bin,
+                    timeout_s=advisor.ADVISOR_TIMEOUT_SEC, deadline=deadline), timeout=left)
+        except asyncio.TimeoutError:
+            consult.outcome = await advisor.expire(consult.spawn_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("task %s: consult %s failed", self._task_id, consult.spawn_id)
+            consult.outcome = await advisor.expire(consult.spawn_id, failure="runtime",
+                                                   detail="the consult could not run")
+        if consult.outcome is None:
+            consult.outcome = advisor.Ended(SpawnState.FAILED, failure="withdrawn")
+        if self._bus is not None and self._running:
+            await self._bus.publish(MessageEnvelope.create(
+                source=self.agent_address, target=self.agent_address, message_type=MessageType.SYSTEM_EVENT,
+                payload={"type": "advice", "spawn_id": consult.spawn_id}))
+
+    async def _end_consults(self, reason: str) -> None:
+        """End every consult going: its run stopped, its row failed (``interrupted``)."""
+        from .. import advisor
+
+        consults, self._consults = list(self._consults.values()), {}
+        for consult in consults:
+            if consult.task is not None and not consult.task.done():
+                await cancel_and_wait(consult.task)
+            try:
+                await advisor.expire(consult.spawn_id, failure="interrupted", detail=reason)
+            except Exception:
+                logger.warning("task %s: cannot end consult %s", self._task_id, consult.spawn_id, exc_info=True)
+
+    async def _consult_event(self, spawn_id: int) -> None:
+        """A consult's outcome came: its request back, the advisor's questions, or its end."""
+        from .. import advisor
+
+        consult, plan = self._consults.get(spawn_id), self._plan
+        if consult is None or plan is None or consult.outcome is None:
+            return
+        outcome, consult.outcome = consult.outcome, None
+        step = plan.step(consult.step_id) if consult.step_id else None
+        if (step is None and plan.status != "planning") or (step is not None and (
+                plan.status not in _LIVE or step.status != "consulting")):
+            self._consults.pop(spawn_id, None)
+            await advisor.expire(spawn_id, failure="withdrawn", detail="what it was about moved on")
+            return
+        if (isinstance(outcome, advisor.Returned) or outcome.state is SpawnState.NEEDS_INFO) and (
+                time.monotonic() >= consult.started + advisor.CONSULT_MAX_SEC):
+            # its time ran out while it waited for the Planner: no turn about it, it ends
+            self._consults.pop(spawn_id, None)
+            ended = await advisor.expire(spawn_id) or advisor.Ended(SpawnState.FAILED, failure="timeout")
+            await self._consult_ended(plan, step, consult, ended)
+            return
+        if isinstance(outcome, advisor.Returned):
+            await self._consult_returned(plan, step, consult, outcome)
+        elif outcome.state is SpawnState.NEEDS_INFO:
+            await self._consult_questions(plan, step, consult, outcome)
+        else:
+            self._consults.pop(spawn_id, None)
+            await self._consult_ended(plan, step, consult, outcome)
+
+    def _consult_parse(self, plan: TaskPlan, step: PlanStep, context: DecisionContext) -> Callable[[str], Any]:
+        view = self._checked(plan.view())
+        if context.checkpoint:
+            return lambda text: parse_decision(text, context, view)
+        return lambda text: self._panel_decision(text, plan, step, context, view)
+
+    async def _consult_returned(self, plan: TaskPlan, step: PlanStep | None, consult: _Consult, outcome: Any) -> None:
+        """The request (or the answers to the advisor's questions) failed the checks: the Planner fixes it, or
+        decides without the advisor."""
+        from ...db import agent_spawns
+        from .. import advisor
+        from .planner_advice import returned_message
+
+        row = await agent_spawns.get(consult.spawn_id)
+        what = "the plan" if step is None else f"Step {step.label}"
+        await self._activity("phase", f"{what}: the advisor's request went back to be fixed "
+                                      f"({outcome.returns_left} more return(s) allowed)")
+        try:
+            if (row or {}).get("rounds"):  # the answers to the advisor's questions came back
+                needs = ((row or {}).get("result") or {}).get("needs_info", [])
+                answer = await self._ask(TurnKind.ADVICE, returned_message(
+                    "ADVICE", outcome.problems, outcome.returns_left, needs=needs), self._advice_parser(row))
+                await self._supplement(plan, step, consult, row, answer)
+                return
+            if step is None:
+                reply = await self._ask(TurnKind.PLAN, returned_message("PLAN", outcome.problems, outcome.returns_left),
+                                        self._plan_parser(advise=True))
+                if reply.advice_request is not None:
+                    self._resend(plan, consult, reply.advice_request, reply.advice_bindings)
+                    return
+                self._consults.pop(consult.spawn_id, None)
+                await advisor.withdraw(consult.spawn_id, "the Planner planned without the advisor")
+                await self._planned(plan, reply, consult.changes, consult.envelope)
+                return
+            context = self._open_now(plan, step, consult.context)
+            reply = await self._ask(TurnKind.DECISION, returned_message(
+                "DECISION", outcome.problems, outcome.returns_left, _allowed_text(context), label=step.label,
+                notes=self._final_notes(step, context)), self._consult_parse(plan, step, context))
+        except PlannerTurnError as exc:
+            self._consults.pop(consult.spawn_id, None)
+            ended = await advisor.withdraw(consult.spawn_id, "the Planner's turn about it failed")
+            await self._consult_ended(plan, step, consult, ended or advisor.Ended(SpawnState.FAILED,
+                                                                                   failure="no_request"), turn=exc)
+            return
+        if reply.decision is Decision.ADVISE:
+            self._resend(plan, consult, reply.advice_request, reply.advice_bindings)
+            return
+        self._consults.pop(consult.spawn_id, None)
+        await advisor.withdraw(consult.spawn_id, "the Planner decided without the advisor")
+        step.status = "deciding"
+        await self._apply_decision(plan, step, context, reply)
+
+    async def _consult_questions(self, plan: TaskPlan, step: PlanStep | None, consult: _Consult,
+                                 outcome: Any) -> None:
+        """The advisor asked back: the Planner answers in an [ADVICE] turn, or withdraws."""
+        from ...db import agent_spawns
+        from .. import advisor
+        from .planner_advice import questions_message
+
+        row = await agent_spawns.get(consult.spawn_id)
+        try:
+            answer = await self._ask(TurnKind.ADVICE, questions_message(
+                step.label if step else "the plan", int((row or {}).get("rounds") or 1), advisor.ROUNDS_MAX,
+                outcome.response.needs_info), self._advice_parser(row, outcome.response.needs_info))
+        except PlannerTurnError as exc:
+            self._consults.pop(consult.spawn_id, None)
+            ended = await advisor.withdraw(consult.spawn_id, "the Planner's turn about it failed")
+            await self._consult_ended(plan, step, consult, ended or advisor.Ended(SpawnState.FAILED,
+                                                                                   failure="withdrawn"), turn=exc)
+            return
+        await self._supplement(plan, step, consult, row, answer)
+
+    async def _supplement(self, plan: TaskPlan, step: PlanStep | None, consult: _Consult,
+                          row: Mapping[str, Any] | None, answer: Any) -> None:
+        """Send the Planner's answers to the advisor's questions as the request's next round, or withdraw it."""
+        from .. import advisor
+        from ..advice import parse_request
+        from .planner_protocol import AdviceAction
+
+        if answer.action is AdviceAction.WITHDRAW:
+            self._consults.pop(consult.spawn_id, None)
+            ended = await advisor.withdraw(consult.spawn_id, answer.reason)
+            await self._consult_ended(plan, step, consult, ended or advisor.Ended(SpawnState.FAILED,
+                                                                                   failure="withdrawn"))
+            return
+        inputs = (row or {}).get("inputs") or {}
+        request = parse_request(inputs["request"]).with_round(answer.answers)
+        self._resend(plan, consult, request, inputs.get("bindings"))
+
+    async def _consult_ended(self, plan: TaskPlan, step: PlanStep | None, consult: _Consult, outcome: Any, *,
+                             turn: Exception | None = None) -> None:
+        """The consult ended: the Planner decides (or plans) with its answer, or without one, told why
+        (``turn``: the Planner's own turn about it failed, so it is not asked again). A checkpoint that got no
+        answer starts its step as planned."""
+        from .. import advisor_alerts
+        from .planner_advice import answered_message, ended_message, ended_lines, plan_answered_lines
+
+        answered = outcome.state is SpawnState.ANSWERED
+        what = "the plan" if step is None else f"Step {step.label}"
+        await self._activity("phase", f"{what}: the advisor's consult ended {outcome.state.value}"
+                                      + (f" ({outcome.failure})" if outcome.failure else ""))
+        await advisor_alerts.consult_ended(self._task_id)
+        advice = dict(outcome.response.fields) if answered and outcome.response is not None else {}
+        if step is None:
+            lines = plan_answered_lines(advice) if answered else ended_lines(outcome.failure or "", outcome.detail)
+            try:
+                reply = await self._ask(TurnKind.PLAN, self._plan_message(
+                    plan, [*await self._template_lines(plan), "", *lines]), self._plan_parser(answered=answered))
+            except PlannerTurnError as exc:
+                await self._fail_plan(plan, reason=f"Planning failed: {exc}")
+                return
+            if answered:
+                await self._adopted(consult, reply.adoption, what)
+            await self._planned(plan, reply, consult.changes, consult.envelope)
+            return
+        context = consult.context
+        if consult.checkpoint:
+            reply = None
+            if answered and turn is None:
+                context = replace(context, answered=True)
+                try:
+                    reply = await self._ask(TurnKind.DECISION, answered_message(
+                        step.label, step.index + 1, advice, _allowed_text(context), checkpoint=True),
+                        self._consult_parse(plan, step, context))
+                except PlannerTurnError as exc:
+                    await self._activity("error", f"The decision after step {step.label}'s checkpoint failed ({exc})"
+                                         [:500])
+            await self._checkpoint_decided(plan, step, consult, reply)
+            return
+        context = self._open_now(plan, step, context)  # other steps may have ended while it ran
+        if turn is not None:
+            step.status = "deciding"
+            await self._undecided(plan, step, context, turn)
+            return
+        if answered:
+            context = replace(context, answered=True)
+            message = answered_message(step.label, step.index + 1, advice, _allowed_text(context), checkpoint=False,
+                                       notes=self._final_notes(step, context))
+        else:
+            context = replace(context, advise=False)
+            message = ended_message(step.label, step.index + 1, outcome.failure or "", outcome.detail,
+                                    _allowed_text(context), notes=self._final_notes(step, context))
+        try:
+            reply = await self._ask(TurnKind.DECISION, message, self._consult_parse(plan, step, context))
+        except PlannerTurnError as exc:
+            step.status = "deciding"
+            await self._undecided(plan, step, context, exc)
+            return
+        if answered:
+            await self._adopted(consult, reply.adoption, what)
+            if reply.decision is Decision.RETRY:
+                step.consult = consult.spawn_id
+        step.status = "deciding"
+        await self._apply_decision(plan, step, context, reply)
+
+    async def _checkpoint_decided(self, plan: TaskPlan, step: PlanStep, consult: _Consult,
+                                  reply: DecisionReply | None) -> None:
+        """After a critical step's checkpoint: proceed (with the Planner's note in its instruction), replan or fail;
+        without a decision (no answer, or no valid turn) it starts as planned, marked."""
+        step.status = "pending"
+        if reply is None:
+            await self._activity("phase", f"Step {step.label}: its checkpoint consult did not finish; it starts as "
+                                          "planned")
+            await self._save(plan, step)
+            await self._dispatch_ready(plan)
+            return
+        await self._adopted(consult, reply.adoption, f"Step {step.label}")
+        await self._activity("phase", f"Planner decision on step {step.index + 1} ({step.label}) after the "
+                                      f"checkpoint: {reply.decision.value}" + (f": {reply.reason}" if reply.reason else "")
+                             [:500])
+        if reply.progress is not None:
+            await self._record_progress(plan, reply.progress)
+        if reply.decision is Decision.PROCEED:
+            step.consult = consult.spawn_id
+            if reply.feedback:
+                step.instruction = f"{step.instruction}\n\nThe Planner's note before this step starts: {reply.feedback}"
+            await self._save(plan, step)
+            await self._dispatch_ready(plan)
+        elif reply.decision is Decision.REPLAN:
+            # The step has not started: the new steps replace it (in place when they keep its id) and the others not
+            # started yet.
+            await self._replan(plan, reply.steps, step, reply.reason)
+            await self._report_progress(plan)
+            if plan.status in _LIVE:
+                await self._dispatch_ready(plan)
+        else:
+            step.status = "failed"
+            plan.fail_reason = reply.reason
+            await self._step_settled(plan, step, note=f"The Planner failed the task: {reply.reason}")
+
+    async def _adopted(self, consult: _Consult, adoption: Mapping[str, Any], what: str) -> None:
+        """What the Planner took of a consult's answer: recorded, and in the task's activity."""
+        from ...db import advisor_advice
+
+        await advisor_advice.adopt(consult.spawn_id, adoption)
+        await self._activity("phase", f"{what}: the Planner {adoption['adoption']} the advice "
+                                      f"({len(adoption['items'])} point(s))")
+
+    def _advice_parser(self, row: Mapping[str, Any] | None,
+                       needs: Sequence[Mapping[str, Any]] = ()) -> Callable[[str], Any]:
+        """The parser of an [ADVICE] reply: the answers to the advisor's last questions."""
+        from .planner_protocol import parse_advice
+
+        asked = [n["id"] for n in needs] or [n["id"] for n in ((row or {}).get("result") or {}).get("needs_info", [])]
+        return lambda text: parse_advice(text, asked)
+
+    def _advice_material(self, plan: TaskPlan, step: PlanStep, report: Sequence[str] = ()) -> str:
+        """The local material of a request about ``step``: its instruction and criteria, the result the decision is
+        about, and what the steps it depends on reported."""
+        from .planner_advice import material
+
+        dependencies = [f"- {d.get('step')}: {d.get('summary') or '(no summary)'}"
+                        for d in self._dependency_reports(plan, step)]
+        return material(instruction=step.instruction, criteria=step.acceptance_criteria, report=report,
+                        dependencies=dependencies)
+
+    def _plan_material(self, plan: TaskPlan) -> str:
+        """The local material of a request about the plan: the task's requirement."""
+        from .planner_advice import material
+
+        return material(instruction=plan.requirement, criteria=[])
+
+    def _local_paths(self, plan: TaskPlan) -> list[str]:
+        """This machine's directories a request must not name: the task's, its steps' and the runtime root."""
+        paths = [plan.work_dir, str(self._runtime_root), str(Path.home())]
+        paths += [s.workspace.work_dir for s in plan.steps if s.workspace is not None]
+        return [path for path in paths if path and len(path) > 3]
+
+    def _local_ids(self, plan: TaskPlan) -> list[str]:
+        """The task's own ids a request must not name: the task's and its steps' and runs'."""
+        ids = [self._task_id, plan.plan_id]
+        for step in plan.steps:
+            ids += [step.step_id, step.worker_id or "", step.reviewer_id or ""]
+        return [value for value in ids if value]
+
+    async def _judged(self, step: PlanStep, context: DecisionContext) -> None:
+        """A result of the step's current attempt: a review's verdict, or a Worker that failed, says whether the
+        attempt passed; a Worker's success without a review waits for the Planner to accept it (``_decided``)."""
+        if context.result is ResultKind.REVIEW:
+            await self._settle_advice(step, context.succeeded)
+        elif not context.succeeded:
+            await self._settle_advice(step, False)
+
+    async def _settle_advice(self, step: PlanStep, passed: bool) -> None:
+        """The attempt just judged was what the step's answered consults were for: whether it passed (unlocked)."""
+        from ...db import advisor_advice
+
+        try:
+            await advisor_advice.unlock(self._task_id, step.step_id, step.retries + 1, passed)
+        except Exception:
+            logger.warning("task %s: cannot record whether step %s's advice unlocked it", self._task_id, step.label,
+                           exc_info=True)
 
     async def _dispatch_ready_impl(self, plan: TaskPlan) -> None:
         # Every ready gate and wait opens; every ready work step starts, and the worker pool runs the work
@@ -2023,10 +2569,13 @@ class PlannerAgent:
                 "context": context,
                 # The version of the role its Worker runs as, when it has one.
                 **({"task_role": task_role.payload()} if task_role is not None else {}),
+                # The consult of the advisor this attempt follows: its record names it (the advice is in its feedback).
+                **({"advisor_consult": step.consult} if step.consult is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
+        step.consult = None  # this attempt's only
 
     @staticmethod
     def _dependency_reports(plan: TaskPlan, step: PlanStep) -> list[dict[str, Any]]:
@@ -2591,6 +3140,30 @@ class PlannerAgent:
         await self._decide(plan, step, context, self._review_report(step, verdict))
 
     @staticmethod
+    def _open_now(plan: TaskPlan, step: PlanStep, context: DecisionContext) -> DecisionContext:
+        """``context`` with what is open now: whether ``step`` is the last open step, or the others are all gates
+        (a decision after a consult comes once other steps may have ended)."""
+        others = [s for s in plan.steps if s is not step and s.status not in ("verified", "skipped")]
+        open_gates = frozenset(s.label for s in others) if others and all(s.gate for s in others) else None
+        return replace(context, last_open=plan.last_open(step), open_gates=open_gates)
+
+    @staticmethod
+    def _final_notes(step: PlanStep, context: DecisionContext) -> list[str]:
+        """What a decision message says when the decision may complete the task, and so must carry "final"."""
+        if context.last_open and step.accept_when is not None:
+            return ["", "This is the task's last work step; remaining panel seats still hold completion. "
+                    'An accept (or replan with no new steps) must carry "final", the delivery summary '
+                    "to keep while those seats finish."]
+        if context.last_open:
+            return ["", "This is the task's last open step: a decision that completes the task (accept, or replan "
+                        'with no new steps) must carry "final", the task\'s final summary.']
+        if context.open_gates:
+            return ["", f"The task's other open steps are gates ({', '.join(sorted(context.open_gates))}): a "
+                        "decision that cancels all of them and completes the task (accept, or replan with no new "
+                        'steps) must carry "final", the task\'s final summary.']
+        return []
+
+    @staticmethod
     def _roles_acceptable(step: PlanStep) -> bool:
         """Whether every required review role's verdict on ``step``'s result passed (the built-in Reviewer passed
         it, or none of them would have reviewed it); an advisory one's never blocks."""
@@ -2604,9 +3177,7 @@ class PlannerAgent:
         Reviewer is spawned.
         """
         view = plan.view()
-        others = [s for s in plan.steps if s is not step and s.status not in ("verified", "skipped")]
-        open_gates = frozenset(s.label for s in others) if others and all(s.gate for s in others) else None
-        context = replace(context, last_open=plan.last_open(step), open_gates=open_gates)
+        context = self._open_now(plan, step, context)
         entries = []
         if record_verification and context.result is ResultKind.WORK and self._is_verification(step):
             result = step.result or {}
@@ -2644,39 +3215,61 @@ class PlannerAgent:
             elif entry.kind is JournalKind.REVIEW_ROUND:
                 await self._report_progress(plan, phase=Phase.REVIEW_ROUND,
                     data={"step": step.label, "attempt": step.retries + 1, **json.loads(entry.summary)})
-        message = self._decision_message(plan, step, context, report)
+        advice_lines: list[str] = []
+        if self._execution.advisor_on:
+            await self._judged(step, context)
+            if (spend := await self._advice_offer(plan, step)) is not None:
+                from ...db import advisor_advice
+                from .planner_advice import earlier_lines, offer_lines
+
+                context = replace(context, advise=True)
+                advice_lines = offer_lines(spend, earlier_lines(await advisor_advice.for_step(step.step_id)))
+                advice_lines += ["", "Local material for a request (it stays here; restate it, do not copy it):",
+                                 self._advice_material(plan, step, report)]
+        message = self._decision_message(plan, step, context, report, advice=advice_lines)
         step.missed_messages.clear()
         try:
             reply = await self._ask(
-                TurnKind.DECISION, message, lambda text: self._panel_decision(text, plan, step, context, self._checked(view)),
+                TurnKind.DECISION, message,
+                await self._asking(plan, step, lambda text: self._panel_decision(text, plan, step, context,
+                                                                                 self._checked(view))),
             )
+            if reply.decision is Decision.ADVISE:
+                await self._start_consult(plan, step, reply.advice_request, reply.advice_bindings,
+                                          _Consult.about(step, context, report))
+                return
         except PlannerTurnError as exc:
-            if (((self._execution.review_all or (self._workflow or {}).get("escalate_on_exhaustion")
-                    or self._verification_repair_required(plan)) and self._needs_review(step))
-                    or step.accept_when is not None) and not context.escalate \
-                    and context.result is ResultKind.WORK and context.succeeded:
-                # Mandatory review still runs when the decision turn fails.
-                await self._activity(
-                    "error",
-                    f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
-                    "This step requires review: it goes to a Reviewer.",
-                )
-                await self._send_to_review(plan, step)
-                return
-            whose = "Reviewer's" if context.result is ResultKind.REVIEW else "Worker's own"
-            succeeded = context.acceptable if context.escalate else context.succeeded
-            if succeeded and not await self._merged(plan, step):
-                return
-            step.status = "verified" if succeeded else "failed"
+            await self._undecided(plan, step, context, exc)
+            return
+        await self._apply_decision(plan, step, context, reply)
+
+    async def _undecided(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, exc: Exception) -> None:
+        """No valid decision on ``step``'s result came: a mandatory review still runs, else the step's own verdict
+        decides."""
+        if (((self._execution.review_all or (self._workflow or {}).get("escalate_on_exhaustion")
+                or self._verification_repair_required(plan)) and self._needs_review(step))
+                or step.accept_when is not None) and not context.escalate \
+                and context.result is ResultKind.WORK and context.succeeded:
+            # Mandatory review still runs when the decision turn fails.
             await self._activity(
                 "error",
                 f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
-                f"The {whose} verdict decides: {step.status}.",
+                "This step requires review: it goes to a Reviewer.",
             )
-            await self._step_settled(plan, step, note=f"The Planner could not decide on it; the {whose} verdict "
-                                                      "failed it.")
+            await self._send_to_review(plan, step)
             return
-        await self._apply_decision(plan, step, context, reply)
+        whose = "Reviewer's" if context.result is ResultKind.REVIEW else "Worker's own"
+        succeeded = context.acceptable if context.escalate else context.succeeded
+        if succeeded and not await self._merged(plan, step):
+            return
+        step.status = "verified" if succeeded else "failed"
+        await self._activity(
+            "error",
+            f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
+            f"The {whose} verdict decides: {step.status}.",
+        )
+        await self._step_settled(plan, step, note=f"The Planner could not decide on it; the {whose} verdict "
+                                                  "failed it.")
 
     async def _apply_decision(
         self, plan: TaskPlan, step: PlanStep, context: DecisionContext, reply: DecisionReply,
@@ -2722,6 +3315,9 @@ class PlannerAgent:
         if reply.final is not None:
             plan.final_summary = reply.final.markdown()
 
+        if self._execution.advisor_on and context.result is ResultKind.WORK and context.succeeded \
+                and not context.review_required and not context.checkpoint and decision is not Decision.REVIEW:
+            await self._settle_advice(step, decision is Decision.ACCEPT)
         if decision is Decision.ACCEPT:
             step.status = "verified"
             if reply.summary and reply.final is None:
@@ -3097,6 +3693,9 @@ class PlannerAgent:
             return
         if plan.status in ("completed", "failed"):
             return  # it ended before this turn (at its spend cap)
+        if plan.status == "planning" and not plan.steps and await self._plan_consulted():
+            await self._plan_after_interrupted_consult(plan, envelope)
+            return
         if plan.status not in _LIVE:
             await self._fail_plan(plan, reason=f"Cannot resume after a server restart: the plan was {plan.status}")
             return
@@ -3182,6 +3781,32 @@ class PlannerAgent:
             await self._complete_plan(plan)
         else:
             await self._dispatch_ready(plan)
+
+    async def _plan_consulted(self) -> bool:
+        """Whether the first plan waited for a consult of the advisor (the restart interrupted it)."""
+        from ...db import agent_spawns
+
+        if not self._execution.advisor_on:
+            return False
+        return any(row["step_id"] is None for row in await agent_spawns.for_task(self._task_id))
+
+    async def _plan_after_interrupted_consult(self, plan: TaskPlan, envelope: MessageEnvelope) -> None:
+        """A restart cut off the consult the first plan waited for: a [PLAN] turn says so, without offering advise
+        again (the consult failed at the start, ``interrupted``)."""
+        from .planner_advice import ended_lines
+
+        await self._activity("phase", "Planner resumed after a server restart: the plan's consult of the advisor "
+                                      "was interrupted; planning without it")
+        changes = await self._pending_changes()
+        await self._read_changes(plan, changes)
+        try:
+            reply = await self._ask(TurnKind.PLAN, self._plan_message(
+                plan, [*await self._template_lines(plan), "", *ended_lines("interrupted", "a server restart")]),
+                self._plan_parser())
+        except PlannerTurnError as exc:
+            await self._fail_plan(plan, reason=f"Planning failed: {exc}")
+            return
+        await self._planned(plan, reply, changes, envelope)
 
     async def _decide_again(self, plan: TaskPlan, step: PlanStep) -> None:
         """Take the decision on ``step`` that a restart cut off, from the result saved with it."""
@@ -3659,6 +4284,8 @@ class PlannerAgent:
             await self._supervise()
         elif event_type == "idle":
             await self._stop_idle_claude()
+        elif event_type == "advice":
+            await self._consult_event(int(envelope.payload.get("spawn_id") or 0))
         # "gate_retry": the event's end gives the gates' messages and delivers the waits, the retry among them.
 
     # --- Supervising the Workers running now ---
@@ -3889,7 +4516,8 @@ class PlannerAgent:
                        verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
                        work_role=(self._workflow or {}).get("work_role"),
                        verification_exhausted=bool(self._plan and self._verification_exhausted(self._plan)),
-                       verification_repair_required=bool(self._plan and self._verification_repair_required(self._plan)))
+                       verification_repair_required=bool(self._plan and self._verification_repair_required(self._plan)),
+                       advisor=self._execution.advisor_on)
 
     def _wait_policy(self) -> WaitPolicy:
         """System limits, command permission, and this event's scheduled-run stop time."""
@@ -4184,6 +4812,7 @@ class PlannerAgent:
         assert plan is not None
         recorder = self._recorder(plan, text, process)
         async with recorder:  # however the turn ends, its task's stop cutting it off too, its record ends
+            self._last_record_id = recorder.record_id  # the turn a consult of the advisor it asks for names as parent
             if annotation is not None:
                 await recorder.annotate(annotation)
             # Only the target turn owns this chain; an old session's HANDOFF uses the empty default.
@@ -4539,7 +5168,8 @@ class PlannerAgent:
                                     or any(s.gate is not None and not s.gate.state.closed for s in plan.steps),
                                     room=self._room is not None, wait_commands=self._execution.wait_commands_on,
                                     wait_limits=waits.limits(), conditions=self._execution.conditions_on, review_panel=self._panel_on,
-                                    adjudication=self._panel_on and bool((self._workflow or {}).get("adjudication")))
+                                    adjudication=self._panel_on and bool((self._workflow or {}).get("adjudication")),
+                                    advisor=self._execution.advisor_on)
             + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
                                          vault=planner_guide(self._vault) if self._vault else "")
                if self._ops else ""),
@@ -4752,7 +5382,8 @@ class PlannerAgent:
         )
 
     def _decision_message(
-        self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str],
+        self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str], *,
+        advice: Sequence[str] = (),
     ) -> str:
         from .planner_protocol import ADJUDICATED_ACCEPT
         from .review_adjudication import required_downgrades
@@ -4792,19 +5423,9 @@ class PlannerAgent:
         if self._is_verification(step) and self._verification_exhausted(plan):
             lines += ["", "The verification failure limit is exhausted: no retry after a failed verification. "
                       "Any new verification step must depend on a new user gate added in the same reply."]
-        if context.last_open and step.accept_when is not None:
-            lines += ["", "This is the task's last work step; remaining panel seats still hold completion. "
-                      'An accept (or replan with no new steps) must carry "final", the delivery summary '
-                      "to keep while those seats finish."]
-        elif context.last_open:
-            lines += ["", "This is the task's last open step: a decision that completes the task (accept, or replan "
-                          'with no new steps) must carry "final", the task\'s final summary.']
-        elif context.open_gates:
-            lines += ["", f"The task's other open steps are gates ({', '.join(sorted(context.open_gates))}): a "
-                          "decision that cancels all of them and completes the task (accept, or replan with no new "
-                          'steps) must carry "final", the task\'s final summary.']
+        lines += self._final_notes(step, context)
         separator = "; " if adjudicated_accept else ", "
-        lines += ["", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
+        lines += [*advice, "", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
         return "\n".join(lines)
 
     def _gate_message(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]],
@@ -5619,7 +6240,10 @@ class PlannerAgent:
                 ready_when=sd.get("ready_when"),
                 accept_when=sd.get("accept_when"), reviews=sd.get("reviews"),
                 review=bool(sd.get("review")),
-                status=forced_status or sd.get("status") or "pending",
+                # A step that waited for the advisor when the server stopped (its consult failed at the start):
+                # a checkpoint's starts as planned, a decision's is taken again.
+                status=forced_status or ({"consulting": "deciding" if sd.get("result") else "pending"}.get(
+                    sd.get("status") or "pending", sd.get("status") or "pending")),
                 result=sd.get("result"),
                 worker_id=sd.get("worker_id"),
                 reviewer_id=sd.get("reviewer_id"),
@@ -5634,6 +6258,7 @@ class PlannerAgent:
                 gate=self._stored_gate(sd, stored.get("gates") or {}),
                 wait=wait,
                 started_at=sd.get("started_at"),
+                difficulty=sd.get("difficulty"),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:

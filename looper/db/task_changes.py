@@ -117,6 +117,17 @@ async def pending(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | Non
         tuple(Supplement(row["id"], row["summary"], row["via"], row["created_at"]) for row in rows), requirement)
 
 
+async def versions(task_id: str, *, pool: asyncpg.Pool | None = None) -> tuple[int, int]:
+    """What changes when the user changes the task: its latest requirement version (0 before any edit) and its
+    latest supplement's journal id (0 for none)."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        "SELECT COALESCE((SELECT max(version) FROM task_requirement_versions WHERE task_id = $1), 0) AS requirement, "
+        "COALESCE((SELECT max(id) FROM task_journal WHERE task_id = $1 AND kind = $2), 0) AS supplement",
+        task_id, SUPPLEMENT)
+    return int(row["requirement"]), int(row["supplement"])
+
+
 async def mark_delivered(
     task_id: str, changes: TaskChanges, *, pool: asyncpg.Pool | None = None,
 ) -> None:
