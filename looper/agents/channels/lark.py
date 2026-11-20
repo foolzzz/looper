@@ -479,7 +479,7 @@ class LarkChannelAdapter(ChannelAdapter):
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         text = files.redact(text, self._runtime_root)
         try:
-            await self._transport.edit(external_id, text=text)
+            await self._transport.edit(external_id, markdown=text)
         except LarkCliError as exc:
             return PostReceipt(False, error=str(exc),
                                outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)

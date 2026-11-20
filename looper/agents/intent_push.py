@@ -154,8 +154,11 @@ class IntentPushService:
         rows = await connection.get_pool().fetch(
             "SELECT id FROM intents WHERE (state IN ('pending','merged') AND created_at >= $1) "
             "OR (state IN ('tasked','rejected','expired') AND EXISTS "
-            "(SELECT 1 FROM intent_posts p WHERE p.intent_id=intents.id AND p.kind='push' AND p.state='sent')) "
-            "ORDER BY id", self._clock()-timedelta(hours=24))
+            "(SELECT 1 FROM intent_posts p WHERE p.intent_id=intents.id AND p.kind='push' AND p.state='sent' "
+            "AND (p.edited_at IS NULL OR p.edited_at < intents.handled_at))) "
+            "OR EXISTS (SELECT 1 FROM intent_posts p WHERE p.intent_id=intents.id AND p.kind='final' "
+            "AND p.state IN ('pending','failed') AND p.attempts < $2) "
+            "ORDER BY id", self._clock()-timedelta(hours=24), db_subs.DELIVERY_ATTEMPTS)
         for row in rows:
             await self._locked(row["id"])
 
@@ -210,19 +213,18 @@ class IntentPushService:
         elif row["state"] in ("tasked", "rejected", "expired"):
             push = next((post for post in posts if post["kind"] == "push" and post["state"] == "sent"
                          and post["external_id"] and (post["channel_id"], post["chat"]) == target), None)
-            if push is not None:
+            if push is not None and (push["edited_at"] is None or push["edited_at"] < row["handled_at"]):
                 text = final_text(view, timezone=timezone)
-                if push["text"] != text:
-                    try:
-                        receipt = await self._registry.edit(channel, push_target(channel, chat), push["external_id"], text)
-                        success = receipt.success
-                    except Exception:
-                        success = False
-                    async with conn.transaction():
-                        if not success:
-                            await self._insert(conn, intent_id, "final", channel, chat, text.splitlines()[0])
-                        await conn.execute("UPDATE intent_posts SET text=$2, edited_at=$3, updated_at=$3 WHERE id=$1",
-                                           push["id"], text, now)
+                try:
+                    receipt = await self._registry.edit(channel, push_target(channel, chat), push["external_id"], text)
+                    success = receipt.success
+                except Exception:
+                    success = False
+                async with conn.transaction():
+                    if not success:
+                        await self._insert(conn, intent_id, "final", channel, chat, text.splitlines()[0])
+                    await conn.execute("UPDATE intent_posts SET text=$2, edited_at=$3, updated_at=$3 WHERE id=$1",
+                                       push["id"], text, max(now, row["handled_at"]))
         for post in await conn.fetch("SELECT * FROM intent_posts WHERE intent_id=$1 AND state IN ('pending','failed') "
                                      "AND attempts < $2 ORDER BY id", intent_id, db_subs.DELIVERY_ATTEMPTS):
             if (post["channel_id"], post["chat"]) == target:

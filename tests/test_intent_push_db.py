@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from looper.agents import intent_push, subscriptions
+from looper.agents import intent_push, intents, subscriptions
+from looper.db import intents as store
 from looper.agents.channels.base import PostOutcome, PostReceipt
 from tests.db_support import DSN, run_db
 from tests.leads_support import intent
@@ -249,7 +250,7 @@ def test_registry_edits_via_lark_and_telegram_without_a_network(tmp_path):
         lark._transport = SimpleNamespace(edit=AsyncMock())
         registry._channels["channel-lark"] = lark
         assert (await registry.edit("channel-lark", target, "om_1", "final")).success
-        lark._transport.edit.assert_awaited_once_with("om_1", text="final")
+        lark._transport.edit.assert_awaited_once_with("om_1", markdown="final")
         telegram = object.__new__(TelegramChannelAdapter)
         telegram._bus = None
         telegram._app = SimpleNamespace(bot=SimpleNamespace(edit_message_text=AsyncMock()))
@@ -258,3 +259,71 @@ def test_registry_edits_via_lark_and_telegram_without_a_network(tmp_path):
         telegram._app.bot.edit_message_text.assert_awaited_once_with(chat_id=10001, message_id=42, text="final")
         assert (await registry.edit("channel-telegram", target, "invalid", "final")).result == PostOutcome.REJECTED
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("edit_ok", [True, False])
+def test_handled_push_is_finalized_once_despite_type_renames(monkeypatch, edit_ok):
+    """A final edit should happen once; renaming the type re-edits (or re-posts the fallback) every time."""
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create()
+        await env.service.run_once()
+        assert len(env.channels.posts) == 1
+        env.channels.edit_ok = edit_ok
+        async with pool.acquire() as conn, conn.transaction():
+            await store.transition(conn, iid, "rejected", via="dashboard", now=NOW)
+        await env.service.run_once()
+        for name in ("改名一", "改名二", "改名三"):
+            await intents.type_save("dev_task", name=name)
+            await env.service.run_once()
+        finals = [p for p in env.channels.posts if p[2].startswith("❌")]
+        assert len(env.channels.edits) == 1, f"{len(env.channels.edits)} edits of one handled push"
+        assert len(finals) == (0 if edit_ok else 1), f"{len(finals)} fallback posts"
+    run_db(check, monkeypatch)
+
+
+def test_handled_push_is_not_reedited_for_new_sources(monkeypatch):
+    """Slice b adds a merged row's sources to its target: a tasked target's push is re-edited each time."""
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create()
+        await env.service.run_once()
+        async with pool.acquire() as conn, conn.transaction():
+            await store.transition(conn, iid, "rejected", via="dashboard", now=NOW)
+        await env.service.run_once()
+        assert len(env.channels.edits) == 1
+        seq = await add(pool, "Synthetic follow-up", sent_at=NOW, kind="p2p", chat_id="oc_synthetic_dm")
+        await pool.execute("INSERT INTO intent_sources(intent_id,event_seq) VALUES($1,$2)", iid, seq)
+        await env.service.run_once()
+        assert len(env.channels.edits) == 1, f"{len(env.channels.edits)} edits"
+    run_db(check, monkeypatch)
+
+
+
+
+def test_expired_then_tasked_edits_once_per_transition(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create()
+        await pool.execute("UPDATE projects SET work_dir=$1 WHERE id='project-push'", str(tmp_path))
+        await env.service.run_once()
+        async with pool.acquire() as conn, conn.transaction():
+            await store.transition(conn, iid, "expired", via="system", now=NOW)
+        await env.service.run_once()
+        await intents.build(iid, via="dashboard", now=NOW+timedelta(seconds=1),
+                            platform=SimpleNamespace(bus=SimpleNamespace(publish=AsyncMock())))
+        env.service._clock = lambda: NOW+timedelta(seconds=2)
+        await env.service.run_once()
+        await env.service.run_once()
+        assert len(env.channels.edits) == 2
+        assert env.channels.edits[0][3].startswith("⌛")
+        assert env.channels.edits[1][3].startswith("✅")
+        processed = []
+        async def remember(number):
+            processed.append(number)
+        monkeypatch.setattr(env.service, "_locked", remember)
+        await env.service.run_once()
+        assert processed == []
+    run_db(check, monkeypatch)
