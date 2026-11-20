@@ -4708,6 +4708,27 @@ Manager's `looper_schedules` cannot create or change one.
   requests are not asked: they leave it cleared, and the schedule's row says so,
   with "Confirm push target…" showing the same text (`subscription.confirmation`
   of the schedule's answer) before it calls `confirm_target`.
+- **Rules** (`subscription.rules`, up to 20; empty: the filter above applies, and
+  `lines_v1` reads exactly as before). With rules a message is kept when any
+  rule takes it, the first that does naming it. A rule has a `name` (rules with
+  one name add up in counts), a `label` (the tag), `chat_kinds`,
+  `include_chats` and `exclude_chats`, `sender_kinds`, `exclude_self` (not sent
+  by the source's own user), `mentions_me` (`any`, `only`, `exclude`),
+  `text_match`, `never_quiet` and `areas` (chat id to a name). `lines_v2` writes
+  `[time] 【label·area】《chat》 sender: text`. `output_header` may hold
+  `{count}` and `{count:RULE NAME}`, filled from what the window kept. A
+  `text_match` is an operator-owned regular expression: at most 500 characters,
+  no repeated group inside a repeated group, run on the first 2,000 characters
+  of a message (Python's `re` has no time limit). When the processor answers
+  the quiet word but the window holds a message of a `never_quiet` rule, code
+  writes the list of those messages (per label, at most 30, 200 characters
+  each, the same @ stripping) and it is pushed and delivered like the
+  processor's output. A subscription that can select private content (a direct
+  chat, `mentions_me` `only`, or `never_quiet`) may target only a direct chat:
+  a group target is refused when it is created, updated or confirmed (and a run
+  pinned to a group before it became private keeps its output on the dashboard),
+  and its confirmation says it includes private messages. Rules are set through
+  the API; the dashboard shows that they exist.
 - **The cursor** (`schedule_admin.reset_cursor` with `after`, a time with its
   offset; a confirmation shows how many events it will read): it moves to just
   before the first event the source stored after that time (`ingested_at`), so

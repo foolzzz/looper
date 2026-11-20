@@ -837,6 +837,16 @@ describe("subscription schedules", () => {
     expect(container.querySelector("[role=group] pre")).toBeNull();
   });
 
+  it("says when a subscription selects by rules, which the form does not edit", async () => {
+    const withRules = { ...subscription("2026-11-19T10:00:00Z") };
+    withRules.subscription = { ...withRules.subscription!, rules: [{ name: "a", label: "单聊", never_quiet: true },
+      { name: "b", label: "", never_quiet: false }] };
+    await act(async () => root.render(<SubscriptionStatus schedule={withRules} onChange={vi.fn()} />));
+    expect(container.textContent).toContain("Selects by 2 rules (set through the API)");
+    await act(async () => root.render(<SubscriptionStatus schedule={subscription("2026-11-19T10:00:00Z")} onChange={vi.fn()} />));
+    expect(container.textContent).not.toContain("Selects by");
+  });
+
   it("shows a confirmed target without the button, and resets the cursor to a time with its offset", async () => {
     const fetch = vi.fn(async () => Response.json({ status: "ok", result: {
       schedule: subscription("2026-11-19T10:00:00Z"), cursor: { cursor_seq: 7, committed_seq: 20, events_after: 13 } } }));

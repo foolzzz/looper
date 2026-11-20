@@ -1596,7 +1596,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     include_history     BOOLEAN NOT NULL DEFAULT false,
     max_age_minutes     INTEGER NOT NULL CHECK (max_age_minutes BETWEEN 5 AND 10080),
     max_events          INTEGER NOT NULL CHECK (max_events BETWEEN 1 AND 2000),
-    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1')),
+    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1', 'lines_v2')),
     text_max_chars      INTEGER NOT NULL CHECK (text_max_chars BETWEEN 20 AND 4000),
     quiet_word          TEXT NOT NULL DEFAULT 'SKIP' CHECK (quiet_word ~ '^[^[:space:]]{1,40}$'),
     output_header       TEXT NOT NULL DEFAULT '' CHECK (length(output_header) <= 200),
@@ -1606,7 +1606,9 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     target_confirmed_at TIMESTAMPTZ,
     -- What the operator was shown when they confirmed (``agents/subscriptions.py`` ``config_version``): a push needs it
     -- to still be what the schedule is.
-    target_confirmed_version TEXT
+    target_confirmed_version TEXT,
+    -- Selection rules (agents/subscription_rules.py): empty, the subscription's own filter above applies.
+    rules               JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array')
 );
 CREATE TABLE IF NOT EXISTS subscription_runs (
     run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,

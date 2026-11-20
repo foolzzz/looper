@@ -746,6 +746,14 @@ async def list_all_schedules(*, runtime_root: Path | None = None) -> dict[str, A
     return {"schedules": await _schedule_views(await db_schedules.list_schedules(), runtime_root=runtime_root)}
 
 
+def check_private_target(sub: Mapping[str, Any], channel: str | None, chat: str | None) -> None:
+    """``subscriptions.check_private_target`` as a refusal (400)."""
+    try:
+        subscriptions.check_private_target(sub, channel, chat)
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
+
+
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",
                           now: datetime | None = None, runtime_root: Path | None = None) -> dict[str, Any]:
     await _existing_project(project_id)
@@ -759,6 +767,8 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
         raise RequestError(HTTP_400, "a subscription schedule needs its subscription: the stream it reads")
     _check_kind_fields(kind, {**fields, "profile_overrides": profiles,
                              **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
+    if stream is not None:
+        check_private_target(stream, fields.get("notify_channel"), fields.get("notify_chat"))
     profiles = (await _profile_overrides(profiles, roles=(*TASK_PROFILE_ROLES, "processor"))
                 if "profile_overrides" in data else None)
     manager_id = fields.pop("manager_id")
@@ -839,6 +849,7 @@ async def confirm_target(schedule_id: str, *, config_version: str, now: datetime
             raise RequestError(HTTP_400, "only a subscription has a push target to confirm")
         if not row["notify_channel"]:
             raise RequestError(HTTP_400, "the subscription has no notify_target: its output stays on the dashboard")
+        check_private_target(row["subscription"], row["notify_channel"], row["notify_chat"])
         current = await subscriptions.config_version(row)
         if config_version != current:
             raise RequestError(HTTP_409, "the subscription changed since it was shown (its target, rule, zone, source "
@@ -953,6 +964,10 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             if "profile_overrides" in data and kind == Kind.SUBSCRIPTION.value and confirm_version is not None:
                 raise RequestError(HTTP_400, "change the processor's Agent Profile in a request of its own: what the "
                                              "operator confirms is the profile that runs")
+            if kind == Kind.SUBSCRIPTION.value:
+                check_private_target({**row["subscription"], **(stream or {})},
+                                     fields.get("notify_channel", row["notify_channel"]),
+                                     fields.get("notify_chat", row["notify_chat"]))
             stream_changes = (await _subscription_changes(conn, row, fields, stream, enabled=enabled, now=now)
                               if kind == Kind.SUBSCRIPTION.value else {})
             if data != {"enabled": False} and kind != Kind.SUBSCRIPTION.value:

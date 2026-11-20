@@ -32,7 +32,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import processor, subscriptions
+from . import processor, subscription_rules, subscriptions
 from .channels.base import PostOutcome
 from .message import builtin_channel_id
 from .task_notice import NotifyTarget, TargetKind
@@ -61,6 +61,13 @@ def push_target(channel: str, chat: str) -> NotifyTarget:
                         group=chat.startswith(("oc_", "-")))
 
 
+async def _matcher(db: Any, sub: Mapping[str, Any]) -> subscription_rules.Matcher | None:
+    """The subscription's rules for one window, or None when it selects with its own filter."""
+    if not sub.get("rules"):
+        return None
+    return subscription_rules.Matcher(sub["rules"], me=await db_subs.source_user(db, sub["source_id"]))
+
+
 class SubscriptionRuns:
     """The runs of subscriptions of one server: planning inside the scheduler's transaction, executing and settling."""
 
@@ -87,7 +94,7 @@ class SubscriptionRuns:
         if to_seq is None or to_seq <= from_seq:
             return None
         picked = await db_subs.window(conn, sub, from_seq=from_seq, to_seq=to_seq, now=now,
-                                      own_apps=await self._own_apps())
+                                      own_apps=await self._own_apps(), matcher=await _matcher(conn, sub))
         if not picked["rows"]:
             await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=to_seq, at=now)
             return None
@@ -133,13 +140,14 @@ class SubscriptionRuns:
         sub = schedule["subscription"]
         pool = db_connection.get_pool()
         picked = await db_subs.window(pool, sub, from_seq=stream["from_seq"], to_seq=stream["to_seq"],
-                                      now=run["fired_at"], own_apps=await self._own_apps())
+                                      now=run["fired_at"], own_apps=await self._own_apps(),
+                                      matcher=await _matcher(pool, sub))
         if not picked["rows"]:  # every message of it was deleted since the run was planned
             await self._end(run_id, status="completed", outcome="quiet", summary="the window's messages were deleted",
                             advance=True)
             return
         text = subscriptions.processor_input(picked["rows"], text_max_chars=sub["text_max_chars"],
-                                             zone_name=schedule["timezone"])
+                                             zone_name=schedule["timezone"], render=sub["render"], rules=sub["rules"])
         if self._runtime_root is None:
             await self._end(run_id, status="failed", outcome="failed", error="this server cannot run a processor")
             return
@@ -161,10 +169,17 @@ class SubscriptionRuns:
             return
         reply = result.reply or ""
         if subscriptions.is_quiet(reply, sub["quiet_word"]):
-            await self._end(run_id, status="completed", outcome="quiet", cost=result.cost_usd, advance=True,
-                            summary="没有内容（处理器回复了静默词）")
-            return
-        message = subscriptions.push_text(reply, sub["output_header"])
+            # What a rule says must never be quiet is listed by code, as the processor's own output would be pushed.
+            reply = subscription_rules.fallback_text(picked["rows"], sub["rules"]) if sub["rules"] else ""
+            if not reply:
+                await self._end(run_id, status="completed", outcome="quiet", cost=result.cost_usd, advance=True,
+                                summary="没有内容（处理器回复了静默词）")
+                return
+        header = sub["output_header"]
+        if sub["rules"]:
+            header = subscription_rules.format_header(header, subscription_rules.counts(picked["rows"], sub["rules"]),
+                                                     len(picked["rows"]))
+        message = subscriptions.push_text(reply, header)
         if not message:
             await self._end(run_id, status="failed", outcome="output_invalid", cost=result.cost_usd,
                             error="the reply was empty once its @ marks were removed")
@@ -200,6 +215,10 @@ class SubscriptionRuns:
             return "the schedule is gone"
         sub = schedule["subscription"]
         pinned = (stream["target_channel"], stream["target_chat"])
+        try:  # a subscription that became private may no longer push to a group
+            subscriptions.check_private_target(sub, *pinned)
+        except ValueError:
+            return "it can select private messages and its target is not your direct chat"
         if (schedule.get("notify_channel"), schedule.get("notify_chat")) != pinned:
             return "its push target was changed"
         if schedule["notify"] == "never":
