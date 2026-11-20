@@ -1,0 +1,41 @@
+{
+ "v": "advice_request/1",
+ "kind": "plan_review",
+ "problem": "A small file-based user store (a two-column CSV with header id,name, about 2 rows) must be migrated to JSON Lines, one object per line with id as a number and name as a string. A single Python script, run once, will do the conversion. The data format is a dependency of a service, so the migration is treated as critical. The plan for the worker: copy the CSV to a .bak file first, refusing to overwrite an existing .bak or output file; write the JSONL to a temp file and rename it atomically; validate the row count and values against the CSV; leave the original CSV untouched; exit non-zero on failure; offer a --rollback flag that restores the CSV from the .bak and removes the JSONL; run the script exactly once. An independent reviewer then checks the result.",
+ "goal": "Migrate safely and reversibly, with no data loss and no corruption, and be able to roll back.",
+ "acceptance": [
+  "The JSONL has the same rows as the CSV, with id as a number",
+  "The .bak is byte-identical to the original CSV",
+  "The original CSV is unchanged",
+  "The script ran once and has a rollback option"
+ ],
+ "constraints": [
+  "Python standard library only",
+  "Script is run exactly once",
+  "Original CSV must remain in place",
+  "Rollback must be possible"
+ ],
+ "stack": [
+  "Python 3",
+  "csv and json modules",
+  "macOS"
+ ],
+ "attempts": [],
+ "artifacts": [
+  {
+   "kind": "pseudocode",
+   "lang": "python",
+   "content": "if exists(bak) or exists(jsonl): exit(1)\ncopy2(csv, bak)\nrows = read csv via csv.DictReader\nfor r in rows: obj = {id: int(r.id), name: r.name}\nwrite tmp file, one json.dumps per line\nreread tmp and compare to rows\nos.replace(tmp, jsonl)\n--rollback: copy bak over csv, remove jsonl"
+  }
+ ],
+ "questions": [
+  {
+   "id": "q1",
+   "text": "What failure modes or edge cases does this plan miss (encoding, BOM, blank lines, non-integer ids, duplicate ids, newline handling, partial failure after the backup)?"
+  },
+  {
+   "id": "q2",
+   "text": "Is the order of backup, temp write, validation and atomic rename right, and is the rollback sound?"
+  }
+ ]
+}

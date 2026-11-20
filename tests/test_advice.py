@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -280,6 +281,20 @@ def test_a_copy_of_the_material_counts_every_window_it_repeats() -> None:
     request = parse_request(_request(problem=problem[:1_200]))
     hits = lint(request, material=problem, secrets=())
     assert [(h.category, h.field) for h in hits] == [("verbatim", "*")]
+
+
+# A checkpoint's request a real Planner wrote (the prompt eval's CSV migration): files named by their role, a
+# backup's extension, library calls. The judge once reported a local path in it; there is none.
+REAL_PLAN_REVIEW = json.loads((Path(__file__).parent / "fixtures/advisor/plan_review_csv_migration.json").read_text())
+
+
+def test_a_real_planners_plan_review_passes_the_format_and_code_checks() -> None:
+    request = parse_request(REAL_PLAN_REVIEW, kind=AdviceKind.PLAN_REVIEW)
+    assert lint(request, secrets=()) == []
+    from looper.agents.advice import JUDGE_ROLE_PROMPT
+
+    # the judge is told what is not a leak, and that a path has directories in it
+    assert "a file named by its role" in JUDGE_ROLE_PROMPT and "A path has directories in it." in JUDGE_ROLE_PROMPT
 
 
 def test_a_clean_request_passes_and_a_file_its_artifact_shows_may_be_named() -> None:
