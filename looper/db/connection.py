@@ -145,6 +145,7 @@ _ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
 _LEDGER = "ledger"
+_MESSAGE_LEADS = "message_leads"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
@@ -347,6 +348,15 @@ def _subscriptions_ddl() -> str:
 
 
 _LEDGER_BLOCK = re.compile(r"-- ledger begin\n(.*?)-- ledger end", re.S)
+_MESSAGE_LEADS_BLOCK = re.compile(r"-- message leads begin\n(.*?)-- message leads end", re.S)
+
+
+def _message_leads_ddl() -> str:
+    """The leads and intents tables as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _MESSAGE_LEADS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its message leads block")
+    return found.group(1)
 
 
 def _ledger_ddl() -> str:
@@ -688,6 +698,12 @@ async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
     return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
+
+
+async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_LEADS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('message_leads') IS NOT NULL")
 
 
 async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
@@ -1168,6 +1184,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE projects ADD COLUMN verification_paths TEXT[] "
                                "CHECK (cardinality(verification_paths) <= 20)")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _VERIFICATION_PATHS)
+        # After every table its keys point at.
+        if await _message_leads_pending(conn):
+            await conn.execute(_message_leads_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_LEADS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1213,7 +1233,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
             or await _subscriptions_pending(conn)
             or await _ledger_pending(conn)
-            or await _manager_events_pending(conn)
+            or await _manager_events_pending(conn) or await _message_leads_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _project_advisor_pending(conn)

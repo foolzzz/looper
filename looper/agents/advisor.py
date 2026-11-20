@@ -377,16 +377,16 @@ async def _return(row: Mapping[str, Any], problems: list[str], checks: list[dict
     one by one, by category and position."""
     number = row["returns"] + 1
     marked = [{**check, "return": number, "round": row["rounds"] + 1} for check in checks]
+    # Appended to the result as it is now: ``row`` was read before this round's runs were noted and booked.
+    appended = {**(append or {}), "checks": marked}
     if row["returns"] >= RETURNS_MAX:
-        result = {**row["result"], "failure": "blocked", "checks": [*row["result"].get("checks", []), *marked]}
         moved = await agent_spawns.move(row["id"], SpawnState.BLOCKED, expect=SpawnState.LINTING,
-                                        spent_usd=spent_usd, result=result, append=append,
+                                        spent_usd=spent_usd, result={"failure": "blocked"}, append=appended,
                                         detail=f"its request failed the checks after {RETURNS_MAX} returns")
         return Ended(SpawnState.BLOCKED, failure="blocked", detail="the request failed the checks again",
                      row=moved or {})
-    result = {**row["result"], "checks": [*row["result"].get("checks", []), *marked]}
     await agent_spawns.move(row["id"], SpawnState.DRAFTING, expect=SpawnState.LINTING, returned=True,
-                            spent_usd=spent_usd, result=result, append=append)
+                            spent_usd=spent_usd, result=None, append=appended)
     return Returned(tuple(problems), RETURNS_MAX - number)
 
 
