@@ -30,7 +30,7 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
                      "started_at": _STR, "state": _STR, "method": _NULL_STR,
                      "stopping": _BOOL, "can_interrupt": _BOOL})
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
-CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS})
+CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "delivery_enabled": _BOOL})
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -55,11 +55,13 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read the chat settings: stopping a reply, and the Manager's completion turns.",
+    _op("chat_settings.get", "Read the chat settings: stopping a reply, the Manager's completion turns, and the "
+        "delivery layer for proactive messages.",
         _object({}, closed=True), CHAT_SETTINGS),
     _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
-                 "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]}},
+                 "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
+                 "delivery_enabled": {"type": ["boolean", "null"]}},
                 [], closed=True), CHAT_SETTINGS, "high"),
 )
 
@@ -87,6 +89,15 @@ async def impact(server, operation, arguments, principal, headers):
                           "ended, in a read-only turn of its own, instead of the code notice; a group chat still "
                           "gets the code notice." if turns != "off" else
                           "From the next task end, every chat gets the code notice again."))
+    if "delivery_enabled" in values:
+        value = values["delivery_enabled"]
+        enabled = chat_settings.DEFAULT_DELIVERY_ENABLED if value is None else value
+        default = " (built-in default)" if value is None else ""
+        changes.append(f"Set delivery.enabled to {str(enabled).lower()}{default}? "
+                       + ("From the next one, each proactive message wired to the delivery layer is decided on "
+                          "before it goes out (sent, into the digest, or dropped, and why), and the decision is "
+                          "recorded." if enabled else
+                          "From the next one, proactive messages go out without a delivery decision."))
     return " ".join(changes)
 
 

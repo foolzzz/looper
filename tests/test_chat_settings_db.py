@@ -22,13 +22,14 @@ def test_the_stop_setting_is_stored_and_loaded(monkeypatch: pytest.MonkeyPatch, 
     async def test(pool: Any) -> None:
         async with _api(tmp_path, pool, None) as (call, _):
             assert await chat_settings.load() is False
-            assert (await call("chat_settings.get"))[1]["result"] == {"stop_enabled": False, "completion_turns": "off"}
+            assert (await call("chat_settings.get"))[1]["result"] == {"stop_enabled": False, "completion_turns": "off",
+                                                                      "delivery_enabled": False}
             assert (await call("chat_settings.update", {"stop_enabled": True}))[1]["result"] == {
-                "stop_enabled": True, "completion_turns": "off"}
+                "stop_enabled": True, "completion_turns": "off", "delivery_enabled": False}
             chat_settings.set_stop_enabled(False)  # a restart
             assert await chat_settings.load() is True
             assert (await call("chat_settings.update", {"stop_enabled": None}))[1]["result"] == {
-                "stop_enabled": False, "completion_turns": "off"}
+                "stop_enabled": False, "completion_turns": "off", "delivery_enabled": False}
             assert await chat_settings.load() is False
 
     run_db(test, monkeypatch, timeout=30)
@@ -42,7 +43,8 @@ def test_the_completion_turns_setting_is_stored_alone_and_loaded(monkeypatch: py
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
             await call("chat_settings.update", {"stop_enabled": True})
             status, answer = await call("chat_settings.update", {"completion_turns": "dm_only"})
-            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "dm_only"}
+            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "dm_only",
+                                                          "delivery_enabled": False}
             chat_settings.set_completion_turns(chat_settings.CompletionTurns.OFF)  # a restart
             await chat_settings.load()
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.DM_ONLY
@@ -59,5 +61,27 @@ def test_the_completion_turns_setting_is_stored_alone_and_loaded(monkeypatch: py
                                chat_settings.COMPLETION_TURNS_KEY)
             await chat_settings.load()  # an unreadable value is the default
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_the_delivery_switch_is_stored_alone_and_loaded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        async with _api(tmp_path, pool, None) as (call, _):
+            await chat_settings.load()
+            assert chat_settings.delivery_enabled() is False
+            status, answer = await call("chat_settings.update", {"delivery_enabled": True})
+            assert status == 200 and answer["result"] == {"stop_enabled": False, "completion_turns": "off",
+                                                          "delivery_enabled": True}
+            assert await pool.fetchval("SELECT value FROM system_settings WHERE key = 'delivery.enabled'") == "true"
+            chat_settings.set_delivery_enabled(False)  # a restart
+            await chat_settings.load()
+            assert chat_settings.delivery_enabled() is True
+            status, answer = await call("chat_settings.update", {"delivery_enabled": "yes"})
+            assert status == 400 and answer["error"]["code"] == "invalid"
+            assert chat_settings.delivery_enabled() is True
+            await call("chat_settings.update", {"delivery_enabled": None})
+            assert chat_settings.delivery_enabled() is False
+            assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = 'delivery.enabled'") == 0
 
     run_db(test, monkeypatch, timeout=30)
