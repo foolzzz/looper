@@ -61,3 +61,43 @@ def test_list_and_get_read_the_ledger_for_the_operator_and_a_client(monkeypatch,
             assert status == 400
 
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_the_dashboard_switches_adds_and_acts_as_the_user_and_a_client_cannot(monkeypatch, tmp_path):
+    async def check(pool):
+        async with v1_api(tmp_path, pool) as call:
+            for operation in ("ledger.status", "ledger.add", "ledger.act", "ledger.configure"):
+                status, _ = await call(operation, {}, client=True)
+                assert status == 403, operation
+            status, answer = await call("ledger.status")
+            assert (status, answer["result"]["enabled"], answer["result"]["needs_you"]) == (200, False, 0)
+            status, answer = await call("ledger.add", {"kind": "pending", "title": "Nope"})
+            assert status == 409
+            status, answer = await call("ledger.configure", {"enabled": True})
+            assert (status, answer["result"]["enabled"]) == (200, True)
+            status, answer = await call("ledger.add", {"kind": "decision", "title": "Use Redis", "due": "2030-01-01"})
+            assert status == 200 and answer["result"]["assurance"] == "user", answer
+            await ledger.apply("add", sup.RELAYED, new=ledger.NewItem(kind="decision", title="Use SQLite"), db=pool)
+            await pool.execute("INSERT INTO channel_configs (channel_id, channel_type, display_name, enabled, config) "
+                               "VALUES ('c1', 'lark', 'L', true, '{}')")
+            status, answer = await call("ledger.status")
+            assert answer["result"]["needs_you"] == 1 and answer["result"]["operator_unset"] is True  # the relayed one
+            status, answer = await call("ledger.list", {"needs_you": True})
+            assert [i["title"] for i in answer["result"]["items"]] == ["Use SQLite"]
+            status, answer = await call("ledger.act", {"item": "L-2", "action": "confirm", "note": "yes"})
+            assert (status, answer["result"]["assurance"]) == (200, "user")
+            status, answer = await call("ledger.act", {"item": "L-1", "action": "amend",
+                                                       "fields": {"title": "Use Valkey", "due": None}})
+            assert status == 200 and answer["result"]["title"] == "Use Valkey" and answer["result"]["due_at"] is None
+            status, answer = await call("ledger.act", {"item": "L-1", "action": "close"})
+            assert status == 409  # a decision is cancelled or superseded, not closed
+            status, answer = await call("ledger.act", {"item": "L-9", "action": "note", "note": "x"})
+            assert status == 404
+            (event,) = [e for e in await ledger.list_events(2, db=pool) if e["action"] == "confirm"]
+            assert (event["actor_kind"], event["via"]) == ("user", "dashboard")
+            status, answer = await call("ledger.status")
+            assert answer["result"]["needs_you"] == 0
+            status, answer = await call("ledger.configure", {"enabled": False})
+            assert answer["result"]["enabled"] is False
+
+    run_db(check, monkeypatch, timeout=30)

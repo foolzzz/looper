@@ -279,6 +279,10 @@ def _added_in(args: list[Any], added_in: tuple[str | None, str | None]) -> str:
             f"AND v.channel_id IS NOT DISTINCT FROM ${len(args) - 1} AND v.chat IS NOT DISTINCT FROM ${len(args)})")
 
 
+# What waits for the user: an open to-do or question, and a decision only someone else said.
+_NEEDS_YOU = "(i.kind = 'pending' OR (i.kind = 'decision' AND i.confirmed_event_id IS NULL))"
+
+
 async def get_item(item_id: int, *, added_in: tuple[str | None, str | None] | None = None,
                    db: Db | None = None) -> dict[str, Any] | None:
     """One item; with ``added_in`` (channel id, chat), only if it was added in that chat."""
@@ -290,7 +294,8 @@ async def get_item(item_id: int, *, added_in: tuple[str | None, str | None] | No
 
 async def list_items(*, status: str | None = "open", kind: str | None = None, owner: str | None = None,
                      project_id: str | None = None, limit: int = LIST_DEFAULT,
-                     added_in: tuple[str | None, str | None] | None = None, db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
+                     added_in: tuple[str | None, str | None] | None = None, needs_you: bool = False,
+                     db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
     """The items matching the filters, newest first, at most ``limit``; and how many more match."""
     if status is not None and status not in STATUSES:
         raise LedgerRefused("invalid", f"status is one of {', '.join(STATUSES)} or all")
@@ -317,6 +322,8 @@ async def list_items(*, status: str | None = "open", kind: str | None = None, ow
     if project_id is not None:
         args.append(project_id)
         where.append(f"COALESCE(i.project_id, t.project_id) = ${len(args)}")
+    if needs_you:
+        where.append(_NEEDS_YOU)
     if added_in:
         where.append(_added_in(args, added_in))
     clause = (" WHERE " + " AND ".join(where)) if where else ""
@@ -694,3 +701,25 @@ async def reconcile(*, db: Db | None = None) -> int:
             registered += await _register(make(row), db=db)
     (logger.warning if registered else logger.info)("ledger reconcile registered=%d", registered)
     return registered
+
+
+async def needs_you_count(*, db: Db | None = None) -> int:
+    """How many open items wait for the user (the sidebar's number)."""
+    args: list[Any] = []
+    return await _db(db).fetchval(
+        "SELECT count(*) FROM (" + _SELECT + " WHERE " + _status_clause("open", args) + " AND " + _NEEDS_YOU + ") AS n",
+        *args)
+
+
+async def operator_unset(*, db: Db | None = None) -> bool:
+    """Whether an enabled chat bot has no ``operator_sender_id``: its direct messages are recorded as relayed."""
+    return await _db(db).fetchval(
+        "SELECT EXISTS (SELECT 1 FROM channel_configs WHERE enabled AND channel_type IN ('lark', 'lark_bot', 'telegram') "
+        "AND COALESCE(config->>'operator_sender_id', '') = '')")
+
+
+async def set_enabled(value: bool, *, db: Db | None = None) -> None:
+    await _db(db).execute(
+        "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", ENABLED_KEY,
+        "true" if value else "false")
