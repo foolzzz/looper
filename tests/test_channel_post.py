@@ -17,7 +17,7 @@ from lark_cli_stand_in import OPEN_ID
 from looper.agents.bus import MessageBus
 from looper.agents.channels import lark_cli
 from looper.agents.channels.allowlist import SenderAllowlist
-from looper.agents.channels.base import ChannelAdapter, DeliveryReceipt, PostReceipt
+from looper.agents.channels.base import ChannelAdapter, DeliveryReceipt, PostOutcome, PostReceipt
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.channels.telegram import TelegramChannelAdapter
@@ -79,7 +79,7 @@ def test_a_lark_post_that_lark_cli_refuses_says_why(
     with caplog.at_level("WARNING"):
         receipt = asyncio.run(_lark(tmp_path).post(target, CARD, reply_to=reply_to))
     # Only a reply whose message is gone (the API's code for a recalled one) may be posted on its own.
-    assert receipt == PostReceipt(False, error=error, parent_gone=reply_to == "om_gone")
+    assert receipt == PostReceipt(False, error=error, parent_gone=reply_to == "om_gone", outcome=PostOutcome.REJECTED)
     assert f"lark: a post to {target.id} failed: {error}" in caplog.text
 
 
@@ -117,7 +117,7 @@ def test_a_lark_post_without_a_message_id_failed(tmp_path: Path, monkeypatch: py
         return printed
 
     monkeypatch.setattr(lark_cli, "run", run)
-    assert asyncio.run(_lark(tmp_path).post(LARK_USER, CARD)) == PostReceipt(False, error=error)
+    assert asyncio.run(_lark(tmp_path).post(LARK_USER, CARD)) == PostReceipt(False, error=error, outcome=PostOutcome.UNKNOWN)  # it may have been accepted
 
 
 # --- Telegram ---
@@ -172,7 +172,7 @@ def test_a_telegram_post_that_fails_part_way_keeps_the_ids_sent_and_hides_the_to
     with caplog.at_level("WARNING"):
         receipt = asyncio.run(_telegram(bot).post(TELEGRAM_GROUP, "x" * 9_000))
     # The first message went out: a reply to it still routes back.
-    assert receipt == PostReceipt(False, external_ids=("101",),
+    assert receipt == PostReceipt(False, external_ids=("101",), outcome=PostOutcome.UNKNOWN,
                                   error="httpx.ConnectError: https://api.telegram.org/bot***/sendMessage")
     assert "secret_token" not in caplog.text and "failed (1 of its messages sent)" in caplog.text
 
@@ -186,7 +186,9 @@ def test_a_telegram_post_that_fails_part_way_keeps_the_ids_sent_and_hides_the_to
 def test_a_telegram_post_that_cannot_be_sent_says_why(bot: _Bot | None, target: NotifyTarget, reply_to: str | None,
                                                       error: str) -> None:
     receipt = asyncio.run(_telegram(bot).post(target, "选 A", reply_to=reply_to))
-    assert receipt == PostReceipt(False, error=error)
+    # What never left is rejected; a send that failed on the wire may have been accepted.
+    assert receipt == PostReceipt(False, error=error, outcome=PostOutcome.UNKNOWN if bot is not None and bot.fail_at == 0
+                                  else PostOutcome.REJECTED)
     assert bot is None or bot.sent == []
 
 
@@ -239,9 +241,10 @@ def test_the_registry_posts_through_the_running_channel_or_says_it_is_not_runnin
     posted, missing, posts = asyncio.run(main())
     assert posted == PostReceipt(True, external_ids=("om_1",))
     assert posts == [(LARK_GROUP, CARD, "om_card", "gate-7")]
-    assert missing == PostReceipt(False, error="the telegram channel is not running: enable it in Settings → Channels")
+    assert missing == PostReceipt(False, error="the telegram channel is not running: enable it in Settings → Channels",
+                                  outcome=PostOutcome.REJECTED)
 
 
 def test_a_channel_that_cannot_post_refuses() -> None:
     receipt = asyncio.run(WebChannelAdapter().post(LARK_USER, CARD, reply_to="om_card"))
-    assert receipt == PostReceipt(False, error="the web channel cannot post messages")
+    assert receipt == PostReceipt(False, error="the web channel cannot post messages", outcome=PostOutcome.REJECTED)

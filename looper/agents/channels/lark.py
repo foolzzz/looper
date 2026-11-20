@@ -473,7 +473,7 @@ class LarkChannelAdapter(ChannelAdapter):
         if message_id is None:
             problem = ("lark-cli" if isinstance(self._transport, CliTransport) else self.channel_type) + " did not say which message it sent"
             logger.warning("%s: a post to %s: %s", self.channel_id, target.id, problem)
-            return PostReceipt(False, error=problem)
+            return PostReceipt(False, error=problem, outcome=PostOutcome.UNKNOWN)  # accepted, id not given
         return PostReceipt(True, external_ids=(message_id,))
 
     def healthcheck(self) -> dict[str, Any]:
