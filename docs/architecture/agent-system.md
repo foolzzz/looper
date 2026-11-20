@@ -4285,8 +4285,8 @@ records the same reply as sent. A batch with a schedule run whose schedule no
 longer sends to the chat its event recorded (its target changed, or the chat is
 no longer allowed) is not sent: it falls back with `target_changed`. A message
 that went but whose bookkeeping failed is never sent again: its outbox row is
-written once more by the event, and a delivery left `sending` becomes
-`uncertain`. Code appends each task's link line (and a worktree task's branch
+written once more by the event, the record (never the send) is tried three
+times, and a delivery left `sending` becomes `uncertain`. Code appends each task's link line (and a worktree task's branch
 line) after the reply; a reply `sent` (or `uncertain`) makes the events
 `delivered` with the run's `record_id`, and nothing more is sent for them; one
 refused falls back. Otherwise the batch falls back and every event's recorded
@@ -4295,10 +4295,13 @@ notice is delivered, to the chat the event recorded, through the one claim
 retries share: a `failed` one is tried again after 5 s, then 15 s, 45 s and so on
 (at most 15 minutes apart, 8 tries in all); an error before the channel is asked
 (the run or the allowed chats cannot be read, no channel can post) is `failed`
-too. When the service starts, a notice left `sending` by the server before is
-`uncertain`, and a pass turns one `sending` for 10 minutes `uncertain`; a
-Manager that starts makes an event whose reply was being sent `delivered` and
-`uncertain`. Reasons:
+too. When the service starts, a notice or reply left `sending` by the server before
+is `uncertain`, and a pass turns one `sending` for 10 minutes `uncertain` (a
+reply's events `delivered`, so the chat's next turn can start); a Manager that
+starts makes an event whose reply was being sent `delivered` and `uncertain`.
+Each send is a claim (`delivery_claim`: the batch for a reply, a new id for
+each notice try): only its answer settles the delivery, and a `sent` it answers
+after being settled `uncertain` makes it `sent` (nothing is sent again). Reasons:
 `turn_failed` (the turn
 failed, or the tools' token was refused), `turn_timeout` (no reply within 120
 seconds of the claim: the notices go at once, then the turn is stopped as a stop
