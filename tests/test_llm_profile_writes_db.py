@@ -146,7 +146,7 @@ def test_invalid_writes_roll_back(changes, monkeypatch):
             await service.update_profile(profile_id, changes)
         assert await db.get_profile(profile_id) == before
         assert {r["id"] for r in await db.list_profiles()} == {"agent-claude-code-opus", "agent-claude-code-fable-5-2",
-                                                                "agent-claude-code-haiku-5-5", profile_id}
+                                                                "agent-claude-code-sonnet-5-5", profile_id}
     _run(test, monkeypatch)
 
 

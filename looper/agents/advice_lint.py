@@ -16,7 +16,8 @@ consult records. The categories:
 - ``raw_log``: a timestamped line, a Python, Java, JavaScript or Go stack trace, or a log excerpt of more than
   ``LOG_LINES_MAX`` lines;
 - ``dangling``: a reference to something the request does not contain ("see above", "the log"), or a file name that
-  no artifact of the request shows;
+  no artifact of the request shows, unless it is in a command the request quotes (`` `sh build.sh > build.log` ``:
+  the files a command runs and writes are named, not referred to);
 - ``verbatim``: more than ``VERBATIM_MAX`` of the request copied from the local material, counted over every
   ``SHINGLE``-character window of the request.
 
@@ -79,6 +80,9 @@ _DANGLING = re.compile(
     r"|\bthe attached\b|见上|如上所述|上面(?:提到|说的|的日志|的代码)|见日志|看日志|日志里|前面提到", re.IGNORECASE)
 _FILE_NAME = re.compile(r"(?<![\w/.-])[\w-]+(?:/[\w.-]+)*\.(?:py|pyi|ts|tsx|js|jsx|go|rs|java|kt|rb|php|c|cc|cpp|h|hpp"
                         r"|cs|swift|sql|yaml|yml|toml|ini|cfg|json|md|sh|txt|log|csv)\b")
+# The code spans of a text, paired in order; one with whitespace inside (an argument) is a command the request
+# quotes. A lone `importer.py` is no command, nor is the prose between two spans.
+_CODE_SPAN = re.compile(r"`([^`\n]*)`")
 _ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})|\\x([0-9a-fA-F]{2})|%([0-9a-fA-F]{2})"
                      r"|&#x([0-9a-fA-F]{1,6});|&#(\d{1,7});")
 _BASE64 = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{8,}={0,2}")
@@ -283,7 +287,9 @@ def lint(request: AdviceRequest, *, bindings: Sequence[Binding] = (), material: 
         add("raw_log", log_spans)
         dangling = _found(_DANGLING, views[:1])
         if not field.startswith("artifacts["):
-            dangling += [(m.start(), m.end()) for m in _FILE_NAME.finditer(text) if m.group(0) not in shown]
+            commands = [(m.start(), m.end()) for m in _CODE_SPAN.finditer(text) if re.search(r"\s", m.group(1))]
+            dangling += [(m.start(), m.end()) for m in _FILE_NAME.finditer(text) if m.group(0) not in shown
+                         and not any(start <= m.start() and m.end() <= end for start, end in commands)]
         add("dangling", dangling)
     if material.strip():
         # Every window of the request counts, each time it occurs; only the material's are a set to look them up in.

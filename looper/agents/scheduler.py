@@ -75,6 +75,8 @@ from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, Message
 from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
+from . import subscriptions
+from .extraction import CATCH_UP_MAX, kind_on as extraction_on
 from .subscription_runs import OwnApps, Poster, SubscriptionRuns
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 
@@ -452,6 +454,7 @@ class Scheduler:
         # What subscriptions push through (``poster``: the channels' ``post``) and which Lark apps are Looper's own.
         self._subscriptions = SubscriptionRuns(poster=poster, own_apps=own_apps or no_apps, runtime_root=runtime_root,
                                                clock=clock, claude_bin=claude_bin)
+        self._catch_ups: dict[str, int] = {}  # an extraction's catch-up firings in a row, by schedule
 
     def drain_waiting(self) -> dict[str, int]:
         return {"gates": self._gates, "starting": self._starting}
@@ -705,9 +708,11 @@ class Scheduler:
             return None
         return await self._fire(conn, schedule, firing, now)
 
-    async def run_now(self, schedule_id: str, *, expected_version: str | None = None) -> str | None:
-        """Fire a schedule now, enabled or not (``trigger`` manual); None if unknown or admission is refused.
-        Its ``next_fire_at`` stays. A gate runs in the background: the run is ``gating`` until it ends."""
+    async def run_now(self, schedule_id: str, *, expected_version: str | None = None,
+                      only_enabled: bool = False) -> str | None:
+        """Fire a schedule now, enabled or not (``trigger`` manual), or with ``only_enabled`` only while it is (checked
+        with its row locked); None if unknown, not enabled then, or admission is refused. Its ``next_fire_at`` stays.
+        A gate runs in the background: the run is ``gating`` until it ends."""
         now = self._clock()
         with ExitStack() as firing_guard:
             try:
@@ -715,7 +720,8 @@ class Scheduler:
                     schedule = await db_schedules.lock_schedule(conn, schedule_id)
                     if schedule is not None:
                         await db_schedules.check_configuration_version(conn, schedule, expected_version)
-                    if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
+                    if (schedule is None or (only_enabled and not schedule["enabled"])
+                            or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
                             or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                         return None
                     launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
@@ -853,7 +859,8 @@ class Scheduler:
         timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
                                                                       schedule["run_timeout_seconds"], conn)}
         if subscription:
-            return await self._start_subscription(conn, schedule, now, common=common, run_id=run_id, timeout=timeout)
+            return await self._start_subscription(conn, schedule, now, scheduled_for=firing.scheduled_for,
+                                                  common=common, run_id=run_id, timeout=timeout)
         if schedule["gate_command"]:
             from .schedule_templates import effective_schedule, fingerprint
             try:
@@ -876,22 +883,26 @@ class Scheduler:
         return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
 
     async def _start_subscription(self, conn: asyncpg.Connection, schedule: dict[str, Any], now: datetime, *,
-                                  common: Mapping[str, Any] | None, run_id: str | None,
+                                  scheduled_for: datetime, common: Mapping[str, Any] | None, run_id: str | None,
                                   timeout: Mapping[str, Any]) -> _Launched:
         """A subscription's firing: its window is fixed now. With nothing selected in it no agent starts, and the
         firing is a ``skipped_gate`` (counted on the day's latest one) with the cursor moved past the window; else the
         run is ``running`` and ``SubscriptionRuns.execute`` takes it after the commit."""
-        window = await self._subscriptions.plan(conn, schedule, now=now)
-        if window is None:
+        window = await self._subscriptions.plan(conn, schedule, now=now, scheduled_for=scheduled_for)
+        if window is None or window.get("skip_reason"):
+            reason = window["skip_reason"] if window else "no new messages in the window"
             if run_id is None:
                 assert common is not None
                 skipped = await self._skip(conn, "skipped_gate", now, common, kind="subscription", fired_at=now,
-                                           error="no new messages in the window")
+                                           error=reason)
+                if subscriptions.is_extraction(schedule["subscription"]):  # a merged skip says the latest reason
+                    await db_schedules.update_run(conn, skipped, error=reason)
             else:
                 await db_schedules.update_run(conn, run_id, status="skipped_gate", fired_at=now, finished_at=now,
-                                              error="no new messages in the window")
+                                              error=reason)
                 skipped = run_id
-            await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
+            if window is None:  # only an empty window is a healthy skip; a daily claim says nothing about health
+                await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
             return _Launched(skipped)
         run_id = await self._put(conn, run_id, common, status=db_schedules.RUNNING, fired_at=now,
                                  runner_pid=os.getpid(), runner_started=self._subscriptions.instance, **timeout)
@@ -900,9 +911,22 @@ class Scheduler:
         return _Launched(run_id, overlap_recovered=recovered, subscription=True)
 
     async def _run_subscription(self, run_id: str) -> None:
-        """A subscription's run after its firing committed: its processor and push, then its message and alerts."""
-        await self._subscriptions.execute(run_id)
+        """A subscription's run after its firing committed: its processor and push, then its message and alerts. An
+        extraction whose window was full fires again at once, at most ``extraction.CATCH_UP_MAX`` times in a row (the
+        daily budget still admits each); a run that read everything ends the series."""
+        more = await self._subscriptions.execute(run_id)
         await self._notifier.run_ended(run_id)
+        run = await db_schedules.get_run(run_id) if more or self._catch_ups else None
+        if run is None:
+            return
+        schedule_id = run["schedule_id"]
+        fired = self._catch_ups.pop(schedule_id, 0)
+        # A catch-up fires only while the subscription is still enabled and its kind still on: a disabled one, or
+        # leads or intents turned off meanwhile, ends the series.
+        if more and fired < CATCH_UP_MAX and await extraction_on(run_id):
+            self._catch_ups[schedule_id] = fired + 1
+            if await self.run_now(schedule_id, only_enabled=True) is None:
+                self._catch_ups.pop(schedule_id, None)
 
     async def _start_command(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], firing: Firing,
                              now: datetime, *, common: Mapping[str, Any] | None = None,

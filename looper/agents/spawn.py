@@ -32,7 +32,7 @@ import logging
 import shutil
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -70,6 +70,7 @@ class ChildFailure(str, Enum):
     TIMEOUT = "timeout"
     BUDGET = "budget"  # it reached its cap, cost more, its cost is unknown, or too little was left to start it
     REFUSED = "refused"  # its model refused, or another model answered
+    RATE_LIMITED = "rate_limited"  # its model's rate limit or quota stopped it (HTTP 429)
 
 
 @dataclass(frozen=True)
@@ -181,9 +182,11 @@ def _refusal(result: Mapping[str, Any], model: str) -> str | None:
 
 
 async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSettings, cap_usd: float,
-                    runtime_root: Path, claude_bin: str = "claude") -> ChildResult:
+                    runtime_root: Path, claude_bin: str = "claude",
+                    on_record: Callable[[int], Awaitable[None]] | None = None) -> ChildResult:
     """Run ``child`` once with ``settings``, spending at most ``cap_usd`` (lowered by the layers' per-run cap), as the
-    module's notes say; any reason it gives no output is in the result."""
+    module's notes say; any reason it gives no output is in the result. ``on_record`` is told the run's record id
+    once it has one."""
     from . import single_run
     from ..db import llm_records
     from .claude_cli import ClaudeRunRecorder
@@ -219,6 +222,8 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
                                      run_kind=run_kind, parent_record_id=parent.record_id,
                                      keep=typed_events if child.private else None, keep_output=not child.private)
         await recorder.start()
+        if on_record is not None and recorder.record_id is not None:
+            await on_record(recorder.record_id)
         try:
             finished = await single_run.run_once(
                 recorder, command, cwd=str(directory), prompt=child.prompt, launch=launch, timeout=child.timeout_s,
@@ -242,6 +247,8 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
         failed = ChildFailure.TIMEOUT, f"no output within {child.timeout_s:g} s"
     elif result is None:
         failed = ChildFailure.RUNTIME, "its run ended without a result"
+    elif result.get("api_error_status") == 429:
+        failed = ChildFailure.RATE_LIMITED, "its model's rate limit or quota stopped it"
     elif (refused := _refusal(result, launch.model)) is not None:
         failed = ChildFailure.REFUSED, refused
     elif launch.runtime.budget_error(result) is not None:

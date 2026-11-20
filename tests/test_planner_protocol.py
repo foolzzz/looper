@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from looper.agents.tiers.planner_protocol import (
+    ADVISOR_DECISIONS,
     ChatAction,
     Decision,
     DecisionContext,
@@ -118,7 +119,8 @@ class TestDecision:
     )
     def test_allowed_decisions(self, context: DecisionContext, allowed: str) -> None:
         assert " ".join(d.value for d in context.allowed()) == allowed
-        for decision in Decision:
+        # advise and proceed only exist with the advisor on (tests/test_planner_advice_protocol.py).
+        for decision in (d for d in Decision if d not in ADVISOR_DECISIONS):
             fields = {"feedback": "f"} if decision is Decision.RETRY else {}
             fields |= {"reason": "r"} if decision is Decision.FAIL else {}
             fields |= {"steps": [step("s3")]} if decision is Decision.REPLAN else {}

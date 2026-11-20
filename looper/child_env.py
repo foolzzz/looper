@@ -55,8 +55,8 @@ NAMES = frozenset((*SYSTEM, *NETWORK, *RUNTIMES))
 BACKUP_PREFIXES = ("PG",)
 BACKUP_NAMES = frozenset({"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"})
 
-# ``looper ledger`` refuses to write when this is set. Nothing sets it yet: the runtimes' environment policies (pi's
-# shell, dsh's config) reject a LOOPER_* variable, so marking agent runs is its own change.
+# Set by ``Launch.environment()`` on every agent run, to the run's role: ``looper ledger`` refuses to write when it
+# is set. It is not inherited from the server's environment (no ``LOOPER_*`` is), only added to a run's.
 AGENT_RUN_ENV = "LOOPER_AGENT_RUN"
 
 _allowed: set[str] = set(NAMES)

@@ -19,7 +19,7 @@ TASK_RUN_ROW = _object({
     "runtime": _object({"type": _NULL_STR, "name": _NULL_STR}, closed=True),
     "model": _NULL_STR, "effort": _NULL_STR,
     "profile": _object({"name": _NULL_STR, "source": _NULL_STR}, closed=True),
-    "task_role": _NULL_OBJECT}, closed=True)
+    "task_role": _NULL_OBJECT, "kind": _NULL_STR, "parent_record_id": {"type": ["integer", "null"]}}, closed=True)
 _RECORD_FIELDS = {
     "id": _INT, "agent_id": _STR, "status": _STATUS,
     **dict.fromkeys(("task_id", "session_id", "input_summary", "output_summary", "input_text", "output_text",

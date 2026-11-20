@@ -12,7 +12,8 @@ import {
   type TaskRole,
   type TaskStep,
 } from "@/lib/api";
-import type { TaskRuns } from "@/lib/node-cards";
+import { formatWhen, type TaskRuns } from "@/lib/node-cards";
+import { consultRunTree } from "@/lib/consults";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { profileName } from "@/lib/use-registry";
@@ -193,6 +194,62 @@ function StepRuns({ task, records, error }: { task: TaskDetail; records: TaskRun
   );
 }
 
+/** A run's line in the consults' run tree: what it ran as and on, its status, and a link to its history. */
+function RunLine({ record, label, taskId }: { record: LlmRecord; label: string; taskId: string }) {
+  const profile = runProfile(record);
+  const on = profile ? profileName({ name: profile.name, effort: record.metadata?.model_choice?.effort ?? null })
+    : record.model;
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+      <span className="font-medium">{label}</span>
+      {on && <span className="font-mono text-muted-foreground">{on}</span>}
+      <Badge variant={STATUS_VARIANTS[record.status]}>{record.status}</Badge>
+      <span className="text-muted-foreground">{formatWhen(record.created_at)}</span>
+      <a
+        href={historyHref(record.agent_id, taskId)}
+        title="Open this run's history"
+        className="font-mono text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        {record.agent_id}
+      </a>
+    </div>
+  );
+}
+
+/** The consults' runs, each under the Planner run that asked: every round of the advisor and every check of a
+ * request is a run of its own. Nothing in a task without consults. */
+function ConsultRuns({ task, records }: { task: TaskDetail; records: TaskRuns | null }) {
+  const tree = records?.consults?.length ? consultRunTree(records.planner, records.consults) : [];
+  if (!tree.length) return null;
+  return (
+    <section aria-labelledby="task-consult-runs-title">
+      <h3 id="task-consult-runs-title" className="mb-1 text-sm font-semibold">
+        The advisor&apos;s runs
+      </h3>
+      <p className="mb-2 text-xs text-muted-foreground">
+        Each round of the advisor and each check of the Planner&apos;s request (advice check), under the Planner run
+        that asked.
+      </p>
+      <ul className="divide-y divide-border rounded-lg border border-border bg-card">
+        {tree.map(({ parent, runs }) => (
+          <li key={parent?.id ?? "none"} className="space-y-1.5 px-4 py-2.5">
+            {parent ? <RunLine record={parent} label="Planner" taskId={task.task_id} />
+              : <p className="text-xs text-muted-foreground">Started by a Planner run that is not listed</p>}
+            <ul aria-label={parent ? `Runs the Planner run ${parent.id} started` : "Runs without a listed Planner run"}
+                className="ml-1.5 space-y-1.5 border-l border-border pl-3">
+              {runs.map((run) => (
+                <li key={run.record.id}>
+                  <RunLine record={run.record} label={roleLabel(run.kind)} taskId={task.task_id} />
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /** The roles the task's Planner defined, each with its kind and Agent Profile; their prompts and numbers are under
  * Overview → Roles. */
 function DefinedRoles({ roles }: { roles: PlannerRole[] }) {
@@ -233,6 +290,7 @@ export function TaskAgentsTab({ task, onAgents, runs = null, runsError = "" }: {
       {task.agents && <TaskAgentsSection taskId={task.task_id} agents={task.agents} onSaved={onAgents} />}
       {task.roles?.length ? <DefinedRoles roles={task.roles} /> : null}
       <StepRuns task={task} records={runs} error={runsError} />
+      <ConsultRuns task={task} records={runs} />
     </div>
   );
 }

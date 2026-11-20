@@ -199,9 +199,9 @@ export function LayerSettingsForm({
   const { registry } = useRegistry();
   const isSystem = layer === "system";
   const [only] = roles;
-  // The processor's own layers have no harness (its prompt is its role prompt and its instructions) and no prompt
-  // mode: it always replaces the runtime's prompt.
-  const processor = roles.length === 1 && only === "processor";
+  // The processor's, the advisor's and the advice check's own layers have no harness (their prompt is their role
+  // prompt and what they are given) and no prompt mode: they always replace the runtime's prompt.
+  const processor = roles.length === 1 && ["processor", "advisor", "advice_check"].includes(only ?? "");
   const concurrencyRole: TaskLimitRole | null =
     layer === "role" && roles.length === 1 && (only === "worker" || only === "reviewer") ? only : null;
 

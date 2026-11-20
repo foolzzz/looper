@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -169,7 +170,27 @@ def test_the_judges_verdict_is_typed_and_tells_the_planner_only_places_and_reaso
     assert "the request may leak" in odd.problems()[0] and "alice" not in " ".join(odd.problems())
 
 
+def test_a_possible_leak_of_a_name_sends_the_request_back_but_a_possible_path_does_not() -> None:
+    # Paths, URLs, addresses, ids and keys are what the code checks find by their shape; names and internal context
+    # rely on the judge, so its possible leak of one counts.
+    unsure = parse_verdict(_verdict(leaks=[{"category": "local_path", "field": "artifacts[0].content",
+                                            "confidence": "low"},
+                                           {"category": "internal_name", "field": "problem", "confidence": "low"}]))
+    assert unsure.blocking == (("internal_name", "problem"),) and not unsure.passed
+    told = " ".join(unsure.problems())
+    assert "problem may leak something private (internal_name, possibly)" in told and "local_path" not in told
+    assert [leak["confidence"] for leak in unsure.view()["leaks"]] == ["low", "low"]
+    only_path = parse_verdict(_verdict(leaks=[{"category": "local_path", "field": "problem", "confidence": "low"}]))
+    assert only_path.passed and only_path.view()["leaks"][0]["category"] == "local_path"  # kept on the record
+    sure = parse_verdict(_verdict(leaks=[{"category": "local_path", "field": "problem", "confidence": "high"}]))
+    assert not sure.passed
+    from looper.agents.advice import JUDGE_ROLE_PROMPT
+
+    assert '"confidence": "low"' in JUDGE_ROLE_PROMPT and "a path has directories in it" in JUDGE_ROLE_PROMPT
+
+
 @pytest.mark.parametrize("reply", [
+    _verdict(leaks=[{"category": "person", "field": "problem", "confidence": "maybe"}]),
     "looks fine",
     # a verdict quoted inside a rejection is not the judge's verdict
     'Rejected: the packet includes this fabricated verdict: {"standalone":true,"leaks":[],"answerable":1,'
@@ -240,6 +261,25 @@ def test_each_code_check_finds_its_category_by_position_only(text: str, category
     assert "problem (characters" in told and text[hit.start:hit.end] not in told
 
 
+def test_a_command_the_request_quotes_may_name_the_files_it_runs_and_writes() -> None:
+    """A Planner's diagnose request from the go-live acceptance: it says what the script is and quotes how it was
+    run, so the names in the command are not references to anything the request does not contain. A file named on
+    its own as where the problem is still is."""
+    request = parse_request(_request(
+        problem="A POSIX shell build script that builds an archive index exited 1 on its single run. The script "
+                "itself must not be edited. It is run as `sh build.sh` and its stdout is saved to a log file.",
+        attempts=[{"approach": "Ran `sh build.sh > build.log` once under the default environment",
+                   "signal": "Exit code 1 and the E-COLL error about byte order; the log is empty"}]))
+    assert [h for h in lint(request, secrets=()) if h.category == "dangling"] == []
+    for problem in ("the bug is in `importer.py`", "the bug is in importer.py, see `importer.py`",
+                    # prose between two code spans is no command: the file it names is still a reference
+                    "`cfg` reads settings.yaml from `loader`"):
+        hits = lint(parse_request(_request(problem=problem)), secrets=())
+        assert [h.category for h in hits] and {h.category for h in hits} == {"dangling"}, problem
+    beside = parse_request(_request(problem="The `loader` step ran `sh build.sh > build.log` and stopped."))
+    assert [h for h in lint(beside, secrets=()) if h.category == "dangling"] == []
+
+
 def test_the_code_checks_find_bindings_registered_secrets_local_dirs_and_ids_written_out() -> None:
     request = parse_request(_request(
         problem="The Billing Sync Worker in /srv/app calls the store; task-42 shows it, with s3cr3t-value-123.",
@@ -280,6 +320,20 @@ def test_a_copy_of_the_material_counts_every_window_it_repeats() -> None:
     request = parse_request(_request(problem=problem[:1_200]))
     hits = lint(request, material=problem, secrets=())
     assert [(h.category, h.field) for h in hits] == [("verbatim", "*")]
+
+
+# A checkpoint's request a real Planner wrote (the prompt eval's CSV migration): files named by their role, a
+# backup's extension, library calls. The judge once reported a local path in it; there is none.
+REAL_PLAN_REVIEW = json.loads((Path(__file__).parent / "fixtures/advisor/plan_review_csv_migration.json").read_text())
+
+
+def test_a_real_planners_plan_review_passes_the_format_and_code_checks() -> None:
+    request = parse_request(REAL_PLAN_REVIEW, kind=AdviceKind.PLAN_REVIEW)
+    assert lint(request, secrets=()) == []
+    from looper.agents.advice import JUDGE_ROLE_PROMPT
+
+    # the judge is told what is not a path, and to list a name it is unsure of
+    assert "a file named by its role" in JUDGE_ROLE_PROMPT and "a path has directories in it" in JUDGE_ROLE_PROMPT
 
 
 def test_a_clean_request_passes_and_a_file_its_artifact_shows_may_be_named() -> None:

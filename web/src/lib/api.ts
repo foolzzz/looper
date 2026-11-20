@@ -185,6 +185,15 @@ export interface ProjectExecution {
   room_consult_budget_usd: number | null;
   room_consult_timeout_seconds: number | null;
   room_consults_per_task: number | null;
+  advisor: "off" | "on" | null;
+  advisor_consult_budget_usd: number | null;
+  advisor_budget_usd: number | null;
+  advisor_consults_per_task: number | null;
+  advisor_consults_per_step: number | null;
+  /** The Agent Profile the advisor would fall back to (not used yet); null = none. */
+  advisor_fallback_profile: string | null;
+  /** The project's internal domains: the request check counts them and their subdomains as a URL. */
+  advisor_internal_domains: string[] | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -1165,6 +1174,9 @@ export interface SubscriptionInfo {
   text_max_chars: number;
   quiet_word: string;
   output_header: string;
+  render?: "lines_v1" | "lines_v2";
+  /** Selection rules (set through the API); empty: the filter above. */
+  rules?: { name: string; label: string; never_quiet: boolean }[];
   /** Where its next run starts reading. */
   cursor_seq: number;
   cursor_at: string | null;
@@ -1997,6 +2009,62 @@ export async function setTaskAgents(
   return { agents: data.agents, note: data.note };
 }
 
+/** A consult of the advisor about one step (the advisor RFC): where it came from and for which attempt, how it
+ * ended, the advisor's conclusions, what the Planner took of them, and whether that attempt passed. */
+export interface AdvisorConsult {
+  id: number;
+  step_id: string | null;
+  source: "checkpoint" | "optional" | "ladder" | null;
+  kind: string | null;
+  attempt: number | null;
+  state: "drafting" | "linting" | "asking" | "needs_info" | "answered" | "blocked" | "failed" | "over_budget";
+  failure: string | null;
+  rounds: number;
+  returns: number;
+  spent_usd: number;
+  status: "answered" | "needs_info" | "out_of_scope" | null;
+  /** The checks its request failed, by stage and category, with how many times; never where they matched. */
+  checks: { stage: string; category: string; count: number }[];
+  answers: { question_id: string; conclusion: string; confidence: string | null }[];
+  adoption: "adopted" | "partial" | "rejected" | null;
+  unlocked: boolean | null;
+  /** The request that was sent (only one that passed every check; never its bindings); null when none was. */
+  question: AdviceRequestView | null;
+  /** The advisor's last questions back. */
+  needs_info: { id: string; question: string; why?: string; blocking?: boolean }[];
+  /** The advisor's answer, as parsed; null when none came. */
+  advice: AdviceView | null;
+  /** What the Planner said of each point it took or left, and why. */
+  adoption_items: { ref: string | null; use: string | null; why: string }[];
+  created_at: string;
+  finished_at: string | null;
+  duration_s: number | null;
+}
+
+/** A request sent to the advisor (AdviceRequest v1), as the consult card shows it. */
+export interface AdviceRequestView {
+  kind?: string;
+  problem?: string;
+  goal?: string;
+  acceptance?: string[];
+  constraints?: string[];
+  stack?: string[];
+  attempts?: { approach: string; signal?: string; learned?: string }[];
+  artifacts?: { kind: string; lang?: string; content: string }[];
+  questions?: { id: string; text: string }[];
+  options?: { id: string; summary: string; pros?: string; cons?: string }[];
+  prior_rounds?: { needs_info_id: string; answer: string }[];
+}
+
+/** The advisor's answer (AdviceResponse v1), as the consult card shows it. */
+export interface AdviceView {
+  status: "answered" | "needs_info" | "out_of_scope";
+  answers: { question_id: string; conclusion: string; basis: string[]; confidence: string; assumptions: string[] }[];
+  options: { id: string; verdict: string; why: string }[];
+  next_steps: { id: string; action: string; verify: string }[];
+  risks: string[];
+}
+
 export interface TaskDetail extends TaskInfo {
   workflow?: Workflow | null;
   /** The task template the task was created from, as it said then; null for none. */
@@ -2058,6 +2126,8 @@ export interface TaskDetail extends TaskInfo {
   waits?: TaskWait[];
   /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
   run_roles?: Record<string, RunRole>;
+  /** Its Planner's consults of the advisor, oldest first, and their one-line summary; only in a task with some. */
+  advisor?: { consults: AdvisorConsult[]; summary: string };
   /** Its steps' git worktrees, in a project whose parallel steps work in worktrees of their own; null (or absent)
    * when it had none. */
   step_workspaces?: TaskWorkspaces | null;
@@ -2721,6 +2791,9 @@ export interface TaskRunRow {
   profile: { name: string | null; source: SettingSource | null };
   /** The role its task's Planner defined that it ran as; null for a built-in role's run. */
   task_role?: RunRole | null;
+  /** What kind of run it is (an advisor's or a judge's run among the Planner's), and the run that started it. */
+  kind?: string | null;
+  parent_record_id?: number | null;
 }
 
 /** A task's Planner, Worker and Reviewer runs, oldest first, in one compact request. */
@@ -4020,7 +4093,7 @@ export type LibraryKind = "plugin" | "skill" | "mcp";
 /** How an item was acquired: imported from this machine, uploaded, taken from git, written in Settings ("ui": a skill
  * or an MCP server) or in a project. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
-export type AgentRole = "manager" | "planner" | "worker" | "reviewer" | "processor";
+export type AgentRole = "manager" | "planner" | "worker" | "reviewer" | "processor" | "advisor" | "advice_check";
 /** The roles whose runs have tools: every role but the processor, which runs with none. */
 export const TOOL_ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
 /** An install's roles: the built-in ones with tools, and "task_role", the roles a task's Planner defines: such an

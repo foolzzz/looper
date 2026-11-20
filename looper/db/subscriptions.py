@@ -1,16 +1,17 @@
 """Subscriptions: the stream configuration of a ``kind = 'subscription'`` schedule and the window each run reads
 (``subscriptions``, ``subscription_runs``; message-stream RFC, section 7).
 
-A subscription reads the events its source ingested after its ``cursor_seq``, up to the source's ``committed_seq`` as
-a run starts, so a reader never sees a gap. The cursor moves in the same transaction that ends the run, and only from
-where the run started (``advance_cursor``): a reset made meanwhile wins.
+A cursor subscription reads after its ``cursor_seq``, up to its source's ``committed_seq`` as a run starts. The
+cursor moves in the transaction ending the run, only from where it started: a reset meanwhile wins. A lookback
+subscription ignores the cursor and reads by sent time, keeping the newest capped messages in oldest-first order.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection, Mapping, Sequence
-from datetime import datetime
+import json
+from collections.abc import Callable, Collection, Mapping, Sequence
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import asyncpg
@@ -22,7 +23,7 @@ Db = asyncpg.Pool | asyncpg.Connection
 # What a request sets on a subscription (``looper/agents/subscriptions.py`` validates it).
 FIELDS = ("source_id", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds", "exclude_mentions_me",
           "include_history", "max_age_minutes", "max_events", "render", "text_max_chars", "quiet_word",
-          "output_header", "output_kind")
+          "output_header", "output_kind", "rules", "window", "delivery_policy")
 STATE_COLUMNS = ("cursor_seq", "cursor_at", "target_confirmed_at", "target_confirmed_version")
 CHAT_KINDS = ("p2p", "group", "topic", "unknown")
 SENDER_KINDS = ("user", "app")
@@ -32,25 +33,44 @@ def _db(db: Db | None) -> Db:
     return db if db is not None else get_pool()
 
 
+def _row(row: Mapping[str, Any]) -> dict[str, Any]:
+    found = dict(row)
+    if isinstance(found.get("rules"), str):
+        found["rules"] = json.loads(found["rules"])
+    return found
+
+
+def _marks(names: Sequence[str], first: int) -> list[str]:
+    return [f"${i}::jsonb" if name == "rules" else f"${i}" for i, name in enumerate(names, first)]
+
+
+def _value(name: str, value: Any) -> Any:
+    return json.dumps(value, ensure_ascii=False) if name == "rules" else value
+
+
 async def get(schedule_id: str, *, db: Db | None = None) -> dict[str, Any] | None:
     row = await _db(db).fetchrow("SELECT * FROM subscriptions WHERE schedule_id = $1", schedule_id)
-    return dict(row) if row else None
+    return _row(row) if row else None
 
 
 async def get_many(schedule_ids: Sequence[str], *, db: Db | None = None) -> dict[str, dict[str, Any]]:
     rows = await _db(db).fetch("SELECT * FROM subscriptions WHERE schedule_id = ANY($1::text[])", list(schedule_ids))
-    return {row["schedule_id"]: dict(row) for row in rows}
+    return {row["schedule_id"]: _row(row) for row in rows}
 
 
 async def create(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str, Any]) -> None:
-    """The subscription of a new schedule; its cursor starts at its source's ``committed_seq``, so it reads what
-    arrives after it exists."""
+    """A new subscription: cursor mode starts at the source's end; lookback leaves the unused cursor alone."""
     names = [name for name in FIELDS if name in fields]
-    placeholders = ", ".join(f"${i}" for i in range(2, len(names) + 2))
+    placeholders = ", ".join(_marks(names, 2))
+    columns = ", ".join(f'"{name}"' for name in names)
+    if fields.get("window", "cursor") == "lookback":
+        await conn.execute(f"INSERT INTO subscriptions (schedule_id, {columns}) VALUES ($1, {placeholders})",
+                           schedule_id, *(_value(name, fields[name]) for name in names))
+        return
     await conn.execute(
-        f"INSERT INTO subscriptions (schedule_id, {', '.join(names)}, cursor_seq, cursor_at) "
+        f"INSERT INTO subscriptions (schedule_id, {columns}, cursor_seq, cursor_at) "
         f"SELECT $1, {placeholders}, s.committed_seq, now() FROM event_sources s WHERE s.id = ${len(names) + 2}",
-        schedule_id, *(fields[name] for name in names), fields["source_id"])
+        schedule_id, *(_value(name, fields[name]) for name in names), fields["source_id"])
 
 
 async def update(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str, Any]) -> None:
@@ -58,9 +78,9 @@ async def update(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str
     names = [name for name in (*FIELDS, *STATE_COLUMNS) if name in fields]
     if not names:
         return
-    sets = ", ".join(f"{name} = ${i}" for i, name in enumerate(names, 2))
+    sets = ", ".join(f'"{name}" = {mark}' for name, mark in zip(names, _marks(names, 2)))
     await conn.execute(f"UPDATE subscriptions SET {sets} WHERE schedule_id = $1", schedule_id,
-                       *(fields[name] for name in names))
+                       *(_value(name, fields[name]) for name in names))
 
 
 async def committed_seq(conn: Db, source_id: str) -> int | None:
@@ -125,14 +145,47 @@ async def advance_cursor(conn: asyncpg.Connection, schedule_id: str, *, from_seq
     return result.endswith(" 1")
 
 
+async def source_user(conn: Db, source_id: str) -> str | None:
+    """The user the source is bound to (whose messages ``exclude_self`` leaves out and whose @-mentions are marked)."""
+    return await conn.fetchval("SELECT user_open_id FROM event_sources WHERE id = $1", source_id)
+
+
+async def claim_day(conn: Db, schedule_id: str, local_date: date) -> bool:
+    """Reserve the day's attempt in the firing's transaction, refusing dates at or before any retained claim."""
+    return bool(await conn.fetchval(
+        "INSERT INTO subscription_daily_claims (schedule_id, local_date) SELECT $1, $2 WHERE NOT EXISTS "
+        "(SELECT 1 FROM subscription_daily_claims WHERE schedule_id = $1 AND local_date >= $2) "
+        "ON CONFLICT DO NOTHING RETURNING true", schedule_id, local_date))
+
+
+def _lookback_bounds(sub: Mapping[str, Any]) -> str:
+    return (" AND e.sent_at BETWEEN $4::timestamptz - make_interval(mins => $5) AND $4"
+            if sub.get("window", "cursor") == "lookback" else "")
+
+
+async def _window_count(conn: Db, sub: Mapping[str, Any], from_seq: int, to_seq: int, now: datetime) -> int:
+    bounds = _lookback_bounds(sub)
+    return await conn.fetchval(
+        "SELECT count(*) FROM source_events e WHERE e.source_id = $1 AND e.seq > $2 AND e.seq <= $3" + bounds,
+        sub["source_id"], from_seq, to_seq, *((now, sub["max_age_minutes"]) if bounds else ()))
+
+
 async def window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int, now: datetime,
-                 own_apps: Collection[str]) -> dict[str, Any]:
+                 own_apps: Collection[str], matcher: Callable[[Mapping[str, Any]], int | None] | None = None
+                 ) -> dict[str, Any]:
     """What the subscription selects from the events after ``from_seq`` up to ``to_seq``: ``in_window`` (every event
     stored in that range), ``too_old`` (selected by the filter but sent before ``max_age_minutes``), ``over_cap``
-    (older than the newest ``max_events``) and ``rows``, newest first, with the chat's and the sender's names.
-    Messages of Looper's own apps are never selected, whatever the filter says."""
+    (older than the newest ``max_events``) and ``rows``, with chat and sender names. Lookback ignores ``from_seq``
+    and bounds sent time to [now - max_age_minutes, now]; its retained rows are oldest first, cursor's newest first.
+    Messages of Looper's own apps are never selected, whatever the filter says. With a ``matcher`` (the rules of the
+    subscription) an event is selected when it returns an index, kept on the row as ``rule``; the subscription's own
+    chat, sender and @me filter is then not applied."""
+    from_seq = 0 if sub.get("window", "cursor") == "lookback" else from_seq
+    if matcher is not None:
+        return await _rules_window(conn, sub, from_seq=from_seq, to_seq=to_seq, now=now, own_apps=own_apps,
+                                   matcher=matcher)
     found = await conn.fetch(
-        """
+        f"""
         WITH base AS (
             SELECT e.seq, e.sent_at, e.chat_id, e.sender_id, e.sender_kind, e.text, c.name AS chat_name,
                    p.name AS sender_name,
@@ -140,7 +193,7 @@ async def window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int
             FROM source_events e
             JOIN source_chats c ON c.source_id = e.source_id AND c.chat_id = e.chat_id
             LEFT JOIN source_people p ON p.source_id = e.source_id AND p.open_id = e.sender_id
-            WHERE e.source_id = $1 AND e.seq > $2 AND e.seq <= $3
+            WHERE e.source_id = $1 AND e.seq > $2 AND e.seq <= $3 {_lookback_bounds(sub)}
               AND c.inclusion = 'included' AND c.kind = ANY($6::text[])
               AND (cardinality($7::text[]) = 0 OR e.chat_id = ANY($7::text[])) AND NOT e.chat_id = ANY($8::text[])
               AND e.sender_kind = ANY($9::text[])
@@ -153,29 +206,165 @@ async def window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int
         sub["source_id"], from_seq, to_seq, now, sub["max_age_minutes"], list(sub["chat_kinds"]),
         list(sub["include_chats"]), list(sub["exclude_chats"]), list(sub["sender_kinds"]),
         sub["exclude_mentions_me"], sub["include_history"], list(own_apps))
-    in_window = await conn.fetchval("SELECT count(*) FROM source_events WHERE source_id = $1 AND seq > $2 AND seq <= $3",
-                                    sub["source_id"], from_seq, to_seq)
+    in_window = await _window_count(conn, sub, from_seq, to_seq, now)
     fresh = [dict(row) for row in found if row["fresh"]]
     kept = fresh[:sub["max_events"]]
+    if sub.get("window", "cursor") == "lookback":
+        kept.reverse()
     return {"in_window": in_window, "too_old": len(found) - len(fresh), "over_cap": len(fresh) - len(kept),
-            "rows": kept}
+            "rows": kept, "match_timed_out": False}
+
+
+async def _rules_window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int, now: datetime,
+                        own_apps: Collection[str], matcher: Callable[[Mapping[str, Any]], int | None]) -> dict[str, Any]:
+    found = await conn.fetch(
+        f"""
+        SELECT e.seq, e.sent_at, e.chat_id, e.sender_id, e.sender_kind, e.text, e.mentions_me, c.kind AS chat_kind,
+               c.name AS chat_name, p.name AS sender_name,
+               e.sent_at >= $4::timestamptz - make_interval(mins => $5) AS fresh
+        FROM source_events e
+        JOIN source_chats c ON c.source_id = e.source_id AND c.chat_id = e.chat_id
+        LEFT JOIN source_people p ON p.source_id = e.source_id AND p.open_id = e.sender_id
+        WHERE e.source_id = $1 AND e.seq > $2 AND e.seq <= $3 {_lookback_bounds(sub)} AND c.inclusion = 'included'
+          AND ($6::boolean OR e.origin = 'live')
+          AND NOT (e.sender_kind = 'app' AND e.sender_id = ANY($7::text[]))
+        ORDER BY e.sent_at DESC, e.seq DESC
+        """,
+        sub["source_id"], from_seq, to_seq, now, sub["max_age_minutes"], sub["include_history"], list(own_apps))
+    in_window = await _window_count(conn, sub, from_seq, to_seq, now)
+    prepare = getattr(matcher, "prepare", None)
+    if prepare is not None:  # the text patterns run in a process that is killed at its deadline
+        await prepare(found)
+    chosen = []
+    for row in found:
+        rule = matcher(row)
+        if rule is not None:
+            chosen.append({**dict(row), "rule": rule})
+    fresh = [row for row in chosen if row["fresh"]]
+    kept = fresh[:sub["max_events"]]
+    if sub.get("window", "cursor") == "lookback":
+        kept.reverse()
+    return {"in_window": in_window, "too_old": len(chosen) - len(fresh), "over_cap": len(fresh) - len(kept),
+            "rows": kept, "match_timed_out": bool(getattr(matcher, "timed_out", False))}
+
+
+async def bump_epoch(conn: asyncpg.Connection, schedule_id: str) -> None:
+    """Count a change to what a push depends on (``config_epoch`` in the schema)."""
+    await conn.execute("UPDATE subscriptions SET config_epoch = config_epoch + 1 WHERE schedule_id = $1", schedule_id)
+
+
+async def epoch(schedule_id: str, *, db: Db | None = None) -> int | None:
+    return await _db(db).fetchval("SELECT config_epoch FROM subscriptions WHERE schedule_id = $1", schedule_id)
+
+
+def snapshot(sub: Mapping[str, Any]) -> dict[str, Any]:
+    """What a run selects and writes with: the subscription's request fields, as they are when it starts."""
+    return {name: (list(sub[name]) if isinstance(sub[name], (list, tuple)) else sub[name]) for name in FIELDS}
+
+
+# What an extraction subscription reads (message-leads-intents RFC, decision 5), fixed by its output kind: the
+# subscription's chat and sender kinds, its mention filter and its history switch are not consulted.
+_EXTRACTION_SCOPE = {
+    "leads": "e.sender_kind = 'user'",
+    "intents": ("((e.sender_kind = 'user' AND (c.kind = 'p2p' OR e.mentions_me OR e.sender_id = s.user_open_id)) "
+                "OR (e.sender_kind = 'app' AND e.sender_id IN "
+                "(SELECT a.app_id FROM intent_alert_senders a WHERE a.source_id = e.source_id)))"),
+}
+
+
+def extraction_scope(output_kind: str) -> str:
+    """The SQL condition of what ``output_kind`` reads, over ``source_events e``, ``source_chats c`` and
+    ``event_sources s``, besides the chats, the age and Looper's own apps (``extraction_window``)."""
+    if output_kind not in _EXTRACTION_SCOPE:
+        raise ValueError(f"not an extraction output kind: {output_kind!r}")
+    return _EXTRACTION_SCOPE[output_kind]
+
+
+def _extraction_from(output_kind: str) -> str:
+    """The FROM and WHERE of what an extraction reads, with ``$1`` the source, ``$2``–``$3`` the seq range, ``$4``
+    and ``$5`` the subscription's included and excluded chats, ``$6`` Looper's own apps, ``$7`` whether imported
+    events count."""
+    return f"""
+        FROM source_events e
+        JOIN event_sources s ON s.id = e.source_id
+        JOIN source_chats c ON c.source_id = e.source_id AND c.chat_id = e.chat_id
+        WHERE e.source_id = $1 AND e.seq > $2 AND e.seq <= $3
+          AND c.inclusion = 'included' AND c.extraction = 'included'
+          AND (cardinality($4::text[]) = 0 OR e.chat_id = ANY($4::text[])) AND NOT e.chat_id = ANY($5::text[])
+          AND ($7::boolean OR e.origin <> 'import')
+          AND NOT (e.sender_kind = 'app' AND e.sender_id = ANY($6::text[]))
+          AND {extraction_scope(output_kind)}"""
+
+
+async def extraction_tally(conn: Db, sub: Mapping[str, Any], *, output_kind: str, since: datetime, to_seq: int,
+                           own_apps: Collection[str], include_import: bool, zone_name: str,
+                           from_seq: int = 0) -> list[dict[str, Any]]:
+    """How many events ``output_kind`` reads among those after ``from_seq`` up to ``to_seq`` sent since ``since``, by
+    chat kind and by day in ``zone_name``: rows of ``chat_kind``, ``day`` and ``events``."""
+    rows = await conn.fetch(
+        f"SELECT c.kind AS chat_kind, (e.sent_at AT TIME ZONE $9)::date AS day, count(*) AS events "
+        f"{_extraction_from(output_kind)} AND e.sent_at >= $8 GROUP BY 1, 2 ORDER BY 2, 1",
+        sub["source_id"], from_seq, to_seq, list(sub["include_chats"]), list(sub["exclude_chats"]), list(own_apps),
+        include_import, since, zone_name)
+    return [dict(row) for row in rows]
+
+
+async def extraction_window(conn: Db, sub: Mapping[str, Any], *, output_kind: str, from_seq: int, to_seq: int,
+                            now: datetime, own_apps: Collection[str], include_import: bool = False) -> dict[str, Any]:
+    """Selected events with ``from_seq < seq <= to_seq``, in seq order, at most ``sub['max_events']``: the chats the
+    stream and the subscription include and the extraction does not exclude, not Looper's own apps, not imported
+    (unless ``include_import``: a backfill), sent within ``max_age_minutes``, and what ``output_kind`` reads
+    (``extraction_scope``). Nothing is dropped: ``last_seq`` is the seq of the last row taken when more rows remain
+    (``more``), else ``to_seq``; the cursor moves only to it. ``in_window`` counts every event in the range,
+    ``too_old`` the selected ones sent before the age limit."""
+    where = _extraction_from(output_kind)
+    common = (sub["source_id"], from_seq, to_seq, list(sub["include_chats"]), list(sub["exclude_chats"]),
+              list(own_apps), include_import)
+    oldest = now - timedelta(minutes=sub["max_age_minutes"])
+    found = await conn.fetch(
+        f"""
+        SELECT e.seq, e.external_id, e.chat_id, c.kind AS chat_kind, c.name AS chat_name, e.thread_id, e.root_id,
+               e.parent_id, e.sender_id, e.sender_kind,
+               (SELECT p.name FROM source_people p WHERE p.source_id = e.source_id AND p.open_id = e.sender_id)
+                   AS sender_name,
+               e.sent_at, e.mentions_me, e.mention_ids, e.text
+        {where} AND e.sent_at >= $8
+        ORDER BY e.seq LIMIT $9
+        """, *common, oldest, sub["max_events"] + 1)
+    too_old = await conn.fetchval(f"SELECT count(*) {where} AND e.sent_at < $8", *common, oldest)
+    in_window = await conn.fetchval("SELECT count(*) FROM source_events WHERE source_id = $1 AND seq > $2 AND seq <= $3",
+                                    sub["source_id"], from_seq, to_seq)
+    rows = [dict(row) for row in found[:sub["max_events"]]]
+    more = len(found) > len(rows)
+    return {"in_window": in_window, "too_old": too_old, "rows": rows,
+            "last_seq": rows[-1]["seq"] if more else to_seq, "more": more}
 
 
 async def insert_run(conn: asyncpg.Connection, run_id: str, *, from_seq: int, to_seq: int, in_window: int,
                      selected: int, too_old: int, over_cap: int, target: tuple[str, str] | None = None,
-                     config_version: str | None = None) -> None:
+                     config_version: str | None = None, window_mode: str = "cursor", config: Mapping[str, Any] | None = None,
+                     config_epoch: int | None = None, daily_date: date | None = None, match_timeouts: int = 0) -> None:
     """The run's window and, when it started with its push target confirmed, where it may push and under which
     configuration (``config_version``)."""
     await conn.execute(
         "INSERT INTO subscription_runs (run_id, from_seq, to_seq, events_in_window, events_selected, events_too_old, "
-        "events_over_cap, target_channel, target_chat, config_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "events_over_cap, target_channel, target_chat, config_version, config, config_epoch, window_mode, daily_date, "
+        "match_timeouts) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)",
         run_id, from_seq, to_seq, in_window, selected, too_old, over_cap, target[0] if target else None,
-        target[1] if target else None, config_version)
+        target[1] if target else None, config_version, json.dumps(config, ensure_ascii=False) if config is not None else None,
+        config_epoch, window_mode, daily_date, match_timeouts)
+
+
+def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    found = dict(row)
+    if isinstance(found.get("config"), str):
+        found["config"] = json.loads(found["config"])
+    return found
 
 
 async def get_run(run_id: str, *, db: Db | None = None) -> dict[str, Any] | None:
     row = await _db(db).fetchrow("SELECT * FROM subscription_runs WHERE run_id = $1", run_id)
-    return dict(row) if row else None
+    return _run_row(row) if row else None
 
 
 async def get_runs(run_ids: Sequence[str], *, db: Db | None = None) -> dict[str, dict[str, Any]]:

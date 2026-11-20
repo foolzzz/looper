@@ -56,6 +56,7 @@ from .gate_courier import GateCourier
 from .gate_service import GateReminders
 from .drain import DrainPhase, DrainScope, DrainState
 from .wait_service import WaitService
+from .ledger_reconciler import LedgerReconciler
 from .source_service import SourceService, own_bot_app_ids
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
@@ -857,6 +858,7 @@ async def _run_agent_system_watched(
                 claude_bin=claude_bin,
                 work_dir=work_dir,
                 http_ready=asyncio.Event(),
+                dashboard_url=dashboard_url,
             )
 
             # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
@@ -866,6 +868,9 @@ async def _run_agent_system_watched(
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
                                   message_backup=db_backup.message_backup_for(ops, runtime_root))
+            # The advisor's alerts go to the operator's chat through the same channels.
+            from . import advisor_alerts
+            advisor_alerts.configure(registry.notify)
             # It notes the user gates that have waited for the user for their project's reminder interval; the courier
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()
@@ -874,6 +879,7 @@ async def _run_agent_system_watched(
                                      on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
             wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
             source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
+            ledger_reconciler = LedgerReconciler()
             supervisor.register(task_router)
 
             worker_config = WorkerConfig(claude_bin=claude_bin)
@@ -1003,6 +1009,7 @@ async def _run_agent_system_watched(
         await wait_service.start()
         # Sources that are off (the default) cost one query per tick.
         await source_service.start()
+        await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
         logger.info(
@@ -1063,6 +1070,7 @@ async def _run_agent_system_watched(
             # Cancel and reap in-flight wait checks before stopping agents and their bus.
             await wait_service.stop()
             await source_service.stop()
+            await ledger_reconciler.stop()
             await gate_courier.stop()
             await scheduler.stop()
             await http_server.stop()

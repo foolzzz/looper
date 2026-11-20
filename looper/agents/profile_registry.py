@@ -199,8 +199,8 @@ BUILTIN_PROFILE = LegacyAgentProfile("agent-claude-code-opus", "claude-code/opus
 BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
     "advisor": LegacyAgentProfile("agent-claude-code-fable-5-2", "claude-code/fable-5-2", BUILTIN_RUNTIME,
                                   BUILTIN_PROVIDER, "claude-fable-5-2", effort="high"),
-    "advice_check": LegacyAgentProfile("agent-claude-code-haiku-5-5", "claude-code/haiku-5-5", BUILTIN_RUNTIME,
-                                       BUILTIN_PROVIDER, "claude-haiku-5-5"),
+    "advice_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
+                                       BUILTIN_PROVIDER, "claude-sonnet-5-5"),
 })
 
 

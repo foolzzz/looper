@@ -117,6 +117,28 @@ def test_projects_are_created_changed_and_read_back_as_the_dashboard_reads_them(
     run_db(test, monkeypatch)
 
 
+def test_a_project_without_the_advisor_reads_to_the_model_as_it_did_before_the_advisor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """With the switch off, the Manager's tool results keep the field set they had before the advisor (the advisor
+    RFC, section 13); with it on, the project's advisor settings are part of them."""
+    async def test(pool: Any) -> None:
+        chat = _Chat(tmp_path)
+        (created,) = await chat.say("建一个项目 tetris", ("looper_projects", {"action": "create", "name": "tetris"}))
+        (changed,) = await chat.say("背景改成 Blocks.", ("looper_projects", {
+            "action": "update", "project": "tetris", "background": "Blocks."}))
+        (got,) = await chat.say("看看 tetris", ("looper_projects", {"action": "get", "project": "tetris"}))
+        for answer in (created, changed, got):
+            assert answer["status"] == "ok", answer
+            assert not [key for key in answer["result"]["project"] if key.startswith("advisor")], answer
+        await pool.execute("UPDATE projects SET advisor = 'on' WHERE name = 'tetris'")
+        (on,) = await chat.say("再看看 tetris", ("looper_projects", {"action": "get", "project": "tetris"}))
+        assert on["result"]["project"]["advisor"] == "on"
+        assert on["result"]["project"]["advisor_consult_budget_usd"] is None
+
+    run_db(test, monkeypatch)
+
+
 @pytest.mark.parametrize(("arguments", "code", "message"), [
     ({"action": "create", "name": "calc"}, "conflict", "a project named 'calc' already exists"),
     ({"action": "create", "name": "x", "work_dir": "relative/dir"}, "invalid", "absolute"),
@@ -273,8 +295,8 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
         await _ok("PUT", "/api/agent-settings/roles/processor", {"profile_id": profile["profile_id"]})
         listed = await _tool(chat, "looper_agent_profiles", action="list")
         # The advisor's and its judge's built-in profiles are listed too.
-        assert [p["name"] for p in listed["profiles"]] == ["claude-code/fable-5-2", "claude-code/haiku-5-5",
-                                                          "claude-code/opus", "fast"]
+        assert [p["name"] for p in listed["profiles"]] == ["claude-code/fable-5-2", "claude-code/opus",
+                                                          "claude-code/sonnet-5-5", "fast"]
         assert listed["profiles"][3]["used_by"] == "the worker role"
         assert listed["profiles"][3]["model_id"] == opus["model_id"]
         assert listed["runtimes"] == [{"runtime_id": "rt-claude-code", "name": "claude-code",
@@ -286,7 +308,8 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
         assert all("prices" not in m for m in listed["models"])
         (unknown,) = await chat.say("改 slow", ("looper_agent_profiles", {
             "action": "update", "profile": "slow", "effort": "high"}))
-        assert _error(unknown) == "not_found" and "claude-code/opus, fast" in unknown["error"]["message"]
+        assert _error(unknown) == "not_found" and "claude-code/opus, claude-code/sonnet-5-5, fast" in unknown["error"][
+            "message"]
         (taken,) = await chat.say("再加一个", ("looper_agent_profiles", {
             "action": "create", "name": "fast", "runtime": "rt-claude-code", "model": opus["model_id"]}))
         assert _error(taken) == "conflict" and "already exists" in taken["error"]["message"]
@@ -372,7 +395,7 @@ def test_deleting_an_agent_profile_asks_first_and_one_in_use_is_refused(
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert done["result"] == {"deleted": "claude-code/sonnet"}
         assert [p["name"] for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"]] == [
-            "claude-code/fable-5-2", "claude-code/haiku-5-5", "claude-code/opus"]
+            "claude-code/fable-5-2", "claude-code/opus", "claude-code/sonnet-5-5"]
 
     run_db(test, monkeypatch)
 
@@ -891,7 +914,7 @@ def test_a_roles_timeout_is_set_as_settings_roles_saves_it(monkeypatch: pytest.M
     ({"values": {"max_concurrency": 2}}, "concurrency is per task: max_concurrency is how many of one task's"),
     ({"role": "manager", "values": {"max_concurrency": 2}}, "max_concurrency is how many"),
     ({"role": "manager", "project": "calc", "values": {"harness_prompt": "x"}}, "the manager spans every project"),
-    ({"role": "worker", "values": {"profile": "nope"}}, "no Agent Profile 'nope'; there are: claude-code/fable-5-2, claude-code/haiku-5-5, claude-code/opus"),
+    ({"role": "worker", "values": {"profile": "nope"}}, "no Agent Profile 'nope'; there are: claude-code/fable-5-2, claude-code/opus, claude-code/sonnet-5-5"),
     ({"role": "worker", "values": {}}, "values: give at least one setting"),
     ({"role": "worker", "values": {"run_budget_usd": -1}}, "run_budget_usd must be more than 0"),
 ])
