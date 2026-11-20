@@ -8,7 +8,7 @@ import pytest
 from looper.agents import source_service, subscription_rules
 from looper.db import message_stream as store, subscriptions
 from tests import leads_support, msgflow_support as sup
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, run_db, v1_api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -112,18 +112,24 @@ def test_stream_inclusion_and_extraction_exclusion_both_filter_existing_events(m
                 pool, sub, output_kind=kind, from_seq=0, to_seq=100000, now=sup.NOW, own_apps=[])
             return [row["text"] for row in result["rows"]]
 
-        assert await picked() == ["hello"]
-        await store.set_chat_inclusion("src", "chat_synthetic", False, db=pool)
-        assert await picked() == []
-        await store.set_chat_inclusion("src", "chat_synthetic", True, db=pool)
-        assert await picked() == ["hello"]
-        await pool.execute("UPDATE source_chats SET extraction = 'excluded', extraction_excluded_at = now()")
-        assert await picked() == []
-        await store.set_chat_inclusion("src", "chat_synthetic", False, db=pool)
-        await store.set_chat_inclusion("src", "chat_synthetic", True, db=pool)
-        assert await picked() == []
-        await pool.execute("UPDATE source_chats SET extraction = 'included', extraction_excluded_at = NULL")
-        assert await picked() == ["hello"]
+        async with v1_api(tmp_path / "api", pool) as call:
+            status, answer = await call("leads.settings_put", {"enabled": True})
+            assert status == 200, answer
+            assert await picked() == ["hello"]
+            # Exercise both operator controls, including each switch while the other excludes the chat.
+            for operation, fields, expected in (
+                ("message_stream.chat_update", {"included": False}, []),
+                ("message_stream.chat_update", {"included": True}, ["hello"]),
+                ("leads.set_chat", {"extraction": "excluded"}, []),
+                ("message_stream.chat_update", {"included": False}, []),
+                ("message_stream.chat_update", {"included": True}, []),
+                ("message_stream.chat_update", {"included": False}, []),
+                ("leads.set_chat", {"extraction": "included"}, []),
+                ("message_stream.chat_update", {"included": True}, ["hello"]),
+            ):
+                status, answer = await call(operation, {"source_id": "src", "chat_id": "chat_synthetic", **fields})
+                assert status == 200, answer
+                assert await picked() == expected
 
     run_db(check, monkeypatch, setup=lambda p: setup(p, tmp_path), timeout=30)
 

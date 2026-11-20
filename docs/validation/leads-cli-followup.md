@@ -55,8 +55,17 @@ Main now includes #1451: a real resolved Worker `Launch.environment()` sets
 search, mark and delete return exit 4 before reading configuration or connecting
 to the database.
 
-The five added or modified Python test files pass against a disposable PostgreSQL
-database: 85 passed, none skipped. The 12 frontend test files changed by the
-incoming main pass too: 306 passed. TypeScript checking and the frontend build
-pass. This update changes no model-visible content; the real-mode skill
-comparison above remains the existing evidence.
+After the latest main update, 22 affected Python test files pass against a
+disposable PostgreSQL database: 581 passed, none skipped. The two frontend test
+files changed by incoming main pass too: 14 passed. TypeScript checking and the
+frontend build pass. This update changes no model-visible content; the real-mode
+skill comparison above remains the existing evidence.
+
+The stream/extraction regression now calls the real operator HTTP endpoints for
+both switches, for leads and intents. Excluding a stream chat blocks extraction;
+enabling extraction while the stream chat is excluded keeps it blocked.
+Re-including a stream chat likewise preserves an extraction exclusion. Only
+enabling both admits the message again. The existing cursor/lookback tests, with
+and without subscription rules, confirm stream exclusion also removes existing
+messages from ordinary subscription windows. All 14 tests in the deletion test
+file pass again after this regression update.
