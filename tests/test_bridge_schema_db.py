@@ -107,8 +107,12 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                 elif table == "agent_runtimes":
                     assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
                 elif table == "agent_profiles":
-                    assert after[table] == [{**r, "fallback_profile_id": None, "web_search": True}
-                                            for r in before[table]]
+                    # The advisor's and its judge's built-in profiles are added as a fresh database has them.
+                    added = ("agent-claude-code-fable-5-2", "agent-claude-code-haiku-5-5")
+                    assert [r for r in after[table] if r["id"] not in added] == [
+                        {**r, "fallback_profile_id": None, "web_search": True} for r in before[table]]
+                    assert [{**r, "created_at": None, "updated_at": None} for r in after[table] if r["id"] in added] == [
+                        {**r, "created_at": None, "updated_at": None} for r in fresh_rows[table] if r["id"] in added]
                 elif table == "task_user_gates":
                     # Existing gates retain their discussion purpose and every historical field.
                     assert after[table] == [{**r, "purpose": "discussion"} for r in before[table]]
@@ -139,7 +143,17 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                         if table == "llm_providers" else before[table]
                     if table == "llm_models":
                         historical = [{**r, "chat_dialect": None} for r in historical]
-                    assert [r for r in after[table] if r[key] not in new_providers] == historical, table
+                    if table == "llm_models":
+                        # The advisor's and its judge's models join the Claude login's catalog.
+                        added_models = [r for r in after[table] if r["builtin"] and r["name"] in (
+                            "claude-fable-5-2", "claude-haiku-5-5")]
+                        assert [{**r, "created_at": None, "updated_at": None} for r in added_models] == [
+                            {**r, "created_at": None, "updated_at": None} for r in fresh_rows[table]
+                            if r["name"] in ("claude-fable-5-2", "claude-haiku-5-5")]
+                        after_rows = [r for r in after[table] if r not in added_models]
+                    else:
+                        after_rows = after[table]
+                    assert [r for r in after_rows if r[key] not in new_providers] == historical, table
                 else:
                     assert after[table] == before[table], table
             assert json.loads(after["tasks"][0]["config"]) == {"worker": {"max_turns": 9}}
