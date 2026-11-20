@@ -327,11 +327,26 @@ class ManagerOps:
         return adjusted
 
     def listing(self) -> list[dict[str, Any]]:
-        return [task_directory_tool(project_tool(tool)).listing() for tool in self._scope.tools.values()]
+        return [task_directory_tool(project_tool(tool)).listing() for tool in self._scope.tools.values()
+                if _audience(tool) is Audience.ANY]
 
-    async def current_listing(self) -> list[dict[str, Any]]:
-        """The tools the Manager has now (``current_scope``), as ``tools/list`` names them."""
-        return [task_directory_tool(project_tool(tool)).listing() for tool in (await self.current_scope()).tools.values()]
+    @property
+    def running_turn(self) -> Turn | None:
+        """The turn running now (``begin_turn``), if any."""
+        return self._turn
+
+    def bound(self, binding: str | None) -> Turn | None:
+        """The turn ``binding`` names, if Looper gave it (``register``)."""
+        return self._bindings.get(binding) if binding else None
+
+    async def current_listing(self, turn: Turn | None = None) -> list[dict[str, Any]]:
+        """The tools the Manager has now (``current_scope``), as ``tools/list`` names them, for ``turn``: a tool only
+        the user's own turns run is listed only in such a turn, never with no turn."""
+        tools = list((await self.current_scope()).tools.values())
+        if any(_audience(tool) is Audience.OPERATOR for tool in tools) and not (
+                turn is not None and await _operator_turn(turn)):
+            tools = [tool for tool in tools if _audience(tool) is Audience.ANY]
+        return [task_directory_tool(project_tool(tool)).listing() for tool in tools]
 
     async def _authorize(self, scope: OpsScope, name: str, arguments: Mapping[str, Any]) -> Tool:
         """The one check of what ``scope`` allows: the tool is among its tools, a read-only tool is only read, and
@@ -420,6 +435,10 @@ class ManagerOps:
         bound = self._bindings.get(binding) if binding else None
         self._observe_turn(name, binding, bound, enforced=enforced)
         turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
+        if _audience(tool) is Audience.OPERATOR:
+            # Only the turn the call is bound to, whatever the stop switch: no binding, or one Looper did not give, is
+            # Claude's own turn; a turn that ended refuses it (below).
+            turn = bound or Turn(channel=None, chat=None)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:

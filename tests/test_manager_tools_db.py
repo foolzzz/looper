@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 WEB = channel_address("web")
 
 async def _converse(root: Path, turns: list[list[tuple[str, dict[str, Any]]]], messages: list[str],
-                    before: Any = None) -> Any:
+                    before: Any = None, *, bound: bool = False) -> Any:
     """Send ``messages`` to a Manager whose Claude makes ``turns``' calls (``before(index, ops)`` runs before each);
     the replies, Claude's user turns and the tools it was given (None for what a Claude that never ran left)."""
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
@@ -37,7 +37,7 @@ async def _converse(root: Path, turns: list[list[tuple[str, dict[str, Any]]]], m
     manager._bus = bus
     router = SimpleNamespace(has_planner=lambda task_id: False)
     replies = []
-    async with manager_endpoint(manager, bus, router, root) as ops:
+    async with manager_endpoint(manager, bus, router, root, turn_file=root / "turn.json" if bound else None) as ops:
         for index, text in enumerate(messages):
             if before is not None:
                 before(index, ops)

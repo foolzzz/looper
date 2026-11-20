@@ -771,8 +771,6 @@ class ManagerAgent:
         self._turned_off_told = False
         self._has_templates = False  # from the last read of the Manager's task templates
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
-        # Group replies not sent because they quoted a message lead this session searched (``_group_safe``).
-        self.leads_withheld = 0
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
         # Reads what a channel's message quotes, by the channel's id; the fleet sets it (``ChannelRegistry``).
@@ -1451,7 +1449,8 @@ class ManagerAgent:
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
-        tools = await token.step("tool_listing", self.ops.current_listing()) if self.ops is not None else []
+        # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
+        tools = await token.step("tool_listing", self.ops.current_listing(ask.turn)) if self.ops is not None else []
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] == ops_leads.LEADS_TOOL for t in tools)
         if self._has_templates or has_workflows or has_leads or self.agent_id != DEFAULT_MANAGER_ID:
@@ -1838,6 +1837,8 @@ class ManagerAgent:
 
     async def _handle_task_result(self, envelope: MessageEnvelope) -> None:
         summary = envelope.payload.get("summary", "任务完成")
+        if _group_task(envelope):
+            summary = ops_leads.for_group(summary)
         origin = envelope.metadata.get("origin_channel_id")
         if origin:
             await self._bus.publish(MessageEnvelope.create(
@@ -2891,15 +2892,16 @@ class ManagerAgent:
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                                record=record, snapshot=snapshot))
 
+    @property
+    def leads_withheld(self) -> int:
+        """Group texts not sent because they quoted a message lead this Manager's session searched."""
+        return ops_leads.withheld(self.agent_id)
+
     def _group_safe(self, original: MessageEnvelope, text: str) -> str:
-        """``text``, or ``WITHHELD_REPLY`` when it goes to a group chat and quotes a message lead this Manager's
-        session searched in the last day (RFC R-2: the session is shared by the user's chats and the groups)."""
-        if not text or not _message_origin(original)["group"] or not ops_leads.quotes_a_lead(self.agent_id, text):
-            return text
-        self.leads_withheld += 1
-        logger.warning("%s: a reply to a group chat quoted a message lead found in the user's own chat; Looper sent "
-                       "a notice instead (%d so far)", self._log, self.leads_withheld)
-        return ops_leads.WITHHELD_REPLY
+        """``text``, or ``WITHHELD_REPLY`` when it answers a group chat's message and quotes a message lead this
+        Manager's session searched in the last day (RFC R-2: the session is shared by the user's chats and the
+        groups). A task's end notice and a gate's post are checked where the channel sends them."""
+        return ops_leads.for_group(text, manager_id=self.agent_id) if _message_origin(original)["group"] else text
 
     async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
         """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""
