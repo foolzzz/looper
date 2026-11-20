@@ -32,6 +32,12 @@ QUEUE_SECONDS = 15 * 60
 # The fallbacks of this many batches in a row, for these reasons, make the completion turns a failing feature (P3).
 FAILING_BATCHES = 5
 FAILING_REASONS = ("turn_failed", "turn_timeout", "empty_reply")
+# A fallback notice known not to have been handed to its channel is tried again after RETRY_SECONDS * 3^(n-1)
+# (at most RETRY_MAX_SECONDS) for its first SEND_ATTEMPTS tries; a pass that took one holds it RETRY_LEASE_SECONDS.
+RETRY_SECONDS = 5
+RETRY_MAX_SECONDS = 15 * 60
+SEND_ATTEMPTS = 8
+RETRY_LEASE_SECONDS = 60
 PRUNE_BATCH = 5000
 SUMMARY_HOURS = 24
 
@@ -102,12 +108,43 @@ async def claim(manager_id: str, channel_id: str, chat: str, batch: UUID, *, lim
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
-async def deliver(batch: UUID, *, record_id: int | None, pool: Db | None = None) -> list[dict[str, Any]]:
-    """The completion turn's reply was handed to the channel: its running events are delivered."""
+async def deliver(batch: UUID, *, record_id: int | None, uncertain: bool = False,
+                  pool: Db | None = None) -> list[dict[str, Any]]:
+    """The completion turn's reply was handed to the channel (``uncertain``: it may have been; it is never sent
+    again): its running events are delivered."""
     rows = await (pool or get_pool()).fetch(
-        "UPDATE manager_events SET state = 'delivered', record_id = $2, sent_at = now(), finished_at = now() "
-        "WHERE batch = $1 AND state = 'running' RETURNING *", batch, record_id)
+        "UPDATE manager_events SET state = 'delivered', record_id = $2, sent_at = now(), finished_at = now(), "
+        "send_uncertain = $3 WHERE batch = $1 AND state = 'running' RETURNING *", batch, record_id, uncertain)
     return [dict(row) for row in rows]
+
+
+async def retry_later(event_id: int, *, pool: Db | None = None) -> datetime | None:
+    """The fallback notice was not handed to its channel, and it is known not to have been: it is tried again with
+    backoff, up to ``SEND_ATTEMPTS`` tries. Answers when, or None once given up."""
+    return await (pool or get_pool()).fetchval(
+        "UPDATE manager_events SET send_attempts = send_attempts + 1, send_retry_at = CASE "
+        "WHEN send_attempts + 1 >= $2 THEN NULL "
+        "ELSE now() + make_interval(secs => least($3 * power(3, send_attempts), $4)) END "
+        "WHERE id = $1 AND sent_at IS NULL RETURNING send_retry_at",
+        event_id, SEND_ATTEMPTS, float(RETRY_SECONDS), float(RETRY_MAX_SECONDS))
+
+
+async def mark_uncertain(event_id: int, *, pool: Db | None = None) -> None:
+    """A try at the fallback notice may have reached the chat: it is never tried again."""
+    await (pool or get_pool()).execute(
+        "UPDATE manager_events SET send_uncertain = true, send_retry_at = NULL, send_attempts = send_attempts + 1 "
+        "WHERE id = $1 AND sent_at IS NULL", event_id)
+
+
+async def claim_retries(now: datetime, *, limit: int = CLAIM_LIMIT, pool: Db | None = None) -> list[dict[str, Any]]:
+    """The fallback notices due to be tried again, taken for ``RETRY_LEASE_SECONDS`` (a pass that runs meanwhile
+    takes none of them), oldest first."""
+    rows = await (pool or get_pool()).fetch(
+        "UPDATE manager_events SET send_retry_at = $1::timestamptz + make_interval(secs => $2) WHERE id IN ("
+        "SELECT id FROM manager_events WHERE state = 'fallback' AND sent_at IS NULL AND NOT send_uncertain "
+        "AND send_retry_at <= $1 ORDER BY id LIMIT $3 FOR UPDATE SKIP LOCKED) RETURNING *",
+        now, float(RETRY_LEASE_SECONDS), limit)
+    return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
 async def fall_back(*, reason: str, batch: UUID | None = None, target: Sequence[str] | None = None,
@@ -139,7 +176,8 @@ async def recover(manager_id: str, *, pool: Db | None = None) -> list[dict[str, 
                      "WHERE manager_id = $1 AND state = 'running'", manager_id)
     unsent = await db.fetch(
         "SELECT * FROM manager_events WHERE manager_id = $1 AND state = 'fallback' AND sent_at IS NULL "
-        "AND created_at >= now() - make_interval(hours => $2) ORDER BY id", manager_id, UNSENT_HOURS)
+        "AND NOT send_uncertain AND created_at >= now() - make_interval(hours => $2) ORDER BY id",
+        manager_id, UNSENT_HOURS)
     return [dict(row) for row in unsent]
 
 
@@ -171,7 +209,7 @@ async def recover_stopped(running: Sequence[str], *, pool: Db | None = None) -> 
     await db.execute("UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now() "
                      "WHERE state = 'running' AND NOT (manager_id = ANY($1::text[]))", list(running))
     rows = await db.fetch(
-        "SELECT * FROM manager_events WHERE state = 'fallback' AND sent_at IS NULL "
+        "SELECT * FROM manager_events WHERE state = 'fallback' AND sent_at IS NULL AND NOT send_uncertain "
         "AND NOT (manager_id = ANY($1::text[])) AND created_at >= now() - make_interval(hours => $2) ORDER BY id",
         list(running), UNSENT_HOURS)
     return [dict(row) for row in rows]

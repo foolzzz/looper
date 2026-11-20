@@ -251,7 +251,7 @@ def test_the_completion_turns_fail_once_five_batches_in_a_row_fell_back(monkeypa
 
 async def _failed_run(env: ScheduleEnv, *, notify: str = "failures", status: str = "failed"):
     sender = with_sender(env)
-    completion_events.set_schedule_delivery(env.scheduler.deliver_run_message)
+    completion_events.set_scheduler(env.scheduler)
     await allow_telegram(env)
     schedule = await env.schedule(notify=notify, notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT})
     run_id = await env.scheduler.run_now(schedule["schedule_id"])
@@ -269,7 +269,7 @@ async def _outbox(env: ScheduleEnv) -> list[dict[str, Any]]:
 @pytest.fixture
 def schedule_delivery():
     yield
-    completion_events.set_schedule_delivery(None)
+    completion_events.set_scheduler(None)
 
 
 def test_a_successful_run_under_notify_failures_records_no_event(monkeypatch, tmp_path, schedule_delivery):
@@ -351,3 +351,146 @@ def test_health_shows_the_services_last_counts_from_memory(monkeypatch, tmp_path
             assert completion_service.health() is None
 
     run_db(run, monkeypatch, timeout=60)
+
+
+# --- Review follow-ups: off is unchanged, a retarget, a send whose outbox failed, unsent fallbacks ---
+
+def _failing_tasks(module: Any) -> Any:
+    """``module.db_tasks`` whose ``get_task`` fails (the database went away for that read)."""
+    from types import SimpleNamespace
+
+    from looper.db import tasks as db_tasks
+
+    async def get_task(*args: Any, **kwargs: Any) -> Any:
+        raise ConnectionError("the database went away")
+
+    return SimpleNamespace(**{name: getattr(db_tasks, name) for name in dir(db_tasks)
+                              if not name.startswith("__") and name != "get_task"}, get_task=get_task)
+
+
+@pytest.mark.parametrize("turns", ["off", "dm_only"])
+def test_a_tasks_result_that_cannot_be_read_never_costs_the_runs_message(monkeypatch, tmp_path, schedule_delivery,
+                                                                          turns):
+    from looper.agents import schedule_notify
+
+    monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.CompletionTurns(turns))
+    monkeypatch.setattr(schedule_notify, "db_tasks", _failing_tasks(schedule_notify))
+    monkeypatch.setattr(completion_events, "db_tasks", _failing_tasks(completion_events))
+
+    async def test(env: ScheduleEnv):
+        sender, *_ = await _failed_run(env)
+        assert len(sender.sent) == 1  # the run's message, as before
+        assert [(r["state"], r["reason"]) for r in await _events(env.pool)] == (
+            [("skipped", "off")] if turns == "off" else [])  # on: the event could not be written, the message went
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_batch_whose_schedule_changed_its_target_is_not_sent_there(monkeypatch, tmp_path, schedule_delivery):
+    async def test(env: ScheduleEnv):
+        sender = with_sender(env)
+        completion_events.set_scheduler(env.scheduler)
+        await allow_telegram(env)
+        await env.pool.execute("UPDATE channel_configs SET config = config || "
+                               "'{\"allowed_user_ids\": [\"1000001\", \"1000002\"]}'::jsonb "
+                               "WHERE channel_id = 'channel-telegram'")
+        target = {"channel": "telegram", "chat": TELEGRAM_CHAT}
+        first = await env.schedule(notify="failures", notify_target=target)
+        second = await env.schedule(notify="failures", notify_target=target)
+        for schedule in (first, second):
+            run = await db_schedules.get_run(await env.scheduler.run_now(schedule["schedule_id"]))
+            await env.end_task(run["task_id"], "failed", summary="no data")
+        await env.scheduler.idle()
+        assert sender.sent == [] and len(await _events(env.pool)) == 2  # both wait for one turn, to one chat
+        await env.pool.execute("UPDATE schedules SET notify_chat = '1000002' WHERE id = $1", first["schedule_id"])
+        batch = uuid.uuid4()
+        rows = await store.claim("manager", "channel-telegram", TELEGRAM_CHAT, batch)
+        with pytest.raises(completion_events.TargetChanged):
+            await completion_events.send_reply(None, None, rows, "两份日报都没写出来。")
+        assert sender.sent == [] and await _outbox(env) == []
+        await completion_events.fall_back(None, None, reason="target_changed", batch=batch)
+        # Each run's own message, where its schedule sends now.
+        assert sorted(chat for _, chat, _ in sender.sent) == ["1000001", "1000002"]
+        assert {row["manager_event_id"] for row in await _outbox(env)} == {row["id"] for row in rows}
+        assert {(r["state"], r["reason"]) for r in await _events(env.pool)} == {("fallback", "target_changed")}
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_reply_that_went_out_but_whose_outbox_row_failed_is_not_sent_again(monkeypatch, tmp_path,
+                                                                             schedule_delivery):
+    real, failed = db_schedules.insert_notification, []
+
+    async def insert_notification(*args: Any, **kwargs: Any) -> str:
+        if kwargs.get("manager_event_id") is not None and not kwargs.get("once") and not failed:
+            failed.append(1)
+            raise ConnectionError("the database went away after the send")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(db_schedules, "insert_notification", insert_notification)
+
+    async def test(env: ScheduleEnv):
+        sender, *_ = await _failed_run(env)
+        (row,) = await _events(env.pool)
+        rows = await store.claim("manager", "channel-telegram", TELEGRAM_CHAT, uuid.uuid4())
+        await completion_events.send_reply(None, None, rows, "日报没写出来。")  # sent: no fallback follows
+        assert [text for _, _, text in sender.sent] == ["日报没写出来。"] and failed == [1]
+        assert await _outbox(env) == [{"kind": "run", "text": "日报没写出来。", "status": "sent",
+                                       "manager_event_id": row["id"]}]  # repaired, once
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_fallback_notice_not_sent_is_tried_again_and_one_that_may_have_gone_is_not(monkeypatch, tmp_path):
+    async def run(pool):
+        async with _manager(pool, tmp_path, monkeypatch, []) as chat:
+            await _tasks(pool, tmp_path, "t1")
+            await chat.manager._handle(_end("t1"))
+            publish, refused = chat.bus.publish, []
+
+            async def flaky(envelope: Any) -> None:
+                if envelope.message_type is MessageType.AGENT_REPLY and not refused:
+                    refused.append(1)
+                    raise OSError("the journal is not writable")
+                await publish(envelope)
+
+            monkeypatch.setattr(chat.bus, "publish", flaky)
+            service = _service(chat.bus)
+            await service.run_once(now=_later(store.QUEUE_SECONDS + 1))
+            assert _drain(chat.bus, "channel-web") == []
+            (row,) = await _events(pool)
+            assert (row["state"], row["sent_at"], row["send_attempts"]) == ("fallback", None, 1)
+            assert row["send_retry_at"] is not None and not row["send_uncertain"]
+            await service.run_once(now=_later(1))  # its backoff (5 s) is not up
+            assert _drain(chat.bus, "channel-web") == []
+            await service.run_once(now=row["send_retry_at"] + timedelta(seconds=1))
+            (notice,) = _drain(chat.bus, "channel-web")
+            assert notice.payload["text"] == web_end_text("completed", "calc t1", "## Done\nadd and sub pass")
+            (row,) = await _events(pool)
+            assert row["sent_at"] is not None
+            await store.mark_uncertain(row["id"])  # (no effect on one sent)
+            assert (await _events(pool))[0]["send_uncertain"] is False
+
+    run_db(run, monkeypatch, timeout=60)
+
+
+def test_a_schedule_fallback_whose_channel_failed_unclearly_is_never_sent_again(monkeypatch, tmp_path,
+                                                                                schedule_delivery):
+    async def test(env: ScheduleEnv):
+        sender, *_ = await _failed_run(env)
+
+        async def unclear(*args: Any) -> Any:
+            raise TimeoutError("the channel did not answer")
+
+        env.scheduler._notifier._sender = unclear
+        service = _service(env.bus)
+        await service.run_once(now=_later(store.QUEUE_SECONDS + 1))
+        (row,) = await _events(env.pool)
+        assert (row["state"], row["sent_at"], row["send_uncertain"], row["send_retry_at"]) == (
+            "fallback", None, True, None)
+        env.scheduler._notifier._sender = sender
+        await service.run_once(now=_later(store.QUEUE_SECONDS + 3600))
+        assert sender.sent == []  # may have gone: never sent again, not even after a restart
+        assert await store.recover("manager") == [] and await store.recover_stopped([]) == []
+
+    run_scheduled(test, monkeypatch, tmp_path)

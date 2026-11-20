@@ -6,6 +6,8 @@ Every ``TICK_SECONDS`` (and at once when an event is recorded, ``completion_even
 
 - a pending event that waited ``QUEUE_SECONDS`` for its turn (its Manager is held by a long one) falls back
   (``queue_deadline``) and its notice goes;
+- a fallback notice known not to have been handed to its channel is tried again when its backoff is up
+  (``store.claim_retries``; one that may have reached the chat is never tried again);
 - a chat whose oldest pending event is due (``WINDOW_SECONDS`` after it was recorded) and that no turn is telling
   gets a ``COMPLETION_DUE`` on its Manager's queue, at most once per ``RESEND_SECONDS`` (a duplicate claims
   nothing); a Manager that does not run gets the chat's notices instead (``manager_off``).
@@ -109,6 +111,12 @@ class CompletionService:
         if self._drain is not None and self._drain.draining:
             return 0
         now = now or datetime.now(timezone.utc)
+        # Notices known not to have been sent, due again (taken for a lease: no other pass sends them meanwhile);
+        # first, so one that fails below waits for its backoff.
+        for row in await store.claim_retries(now):
+            logger.info("completion fallback id=%s: trying its notice again (try %d)", row["id"],
+                        row["send_attempts"] + 1)
+            await completion_events.send_fallbacks(self._bus, manager_address(row["manager_id"]), [row])
         for row in await store.expire(now):
             logger.info("completion fallback id=%s reason=queue_deadline", row["id"])
             await completion_events.send_fallbacks(self._bus, manager_address(row["manager_id"]), [row])

@@ -23,6 +23,7 @@ const FALLBACK_REASONS: Record<string, string> = {
   restart: "the server restarted",
   manager_off: "Manager off",
   off: "turned off",
+  target_changed: "the schedule's target changed",
 };
 
 /** Settings → Chat: whether a reply can be stopped (Esc, the Stop button, /stop; experimental, off by default), and

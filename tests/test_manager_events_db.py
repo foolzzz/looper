@@ -324,6 +324,7 @@ def test_an_event_is_unique_by_its_dedupe_key_and_goes_with_its_task(monkeypatch
     run_db(check, monkeypatch, timeout=30)
 
 
+FRESH_INDEX = None
 HAS_EVENT_COLUMN = ("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = "
                     "'schedule_notifications' AND column_name = 'manager_event_id')")
 
@@ -331,8 +332,13 @@ HAS_EVENT_COLUMN = ("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHE
 @pytest.mark.parametrize("before", ["no_table", "no_column"])
 def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(monkeypatch, before):
     async def check(pool):
+        global FRESH_INDEX
+        FRESH_INDEX = await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = "
+                                          "'idx_schedule_notifications_manager_event'")
+        assert FRESH_INDEX and "WHERE (manager_event_id IS NOT NULL)" in FRESH_INDEX
         await pool.execute("ALTER TABLE schedule_notifications DROP COLUMN manager_event_id; "
-                           "DELETE FROM schema_migrations WHERE name = 'schedule_notification_events'")
+                           "DELETE FROM schema_migrations WHERE name IN ('schedule_notification_events', "
+                           "'schedule_notification_events_online')")
         if before == "no_table":  # older than completion events
             await pool.execute("DROP TABLE manager_events; DELETE FROM schema_migrations WHERE name = 'manager_events'")
         async with pool.acquire() as conn:
@@ -342,6 +348,9 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
         assert await pool.fetchval(HAS_EVENT_COLUMN)
+        # The outbox's new foreign key is indexed (built online), as a new database has it.
+        assert await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = "
+                                   "'idx_schedule_notifications_manager_event'") == FRESH_INDEX
 
     run_db(check, monkeypatch, timeout=30)
 
@@ -437,13 +446,15 @@ def test_the_foreign_keys_that_are_cleared_or_cascaded_have_indexes(monkeypatch)
     run_db(check, monkeypatch, timeout=30)
 
 
-def test_a_database_whose_events_cannot_record_no_chat_gets_it_on_upgrade(monkeypatch, tmp_path):
+def test_a_database_whose_events_predate_the_new_reasons_and_retries_gets_them_on_upgrade(monkeypatch, tmp_path):
     async def check(pool):
         await pool.execute(
             "ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
             "manager_events_reason_check CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', "
             "'turn_timeout', 'turn_stopped', 'empty_reply', 'send_failed', 'queue_deadline', 'restart')); "
-            "DELETE FROM schema_migrations WHERE name = 'manager_event_no_chat'")
+            "ALTER TABLE manager_events DROP COLUMN send_attempts, DROP COLUMN send_retry_at, "
+            "DROP COLUMN send_uncertain; "
+            "DELETE FROM schema_migrations WHERE name IN ('manager_event_reasons', 'manager_event_send_retry')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
@@ -451,5 +462,6 @@ def test_a_database_whose_events_cannot_record_no_chat_gets_it_on_upgrade(monkey
             assert not await connection.schema_change_pending(conn)
         await with_task(pool, tmp_path)
         await insert(pool, dedupe_key="k", state="skipped", reason="no_chat")
+        await insert(pool, dedupe_key="k2", state="fallback", reason="target_changed", send_attempts=2)
 
     run_db(check, monkeypatch, timeout=30)

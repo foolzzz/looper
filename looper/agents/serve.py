@@ -879,7 +879,7 @@ async def _run_agent_system_watched(
                                      on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
             wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
             from . import completion_events
-            completion_events.set_schedule_delivery(scheduler.deliver_run_message)
+            completion_events.set_scheduler(scheduler)
             source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
             ledger_reconciler = LedgerReconciler()
             supervisor.register(task_router)

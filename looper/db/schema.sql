@@ -1826,7 +1826,7 @@ CREATE TABLE IF NOT EXISTS manager_events (
     state           TEXT NOT NULL CHECK (state IN ('pending', 'running', 'delivered', 'fallback', 'skipped')),
     reason          TEXT CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', 'turn_timeout',
                                            'turn_stopped', 'empty_reply', 'send_failed', 'queue_deadline',
-                                           'restart', 'no_chat')),
+                                           'restart', 'no_chat', 'target_changed')),
     batch           UUID,
     record_id       BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1847,10 +1847,18 @@ CREATE INDEX IF NOT EXISTS idx_manager_events_task ON manager_events (task_id);
 CREATE INDEX IF NOT EXISTS idx_manager_events_created ON manager_events (created_at);
 CREATE INDEX IF NOT EXISTS idx_manager_events_schedule_run ON manager_events (schedule_run_id) WHERE schedule_run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_manager_events_record ON manager_events (record_id) WHERE record_id IS NOT NULL;
+-- A fallback notice not handed to its channel: how often it was tried, when the service tries it again (NULL: not
+-- known to be unsent, or given up), and whether a try may have reached the chat (never tried again).
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS send_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS send_retry_at TIMESTAMPTZ;
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS send_uncertain BOOLEAN NOT NULL DEFAULT false;
 -- The completion event that told a schedule run's message (the Manager's reply, or its fallback); NULL otherwise.
 ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT
     REFERENCES manager_events(id) ON DELETE SET NULL;
 -- manager events end
+-- A database that gets the column above later builds this index online (connection.py ``_ONLINE_STEPS``).
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_manager_event ON schedule_notifications (manager_event_id)
+    WHERE manager_event_id IS NOT NULL;
 
 -- agent spawns begin
 -- A run another run starts (the advisor RFC, section 5): one row per consult of the advisor, its state, what it was

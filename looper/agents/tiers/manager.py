@@ -1954,15 +1954,23 @@ class ManagerAgent:
             if reason is None:
                 body = "\n\n".join(part for part in (
                     text, completion_events.link_block(rows, base=self._config.dashboard_url)) if part)
+                uncertain = False
                 try:
                     await completion_events.send_reply(self._bus, self.agent_address, rows, body,
                                                        metadata=state.get("chat_record"))
+                except completion_events.TargetChanged as exc:
+                    logger.warning("%s: the completion turn %s's reply is not sent: %s", self._log, batch, exc)
+                    reason = "target_changed"
+                except completion_events.MaybeSent:
+                    # It may have reached the chat: never sent again, nor its notices (an unknown post is final).
+                    logger.warning("%s: the completion turn %s's reply may not have been sent", self._log, batch)
+                    uncertain = True
                 except Exception:
                     logger.exception("%s: the completion turn %s's reply could not be sent", self._log, batch)
                     reason = "send_failed"
-                else:
+                if reason is None:
                     try:
-                        await db_manager_events.deliver(batch, record_id=state.get("record_id"))
+                        await db_manager_events.deliver(batch, record_id=state.get("record_id"), uncertain=uncertain)
                     except Exception:
                         logger.exception("%s: could not record that the completion turn %s was delivered",
                                          self._log, batch)

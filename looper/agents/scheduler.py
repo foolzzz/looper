@@ -1240,6 +1240,10 @@ class Scheduler:
         """A run's message as its completion event tells it (``Notifier.deliver_run_message``)."""
         return await self._notifier.deliver_run_message(run_id, text, manager_event_id, send=send)
 
+    async def run_target_ok(self, run_id: str, channel_id: str, chat: str) -> bool:
+        """Whether the run's messages still go to the chat its completion event recorded (``Notifier``)."""
+        return await self._notifier.run_target_ok(run_id, channel_id, chat)
+
     async def task_ended(self, task_id: str, status: str) -> None:
         """The TaskRouter's report that a task ended: finish its run, then start the schedule's queued run."""
         try:
