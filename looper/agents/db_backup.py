@@ -15,10 +15,33 @@ release):
   ``pg_dump`` that cannot reach the database URL as written, such as the one
   inside a PostgreSQL container; ``{dbname}`` and ``{user}`` are filled in
   from the database URL. Its version is not checked; a verifier must still
-  list the archive before migration (below);
+  list the archive before migration (below). When that command is ``pg_dump``
+  (including ``docker exec [options] <container> pg_dump``), Looper appends
+  ``--exclude-table-data`` for the message-body tables. Any other program is
+  run as given and has to exclude that data itself.
 - the ``pg_dump`` that ``backup.pg_dump`` names, else ``pg_dump`` on PATH. Its
   major version must be at least the server's; the dump is then listed with
   the ``pg_restore`` beside it (else the one on PATH) to prove it is readable.
+
+The schema-change dump keeps every table's definition. It omits the rows of
+the message-body tables (``MESSAGE_BODY_TABLES``: ``source_events``, whose
+``text`` and ``body`` are the ingested messages). The other message-stream
+tables (``event_sources``, ``source_chats``, ``source_threads``,
+``source_people``, ``source_runs``) are metadata and cursors and stay, rows
+included. Delivered subscription output stays too.
+
+A daily dump of just those message-body tables is off until ``[backup]
+messages = "daily"`` (``message_backup_for``). It writes
+``looper-<database>-<stamp>.messages.dump`` in the same directory, at most
+once a day, and keeps the newest ``MESSAGE_KEEP``. The ``.messages.dump``
+suffix is one a schema-change backup cannot have, so the two rotations do
+not match each other's files (a database named ``demo-messages`` would
+otherwise share ``looper-demo-messages-<stamp>.dump`` with ``demo``'s message
+backups). Rotation deletes only its own files. Omit the key, or set
+``"off"``, and nothing is dumped or deleted. The daily dump is an asyncio
+subprocess: cancelling it terminates the process, kills it if it is still
+running, and reaps it, so stopping the service does not leave ``pg_dump``
+behind.
 
 The dump is proved readable by, in order: ``backup.verify_command`` (the
 dump on its stdin; it must list the archive like ``pg_restore --list``;
@@ -34,6 +57,7 @@ database URL for ``pg_dump``.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import getpass
 import os
@@ -41,6 +65,7 @@ import re
 import shutil
 import subprocess
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,9 +73,19 @@ from .. import child_env
 from ..ops_config import OpsConfig, Origin
 BACKUP_DIRNAME = "backups"
 KEEP = 5
+# Ingested message bodies live only in source_events (text and body). The other
+# message-stream tables are metadata; subscription output is a processor reply.
+MESSAGE_BODY_TABLES = ("source_events",)
+MESSAGE_KEEP = 7
+MESSAGE_INTERVAL = datetime.timedelta(days=1)
+_SCHEMA_EXCLUDES = tuple(f"--exclude-table-data={name}" for name in MESSAGE_BODY_TABLES)
+_MESSAGE_TABLES = tuple(f"--table={name}" for name in MESSAGE_BODY_TABLES)
 
 _VERSION_TIMEOUT_SECONDS = 15.0
 _DUMP_TIMEOUT_SECONDS = 3600.0
+# How long a cancelled daily dump is given to exit after SIGTERM before SIGKILL.
+# Well under serve.SHUTDOWN_DEADLINE_SEC, so stop() finishes inside that bound.
+_DUMP_STOP_GRACE_SECONDS = 2.0
 _LIST_TIMEOUT_SECONDS = 300.0
 _MAGIC = b"PGDMP"  # how every custom-format archive starts
 _STAMP = "%Y%m%dT%H%M%S.%fZ"
@@ -80,7 +115,7 @@ class Dumper:
     """How a backup is made."""
 
     argv: tuple[str, ...]  # the pg_dump program, or the whole backup.command
-    command: bool  # backup.command: run as given (placeholders filled in)
+    command: bool  # backup.command: placeholders filled in; pg_dump also gets the message-body flags
     detail: str  # what doctor and the log show
     verify: tuple[str, ...] = ()  # lists the archive read from stdin; else the local pg_restore does
     verify_label: str = ""  # how the result names ``verify``
@@ -169,6 +204,13 @@ def docker_exec_container(command: tuple[str, ...]) -> str | None:
     return None
 
 
+def _accepts_pg_dump_args(argv: tuple[str, ...]) -> bool:
+    """Whether ``argv`` is pg_dump, or ``docker exec ... pg_dump``, so extra pg_dump flags are safe to append."""
+    if not argv:
+        return False
+    return Path(argv[0]).name == "pg_dump" or docker_exec_container(argv) is not None
+
+
 def _verifier(command: tuple[str, ...], explicit: tuple[str, ...], ops: OpsConfig | None) -> tuple[tuple[str, ...], str]:
     """The command that lists the dump from stdin and how the result names it; ((), "") for the local pg_restore."""
     if explicit:
@@ -202,17 +244,61 @@ def _file_stem(dbname: str) -> str:
     return "looper-" + re.sub(r"[^A-Za-z0-9_.-]", "_", dbname)
 
 
-def prune(backup_dir: Path, dbname: str, keep: int = KEEP) -> list[Path]:
-    """Delete all but the newest ``keep`` backups of ``dbname`` (by the time in their names); the deleted ones."""
-    pattern = re.compile(re.escape(_file_stem(dbname)) + rf"-({_STAMP_PATTERN})\.dump")
-    backups = sorted(
+def _named_dumps(backup_dir: Path, pattern: re.Pattern[str]) -> list[tuple[str, Path]]:
+    if not backup_dir.is_dir():
+        return []
+    return sorted(
         (match.group(1), path) for path in backup_dir.iterdir()
         if path.is_file() and (match := pattern.fullmatch(path.name))
     )
-    old = [path for _, path in backups[:max(len(backups) - keep, 0)]]
+
+
+def _drop_oldest(found: list[tuple[str, Path]], keep: int) -> list[Path]:
+    old = [path for _, path in found[:max(len(found) - keep, 0)]]
     for path in old:
         path.unlink()
     return old
+
+
+def _schema_pattern(dbname: str) -> re.Pattern[str]:
+    """``looper-<database>-<stamp>.dump`` exactly. ``.messages.dump`` does not match."""
+    return re.compile(re.escape(_file_stem(dbname)) + rf"-({_STAMP_PATTERN})\.dump")
+
+
+def prune(backup_dir: Path, dbname: str, keep: int = KEEP) -> list[Path]:
+    """Delete all but the newest ``keep`` schema-change backups of ``dbname`` (by the time in their names).
+
+    Message backups (``looper-<database>-<stamp>.messages.dump``) do not match, nor does any other file.
+    A database whose name ends in ``-messages`` cannot match another database's message backups.
+    """
+    return _drop_oldest(_named_dumps(backup_dir, _schema_pattern(dbname)), keep)
+
+
+def _message_pattern(dbname: str) -> re.Pattern[str]:
+    """``looper-<database>-<stamp>.messages.dump`` exactly. A schema-change dump cannot match."""
+    return re.compile(re.escape(_file_stem(dbname)) + rf"-({_STAMP_PATTERN})\.messages\.dump")
+
+
+def prune_messages(backup_dir: Path, dbname: str, keep: int = MESSAGE_KEEP) -> list[Path]:
+    """Delete all but the newest ``keep`` message backups of ``dbname``; the deleted ones.
+
+    Only ``looper-<database>-<stamp>.messages.dump`` matches. Schema-change dumps and every other name stay.
+    """
+    return _drop_oldest(_named_dumps(backup_dir, _message_pattern(dbname)), keep)
+
+
+def newest_message_backup(backup_dir: Path, dbname: str) -> datetime.datetime | None:
+    """When the newest message backup of ``dbname`` was taken, from its name; None when there is none."""
+    found = _named_dumps(backup_dir, _message_pattern(dbname))
+    if not found:
+        return None
+    return datetime.datetime.strptime(found[-1][0], _STAMP).replace(tzinfo=datetime.timezone.utc)
+
+
+def message_backup_due(backup_dir: Path, dbname: str, now: datetime.datetime) -> bool:
+    """Whether ``dbname`` has no message backup, or its newest one is at least ``MESSAGE_INTERVAL`` old."""
+    newest = newest_message_backup(backup_dir, dbname)
+    return newest is None or now - newest >= MESSAGE_INTERVAL
 
 
 def _tail(text: str, *, password: str | None, lines: int = 5) -> str:
@@ -221,11 +307,78 @@ def _tail(text: str, *, password: str | None, lines: int = 5) -> str:
 
 
 def back_up(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetime | None = None) -> tuple[Path, str]:
-    """Write a verified dump of ``dsn`` into ``backup_dir`` (mode 0600), then prune; (its path, how it was checked).
+    """Write a verified schema-change dump of ``dsn`` into ``backup_dir`` (mode 0600), then prune.
 
+    The rows of ``MESSAGE_BODY_TABLES`` are left out when the dump is ``pg_dump``;
+    their schema stays. A ``backup.command`` that is not pg_dump is run as given.
     ``BackupFailed`` when the dump fails or is not a readable custom-format
-    archive; the partial file is removed.
+    archive; the partial file is removed. Returns (its path, how it was checked).
     """
+    return _write_dump(dumper, dsn, backup_dir, now=now, extra=_SCHEMA_EXCLUDES, require_extra=False,
+                       name_for=lambda dbname, stamp: f"{_file_stem(dbname)}-{stamp}.dump",
+                       keep_own=prune)
+
+
+def back_up_messages(dumper: Dumper, dsn: str, backup_dir: Path, *,
+                     now: datetime.datetime | None = None) -> tuple[Path, str]:
+    """Write a verified dump of the message-body tables into ``backup_dir``, then keep ``MESSAGE_KEEP`` of them.
+
+    The file is ``looper-<database>-<stamp>.messages.dump``. A command that is
+    not pg_dump is refused, so this cannot take a full database dump by mistake.
+    """
+    return _write_dump(dumper, dsn, backup_dir, now=now, extra=_MESSAGE_TABLES, require_extra=True,
+                       name_for=_message_name, keep_own=prune_messages)
+
+
+def _message_name(dbname: str, stamp: str) -> str:
+    return f"{_file_stem(dbname)}-{stamp}.messages.dump"
+
+
+@dataclass(frozen=True)
+class MessageBackup:
+    """One enabled daily message backup: where, and the ops file that says how to run pg_dump."""
+
+    dsn: str
+    backup_dir: Path
+    ops: OpsConfig
+
+    @property
+    def dbname(self) -> str:
+        return _connection(self.dsn)[2]
+
+
+def message_backup_for(ops: OpsConfig, runtime_root: Path) -> MessageBackup | None:
+    """The daily message backup ``ops`` asks for; None when ``[backup] messages`` is off (the default)."""
+    if ops.message_backups != "daily":
+        return None
+    return MessageBackup(ops.database_url, runtime_root / BACKUP_DIRNAME, ops)
+
+
+async def run_message_backup(job: MessageBackup, server_major: int | None, now: datetime.datetime) -> tuple[Path, str]:
+    """Dump ``job``'s message-body tables. Cancellation stops the ``pg_dump`` process and reaps it.
+
+    ``NoDumper`` or ``BackupFailed`` when the dump cannot be made. The process is an asyncio subprocess, not a
+    thread, so ``scheduler.stop`` does not leave it running past the service's shutdown bound.
+    """
+    return await _write_dump_async(find_dumper(server_major, job.ops), job.dsn, job.backup_dir, now=now,
+                                   extra=_MESSAGE_TABLES, require_extra=True, name_for=_message_name,
+                                   keep_own=prune_messages)
+
+
+@dataclass
+class _PlannedDump:
+    argv: list[str]
+    env: dict[str, str]
+    path: Path
+    partial: Path
+    password: str | None
+    dumper: Dumper
+    fill: Callable[[str], str]
+    dbname: str
+
+
+def _plan_dump(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetime | None,
+               extra: tuple[str, ...], require_extra: bool, name_for: Callable[[str, str], str]) -> _PlannedDump:
     bare_dsn, password, dbname, user = _connection(dsn)
 
     def fill(text: str) -> str:
@@ -233,34 +386,115 @@ def back_up(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetim
 
     if dumper.command:
         argv = [fill(arg) for arg in dumper.argv]
+        if extra and _accepts_pg_dump_args(dumper.argv):
+            argv.extend(extra)
+        elif extra and require_extra:
+            raise BackupFailed(
+                f"`{Path(dumper.argv[0]).name}` is not pg_dump, so a message backup cannot limit the dump to "
+                f"{', '.join(MESSAGE_BODY_TABLES)}; set backup.command to pg_dump or `docker exec ... pg_dump`")
         env = child_env.backup()
     else:
-        argv = [*dumper.argv, "--format=custom", "--no-password", f"--dbname={bare_dsn}"]
+        # Options stay in front of --dbname. pg_dump accepts either order; the last argument is the database.
+        argv = [*dumper.argv, "--format=custom", "--no-password", *extra, f"--dbname={bare_dsn}"]
         env = {**child_env.backup(), **({"PGPASSWORD": password} if password else {})}
     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime(_STAMP)
-    path = backup_dir / f"{_file_stem(dbname)}-{stamp}.dump"
-    partial = path.with_name(path.name + ".partial")
-    fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    path = backup_dir / name_for(dbname, stamp)
+    return _PlannedDump(argv, env, path, path.with_name(path.name + ".partial"), password, dumper, fill, dbname)
+
+
+def _write_dump(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetime | None,
+                extra: tuple[str, ...], require_extra: bool, name_for: Callable[[str, str], str],
+                keep_own: Callable[[Path, str], list[Path]]) -> tuple[Path, str]:
+    plan = _plan_dump(dumper, dsn, backup_dir, now=now, extra=extra, require_extra=require_extra, name_for=name_for)
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as out:
-            try:
-                dump = subprocess.run(argv, stdout=out, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env,
-                                      timeout=_DUMP_TIMEOUT_SECONDS)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise BackupFailed(f"`{argv[0]}` did not finish: {_why(exc)}") from None
-        if dump.returncode != 0:
-            reason = _tail(dump.stderr.decode("utf-8", "replace"), password=password)
-            raise BackupFailed(f"`{argv[0]}` exited with {dump.returncode}: {reason or 'no message'}")
-        checked = _verify(partial, dumper.pg_restore, password=password, verify=tuple(fill(arg) for arg in dumper.verify),
-                         verify_label=fill(dumper.verify_label))
-        os.replace(partial, path)
+        _run_dump(plan)
+        return _checked(plan, keep_own)
     except BaseException:
-        partial.unlink(missing_ok=True)
+        plan.partial.unlink(missing_ok=True)
         raise
-    prune(backup_dir, dbname)
-    return path, checked
+
+
+async def _write_dump_async(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetime | None,
+                            extra: tuple[str, ...], require_extra: bool, name_for: Callable[[str, str], str],
+                            keep_own: Callable[[Path, str], list[Path]]) -> tuple[Path, str]:
+    plan = _plan_dump(dumper, dsn, backup_dir, now=now, extra=extra, require_extra=require_extra, name_for=name_for)
+    try:
+        await _run_dump_async(plan)
+        return _checked(plan, keep_own)
+    except BaseException:
+        plan.partial.unlink(missing_ok=True)
+        raise
+
+
+def _checked(plan: _PlannedDump, keep_own: Callable[[Path, str], list[Path]]) -> tuple[Path, str]:
+    checked = _verify(plan.partial, plan.dumper.pg_restore, password=plan.password,
+                      verify=tuple(plan.fill(arg) for arg in plan.dumper.verify),
+                      verify_label=plan.fill(plan.dumper.verify_label))
+    os.replace(plan.partial, plan.path)
+    keep_own(plan.path.parent, plan.dbname)
+    return plan.path, checked
+
+
+def _run_dump(plan: _PlannedDump) -> None:
+    fd = os.open(plan.partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb") as out:
+        try:
+            dump = subprocess.run(plan.argv, stdout=out, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                  env=plan.env, timeout=_DUMP_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise BackupFailed(f"`{plan.argv[0]}` did not finish: {_why(exc)}") from None
+    if dump.returncode != 0:
+        reason = _tail(dump.stderr.decode("utf-8", "replace"), password=plan.password)
+        raise BackupFailed(f"`{plan.argv[0]}` exited with {dump.returncode}: {reason or 'no message'}")
+
+
+async def _run_dump_async(plan: _PlannedDump) -> None:
+    """Run the dump as an asyncio subprocess. Cancellation terminates it, then kills and reaps it."""
+    fd = os.open(plan.partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.fchmod(fd, 0o600)
+    out = os.fdopen(fd, "wb")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *plan.argv, stdin=asyncio.subprocess.DEVNULL, stdout=out, stderr=asyncio.subprocess.PIPE,
+            env=plan.env)
+    except OSError as exc:
+        raise BackupFailed(f"`{plan.argv[0]}` did not finish: {_why(exc)}") from None
+    finally:
+        out.close()
+    assert process.stderr is not None
+    try:
+        stderr = await asyncio.wait_for(process.stderr.read(), _DUMP_TIMEOUT_SECONDS)
+        code = await process.wait()
+    except asyncio.TimeoutError:
+        await _stop_dump(process)
+        raise BackupFailed(
+            f"`{plan.argv[0]}` did not finish: timed out after {_DUMP_TIMEOUT_SECONDS:g}s") from None
+    except asyncio.CancelledError:
+        await _stop_dump(process)
+        raise
+    if code != 0:
+        reason = _tail(stderr.decode("utf-8", "replace"), password=plan.password)
+        raise BackupFailed(f"`{plan.argv[0]}` exited with {code}: {reason or 'no message'}")
+
+
+async def _stop_dump(process: asyncio.subprocess.Process) -> None:
+    """SIGTERM, then SIGKILL if it is still running after the grace, and wait until it has been reaped."""
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), _DUMP_STOP_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        raise
 
 
 def _why(exc: OSError | subprocess.TimeoutExpired) -> str:

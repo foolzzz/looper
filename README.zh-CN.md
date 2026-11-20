@@ -145,7 +145,12 @@ Anthropic 的模型变量、`CODEX_API_KEY`、`XAI_API_KEY`，以及 `child_env.
 
 `looper serve` 每次启动都会应用 schema，升级可能删列、删表。schema 将要变化时，serve 先用 `pg_dump`
 备份到 `~/.looper/backups/`（runtime root 下的 `backups/`，每个库保留最近 5 份），并在日志里给出恢复方法；
-新建的空库不需要备份。它用 PATH 上的 `pg_dump`，或运维文件里 `[backup] pg_dump` 指定的那个，主版本不能低于服务器
+新建的空库不需要备份。这份备份保留每张表的结构，但不含 `source_events` 的行。消息流里只有这张表存消息正文
+（`text` 和 `body`）。`event_sources`、`source_chats`、`source_threads`、`source_people`、`source_runs`
+是元数据和游标，行仍在备份里，恢复后事件所引用的会话还在。已经投递的订阅输出也留在里面。Looper 给自己的
+`pg_dump`，以及程序是 `pg_dump` 的 `backup.command`（含 `docker exec ... pg_dump`），加上
+`--exclude-table-data=source_events`。不是 `pg_dump` 的命令仍按原样执行，需要它自己排除这些数据。
+它用 PATH 上的 `pg_dump`，或运维文件里 `[backup] pg_dump` 指定的那个，主版本不能低于服务器
 （`looper doctor` 会检查；macOS 上 `brew install libpq`，再把 `$(brew --prefix libpq)/bin` 加进 PATH）。
 PostgreSQL 跑在 Docker 里时，把 `[backup] command` 设成 argv 数组，在容器里备份（`{dbname}` 和 `{user}` 会填上）：
 
@@ -165,7 +170,19 @@ verify_command = ["docker", "exec", "-i", "looper-postgres", "pg_restore", "--li
 
 `looper doctor` 和启动日志会说明用的是哪个校验器。
 
-没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出。桥接升级拒绝 `looper serve --skip-backup`。不是这次升级的 schema 变化仍可能警告后带着 `--skip-backup` 继续；这里不要用它。升级后的 schema 不能再用旧二进制打开。回退时停掉新服务，保持已升级的数据库不变，把校验过的完整备份恢复到另一个数据库：
+只备份 `source_events`（结构和行，含原文）的每日任务默认关闭，没有对应的环境变量。运维文件这样打开：
+
+```toml
+[backup]
+messages = "daily"
+```
+
+`looper serve` 然后最多每天一次，把 `looper-<库名>-<UTC 时间>.messages.dump` 写到同一个 `backups/` 目录，保留最近 7 份。
+文件名以 `.messages.dump` 结尾，schema 变更备份（`looper-<库名>-<UTC 时间>.dump`）对不上这个名字，所以轮换一个库不会删掉另一个库的文件。
+轮换只删除这些消息备份。schema 变更备份、其他库的文件和其他名字都留着。不写 `messages`，或写成 `"off"`，serve 不做这份备份，
+也不删除已有的。失败后一天内不再试；下次启动时，只有最新一份已经超过一天才会再试。把消息备份恢复进一个已经有这些会话行的库。
+
+没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出。桥接升级拒绝 `looper serve --skip-backup`。不是这次升级的 schema 变化仍可能警告后带着 `--skip-backup` 继续；这里不要用它。升级后的 schema 不能再用旧二进制打开。回退时停掉新服务，保持已升级的数据库不变，把校验过的 schema 变更备份恢复到另一个数据库（有 `source_events` 的结构，没有它的行）：
 
 ```bash
 pg_restore --no-owner --dbname '<isolated-database-url>' <文件>
@@ -191,7 +208,7 @@ v2.13.165 含有全部历史迁移，并保持为固定桥。比它更早的安�
 
 旧配置文件在 v2.13.165 上导入，升级那次安装和数据库，再由本版本导出 `looper-config/v4`。一次性的 v2.13.165 安装可以做导入。v2.13.165 仍可能导出 v3，在那里再导出不会得到 v4。本版本拒绝任何其他格式，也在写入前拒绝层上已退役的 `model` 或 `effort`，以及提供方已退役的 `protocols`、`base_url` 或 `models`。任务对照只接受 `looper-prompt-eval/v2`，对话对照只接受 `looper-manager-dialogs/v2`。
 
-空库运行一次当前 schema，并记下 `post_bridge_baseline`。当前库不重放那份 DDL。每次启动都应用 `seeds.sql`，它不改变已保存的选择。回退是把校验过的完整备份恢复到另一个数据库，再让受保护的旧版本指向那个库。
+空库运行一次当前 schema，并记下 `post_bridge_baseline`。当前库不重放那份 DDL。每次启动都应用 `seeds.sql`，它不改变已保存的选择。回退是把那份 schema 变更备份恢复到另一个数据库（不含 `source_events` 的行），再让受保护的旧版本指向那个库。
 
 控制台、Telegram、飞书和 CLI 继续支持，包括紧凑的 v1 操作和 `loopercli` 别名。功能关闭、shared 和 in-place、未来 schema 拒绝、当前的 `LegacyProviderSpec` 与 `LegacyAgentProfile` 投影、`use_runtime_default`、仍被引用的自定义运行时、能力探测、稳定的对话身份、不完整的用量与输出、`DeliveryResult` 的安全性和隔离都保持原样。已有数据库保持原名（常常是 `loopx`）。数据库 URL 没有默认值；什么都没写时，`looper config init-ops` 才写入 `postgresql://localhost:5432/loopx`，并说明这一点。[NOTICE](NOTICE) 保留对上游 LoopX 的署名。
 
