@@ -4769,16 +4769,28 @@ a pending suggestion's expiry to 24 hours after that delivery.
 `驳回 I-0042` rejects the suggestion. Code handles these before the Manager's
 model and checks the operator's typed identity, including dashboard turns.
 An unbound chat requires a project selection: numbered replies use the project
-candidates saved with the push. A project must have a default directory. Task
-creation and the transition are one database transaction; task notices belong
-to the operator's direct chat, never the source conversation. The requirement
+candidates saved with the push, or the currently listed candidates before its
+first push. Deleted candidates retain their positions; selecting one returns a
+typed refusal. A project must have a default directory. Route
+preparation only reads; task creation, start requests, rejection and final edits
+run after the Manager's final stop check. A stopped or timed-out preparation
+changes no intents or tasks; timeout and task-validation failures receive
+code-written replies. Task creation and the transition are one database
+transaction; task notices belong to the operator's direct chat, never the source
+conversation. The requirement
 contains only the displayed title, summary and up to five source references,
-marked as background rather than instructions.
+marked as background rather than instructions. Tasks created from the dashboard
+leave `origin_channel_id` empty, as other dashboard-created tasks do.
 
 The one state writer permits `pending → tasked | rejected | expired` and
-`expired → tasked`. Handling edits the original push; a rejected edit falls
-back to a reply with its final state. Delivery claims commit before sending;
-an uncertain result is never resent, while an explicit failure has a bounded
+`expired → tasked`. Handling attempts one final edit per transition, tracked by
+`intent_posts.edited_at >= intents.handled_at`; type, sender or chat renames,
+added evidence and timezone changes do not edit an already finalized push.
+`expired → tasked` advances `handled_at`, allowing one further edit. A failed
+edit queues one final-state reply, with the existing bounded delivery retries.
+Lark post edits use Markdown rich-text posts, matching the original message;
+status-message edits keep their original plain-text format. Delivery claims
+commit before sending; an uncertain result is never resent, while an explicit failure has a bounded
 retry count. Channel errors remain visible in `intent_posts`.
 [Feishu's edit API](https://open.feishu.cn/document/server-docs/im-v1/message/update)
 reports an administrator-configured editing time limit (230075) and a maximum
