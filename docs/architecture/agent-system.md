@@ -5421,8 +5421,15 @@ are delivered separately; CLI callers use the same operator API operations.
 The ledger lists what waits for the user (`pending`), what was decided
 (`decision`) and who does what (`work_item`) ([Completion and ledger
 RFC](rfcs/manager-completion-ledger-v0.zh-CN.md), section 4). It is off until
-the system setting `ledger.enabled` is `true`; the dashboard has no switch yet.
-Off, no prompt, tool list or command line mentions it.
+the system setting `ledger.enabled` is `true`. Settings → Chat and
+`chat_settings.update` turn it on and off; null removes the row and the ledger
+stays off. Turning it on returns `missing_operator_ids`: every enabled Lark or
+Telegram bot (`telegram`, `lark`, `lark_bot`) whose configuration has no
+`operator_sender_id` (`channels.operator_ids.missing`). In those bots' direct
+chats a decision is recorded as relayed until Settings → Channels has "My ID".
+The ledger reads the row from the database; there is no second copy in memory.
+Off, no prompt, tool list or command line mentions it, and reading the setting
+writes nothing.
 
 - **Tables** (`ledger_items`, `ledger_events`; migration `ledger`): an own item
   (a decision, a hand-made to-do) keeps its `status` (`open`, `done`,
@@ -5474,9 +5481,8 @@ Off, no prompt, tool list or command line mentions it.
   database unusable.
 - **Reads:** `ledger.list` and `ledger.get` (`/api/v1`, read-only, open to an
   API client and the operator) answer `conflict` while the ledger is off.
-- **Not yet:** the To-do page and the dashboard switch, the ledger contract in
-  the Manager's system prompt (the tool descriptions are all it has), HTTP
-  writes.
+- **Not yet:** the To-do page, the ledger contract in the Manager's system
+  prompt (the tool descriptions are all it has), HTTP writes.
 
 ### User gates
 
