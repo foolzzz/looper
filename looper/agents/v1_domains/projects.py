@@ -24,7 +24,9 @@ EXECUTION = {
     **dict.fromkeys(("planner_roles", "wait_commands", "user_gates", "agent_room", "operator_notes", "vault",
                     "dependency_conditions", "advisor"),
                     _choice("off", "on")),
-    **dict.fromkeys(("workspace_links", "verification_paths"), {"type": ["array", "null"], "items": _STR}),
+    **dict.fromkeys(("workspace_links", "verification_paths", "advisor_internal_domains"),
+                    {"type": ["array", "null"], "items": _STR}),
+    "advisor_fallback_profile": {"type": ["string", "null"]},
     "distill_lessons": {"type": "string", "enum": ["off", "draft", "write"]},
 }
 assert set(EXECUTION) == set(FIELDS)

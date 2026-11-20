@@ -407,7 +407,9 @@ _PROJECT_ADVISOR_DDL = (
     "ADD COLUMN advisor_consults_per_task INTEGER "
     "CHECK (advisor_consults_per_task >= 0 AND advisor_consults_per_task <= 100), "
     "ADD COLUMN advisor_consults_per_step INTEGER "
-    "CHECK (advisor_consults_per_step >= 0 AND advisor_consults_per_step <= 10)"
+    "CHECK (advisor_consults_per_step >= 0 AND advisor_consults_per_step <= 10), "
+    "ADD COLUMN advisor_fallback_profile TEXT CHECK (length(advisor_fallback_profile) BETWEEN 1 AND 200), "
+    "ADD COLUMN advisor_internal_domains TEXT[] CHECK (cardinality(advisor_internal_domains) <= 20)"
 )
 
 

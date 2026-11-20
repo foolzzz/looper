@@ -448,7 +448,8 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
             "room_ping_pong_rounds": None, "room_wait_max_seconds": None, "room_consult_budget_usd": None,
             "room_consult_timeout_seconds": None, "room_consults_per_task": None, "task_workspaces": None,
             "operator_notes": None, "vault": None, "advisor": None, "advisor_consult_budget_usd": None,
-            "advisor_budget_usd": None, "advisor_consults_per_task": None, "advisor_consults_per_step": None}
+            "advisor_budget_usd": None, "advisor_consults_per_task": None, "advisor_consults_per_step": None,
+            "advisor_fallback_profile": None, "advisor_internal_domains": None}
 
         execution = ProjectExecution.from_row(await projects.get_task_project("task-1", pool=pool))
         assert execution.wait_commands_on and execution.conditions_on
