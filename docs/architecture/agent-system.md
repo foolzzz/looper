@@ -4735,6 +4735,41 @@ Manager's `looper_schedules` cannot create or change one.
   file leaves it out), the digest and daily subscriptions, and Looper's own
   collection.
 
+### Message leads
+
+Message leads are sourced, unconfirmed notes, stored in PostgreSQL rather than
+the knowledge vault. The `message leads` block of `looper/db/schema.sql`
+(migration `message_leads`) defines `message_leads`, its source and people
+tables, the chat extraction columns and the intent tables. `agents.leads.search`
+is the shared search: every word matches a summary, detail, chat or person;
+filters select chat, person, time, kind and state. Expired is derived from
+`valid_until`, never stored. Results contain provenance, confidence and validity,
+never source message bodies; message-derived text loses mention markup.
+
+`looper leads search [WORDS ...]` reads the database directly, even while serve
+is stopped, with `--chat`, `--person`, `--since YYYY-MM-DD` or `--days N`,
+`--kind`, `--state` (default `active`), `--limit` (1–50, default 10) and `--json`.
+`mark LEAD --inaccurate [--note TEXT]` and `delete LEAD` write directly;
+`LEAD` is `lead-123` or `123`. Each subcommand accepts `--config` and
+`--runtime-root`. Exit codes: 0 results or done, 1 no results, 2 usage,
+3 disabled, 4 refused inside `LOOPER_AGENT_RUN` (reads included), 5 missing
+lead, 6 unusable database or missing tables (start serve once to migrate).
+Dates without times use the machine's zone, at midnight.
+
+Operator-only POST operations under `/api/v1/leads/` are `search`, `mark`,
+`delete`, `settings_get`, `settings_put`, `chats` and `set_chat`; API clients
+cannot call them. All but settings conflict while `leads.enabled` is absent or
+false. Settings include validity (1–365 days, default 90) and leads subscriptions;
+disabling leads disables those subscriptions atomically, and enabling leaves
+them disabled. Source-scoped operations default to the only message source,
+require its id if several exist, and conflict if none exists. `chats` lists
+collected, included chats with extraction state and lead/pending-intent counts.
+`set_chat` changes `source_chats.extraction`: excluding sets its timestamp;
+including clears it. Optional `delete_extracted` with exclusion deletes the
+chat's leads and non-tasked intents in the same transaction; messages and tasked
+intents remain. This stage adds no extraction, UI or Manager tool, and changes
+no agent prompt, tool list or launch command.
+
 ### The ledger
 
 The ledger lists what waits for the user (`pending`), what was decided
