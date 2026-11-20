@@ -599,6 +599,17 @@ which the ledger shows L-0001 done. The two tools are the only thing the Manager
 descriptions); its system prompt has no ledger contract yet. Run it with Sonnet at two reps and the opus xhigh Manager at
 one, as the Manager PR commands above say, with `--dialogs ledger_tools`.
 
+#### One-time reminders
+
+`reminder_tools` turns reminders on (`reminders.enabled`) on its disposable server and names a synthetic user as the
+operator of the Lark bot's row (enabled in the database; the running server starts no bot for it), so a reminder set on
+the dashboard has a direct chat to go to. "明天下午三点提醒我看一下 PR #42" must become exactly one
+`looper_reminder_create` and no other write, stored pending at 15:00 tomorrow in its zone with the PR in its text, and
+the reply must carry Looper's line about it; then "取消这个提醒" must become one `looper_reminder_cancel`. The tool
+descriptions are all the Manager is told about reminders. Run it as the Manager PR commands above say, with
+`--dialogs reminder_tools`. Delivery at the time, the catch-up after downtime and the other turns are unit tests
+(`tests/test_reminders_db.py`).
+
 #### Message leads
 
 The five `leads_*` dialogs turn `leads.enabled` on in their disposable database and store synthetic leads over
