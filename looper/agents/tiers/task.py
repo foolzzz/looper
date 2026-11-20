@@ -51,7 +51,7 @@ from .planner import PlannerAgent, closing_note
 
 logger = logging.getLogger(__name__)
 
-from ...db import activity as db_activity, plans as db_plans, tasks as db_tasks
+from ...db import activity as db_activity, ledger as db_ledger, plans as db_plans, tasks as db_tasks
 
 # Told each task's id and final status when it ends.
 TaskEndListener = Callable[[str, str], Awaitable[None]]
@@ -342,6 +342,7 @@ class TaskRouter:
         except Exception:
             logger.exception("failed to persist task %s", task_id)
             return
+        await db_ledger.register_task(task_id)
         logger.info("task %s created ready in project %s", task_id, project_id)
 
     async def _handle_start(self, envelope: MessageEnvelope) -> None:

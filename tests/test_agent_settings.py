@@ -230,8 +230,10 @@ class TestEnvironment:
         # adds its agent teams variable.
         monkeypatch.delenv(AGENT_TEAMS, raising=False)
         plain = Launch(resolve("worker", {(Layer.SYSTEM, None): LayerValues(profile=_profile("opus"))}))
-        assert plain.environment() == child_env.inherited() and plain.env_sha256 is None
-        assert Launch(_builtin_settings()).environment() == {**child_env.inherited(), AGENT_TEAMS: "1"}
+        marked = {child_env.AGENT_RUN_ENV: "agent"}
+        assert plain.environment() == {**child_env.inherited(), **marked} and plain.env_sha256 is None
+        assert Launch(_builtin_settings()).environment() == {**child_env.inherited(), AGENT_TEAMS: "1", **marked}
+        assert Launch(_builtin_settings(), role=AgentType.WORKER).environment()[child_env.AGENT_RUN_ENV] == "worker"
 
 
 class TestReviewerHarness:

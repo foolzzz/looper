@@ -35,7 +35,7 @@ from typing import Any
 import asyncpg
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
-from ..db import projects as db_projects, schedules as db_schedules, tasks as db_tasks
+from ..db import ledger as db_ledger, projects as db_projects, schedules as db_schedules, tasks as db_tasks
 from .agent_settings import CONCURRENCY_MAX, PLANNER_CHOICE_ROLES, TASK_LIMIT_ROLES, AgentType, SettingsError
 from .agent_settings import concurrency, index_layers, task_agents_view
 from .agent_settings import TASK_ROLES, AgentSettings, Layer, resolve, resolve_task_concurrency
@@ -646,6 +646,7 @@ async def create_task_core(
         raise _name_taken(new_fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") from None
+    await db_ledger.register_task(task["task_id"])
     work_dir = task["work_dir"]
     shown = task["title"] or task["goal_id"] or task["task_id"]
     block = (await configuration_block(task["task_id"], shown, project, work_dir, new_project is not None,
