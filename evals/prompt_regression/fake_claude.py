@@ -145,7 +145,7 @@ def _answer(session_id: str, text: str, cost: float, *, writes: dict[str, str] |
 
 # The advisor's and the advice check's reply contracts (looper/agents/advice.py), which mark their runs.
 _ADVISOR_MARKER = '{"status": "answered | needs_info | out_of_scope",'
-_JUDGE_MARKER = '{"standalone": true, "leaks": [{"category":'
+_JUDGE_MARKER = '"leaks": [{"category": "local_path | url | identity'
 
 
 def _fenced(value: dict[str, Any]) -> str:
