@@ -387,7 +387,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",

@@ -97,7 +97,7 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
             manager, bus, queue = _manager(Path(tmp), session)
             _setup(name, manager, session, agent_db)
             hold = hold_at(monkeypatch, name)
-            envelope = _web("你好")
+            envelope = _web("/todo" if name == "attention_enabled" else "你好")  # only /todo reads that setting
             if name == "read_quote":  # only a message that quotes another reads it
                 envelope.payload["quote_ref"] = {"channel_id": "channel-lark", "chat_id": "oc_dm",
                                                  "message_id": "om_in", "kind": "forward"}

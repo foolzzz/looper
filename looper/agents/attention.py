@@ -12,8 +12,8 @@ The sections, in this order (``KINDS``):
   (``ManagerOps.waiting_confirmations``: they live in memory, so a restart drops them, and the operator is asked
   again);
 - ``schedules``: failing schedules, as the dashboard's Schedules card lists them (``db.schedules.failing``);
-- ``logins``: a runtime login an Agent Profile uses, or the Claude Code CLI or login, failing, as the startup checks
-  report them now (``use_status_checks``);
+- ``logins``: a runtime login an Agent Profile uses, or the Claude Code CLI or login, failing, as the HTTP server's
+  status checks report them now (``use_status_checks``);
 - ``intents``: intents waiting to be built or rejected, while intents are on;
 - ``ledger``: the ledger's own open items that wait for the user (a to-do, a decision to confirm, anything overdue),
   while the ledger is on;
@@ -70,11 +70,13 @@ async def enabled() -> bool:
     return (await db_settings.get_settings([ENABLED_KEY])).get(ENABLED_KEY) == "true"
 
 
-def use_status_checks(read: StatusChecks | None) -> None:
-    """Where ``logins`` is read from: the server's startup checks with the logins read now (``looper serve`` sets
-    it once its HTTP server exists). None: ``logins`` is ``unknown``."""
+def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None) -> None:
+    """Where ``logins`` is read from: the HTTP server's startup checks with the logins read now, set while it runs
+    (``AgentHTTPServer.start``). None: ``logins`` is ``unknown``; with ``owner``, only if ``owner`` is the reader
+    (a server that stops clears its own, never a newer one's)."""
     global _status_checks
-    _status_checks = read
+    if owner is None or _status_checks == owner:
+        _status_checks = read
 
 
 def _item(key: str, title: str, *, context: str = "", since: datetime | None = None, href: str | None = None,
