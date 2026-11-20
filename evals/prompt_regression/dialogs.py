@@ -184,6 +184,7 @@ class Dialog:
     tags: tuple[str, ...] = field(default=())
     projects_root: bool = False  # the server has [projects] root set to a directory of the case
     leads: bool = False  # leads are on, and the database holds the synthetic leads (``_seed_leads``)
+    research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -472,6 +473,48 @@ def _requirement_has_the_lead(look: Look) -> str | None:
         return found
     requirement = str(look.detail(look.new_tasks()[0]["task_id"]).get("requirement") or "")
     return None if "ZX-42" in requirement else "the task's requirement lacks the background the lead gave (ZX-42)"
+
+
+# --- The research order: where the Manager looks before it asks the user ---
+
+def _asks(reply: str) -> bool:
+    return "？" in reply or "?" in reply
+
+
+def _found_in_leads(look: Look) -> str | None:
+    """The answer is in a lead: the Manager searches the leads, gives it from there, and asks the user nothing."""
+    searches = [a for a in _searches(look, this_turn=True) if a["status"] == "ok"]
+    if not searches:
+        return "the Manager did not search the leads before answering"
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    return None if "ZX-42" in look.reply else "the reply does not give what the lead says (ZX-42)"
+
+
+def _found_in_records(look: Look) -> str | None:
+    """The answer is in a ready task's requirement: the Manager reads its tasks and answers from there."""
+    reads = [a for a in _reads(look, this_turn=True) if a["tool"] == "looper_tasks"]
+    if not reads:
+        return "the Manager did not read its tasks before answering"
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    return None if "done" in look.reply else "the reply does not give what the task's requirement says (done)"
+
+
+def _looked_then_asked(look: Look) -> str | None:
+    """Nothing anywhere answers it: the Manager looks first (its records or the leads), then asks the user."""
+    looked = [a for a in look.turn_actions() if a["tool"] in (LEADS_TOOL, "looper_tasks", "looper_projects")]
+    if not looked:
+        return "the Manager asked the user without looking anywhere first"
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    return None if _asks(look.reply) else "the reply does not ask the user"
 
 
 def _manager_capabilities(look: Look) -> str | None:
@@ -2361,6 +2404,16 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("leads_background", (
         Say("Nebula 项目的上线日期定下来了吗？", _leads_used_with_sources, ((LEADS_TOOL, {"query": "Nebula"}),)),
     ), leads=True, tags=("manager", "leads")),
+    Dialog("research_leads", (
+        Say("Nebula 发布前要跑哪个回归套件？", _found_in_leads, ((LEADS_TOOL, {"query": "Nebula"}),)),
+    ), leads=True, research=True, tags=("manager", "research")),
+    Dialog("research_records", (
+        Say("done.txt 那个任务，文件里最后要写什么内容？", _found_in_records,
+            (("looper_tasks", {"action": "list"}),)),
+    ), ready_task=True, research=True, tags=("manager", "research")),
+    Dialog("research_ask", (
+        Say("Orion 项目的预算上限是多少？", _looked_then_asked, ((LEADS_TOOL, {"query": "Orion"}),)),
+    ), leads=True, research=True, tags=("manager", "research")),
     Dialog("leads_dont_search", (
         Say("别查消息，直接说你知道的：Nebula 项目的上线日期定了吗？", _no_search),
     ), leads=True, tags=("manager", "leads")),
@@ -3173,6 +3226,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _seed_login_runtime(database_url)
         if dialog.leads:
             _seed_leads(database_url)
+        if dialog.research:
+            api.post("/api/v1/chat_settings/update", {"research_order": True})
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
