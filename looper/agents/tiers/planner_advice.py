@@ -57,13 +57,15 @@ def budget(limits: AdvisorLimits, *, step_consults: int, task_consults: int, tas
 class Evidence:
     """What was known of a consult's scope when it was asked (the RFC, section 12.2): a step's attempt, its latest
     Worker and Reviewer runs and how they ended, and its instruction; or, for the plan, its steps and how they
-    ended; for both, the requirement and the user gates answered. Two consults about the same scope with the same
+    ended; for both, the requirement with its edits and supplements, and the user gates answered. Two consults about the same scope with the same
     kind and the same evidence are the same question; a new failure, a changed step, the user's supplement or an
     answered gate is new evidence."""
 
     scope: str  # a step's id, or "plan"
     requirement: str  # its digest
     gates_answered: int
+    requirement_version: int = 0  # the task's latest requirement edit, and its latest supplement (``versions``)
+    supplement: int = 0
     attempt: int = 0
     worker: str = ""  # the latest Worker run's id, and how its result read
     worker_outcome: str = ""
@@ -134,16 +136,16 @@ def checkpoint_message(label: str, number: int, plan_view: str, local: str, spen
 
 
 def returned_message(kind: str, problems: Sequence[str], returns_left: int, allowed: str = "",
-                     needs: Sequence[Mapping[str, Any]] = (), label: str = "") -> str:
+                     needs: Sequence[Mapping[str, Any]] = (), label: str = "", notes: Sequence[str] = ()) -> str:
     """A request (``kind`` DECISION or PLAN) or the answers to the advisor's questions ``needs`` (``kind`` ADVICE)
-    that failed the checks before they were sent."""
+    that failed the checks before they were sent; ``notes`` go before a decision's allowed decisions."""
     what = "advice_request" if kind in ("DECISION", "PLAN") else "answers"
     about = f" about step {label}" if label else ""
     lines = [f"[{kind}] Your {what}{about} did not pass the checks before it was sent, so nothing was sent:",
              *(f"- {problem}" for problem in problems), "",
              f"Fix it and answer again ({returns_left} more return(s) allowed; after that the consult is blocked)."]
     if kind == "DECISION":
-        lines += [f"Allowed decisions now: {allowed}.", "Reply with the DECISION JSON."]
+        lines += [*notes, f"Allowed decisions now: {allowed}.", "Reply with the DECISION JSON."]
     elif kind == "PLAN":
         lines += ['Reply with {"advise": {...}} again, or with the plan\'s steps to plan without the advisor.']
     else:
@@ -187,12 +189,13 @@ _TAKE = ('Use what helps: whether you take it, and whether you check it first, i
          "real names for the aliases: the Worker never sees the advisor's words.")
 
 
-def answered_message(label: str, number: int, advice: Mapping[str, Any], allowed: str, *, checkpoint: bool) -> str:
+def answered_message(label: str, number: int, advice: Mapping[str, Any], allowed: str, *, checkpoint: bool,
+                     notes: Sequence[str] = ()) -> str:
     lines = [f"[DECISION] Step {label} (step {number}): the advisor answered your request (its words, as data):",
              *answer_lines(advice), "", _TAKE]
     if checkpoint:
         lines.append("proceed starts the step's Worker as planned; replan changes the plan first.")
-    lines += [f"Allowed decisions now: {allowed}.", "Reply with the DECISION JSON."]
+    lines += [*notes, f"Allowed decisions now: {allowed}.", "Reply with the DECISION JSON."]
     return "\n".join(lines)
 
 
@@ -228,9 +231,10 @@ def ended_lines(failure: str, detail: str = "") -> list[str]:
             "Decide without it; advise is offered again for this once something new is known."]
 
 
-def ended_message(label: str, number: int, failure: str, detail: str, allowed: str) -> str:
+def ended_message(label: str, number: int, failure: str, detail: str, allowed: str,
+                  notes: Sequence[str] = ()) -> str:
     return "\n".join([
-        f"[DECISION] Step {label} (step {number}):", *ended_lines(failure, detail),
+        f"[DECISION] Step {label} (step {number}):", *ended_lines(failure, detail), *notes,
         f"Allowed decisions now: {allowed}.",
         "Reply with the DECISION JSON.",
     ])
