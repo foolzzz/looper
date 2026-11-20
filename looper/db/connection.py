@@ -165,6 +165,19 @@ _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _CHAT_DIRECT_THREADS = "chat_direct_threads"
+_LEADS_TRIGRAM = "leads_trigram"
+# pg_trgm for the leads' full-text search (assistant search RFC, section 4), in the schema public whatever schema
+# Looper's tables are in, so every schema of the database shares one: created when the database lets this user
+# create it (a trusted extension needs CREATE on the database and on public), else skipped; the search finds it
+# wherever it is installed and works without it.
+_LEADS_TRIGRAM_DDL = """
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public;
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'pg_trgm is not available (%): the leads full-text search matches without it', SQLERRM;
+END $$;
+"""
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -889,6 +902,13 @@ async def _chat_direct_threads_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('chat_direct_threads') IS NOT NULL")
 
 
+async def _leads_trigram_pending(conn: asyncpg.Connection) -> bool:
+    """pg_trgm has not been tried on this database: it is not installed and no start recorded trying it."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEADS_TRIGRAM):
+        return False
+    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')")
+
+
 async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_EVENTS):
         return False
@@ -1460,6 +1480,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _chat_direct_threads_pending(conn):
             await conn.execute(_chat_direct_threads_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_DIRECT_THREADS)
+        if await _leads_trigram_pending(conn):
+            await conn.execute(_LEADS_TRIGRAM_DDL)
+            if state != "empty":  # a fresh database records only its baseline; it is tried again next start
+                await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEADS_TRIGRAM)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1522,4 +1546,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
-            or await _processor_role_pending(conn) or await _chat_direct_threads_pending(conn)))
+            or await _processor_role_pending(conn) or await _chat_direct_threads_pending(conn)
+            or await _leads_trigram_pending(conn)))

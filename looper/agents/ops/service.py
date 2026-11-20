@@ -63,7 +63,7 @@ from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Tu
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
-from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
+from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_tool
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .session_search import TOOL as SESSION_SEARCH, enabled as session_search_on
 from .settings import TOOLS as SETTINGS_TOOLS
@@ -334,15 +334,16 @@ class ManagerOps:
         return adjusted
 
     async def _with_leads(self, scope: OpsScope) -> OpsScope:
-        """``scope`` with ``looper_leads_search`` exactly while ``leads.enabled`` is on, for the default Manager; any
-        other Manager's as it is. Off, the default Manager's is what it was before leads existed."""
+        """``scope`` with ``looper_leads_search`` exactly while ``leads.enabled`` is on, for the default Manager, as
+        ``leads.search_mode`` describes it (``ops.leads.leads_tool``); any other Manager's as it is. Off, the default
+        Manager's is what it was before leads existed."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
             return scope
-        wanted = await leads_on()
-        if wanted == (LEADS_TOOL in scope.tools):
+        wanted = await leads_tool()
+        if scope.tools.get(LEADS_TOOL) is wanted:
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name != LEADS_TOOL]
-        adjusted = replace(scope, tools=_tool_map([*kept, LEADS_SEARCH] if wanted else kept))
+        adjusted = replace(scope, tools=_tool_map([*kept, wanted] if wanted else kept))
         if self._scope is scope:
             self._scope = adjusted
         return adjusted
