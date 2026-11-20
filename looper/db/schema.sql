@@ -2224,6 +2224,9 @@ ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
 
+-- One row per proactive message. Metrics write the receipt directly; the delivery
+-- layer will own the single decision/write point. Its nullable fields stay unset
+-- until that layer is connected. Keep this block as the one named migration.
 -- proactive deliveries begin
 CREATE TABLE IF NOT EXISTS proactive_deliveries (
     id          BIGSERIAL PRIMARY KEY,
@@ -2236,6 +2239,21 @@ CREATE TABLE IF NOT EXISTS proactive_deliveries (
     group_chat  BOOLEAN NOT NULL,
     external_id TEXT,                 -- 发送方知道时：平台消息 id
     outcome     TEXT NOT NULL CHECK (outcome IN ('sent', 'rejected', 'unknown')),
+    dedupe_key  TEXT,
+    kind        TEXT CHECK (kind IN ('gate_reminder', 'task_notice', 'subscription', 'intent',
+                                    'completion_turn', 'user_reminder')),
+    urgency     TEXT CHECK (urgency IN ('normal', 'blocking', 'user_set')),
+    chat_kind   TEXT CHECK (chat_kind IN ('direct', 'group')),
+    task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id     TEXT,
+    schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL,
+    decision    TEXT CHECK (decision IN ('send', 'merge', 'defer', 'digest', 'drop')),
+    reason      TEXT CHECK (reason IN ('silent', 'urgent', 'outside_active_hours', 'recent_reply',
+                                      'quiet_hours', 'daily_cap', 'within_limits', 'off')),
+    counted     BOOLEAN,
+    local_date  DATE,
+    digest_date DATE,
+    decided_at  TIMESTAMPTZ,
     sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     replied_at  TIMESTAMPTZ,
     reply_match TEXT CHECK (reply_match IN ('quoted', 'next_message')),
@@ -2244,4 +2262,14 @@ CREATE TABLE IF NOT EXISTS proactive_deliveries (
 CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_open
     ON proactive_deliveries (channel_id, chat, sent_at DESC) WHERE replied_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_sent ON proactive_deliveries (sent_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proactive_deliveries_dedupe
+    ON proactive_deliveries (dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_counted
+    ON proactive_deliveries (channel_id, chat, local_date) WHERE counted;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_digest
+    ON proactive_deliveries (digest_date) WHERE decision = 'digest';
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_task ON proactive_deliveries (task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_schedule
+    ON proactive_deliveries (schedule_id) WHERE schedule_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_decided ON proactive_deliveries (decided_at);
 -- proactive deliveries end

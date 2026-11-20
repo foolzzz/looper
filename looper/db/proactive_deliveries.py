@@ -24,7 +24,8 @@ async def mark_replied(channel_id: str, chat: str, quoted_external_id: str | Non
         "UPDATE proactive_deliveries SET replied_at=$4, "
         "reply_match=CASE WHEN external_id=$3 THEN 'quoted' ELSE 'next_message' END "
         "WHERE channel_id=$1 AND chat=$2 AND replied_at IS NULL "
-        "AND sent_at >= $4::timestamptz - interval '30 minutes'", channel_id, chat, quoted_external_id, now)
+        "AND sent_at >= $4::timestamptz - interval '30 minutes' AND sent_at <= $4",
+        channel_id, chat, quoted_external_id, now)
 
 
 async def summary(days: int) -> dict[str, Any]:

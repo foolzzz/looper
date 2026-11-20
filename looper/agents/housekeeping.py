@@ -272,7 +272,7 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
     if chat_settings.metrics_enabled():
         with _step(report, "proactive deliveries"):
             while True:
-                count = await proactive_deliveries.purge(now - timedelta(days=90))
+                count = await proactive_deliveries.purge(now - timedelta(days=proactive_deliveries.RETENTION_DAYS))
                 report.proactive_deliveries += count
                 if count == 0:
                     break

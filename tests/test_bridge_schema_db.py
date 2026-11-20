@@ -136,6 +136,7 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                          {"sequencename": "agent_spawns_id_seq", "last_value": None},
                          {"sequencename": "message_leads_id_seq", "last_value": None},
                          {"sequencename": "intents_id_seq", "last_value": None},
+                         {"sequencename": "proactive_deliveries_id_seq", "last_value": None},
                          {"sequencename": "intent_posts_id_seq", "last_value": None}],
                         key=lambda row: row["sequencename"])
                 elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
@@ -185,7 +186,7 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
-            assert {"schedule_user_gates", "command_schedules", "runtime_launcher"} <= {
+            assert {"schedule_user_gates", "command_schedules", "runtime_launcher", "proactive_deliveries"} <= {
                 r["name"] for r in after["schema_migrations"]}
             assert await conn.fetchval("SELECT planner_session_runtime FROM schedules") == "claude-code"
             # Added snapshot and command metadata preserve every historical run field.
