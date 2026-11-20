@@ -264,6 +264,40 @@ def test_only_the_consulting_step_waits_while_the_others_are_decided(
     assert h.final().payload["status"] == "completed"
 
 
+def test_a_consult_before_a_replan_lets_the_running_step_finish_while_only_the_replanned_one_waits(
+    planner_claude: Any, agent_db: Any, advisor_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Looper replans in a DECISION (or a CHAT) turn, never in a later PLAN: a consult before a replan is advise in
+    # the DECISION, and only the step it is about waits (the RFC, D16).
+    gate = asyncio.Event()
+    consults = FakeConsults(_answered(), gate=gate)
+    consults.install(monkeypatch)
+    claude = planner_claude(plan(step("s1"), step("s2")),
+                            decide("advise", advice_request=_request()),
+                            decide("replan", reason="read each key once instead", steps=[step("s3")],
+                                   advice_adoption=ADOPTION),
+                            decide("accept", final=None),
+                            decide("accept"))
+    outcomes = {"do s1": iter([WORK_FAILED]), "do s2": iter([None]), "do s3": iter([WORK_OK])}  # s2 is held
+
+    async def scenario(h: Harness) -> None:
+        await h.start()
+        await h.until(lambda: consults.submitted)
+        s1, s2 = (h.planner._plan.step(w.payload["task_id"]) for w in h.work_items[:2])
+        assert (s1.status, s2.status) == ("consulting", "dispatched")
+        gate.set()
+        await h.until(lambda: len(h.work_items) == 3 and len(h.claude.turns()) >= 4)  # s3 ran and was accepted
+        assert s1.status == "skipped" and s2.status == "dispatched"  # the running step went on through the replan
+        await h.release(WORK_OK)
+        await h.finished()
+
+    h = drive(claude, lambda envelope: next(outcomes[envelope.payload["instruction"].split("\n")[0]]), scenario)
+    texts = _texts(claude)
+    assert "the advisor answered your request" in texts[2] and "replan" in texts[2].split("Allowed decisions now:")[1]
+    assert [w.payload["instruction"].split("\n")[0] for w in h.work_items] == ["do s1", "do s2", "do s3"]
+    assert consults.adopted and h.final().payload["status"] == "completed"
+
+
 def test_a_consult_that_gives_no_answer_says_why_and_advise_waits_for_new_evidence(
     planner_claude: Any, agent_db: Any, advisor_on: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
