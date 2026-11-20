@@ -123,6 +123,10 @@ async def save(
     async with pool.acquire() as conn, conn.transaction():
         await write(conn, task_id, plan=plan, steps=steps, journal=journal, gates=gates,
                     gate_messages=gate_messages, waits=waits)
+    if gates:  # after the commit: the ledger lists the gates that now wait for the user (a no-op while it is off)
+        from . import ledger
+
+        await ledger.register_gates(task_id, db=pool)
 
 
 async def write(

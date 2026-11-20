@@ -85,9 +85,11 @@ PLACEHOLDER = {"secret": "omitted"}
 # and the description.
 # Any other key is treated as a secret.
 _CHANNEL_PUBLIC_KEYS = {
-    "telegram": frozenset({"allowed_user_ids", "bot_token_env", "backlog_max_age_seconds", "description"}),
-    "lark": frozenset({"allowed_open_ids", "allowlist_app_id", "profile", "description"}),
-    "lark_bot": frozenset({"allowed_open_ids", "allowlist_app_id", "app_id", "domain", "description"}),
+    "telegram": frozenset({"allowed_user_ids", "bot_token_env", "backlog_max_age_seconds", "description",
+                           "operator_sender_id"}),
+    "lark": frozenset({"allowed_open_ids", "allowlist_app_id", "profile", "description", "operator_sender_id"}),
+    "lark_bot": frozenset({"allowed_open_ids", "allowlist_app_id", "app_id", "domain", "description",
+                           "operator_sender_id"}),
 }
 
 # A channel whose credential is a DB-stored secret (channel_secrets), not a config key: it is not

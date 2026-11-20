@@ -218,7 +218,9 @@ def test_direct_environment_is_byte_stable(official, monkeypatch, tmp_path):
     profile = resolved_profile('test-agent', 'Test agent', RuntimeSpec('rt', 'Claude Code', 'claude-code'),
                                provider, 'haiku', agent_teams=False)
     launch = Launch(AgentSettings(profile=profile, env=(('CUSTOM_SETTING', 'kept'),)))
-    expected = {'PATH': '/synthetic/bin', 'ENABLE_TOOL_SEARCH': 'false', 'CUSTOM_SETTING': 'kept'}
+    # The one variable every agent process carries: the run's marker (`looper ledger` refuses to write under it).
+    expected = {'PATH': '/synthetic/bin', 'ENABLE_TOOL_SEARCH': 'false', 'CUSTOM_SETTING': 'kept',
+                'LOOPER_AGENT_RUN': 'agent'}
     if official:
         expected[API_KEY] = 'synthetic-key'
     else:
@@ -239,5 +241,5 @@ def test_default_legacy_launch_keeps_its_direct_environment(monkeypatch):
         catalog=(CatalogModel(default.model),)), agent_teams=True)
     launch = Launch(AgentSettings(profile=profile))
     assert launch.environment() == {'PATH': '/synthetic/bin', 'CUSTOM_ENV': 'preserved',
-                                    'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS': '1'}
+                                    'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS': '1', 'LOOPER_AGENT_RUN': 'agent'}
     assert 'llmrec' not in launch.record()

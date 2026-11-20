@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import sys
-from datetime import date, datetime, time
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -39,13 +39,10 @@ class _Exit(Exception):
 
 
 def _due(text: str) -> datetime:
-    """``YYYY-MM-DD`` (the end of that day) or an ISO 8601 time; without a time zone, this machine's."""
     try:
-        parsed = (datetime.combine(date.fromisoformat(text), time(23, 59))
-                  if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else datetime.fromisoformat(text))
-    except ValueError:
-        raise _Exit(USAGE, f"--due is YYYY-MM-DD or an ISO 8601 time, not {text!r}") from None
-    return parsed if parsed.tzinfo else parsed.astimezone()
+        return ledger.parse_due(text)
+    except ledger.LedgerRefused as refused:
+        raise _Exit(USAGE, str(refused)) from None
 
 
 def _ref(text: str) -> dict[str, str]:
@@ -111,10 +108,10 @@ async def _run(database_url: str, args: Any) -> tuple[int, str]:
 
 
 async def _project(pool: asyncpg.Pool, name: str) -> str:
-    found = await pool.fetch("SELECT id FROM projects WHERE id = $1 OR name = $1", name)
-    if len(found) != 1:
-        raise _Exit(USAGE, f"--project {name!r} matches {len(found)} projects: name one by its id")
-    return found[0]["id"]
+    try:
+        return await ledger.resolve_project(name, db=pool)
+    except ledger.LedgerRefused as refused:
+        raise _Exit(USAGE, f"--project: {refused}") from None
 
 
 async def _command(pool: asyncpg.Pool, args: Any) -> tuple[int, str]:
