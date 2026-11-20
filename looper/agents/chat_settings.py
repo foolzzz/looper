@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import Enum
+import math
 from typing import Any
 
 from ..db import system_settings as db_settings
@@ -32,7 +33,10 @@ RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
 OUTBOUND_ENABLED_KEY = "channels.outbound.enabled"
 DEFAULT_OUTBOUND_ENABLED = False
-FIELDS = ("stop_enabled", "completion_turns", "research_order", "outbound_enabled")
+OUTBOUND_DEFAULTS = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
+# Rate and edit defaults are conservative platform assumptions, to verify (RFC section 7).
+OUTBOUND_FIELDS = ("outbound_enabled", *OUTBOUND_DEFAULTS)
+FIELDS = ("stop_enabled", "completion_turns", "research_order", *OUTBOUND_FIELDS)
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -50,6 +54,7 @@ _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
 _outbound_enabled = DEFAULT_OUTBOUND_ENABLED
+_outbound_limits = dict(OUTBOUND_DEFAULTS)
 
 
 def stop_enabled() -> bool:
@@ -92,14 +97,36 @@ def set_outbound_enabled(value: bool) -> None:
     _outbound_enabled = value
 
 
+def outbound_limits() -> dict[str, float | int]:
+    return dict(_outbound_limits)
+
+
+def outbound_view() -> dict[str, Any]:
+    return {"outbound_enabled": outbound_enabled(), **outbound_limits()}
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
     stored = await db_settings.get_settings(
-        [STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, OUTBOUND_ENABLED_KEY])
+        [STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, OUTBOUND_ENABLED_KEY,
+         *("channels.outbound." + key for key in OUTBOUND_DEFAULTS)])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_outbound_enabled(stored.get(OUTBOUND_ENABLED_KEY) == "true")
+    limits = {}
+    for key, default in OUTBOUND_DEFAULTS.items():
+        raw = stored.get("channels.outbound." + key)
+        try:
+            value = float(raw) if raw is not None else default
+            if key == "max_in_flight" and value == int(value):
+                value = int(value)
+            checked({key: value})
+        except (ValueError, TypeError, OverflowError):
+            value = default
+        limits[key] = value
+    global _outbound_limits
+    _outbound_limits = limits
     try:
         turns = CompletionTurns(stored.get(COMPLETION_TURNS_KEY, DEFAULT_COMPLETION_TURNS.value))
     except ValueError:
@@ -140,6 +167,17 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("outbound_enabled must be true, false or null")
         values["outbound_enabled"] = value
+    for key in OUTBOUND_DEFAULTS:
+        if key not in body:
+            continue
+        value = body[key]
+        if value is not None:
+            if key == "max_in_flight":
+                if type(value) is not int or not 1 <= value <= 32:
+                    raise ValueError("max_in_flight must be an integer from 1 to 32 or null")
+            elif type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{key} must be a finite positive number or null")
+        values[key] = value
     return values
 
 
@@ -159,6 +197,9 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if "outbound_enabled" in values:
         value = values["outbound_enabled"]
         stored[OUTBOUND_ENABLED_KEY] = None if value is None else ("true" if value else "false")
+    for key in OUTBOUND_DEFAULTS:
+        if key in values:
+            stored["channels.outbound." + key] = None if values[key] is None else str(values[key])
     await db_settings.put_settings(stored)
     await load()
     return settings_view()

@@ -20,14 +20,12 @@ from .lark_api import LarkApiError
 from .lark_cli import LarkCliError, MESSAGE_GONE_CODES, TIMEOUT
 
 logger = logging.getLogger(__name__)
-RATE_PER_SECOND = 15
 BACKOFF = (1, 2, 4, 8, 16)
 JITTER = 0.2
 MAX_RETRIES = 5
 BREAKER_FAILURES = 5
 BREAKER_WINDOW = 30
 BREAKER_OPEN = 60
-EDIT_FLOOR = 1.0
 SEND_WAIT_SECONDS = 30
 KEYED_DEDUPE_WINDOW = 3600
 
@@ -164,21 +162,54 @@ class _Edit:
 
 
 class Gateway:
-    def __init__(self, channel_id: str, clock=time.monotonic, sleep=asyncio.sleep):
+    def __init__(self, channel_id: str, clock=time.monotonic, sleep=asyncio.sleep, *, settings=None):
         self.channel_id, self.clock, self.sleep = channel_id, clock, sleep
-        self.bucket = TokenBucket(RATE_PER_SECOND, RATE_PER_SECOND, clock, sleep=sleep)
+        if settings is None:
+            from ..chat_settings import outbound_limits
+            settings = outbound_limits
+        self.settings = settings
+        self._limits = {}
+        self._in_flight = 0
+        self._slots = asyncio.Condition()
+        self._configure()
         self.breaker = Breaker(clock)
         self.counters = Counters()
         self._edits: dict[str, _Edit] = {}
 
+    def _configure(self):
+        limits = self.settings()
+        for name, attr in (('send_qps', 'send_bucket'), ('write_qps', 'bucket')):
+            rate = limits[name]
+            if self._limits.get(name) != rate:
+                setattr(self, attr, TokenBucket(rate, max(1, rate), self.clock, sleep=self.sleep))
+        self._limits = dict(limits)
+
+    @contextlib.asynccontextmanager
+    async def _slot(self):
+        async with self._slots:
+            await self._slots.wait_for(lambda: self._in_flight < self.settings()['max_in_flight'])
+            self._in_flight += 1
+        try:
+            yield
+        finally:
+            async with self._slots:
+                self._in_flight -= 1
+                self._slots.notify_all()
+
     async def write(self, kind: WriteKind | str, call, *, keyed: bool = False, retry: bool = True):
-        WriteKind(kind)  # reject unsupported operations at the boundary
+        kind = WriteKind(kind)  # reject unsupported operations at the boundary
         for attempt in range(MAX_RETRIES + 1):
-            await self.bucket.acquire()
-            if not self.breaker.allow():
-                raise CircuitOpen('outbound circuit is open')
             try:
-                result = await call()
+                async with self._slot():
+                    self._configure()
+                    if kind in {WriteKind.SEND, WriteKind.REPLY}:
+                        await self.send_bucket.acquire()
+                    await self.bucket.acquire()
+                    if not self.breaker.allow():
+                        raise CircuitOpen('outbound circuit is open')
+                    result = await call()
+            except CircuitOpen:
+                raise
             except Exception as exc:
                 error_class, retry_after = classify(exc)
                 self.counters.failures[error_class] += 1
@@ -216,16 +247,22 @@ class Gateway:
         item.call = call_with_text
         if item.task is None or item.task.done():
             async def flush():
-                delay = EDIT_FLOOR - (self.clock() - item.last_at)
+                delay = self.settings()['edit_interval_seconds'] - (self.clock() - item.last_at)
                 if delay > 0:
                     await self.sleep(delay)
                 while True:
                     call = item.call
-                    item.last_at = self.clock()
-                    result = await self.write(WriteKind.EDIT, call)
+                    async def transmit():
+                        # Rate/slot waits must not shorten the interval between actual edits.
+                        remaining = self.settings()['edit_interval_seconds'] - (self.clock() - item.last_at)
+                        if remaining > 0:
+                            await self.sleep(remaining)
+                        item.last_at = self.clock()
+                        return await call()
+                    result = await self.write(WriteKind.EDIT, transmit)
                     if item.call is call:
                         return result
-                    await self.sleep(max(0, EDIT_FLOOR - (self.clock() - item.last_at)))
+                    await self.sleep(max(0, self.settings()['edit_interval_seconds'] - (self.clock() - item.last_at)))
             item.task = asyncio.create_task(flush())
         return await asyncio.shield(item.task)
 
@@ -244,6 +281,12 @@ class Outbox:
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._workers: set[asyncio.Task] = set()
+        self._waiters: dict[int, asyncio.Future] = {}
+
+    async def start_if_needed(self):
+        # Off only gates new inserts; persisted work keeps its delivery promise.
+        if self.enabled() or await self.db.has_unfinished(self.channel_id):
+            await self.start()
 
     async def start(self):
         async with self._start_lock:
@@ -260,6 +303,9 @@ class Outbox:
         await asyncio.gather(*tasks, return_exceptions=True)
         self._task = None
         self._workers.clear()
+        for future in self._waiters.values():
+            future.cancel()
+        self._waiters.clear()
 
     async def _call(self, row):
         body = dict(row['body'])
@@ -309,28 +355,30 @@ class Outbox:
                 return PostReceipt(False, error=str(exc), parent_gone=getattr(exc, 'code', None) in MESSAGE_GONE_CODES,
                                    outcome=PostOutcome.REJECTED if error_class == ErrorClass.REJECTED
                                    else PostOutcome.UNKNOWN)
+        if row['state'] in {'sent', 'failed', 'uncertain'}:
+            return self._receipt(row)
+        future = self._waiters.setdefault(row['id'], asyncio.get_running_loop().create_future())
         self._wake.set()
         if self._task is None:
             await self.start()
-        async def wait():
-            nonlocal row
-            while row['state'] not in {'sent', 'failed', 'uncertain'}:
-                await asyncio.sleep(0.05)
-                row = await self.db.get(row['id'])
-            return self._receipt(row)
+        # One read closes insert/register and startup-recovery races.
+        current = await self.db.get(row['id'])
+        if current['state'] in {'sent', 'failed', 'uncertain'} and not future.done():
+            future.set_result(self._receipt(current))
+            self._waiters.pop(row['id'], None)
         try:
-            return await asyncio.wait_for(wait(), SEND_WAIT_SECONDS)
+            return await asyncio.wait_for(asyncio.shield(future), SEND_WAIT_SECONDS)
         except asyncio.TimeoutError:
             return PostReceipt(False, outcome=PostOutcome.UNKNOWN, error='outbound delivery is still pending')
 
     async def _run(self):
         while True:
             self._wake.clear()
+            delay = None
             try:
-                # Already claimed calls may finish; disabling pauses new work.
-                while self.enabled():
+                while True:
                     row = await self.db.next_due(self.channel_id, self.clock())
-                    if row is None or not self.enabled():
+                    if row is None:
                         break
                     breaker = self.gateway.breaker
                     if breaker.state == 'half_open':
@@ -345,10 +393,14 @@ class Outbox:
                     task = asyncio.create_task(self._deliver(row))
                     self._workers.add(task)
                     task.add_done_callback(self._finished)
+                at = await self.db.next_attempt(self.channel_id)
+                if at is not None and self.gateway.breaker.state != 'half_open':
+                    delay = max(.01, (at - self.clock()).total_seconds())
             except Exception:
                 logger.exception('outbound outbox scan failed')
+                delay = 1
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._wake.wait(), 0.1)
+                await asyncio.wait_for(self._wake.wait(), delay)
 
     def _finished(self, task):
         self._workers.discard(task)
@@ -383,3 +435,8 @@ class Outbox:
                 await self.db.retry_later(row['id'], self.clock() + timedelta(seconds=delay), error_class, error)
         else:
             await self.db.mark_sent(row['id'], external_id)
+        current = await self.db.get(row['id'])
+        if current['state'] in {'sent', 'failed', 'uncertain'}:
+            future = self._waiters.pop(row['id'], None)
+            if future is not None and not future.done():
+                future.set_result(self._receipt(current))

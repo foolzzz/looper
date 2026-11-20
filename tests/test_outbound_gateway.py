@@ -234,3 +234,44 @@ def test_gateway_stop_cancels_shielded_edits_before_transport_closes():
         assert cancelled.is_set()
         assert gateway._edits == {}
     asyncio.run(run())
+
+
+def test_twenty_chats_share_four_in_flight_slots():
+    async def run():
+        gateway = Gateway('app')
+        active = peak = 0
+        async def call():
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(.02)
+            active -= 1
+        await asyncio.gather(*(gateway.write(kind, call) for kind in ['send', 'reply', 'edit', 'react'] * 5))
+        assert peak <= 4
+        assert peak > 1
+    asyncio.run(run())
+
+
+def test_distinct_rate_buckets_and_live_limits():
+    async def run():
+        clock = Clock()
+        limits = dict(send_qps=2, write_qps=3, edit_interval_seconds=2, max_in_flight=1)
+        gateway = Gateway('app', clock, clock.sleep, settings=lambda: limits)
+        async def call():
+            return True
+        for _ in range(4):
+            await gateway.write('send', call)
+        assert clock.now == pytest.approx(1)
+        # Reactions consume the shared write bucket but no send tokens.
+        for _ in range(3):
+            await gateway.write('react', call)
+        assert clock.now == pytest.approx(4 / 3)
+        await gateway.edit('message', call)
+        before = clock.now
+        await gateway.edit('message', call)
+        assert clock.now - before + 1e-9 >= 2
+        limits['edit_interval_seconds'] = 3
+        before = clock.now
+        await gateway.edit('message', call)
+        assert clock.now - before + 1e-9 >= 3
+    asyncio.run(run())

@@ -79,13 +79,14 @@ class ChannelRegistry:
             return f"the {parsed.channel_type} channel is not running: enable it in Settings → Channels"
         return f"the bot {channel_id} is not running: enable it in Settings → Channels"
 
-    async def notify(self, channel_id: str, chat: str, text: str) -> tuple[bool, str | None]:
-        """Send a schedule's message through the running channel ``channel_id``: whether it was sent, and why
-        not."""
+    async def notify(self, channel_id: str, chat: str, text: str, *,
+                     idempotency_key: str | None = None) -> tuple[bool, str | None]:
+        """Send a schedule's message, retaining its event key across caller retries when supplied."""
         adapter = self._channels.get(channel_id)
         if adapter is None:
             return False, self._not_running(channel_id)
-        receipt = await adapter.notify(chat, text)
+        receipt = await adapter.notify(chat, text, **({"idempotency_key": idempotency_key}
+                                                    if idempotency_key is not None else {}))
         return receipt.success, receipt.error
 
     async def post(self, channel_id: str, target: NotifyTarget, text: str, *,

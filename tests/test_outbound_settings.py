@@ -48,6 +48,8 @@ def test_outbound_settings_are_operator_only():
     ('outbound_settings.get', {}),
     ('outbound_settings.update', {'outbound_enabled': True}),
     ('chat_settings.update', {'outbound_enabled': True}),
+    ('outbound_settings.update', {'send_qps': 2}),
+    ('chat_settings.update', {'max_in_flight': 2}),
 ])
 @pytest.mark.parametrize('principal_kind', ['client', 'agent'])
 def test_nonoperator_principal_cannot_change_outbound_control(operation, body, tmp_path, principal_kind):
@@ -109,7 +111,8 @@ def test_http_agent_client_token_is_forbidden_and_settings_tool_omits_outbound(t
         await server.start()
         try:
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{server._port}",
-                                         headers={"Authorization": "Bearer " + token}) as client:
+                                         headers={"Authorization": "Bearer " + token},
+                                         limits=httpx.Limits(max_keepalive_connections=0)) as client:
                 # Positive control: this is an authenticated API client, not an invalid token.
                 response = await client.get("/api/v1/whoami")
                 assert response.status_code == 200 and response.json()["result"]["principal"] == "client"
@@ -123,3 +126,42 @@ def test_http_agent_client_token_is_forbidden_and_settings_tool_omits_outbound(t
             await server.stop()
 
     asyncio.run(run())
+
+
+def test_outbound_limits_defaults_update_reload_reset_and_schema(monkeypatch):
+    from looper.agents.v1_domains import chat_controls
+    stored = {}
+    async def put(values):
+        for key, value in values.items():
+            if value is None:
+                stored.pop(key, None)
+            else:
+                stored[key] = value
+    monkeypatch.setattr(chat_settings.db_settings, 'get_settings', AsyncMock(side_effect=lambda _: stored))
+    monkeypatch.setattr(chat_settings.db_settings, 'put_settings', put)
+    monkeypatch.setattr(chat_settings, '_outbound_limits', {}, raising=False)
+    async def run():
+        await chat_settings.load()
+        defaults = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
+        assert chat_settings.outbound_limits() == defaults
+        operation = api_v1.find('POST', '/api/v1/outbound_settings/update')
+        values = dict(send_qps=2.5, write_qps=7, edit_interval_seconds=.25, max_in_flight=2)
+        assert set(values) <= operation.request['properties'].keys()
+        await chat_controls.run(None, operation, values, api_v1.Principal('operator'), {})
+        assert chat_settings.outbound_limits() == values
+        assert stored == {'channels.outbound.' + k: str(v) for k, v in values.items()}
+        await chat_settings.load()
+        assert chat_settings.outbound_limits() == values
+        await chat_settings.update(dict.fromkeys(defaults))
+        assert chat_settings.outbound_limits() == defaults and not stored
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('field,value', [
+    ('send_qps', 0), ('send_qps', True), ('write_qps', float('inf')),
+    ('edit_interval_seconds', float('nan')), ('max_in_flight', 0),
+    ('max_in_flight', 33), ('max_in_flight', 1.5), ('max_in_flight', True),
+])
+def test_outbound_limits_reject_invalid_values(field, value):
+    with pytest.raises(ValueError, match=field + " must be"):
+        chat_settings.checked({field: value})

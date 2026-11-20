@@ -95,14 +95,14 @@ def test_outbound_is_operator_controlled_and_survives_restart(monkeypatch: pytes
                 status, answer = await call(operation, {"outbound_enabled": True}, client=True)
                 assert status == 403 and answer["error"]["code"] == "forbidden"
             status, answer = await call("outbound_settings.update", {"outbound_enabled": True})
-            assert status == 200 and answer["result"] == {"outbound_enabled": True}
+            assert status == 200 and answer["result"] == {"outbound_enabled": True, **chat_settings.OUTBOUND_DEFAULTS}
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1",
                                        chat_settings.OUTBOUND_ENABLED_KEY) == "true"
             chat_settings.set_outbound_enabled(False)
             await chat_settings.load()
             assert chat_settings.outbound_enabled() is True
             status, answer = await call("outbound_settings.update", {"outbound_enabled": None})
-            assert status == 200 and answer["result"] == {"outbound_enabled": False}
+            assert status == 200 and answer["result"] == {"outbound_enabled": False, **chat_settings.OUTBOUND_DEFAULTS}
             assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key=$1",
                                        chat_settings.OUTBOUND_ENABLED_KEY) == 0
 

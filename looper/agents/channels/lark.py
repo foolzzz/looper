@@ -241,10 +241,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     "%s: messages sent by other bots are not received on this channel type unless the app "
                     "has Lark's permission to receive bot messages; alternatively use the lark-cli channel's "
                     "polling", self.channel_id)
-        from .. import chat_settings
-
-        if chat_settings.outbound_enabled():
-            await self._channel_outbox.start()
+        await self._channel_outbox.start_if_needed()
         self._bus = bus
         self._running = True
         self._outbound_task = asyncio.create_task(self._outbound_loop())
@@ -464,8 +461,8 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _react(self, chat_id: str, message_id: str) -> None:
         await self._transport.react(message_id)
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
-        with self._transport.message_scope(str(_uuid.uuid4()), source="notify", chat=chat):
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
+        with self._transport.message_scope(idempotency_key or str(_uuid.uuid4()), source="notify", chat=chat):
             return await self._notify(chat, text)
 
     async def _notify(self, chat: str, text: str) -> DeliveryReceipt:

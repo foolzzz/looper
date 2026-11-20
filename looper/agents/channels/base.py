@@ -100,8 +100,8 @@ class ChannelAdapter(ABC):
         """Send a message from the system to the user through this channel."""
         ...
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
-        """Send ``text``, unprompted, to ``chat``: a schedule's message, or a task's end (``task_notice``)."""
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
+        """Send ``text`` unprompted. A capable channel deduplicates caller retries by ``idempotency_key``."""
         return DeliveryReceipt(channel=self.channel_type, success=False,
                                error=f"the {self.channel_type} channel cannot send notifications")
 

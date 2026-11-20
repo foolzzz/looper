@@ -136,3 +136,20 @@ async def defer_unsent(id: int, at: datetime, *, pool: asyncpg.Pool | None = Non
           attempts=CASE WHEN state='sending' THEN greatest(attempts-1, 0) ELSE attempts END
         WHERE id=$1 AND state IN ('pending', 'sending')
         """, id, at)
+
+
+async def has_unfinished(channel_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    return await (pool or get_pool()).fetchval(
+        "SELECT EXISTS(SELECT 1 FROM channel_outbox WHERE channel_id=$1 AND state IN ('pending','sending'))",
+        channel_id)
+
+
+async def next_attempt(channel_id: str, *, pool: asyncpg.Pool | None = None) -> datetime | None:
+    """Earliest unblocked chat head; completion wakes heads blocked by in-flight calls."""
+    return await (pool or get_pool()).fetchval("""
+        SELECT min(o.next_attempt_at) FROM channel_outbox o
+        WHERE o.channel_id=$1 AND o.state='pending'
+          AND NOT EXISTS (SELECT 1 FROM channel_outbox prior
+              WHERE prior.channel_id=o.channel_id AND prior.chat=o.chat
+                AND (prior.state='sending' OR (prior.state='pending' AND prior.id < o.id)))
+        """, channel_id)

@@ -40,6 +40,12 @@ class Database:
                 return dict(row)
         return None
 
+    async def next_attempt(self, channel):
+        return min((row['next_attempt_at'] for row in self.rows.values()
+                    if row['state'] == 'pending' and not any(
+                        prior['chat'] == row['chat'] and prior['id'] < row['id'] and
+                        prior['state'] in {'pending', 'sending'} for prior in self.rows.values())), default=None)
+
     async def mark_sending(self, id):
         self.rows[id]['state'] = 'sending'
         self.rows[id]['attempts'] += 1
@@ -152,7 +158,7 @@ def test_open_breaker_defers_pending_without_consuming_attempts(monkeypatch):
     asyncio.run(run())
 
 
-def test_switch_pauses_pending_and_resumes_without_scanning_while_off():
+def test_switch_off_does_not_pause_persisted_work():
     async def run():
         db = Database()
         enabled = True
@@ -167,12 +173,10 @@ def test_switch_pauses_pending_and_resumes_without_scanning_while_off():
         await box.start()
         enabled = False
         try:
-            await asyncio.sleep(.15)
-            assert calls == []
-            assert db.scans == 0
-            assert db.rows[1]['state'] == 'pending' and db.rows[1]['attempts'] == 0
-            enabled = True
             await until(lambda: db.rows[1]['state'] == 'sent')
+            scans = db.scans
+            await asyncio.sleep(.15)
+            assert db.scans == scans
             assert calls == ['hello']
         finally:
             await box.stop()
