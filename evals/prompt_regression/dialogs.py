@@ -489,7 +489,8 @@ def _session_answer(*wanted: str, where: tuple[str, ...]) -> Callable[[Look], st
         for value in wanted:
             if value not in look.reply:
                 return f"the reply does not give {value!r}"
-        if not any(word in look.reply for word in (*where, *_said_dates())):
+        spaced = "".join(look.reply.split())  # 「11 月 14 日」 is 「11月14日」
+        if not any(word in look.reply for word in where) and not any(day in spaced for day in _said_dates()):
             return "the reply does not say where or when it was said"
         return None
 
