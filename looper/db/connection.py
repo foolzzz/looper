@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -103,6 +104,10 @@ def schema_fingerprint(sql: str) -> str:
 # Serializes schema runs on one database (any schema in it): the script runs as one transaction, which takes
 # this lock first, so two processes starting together cannot both create a table or migrate.
 _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
+# Session lock, distinct from the schema transaction's lock: online DDL must
+# stay in autocommit, including while another process builds an index.
+_ONLINE_LOCK = 0x6C6F6F706F6E6C  # "looponl", database-wide across schemas
+_ONLINE_LOCK_WAIT_SECONDS = 5.0
 
 REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
@@ -295,19 +300,40 @@ _ONLINE_STEPS = (
 
 
 async def _finish_online(conn: asyncpg.Connection) -> None:
-    """Run the ``_ONLINE_STEPS`` still owed. In a caller's transaction, where no index can be built concurrently,
-    they build it plainly; ``looper serve`` ensures the schema outside one."""
-    how = "" if conn.is_in_transaction() else " CONCURRENTLY"
-    done = {row["name"] for row in await conn.fetch("SELECT name FROM schema_migrations")}
-    for step in _ONLINE_STEPS:
-        if step.migration not in done or step.marker in done:
-            continue
-        for table, constraint in step.validate:
-            await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
-        for name, definition in step.indexes:
-            await conn.execute(f"DROP INDEX{how} IF EXISTS {name}")
-            await conn.execute(f"CREATE INDEX{how} {name} {definition}")
-        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
+    """Serialize online DDL without holding a transaction while waiting.
+
+    After five seconds of contention, defer to the owner or the next start;
+    markers stay absent until a step finishes. A caller's open transaction also
+    defers these steps: even waiting for this lock could block the owner's CIC.
+    """
+    if conn.is_in_transaction():
+        logger.warning("deferring online schema steps until a start outside a transaction")
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _ONLINE_LOCK_WAIT_SECONDS
+    while not await conn.fetchval("SELECT pg_try_advisory_lock($1)", _ONLINE_LOCK):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.warning("online schema lock busy after %.1fs; deferring steps to the owner or next start",
+                           _ONLINE_LOCK_WAIT_SECONDS)
+            return
+        # A blocking advisory-lock SELECT would leave an active transaction
+        # whose snapshot a concurrent index build could itself be waiting for.
+        await asyncio.sleep(min(0.1, remaining))
+    try:
+        # The previous owner may have finished while we waited.
+        done = {row["name"] for row in await conn.fetch("SELECT name FROM schema_migrations")}
+        for step in _ONLINE_STEPS:
+            if step.migration not in done or step.marker in done:
+                continue
+            for table, constraint in step.validate:
+                await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+            for name, definition in step.indexes:
+                await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+                await conn.execute(f"CREATE INDEX CONCURRENTLY {name} {definition}")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock($1)", _ONLINE_LOCK)
 
 
 def _subscriptions_ddl() -> str:
