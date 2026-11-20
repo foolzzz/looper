@@ -3154,8 +3154,37 @@ evaluation is required before the original schedule requirement is complete.
   existing session-switch path and writes the replacement session through;
   a parallel run or a failed claim starts fresh without changing the stored
   session. Each fallback records its reason as phase activity. Runtime
-  compaction and existing handoff remain in effect; failures and edits to
-  the requirement, rule, gate or overlap never reset the session.
+  compaction and existing handoff remain in effect; edits to the requirement,
+  rule, gate or overlap do not reset the session.
+  Persistent sessions are bounded by default. After each Planner turn the
+  schedule stores its last main-loop request's context (uncached input plus
+  cache reads and writes) and this task's total Planner cost, including
+  compaction. Before the next run resumes, context strictly above
+  `scheduler.session_context_max_tokens` (default 100,000), or the previous
+  run's Planner cost strictly above half its effective task budget, triggers
+  maintenance. Equality does not trigger it; an unknown measurement does not
+  act as zero. The schedule's `run_budget_usd` takes precedence over the
+  inherited project task budget; with no budget only the context rule applies.
+  Claude Code declares `headless_compaction`, verified with version 2.1.329:
+  `/compact` on a resumed headless session emits a manual `compact_boundary`,
+  whose summary is available on the next turn. Looper requires that event,
+  records the compaction's cost from session-total deltas, and accepts its
+  empty result. A runtime without this capability, or a failed compaction,
+  rotates to a new session with the last `scheduler.session_history_runs`
+  results in its first prompt (default 3, oldest first, 300 characters each).
+  These two scheduler settings accept positive integers (at most 100,000,000
+  tokens and 100 runs), or null to restore their defaults, through
+  `scheduler_settings.update` and configuration import/export.
+  Schedule runs expose `planner_context_tokens`, `planner_cost_usd`,
+  `planner_session_action` (`compacted` or `rotated`), `planner_session_reason`
+  (`context` or `cost`) and `planner_session_before_tokens` /
+  `planner_session_after_tokens`. A rotation's after-size is the first measured
+  request in the new session; a compaction's is its boundary's post-size.
+  Maintenance also appears in the task's activity and server log. Budget
+  failure alerts name the task budget and point at an oversized session.
+  Parallel runs, ordinary tasks, and schedules without a stored session keep
+  their existing launch and prompt paths. The task budget remains a soft cap
+  checked at existing boundaries; this does not add a mid-request hard stop.
   Reset is explicit: `POST /api/v1/schedule_admin/reset_planner_session` with `schedule_id`, the
   project's schedule-row **Reset Planner session** button (with a
   confirmation), or the Manager's `reset_planner_session` action (high,
@@ -3165,7 +3194,8 @@ evaluation is required before the original schedule requirement is complete.
   according to whether a stored session existed, or 404 for an unknown
   schedule, with the same caller checks as editing a schedule. Schedule
   responses expose only `planner_session` status: `active`, `runtime`,
-  `profile`, `last_task_id`, `last_task_title` and `updated_at`; never the
+  `profile`, `last_task_id`, `last_task_title`, `updated_at`, `context_tokens`
+  and `run_cost_usd`; never the
   session id. `updated_at` is when the current id was first stored, not the
   schedule's last edit; with no session the other fields are null. Stored
   sessions are excluded from configuration export; an import entry carrying
