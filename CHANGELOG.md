@@ -41,6 +41,7 @@ How the agent system works today is described in
 ### Documentation
 
 - **Measured extraction cost, edit limits and the DSH gap.** ([#1462](https://github.com/foolzzz/looper/pull/1462)) Docs only. A Manager on the DSH runtime still has no `looper_leads_search`.
+- **Leads second check and a stable Manager context block (RFC addendum).** ([#1467](https://github.com/foolzzz/looper/pull/1467)) Docs only: section 10 of the leads RFC designs a tool-less `leads_check` role and the `manager.stable_context` block. Neither is implemented in this release.
 
 ## [2.15.21] - 2026-11-20
 
