@@ -122,6 +122,7 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                         [*before[table], {"sequencename": "project_activity_seq_seq", "last_value": None},
                          {"sequencename": "llm_requests_id_seq", "last_value": None},
                          {"sequencename": "source_events_seq_seq", "last_value": None},
+                         {"sequencename": "source_deletions_id_seq", "last_value": None},
                          {"sequencename": "source_runs_id_seq", "last_value": None},
                          {"sequencename": "ledger_events_id_seq", "last_value": None},
                          {"sequencename": "ledger_items_id_seq", "last_value": None},
