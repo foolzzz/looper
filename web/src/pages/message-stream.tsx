@@ -197,8 +197,8 @@ function Chats({ sourceId, refresh }: { sourceId: string; refresh: number }) {
         {error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">Cannot update chats ({error}) <Button variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>Retry chats</Button></p>}
         {loading ? <p role="status" className="text-sm text-muted-foreground">Loading chats…</p> : error && chats.length === 0 ? null : chats.length === 0 ?
           <p className="text-sm text-muted-foreground">No chats found.</p> : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
+            <div role="region" aria-label="Chat table" tabIndex={0} className="overflow-x-auto focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+              <table className="w-full min-w-xl text-left text-sm">
                 <thead className="text-xs text-muted-foreground"><tr>
                   <th scope="col" className="px-2 py-2 font-medium">Chat</th>
                   <th scope="col" className="px-2 py-2 font-medium">State</th>
@@ -207,7 +207,7 @@ function Chats({ sourceId, refresh }: { sourceId: string; refresh: number }) {
                 </tr></thead>
                 <tbody className="divide-y divide-border">{chats.map((chat) => (
                   <tr key={chat.chat_id}>
-                    <td className="max-w-48 px-2 py-3 [overflow-wrap:anywhere]">
+                    <td className="min-w-40 max-w-48 px-2 py-3 [overflow-wrap:anywhere]">
                       <span className="font-medium">{chat.name || (chat.purged_at ? "Deleted chat" : "Unnamed chat")}</span>
                       <span className="block font-mono text-xs text-muted-foreground">{chat.chat_id}</span>
                       <span className="text-xs text-muted-foreground">{chat.kind}</span>
