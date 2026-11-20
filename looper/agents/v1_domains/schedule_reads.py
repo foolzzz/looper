@@ -109,7 +109,8 @@ NOTIFICATION = _object({
     **dict.fromkeys(("notification_id", "text", "created_at"), _STR),
     **dict.fromkeys(("run_id", "channel", "chat", "error"), _NULL_STR),
     "kind": _enum("run", "failures_alert", "failures_recovered", "stale_alert", "stale_recovered",
-                  "deadline_alert", "deadline_recovered", "overlap_alert", "overlap_recovered"),
+                  "deadline_alert", "deadline_recovered", "overlap_alert", "overlap_recovered", "check_alert",
+                  "check_recovered"),
     "status": _enum("sent", "failed", "dashboard")})
 LISTED_RUN = _object({
     **dict.fromkeys(("run_id", "status", "trigger"), _STR),

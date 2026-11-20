@@ -815,10 +815,10 @@ class _Finished(Exception):
 
 async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: str, cost: float | None = None,
                   error: str | None = None, summary: str | None = None, advance_to: int | None = None,
-                  store: Any = None, held: Mapping[str, Any] | None = None) -> None:
+                  store: Any = None, held: Mapping[str, Any] | None = None, check_status: str | None = None) -> None:
     """End the run in one transaction: what ``store(conn)`` writes (it returns the counts), the run's status, outcome,
-    counts and count line, and, when ``advance_to`` is given, the cursor. An ``extracted`` run that stored nothing is
-    ``quiet``. With ``held`` (the run's snapshot and the Profile it launched with), the schedule's row is locked first
+    counts and count line, what its check did (``check_status``, kept only with what it stored) and, when
+    ``advance_to`` is given, the cursor. An ``extracted`` run that stored nothing is ``quiet``. With ``held`` (the run's snapshot and the Profile it launched with), the schedule's row is locked first
     (a change or a confirmation waits, or has committed) and the confirmation checked again: when it no longer holds
     nothing is stored, the run is ``cancelled`` and the cursor stays."""
     from .subscriptions import digest
@@ -845,9 +845,9 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
                 raise _Finished
             await conn.execute(
                 "UPDATE subscription_runs SET outcome = $2, extract_counts = $3::jsonb, output_text = $4, "
-                "output_sha256 = $5 WHERE run_id = $1", run_id, outcome,
+                "output_sha256 = $5, check_status = $6 WHERE run_id = $1", run_id, outcome,
                 json.dumps(counts, sort_keys=True) if counts is not None else None, line,
-                digest(line) if line else None)
+                digest(line) if line else None, check_status if counts is not None else None)
             if advance_to is not None:
                 await db_subs.advance_cursor(conn, run["schedule_id"], from_seq=stream["from_seq"], to_seq=advance_to,
                                              at=now)
@@ -935,10 +935,13 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         return {**counts, **checked.counts} if checked is not None else counts
 
     cost = result.cost_usd if checked is None else (result.cost_usd or 0.0) + checked.counts["check_cost_usd"]
+    # What the check did, typed: skipped (off, or nothing to check), checked or failed (fail-open: stored unchecked).
+    check_status = ("skipped" if checked is None or not (parsed.state == "items" and parsed.items)
+                    else "failed" if checked.counts["check_failed"] else "checked")
     await end(status="completed", outcome="extracted", cost=cost, advance_to=found.last_seq, store=store,
               summary="没有可整理的（处理器回复了 NONE）" if parsed.state == "quiet" else None,
               held={"snapshot": snapshot, "profile": result.profile,
-                    "checker": checked.profile if checked is not None else None})
+                    "checker": checked.profile if checked is not None else None}, check_status=check_status)
     return found.more
 
 

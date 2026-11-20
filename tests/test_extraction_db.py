@@ -674,6 +674,71 @@ def test_a_check_that_fails_stores_every_item_unchecked_and_the_run_still_succee
     scenario(check, monkeypatch, tmp_path, reply=FOUR_LEADS)
 
 
+@pytest.mark.parametrize("case, status", [("off", "skipped"), ("nothing", "skipped"), ("checked", "checked"),
+                                          ("failed", "failed")])
+def test_each_extraction_run_records_what_its_check_did(monkeypatch, tmp_path, case, status):
+    from looper.agents import processor
+
+    async def check(env, poster, fake):
+        if case == "off":
+            sid = await extractor(env)
+            await add(env.pool, "release moves to Friday", sent_at=minutes_ago(env, 9))
+            await add(env.pool, "maybe Friday, not sure", sent_at=minutes_ago(env, 8))
+        else:
+            sid = await _checked_window(env, fake)
+        fake.check_reply = VERDICTS
+        if case == "nothing":
+            fake.reply = "NONE"
+        if case == "failed":
+            fake.check_failure = processor.ProcessorFailure.TIMEOUT
+        run = await fire(env, sid)
+        assert (run["status"], run["stream"]["check_status"]) == ("completed", status)
+
+    scenario(check, monkeypatch, tmp_path, reply=FOUR_LEADS)
+
+
+ONE_INTENT = json.dumps({"intents": [{"type": "bug_triage", "title": "Look at the payment error", "summary": "Bob asks",
+                                      "confidence": "high", "sources": ["m1"]}]})
+
+
+def test_three_failed_checks_in_a_row_alert_once_and_a_checked_run_recovers(monkeypatch, tmp_path):
+    from looper.agents import processor
+
+    async def check(env, poster, fake):
+        sid = await extractor(env, "intents", subscription={"check_items": True})
+
+        async def firing(n, *, failing=True, quiet=False):
+            await add(env.pool, f"can you look at payment error {n}?", chat_id="oc_bob", kind="p2p",
+                      sent_at=minutes_ago(env, 1))
+            fake.reply = "NONE" if quiet else ONE_INTENT
+            fake.check_failure = processor.ProcessorFailure.TIMEOUT if failing else None
+            fake.check_reply = json.dumps({"verdicts": [{"item": "X1", "verdict": "keep"}]})
+            run = await fire(env, sid)
+            assert run["status"] == "completed"
+            return run["stream"]["check_status"]
+
+        async def notices():
+            return [dict(row) for row in await env.pool.fetch(
+                "SELECT kind, text FROM schedule_notifications WHERE schedule_id = $1 AND kind LIKE 'check_%' "
+                "ORDER BY created_at, id", sid)]
+
+        assert [await firing(1), await firing(2)] == ["failed", "failed"]
+        assert await firing(3, quiet=True) == "skipped"  # nothing to check: it neither ends nor adds to the streak
+        assert await notices() == []
+        assert await firing(4) == "failed"
+        [alert] = await notices()
+        assert alert["kind"] == "check_alert" and "第二道检查已连续 3 次没有完成" in alert["text"]
+        assert await firing(5) == "failed"
+        assert [n["kind"] for n in await notices()] == ["check_alert"]  # once per streak
+        assert await firing(6, failing=False) == "checked"
+        assert [n["kind"] for n in await notices()] == ["check_alert", "check_recovered"]
+        # Fail-open: every run whose check failed still stored what it found, unchecked.
+        assert await env.pool.fetchval("SELECT count(*) FROM intents WHERE schedule_id = $1 AND state = 'pending' "
+                                       "AND check_verdict IS NULL", sid) == 4
+
+    scenario(check, monkeypatch, tmp_path)
+
+
 def test_the_check_is_bounded_by_what_is_left_of_the_days_budget(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await _checked_window(env, fake)

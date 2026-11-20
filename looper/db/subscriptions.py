@@ -375,6 +375,23 @@ async def get_runs(run_ids: Sequence[str], *, db: Db | None = None) -> dict[str,
 _RUN_FIELDS = ("record_id", "outcome", "output_text", "output_sha256", "notification_id", "events_selected")
 
 
+async def check_failures(conn: Db, schedule_id: str, *, limit: int) -> int:
+    """How many of the subscription's latest runs whose check ran (``check_status`` checked or failed; skipped ones
+    neither end nor add to it) failed in a row, counting at most ``limit``."""
+    rows = await conn.fetch(
+        "SELECT sr.check_status FROM subscription_runs sr JOIN schedule_runs r ON r.id = sr.run_id "
+        "WHERE r.schedule_id = $1 AND sr.check_status IN ('checked', 'failed') "
+        "ORDER BY r.created_at DESC, r.id DESC LIMIT $2", schedule_id, limit)
+    return next((index for index, row in enumerate(rows) if row["check_status"] != "failed"), len(rows))
+
+
+async def set_check_alert(conn: Db, schedule_id: str, at: datetime | None) -> bool:
+    """Start (``at``) or end (None) the subscription's failed-check alert, once: False when it already was so."""
+    condition = "check_alert_at IS NULL" if at is not None else "check_alert_at IS NOT NULL"
+    return await conn.execute(f"UPDATE subscriptions SET check_alert_at = $2 WHERE schedule_id = $1 AND {condition}",
+                              schedule_id, at) == "UPDATE 1"
+
+
 async def update_run(conn: Db, run_id: str, **fields: Any) -> None:
     unknown = sorted(set(fields) - set(_RUN_FIELDS))
     if unknown:
