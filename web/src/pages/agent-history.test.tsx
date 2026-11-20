@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentHistoryPage, RunCard, sourceName } from "@/pages/agent-history";
+import { AgentHistoryPage, HISTORY_ROLES, RunCard, historyHref, parseHistoryRoute, sourceName } from "@/pages/agent-history";
 import { exportLlmRequests, runProfile, type LlmRecord, type LlmRecordSummary, type LlmRequest } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -70,6 +70,22 @@ describe("run system prompt mode", () => {
   it("keeps absent-transcript output and the current waiting state", () => {
     expect(render(undefined, {}, { output_text: "retained evidence" })).toContain("retained evidence");
     expect(render(undefined, {}, { status: "running" })).toContain("Waiting for the first event");
+  });
+  it("shows runtime catalog skips beside the loaded library, and no section without them", () => {
+    const shown = render(undefined, { runtime_catalog: { runtime: "pi", skipped: [
+      "skill demo: pi does not load catalog MCP servers, skills or plugins",
+      { name: "plugin/hooks", reason: "Claude plugin component is not translated" },
+    ] } });
+    expect(shown).toContain("Runtime catalog skips · 2");
+    expect(shown).toContain("skill demo: pi does not load catalog MCP servers, skills or plugins");
+    expect(shown).toContain("plugin/hooks: Claude plugin component is not translated");
+    for (const metadata of [
+      {},
+      { runtime_catalog: { runtime: "pi", skipped: [] } },
+      { runtime_catalog: { runtime: "codex", skills_as_documents: ["demo-lib:hello"] } },
+    ]) {
+      expect(render(undefined, metadata)).not.toContain("Runtime catalog skips");
+    }
   });
   it("renders unknown library evidence and historical labels from the DTO", async () => {
     const host = document.createElement("div"), root = createRoot(host);
@@ -246,6 +262,7 @@ describe("agent history summary polling", () => {
     try {
       await act(async () => root.render(<AgentHistoryPage sub="worker-example" />));
       expect(listCalls()).toHaveLength(1);
+      expect(JSON.parse(String(listCalls()[0][1]?.body))).toEqual({ agent_id: "worker-example", limit: 50 });
       await act(async () => vi.advanceTimersByTimeAsync(2000));
       expect(listCalls()).toHaveLength(2);
       expect(host.textContent).toContain("last output 2s ago");
@@ -259,6 +276,60 @@ describe("agent history summary polling", () => {
     } finally {
       await act(async () => root.unmount());
       vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("history role filter", () => {
+  it("keeps agent links and reads a role only from the typed list", () => {
+    expect(historyHref("planner-1", "task 1")).toBe("#history/planner-1?task=task%201");
+    expect(historyHref("", null, "manager")).toBe("#history?role=manager");
+    expect(parseHistoryRoute("planner-1?task=task%201")).toEqual({
+      agentId: "planner-1", taskId: "task 1", role: null,
+    });
+    expect(parseHistoryRoute("", "role=worker").role).toBe("worker");
+    expect(parseHistoryRoute("?role=processor").role).toBe("processor");
+    expect(parseHistoryRoute("", "role=consult").role).toBeNull();
+    expect([...HISTORY_ROLES]).toEqual(["manager", "planner", "worker", "reviewer", "processor"]);
+  });
+
+  it("lists one role's runs, opens the newest, and does not fetch an unknown role", async () => {
+    const host = document.createElement("div"), root = createRoot(host);
+    const summary = {
+      id: 20, agent_id: "worker-7", task_id: "task 1", status: "completed", created_at: "2026-11-01T10:00:00Z",
+      input_summary: "Role prompt", metadata: null, task_role: { id: "fe_rd", kind: "work", version: 1 },
+    } as LlmRecordSummary;
+    const full = {
+      ...summary, input_text: "Complete prompt", output_text: "Complete result",
+      metadata: { presentation: { library: { items: [{ kind: "plugin", name: "loaded-plugin", plugin: null, scope: null,
+        project_id: null, sha256: null }], sha256: null, error: null, project_error: null } } },
+    };
+    const fetcher = vi.fn<typeof fetch>(async (url) => Response.json({ status: "ok", result:
+      String(url).endsWith("runs/list") ? { records: [summary] } :
+      String(url).endsWith("runs/get") ? { record: full } : { events: [] } }));
+    vi.stubGlobal("fetch", fetcher);
+    const listCalls = () => fetcher.mock.calls.filter(([url]) => String(url).endsWith("runs/list"));
+    try {
+      await act(async () => root.render(<AgentHistoryPage sub="" query="role=worker" />));
+      expect(JSON.parse(String(listCalls()[0][1]?.body))).toEqual({ role: "worker", limit: 100 });
+      expect(listCalls()).toHaveLength(1);
+      const nav = host.querySelector('nav[aria-label="Roles"]')!;
+      expect([...nav.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(
+        HISTORY_ROLES.map((role) => historyHref("", null, role)),
+      );
+      expect(nav.querySelector('[aria-current="page"]')?.getAttribute("href")).toBe("#history?role=worker");
+      expect(host.querySelector('a[href="#history/worker-7?task=task%201"]')?.textContent).toBe("worker-7");
+      expect(host.querySelector('a[href="#tasks/task%201"]')?.textContent).toContain("task 1");
+      expect(host.textContent).toContain("fe_rd · work");
+      expect(host.textContent).toContain("Complete prompt");
+      expect(host.textContent).toContain("Plugins & skills · 1 plugin, 0 skills");
+      await act(async () => root.render(<AgentHistoryPage sub="" query="role=consult" />));
+      expect(listCalls()).toHaveLength(1);
+      expect(host.textContent).toContain("Pick a role to see its runs.");
+      expect(host.querySelector('[aria-current="page"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
       vi.unstubAllGlobals();
     }
   });

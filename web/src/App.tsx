@@ -9,16 +9,15 @@ import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
-import { RunsPage } from "@/pages/runs";
 import { GatesPage } from "@/pages/gates";
 import { SchedulesPage } from "@/pages/schedules";
 import { MessageStreamPage } from "@/pages/message-stream";
 import { SettingsPage } from "@/pages/settings";
-import { AgentHistoryPage } from "@/pages/agent-history";
+import { AgentHistoryPage, historyHref, isHistoryRole } from "@/pages/agent-history";
 import { ProjectPage } from "@/pages/project";
 import { DEFAULT_SETTINGS_PAGE, isSettingsPage, type SettingsPageId } from "@/lib/settings-pages";
 
-const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "gates", "projects", "runs", "schedules", "messages", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "gates", "projects", "schedules", "messages", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -28,11 +27,20 @@ interface Route {
   query: string;
 }
 
+/** Old settings aliases, and the removed Runs page, land on a page that still exists. */
+function retiredHash(shown: string): string {
+  const settingsPage = /^settings(?:\/([^/?]*))?(?:[/?]|$)/.exec(shown);
+  if (settingsPage && !isSettingsPage(settingsPage[1] ?? "")) return `settings/${DEFAULT_SETTINGS_PAGE}`;
+  if (shown === "runs" || shown.startsWith("runs/") || shown.startsWith("runs?")) {
+    const role = decodeURIComponent(/^runs\/([^/?]*)/.exec(shown)?.[1] ?? "");
+    return historyHref("", null, isHistoryRole(role) ? role : null).slice(1);
+  }
+  return shown;
+}
+
 function readHash(): Route {
   const shown = window.location.hash.replace(/^#\/?/, "");
-  const settingsPage = /^settings(?:\/([^/?]*))?(?:[/?]|$)/.exec(shown);
-  const raw = settingsPage && !isSettingsPage(settingsPage[1] ?? "")
-    ? `settings/${DEFAULT_SETTINGS_PAGE}` : shown;
+  const raw = retiredHash(shown);
   if (raw !== shown) window.history.replaceState(null, "", `#${raw}`);
   const cut = raw.search(/[/?]/);
   const pagePart = (cut >= 0 ? raw.slice(0, cut) : raw) as Page;
@@ -167,14 +175,6 @@ function App() {
               />
             </div>
           )}
-          {route.page === "runs" && (
-            <div className="h-full overflow-y-auto">
-              <RunsPage
-                sub={route.sub}
-                onNavigate={(sub) => navigateSub("runs", sub)}
-              />
-            </div>
-          )}
           {route.page === "schedules" && (
             <div className="h-full overflow-y-auto">
               <SchedulesPage
@@ -194,7 +194,7 @@ function App() {
           )}
           {route.page === "history" && (
             <div className="h-full overflow-y-auto">
-              <AgentHistoryPage sub={route.sub} />
+              <AgentHistoryPage sub={route.sub} query={route.query} />
             </div>
           )}
           {route.page === "settings" && (
