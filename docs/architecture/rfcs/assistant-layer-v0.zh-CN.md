@@ -1,8 +1,9 @@
 # RFC：助理层 v0（第 0、1 期：度量、每轮上下文、人格、会话路由、会话预算、交付保证、出站网关）
 
-- **状态：** 草案，等维护者评审。方向是维护者在 2026-11-20 批准的产品设计（「在 Looper 里做一层助理」，第 7 节的第 0、1 期）；第 2 节是维护者已定的决定，不再讨论。评审通过后按第 13 节的 PR 顺序实现。
+- **状态：** 草案，等维护者评审。方向是维护者在 2026-11-20 批准的产品设计（「在 Looper 里做一层助理」，产品设计第 14 节：14.7.4 第 0 期、14.7.5 第 1 期、14.7.9 模型接入层、14.7.10 依赖、14.7.11 表和开关；第 0 期验证的结论在 14.8）；第 2 节是维护者已定的决定，不再讨论。评审通过后按第 13 节的 PR 顺序实现。
+- **编号：** 本文的 0.1、1.3 等就是产品设计里的 P0.1、P1.3；PR 编号（0.1a、1.3b……）是本文自己的拆分。
 - **需求：** 默认管家用起来要像一个助理：知道现在几点、是谁在跟它说话；有固定的名字和语气；群里的消息不等私聊里的长回合，群里也拿不到私聊里的内容；会话不会无限变长；回执了就一定给结果；飞书限流时不丢消息、不重复。做这些之前，先有能对比的数字。
-- **范围：** 第 0 期（度量、前提验证、体验评测集）和第 1 期（1.1–1.7）。第 2 期以后（画像块、提醒、卡片按钮、送达层、车道和插话等）不在本文。
+- **范围：** 第 0 期（度量、前提验证、体验评测集）和第 1 期（1.1–1.7）。第 2 期以后（画像块、提醒、卡片按钮、送达层、车道等）不在本文；其中几项已经在并行开发（默认关），和本文的分工见第 13 节。
 - **相关：** [Manager 收尾、账本与晨报 RFC](manager-completion-ledger-v0.zh-CN.md)（收尾回合、账本、`operator_sender_id`）；[消息线索 RFC](message-leads-intents-v0.zh-CN.md) 第 10.2 节（常驻内容的稳定块）；[对外动作审查与围栏 RFC](outbound-review-v0.zh-CN.md)（第 8 节的不可信内容围栏）；[定时任务共用一条规划者会话 RFC](schedule-planner-session-v0.zh-CN.md) 和 #1473（会话上限）；[Manager 会话 Profile RFC](manager-session-profile-v0.zh-CN.md)；[Agent 系统架构](../agent-system.md)；[开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 1 节（测试和评测要求）。
 - **核对基线：** `main` `26d1b3a82`（含 #1463 收尾窗口、#1469 审查 RFC、#1471 稳定块）；另读了未合入的 #1473（定时任务规划者会话上限）和 #1477（管家只读 vault）。第 3 节的现状是读代码得出的，每项标了出处；本文没有启动服务、没有调用模型。
 - **术语：**
@@ -30,7 +31,7 @@
 
 | 编号 | 决定 |
 |---|---|
-| D1 | 采用「在 Looper 里做一层助理」的方案；第 0、1 期现在开工，第 2 期以后暂不做。 |
+| D1 | 采用「在 Looper 里做一层助理」的方案；第 0、1 期现在开工。开发可以超前（第 2 期的若干项已经在并行开发，都默认关），**打开**仍按期：第 2 期以后的打开顺序不变。 |
 | D2 | 管家的会话：控制台和你本人的私聊（飞书、Telegram）共用主会话 `main`；每个群一个会话。 |
 | D3 | 收尾回合（先只开私聊）和账本在线上打开，按第 5.7 节逐个打开。 |
 | D4 | 名字保留「管家」，语气简洁、直接。 |
@@ -104,31 +105,20 @@
 
 #### 4.1.2 主动消息：`proactive_deliveries`
 
-每发一条主动消息记一行，第 2 期的送达层会用这张表；第 0 期**只写不拦**：写失败只记日志，写在发送之后，不在发送路径上等待。
+每发一条主动消息记一行；第 0 期**只写不拦**：写失败只记日志，写在发送之后，不在发送路径上等待。
 
-```sql
--- proactive deliveries begin
-CREATE TABLE IF NOT EXISTS proactive_deliveries (
-    id          BIGSERIAL PRIMARY KEY,
-    source      TEXT NOT NULL CHECK (source IN ('task_notice', 'completion', 'progress', 'gate', 'gate_reminder',
-                                                'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous')),
-    source_ref  TEXT,                 -- 任务、关卡、订阅运行、意图或定时任务运行的 id；管家自己说的话为空
-    manager_id  TEXT,
-    channel_id  TEXT NOT NULL,        -- 'web' 或机器人的渠道 id
-    chat        TEXT NOT NULL,        -- 飞书、Telegram 的会话 id；控制台的会话 id
-    group_chat  BOOLEAN NOT NULL,
-    external_id TEXT,                 -- 发送方知道时：平台消息 id
-    outcome     TEXT NOT NULL CHECK (outcome IN ('sent', 'rejected', 'unknown')),
-    sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    replied_at  TIMESTAMPTZ,
-    reply_match TEXT CHECK (reply_match IN ('quoted', 'next_message')),
-    CONSTRAINT proactive_deliveries_reply CHECK ((replied_at IS NULL) = (reply_match IS NULL))
-);
-CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_open
-    ON proactive_deliveries (channel_id, chat, sent_at DESC) WHERE replied_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_sent ON proactive_deliveries (sent_at);
--- proactive deliveries end
-```
+**表由第 2 期送达层（P2.6）的第一个 PR 建**，那个 PR 已经在并行开发（默认关），它定表的列和迁移，0.1 不建表。0.1 需要那张表至少有这些（名字以那边为准）：
+
+| 0.1 需要的 | 用途 |
+|---|---|
+| 来源（类型化，取值见下） | 按来源计数、算回复率 |
+| 渠道 ID、会话，是不是群 | 回复标记按会话找行 |
+| 任务、步骤、定时任务等引用 | 按来源对回去 |
+| 平台消息 id（发送方知道时） | 回复引用了哪一条（`quoted`） |
+| 发送时间、发送结果（发出、被拒、不确定） | 每天条数；回复率只算发出去的 |
+| 回复时间、回复方式（`quoted` 或 `next_message`），由 0.1 回填 | 30 分钟内的回复率 |
+
+送达层自己的决定列（结果、原因、是否计数、摘要日期）在送达层关闭时怎么填，以它的 RFC 为准；0.1 只写上表的列。来源的取值：`task_notice`、`completion`、`progress`、`gate`、`gate_reminder`、`subscription`、`intent`、`schedule`、`advisor_alert`、`autonomous`。
 
 **哪里写（两个出口，都在拿到发送结果之后）：**
 
@@ -139,7 +129,7 @@ CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_sent ON proactive_deliveries
 
 **回复标记：** 管家收到一条**说话人是操作者**的消息时（第 5.1 节的判断；第 0 期还没有 `SpeakerKind`，用同一个函数的第 0 期版本：控制台不经客户端，或发送者等于 `operator_sender_id`，私聊和群都算），把同一（渠道 ID，会话）里 30 分钟内发出、还没标记的行全部标上 `replied_at = now()`；消息引用或回复的平台消息 id 等于某行 `external_id` 的那一行标 `quoted`，其余标 `next_message`。后台执行，不挡回合。
 
-**保留：** `housekeeping` 删 90 天前的行。
+**保留：** 按送达层 RFC 定（0.1 不另设）。
 
 #### 4.1.3 指标页
 
@@ -160,14 +150,14 @@ CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_sent ON proactive_deliveries
 
 ### 4.2 0.2 四个前提验证（另行完成，本文只用结论）
 
-验证在 2026-11-20 完成（另外的验证任务，在本机和测试应用上做，本文没有重做）：
+以下是 2026-11-20 的实测（另外的验证任务，在本机和测试应用上做，本文没有重做）：
 
 | 验证 | 结论 | 对本文的影响 |
 |---|---|---|
-| 自研飞书长连接能不能收到卡片回调 | 能收到 `card.action.trigger`，但 Looper 现在只处理事件帧，会丢掉它；支持它要处理卡片帧并在 3 秒内回响应 | 第 2 期卡片按钮走长连接；与第 1 期无关 |
-| Claude Code 运行中能不能接收新输入 | 原生支持：回合进行中写入的消息先排队，等当前工具返回后并入同一轮，模型下一次推理就能看到；也能发中断请求立刻结束本轮，进程和会话保留 | 1.5 的中途提醒按写入常驻进程的做法实现（第 5.5.2 节）；Claude Code 声明 `MID_TURN_INPUT` |
-| 分会话后的空闲开销 | 每个常驻会话空闲约 240 MB，跑过一轮后约 310 MB，5 个合计约 1.5 GB；按需恢复一个会话到首次回复 1.8–3.4 秒，常驻只快 1–2 秒；空闲约 6 分钟后恢复 3.0–3.8 秒、每次 $0.001–0.006；空闲超过 1 小时没测 | `manager.sessions.max_resident` 默认从 4 降到 **2**（`main` 加一个最近的会话），其余按需恢复 |
-| 飞书的限流参数 | 近 5 天（日志保留到的范围）出站请求里 230020、99991400、429 都是 0 次；出站失败来自 lark-cli 的 20 秒超时，不是限流；官方限流数字还在查 | 1.6 里**超时重试和发件箱比限流更要紧**：所有消息都带幂等键，超时（`unknown`）可以安全重发；令牌桶保留参考值 15 QPS 作为兜底 |
+| 自研飞书长连接能不能收到卡片回调 | 长连接能带来 `card.action.trigger`，但 Looper 现在丢掉它：`lark_stream.py` 只处理 `event` 帧，其他数据帧回 `{"code":200}` 后丢弃，`_flat_event` 只认 `im.message.receive_v1`。支持它要处理卡片帧（帧类型推测是 `card`）并在约 3 秒内回业务响应，还要在开发者后台打开回调配置；还没有真机测试 | 第 2 期卡片按钮走长连接，不需要 HTTP 回调；与第 1 期无关 |
+| Claude Code 运行中能不能接收新输入 | 原生支持（stream-json、`--replay-user-messages`）：回合进行中写入的第二条用户消息先排队，等当前工具返回后并入**同一轮**（只有一个结果）。`control_request` 中断能立刻结束本轮（`error_during_execution`），进程和会话保留，下一条消息约 1.5 秒有回复；前台 Bash 的子进程可能残留 | 1.5 的中途提醒按写入常驻进程做（第 5.5.2 节），Claude Code 声明 `MID_TURN_INPUT`；同一会话运行中来的新消息直接并入当前回合（第 5.3.6 节）；中断只给第 3 期车道用，残留子进程的清理写进那时的验收 |
+| 分会话后的空闲开销（haiku） | 每个常驻会话空闲约 240 MB，带子进程树约 310 MB，5 个约 1.5 GB。恢复到首次回复：并发时 2.7–3.4 秒，单独 1.8–2.7 秒（94k 上下文 2.7 秒），冷启动 2.9 秒，常驻只省 1–2 秒。空闲 370 秒后（缓存按理已过期）恢复只多 0.4–0.8 秒（小会话 3.0–3.8 秒，约 94k 时 3.2–3.4 秒），每次 $0.001–0.006，只有约 18k 的前缀重建（机制没验证）。空闲超过 1 小时没测，推测要全部重建：多几秒、几美分 | `manager.sessions.max_resident` 默认 **2**（`main` 加一个最近的会话），其余按需恢复 |
+| 飞书的限流参数 | 现有日志（约 5 天）里 230020、99991400、429 都是 0 次；出站失败全是 lark-cli 的 20 秒超时，30 次里约 25 次集中在 10:00 和 17–18:00（推测是定时任务同时经 lark-cli 发送，或网关变慢）。内部文档：每个应用 OpenAPI 合计 50 次/秒、1000 次/分钟；99991400 是应用级网关限流，按响应头 `x-ogw-ratelimit-reset` 退避；机器人发消息「一般每个机器人约 5 QPS」（实践指南，不是官方）。230020 的含义、按会话和按用户的限制、同一条消息的编辑上限都**没有确认** | 1.6 的重点是单一出口、有上限的并发、超时后对带键发送的重试、发件箱的幂等；令牌桶和编辑间隔做成设置，取保守默认值并标「待核实」（第 5.6.3 节） |
 
 ### 4.3 0.3 助理体验评测集
 
@@ -328,6 +318,7 @@ themselves. Looper refuses such calls anyway.
 - **为什么说话人和「操作者本人的回合」分开：** 后者管的是**内容给谁看**（线索、vault 的文字会出现在这个会话里，群里不能给），前者管的是**谁有权决定**。你在群里说「确认」，发送者的 open_id 是平台给的，可以当你本人；但线索仍然不在群里出现。
 - **`CLIENT` 照常：** API 客户端的令牌是操作者签发的，现有的客户端转达确认（`client_handoff` 对话）保持不变；见第 16 节 Q3。
 - **机器人没填 `operator_sender_id`：** 那个机器人上没有人是 `OPERATOR`，需要授权的调用一律拒绝（失败即拒），拒绝消息写明「这个机器人没有设置『我的 ID』」。打开开关时的确认框已经列出这些机器人。
+- **按说话人判断，不按会话：** 检查只看发起这次调用的回合的 `turn.speaker`，不假设确认发生在请求它的那个会话里（第 3 期会把群里发起的确认改成发到你的私聊卡片，那时这条检查不用改）。
 - 开关关时这道检查不存在，`turn.speaker` 是 None，行为和现在一样。
 
 **验收：** 0.3 的时间类、身份类通过率明显高于基线（阈值见第 14 节）；关闭开关后 prompt 和原来逐字节一致；身份类的确认劫持用例在代码层面被拒（数据库测试，不依赖模型）。
@@ -363,7 +354,7 @@ Persona (set by the operator: your name, how you address them, your tone; Looper
 
 ### 5.3 1.3 会话路由（第一版）
 
-**开关：** `manager.session_routing.enabled`（默认关）、`manager.sessions.max_resident`（整数 2–16，默认 2，依据第 4.2 节的实测：按需恢复只比常驻慢 1–2 秒）。只对默认管家生效；场景管家仍是一个会话。
+**开关：** `manager.session_routing.enabled`（默认关）、`manager.sessions.max_resident`（整数 1–16，默认 2，依据第 4.2 节的实测：按需恢复只比常驻慢 1–2 秒；1 表示只有 `main` 常驻）。只对默认管家生效；场景管家仍是一个会话。
 
 #### 5.3.1 会话键
 
@@ -416,7 +407,7 @@ CREATE INDEX IF NOT EXISTS idx_manager_sessions_active ON manager_sessions (mana
 - **派发（1.3b）：** 开关打开时，消息循环只做派发：`USER_MESSAGE` 按键放进对应槽的队列，每个槽一个工作协程，串行处理自己的队列；`COMPLETION_DUE` 按收尾事件的会话算出的键进对应的槽（收尾回合现在只有私聊和控制台，所以是 `main` 或 `dm:`）；`GOAL_STATUS`、`TASK_*`、`AGENT_LIFECYCLE` 不跑模型，由派发协程直接处理。
 - **送达确认：** 现在总线在循环体返回后才把消息记为已送达；派发后循环体马上返回，消息会在槽处理完之前被记为送达，重启就丢了。所以 `MessageBus.subscribe` 加 `settle=False` 模式，槽处理完一条消息后调用 `bus.settle(message_id)`；同一个槽内先进先出，不同槽之间不保证顺序。
 - **每槽一个绑定文件：** `ManagerOps` 的绑定文件和 MCP 配置按槽分开（`turn_file_for(session_key)`，桥的环境变量里是这个槽的文件），一个槽的进程发来的调用只会对应到这个槽的回合。开关打开时调用一律按绑定找回合，不再用「当前回合」兜底（`chat.stop_enabled` 关时的那条路径）；没有绑定的调用按 Claude 自己的回合处理（只能读）。
-- **常驻上限和回收：** 每个管家同时最多 `max_resident` 个常驻进程（含 `main`）。一个群或 dm 槽要启动进程而已满时，回收最久没用、此刻空闲（没有回合在跑、队列为空、`try_stop_if_idle` 成功）的非 `main` 槽；它的会话 ID 留在表里，下次来消息时恢复。都不空闲时，这条消息在自己的队列里等，有槽结束回合时被唤醒；等待期间状态行显示「排队中：其他会话正忙」。`main` 不参与回收。
+- **常驻上限和回收：** 每个管家同时最多 `max_resident` 个常驻进程（含 `main`；上限是 1 时只有 `main` 常驻，其他会话每次按需恢复）。一个群或 dm 槽要启动进程而已满时，回收最久没用、此刻空闲（没有回合在跑、队列为空、`try_stop_if_idle` 成功）的非 `main` 槽；它的会话 ID 留在表里，下次来消息时恢复。都不空闲时，这条消息在自己的队列里等，有槽结束回合时被唤醒；等待期间状态行显示「排队中：其他会话正忙」。`main` 不参与回收。
 - **`/new`、`/stop`：** `/new` 只重置发出它的那个槽；`/stop` 按会话找正在跑的回合，和现在一样。
 - **会话 Profile：** 控制台选的会话 Profile（`select_session_profile`）只管 `main`；群和 dm 槽用管家的设置。
 - **排空和热升级：** `deletion_blocked`、`_idle_blocked`、排空判断看所有槽。
@@ -444,7 +435,32 @@ v1 只读操作 `manager_sessions.list`（`operator_only`）：每个会话的�
 
 **验收：** 控制台一个 5 分钟的回合进行时，群里的消息照常在正常时间内回复（第 14 节的口径）；串话类用例全部通过、`dm_still_knows` 通过；关闭开关后回到单会话，`main` 的历史还在。
 
-**有意没解决的：** 私聊和控制台仍共用 `main`，互相会等；两边要共享上下文。第 3 期的车道和插话解决等待。
+**还剩的等待：** 私聊和控制台仍共用 `main`（两边要共享上下文）。第 5.3.6 节让你在回合进行中发的新消息直接并入当前回合，这在第 1 期就缓解了大部分等待；不能并入的消息（命令、关卡回复、确认、带附件或引用的、别人说的）仍然排在这一轮之后。真正的并行车道在第 3 期。
+
+#### 5.3.6 运行中来的新消息并入当前回合（1.3e）
+
+**开关：** `manager.mid_turn_input.enabled`（默认关）。只在常驻会话的运行时声明了 `MID_TURN_INPUT` 时生效（第一版只有 Claude Code，第 4.2 节已实测）；其他运行时照旧排队。
+
+**做法：** 一条用户消息到达时，如果它要去的会话正有一个**用户回合**在跑（提示已经写进进程），并且下表的条件都满足，就不排下一轮，而是把它作为一条 `[Looper]` 输入写进正在运行的进程；Claude Code 在当前工具返回后把它并入同一轮，这一轮只有一个结果。
+
+| 条件 | 为什么 |
+|---|---|
+| 同一个会话；路由关时（只有一个会话，群也在里面）还要求同一个聊天 | 群的消息不能进你私聊的回合 |
+| 同一个发送者（说话人一致） | 别人的话不能借你这一轮的授权（第 5.1.4 节） |
+| 正在跑的是用户回合：不是收尾回合、不是 Claude 自己的回合、不是隐藏的追加回合 | 后台回合只能读，不该替用户做事 |
+| 新消息是纯文字：不是命令（`/stop` 照旧立刻处理，`/new`、`/help`、Profile、关卡命令）、不是关卡回复、不是意图回复、没有附件和引用 | 这些都由代码先处理，或要先读材料 |
+| 这个聊天里没有等确认的操作 | 确认必须是它自己那一轮（`looper_confirm` 的规则），不能并进别的回合 |
+| 这一轮并入的消息不到 3 条 | 有界 |
+
+- **写入的文字（模型可见）：** `[Looper] Another message from the user arrived while you were working (<聊天，同 [Turn context] 的 Chat 行；1.1 关时同 Channel 行>). Answer it in this same reply.`，接着是消息正文。
+- **回复：** 这一轮的最终回复照常发到这一轮自己的聊天；并入的消息如果来自**另一个聊天**（`main` 里控制台和私聊之间），同一段回复也作为对它的回复发过去；来自同一个聊天的，飞书和 Telegram 不另发，控制台给它的回复流一条代码写的结束语「（已并入上一条的回复）」。
+- **停止：** 任何一个相关聊天里的 `/stop` 停这一轮，所有并入的消息都收到停止的回复。
+- **送达确认：** 并入的消息在这一轮结束、回复交给渠道之后才 `bus.settle`；进程在这之前崩了，重启时它被重放，按普通消息处理。
+- **需要 1.3b 的派发：** 现在的消息循环在一轮进行中不读下一条消息；1.3b 的派发协程让队列在回合进行中也能被读到。所以这一项的开关打开时，即使路由关着也走派发（所有消息都进 `main` 一个槽）。
+- **记录：** 这一轮的回合记录加 `metadata.merged = [{message_id, chat, received_at}]`；0.1 打开时，并入的消息记自己的回执，首条回复记这一轮的回复时间。
+- **工具调用的归属：** 并入之后的调用仍然属于这一轮（它的聊天、它的绑定）；在这一轮里请求的确认挂在这一轮的聊天上。
+
+**验收：** 回合进行中你在同一聊天发的第二条消息被并入（一个结果、一条记录），模型的回复照顾到两条；控制台回合进行中你的私聊消息被并入，私聊也收到回复；另一个发送者的消息、命令、确认都照旧排队；关闭时逐字节不变。
 
 ### 5.4 1.4 会话预算
 
@@ -511,7 +527,7 @@ class DeliveryDebt(str, Enum):
 
 新模块 `looper/agents/channels/outbound.py`，两层：
 
-1. **网关**（所有写操作）：按应用的令牌桶、退避、熔断、编辑限速。
+1. **网关**（所有写操作）：按应用的并发上限、令牌桶、退避、熔断、编辑限速。
    - **飞书：** `GatedLarkTransport` 包住适配器的那一个 `LarkTransport` 实例（两种传输都是），`send`、`reply`、`edit`、`react` 经过网关，读操作原样转发；适配器里 `isinstance(transport, CliTransport)` 的判断改成问传输的类型化属性（或 `unwrap()`），不因为包了一层而走错分支。另一个绕过点是 `probe.py`（独立进程的探活），不在服务进程里，不接入。
    - **Telegram：** 非轮询请求的那个 `HTTPXRequest`（`self._requests[1]`）换成一个子类，按 Bot API 方法名区分写操作（`sendMessage`、`editMessageText`、`setMessageReaction`、`sendDocument`、`sendPhoto` 等）经过网关；`getMe` 这类读和轮询不经过。
 2. **发件箱**（消息的发送和回复）：先落库再发，带幂等键，崩溃后接着发、不重复。状态行、编辑、表情只经过网关，不进发件箱（丢了无害）。
@@ -558,11 +574,12 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 
 | 项 | 规则 |
 |---|---|
-| 令牌桶 | 每个应用（渠道 ID）一个，速率 `RATE_PER_SECOND = 15`（参考值，是代码常量不是设置；近 5 天没有一次限流，官方数字出来后由 PR 调整），容量等于一秒的量 |
-| 错误分类 `classify(exc) -> ErrorClass` | `rate_limited`：HTTP 429、飞书错误码 230020 或 99991400、Telegram 的 429（`parameters.retry_after`）；`rejected`：平台拒绝（`LarkCliError.refused`、Telegram 的 BadRequest、Forbidden 等）；`transient`：确定没发出去（启动失败、连接失败）；`unknown`：可能已发出（超时、连接中断） |
+| 并发上限 | 每个应用同时在途的平台调用最多 `channels.outbound.max_in_flight` 个（默认 4），其余排队：超时集中在定时任务扎堆的时段，单一出口加有界并发是主要的缓解 |
+| 令牌桶 | 每个应用两个，都是设置，默认值保守并标「待核实」：消息发送和回复 `channels.outbound.send_qps`（默认 5，依据「每个机器人约 5 QPS」的实践值）；所有写操作合计 `channels.outbound.write_qps`（默认 15，低于文档的每应用 50 次/秒、1000 次/分钟）。容量等于一秒的量 |
+| 错误分类 `classify(exc) -> ErrorClass` | `rate_limited`：HTTP 429、飞书错误码 230020（含义未确认，先按限流处理）或 99991400（应用级网关限流；HTTP 传输时按响应头 `x-ogw-ratelimit-reset` 定等待时间，lark-cli 不给响应头时按退避表）、Telegram 的 429（`parameters.retry_after`）；`rejected`：平台拒绝（`LarkCliError.refused`、Telegram 的 BadRequest、Forbidden 等）；`transient`：确定没发出去（启动失败、连接失败）；`unknown`：可能已发出（超时、连接中断） |
 | 退避 | `rate_limited`、`transient`：1、2、4、8、16 秒，±20% 抖动，平台给了 `retry_after` 时取较大值，最多重试 5 次，之后 `failed`；`unknown`（包括 lark-cli 的 20 秒超时，近几天出站失败的唯一来源）：飞书带键的发送按同样的退避重试（平台按键去重；打开后所有消息都带键，现在只有 `post` 带），其余记 `uncertain` 不重试；`rejected` 不重试 |
 | 熔断 | 同一应用 30 秒内连续 5 次失败（`rejected` 不算）就熔断 60 秒：发件箱的发送暂停；编辑和表情直接失败（和现在失败时一样被忽略）；60 秒后放一条探测，成功就恢复，失败再熔断 60 秒 |
-| 编辑限速 | 同一条消息两次编辑至少隔 1 秒，期间的编辑合并，最后一次的文字生效。现有状态行本来就最多 3 秒一次，这条是给所有编辑的兜底 |
+| 编辑限速 | 同一条消息两次编辑至少隔 `channels.outbound.edit_interval_seconds`（默认 1 秒，平台的编辑上限未确认），期间的编辑合并，最后一次的文字生效。现有状态行本来就最多 3 秒一次，这条是给所有编辑的兜底 |
 
 错误码的来源：`LarkCliError.code`（lark-cli 输出里的 `error.code`，没有 HTTP 状态）、`LarkApiError.code` 和 `http_status`（非 JSON 的 429 只有 `http_status`，所以分类要先看状态码）。lark-cli 遇到 429 时给出什么码需要验证（1.6a 用替身覆盖各种码；真实平台上的那一次由协调者用测试应用、测试会话确认，开发 agent 不调用真实平台）。
 
@@ -570,7 +587,9 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 
 `manager_metrics.get` 加一组 `outbound`：每个渠道的排队长度（`pending` + `sending` 行数）、近 24 小时的退避次数、熔断次数、按 `error_class` 的失败数、`uncertain` 数；首页「管家」一组加对应的几个数。状态变化（熔断打开和恢复）各记一行日志。
 
-**验收：** 用假的飞书服务注入 429，消息全部最终送达且不重复；发送中途杀掉进程，重启后补发、不重复（飞书）或记 `uncertain`（Telegram）；关闭时调用序列逐字节不变。
+**新的写路径：** 第 2 期并行开发的卡片按钮、提醒等会加新的飞书写调用（发卡片、更新卡片）。`LarkTransport` 上的写方法列在一个类型化集合里，`GatedLarkTransport` 对集合里的每一个都经过网关，测试断言协议上每个写方法都在集合里，新加的写方法不经网关就过不了测试。
+
+**验收（按实际发生的频率排序）：** 替身让发送超时（可能已发出）后，带键的发送重试且平台只收到一条、不带键的记 `uncertain`；定时任务扎堆时在途调用不超过上限；替身注入 230020、99991400、429 后消息全部最终送达且不重复；发送中途杀掉进程，重启后补发、不重复（飞书）或记 `uncertain`（Telegram）；关闭时调用序列逐字节不变。
 
 ### 5.7 1.7 打开已经做好的能力
 
@@ -590,7 +609,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 
 | 期 | 变化 | 迁移 | 在线安全 |
 |---|---|---|---|
-| 0 | 新表 `proactive_deliveries` | 命名迁移 `proactive_deliveries`，块标记 `-- proactive deliveries begin/end` | 新表，约束随表生效 |
+| 0 | `proactive_deliveries` | 由送达层（P2.6）的第一个 PR 建，0.1 不建表 | 新表 |
 | 0 | `llm_records.metadata.turn_metrics`（JSON 键） | 无 | 不改表 |
 | 1.3 | 新表 `manager_sessions`（只存 `group:`、`dm:`） | 命名迁移 `manager_sessions` | 新表 |
 | 1.4 | `agent_sessions` 加可空列 `context_tokens INTEGER`、`last_turn_cost_usd DOUBLE PRECISION` | 命名迁移 `manager_session_bounds`；`ALTER TABLE … ADD COLUMN`（无默认值、无约束，不重写表） | 小表；不加约束 |
@@ -610,11 +629,16 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | `user.reply_language` | `zh-CN`、`en` | `zh-CN` | 操作者 | 同上 |
 | `manager.persona` | JSON（第 5.2 节） | 未设置 | 操作者（管家没有写工具） | 没有人格段 |
 | `manager.session_routing.enabled` | 布尔 | 关 | 操作者 | 单会话 |
-| `manager.sessions.max_resident` | 整数 2–16 | 2 | 操作者 | 不用 |
+| `manager.sessions.max_resident` | 整数 1–16 | 2 | 操作者 | 不用 |
 | `scheduler.session_context_max_tokens` | 整数（#1473） | 100000 | 操作者 | 1.4 关时管家不用 |
 | `manager.turn_budget_usd` | 正数 | 未设置（默认值待第 4.4 节的查询） | 操作者 | 管家没有逐轮上限、不做压缩和换新 |
 | `manager.delivery_guard.enabled` | 布尔 | 关 | 操作者 | 不提醒、不追加回合，空回复照旧报错 |
 | `channels.outbound.enabled` | 布尔 | 关 | 操作者 | 直接用原来的传输 |
+| `channels.outbound.send_qps` | 正数 | 5（待核实） | 操作者 | 不用 |
+| `channels.outbound.write_qps` | 正数 | 15（待核实） | 操作者 | 不用 |
+| `channels.outbound.edit_interval_seconds` | 正数 | 1（待核实） | 操作者 | 不用 |
+| `channels.outbound.max_in_flight` | 整数 1–32 | 4 | 操作者 | 不用 |
+| `manager.mid_turn_input.enabled` | 布尔 | 关 | 操作者 | 运行中来的消息排到下一轮 |
 
 「操作者」指 Settings 页和 `loopercli`（v1 操作 `operator_only`）；管家的 `looper_settings` 不列这些键，既不能读也不能改。打开任何一个开关都在 Settings 里有一句它会改变什么。
 
@@ -647,6 +671,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 1.4 压缩失败 | 换新 |
 | 1.4 换新时交接摘要失败 | 和现在的换会话一样：没有交接摘要，新会话照常开始 |
 | 1.5 追加回合出错 | 停止追加，发固定的失败提示 |
+| 1.3e 写进运行中的进程失败 | 这条消息退回队列，排到下一轮（和开关关时一样） |
 | 1.6 发件箱写库失败 | 这一条直接经网关发送（不落库），日志警告并计数；消息不因为库坏了而不发 |
 | 1.6 熔断 | 消息留在发件箱，熔断结束后发 |
 
@@ -663,6 +688,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | `manager.turn_budget_usd` | 未设置时记录器没有软上限、命令行与基准一致、回合结束后不做检查 |
 | `manager.delivery_guard.enabled` | 关时空回复仍得到现在的错误提示，只有一条回合记录 |
 | `channels.outbound.enabled` | 关时替身传输记录到的调用序列（方法、参数、幂等键）与基准一致，`channel_outbox` 为空 |
+| `manager.mid_turn_input.enabled` | 关时回合进行中来的第二条消息排到下一轮：两条记录，写进进程的输入和 `main` 上一样 |
 
 「基准」是测试里固定的期望值，在 PR 开出时从 `main` 的行为得出；不比对 prompt 全文快照（开发计划第 1 节），比对哈希和关键行。
 
@@ -676,6 +702,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 1.2 | Settings → Chat：人格表单 | 自称和语气 | 同飞书 | 由 v1 目录生成 |
 | 1.3 | 首页会话列表、重置 | 群和他人私聊各自的会话 | 同飞书 | `loopercli manager_sessions list` |
 | 1.4 | 设置、首页次数 | 超限提示 | 同飞书 | 由 v1 目录生成 |
+| 1.3e | 回合进行中发的消息并入当前回复 | 同控制台；跨聊天时私聊也收到回复 | 同飞书 | — |
 | 1.5 | 空回复被补发 | 同控制台 | 同控制台 | — |
 | 1.6 | 首页出站几个数 | 所有写操作 | 所有写操作 | — |
 
@@ -685,6 +712,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 - **1.1 打开后你在某个机器人上确认不了操作：** 那个机器人没填「我的 ID」。打开时的确认框列出它们，拒绝消息写明原因。
 - **1.1 的群里「你本人」靠 open_id：** 同一个人在不同应用下 open_id 不同，按机器人分别填（账本 RFC 第 4.3 节已是这样）。
 - **多个常驻进程的内存和订阅用量：** 每个常驻会话约 240–310 MB（第 4.2 节），上限默认 2；回收只回收空闲的。空闲超过 1 小时后恢复的延迟和花费没测过，1.3b 的真实路径补测一次。
+- **1.3e 跨聊天并入：** 控制台的回合里并入了你的私聊消息，回复会同时出现在两边；这一轮里请求的确认挂在这一轮的聊天上，你在另一边说「确认」不算（会提示去原来的聊天，或重新发起）。
 - **1.5 的追加回合会多花钱：** 每轮最多 2 次，只在成功结束却没有文字时触发；度量里单独计数。
 - **1.6 的发件箱多一次写库：** 每条消息多一次插入和一次更新（毫秒级）；写库失败时直接发送，不让消息卡在库上。
 - **飞书幂等键的去重窗口** 按文档是 1 小时，需要验证；超过窗口的 `sending` 行记 `uncertain`，不重发。
@@ -697,7 +725,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | PR | 内容 | 依赖 | 默认关闭时 | 模型可见 | 验收 |
 |---|---|---|---|---|---|
 | 1.7a | 账本开关的入口：`chat_settings.ledger_enabled`、Settings → Chat 的开关、打开时列出没填「我的 ID」的机器人（`channels.operator_ids.missing()`） | — | 不变（开关本来就是关） | 否 | 打开、关闭、列出的测试；截图 |
-| 0.1a | `turn_metrics`、`AckBoard`、`proactive_deliveries` 表与写入、回复标记、`manager.metrics.enabled`、`manager_metrics.get` | — | 回合记录不变，表为空 | 否 | 第 4.1 节；第 10 节 |
+| 0.1a | `turn_metrics`、`AckBoard`、往 `proactive_deliveries` 写行（表由 P2.6 建）、回复标记、`manager.metrics.enabled`、`manager_metrics.get` | P2.6 的第一个 PR（建表） | 回合记录不变，表为空 | 否 | 第 4.1 节；第 10 节 |
 | 0.1b | 首页「管家」一组（含开关关时的说明） | 0.1a | — | 否 | 无头浏览器截图（1280、390） |
 | 0.3 | `evals/assistant_experience.py`、20 条用例、假模式通过、基线文件格式；真实基线在预算获批后跑 | — | — | 否（只加评测） | 假模式 20 条都能跑通；真实基线四类都有通过率 |
 | 1.1 | `turn_context`、说话人、两个用户设置、渲染、契约、授权检查、Settings 字段 | 0.3（评测用例）、1.7a（列出机器人的函数） | prompt 逐字节不变 | 是 | 时间、身份类对比基线；第 10 节 |
@@ -706,9 +734,10 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 1.3b | `manager_sessions`、迁移、`session_key_for`、派发、每槽绑定、送达确认、常驻上限与回收、收尾回合和自己说的话回到原槽、`manager.session_routing.enabled` | 1.3a、1.7a | 单会话 | 否（会话内容不变） | 并行与回收、重启重放、绑定隔离的测试；真实路径：控制台长回合时群照常回复 |
 | 1.3c | 群和 dm 槽的裁剪：开场摘录、续接简报范围、人格裁剪、第二道 | 1.3b（人格裁剪需 1.2） | 不变 | 是 | 串话类全部通过、`dm_still_knows` 通过 |
 | 1.3d | `manager_sessions.list`、首页会话列表与重置 | 1.3b | — | 否 | 截图 |
+| 1.3e | 运行中来的新消息并入当前回合（第 5.3.6 节）、`manager.mid_turn_input.enabled`、`MID_TURN_INPUT` 能力 | 1.3b（派发） | 第二条消息排到下一轮，和现在一样 | 是（并入时写入的那一行） | 第 5.3.6 节；真实 Claude Code 上的同一聊天和跨聊天两种并入 |
 | 1.4 | 管家路径的 `session_bound`、维护回合 `/compact`、`SESSION_BOUND` 换新、最近 3 次任务结果、单轮软上限、`manager.turn_budget_usd`、`agent_sessions` 两列、次数指标 | #1473、1.3b | 行为不变 | 是（续接简报多一段、超限提示） | 第 5.4 节 |
-| 1.5 | `DeliveryDebt`、追加回合、固定失败提示、中途提醒（按 0.2）、`manager.delivery_guard.enabled` | — | 不变 | 是 | 第 5.5 节 |
-| 1.6a | `channel_outbox`、迁移、网关核心（令牌桶、分类、退避、熔断、编辑限速）、发送循环、`channels.outbound.enabled`；飞书接入（`GatedLarkTransport`、适配器的发送走发件箱） | — | 调用序列不变 | 否 | 替身注入 429、230020、99991400 后全部送达且不重复；发送中途停掉再启动后补发、不重复 |
+| 1.5 | `DeliveryDebt`、追加回合、固定失败提示、中途提醒（`MID_TURN_INPUT`，和 1.3e 共用这个能力，先合入的那个加）、`manager.delivery_guard.enabled` | — | 不变 | 是 | 第 5.5 节 |
+| 1.6a | `channel_outbox`、迁移、网关核心（并发上限、两个令牌桶、分类、退避、熔断、编辑限速）、发送循环、`channels.outbound.*` 设置；飞书接入（`GatedLarkTransport`、写方法集合、适配器的发送走发件箱） | — | 调用序列不变 | 否 | 先是超时：带键的重试且只收到一条、不带键的记 `uncertain`；再是并发上限；再是 230020、99991400、429 全部送达且不重复；发送中途停掉再启动后补发、不重复 |
 | 1.6b | Telegram 接入（请求子类、发送走发件箱、分段的键） | 1.6a | 调用序列不变 | 否 | 替身注入 429；崩溃后 `uncertain` 不重发 |
 | 1.6c | 出站指标进 `manager_metrics.get` 和首页 | 1.6a、0.1b | — | 否 | 截图 |
 
@@ -716,11 +745,17 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 
 - 0.1a 先合入（之后的每一项都要有可比的数字）；0.3、1.7a 和 0.1a 可以同时做。
 - 1.1、1.2、1.5、1.6a 互相独立，也不依赖第 0 期的代码，可以同时开发；但**打开**要等 0.1 有一周数据、0.3 有基线。
-- 1.3a 在 0.1a 之后尽早合入：它动的字段 1.1、1.2、1.5 都会碰到，晚了冲突更多。1.3b → 1.3c → 1.3d 依次；1.4 在 1.3b 和 #1473 之后。
+- 1.3a 在 0.1a 之后尽早合入：它动的字段 1.1、1.2、1.5 都会碰到，晚了冲突更多。1.3b → 1.3c、1.3e → 1.3d 依次；1.4 在 1.3b 和 #1473 之后。
 - 1.6b、1.6c 在 1.6a 之后可以并行。
-- 同时进行的开发会话不超过 4 个（开发计划第 1 节）。
+- **冲突热点：** `looper/agents/tiers/manager.py`。改它的是 0.1a、1.1、1.2、1.3a、1.3b、1.3c、1.3e、1.4、1.5，还有第 2 期并行开发的几项。**同时在做的 `manager.py` 接线 PR 不超过 2 个**（含第 2 期的）；新逻辑放进新模块，`manager.py` 里只做薄接线，PR 描述写明改了哪些行。其余 PR（0.1b、0.3、1.7a、1.3d、1.6a–c）不受这个限制。
+- 同时进行的开发会话数按开发计划第 1 节的当前上限。
+- **和第 2 期并行项的分工：** `proactive_deliveries` 由送达层（P2.6）建，0.1 只写行和回填回复；`user.timezone` 由 1.1 拥有（设置和编辑入口），提醒（P2.3）只读它；卡片按钮（P2.4）新加的飞书写调用在 1.6a 合入后要经过网关（第 5.6.4 节后的「新的写路径」）。待办（P2.5）、检索（P2.2）和本文没有交叉。
 
-推荐的合入顺序：0.1a、0.3、1.7a → 1.3a → 0.1b、1.1、1.2、1.5、1.6a（并行）→ 1.3b、1.6b → 1.3c、1.3d、1.6c → 1.4。
+推荐的合入顺序（`manager.py` 的 PR 两个一组）：
+
+1. 0.3、1.7a、1.6a、0.1b 的前端部分可以随时做；
+2. `manager.py`：0.1a 和 1.3a → 1.1 和 1.5 → 1.2 和 1.3b → 1.3c 和 1.3e → 1.4；
+3. 1.6b、1.6c、1.3d 跟在各自的依赖后面。
 
 ## 14. 出口标准
 
@@ -752,7 +787,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 回复语言「来自设置」 | 新键 `user.reply_language` | 产品设计没给键名 |
 | 群会话开头带「最近 8 条消息的摘要」 | 代码摘出最近 8 条已存消息，不调用模型 | 省一次模型调用，内容可预期；用不可信内容围栏包住 |
 | 场景管家可以选择继承人格 | 推迟，记入第 5 节待办 | 现在没有使用方，不先加列 |
-| 令牌桶速率按 0.2 定（参考 15 QPS） | 代码常量 15；0.2 测到近 5 天没有一次限流，官方数字出来后由 PR 改 | 不加一个没人调的设置；出站的重点放在超时重试和发件箱 |
+| 令牌桶速率按 0.2 定（参考 15 QPS） | 两个可调的设置：发送 5 QPS、所有写操作 15 QPS，加并发上限 4、编辑间隔 1 秒，都标「待核实」 | 官方的按接口数字没找到；近几天没有一次限流，实际失败是扎堆时段的超时，所以加有界并发 |
 | 常驻上限默认 4 | 默认 2 | 0.2 实测：每个常驻会话约 240–310 MB，按需恢复只慢 1–2 秒 |
 | 状态行同一条消息 1 秒内最多更新 1 次 | 现有状态行已经是 3 秒一次；网关对所有编辑加 1 秒的兜底 | 不放宽现有的限制 |
 | 1.3 的 PR ①–⑥ | 1.3a 重构、1.3b（表和迁移 + 路由和回收 + 通知回到原会话）、1.3c（裁剪 + 评测）、1.3d（会话列表） | 只有表没有用法不算一个结果；重构先行减少冲突 |
@@ -761,8 +796,12 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 1.6 的 PR ① 表和发送循环、② 飞书、③ Telegram、④ 指标 | 1.6a（表、发送循环和飞书）、1.6b（Telegram）、1.6c（指标） | 没有调用方的发送循环不算一个结果；飞书是主要渠道，和核心一起评审 |
 | 「指标页」 | 控制台首页加一组 | 现在没有单独的指标页 |
 | 1.5 中途「注入一条提醒」 | 写入常驻进程，只在声明 `MID_TURN_INPUT` 的运行时（第一版只有 Claude Code） | 0.2 证实 Claude Code 在工具返回后读到中途写入的输入 |
+| 私聊和控制台互相等，留到第 3 期 | 第 1 期加 1.3e：同一会话运行中来的你的消息并入当前回合 | 0.2 证实运行时原生支持；跨聊天并入时回复两边都发 |
+| `proactive_deliveries` 在第 0 期建 | 由送达层（P2.6）的第一个 PR 建，0.1 只写行 | 送达层已经在并行开发，表的列由它定一次 |
 
 ## 16. 待定问题（各有推荐）
+
+评审意见（2026-11-20）同意 Q1–Q5、Q7、Q9 的推荐（Q2 另提醒：1.1 的检查按说话人写，已写进第 5.1.4 节）；Q6 等第 4.4 节的线上只读查询；Q8 等维护者批准预算；Q10 是按评审意见加了 1.3e 之后新出现的。以上都由维护者最后定。
 
 | 编号 | 问题 | 选项 | 推荐 |
 |---|---|---|---|
@@ -775,3 +814,4 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | Q7 | 0.1 合入后是否马上打开 | (a) 马上打开；(b) 和其他开关一样逐个打开 | **(a)**。只记录、不改行为，越早有一周数据越好；打开前照例告诉你 |
 | Q8 | 0.3 基线跑哪些档位 | 第 4.3.1 节 | sonnet `--reps 3` 加 opus xhigh 管家 `--reps 2`，约 $6.2，上限 $12 |
 | Q9 | Telegram 要不要进 0.3 | (a) 只用飞书替身；(b) 另写 Telegram 替身 | **(a)**。说话人、会话键和裁剪的代码两个渠道共用；Telegram 的差别（群消息不存、没有显示名）用单元测试覆盖 |
+| Q10 | 1.3e 并入来自另一个聊天（控制台和你的私聊之间）的消息时，回复发到哪 | (a) 两边都发同一段回复；(b) 只发到这一轮自己的聊天，另一边给一句「已在控制台回复」；(c) 跨聊天不并入，只并同一聊天 | **(a)**。两边都是你本人的聊天，没有隐私问题；你在哪边问就在哪边看到答案。(c) 最简单，但缓解不了控制台和私聊互相等 |
