@@ -30,7 +30,7 @@ class LarkTransport(Protocol):
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
                     idempotency_key: str | None = None, return_id: bool = False,
                     reply_in_thread: bool = False) -> str | None: ...
-    async def edit(self, message_id: str, *, text: str) -> None: ...
+    async def edit(self, message_id: str, *, text: str | None = None, markdown: str | None = None) -> None: ...
     async def react(self, message_id: str) -> None: ...
     async def download(self, message_id: str, ref: ResourceRef, part: Path, *, max_bytes: int) -> None: ...
     def events(self) -> AsyncIterator[dict[str, Any]]: ...
@@ -241,8 +241,8 @@ class CliTransport:
         await lark_cli.run(argv)
         return None
 
-    async def edit(self, message_id: str, *, text: str) -> None:
-        await lark_cli.run(lark_cli.edit_command(message_id, text=text, profile=self._profile))
+    async def edit(self, message_id: str, *, text: str | None = None, markdown: str | None = None) -> None:
+        await lark_cli.run(lark_cli.edit_command(message_id, text=text, markdown=markdown, profile=self._profile))
 
     async def react(self, message_id: str) -> None:
         await lark_cli.run(lark_cli.reaction_command(message_id, profile=self._profile))

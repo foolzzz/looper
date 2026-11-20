@@ -114,6 +114,11 @@ class ChannelAdapter(ABC):
         return PostReceipt(False, error=f"the {self.channel_type} channel cannot post messages",
                            outcome=PostOutcome.REJECTED)
 
+    async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
+        """Edit a bot's own message when this channel supports it."""
+        return PostReceipt(False, error=f"the {self.channel_type} channel cannot edit messages",
+                           outcome=PostOutcome.REJECTED)
+
     def healthcheck(self) -> dict[str, Any]:
         """Return channel health status. Override for richer diagnostics."""
         return {"channel": self.channel_type, "healthy": True}

@@ -55,7 +55,7 @@ SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
 # What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run
 # (its prompt and reply) and a part per window event. ``estimate`` uses them for the confirmation and the backfill.
-COST_MEASURED_ON = "2026-11-19"
+COST_MEASURED_ON = "2026-11-20"
 COST_PER_RUN_USD = (0.005, 0.008)
 COST_PER_EVENT_USD = 0.0002
 
