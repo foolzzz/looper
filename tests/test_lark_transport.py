@@ -431,13 +431,13 @@ def test_recovered_progress_falls_back_only_when_the_original_message_is_gone(
     asyncio.run(main())
 
 
-def test_a_post_without_a_message_id_is_not_successful(tmp_path: Path) -> None:
+def test_a_post_the_platform_took_without_a_message_id_was_sent(tmp_path: Path) -> None:
     async def main() -> None:
         transport = StubTransport()
-        transport.message_id = None
+        transport.message_id = None  # the answer was a success (ok / code 0) and gave no id
         adapter = _adapter(tmp_path, transport)
         receipt = await adapter.post(USER, "gate question")
-        assert not receipt.success and receipt.external_ids == () and receipt.error
+        assert receipt.success and receipt.external_ids == () and receipt.error is None
         await adapter.stop()
 
     asyncio.run(main())

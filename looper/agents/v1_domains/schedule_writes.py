@@ -1,7 +1,10 @@
 """Schedule administration through the shared services and scheduler."""
 
+from datetime import datetime, timezone
+
 from ...db import connection as db_connection, projects as db_projects, schedules as db_schedules
-from .. import schedules
+from ...db import subscriptions as db_subs
+from .. import schedules, subscriptions
 from ..agent_settings import BUDGET_MAX_USD, CONCURRENCY_MAX
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..ops import ErrorCode, OpError
@@ -20,9 +23,19 @@ EDIT_EFFECT = {
                          "without an agent or model spend."),
 }
 
+_SUBSCRIPTION = _object({
+    "source_id": _STR, "chat_kinds": _array(_enum("p2p", "group", "topic", "unknown")),
+    "sender_kinds": _array(_enum("user", "app")), "include_chats": _array(_STR), "exclude_chats": _array(_STR),
+    "exclude_mentions_me": _BOOL, "include_history": _BOOL,
+    "max_age_minutes": {"type": "integer", "minimum": 5, "maximum": 10080},
+    "max_events": {"type": "integer", "minimum": 1, "maximum": 2000}, "render": _enum("lines_v1"),
+    "text_max_chars": {"type": "integer", "minimum": 20, "maximum": 4000},
+    "quiet_word": {"type": "string", "minLength": 1, "maxLength": 40},
+    "output_header": {"type": "string", "maxLength": subscriptions.HEADER_MAX_CHARS},
+    "output_kind": _enum("push")}, [], closed=True)
 _BUDGET = _nullable({"type": "number", "exclusiveMinimum": 0, "maximum": BUDGET_MAX_USD})
 _FIELDS = {
-    "kind": _enum("agent", "command"),
+    "kind": _enum("agent", "command", "subscription"), "subscription": _SUBSCRIPTION,
     "name": {"type": "string", "maxLength": schedules.NAME_MAX_CHARS}, "cron": _STR,
     "requirement": _STR, "timezone": _STR, "work_dir": _STR,
     "command": _nullable({"type": "string", "maxLength": schedules.GATE_COMMAND_MAX_CHARS}),
@@ -47,7 +60,7 @@ _FIELDS = {
     "notify_format": _enum("report", "deliverable"),
     "user_gates": _enum("off", "on"),
     "notify_target": _nullable(_object({"channel": _STR, "chat": _STR}, closed=True)),
-    "profile_overrides": _nullable(_object(dict.fromkeys(("planner", "worker", "reviewer"), _NULL_STR),
+    "profile_overrides": _nullable(_object(dict.fromkeys(("planner", "worker", "reviewer", "processor"), _NULL_STR),
                                             [], closed=True)),
     "task_limits": _nullable(_object(dict.fromkeys(("worker", "reviewer"), _nullable({
         "type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX})), [], closed=True)),
@@ -69,10 +82,10 @@ RESULTS = {
 }
 
 
-def _op(action, fields, result, *, risk="write"):
+def _op(action, fields, result, *, risk="write", required=None):
     description = f"Change schedules: {action.replace('_', ' ')}."
     return Operation(f"schedule_admin.{action}", "POST", f"/api/v1/schedule_admin/{action}",
-                     description, description, _object(fields, closed=True), result,
+                     description, description, _object(fields, required, closed=True), result,
                      risk=risk, confirms=action != "create")
 
 
@@ -83,7 +96,101 @@ OPERATIONS = (
     _op("delete", _ID, _object({"deleted": _STR}), risk="high"),
     _op("reset_planner_session", _ID, _object({"cleared": _BOOL}), risk="high"),
     _op("run", _ID, _object({"run": RUN}), risk="high"),
+    # A subscription's push target, shown to the operator and confirmed as it is now; and its cursor, moved to just
+    # before the first event its source ingested after a time (the switch from an outside collector).
+    _op("confirm_target", {**_ID, "config_version": _STR}, _object({"schedule": SCHEDULE}), risk="high",
+        required=["schedule_id"]),
+    _op("reset_cursor", {**_ID, "after": {"type": "string", "format": "date-time"}},
+        _object({"schedule": SCHEDULE, "cursor": _object({
+            "cursor_seq": {"type": "integer"}, "committed_seq": {"type": "integer"},
+            "events_after": {"type": "integer"}})}), risk="high"),
 )
+
+
+def _after(value: str) -> datetime:
+    """A time with its offset, as ``reset_cursor`` takes it."""
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise OpError(ErrorCode.INVALID, "after must be an ISO 8601 time with its offset, such as "
+                                         "2026-11-19T08:00:00-08:00") from None
+    if moment.tzinfo is None:
+        raise OpError(ErrorCode.INVALID, "after needs its offset (such as -08:00 or Z): events are stored in UTC")
+    return moment.astimezone(timezone.utc)
+
+
+async def _subscription_impact(action, row, arguments, project_dir, subject, principal):
+    """What the operator is shown before they act on a subscription schedule; None when no confirmation is needed
+    (a change that touches neither its target, its rule, its zone nor whether it runs)."""
+    now = datetime.now(timezone.utc)
+    if action == "delete":
+        return (f"Delete {subject}, its runs and notifications. The events it read stay in the stream; "
+                "what it pushed stays in the chat.")
+    if action == "reset_planner_session":
+        raise OpError(ErrorCode.INVALID, "a subscription has no Planner session")
+    if action == "run":
+        arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
+        pushes = "pushes it to its confirmed target" if row["subscription"]["target_confirmed_at"] else \
+            "keeps it on the dashboard (its push target is not confirmed)"
+        return (f"Run {subject} once now: it reads the events after its cursor, runs its processor within its caps and "
+                f"{pushes}. Its next fire stays.")
+    if action == "confirm_target":
+        if not row["notify_channel"]:
+            raise OpError(ErrorCode.INVALID, "the subscription has no notify_target to confirm")
+        arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
+        shown = await subscriptions.config_version(row)
+        if arguments.get("config_version") not in (None, shown):
+            raise OpError(ErrorCode.CONFLICT, "the subscription changed since config_version was read: read it again")
+        # A client is shown what the schedule is now; confirming confirms that.
+        if principal.kind == "client":
+            arguments["_config_version"] = shown
+        return await subscriptions.confirmation_text(row, now=now, action="确认推送目标：")
+    if action == "reset_cursor":
+        if await db_schedules.open_runs(db_connection.get_pool(), row["id"]):
+            raise OpError(ErrorCode.CONFLICT, "a run of the subscription is in progress: reset its cursor when it ends")
+        moment = _after(arguments.get("after"))
+        found = await db_subs.cursor_after(db_connection.get_pool(), row["id"], moment)
+        return (f"Reset the cursor of {subject} to just after the events ingested before {moment.isoformat()}: "
+                f"it moves from {row['subscription']['cursor_seq']} to {found['cursor_seq']}, so its next run reads "
+                f"the {found['events_after']} events stored since (up to {found['committed_seq']}), then the "
+                "subscription's own filter and window limits apply.")
+    data = arguments["fields"]
+    if not data:
+        raise OpError(ErrorCode.INVALID, "give at least one field to change")
+    if "kind" in data and data["kind"] != "subscription":
+        raise OpError(ErrorCode.INVALID, "a schedule's kind cannot change; create a new schedule")
+    try:
+        stream = await schedules._stream_fields(data, update=True)
+        rest = {key: value for key, value in data.items() if key != "subscription"}
+        fields, profiles, _ = (await schedules._fields(rest, update=True, resolve_profiles=False)
+                               if rest else ({}, None, None))
+        schedules._check_kind_fields("subscription", {**row, **fields, **(
+            {"profile_overrides": profiles} if "profile_overrides" in rest else {})})
+        schedules._check_rule(fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"]), now,
+                              gated=True)
+    except schedules.RequestError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
+    asked = {**fields, **({"enabled": data["enabled"]} if "enabled" in data else {})}
+    enabling = bool(data.get("enabled")) and not row["enabled"]
+    if not (enabling or subscriptions.needs_confirmation(row, asked)):
+        return None
+    if enabling:
+        try:
+            await schedules._check_processor_runs(row["id"])
+        except schedules.RequestError as exc:
+            raise OpError(ErrorCode.CONFLICT, str(exc)) from None
+    if "profile_overrides" in rest:
+        raise OpError(ErrorCode.INVALID, "change the processor's Agent Profile in a request of its own: what you "
+                                         "confirm is the profile that runs")
+    arguments["_schedule_version"] = db_schedules.configuration_version(
+        row, project_work_dir=project_dir, changes=fields)
+    after = {**row, **fields, "enabled": data.get("enabled", row["enabled"]),
+             "subscription": {**row["subscription"], **(stream or {})}}
+    # Only a client that was asked and confirmed has the operator's word, and only for what it was shown: the
+    # dashboard's own request is not asked, and its operator confirms the target after (``confirm_target``).
+    arguments["_confirm_version"] = (await subscriptions.config_version(after)
+                                     if principal.kind == "client" and after.get("notify_channel") else None)
+    return await subscriptions.confirmation_text(after, now=now, action=f"{'启用并更新' if enabling else '更新'}")
 
 
 async def impact(server, operation, arguments, principal, headers):
@@ -105,6 +212,10 @@ async def impact(server, operation, arguments, principal, headers):
         # Bind the displayed read; the closed request cannot supply this server-owned version.
         arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
     subject = f"schedule {row['name']!r} in project {row['project_name']!r}"
+    if row["kind"] == "subscription":
+        return await _subscription_impact(action, row, arguments, project_dir, subject, principal)
+    if action in ("confirm_target", "reset_cursor"):
+        raise OpError(ErrorCode.INVALID, f"{action} applies to subscriptions only")
     if action == "delete":
         if row["kind"] == "command":
             runs = await db_schedules.open_runs(db_connection.get_pool(), row["id"])
@@ -124,6 +235,8 @@ async def impact(server, operation, arguments, principal, headers):
     data = arguments["fields"]
     if not data:
         raise OpError(ErrorCode.INVALID, "give at least one field to change")
+    if "subscription" in data:
+        raise OpError(ErrorCode.INVALID, "subscription applies to schedules of kind subscription only")
     if "kind" in data and data["kind"] != row.get("kind", "agent"):
         raise OpError(ErrorCode.INVALID, "a schedule's kind cannot change; create a new schedule")
     # Normalize with the same validators as execution before deciding whether a cap rises.
@@ -188,7 +301,19 @@ async def run(server, operation, arguments, principal, headers):
     elif action == "update":
         result = await answered(schedules.update_schedule(arguments["schedule_id"], arguments["fields"],
                                                           runtime_root=server._runtime_root,
-                                                          expected_version=arguments.get("_schedule_version")))
+                                                          expected_version=arguments.get("_schedule_version"),
+                                                          confirm_version=arguments.get("_confirm_version")))
+    elif action == "confirm_target":
+        version = arguments.get("config_version") or arguments.get("_config_version")
+        if not version:
+            raise OpError(ErrorCode.INVALID, "config_version is required: read it from the schedule's subscription "
+                                             "(schedule_admin.get) and confirm what it showed")
+        result = await answered(schedules.confirm_target(arguments["schedule_id"], config_version=version,
+                                                         runtime_root=server._runtime_root,
+                                                         expected_version=arguments.get("_schedule_version")))
+    elif action == "reset_cursor":
+        result = await answered(schedules.reset_cursor(arguments["schedule_id"], _after(arguments.get("after")),
+                                                       runtime_root=server._runtime_root))
     elif action == "run":
         if server._scheduler is None:
             raise OpError(ErrorCode.CONFLICT, "the scheduler is not running in this server")

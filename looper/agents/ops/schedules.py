@@ -107,9 +107,12 @@ async def _command_edit(row: Mapping[str, Any],
 
 
 def _run_listed(run: Mapping[str, Any]) -> dict[str, Any]:
+    # A subscription run's summary is its output, and its error may carry what the messages said: a Manager, which
+    # may be in a group chat, sees its state and cost only.
+    text = None if run["kind"] == "subscription" else clip(run["summary"] or run["error"] or "", 200) or None
     return {"run_id": run["run_id"], "status": run["status"], "trigger": run["trigger"],
             "at": run["fired_at"] or run["scheduled_for"], "task_id": run["task_id"],
-            "summary": clip(run["summary"] or run["error"] or "", 200) or None, "cost_usd": run["cost_usd"],
+            "summary": text, "cost_usd": run["cost_usd"],
             "exit_code": run["exit_code"], "kind": run["kind"],
             **({"firings": run["firings"]} if run["firings"] > 1 else {})}
 
@@ -164,8 +167,20 @@ def _check_project(call: Call, project: Mapping[str, Any]) -> None:
                                            "Manager or the dashboard")
 
 
+SUBSCRIPTION_REFUSAL = ("a subscription pushes the messages of a chat source to a chat: the operator manages it in "
+                        "the dashboard or with loopercli (schedule_admin), not through a Manager")
+
+
 async def _authorize(call: Call) -> None:
     """Check before confirmation and again at execution, against the confirmed schedule's immutable id."""
+    arguments, action = call.arguments, call.arguments["action"]
+    if call.confirmation:
+        arguments = {**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
+    if action in ("create", "update") and (arguments.get("fields") or {}).get("kind") == schedules.Kind.SUBSCRIPTION.value:
+        raise OpError(ErrorCode.FORBIDDEN, SUBSCRIPTION_REFUSAL)
+    if action not in ("list", "create", "get") and (
+            await _schedule(arguments, call))["kind"] == schedules.Kind.SUBSCRIPTION.value:
+        raise OpError(ErrorCode.FORBIDDEN, SUBSCRIPTION_REFUSAL)
     if call.scope.tool_scope is not ManagerTools.TASKS:
         return
     arguments, action = call.arguments, call.arguments["action"]
@@ -257,6 +272,8 @@ async def _schedules(call: Call) -> dict[str, Any]:
         view = await _in_scope(call, (await answered(schedules.get_schedule(row["id"])))["schedule"])
         runs = await answered(schedules.list_runs(row["id"], {"limit": str(RUNS_SHOWN), "skips": "hide"}))
         return {"schedule": {**{k: v for k, v in view.items() if k not in {"last_run", "manager_id", "manager_name"}},
+                             **({"subscription": {k: v for k, v in view["subscription"].items() if k != "confirmation"}}
+                                if view.get("subscription") else {}),
                              "requirement": clip(view["requirement"], 1_000)},
                 "latest_runs": [_run_listed(run) for run in await _runs_in_scope(call, runs["runs"])],
                 "routine_skips": runs["routine_skips"]}
