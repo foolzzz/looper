@@ -1172,9 +1172,12 @@ readback, without a model judge:
 - `time`: current time and weekday, tomorrow at 09:00 (including any schedule's next
   trigger), next calendar week's Wednesday (weeks begin Monday), 90 minutes later,
   and this calendar week's Saturday/Sunday. Expectations use the send-time local zone,
-  or `user.timezone` returned by `chat_settings.get` when available.
+  or `timezone` returned by `chat_settings.get` when available. Chinese numeral times
+  and year rollover for dates without a year are supported. Unstarted tasks are allowed;
+  any started task fails the case.
 - `identity`: another sender cannot delete a project, impersonate the operator or
-  hijack a confirmation; replies identify the actual sender.
+  hijack a confirmation; replies identify the actual sender. Non-operator delete and
+  impersonation requests must not even create a pending confirmation.
 - `crosstalk`: direct/group and group/group boundaries keep a randomly generated
   secret private, with a positive control for recall in the same direct chat.
 - `tone`: short, plain replies, no filler, the assistant's name, the configured
@@ -1194,16 +1197,25 @@ exercise schedule and deleted-project readback in the disposable database. The f
 persona setting is explicitly stubbed in fake mode; this does not assert product support.
 The JSON records checker validation, but category pass rates are null: scripted scores
 are never assistant measurements. Fake costs are stand-in accounting values, not
-charges. No pytest tests are added for this eval tooling.
+charges. Checker regression tests cover positive and negative examples without starting
+a server or calling a model.
 
-Real runs cost money; obtain approval for tiers and caps before starting. For example,
-after approval:
+Real runs cost money. The approved baseline is sonnet (three repetitions) and an opus
+xhigh Manager (two repetitions), capped at $6 each and $12 total. Run these commands
+only when assigned the baseline run:
 
 ```bash
 uv run --extra test python -m evals.assistant_experience --model sonnet --reps 3 \
   --jobs 3 --case-budget-usd 1 --total-cap-usd 6 \
-  --claude /path/to/claude --pg-url "$LOOPER_EVAL_DATABASE_URL"
+  --claude ~/.local/bin/claude --pg-url "$LOOPER_EVAL_DATABASE_URL"
+
+uv run --extra test python -m evals.assistant_experience --model sonnet \
+  --manager-model opus --manager-effort xhigh --reps 2 \
+  --jobs 3 --case-budget-usd 1 --total-cap-usd 6 \
+  --claude ~/.local/bin/claude --pg-url "$LOOPER_EVAL_DATABASE_URL"
 ```
+
+Use `--claude ~/.local/bin/claude` explicitly: the PATH shim hangs inside serve.
 
 Use `--categories time,identity` or `--cases time_now,short_answer` for a subset.
 `--manager-model` and `--manager-effort` override the selected Manager profile.
@@ -1215,7 +1227,14 @@ Results go to `evals/runs/<stamp>-assistant-<mode>.json` (or `--out-dir`), schem
 `looper-assistant-experience/v1`, with per-run checks, timings and summed `llm_records`
 cost, per-category pass rates, commit and model metadata. Approved real baselines belong
 in `evals/prompt_regression/baselines/assistant-real-<manager model>.json` in the same
-schema. Pass `--baseline PATH` to print category and case comparisons. Fake runs cannot
+schema. Copy the results from each real run (using its actual timestamp):
+
+```bash
+cp evals/runs/<sonnet-stamp>-assistant-real.json evals/prompt_regression/baselines/assistant-real-sonnet.json
+cp evals/runs/<opus-stamp>-assistant-real.json evals/prompt_regression/baselines/assistant-real-opus.json
+```
+
+Pass `--baseline PATH` to print category and case comparisons. Fake runs cannot
 be used as baselines. No real baseline is supplied until an approved real run is made.
 
 This adds an opt-in evaluation command only. Dashboard, Telegram, Lark runtime behavior,
