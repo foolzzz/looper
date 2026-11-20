@@ -92,13 +92,14 @@ class Match:
     def prefilter(self, doc: str) -> str:
         """True for a text that may match: it holds a term as written or one of its tokens."""
         patterns = list(dict.fromkeys(_like(value) for term in self.terms for value in (term.text, *term.tokens)))
-        return f"{doc} LIKE ANY({self._param(patterns, '::text[]')})"
+        return f"{doc} LIKE ANY(ARRAY(SELECT lower(p) FROM unnest({self._param(patterns, '::text[]')}) AS p))"
 
     def coverage(self, doc: str, index: int, *, whole: str | None = None, fuzzy: str | None = None) -> str:
         """How much of term ``index`` the text covers, from 0 to 1. ``whole``: an SQL condition that also covers it
         fully (a name it concerns); ``fuzzy``: an SQL expression of a partial coverage to take when larger."""
         term = self.terms[index]
-        full = f"strpos({doc}, {self._param(term.text, '::text')}) > 0" + (f" OR {whole}" if whole else "")
+        # The term lower-cased as the database does it, as ``doc`` is.
+        full = f"strpos({doc}, lower({self._param(term.text, '::text')})) > 0" + (f" OR {whole}" if whole else "")
         if term.tokens:
             held = " + ".join(
                 f"({doc} ~ {self._param(_word_start(token), '::text')})::int" if token.isascii()
