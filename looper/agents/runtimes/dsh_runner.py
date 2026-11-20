@@ -141,7 +141,7 @@ class DshRunnerRuntime(DshRuntime):
         if launch.role not in (AgentType.WORKER, AgentType.REVIEWER):
             raise RuntimeUnsupported("the DSH runner hosts Worker, Reviewer and consult runs only")
         self._check_executable(executable)
-        env = self.environment(launch)
+        env = launch.environment()  # not the adapter's: the run's marker (LOOPER_AGENT_RUN) is added there
         prompt = self._runner_prompt(prompt_file, launch, cwd)
         state_dir, fork_from = session_dir, None
         if fork is not None:

@@ -2328,7 +2328,8 @@ _FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_
          # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
          "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
          "reviewer_unrelated_note": (1, 2, 2, 0), "reviewer_elsewhere": (1, 0, 1, 0),
-         "reviewer_elsewhere_wrong": (1, 1, 2, 0)}
+         "reviewer_elsewhere_wrong": (1, 1, 2, 0), "advisor_checkpoint": (1, 0, 0, 0),
+         "advisor_optional_flaky": (1, 1, 0, 0)}
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
 _SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
@@ -2336,6 +2337,7 @@ _SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step"
           "any_of_ready": (1, 0, 2), "conditions_not_needed": (0, 0, 1),
           "parallel_parts": (1, 0, 2),
           "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
+          "advisor_checkpoint": (0, 0, 1), "advisor_optional_flaky": (0, 0, 1),
           "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),
           # The failed verification and repair share s1; the new verification follows only the repair.
           "workflow_verify_loop": (2, 0, 1),
@@ -2427,8 +2429,17 @@ def _the_run_was_written(result: dict[str, Any], path: Path, tmp_path: Path) -> 
     assert str(tmp_path) not in path.read_text(encoding="utf-8")
 
 
+# (offers, consults, checkpoints, returns, answered, adoptions, advisor runs, advice check runs)
+# advise is offered in every decision with the advisor on: after the checkpoint's step succeeded, and after the
+# flaky step's failure and its success.
+_ADVISOR = {"advisor_checkpoint": (1, 1, 1, 0, 1, 1, 1, 1), "advisor_optional_flaky": (2, 0, 0, 0, 0, 0, 0, 0)}
+_ADVISOR_KEYS = ("advisor_offers", "advisor_consults", "advisor_checkpoints", "advisor_returns", "advisor_answered",
+                 "advisor_adoptions", "advisor_runs", "advice_check_runs")
+
+
 def _the_flow_of(task_id: str, row: dict[str, Any]) -> None:
     assert (row["steps"], row["retries"], row["reviews"], row["chat_turns"]) == _FLOW[task_id]
+    assert tuple(row[key] for key in _ADVISOR_KEYS) == _ADVISOR.get(task_id, (0,) * len(_ADVISOR_KEYS))
     assert (row["independent_pairs"], row["bracketed_pairs"], row["parallel_workers"]) == _SHAPE[task_id]
     assert row["cost_usd"] > 0
     assert row["vault_outside"] == 0

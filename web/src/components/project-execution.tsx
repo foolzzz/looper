@@ -2,7 +2,7 @@ import { WorkflowField, useWorkflows } from "@/components/workflows";
 import type { Project, ProjectExecution, ProjectUpdate } from "@/lib/api";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { ROOM_LIMITS } from "@/lib/room";
+import { ADVISOR_LIMITS, ROOM_LIMITS } from "@/lib/room";
 
 /** The execution settings as the editor holds them: text, "" = inherit; a list is one item per line. */
 export type ExecutionDraft = Record<keyof ProjectExecution, string>;
@@ -29,6 +29,10 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "agent_room",
   "vault",
   ...ROOM_LIMITS.map((limit) => limit.field),
+  "advisor",
+  ...ADVISOR_LIMITS.map((limit) => limit.field),
+  "advisor_fallback_profile",
+  "advisor_internal_domains",
 ];
 const NUMBERS = new Set<keyof ProjectExecution>([
   "task_budget_usd",
@@ -37,9 +41,10 @@ const NUMBERS = new Set<keyof ProjectExecution>([
   "role_text_max_chars",
   "gate_reminder_hours",
   ...ROOM_LIMITS.map((limit) => limit.field),
+  ...ADVISOR_LIMITS.map((limit) => limit.field),
 ]);
 
-const LISTS = new Set<keyof ProjectExecution>(["workspace_links", "verification_paths"]);
+const LISTS = new Set<keyof ProjectExecution>(["workspace_links", "verification_paths", "advisor_internal_domains"]);
 
 export function executionDraft(project: Project): ExecutionDraft {
   const text = (value: unknown) => (value == null ? "" : Array.isArray(value) ? value.join("\n") : String(value));
@@ -402,6 +407,80 @@ export function ProjectExecutionFields({
             ))}
           </div>
         </fieldset>
+        <div className="space-y-1">
+          {label("advisor", "Advisor")}
+          <select
+            id={`${idPrefix}-advisor`}
+            value={draft.advisor || "off"}
+            onChange={set("advisor")}
+            aria-describedby={`${idPrefix}-advisor-help`}
+            className={SELECT}
+          >
+            <option value="off">Off</option>
+            <option value="on">On</option>
+          </select>
+          <p id={`${idPrefix}-advisor-help`} className="text-xs text-muted-foreground">
+            Lets the task&apos;s Planner ask an outside model, through an abstract request that is checked before it
+            is sent: when it plans and at its decisions, as it judges, and always before a step it marks critical
+            starts. Its model is the Advisor role&apos;s (Settings → Roles); off by default.
+          </p>
+        </div>
+        {draft.advisor === "on" && (
+          <fieldset className="rounded-md border border-border px-3 py-3 sm:col-span-2">
+            <legend className="px-1 text-xs font-medium text-muted-foreground">Advisor limits</legend>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {ADVISOR_LIMITS.map(({ field, label: text, help, min, max, fallback }) => (
+                <div key={field} className="space-y-1">
+                  {label(field, text)}
+                  <Input
+                    id={`${idPrefix}-${field}`}
+                    inputMode={Number.isInteger(min) ? "numeric" : "decimal"}
+                    value={draft[field]}
+                    onChange={set(field)}
+                    aria-describedby={`${idPrefix}-${field}-help`}
+                    placeholder={`${fallback?.toLocaleString() ?? "No limit"} (${min.toLocaleString()}–${max.toLocaleString()})`}
+                  />
+                  <p id={`${idPrefix}-${field}-help`} className="text-xs text-muted-foreground">
+                    {help} {min.toLocaleString()}–{max.toLocaleString()}; default{" "}
+                    {fallback == null ? "no limit" : fallback.toLocaleString()}.
+                  </p>
+                </div>
+              ))}
+              <div className="space-y-1 sm:col-span-2">
+                {label("advisor_fallback_profile", "Fallback Agent Profile")}
+                <Input
+                  id={`${idPrefix}-advisor_fallback_profile`}
+                  value={draft.advisor_fallback_profile}
+                  onChange={set("advisor_fallback_profile")}
+                  aria-describedby={`${idPrefix}-advisor_fallback_profile-help`}
+                  placeholder="None"
+                  spellCheck={false}
+                />
+                <p id={`${idPrefix}-advisor_fallback_profile-help`} className="text-xs text-muted-foreground">
+                  An Agent Profile&apos;s name for the advisor when its own cannot run. Kept for later: consults do
+                  not use it yet.
+                </p>
+              </div>
+              <div className="space-y-1 sm:col-span-2">
+                {label("advisor_internal_domains", "Internal domains")}
+                <textarea
+                  id={`${idPrefix}-advisor_internal_domains`}
+                  value={draft.advisor_internal_domains}
+                  onChange={set("advisor_internal_domains")}
+                  aria-describedby={`${idPrefix}-advisor_internal_domains-help`}
+                  placeholder={"corp.example\nbuild.internal"}
+                  rows={3}
+                  spellCheck={false}
+                  className="flex w-full rounded-md border border-input bg-transparent px-3 py-1.5 font-mono text-sm text-foreground"
+                />
+                <p id={`${idPrefix}-advisor_internal_domains-help`} className="text-xs text-muted-foreground">
+                  One domain per line, at most 20: a request that names one of them or its subdomains is sent back
+                  before it reaches the advisor, as a URL would be.
+                </p>
+              </div>
+            </div>
+          </fieldset>
+        )}
       </div>
     </fieldset>
   );

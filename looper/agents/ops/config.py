@@ -25,6 +25,7 @@ from ...db import llm_records as db_llm_records, projects as db_projects, manage
 from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..model_names import MODEL_NAME_SCHEMA
+from ..project_execution import ADVISOR_FIELDS
 from ..projects import RequestError, project_name
 from ..llmrec.dialects import ChatDialect
 from ..runtimes import ApiProtocol, AuthKind, VendorType
@@ -128,7 +129,22 @@ def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
             "dependency_conditions": view["dependency_conditions"]}
 
 
+def _model_project(view: Mapping[str, Any]) -> dict[str, Any]:
+    """A project as the Manager's tool gives it: without the advisor's settings while its switch is off, so the
+    model sees what it saw before the advisor (the advisor RFC, section 13)."""
+    if view.get("advisor") == "on":
+        return dict(view)
+    return {key: value for key, value in view.items() if key not in ADVISOR_FIELDS}
+
+
 async def _projects(call: Call) -> dict[str, Any]:
+    answer = await _project_action(call)
+    if isinstance(answer.get("project"), Mapping):
+        return {**answer, "project": _model_project(answer["project"])}
+    return answer
+
+
+async def _project_action(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
     f = call.scope.tasks
     if action == "list":

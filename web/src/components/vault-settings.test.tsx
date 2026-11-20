@@ -220,6 +220,34 @@ describe("Knowledge vault settings", () => {
     expect(executionChanges(changed, project)).toEqual({ vault: vault === "on" ? "off" : "on" });
   });
 
+  it.each([null, "off", "on"] as const)("round trips the advisor switch, its limits shown only when on (%s)", async (advisor) => {
+    const project = { advisor, advisor_consults_per_step: 3 } as Project;
+    let draft = executionDraft(project);
+    await act(async () => root.render(<ProjectExecutionFields idPrefix="project" draft={draft}
+      onChange={(value) => { draft = value; }} />));
+    const select = container.querySelector<HTMLSelectElement>("#project-advisor")!;
+    expect(select.value).toBe(advisor || "off");
+    expect(document.getElementById(select.getAttribute("aria-describedby")!)?.textContent).toContain("off by default");
+    expect(Boolean(container.querySelector("#project-advisor_consults_per_step"))).toBe(advisor === "on");
+    expect(executionChanges(draft, project)).toEqual({});
+    await act(async () => {
+      select.value = advisor === "on" ? "off" : "on";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => root.render(<ProjectExecutionFields idPrefix="project" draft={draft}
+      onChange={(value) => { draft = value; }} />));
+    expect(executionChanges(draft, project)).toEqual({ advisor: advisor === "on" ? "off" : "on" });
+    const limit = container.querySelector<HTMLInputElement>("#project-advisor_consults_per_step");
+    expect(Boolean(limit)).toBe(advisor !== "on");
+    if (!limit) return;
+    expect(limit.value).toBe("3");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(limit, "");
+      limit.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(executionChanges(draft, project)).toEqual({ advisor: "on", advisor_consults_per_step: null });
+  });
+
   it.each([null, "off", "on"] as const)("round trips dependency conditions, off by default (%s)", async (dependency_conditions) => {
     const project = { dependency_conditions } as Project;
     let draft = executionDraft(project);

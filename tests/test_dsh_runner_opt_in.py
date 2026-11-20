@@ -271,6 +271,7 @@ def test_hosted_run_and_consult_fork(tmp_path, runtime, role, max_turns, timeout
     kwargs = dict(cwd=tmp_path, prompt_file=prompt_file(tmp_path), launch=selected,
         session_dir=tmp_path / "sessions", max_turns=max_turns, timeout_s=timeout_s, tools=None, limits=AsyncMock())
     handle = adapter.hosted_run(executable, **kwargs)
+    assert handle._env["LOOPER_AGENT_RUN"] == role.value  # the hosted run's environment carries the run marker
     descriptor = Descriptor.parse(handle.command)
     assert descriptor.role == role.value and descriptor.builtin == ("read", "glob", "grep", "write", "edit", "bash")
     assert (descriptor.max_requests, descriptor.tool_timeout_s) == (requests, tool_timeout)

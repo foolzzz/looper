@@ -156,6 +156,7 @@ def _assert_environment(env: dict[str, str], visible: dict[str, str], runtime: s
             assert env[name] == value
     assert env["HOME"] == visible["HOME"]
     assert env["RUN_SETTING"] == "configured" and env["PROVIDER_SETTING"] == "bound"
+    assert env["LOOPER_AGENT_RUN"] == "agent"  # every runtime marks its run as an agent's (`looper ledger` refuses it)
     if auth != "login":
         key = ("ANTHROPIC_AUTH_TOKEN" if auth == "endpoint" else "ANTHROPIC_API_KEY") \
             if runtime == "claude-code" else "LOOPER_PROVIDER_API_KEY"
@@ -391,7 +392,9 @@ def test_pi_main_and_nested_shell_keep_personal_config_and_server_secrets_out(
         assert not any(name.startswith("XDG_") for name in env)
     assert {name: actual["env"][name] for name in ("PI_OFFLINE", "PI_TELEMETRY", "PI_SKIP_VERSION_CHECK")} == {
         "PI_OFFLINE": "1", "PI_TELEMETRY": "0", "PI_SKIP_VERSION_CHECK": "1"}
-    assert not any(name.startswith(("PI_", "LOOPER_", "LOOPX_", "PROVIDER_")) for name in actual["shell"])
+    assert not any(name.startswith(("PI_", "LOOPER_", "LOOPX_", "PROVIDER_")) and name != "LOOPER_AGENT_RUN"
+                   for name in actual["shell"])
+    assert actual["shell"]["LOOPER_AGENT_RUN"] == "agent"  # the pi shell the agent runs commands in has it too
     assert os.environ["HOME"] == str(operator)
     assert all(path.read_bytes() == content for path, content in sentinels.items())
 
