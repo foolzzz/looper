@@ -75,8 +75,9 @@ from ... import child_env
 from .. import claude_cli
 from ..llmrec import TRANSLATED_BACKEND_ENV
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, ManagedHooks, Probe, PromptBlock, ProviderBinding,
-    ReadOnly, RunCost, RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
+    ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, LoadedSources, ManagedHooks, Probe,
+    PromptBlock, ProviderBinding, ReadOnly, RunCost, RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
+    library_mcp_servers, plugin_skills,
 )
 from .instructions import InstructionFile
 
@@ -340,6 +341,17 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                 env.setdefault("ENABLE_TOOL_SEARCH", "true")
             no_proxy(env)
         return env
+
+    def loaded_sources(self, launch: Launch) -> LoadedSources:
+        """Every plugin directory and every server of the ``--mcp-config`` file (``claude_cli.library_args``)."""
+        return LoadedSources(tuple(sorted(library_mcp_servers(launch.library))),
+                             plugin_skills(launch.library.plugin_dirs))
+
+    def web_tools(self, launch: Launch) -> bool:
+        """WebSearch is a tool of Anthropic's own API: only a launch whose model requests go there has it (a
+        compatible or translated endpoint does not)."""
+        upstream = self.llmrec_upstream(launch)
+        return upstream is not None and official_endpoint(upstream)
 
     def llmrec_upstream(self, launch: Launch) -> str | None:
         from . import Launcher

@@ -3,7 +3,9 @@ its typed tools, library and runtime, and the section they make; off, the Manage
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -51,38 +53,86 @@ def _listing(*names: str) -> list[dict[str, Any]]:
 OPERATOR = _listing("looper_overview", "looper_tasks", "looper_projects", "looper_confirm", "looper_leads_search")
 GROUP = _listing("looper_overview", "looper_tasks", "looper_projects", "looper_confirm")
 SCENARIO = _listing("looper_tasks", "looper_task_create", "looper_projects", "looper_schedules", "looper_confirm")
-LIBRARY = AgentLibrary(items=(LoadedItem(ItemKind.MCP, "looper", "a" * 64, plugin="", scope="builtin"),
-                              LoadedItem(ItemKind.MCP, "github", "b" * 64, plugin=""),
-                              LoadedItem(ItemKind.SKILL, "lark-cli", "c" * 64)))
 
 
-def _launch(runtime: str = "claude-code", *, web_search: bool = True) -> Any:
-    return SimpleNamespace(runtime=ADAPTERS[runtime], library=LIBRARY, profile=SimpleNamespace(web_search=web_search))
+@pytest.fixture
+def library(tmp_path: Path) -> AgentLibrary:
+    """A Manager's library as ``load_installed`` writes it: Looper's own server, a stdio and an SSE server in the
+    ``--mcp-config`` file, and a plugin with one skill."""
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {
+        "looper": {"command": "python", "args": ["-m", "looper.cli", "mcp-server"]},
+        "github": {"command": "github-mcp", "args": []},
+        "events": {"type": "sse", "url": "https://events.example.invalid/sse"}}}))
+    plugin = tmp_path / "plugins" / "looper-skills"
+    (plugin / "skills" / "lark-cli").mkdir(parents=True)
+    (plugin / "skills" / "lark-cli" / "SKILL.md").write_text("---\nname: lark-cli\ndescription: Lark.\n---\nUse it.\n")
+    items = (LoadedItem(ItemKind.MCP, "looper", "a" * 64, plugin="", scope="builtin"),
+             LoadedItem(ItemKind.MCP, "github", "b" * 64, plugin=""),
+             LoadedItem(ItemKind.MCP, "events", "c" * 64, plugin=""),
+             LoadedItem(ItemKind.SKILL, "lark-cli", "d" * 64))
+    return AgentLibrary(items=items, plugin_dirs=(str(plugin),), mcp_config=str(config))
 
 
-@pytest.mark.parametrize("tools, launch, expected", [
-    # The user's own turn: Looper's records, the leads search, what is installed, the web.
-    (OPERATOR, _launch(), ResearchSources(records=True, leads=True, installed=("github", "lark-cli"), web=True)),
-    # A group turn, or a scenario Manager: no leads search listed, so none named.
-    (GROUP, _launch(), ResearchSources(records=True, installed=("github", "lark-cli"), web=True)),
-    (SCENARIO, _launch(), ResearchSources(records=True, installed=("github", "lark-cli"), web=True)),
-    # The vault's tools, when a turn lists both.
-    ([*GROUP, *_listing("looper_vault_search", "looper_vault_read")], _launch(),
-     ResearchSources(vault=True, records=True, installed=("github", "lark-cli"), web=True)),
-    # The API runtime loads no library and has no web tools; a Grok profile may turn its web tools off.
-    (OPERATOR, _launch("api"), ResearchSources(records=True, leads=True)),
-    # Grok loads MCP servers but not skills, and its profile may turn its web tools off.
-    (OPERATOR, _launch("grok", web_search=False), ResearchSources(records=True, leads=True, installed=("github",))),
+def _launch(runtime: str, library: AgentLibrary, *, web_search: bool = True, env: tuple = ()) -> Any:
+    return SimpleNamespace(runtime=ADAPTERS[runtime], library=library, env=env,
+                           profile=SimpleNamespace(web_search=web_search))
+
+
+def _claude_launch(library: AgentLibrary, *, base_url: str | None = None) -> Any:
+    """A real Claude Code launch: the built-in login, or an API key for a compatible endpoint at ``base_url``."""
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec, builtin_resolved_profile
+    from looper.agents.runtimes import ApiProtocol, AuthKind
+    from tests.runtime_model_helpers import resolved_profile
+
+    if base_url is None:
+        return Launch(AgentSettings(profile=builtin_resolved_profile()), library)
+    provider = LegacyProviderSpec("compatible", "Compatible", AuthKind.API_KEY, frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
+                                  base_url=base_url, api_key="synthetic-key")
+    profile = resolved_profile("compatible-agent", "Compatible agent",
+                               RuntimeSpec("rt-claude", "Claude Code", "claude-code"), provider, "model-x")
+    return Launch(AgentSettings(profile=profile), library)
+
+
+def test_the_installed_tools_are_what_the_runtime_really_loads(library: AgentLibrary) -> None:
+    # Claude Code loads the whole --mcp-config file and every plugin directory.
+    assert ResearchSources.of(OPERATOR, _claude_launch(library)).installed == ("events", "github", "lark-cli")
+    # Codex (and Coco, which runs on its configuration) has no SSE transport, and gets the skills as documents.
+    for runtime in ("codex", "coco"):
+        assert ResearchSources.of(OPERATOR, _launch(runtime, library)).installed == ("github", "lark-cli"), runtime
+    # Grok reaches stdio and SSE servers, and scans the plugins' skill directories.
+    assert ResearchSources.of(OPERATOR, _launch("grok", library)).installed == ("events", "github", "lark-cli")
+    # Pi loads no catalog server or skill; the API runtime nothing; a runtime not checked claims nothing.
+    for runtime in ("pi", "api", "omp", "dsh", "cursor-agent"):
+        assert ResearchSources.of(OPERATOR, _launch(runtime, library)).installed == (), runtime
+
+
+def test_the_web_is_named_only_where_the_launch_has_web_tools(library: AgentLibrary) -> None:
+    assert ResearchSources.of(OPERATOR, _claude_launch(library)).web  # Anthropic's own API: WebSearch
+    assert not ResearchSources.of(OPERATOR, _claude_launch(library, base_url="https://gateway.example.invalid")).web
+    assert ResearchSources.of(OPERATOR, _launch("grok", library)).web
+    assert not ResearchSources.of(OPERATOR, _launch("grok", library, web_search=False)).web
+    assert not ResearchSources.of(OPERATOR, _launch("dsh", library)).web  # DSH_ALLOW_WEB_SEARCH is off by default
+    assert ResearchSources.of(OPERATOR, _launch("dsh", library, env=(("DSH_ALLOW_WEB_SEARCH", "true"),))).web
+    for runtime in ("pi", "api", "codex", "omp", "cursor-agent", "coco"):  # not shown to have web tools
+        assert not ResearchSources.of(OPERATOR, _launch(runtime, library)).web, runtime
+
+
+@pytest.mark.parametrize("tools, expected", [
+    (OPERATOR, ResearchSources(records=True, leads=True)),  # the user's own turn
+    (GROUP, ResearchSources(records=True)),  # a group turn: no leads search listed, none named
+    (SCENARIO, ResearchSources(records=True)),
+    ([*GROUP, *_listing("looper_vault_search", "looper_vault_read")], ResearchSources(vault=True, records=True)),
 ])
-def test_the_sources_come_from_the_turns_tools_library_and_runtime(tools: Any, launch: Any,
-                                                                   expected: ResearchSources) -> None:
-    assert ResearchSources.of(tools, launch) == expected
+def test_the_listed_sources_come_from_the_turns_own_tools(tools: Any, expected: ResearchSources) -> None:
+    assert ResearchSources.of(tools, _launch("pi", AgentLibrary())) == expected
 
 
 def test_the_leads_line_appears_only_when_the_leads_search_is_listed() -> None:
-    assert "looper_leads_search" in section(ResearchSources.of(OPERATOR, _launch()))
+    assert "looper_leads_search" in section(ResearchSources.of(OPERATOR, _launch("pi", AgentLibrary())))
     for tools in (GROUP, SCENARIO):
-        assert "leads" not in section(ResearchSources.of(tools, _launch())).lower()
+        assert "leads" not in section(ResearchSources.of(tools, _launch("pi", AgentLibrary()))).lower()
 
 
 def _composed(research: ResearchSources | None, *, leads: bool = False, agent_id: str = "manager") -> Any:
@@ -132,5 +182,5 @@ def test_only_the_default_manager_gets_a_research_order_and_only_while_it_is_on(
     from looper.agents.tiers.manager import ManagerAgent
 
     monkeypatch.setattr(chat_settings, "_research_order", on)
-    found = ManagerAgent._research_sources(SimpleNamespace(agent_id=agent_id), OPERATOR, _launch())
+    found = ManagerAgent._research_sources(SimpleNamespace(agent_id=agent_id), OPERATOR, _launch("pi", AgentLibrary()))
     assert (found is not None) is offered

@@ -519,6 +519,10 @@ class DshRuntime(RuntimeAdapter):
 
         return budget_error(result_event) if (result_event or {}).get(SOFT_CAP) else None
 
+    def web_tools(self, launch: Launch) -> bool:
+        """DSH searches the web only when its environment allows it (``DSH_ALLOW_WEB_SEARCH``, off by default)."""
+        return _web_search(launch)
+
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
                          read_only=launch.read_only, consult=launch.consult)
