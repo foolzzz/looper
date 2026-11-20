@@ -15,8 +15,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
   session (the `agent_sessions` row whose id is its id), runs
-  (`llm_records.agent_id`), turn binding file and `ManagerOps`.
-  `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  (`llm_records.agent_id`), turn binding file and `ManagerOps`. What belongs
+  to its conversation (the resident runtime, the saved session, the turn lock
+  and the turn holding it, what the next turn is told) is one
+  `ManagerSession` (`looper/agents/tiers/manager_session.py`), `main`, the
+  only one so far. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
