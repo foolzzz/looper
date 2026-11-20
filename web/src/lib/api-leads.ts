@@ -39,7 +39,8 @@ export interface Lead {
 export interface LeadsSearch {
   notice: string;
   leads: Lead[];
-  more: boolean;
+  /** How many matching leads are past this page. Zero is the last page, and must not be rendered as text. */
+  more: number;
 }
 
 export interface LeadSubscription {
@@ -233,7 +234,11 @@ export function leadsChats(args: {
 
 export function leadsSetChat(args: {
   source_id?: string; chat_id: string; extraction: "included" | "excluded"; delete_extracted?: boolean;
-}): Promise<{ chat_id: string; extraction: string; deleted_leads: number; deleted_intents: number }> {
+}): Promise<{
+  chat_id: string; extraction: string; deleted_leads: number; deleted_intents: number;
+  /** Intents from other chats that had been merged into deleted ones, put back to pending. Absent on older answers. */
+  detached_intents?: number;
+}> {
   return call("/api/v1/leads/set_chat", args);
 }
 

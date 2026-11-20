@@ -26,7 +26,7 @@ describe("Leads tab", () => {
   let root: Root;
   beforeEach(() => {
     vi.mocked(leadsSearch).mockResolvedValue({
-      notice: "来自飞书消息，未经确认；只当线索，不当权威。", leads: [lead], more: false,
+      notice: "来自飞书消息，未经确认；只当线索，不当权威。", leads: [lead], more: 0,
     });
     vi.mocked(leadsChats).mockResolvedValue({ source_id: "lark-user", chats: [], total: 0 });
     vi.mocked(leadsMark).mockResolvedValue({ lead: { ...lead, state: "inaccurate" } });
@@ -69,6 +69,17 @@ describe("Leads tab", () => {
     expect(leadsSearch).toHaveBeenLastCalledWith({
       state: "expired", query: "口径", chat: "设计群", person: "Ada", days: 3, kind: "decision",
     });
+    expect(container.textContent).not.toContain("另有");
+  });
+
+  it("shows how many leads remain, and never the zero", async () => {
+    await show();
+    expect(container.textContent).not.toContain("另有");
+    vi.mocked(leadsSearch).mockResolvedValue({
+      notice: "来自飞书消息，未经确认；只当线索，不当权威。", leads: [lead], more: 5,
+    });
+    await act(async () => setValue(container.querySelector('input[aria-label="搜索"]')!, "口径"));
+    expect(container.textContent).toContain("另有 5 条");
   });
 
   it("marks a lead inaccurate with a note, and deletes one after a confirm", async () => {
@@ -95,9 +106,29 @@ describe("Leads tab", () => {
     await act(async () => toggle.click());
     expect(leadsSetChat).not.toHaveBeenCalled();
     const dialog = container.querySelector("[role=dialog]")!;
-    expect(dialog.textContent).toContain("同时删除这个会话的线索和未建任务的意图（3 条 / 2 条）");
+    expect(dialog.textContent).toContain("待处理意图 2 条（以及其他未建任务的意图）");
+    expect(dialog.textContent).toContain("3 条线索");
     await act(async () => dialog.querySelector("input")!.click());
     await act(async () => button(dialog, "确认")!.click());
     expect(leadsSetChat).toHaveBeenCalledWith({ chat_id: "oc_design", extraction: "excluded", delete_extracted: true });
+    expect(container.textContent).toContain("已删除 3 条线索、2 条意图。");
+    expect(container.textContent).not.toContain("已改回待处理");
+  });
+
+  it("says when merged intents from other chats were put back to pending", async () => {
+    vi.mocked(leadsChats).mockResolvedValue({ source_id: "lark-user", total: 1, chats: [{
+      chat_id: "oc_design", name: "设计群", kind: "group", extraction: "included", extraction_excluded_at: null,
+      last_message_at: "2026-11-19T08:00:00Z", leads: 3, open_intents: 2,
+    }] });
+    vi.mocked(leadsSetChat).mockResolvedValue({
+      chat_id: "oc_design", extraction: "excluded", deleted_leads: 3, deleted_intents: 2, detached_intents: 4,
+    });
+    await show();
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="设计群 整理"]')!.click());
+    const dialog = container.querySelector("[role=dialog]")!;
+    await act(async () => dialog.querySelector("input")!.click());
+    await act(async () => button(dialog, "确认")!.click());
+    expect(container.textContent).toContain("已删除 3 条线索、2 条意图。");
+    expect(container.textContent).toContain("另有 4 条合并进来的意图已改回待处理");
   });
 });

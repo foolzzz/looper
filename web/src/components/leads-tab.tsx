@@ -117,7 +117,7 @@ export function LeadsTab() {
           </li>
         ))}
       </ul>
-      {page?.more && <p className="text-xs text-muted-foreground">还有更多线索。缩小搜索后再看。</p>}
+      {page != null && page.more > 0 && <p className="text-xs text-muted-foreground">另有 {page.more} 条</p>}
       <LeadsChats />
       {marking && (
         <ConfirmDialog title={`标为不准确 ${marking.id}`} onClose={() => setMarking(null)}>

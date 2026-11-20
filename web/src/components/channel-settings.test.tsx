@@ -73,7 +73,8 @@ describe("Lark bot-token settings", () => {
     expect(container.textContent).toContain("Nobody found");
     expect(container.textContent).toContain("Only part of the directory was searched: use the person's email.");
     expect(container.textContent).toContain("我的 ID");
-    expect(container.textContent).toContain("It must be one of the allowed senders.");
+    expect(container.textContent).toContain("必须是允许的发送者之一。");
+    expect(container.textContent).not.toContain("It must be one of the allowed senders.");
   });
 
   it("sends my id when it is filled in, and leaves the key out when it is cleared", async () => {

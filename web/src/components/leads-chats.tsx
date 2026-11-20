@@ -18,6 +18,7 @@ export function LeadsChats() {
   const [remove, setRemove] = useState(false);
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [removed, setRemoved] = useState<{ leads: number; intents: number; detached: number } | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -37,11 +38,14 @@ export function LeadsChats() {
     setBusy(true);
     setError("");
     try {
-      await leadsSetChat({
+      const result = await leadsSetChat({
         chat_id: chat.chat_id, extraction, ...(extraction === "excluded" ? { delete_extracted: deleteExtracted } : {}),
       });
       setPending(null);
       setRemove(false);
+      setRemoved(extraction === "excluded" && deleteExtracted ? {
+        leads: result.deleted_leads, intents: result.deleted_intents, detached: result.detached_intents ?? 0,
+      } : null);
       setAttempt((n) => n + 1);
     } catch (err) {
       if (err instanceof V1Error && err.code === "conflict") setConflict(err.message);
@@ -56,6 +60,12 @@ export function LeadsChats() {
       <h2 id="leads-chats-title" className="text-sm font-medium">整理范围</h2>
       {conflict && <p role="status" data-state="conflict" className="text-sm text-warning">{conflict}</p>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+      {removed && (
+        <p role="status" className="text-sm">
+          已删除 {removed.leads} 条线索、{removed.intents} 条意图。
+          {removed.detached > 0 && `另有 ${removed.detached} 条合并进来的意图已改回待处理`}
+        </p>
+      )}
       {!chats && !error && !conflict && <p role="status" className="text-sm text-muted-foreground">加载中…</p>}
       {chats && chats.length === 0 && !conflict && <p role="status" className="text-sm text-muted-foreground">没有会话</p>}
       {chats && chats.length > 0 && (
@@ -98,7 +108,7 @@ export function LeadsChats() {
           <p className="text-sm">之后不再从 {pending.name} 整理线索和意图。</p>
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" className="mt-1 h-4 w-4 accent-primary" checked={remove} onChange={(e) => setRemove(e.target.checked)} />
-            <span>同时删除这个会话的线索和未建任务的意图（{pending.leads} 条 / {pending.open_intents} 条）</span>
+            <span>同时删除这个会话的 {pending.leads} 条线索，以及待处理意图 {pending.open_intents} 条（以及其他未建任务的意图）</span>
           </label>
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => setPending(null)}>取消</Button>

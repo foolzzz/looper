@@ -41,7 +41,7 @@ describe("MessageStreamPage", () => {
     vi.resetAllMocks();
     vi.mocked(fetchMessageStreamRuns).mockResolvedValue({ source_id: "lark-user", runs: [] });
     vi.mocked(leadsSettingsGet).mockResolvedValue({ enabled: false, valid_days: 14, subscriptions: [] });
-    vi.mocked(leadsSearch).mockResolvedValue({ notice: "来自飞书消息，未经确认；只当线索，不当权威。", leads: [], more: false });
+    vi.mocked(leadsSearch).mockResolvedValue({ notice: "来自飞书消息，未经确认；只当线索，不当权威。", leads: [], more: 0 });
     vi.mocked(leadsChats).mockResolvedValue({ source_id: null, chats: [], total: 0 });
     container = document.createElement("div");
     document.body.append(container);

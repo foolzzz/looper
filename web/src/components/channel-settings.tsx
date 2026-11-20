@@ -88,7 +88,7 @@ function OperatorIdField({ id, value, onChange }: { id: string; value: string; o
     <div>
       <label htmlFor={id} className="block text-xs font-medium text-muted-foreground mb-1.5">我的 ID</label>
       <Input id={id} value={value} spellCheck={false} autoComplete="off" onChange={(e) => onChange(e.target.value)} />
-      <p className="mt-1 text-[10px] text-muted-foreground">It must be one of the allowed senders.</p>
+      <p className="mt-1 text-[10px] text-muted-foreground">必须是允许的发送者之一。</p>
     </div>
   );
 }
