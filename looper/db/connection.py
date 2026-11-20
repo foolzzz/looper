@@ -130,6 +130,7 @@ _TASK_CHAT_GROUP = "task_chat_group"
 _PROCESSOR_ROLE = "processor_role"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
+_SUBSCRIPTIONS = "subscriptions"
 _MANAGER_EVENTS = "manager_events"
 _PROJECT_ACTIVITY = "project_activity"
 _LEDGER = "ledger"
@@ -225,6 +226,7 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 )
 
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
+_SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
 
 
@@ -234,6 +236,16 @@ def _message_stream_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its message stream block")
     return found.group(1)
+
+
+def _subscriptions_ddl() -> str:
+    """The subscription tables as schema.sql defines them, after the widened ``schedules.kind`` check."""
+    found = _SUBSCRIPTIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its subscriptions block")
+    return ("ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_kind_check, "
+            "ADD CONSTRAINT schedules_kind_check CHECK (kind IN ('agent', 'command', 'subscription'));\n"
+            + found.group(1))
 
 
 _LEDGER_BLOCK = re.compile(r"-- ledger begin\n(.*?)-- ledger end", re.S)
@@ -507,10 +519,18 @@ async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('event_sources') IS NOT NULL")
 
 
+async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SUBSCRIPTIONS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('subscriptions') IS NOT NULL")
+
+
 async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
     return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
+
+
 async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_EVENTS):
         return False
@@ -889,6 +909,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _message_stream_pending(conn):
             await conn.execute(_message_stream_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM)
+        if await _subscriptions_pending(conn):
+            await conn.execute(_subscriptions_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTIONS)
         if await _ledger_pending(conn):
             await conn.execute(_ledger_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
@@ -1009,6 +1032,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
+            or await _subscriptions_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn)
             or await _llm_requests_pending(conn)

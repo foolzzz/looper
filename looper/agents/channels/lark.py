@@ -35,7 +35,7 @@ from ..message import (
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from .allowlist import SenderAllowlist
-from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
+from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
@@ -467,14 +467,14 @@ class LarkChannelAdapter(ChannelAdapter):
             else:
                 message_id = await self._send_target(target, text, idempotency_key=idempotency_key, return_id=True)
         except LarkCliError as exc:
-            logger.warning("%s: a post to %s failed: %s", self.channel_id, target.id, exc)
-            return PostReceipt(False, error=str(exc),
-                               parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES)
-        if message_id is None:
-            problem = ("lark-cli" if isinstance(self._transport, CliTransport) else self.channel_type) + " did not say which message it sent"
-            logger.warning("%s: a post to %s: %s", self.channel_id, target.id, problem)
-            return PostReceipt(False, error=problem)
-        return PostReceipt(True, external_ids=(message_id,))
+            # The error's text (lark-cli's own words, and whatever it printed) is in the receipt, not in the log.
+            logger.warning("%s: a post to %s failed: %s%s", self.channel_id, target.id, type(exc).__name__,
+                           f" (code {exc.code})" if exc.code is not None else "")
+            return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
+                               outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
+        # Only a successful answer (lark-cli ``ok: true``, the Bot API's HTTP 200 with ``code`` 0) gets here: the message
+        # was sent, and replies to it just cannot be routed when its id was not given.
+        return PostReceipt(True, external_ids=(message_id,) if message_id else ())
 
     def healthcheck(self) -> dict[str, Any]:
         info = {
