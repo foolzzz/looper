@@ -441,7 +441,7 @@ Allowed decisions now: advise (kind plan_review).
 - **[PLAN] 里的请教**：只在首次规划和「重新开始」时有，这时还没有计划，整个任务等待。改计划之前的请教在 [DECISION] 里，只有那一步等待，在跑的步骤照常跑完；
 - **时限：** 每轮最长 5 分钟，一次请教（含回问）总共最长 15 分钟，超时算失败；
 - **并发：** 同一个范围（步骤，或者计划）同时只有一次请教；不同步骤的请教可以并行，每次请教在自己的 asyncio 任务里跑，回答回来后排进规划者的回合队列；
-- **重启：** 服务启动时，`linting` 和 `asking` 的请教记为失败（`interrupted`），`consulting` 的步骤回到 `pending`，规划者收到「请教没有结果：interrupted」的回合；`drafting` 和 `needs_info` 的请教按第 5.2 节处理。
+- **重启：** 服务启动时，`linting` 和 `asking` 的请教记为失败（`interrupted`），`consulting` 的步骤回到 `pending`，规划者收到「请教没有结果：interrupted」的回合；[PLAN] 里的请教被打断时，规划者收到一个说明请教被打断的 [PLAN] 回合，不再提供 advise；`drafting` 和 `needs_info` 的请教按第 5.2 节处理。每次运行结束就把花费记进请教，被打断的运行按它的记录补记，不重复。
 
 ### 11.7 失败
 

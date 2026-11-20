@@ -135,6 +135,29 @@ async def move(spawn_id: int, to: SpawnState, *, expect: SpawnState, child_recor
     return _row(row)
 
 
+async def note_run(spawn_id: int, record_id: int, *, pool: asyncpg.Pool | None = None) -> None:
+    """A run the spawn started (its ``llm_records`` id, under ``result.runs``), so what it spends can be booked even
+    when the spawn is stopped while it runs."""
+    pool = pool or get_pool()
+    await pool.execute(
+        """UPDATE agent_spawns SET result = jsonb_set(result, '{runs}', COALESCE(result->'runs', '[]') || to_jsonb($2::bigint))
+            WHERE id = $1 AND NOT COALESCE(result->'runs', '[]') @> to_jsonb($2::bigint)""", spawn_id, record_id)
+
+
+async def book(spawn_id: int, record_id: int, cost_usd: float, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Add what run ``record_id`` spent to the spawn's spend, once per run (``result.booked``); False when it was
+    booked before."""
+    if cost_usd < 0:
+        raise ValueError("cost_usd cannot be negative")
+    pool = pool or get_pool()
+    status = await pool.execute(
+        """UPDATE agent_spawns SET spent_usd = spent_usd + $3, updated_at = now(),
+                  result = jsonb_set(result, '{booked}', COALESCE(result->'booked', '[]') || to_jsonb($2::bigint))
+            WHERE id = $1 AND NOT COALESCE(result->'booked', '[]') @> to_jsonb($2::bigint)""",
+        spawn_id, record_id, cost_usd)
+    return status == "UPDATE 1"
+
+
 async def usage(task_id: str, step_id: str | None, *, kind: str = "advisor",
                 pool: asyncpg.Pool | None = None) -> tuple[int, int, float]:
     """A task's spawns of ``kind``: how many it has, how many of them are about ``step_id``, and what they spent."""

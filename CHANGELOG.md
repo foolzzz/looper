@@ -18,6 +18,20 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.20] - 2026-11-19
+
+### Added
+
+- **Subscriptions (default off).** ([#1437](https://github.com/foolzzz/looper/pull/1437)) Additive migration `subscriptions`: `schedules.kind` accepts `subscription`, and the migration creates `subscriptions`, `subscription_runs` and `subscription_deliveries`. A firing reads the message-stream window after the cursor, runs the tool-less processor, and pushes the result only after the operator confirms the target. Until a subscription is created, nothing about it runs; until the target is confirmed, the output stays on the dashboard. Delivery of each segment is at most once (`pending`, `sending`, then `sent`, `failed` or `uncertain`); an `uncertain` segment is never resent.
+
+### Changed
+
+- **A Lark or Telegram `post` reports `sent`, `rejected` or `unknown`.** ([#1437](https://github.com/foolzzz/looper/pull/1437)) A subscription asks again only on `rejected`, and treats `unknown` as `uncertain`. A user gate still retries from `success`, so a lost Telegram answer may still arrive twice. A Lark success without a message id is `sent` for every caller of `post`, and replies to it cannot be routed. The web channel and a channel that is not running answer `rejected`; a caller that only checks `success` sees the same refusal.
+
+### Documentation
+
+- **Advisor RFC, phase 1 (Planner-only consults).** ([#1435](https://github.com/foolzzz/looper/pull/1435)) Design proposal only; no code or behavior change.
+
 ## [2.15.19] - 2026-11-19
 
 ### Added

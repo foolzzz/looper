@@ -261,6 +261,11 @@ class _PlanStore:
         if changes.requirement is not None:
             self.requirements.pop(task_id, None)
 
+    async def versions(self, task_id: str, **_: object) -> tuple[int, int]:
+        edit = self.requirements.get(task_id)
+        return (edit.version if edit is not None else 0,
+                max((e["id"] for e in self.journal.get(task_id, []) if e["kind"] == "supplement"), default=0))
+
     async def list_entries(self, task_id: str, **_: object) -> list[dict[str, Any]]:
         keys = {step["id"]: step["key"] for step in self.steps.get(task_id, {}).values()}
         return [{**entry, "step_key": keys.get(entry["step_id"], "")} for entry in self.journal.get(task_id, [])]
@@ -791,6 +796,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         (task_changes, "add_supplement", "add_supplement", store.add_supplement),
         (task_changes, "pending_changes", "pending", store.pending),
         (task_changes, "mark_delivered", "mark_delivered", store.mark_delivered),
+        (task_changes, "change_versions", "versions", store.versions),
         (db_journal, "list_entries", "list_entries", store.list_entries),
         (user_gates, "list_gates", "list_for_task", store.list_gates),
         (user_gates, "get_gate", "get", store.get_gate),

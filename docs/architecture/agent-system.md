@@ -3606,7 +3606,15 @@ example, are added without a default, with their constraints `NOT VALID`, and
 no older row is updated. After the schema transaction commits, `ensure_schema`
 validates those constraints and builds the index concurrently, which lets
 reads and writes go on (`connection._ONLINE_STEPS`). Each of these steps has
-its own marker, and a start that stopped halfway resumes it.
+its own marker, and a start that stopped halfway resumes it. A database-wide
+session advisory lock (`0x6C6F6F706F6E6C`, "looponl") serializes these steps
+across processes, with the markers read again after acquiring it. Lock attempts
+are nonblocking, with no transaction held between attempts, so a waiting
+starter cannot block the owner's concurrent index build. After five seconds
+of contention the starter logs a warning and continues; the owner or a later
+start finishes any unmarked steps. A caller that already holds a transaction
+also defers the online steps with a warning until a start outside one. The lock
+is released on completion, failure or cancellation (and on connection loss).
 
 Rollback means stopping the new service, leaving the upgraded database
 unchanged, restoring the verified full backup into a separate database, and
@@ -5294,7 +5302,8 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   its activity says the checkpoint consult did not finish.
 - **Alerts** (`advisor_alerts`, to the chat the dashboard's user gates use): the day's advisor spend over
   `advisor_daily_alert_usd` (a system setting, 30 USD when unset), a task consulting about more than half of its
-  steps, and 3 consults in a row failing across tasks. They never stop a consult.
+  steps, and 3 consults in a row failing across tasks. Each kind goes out at most once a local day (the day is
+  stored, so a restart does not send it again), and they never stop a consult.
 
 - **Two roles with no tools.** `advisor` answers; `advice_check` judges a request before it is sent. Their
   runtime needs `run` and `no_tools` (`ROLE_CAPABILITIES`). Only their role layer (Settings → Roles) chooses their
@@ -5335,8 +5344,12 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   `parent_record_id`. Its cost is the task's, counted in the Planner's share of `task_costs`. A judge's record keeps
   none of the request: its input is the request's sha256 and length, its stream only the typed events
   (`processor.typed_events`), and it has no output text.
-- **Restarts.** At startup, every consult a stopped server left unfinished fails (`interrupted`); the Planner takes
-  its decision again.
+- **Restarts.** At startup, every consult a stopped server left unfinished fails (`interrupted`), keeping what its
+  runs spent (each run's spend is booked when it ends; a run cut off is booked from its record); the Planner takes
+  its decision again, and a first plan that waited for its consult is planned in a [PLAN] turn that says the consult
+  was interrupted, without offering advise again.
+- **Time.** A consult has one deadline, 15 minutes after it opened: the judge's and the advisor's runs get only what
+  is left of it, and a request sent back or a question asked that waits for the Planner past it ends the consult.
 - **Where they show.** A task's detail has `advisor` (only in a task with some): `consults`
   (`advisor_advice.consults_view`: each consult's source, kind, attempt, state and why it failed, rounds, returns,
   spend and duration, the checks its request failed (stage, category and count), the request that was sent

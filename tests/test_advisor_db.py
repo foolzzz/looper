@@ -36,6 +36,9 @@ with open(os.environ["ADVISOR_SEEN"], "a") as seen:
 def emit(event):
     print(json.dumps(event), flush=True)
 emit({"type": "system", "subtype": "init", "session_id": "s", "model": model, "tools": [], "mcp_servers": []})
+if judge and os.environ.get("JUDGE_MODE") == "hang":
+    import time
+    time.sleep(120)
 if judge:
     text, cost, stop = os.environ.get("JUDGE_REPLY", ""), 0.001, "end_turn"
 else:
@@ -44,6 +47,13 @@ else:
     open(counter, "w").write(str(n + 1))
     replies = open(os.environ["ADVISOR_REPLIES"]).read().splitlines()
     mode = os.environ.get("ADVISOR_MODE")
+    if mode == "error_then_hang" and n > 0:
+        import time
+        time.sleep(120)
+    if mode == "error_then_hang":
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": "s",
+                          "result": "", "total_cost_usd": 0.2, "modelUsage": {model: {"costUSD": 0.2}}}), flush=True)
+        sys.exit(0)
     if mode == "error_once" and n == 0 or mode == "rate_limited":
         print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": "s",
                           "result": "", "total_cost_usd": 0.01, "modelUsage": {model: {"costUSD": 0.01}},
@@ -73,7 +83,7 @@ def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("JUDGE_REPLY", PASS)
     (tmp_path / "replies.txt").write_text(ANSWER + "\n")
     monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {"ADVISOR_SEEN", "ADVISOR_REPLIES", "JUDGE_REPLY",
-                                                                    "ADVISOR_MODE"})
+                                                                    "ADVISOR_MODE", "JUDGE_MODE"})
 
 
 def _replies(tmp_path: Path, *replies: str) -> None:
@@ -371,6 +381,54 @@ def test_an_advisor_run_that_ends_in_error_runs_once_more_and_a_rate_limited_one
     run_db(test, monkeypatch, setup=_setup)
 
 
+def test_a_runs_spend_is_booked_when_it_ends_so_a_consult_stopped_in_its_retry_keeps_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents import advisor
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setenv("ADVISOR_MODE", "error_then_hang")
+        spawn, _ = await _consult(pool)
+        running = asyncio.create_task(_submit(tmp_path, spawn, _request()))
+        for _ in range(400):  # until the retry has started
+            if [s["as"] for s in _seen(tmp_path)] == ["judge", "advisor", "advisor"]:
+                break
+            await asyncio.sleep(0.05)
+        assert [s["as"] for s in _seen(tmp_path)] == ["judge", "advisor", "advisor"]
+        assert float(await pool.fetchval("SELECT spent_usd FROM agent_spawns WHERE id = $1", spawn)) == \
+            pytest.approx(0.001 + 0.2)  # the judge's and the failed run's, booked as each ended
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        ended = await advisor.expire(spawn, failure="interrupted", detail="the task stopped")
+        assert ended.state.value == "failed"
+        assert float(await pool.fetchval("SELECT spent_usd FROM agent_spawns WHERE id = $1", spawn)) == \
+            pytest.approx(0.001 + 0.2)
+        await advisor.reconcile(spawn)  # again: nothing is booked twice
+        assert float(await pool.fetchval("SELECT spent_usd FROM agent_spawns WHERE id = $1", spawn)) == \
+            pytest.approx(0.001 + 0.2)
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
+def test_a_consult_ends_at_its_deadline_whichever_run_is_going(monkeypatch: pytest.MonkeyPatch,
+                                                                 tmp_path: Path) -> None:
+    import time
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setenv("JUDGE_MODE", "hang")
+        spawn, _ = await _consult(pool)
+        started = time.monotonic()
+        ended = await asyncio.wait_for(_submit(tmp_path, spawn, _request(), deadline=started + 2), 30)
+        assert time.monotonic() - started < 10  # the judge got only what was left of the consult's time
+        assert (ended.state.value, ended.failure) == ("failed", "judge") and "no output within" in ended.detail
+        late, _ = await _consult(pool, task="task-b")
+        ended = await _submit(tmp_path, late, _request(), deadline=time.monotonic() - 1)
+        assert (ended.state.value, ended.failure) == ("failed", "timeout")  # nothing runs past the deadline
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
 def test_a_consult_with_too_little_left_after_the_judge_is_over_budget(monkeypatch: pytest.MonkeyPatch,
                                                                        tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
@@ -457,7 +515,6 @@ def test_the_advisors_alerts_tell_the_operator_once_each(monkeypatch: pytest.Mon
         return GateChat(NotifyChannel.TELEGRAM, NotifyTarget(TargetKind.CHAT, "42"))
 
     async def test(pool: Any) -> None:
-        monkeypatch.setattr(advisor_alerts, "_sent", set())
         monkeypatch.setattr(gate_service, "dashboard_target", target)
         advisor_alerts.configure(sender)
         try:
@@ -479,6 +536,22 @@ def test_the_advisors_alerts_tell_the_operator_once_each(monkeypatch: pytest.Mon
             await advisor.withdraw(spawn, "the plan changed")  # a withdrawal is no failure: the streak ends
             await advisor_alerts.consult_ended("task-a")
             assert len(sent) == 3 and "任务 task-a 的 2 个步骤里有 2 个请教过 advisor，超过一半" in sent[2][2]
+            # each kind at most once a day: task-b over the rate too, and three more failures in a row, say nothing
+            await pool.execute("INSERT INTO task_steps (id, task_id, step_index, step_key, instruction) "
+                               "VALUES ('task-b-s2', 'task-b', 1, 's2', 'Test it.')")
+            spawn = await advisor.open_consult(advisor.Brief("task-b", "task-b-s2", 1, advisor.Source.CHECKPOINT),
+                                               budget_usd=1)
+            await agent_spawns.move(spawn, SpawnState.FAILED, expect=SpawnState.DRAFTING, result={"failure": "parse"})
+            for task in ("task-d", "task-e"):
+                spawn, _ = await _consult(pool, task=task)
+                await agent_spawns.move(spawn, SpawnState.FAILED, expect=SpawnState.DRAFTING,
+                                        result={"failure": "parse"})
+            await advisor_alerts.consult_ended("task-b")
+            assert len(sent) == 3, sent[3:]
+            # and so after a restart (the marks are stored, not kept in memory)
+            monkeypatch.setattr(advisor_alerts, "_sent", set(), raising=False)
+            await advisor_alerts.consult_ended("task-e")
+            assert len(sent) == 3, sent[3:]
         finally:
             advisor_alerts.configure(None)
 

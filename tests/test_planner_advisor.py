@@ -69,7 +69,7 @@ class FakeConsults:
 
         async def expire(spawn_id: int, *, failure: str = "timeout", detail: str = "") -> Any:
             self.expired.append(failure)
-            return None
+            return advisor.Ended(SpawnState.FAILED, failure=failure, detail=detail)
 
         async def get(spawn_id: int) -> dict[str, Any]:
             return {"rounds": self.rounds, "inputs": {"request": _request(), "bindings": []},
@@ -98,6 +98,9 @@ class FakeConsults:
         async def summary_line(task_id: str) -> str:
             return f"请教 advisor {len(self.opened)} 次，花费 0.30 美元，采纳 1 条，其中 1 条帮步骤通过"
 
+        async def for_task(task_id: str) -> list[dict[str, Any]]:
+            return [{"id": n, "step_id": brief.step_id, "state": "failed"} for n, (brief, _) in enumerate(self.opened, 1)]
+
         monkeypatch.setattr(advisor, "open_consult", open_consult)
         monkeypatch.setattr(advisor, "submit", submit)
         monkeypatch.setattr(advisor, "withdraw", withdraw)
@@ -107,6 +110,7 @@ class FakeConsults:
         monkeypatch.setattr(agent_spawns, "usage", usage)
         monkeypatch.setattr(agent_spawns, "asked", asked)
         monkeypatch.setattr(agent_spawns, "has_source", lambda *a, **k: none())
+        monkeypatch.setattr(agent_spawns, "for_task", for_task)
         monkeypatch.setattr(advisor_advice, "adopt", adopt)
         monkeypatch.setattr(advisor_advice, "unlock", unlock)
         monkeypatch.setattr(advisor_advice, "for_step", nothing)
@@ -270,6 +274,35 @@ def test_only_the_consulting_step_waits_while_the_others_are_decided(
     assert h.final().payload["status"] == "completed"
 
 
+def test_a_consult_that_ends_after_the_other_steps_were_accepted_completes_the_task_with_its_final_summary(
+    planner_claude: Any, agent_db: Any, advisor_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    consults = FakeConsults(_answered(), gate=gate)
+    consults.install(monkeypatch)
+    final = {"delivered": "the loop reads each key once", "how_to_use": "run it", "verification": "tests pass",
+             "open_issues": "none"}
+    claude = planner_claude(plan(step("s1"), step("s2")),
+                            decide("advise", advice_request=_request()),  # s1 succeeded: s2 is still open
+                            decide("accept", final=None),  # s2: s1 is still open
+                            decide("accept", final=final, advice_adoption=ADOPTION))  # s1, now the last open step
+    outcomes = {"do s1": iter([WORK_OK]), "do s2": iter([None])}
+
+    async def scenario(h: Harness) -> None:
+        await h.start()
+        await h.until(lambda: consults.submitted)
+        await h.release(WORK_OK)
+        await h.until(lambda: len(h.claude.turns()) >= 3)
+        gate.set()
+        await h.finished()
+
+    h = drive(claude, lambda envelope: next(outcomes[envelope.payload["instruction"].split("\n")[0]]), scenario)
+    texts = _texts(claude)
+    assert "the advisor answered" in texts[3] and "This is the task's last open step" in texts[3]
+    result = h.final().payload  # type: ignore[union-attr]
+    assert result["status"] == "completed" and "the loop reads each key once" in result["summary"]
+
+
 def test_a_consult_before_a_replan_lets_the_running_step_finish_while_only_the_replanned_one_waits(
     planner_claude: Any, agent_db: Any, advisor_on: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -361,6 +394,91 @@ def test_the_planner_may_ask_before_it_plans_and_its_plan_says_what_it_takes(
     brief = consults.opened[0][0]
     assert (brief.step_id, brief.source.value, brief.attempt) == (None, "optional", 1)
     assert consults.adopted and h.final().payload["status"] == "completed"
+
+
+def test_a_restart_during_the_plans_consult_plans_again_told_it_was_interrupted(
+    planner_claude: Any, agent_db: Any, advisor_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+    from looper.agents.tiers.planner import PlannerAgent
+
+    consults = FakeConsults(_answered(), gate=asyncio.Event())  # the consult never answers before the stop
+    consults.install(monkeypatch)
+    claude = planner_claude(reply({"advise": {"advice_request": _request("design_choice", constraints=["c"],
+                                                                        options=[{"id": "o1", "summary": "a"},
+                                                                                 {"id": "o2", "summary": "b"}])}}),
+                            plan(step("s1")), decide("accept"))
+
+    async def scenario(h: Harness) -> None:
+        await h.start()
+        await h.until(lambda: len(consults.submitted) == 1)
+        await h.planner.stop()  # the server stops while the plan's consult runs
+        assert agent_db.store.plans["t1"]["status"] == "planning" and consults.expired == ["interrupted"]
+        agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        await h.planner.start(h.bus)
+        await h.bus.publish(MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_RESUME,
+            payload={"task_id": "t1"}, correlation_id="corr-1"))
+        await h.finished()
+
+    h = drive(claude, lambda envelope: WORK_OK, scenario)
+    texts = _texts(claude)
+    assert texts[1].startswith("[PLAN]") and "The consult gave no answer: interrupted" in texts[1]
+    assert "You may ask the advisor" not in texts[1]  # advise is not offered again
+    assert h.final().payload["status"] == "completed"
+    assert len(consults.opened) == 1
+
+
+def test_a_consult_is_stopped_at_its_deadline_and_the_planner_decides_without_it(
+    planner_claude: Any, agent_db: Any, advisor_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import advisor
+
+    monkeypatch.setattr(advisor, "CONSULT_MAX_SEC", 0.5)
+    consults = FakeConsults(advisor.Returned(("restate the path",), 1))
+    consults.install(monkeypatch)
+    submit = advisor.submit
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(3)  # longer than the consult's whole time
+        return await submit(*args, **kwargs)
+
+    monkeypatch.setattr(advisor, "submit", slow)
+    claude = planner_claude(plan(step("s1")), decide("advise", advice_request=_request()),
+                            decide("retry", feedback="read once"), decide("accept"))
+    outcomes = iter([WORK_FAILED, WORK_OK])
+    h = drive(claude, lambda envelope: next(outcomes))
+    texts = _texts(claude)
+    assert consults.expired == ["timeout"] and not consults.submitted  # stopped before its late outcome
+    assert "The consult gave no answer: timeout" in texts[2]
+    assert not any("restate the path" in text for text in texts)
+    assert h.final().payload["status"] == "completed"
+
+
+def test_a_supplement_or_a_requirement_edit_is_new_evidence(agent_db: Any, tmp_path: Any) -> None:
+    """The user's supplements and requirement edits change what is known (the RFC, section 12.2), though a
+    supplement leaves the requirement's text as it was."""
+    from looper.db import task_changes
+    from looper.db.task_changes import RequirementEdit
+    from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
+
+    async def main() -> None:
+        planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+        plan_ = TaskPlan("plan-1", "goal-1", "build the calc package", str(tmp_path))
+        step_ = PlanStep("step-1", 0, "add the parser", key="s1")
+        plan_.steps.append(step_)
+        before = {"step": (await planner._evidence(plan_, step_)).fingerprint(),
+                  "plan": (await planner._evidence(plan_, None)).fingerprint()}
+        await task_changes.add_supplement("t1", "The input may be empty.", via="dashboard")
+        supplemented = {"step": (await planner._evidence(plan_, step_)).fingerprint(),
+                        "plan": (await planner._evidence(plan_, None)).fingerprint()}
+        assert supplemented["step"] != before["step"] and supplemented["plan"] != before["plan"]
+        agent_db.store.requirements["t1"] = RequirementEdit(2, "build the calc package, in Rust", 1,
+                                                             "build the calc package")
+        assert (await planner._evidence(plan_, step_)).fingerprint() != supplemented["step"]
+
+    asyncio.run(main())
 
 
 def test_with_the_advisor_off_nothing_offers_advise_and_a_critical_step_is_refused(
