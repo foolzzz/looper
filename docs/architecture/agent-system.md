@@ -5444,8 +5444,9 @@ list or command line changes either way.
   `ManagerOps.waiting_confirmations`, read from memory, so a restart drops
   them), `schedules` (`db.schedules.failing`, the Schedules card's list),
   `logins` (the Claude Code CLI or login, or a runtime login an Agent
-  Profile uses, failing in the checks `system/status` reads; `looper serve`
-  hands the reader over with `attention.use_status_checks`), `intents`
+  Profile uses, failing in the checks `system/status` reads; the HTTP server
+  registers that reader with `attention.use_status_checks` while it runs),
+  `intents`
   (pending, only while intents are on), `ledger` (own open items that wait
   for the user: a to-do, an unconfirmed relayed decision, anything overdue;
   only while the ledger is on) and `deliveries` (`uncertain` subscription

@@ -21,7 +21,7 @@
 | `gates` | `gate_service.list_gates`（`waiting_on=user`） | 等你回复的关卡，和 User Gates 页的「Waiting for you only」同一个规则 |
 | `confirmations` | `ManagerOps.waiting_confirmations()`（内存） | 每个管家等你一句「确认」的操作：已经问了、还没有哪一轮在处理它、没过 `CONFIRMATION_SECONDS` |
 | `schedules` | `db.schedules.failing()` | 连续失败或有告警的定时任务，和 Dashboard 的 Schedules 卡片同一个查询（从 `overview` 里抽出来） |
-| `logins` | 启动自检加上现在读的登录检查（`system/status` 的同一个读取） | Claude Code CLI 或登录、Agent Profile 用到的运行时登录处于 `fail` |
+| `logins` | 启动自检加上现在读的登录检查（`system/status` 的同一个读取，HTTP 服务运行时登记给汇总） | Claude Code CLI 或登录、Agent Profile 用到的运行时登录处于 `fail` |
 | `intents` | `intents.state = 'pending'` | 待建或待驳回的意图；意图关闭时整个分区不出现 |
 | `ledger` | 账本自己的条目（`source_kind IS NULL`） | 你的待办、还没确认的转述决定、已经过期的你的事；账本关闭时不出现。来自关卡和确认的条目不重复列 |
 | `deliveries` | `subscription_deliveries`、`intent_posts`、`manager_events` 的 `uncertain` | 最近 72 小时可能没送到的消息（这种消息不会再发，所以要人看一眼）；一次订阅推送分几段的算一条 |
@@ -48,5 +48,5 @@
 ## 4. 以后
 
 - 一次性提醒落地后加 `reminders` 分区（已错过的提醒）。
-- 卡片按钮落地后：确认改读表；飞书卡片每条带按钮。
+- 卡片按钮那一项把高风险确认落库后，`confirmations` 改读那张表，不再读 `ManagerOps` 的内存，只留一个来源；飞书卡片每条带按钮。
 - 晨报直接读这个汇总，加上昨天完成的任务；没有内容就不发。
