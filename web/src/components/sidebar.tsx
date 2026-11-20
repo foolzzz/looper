@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   ListTodo,
+  ClipboardCheck,
   MessageCircleQuestion,
   Bot,
   CalendarClock,
@@ -22,17 +23,19 @@ import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { fetchOverview } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
+import { useLedgerCount } from "@/lib/use-ledger-count";
 import { cn } from "@/lib/utils";
 
 /** "history" is one agent's session, or every run of one role; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page = "dashboard" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "settings" | "history";
+export type Page = "dashboard" | "chat" | "tasks" | "gates" | "ledger" | "projects" | "schedules" | "messages" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { page: "chat", label: "Chat", icon: MessageSquare },
   { page: "tasks", label: "Tasks", icon: ListTodo },
   { page: "gates", label: "User Gates", icon: MessageCircleQuestion },
+  { page: "ledger", label: "To-do", icon: ClipboardCheck },
   { page: "schedules", label: "Schedules", icon: CalendarClock },
   { page: "messages", label: "Message stream", icon: Radio },
 ];
@@ -64,6 +67,7 @@ export function Sidebar({
   onClose,
 }: SidebarProps) {
   const waitingGates = useWaitingGates();
+  const ledgerCount = useLedgerCount();
   const [version, setVersion] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
@@ -123,6 +127,15 @@ export function Sidebar({
           >
             <Icon className="h-4 w-4" />
             {label}
+            {page === "ledger" && ledgerCount !== null && ledgerCount > 0 && (
+              <Badge
+                variant="warning"
+                aria-label={`${ledgerCount} to-do ${ledgerCount === 1 ? "item" : "items"} for you`}
+                className="ml-auto tabular-nums"
+              >
+                {ledgerCount > 99 ? "99+" : ledgerCount}
+              </Badge>
+            )}
             {page === "gates" && waitingGates !== null && waitingGates > 0 && (
               <Badge
                 variant="warning"

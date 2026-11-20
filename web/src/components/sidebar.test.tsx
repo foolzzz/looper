@@ -4,11 +4,15 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/sidebar";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
+import { fetchLedgerState } from "@/lib/ledger-api";
 import { fetchGates, fetchOverview, fetchProjectsList, type GateList } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
   fetchGates: vi.fn(), fetchProjectsList: vi.fn(), fetchOverview: vi.fn(),
+}));
+vi.mock("@/lib/ledger-api", async (original) => ({
+  ...await original<typeof import("@/lib/ledger-api")>(), fetchLedgerState: vi.fn(),
 }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => <div role="dialog" /> }));
@@ -41,6 +45,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
   vi.mocked(fetchGates).mockResolvedValue(gates(2));
+  vi.mocked(fetchLedgerState).mockResolvedValue(
+    { enabled: true, needs_you: 3, counts: {} as never, operator_unset: false });
   onNavigate.mockClear();
   vi.mocked(fetchOverview).mockResolvedValue({} as never);
   activePage = "gates";
@@ -62,11 +68,27 @@ describe("Sidebar User Gates item", () => {
     const at = (name: string) => labels.findIndex((l) => l.includes(name));
     expect(at("Tasks")).toBeGreaterThanOrEqual(0);
     expect(at("User Gates")).toBe(at("Tasks") + 1);
-    expect(at("Schedules")).toBe(at("User Gates") + 1);
+    expect(at("To-do")).toBe(at("User Gates") + 1);
+    expect(at("Schedules")).toBe(at("To-do") + 1);
     expect(labels.some((label) => label.includes("Runs"))).toBe(false);
     expect(gatesButton().className).toContain("text-primary");
     act(() => (gatesButton() as HTMLButtonElement).click());
     expect(onNavigate).toHaveBeenCalledWith("gates");
+  });
+
+  it("shows what waits for the user in the ledger on the To-do item, and nothing while the ledger is off or unreadable", async () => {
+    await render();
+    expect(host.querySelector('[aria-label="3 to-do items for you"]')?.textContent).toBe("3");
+    act(() => root.unmount());
+    root = createRoot(host);
+    vi.mocked(fetchLedgerState).mockResolvedValue({ enabled: false, needs_you: 0, counts: {} as never, operator_unset: false });
+    await render();
+    expect(host.querySelector('[aria-label*="to-do"]')).toBeNull();
+    act(() => root.unmount());
+    root = createRoot(host);
+    vi.mocked(fetchLedgerState).mockRejectedValue(new Error("down"));
+    await render();
+    expect(host.querySelector('[aria-label*="to-do"]')).toBeNull();
   });
 
   it("shows the waiting count as a badge", async () => {

@@ -5,6 +5,7 @@ import { AgentProfilesSection } from "@/components/agent-profiles";
 import { ApiClientsSection } from "@/components/api-clients";
 import { CatalogCard } from "@/components/catalog-card";
 import { ChatSettingsSection } from "@/components/chat-settings";
+import { LedgerSettingsSection } from "@/components/ledger-settings";
 import { ChannelsSection } from "@/components/channel-settings";
 import { ConfigTransferCard } from "@/components/config-transfer";
 import { ManagersSection } from "@/components/managers-settings";
@@ -76,7 +77,12 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "clients" && <ApiClientsSection />}
       {page === "catalog" && <CatalogCard />}
       {page === "channels" && <ChannelsSection />}
-      {page === "chat" && <ChatSettingsSection />}
+      {page === "chat" && (
+        <div className="space-y-4">
+          <ChatSettingsSection />
+          <LedgerSettingsSection />
+        </div>
+      )}
       {page === "scheduler" && <SchedulerSection />}
       {page === "vault" && <VaultSettingsSection />}
       {page === "recording" && <LlmrecSettingsSection />}
