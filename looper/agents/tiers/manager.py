@@ -80,7 +80,8 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, session_switch
+from .. import leads_model, research_order, session_switch
+from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
@@ -92,7 +93,7 @@ from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStop
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered, StateShown
-from ..ops import Turn, TurnOrigin, leads as ops_leads
+from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
 from ..ops import session_search as ops_sessions
@@ -820,6 +821,8 @@ class ManagerAgent:
         self._turned_off_told = False
         self._has_templates = False  # from the last read of the Manager's task templates
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
+        self._vault_on = False  # whether the default Manager reads the knowledge vault, from the last read
+        self._research: ResearchSources | None = None  # where the turn being prepared may look things up, when on
         self._stable_context = False  # manager.stable_context, from the last read
         # The last whole "Looper state" block the session got (``state_view``); in memory only, so the first turn
         # after a restart sends it whole. None: none a turn may refer to, for ``_state_lost``'s reason.
@@ -1018,6 +1021,7 @@ class ManagerAgent:
             logger.debug("could not load manager config from database", exc_info=True)
         try:
             self._leads_on = await leads_model.leads_enabled()
+            self._vault_on = await ops_vault.manager_vault() is not None
         except Exception:
             logger.debug("could not read leads.enabled; keeping the last value", exc_info=True)
 
@@ -1506,7 +1510,6 @@ class ManagerAgent:
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         await token.step("templates", self._read_templates())
-        system_prompt = self._composed_prompt(agent_settings)
         library = await token.step("library", load_installed(
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
@@ -1515,6 +1518,10 @@ class ManagerAgent:
             launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
         if ask.turn is not None:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
+        # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
+        tools = await token.step("tool_listing", self.ops.current_listing(ask.turn)) if self.ops is not None else []
+        self._research = self._research_sources(tools, launch)
+        system_prompt = self._composed_prompt(agent_settings)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
@@ -1530,10 +1537,8 @@ class ManagerAgent:
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
-        # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
-        tools = await token.step("tool_listing", self.ops.current_listing(ask.turn)) if self.ops is not None else []
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
-        has_leads = any(t["name"] == ops_leads.LEADS_TOOL for t in tools)
+        has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
         has_sessions = any(t["name"] == ops_sessions.TOOL_NAME for t in tools)
         if (self._has_templates or has_workflows or has_leads or has_ledger or has_sessions
@@ -2208,14 +2213,27 @@ class ManagerAgent:
             raise RuntimeError(settings.error or settings.profile_error)
         return {"run_cap": settings.max_budget_usd, "task_cap": None, "task_spent": 0}
 
+    def _research_sources(self, tools: list[dict[str, Any]], launch: Launch) -> ResearchSources | None:
+        """Where a turn with ``tools`` and ``launch`` may look things up (Settings → Chat, research order): the
+        default Manager's only, from its own tools, library and runtime; None when the setting is off."""
+        if not chat_settings.research_order() or self.agent_id != DEFAULT_MANAGER_ID:
+            return None
+        return ResearchSources.of(tools, launch)
+
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
         contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
             contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
-        elif getattr(self, "_leads_on", False):  # a Manager without the switch read is leads-off
-            contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
+        else:  # a Manager without the switches read has neither
+            if getattr(self, "_leads_on", False):
+                contract_name, contract = contract_name + "+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
+            if getattr(self, "_vault_on", False):
+                contract_name, contract = contract_name + "+VAULT_CONTRACT", contract + "\n" + ops_vault.VAULT_CONTRACT
+        if (research := getattr(self, "_research", None)) is not None:  # the turn's sources (``_prepare_turn``)
+            contract_name += f"+{research_order.CONTRACT_NAME}"
+            contract += "\n" + research_order.section(research)
         if getattr(self, "_stable_context", False):  # last, so every part before it reads as it does without it
             contract_name += "+STABLE_CONTEXT_CONTRACT"
             contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT

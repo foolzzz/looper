@@ -76,8 +76,8 @@ from ..run_usage import Usage, reported_totals, run_usage
 from ..reported_files import prompt_name
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RoomPush, RunCost, RuntimeAdapter,
-    RuntimeUnsupported, codex_login, instructions, runtime_prompt_text, ttadk,
+    ApiProtocol, AuthKind, Capability, Launcher, LoadedSources, Probe, PromptBlock, ProviderBinding, ReadOnly, RoomPush,
+    RunCost, RuntimeAdapter, RuntimeUnsupported, codex_login, instructions, runtime_prompt_text, ttadk,
 )
 from .instructions import InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -424,6 +424,12 @@ class CodexRuntime(RuntimeAdapter):
         reads itself."""
         names = (instructions.AGENTS_MD, *FALLBACK_NAMES)
         return tuple(map(InstructionFile, instructions.first_per_directory(cwd, names)))
+
+    def loaded_sources(self, launch: Launch) -> LoadedSources:
+        """The MCP servers Codex reaches (no SSE) and the skills it gets as documents (``materialize``)."""
+        return LoadedSources(tuple(name for name, _ in mcp_servers(launch.library)[0]),
+                             tuple(sorted({skill.name.rpartition(":")[2]
+                                           for skill in materialize(launch.library).skills})))
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """The skills given as documents and what Codex could not load, when there are any (RFC P9)."""
