@@ -1201,6 +1201,8 @@ export interface SubscriptionInfo {
   text_max_chars: number;
   quiet_word: string;
   output_header: string;
+  /** What a run writes. Absent on older answers: a push. */
+  output_kind?: "push" | "leads" | "intents";
   render?: "lines_v1" | "lines_v2";
   /** Selection rules (set through the API); empty: the filter above. */
   rules?: { name: string; label: string; never_quiet: boolean }[];
@@ -1221,7 +1223,7 @@ export type SubscriptionSenderKind = "user" | "app";
 /** The fields of a subscription a request sets; an update names the ones it changes. */
 export type SubscriptionFields = Partial<Pick<SubscriptionInfo, "source_id" | "chat_kinds" | "include_chats" |
   "exclude_chats" | "sender_kinds" | "exclude_mentions_me" | "include_history" | "max_age_minutes" | "max_events" |
-  "text_max_chars" | "quiet_word" | "output_header">>;
+  "text_max_chars" | "quiet_word" | "output_header" | "output_kind">>;
 /** What one subscription run read and made. */
 export interface SubscriptionRunInfo {
   from_seq: number;

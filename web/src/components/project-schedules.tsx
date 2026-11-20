@@ -49,6 +49,7 @@ import {
   type TaskLimitRole,
   type TaskRole,
 } from "@/lib/api";
+import { subscriptionPreset, type SubscriptionPresetFields } from "@/lib/api-leads";
 import { roleLabel } from "@/lib/runtime-catalog";
 import {
   scheduleNotifyOptions,
@@ -287,6 +288,17 @@ function targetOf(key: string): ScheduleNotifyTarget | null {
   if (!key) return null;
   const at = key.indexOf("\n");
   return { channel: key.slice(0, at), chat: key.slice(at + 1) };
+}
+
+/** A direct chat the operator can be pushed to: a Lark open id, or a positive Telegram user id. Bound groups are not. */
+function isDirectChat(chat: string): boolean {
+  return /^(?:ou_[0-9A-Za-z]+|[1-9][0-9]{0,19})$/.test(chat);
+}
+
+type OutputKind = "" | "push" | "leads" | "intents";
+
+function outputKindOf(value: string | undefined): OutputKind {
+  return value === "push" || value === "leads" || value === "intents" ? value : "";
 }
 
 function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
@@ -1474,6 +1486,8 @@ interface SubDraft {
   excludeMe: boolean; history: boolean; maxAge: string; maxEvents: string; textChars: string;
   quiet: string; header: string; budget: string; dailyBudget: string;
   overlap: ScheduleOverlap; catchUp: ScheduleCatchUp; notify: ScheduleNotify; notifyTarget: string;
+  /** What a run writes. "" is a push subscription that predates the field. */
+  outputKind: OutputKind;
 }
 
 function subDraftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): SubDraft {
@@ -1489,6 +1503,23 @@ function subDraftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): SubD
     dailyBudget: schedule?.daily_budget_usd == null ? "" : String(schedule.daily_budget_usd),
     overlap: schedule?.overlap === "queue" ? "queue" : "skip", catchUp: schedule?.catch_up ?? "once",
     notify: schedule?.notify ?? "failures", notifyTarget: targetKey(schedule?.notify_target ?? null),
+    outputKind: outputKindOf(sub?.output_kind),
+  };
+}
+
+/** Fill a new subscription from a preset. An intents preset drops a group target: it only pushes to a direct chat. */
+function draftFromPreset(current: SubDraft, fields: SubscriptionPresetFields): SubDraft {
+  const sub = fields.subscription;
+  const chat = current.notifyTarget.includes("\n") ? current.notifyTarget.slice(current.notifyTarget.indexOf("\n") + 1) : "";
+  return {
+    ...current,
+    name: fields.name, cron: fields.cron, timezone: fields.timezone || current.timezone, requirement: fields.requirement,
+    budget: String(fields.run_budget_usd), dailyBudget: fields.daily_budget_usd == null ? "" : String(fields.daily_budget_usd),
+    notify: fields.notify, source: sub.source_id, chatKinds: [...sub.chat_kinds], senderKinds: [...sub.sender_kinds],
+    ...(sub.exclude_mentions_me === undefined ? {} : { excludeMe: sub.exclude_mentions_me }),
+    history: sub.include_history, maxAge: String(sub.max_age_minutes), maxEvents: String(sub.max_events),
+    textChars: String(sub.text_max_chars), quiet: sub.quiet_word, header: sub.output_header, outputKind: sub.output_kind,
+    notifyTarget: sub.output_kind === "intents" && chat && !isDirectChat(chat) ? "" : current.notifyTarget,
   };
 }
 
@@ -1504,7 +1535,7 @@ function subFieldsOf(d: SubDraft, limits: ScheduleLimits) {
     source_id: d.source.trim(), chat_kinds: d.chatKinds, sender_kinds: d.senderKinds,
     exclude_mentions_me: d.excludeMe, include_history: d.history, max_age_minutes: whole(d.maxAge),
     max_events: whole(d.maxEvents), text_max_chars: whole(d.textChars), quiet_word: d.quiet.trim(),
-    output_header: d.header.trim(),
+    output_header: d.header.trim(), ...(d.outputKind ? { output_kind: d.outputKind } : {}),
   };
   return { schedule, subscription };
 }
@@ -1567,7 +1598,21 @@ function SubscriptionForm({
   const invalid = problems.length > 0 || tooLong || check?.preview?.valid === false;
   const id = (field: string) => `${idPrefix}-${field}`;
   const targets = limits.notify_targets;
-  const gone = draft.notifyTarget && !targets.some((t) => targetKey(t) === draft.notifyTarget) ? targetOf(draft.notifyTarget) : null;
+  const shownTargets = draft.outputKind === "intents" ? targets.filter((target) => isDirectChat(target.chat)) : targets;
+  const gone = draft.notifyTarget && !shownTargets.some((t) => targetKey(t) === draft.notifyTarget) ? targetOf(draft.notifyTarget) : null;
+  const applyPreset = async (outputKind: "leads" | "intents") => {
+    setBusy(true);
+    setError("");
+    try {
+      const { fields: preset } = await subscriptionPreset({ output_kind: outputKind });
+      setDraft((current) => draftFromPreset(current, preset));
+      setSaved(false);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1600,6 +1645,12 @@ function SubscriptionForm({
             { value: "command" as ScheduleKind, label: "Command", hint: "Each firing runs a shell command directly: no agent, no model spend." },
             SUBSCRIPTION_CHOICE,
           ]} />
+      )}
+      {!schedule && (
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("leads")}>消息线索</Button>
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("intents")}>意图识别</Button>
+        </div>
       )}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
@@ -1696,10 +1747,11 @@ function SubscriptionForm({
             <label htmlFor={id("target")} className={LABEL}>Push to</label>
             <select id={id("target")} value={draft.notifyTarget} onChange={(e) => set("notifyTarget", e.target.value)} className={SELECT}>
               <option value="">Dashboard only</option>
-              {targets.map((target) => (
+              {shownTargets.map((target) => (
                 <option key={targetKey(target)} value={targetKey(target)}>{`${target.label}${target.channel_enabled ? "" : " (channel off)"}`}</option>))}
               {gone && <option value={draft.notifyTarget}>{`${gone.channel} · ${gone.chat} (unavailable)`}</option>}
             </select>
+            {draft.outputKind === "intents" && <p className="text-xs text-muted-foreground">意图识别只推到私聊。</p>}
             <p className="text-xs text-muted-foreground">
               A direct chat or a bound group. Changing it, the rule or the zone, or turning the subscription on, asks you to
               confirm before anything is pushed; until then the output stays on this page.

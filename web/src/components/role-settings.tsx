@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CollapsibleRow } from "@/components/collapsible-row";
+import { LeadsSettings } from "@/components/leads-settings";
 import { LayerSettingsForm } from "@/components/layer-settings";
 import {
   fetchAgentSettings,
@@ -213,6 +214,7 @@ function RoleConfigForm({
             without tools.
           </p>
           <ManagedHooks />
+          <LeadsSettings />
         </div>
       ) : SPAWNED.includes(config.role) ? (
         <div className="space-y-1">

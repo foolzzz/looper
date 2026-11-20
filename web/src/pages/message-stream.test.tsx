@@ -8,12 +8,16 @@ import {
   setMessageStreamChat, previewMessageStreamDeletion, deleteMessageStream,
   type MessageStreamRun, type MessageStreamSource,
 } from "@/lib/api";
+import { leadsChats, leadsSearch, leadsSettingsGet } from "@/lib/api-leads";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
   fetchMessageStream: vi.fn(), fetchMessageStreamRuns: vi.fn(), configureMessageStream: vi.fn(),
   fetchMessageStreamChats: vi.fn(), setMessageStreamChat: vi.fn(),
   previewMessageStreamDeletion: vi.fn(), deleteMessageStream: vi.fn(),
+}));
+vi.mock("@/lib/api-leads", () => ({
+  leadsSettingsGet: vi.fn(), leadsSearch: vi.fn(), leadsChats: vi.fn(),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,6 +45,9 @@ describe("MessageStreamPage", () => {
     vi.setSystemTime(new Date("2026-11-18T12:00:00Z"));
     vi.resetAllMocks();
     vi.mocked(fetchMessageStreamRuns).mockResolvedValue({ source_id: "lark-user", runs: [] });
+    vi.mocked(leadsSettingsGet).mockResolvedValue({ enabled: false, valid_days: 14, subscriptions: [] });
+    vi.mocked(leadsSearch).mockResolvedValue({ notice: "来自飞书消息，未经确认；只当线索，不当权威。", leads: [], more: 0 });
+    vi.mocked(leadsChats).mockResolvedValue({ source_id: null, chats: [], total: 0 });
     vi.mocked(fetchMessageStreamChats).mockResolvedValue({ source_id: "lark-user", chats: [] });
     container = document.createElement("div");
     document.body.append(container);
@@ -105,6 +112,21 @@ describe("MessageStreamPage", () => {
     expect(container.textContent).not.toContain("Set up a source");
   });
 
+  it("hides the leads tab unless leads are on", async () => {
+    vi.mocked(fetchMessageStream).mockResolvedValue({ sources: [source()] });
+    await show();
+    expect(container.querySelector('[role="tab"]')).toBeNull();
+    expect(leadsSearch).not.toHaveBeenCalled();
+    vi.mocked(leadsSettingsGet).mockResolvedValue({ enabled: true, valid_days: 14, subscriptions: [] });
+    act(() => root.unmount());
+    root = createRoot(container);
+    await show();
+    const tab = [...container.querySelectorAll('[role="tab"]')].find((item) => item.textContent === "线索")!;
+    expect(tab).toBeTruthy();
+    await act(async () => { (tab as HTMLButtonElement).click(); });
+    expect(container.textContent).toContain("来自飞书消息，未经确认；只当线索，不当权威。");
+    expect(leadsSearch).toHaveBeenCalledWith({ state: "active" });
+  });
   const change = async (selector: string, value: string) => {
     await act(async () => {
       const input = container.querySelector<HTMLInputElement>(selector)!;

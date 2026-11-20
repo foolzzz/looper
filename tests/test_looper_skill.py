@@ -55,6 +55,10 @@ def test_the_two_copies_are_byte_for_byte_equal() -> None:
     assert PLUGIN_COPY.read_bytes() == CANONICAL.read_bytes()
 
 
+def test_leads_disabled_is_silent_and_not_retried() -> None:
+    assert "exit 3 means leads are not enabled — don't retry or mention it" in CANONICAL.read_text(encoding="utf-8")
+
+
 def test_the_frontmatter_names_the_skill_and_describes_it() -> None:
     fields = _frontmatter(CANONICAL.read_text(encoding="utf-8"))
     assert fields["name"] == "looper-skill"
