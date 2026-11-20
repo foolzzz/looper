@@ -334,6 +334,27 @@ def test_a_send_cut_off_by_a_stop_is_never_sent_again(monkeypatch: pytest.Monkey
     run_with_channel_configs(test, monkeypatch)
 
 
+def test_a_stop_lets_the_send_under_way_finish_and_starts_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        first, second = await _stored("first", now), await _stored("second", now)
+        channel = _Channel(delay=1.0)
+        service = reminders.ReminderService(channel, clock=_Clock(now), interval=0.05)
+        await service.start()
+        for _ in range(200):
+            if channel.posts:
+                break
+            await asyncio.sleep(0.05)
+        await service.stop()  # the server stops while the first send is under way
+        assert [post["text"].rsplit("：", 1)[1] for post in channel.posts] == ["first"]
+        statuses = await _statuses(pool)
+        assert (statuses[first][0], statuses[second][0]) == ("delivered", "pending")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def test_a_refused_send_is_tried_three_times_and_a_lost_answer_never_again(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _operator(pool, enabled=True)

@@ -36,6 +36,7 @@ ON_TIME = timedelta(minutes=10)  # sent within this of its time, a reminder is n
 CATCH_UP = timedelta(hours=36)  # past ON_TIME, only a chat's latest reminder due within this is sent
 LATE_NOTE = timedelta(minutes=2)  # sent this late or later, the message says when it was due
 ATTEMPTS = 3  # sends the channel refused before the reminder is failed
+STOP_GRACE_SECONDS = 15.0  # how long a stop waits for a send under way, so a restart does not leave it uncertain
 MAX_AHEAD = timedelta(days=366)
 TEXT_MAX = 500
 _LOCK = (741925, 1)  # (namespace, key) of the session advisory lock a tick holds
@@ -163,7 +164,8 @@ def _clip(text: str | None) -> str | None:
 
 class ReminderService:
     """Sends the due reminders every ``interval`` seconds while ``reminders.enabled`` is on (one setting read per
-    tick while it is off), and not while the server drains."""
+    tick while it is off), and not while the server drains. A stop lets a send under way finish (up to
+    ``STOP_GRACE_SECONDS``) and starts no other."""
 
     def __init__(self, registry: Any, *, drain: Any = None, clock: Callable[[], datetime] | None = None,
                  interval: float = TICK_SECONDS) -> None:
@@ -172,23 +174,32 @@ class ReminderService:
         self._clock = clock or (lambda: datetime.now(dt_timezone.utc))
         self._interval = interval
         self._task: asyncio.Task | None = None
+        self._stopping = asyncio.Event()
 
     async def start(self) -> None:
+        self._stopping.clear()
         self._task = asyncio.create_task(self._loop(), name="reminders")
 
     async def stop(self) -> None:
         if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+            self._stopping.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(self._task), STOP_GRACE_SECONDS)
+            except (asyncio.TimeoutError, Exception):
+                self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
 
     async def _loop(self) -> None:
-        while True:
+        while not self._stopping.is_set():
             try:
                 await self.run_once()
             except Exception:
                 logger.warning("reminder delivery failed; trying again at the next tick", exc_info=True)
-            await asyncio.sleep(self._interval)
+            try:
+                await asyncio.wait_for(self._stopping.wait(), self._interval)
+            except asyncio.TimeoutError:
+                pass
 
     async def run_once(self) -> None:
         if (self._drain is not None and self._drain.draining) or not await enabled():
@@ -212,7 +223,7 @@ class ReminderService:
             logger.info("reminder %s missed: %s", reminder_id, why)
         by_id = {reminder["id"]: reminder for reminder in due}
         for reminder_id in decided.send:
-            if self._drain is not None and self._drain.draining:
+            if self._stopping.is_set() or (self._drain is not None and self._drain.draining):
                 return
             await self._send(conn, by_id[reminder_id])
 
