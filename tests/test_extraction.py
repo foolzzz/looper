@@ -278,3 +278,14 @@ def test_an_input_over_sixty_thousand_characters_leaves_its_newest_rows_for_the_
     small = rows[:3]
     assert extraction.fit("leads", small, before=[], parents=[], participants=PEOPLE, known=[], zone_name=ZONE,
                           text_max_chars=500)[0] == small
+
+
+def test_malformed_fields_drop_their_item_only_and_a_far_date_is_clamped():
+    found = parsed_leads(leads(lead(kind=[]), lead(confidence={}), lead(kind={"a": 1}), lead(valid_until="9999-12-31"),
+                               lead(valid_until="0001-01-01"), lead(summary="kept")))
+    assert dict(found.dropped) == {"unknown_kind": 2, "bad_confidence": 1}
+    assert [item["summary"] for item in found.items] == ["发布改到周五", "发布改到周五", "kept"]
+    assert found.items[0]["valid_until"] == NOW + timedelta(days=90)
+    assert found.items[1]["valid_until"] == datetime(2026, 11, 21, tzinfo=ZoneInfo(ZONE))
+    found = parsed_intents(intent(type=["dev_task"]), intent(confidence=[]), intent(title="kept"))
+    assert dict(found.dropped) == {"unknown_type": 1, "bad_confidence": 1} and len(found.items) == 1

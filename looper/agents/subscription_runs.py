@@ -107,6 +107,8 @@ class SubscriptionRuns:
                                  in_window=window["in_window"], selected=len(window["rows"]),
                                  too_old=window["too_old"], over_cap=window["over_cap"], target=window["target"],
                                  config_version=window["config_version"])
+        if window.get("snapshot"):  # an extraction's pinned configuration and confirmation (``extraction.plan``)
+            await db_schedules.update_run(conn, run_id, execution_snapshot=window["snapshot"])
 
     # --- Executing ---
 
@@ -139,10 +141,13 @@ class SubscriptionRuns:
         sub = schedule["subscription"]
         pool = db_connection.get_pool()
         if subscriptions.is_extraction(sub):
+            snapshot = run.get("execution_snapshot") or {}
+            planned = extraction.pinned(schedule, snapshot) if snapshot.get("subscription") else schedule
             picked = await db_subs.extraction_window(
-                pool, sub, output_kind=subscriptions.output_kind(sub), from_seq=stream["from_seq"],
-                to_seq=stream["to_seq"], now=run["fired_at"], own_apps=await self._own_apps())
-            return await extraction.execute(self, run_id, schedule, stream, picked)
+                pool, planned["subscription"], output_kind=subscriptions.output_kind(planned["subscription"]),
+                from_seq=stream["from_seq"], to_seq=stream["to_seq"], now=run["fired_at"],
+                own_apps=await self._own_apps())
+            return await extraction.execute(self, run_id, planned, stream, {**picked, "snapshot": snapshot or None})
         await self._push_run(run_id, run, schedule, stream)
         return False
 

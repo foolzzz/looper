@@ -297,7 +297,8 @@ def _text(raw: Any) -> str:
 
 def _valid_until(raw: Any, *, now: datetime, valid_days: int) -> datetime:
     """The end of the day ``raw`` (``YYYY-MM-DD`` in ``now``'s zone) names, clamped to [tomorrow 00:00, now +
-    ``valid_days``]; absent is now + ``valid_days``."""
+    ``valid_days``]; absent is now + ``valid_days``. A day past the latest is the latest (no date arithmetic on it,
+    so 9999-12-31 cannot overflow)."""
     latest = now + timedelta(days=valid_days)
     if raw is None or raw == "":
         return latest
@@ -307,15 +308,26 @@ def _valid_until(raw: Any, *, now: datetime, valid_days: int) -> datetime:
         day = datetime.strptime(raw.strip(), "%Y-%m-%d").date()
     except ValueError:
         raise _Drop("bad_date") from None
+    if day >= latest.date():
+        return latest
     earliest = datetime.combine(now.date() + timedelta(days=1), time(), tzinfo=now.tzinfo)
     end = datetime.combine(day + timedelta(days=1), time(), tzinfo=now.tzinfo)
     return min(max(end, earliest), latest)
 
 
+def _member(raw: Any, allowed: Collection[str]) -> bool:
+    """Whether ``raw`` is one of ``allowed``: a string first, so a list or an object is simply not one."""
+    return isinstance(raw, str) and raw in allowed
+
+
+_LEAD_KINDS = frozenset(kind.value for kind in leads_model.LeadKind)
+_CONFIDENCES = frozenset(c.value for c in leads_model.Confidence)
+
+
 def _lead(item: Mapping[str, Any], refs: Refs, *, now: datetime, valid_days: int) -> dict[str, Any]:
-    if item.get("kind") not in {kind.value for kind in leads_model.LeadKind}:
+    if not _member(item.get("kind"), _LEAD_KINDS):
         raise _Drop("unknown_kind")
-    if item.get("confidence") not in {c.value for c in leads_model.Confidence}:
+    if not _member(item.get("confidence"), _CONFIDENCES):
         raise _Drop("bad_confidence")
     summary, detail = _text(item.get("summary")), _text(item.get("detail"))
     if not summary:
@@ -340,9 +352,9 @@ def _lead(item: Mapping[str, Any], refs: Refs, *, now: datetime, valid_days: int
 
 def _intent(item: Mapping[str, Any], refs: Refs, *, enabled_types: Collection[str],
             app_seqs: Collection[int]) -> dict[str, Any]:
-    if item.get("type") not in enabled_types:
+    if not _member(item.get("type"), enabled_types):
         raise _Drop("unknown_type")
-    if item.get("confidence") not in {c.value for c in leads_model.Confidence}:
+    if not _member(item.get("confidence"), _CONFIDENCES):
         raise _Drop("bad_confidence")
     title, summary = _text(item.get("title")), _text(item.get("summary"))
     if not title:
@@ -398,17 +410,32 @@ def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, 
                          else _intent(item, refs, enabled_types=enabled_types, app_seqs=app_seqs))
         except _Drop as drop:
             dropped[str(drop)] += 1
+        except (TypeError, ValueError, OverflowError):  # a shape no rule above foresaw: this item only
+            dropped["malformed"] += 1
     return Parsed("items", items=items, instructions_seen_seqs=seen_seqs, dropped=dropped)
 
 
 # --- Storing ---
 
 
-async def _lock_sources(conn: asyncpg.Connection, seqs: Collection[int]) -> dict[int, dict[str, Any]]:
-    """The events of ``seqs`` still there, locked against deletion until the transaction ends."""
+async def _lock_sources(conn: asyncpg.Connection, source_id: str,
+                        seqs: Collection[int]) -> tuple[dict[int, dict[str, Any]], set[str]]:
+    """The events of ``seqs`` still there, locked against deletion until the transaction ends, and the chats among
+    theirs that may no longer be extracted (excluded from the stream or from extraction).
+
+    The lock convention with an exclusion (``source_chats.extraction``, the leads operations): it UPDATEs the chat's
+    row, and deletes what was extracted from it, in one transaction; this takes that row ``FOR SHARE`` first, before
+    any lead or intent is written. Either the exclusion committed first, and this reads it and writes nothing from
+    the chat, or it waits for this transaction, and its delete then sees what this one wrote."""
     rows = await conn.fetch("SELECT seq, chat_id, sender_id, sender_kind, mention_ids, sent_at FROM source_events "
                             "WHERE seq = ANY($1::bigint[]) FOR SHARE", sorted(set(seqs)))
-    return {row["seq"]: dict(row) for row in rows}
+    events = {row["seq"]: dict(row) for row in rows}
+    chats = await conn.fetch(
+        "SELECT chat_id, inclusion = 'included' AND extraction = 'included' AS allowed FROM source_chats "
+        "WHERE source_id = $1 AND chat_id = ANY($2::text[]) ORDER BY chat_id FOR SHARE",
+        source_id, sorted({event["chat_id"] for event in events.values()}))
+    allowed = {row["chat_id"] for row in chats if row["allowed"]}
+    return events, {event["chat_id"] for event in events.values()} - allowed
 
 
 def _counts(parsed: Parsed, *, more: bool) -> dict[str, Any]:
@@ -416,10 +443,17 @@ def _counts(parsed: Parsed, *, more: bool) -> dict[str, Any]:
             "instructions_seen": len(parsed.instructions_seen_seqs), "more": more}
 
 
-def _live(item: dict[str, Any], events: Mapping[int, Any], counts: dict[str, Any]) -> list[int] | None:
-    """The item's sources still stored; None (counted ``source_deleted``) when none of its window sources is."""
-    if not any(seq in events for seq in item["window_sources"]):
-        counts["dropped"]["source_deleted"] = counts["dropped"].get("source_deleted", 0) + 1
+def _live(item: dict[str, Any], events: Mapping[int, Any], revoked: Collection[str],
+          counts: dict[str, Any]) -> list[int] | None:
+    """The item's sources still stored; None when none of its window sources is (counted ``source_deleted``) or
+    any of its sources is in a chat that may no longer be extracted (``chat_excluded``: its text may restate it)."""
+    reason = None
+    if any(seq in events and events[seq]["chat_id"] in revoked for seq in item["sources"]):
+        reason = "chat_excluded"
+    elif not any(seq in events for seq in item["window_sources"]):
+        reason = "source_deleted"
+    if reason is not None:
+        counts["dropped"][reason] = counts["dropped"].get(reason, 0) + 1
         return None
     return [seq for seq in item["sources"] if seq in events]
 
@@ -442,9 +476,9 @@ async def store_leads(conn: asyncpg.Connection, parsed: Parsed, *, source_id: st
     ``same_as`` (merged), and the active leads it ``supersedes`` marked so. Returns the counts ``extract_counts``
     keeps."""
     counts = {**_counts(parsed, more=more), "superseded": 0}
-    events = await _lock_sources(conn, [seq for item in parsed.items for seq in item["sources"]])
+    events, revoked = await _lock_sources(conn, source_id, [seq for item in parsed.items for seq in item["sources"]])
     for item in parsed.items:
-        sources = _live(item, events, counts)
+        sources = _live(item, events, revoked, counts)
         if sources is None:
             continue
         first, last = min(events[seq]["sent_at"] for seq in sources), max(events[seq]["sent_at"] for seq in sources)
@@ -478,10 +512,10 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
     ``REJECTED_WITHIN``. Each keeps only its own sources. Returns the counts ``extract_counts`` keeps."""
     counts = _counts(parsed, more=more)
     versions = {row["key"]: row["version"] for row in await conn.fetch("SELECT key, version FROM intent_types")}
-    events = await _lock_sources(conn, [seq for item in parsed.items for seq in item["sources"]])
+    events, revoked = await _lock_sources(conn, source_id, [seq for item in parsed.items for seq in item["sources"]])
     seen = set(parsed.instructions_seen_seqs)
     for item in parsed.items:
-        sources = _live(item, events, counts)
+        sources = _live(item, events, revoked, counts)
         if sources is None or item["type"] not in versions:
             continue
         chat_id = events[min(sources, key=lambda seq: (events[seq]["sent_at"], seq))]["chat_id"]
@@ -687,8 +721,62 @@ async def plan(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, now: da
     if not picked["rows"]:
         await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=picked["last_seq"], at=now)
         return None
+    snapshot = {"subscription": {name: sub[name] for name in PINNED}, "config_version": version,
+                "confirmed_at": sub["target_confirmed_at"].isoformat()}
     return {"from_seq": from_seq, "to_seq": to_seq, **picked, "over_cap": 0, "target": None,
-            "config_version": version}
+            "config_version": version, "snapshot": snapshot}
+
+
+# What a run reads is fixed as it is planned, with the confirmation it was planned under (``schedule_runs.
+# execution_snapshot``): ``execute`` reads the window with these and stores only while that confirmation holds.
+PINNED = ("source_id", "output_kind", "include_chats", "exclude_chats", "max_age_minutes", "max_events",
+          "text_max_chars")
+
+
+async def confirmation_problem(db: Any, schedule_id: str, snapshot: Mapping[str, Any] | None, *,
+                               profile: Mapping[str, Any] | None = None) -> str | None:
+    """Why a run planned under ``snapshot`` may not read or store now, read afresh through ``db``: its kind's switch
+    is off, the confirmation it was planned under was cleared or given again (another epoch), or the configuration
+    (and, with ``profile``, the Profile the processor launched with) is not the one confirmed. None: it may."""
+    from . import subscriptions
+
+    if not snapshot:
+        return "it has no pinned configuration"
+    schedule = await db_schedules.get_schedule(schedule_id, pool=db)
+    if schedule is None:
+        return "the schedule is gone"
+    sub = schedule["subscription"]
+    kind = subscriptions.output_kind(sub)
+    if kind != snapshot["subscription"]["output_kind"]:
+        return "its output kind changed"
+    if not await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(db):
+        return TURNED_OFF[kind]
+    confirmed = sub["target_confirmed_at"]
+    if (confirmed is None or confirmed.isoformat() != snapshot["confirmed_at"]
+            or sub.get("target_confirmed_version") != snapshot["config_version"]):
+        return "its confirmation was cleared or given again while it ran"
+    if await subscriptions.config_version(schedule, profile=profile) != snapshot["config_version"]:
+        return ("the processor launched with a Profile other than the confirmed one" if profile is not None
+                else "its configuration changed since it was confirmed")
+    return None
+
+
+async def kind_on(run_id: str) -> bool:
+    """Whether the switch of the kind of the run's subscription (``leads.enabled``, ``intents.enabled``) is on."""
+    from . import subscriptions
+
+    pool = db_connection.get_pool()
+    run = await db_schedules.get_run(run_id, pool=pool)
+    schedule = await db_schedules.get_schedule(run["schedule_id"], pool=pool) if run else None
+    if schedule is None or not subscriptions.is_extraction(schedule.get("subscription")):
+        return False
+    kind = subscriptions.output_kind(schedule["subscription"])
+    return await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(pool)
+
+
+def pinned(schedule: Mapping[str, Any], snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """``schedule`` with the subscription fields its run was planned with."""
+    return {**schedule, "subscription": {**schedule["subscription"], **snapshot["subscription"]}}
 
 
 class _Finished(Exception):
@@ -697,10 +785,12 @@ class _Finished(Exception):
 
 async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: str, cost: float | None = None,
                   error: str | None = None, summary: str | None = None, advance_to: int | None = None,
-                  store: Any = None) -> None:
+                  store: Any = None, held: Mapping[str, Any] | None = None) -> None:
     """End the run in one transaction: what ``store(conn)`` writes (it returns the counts), the run's status, outcome,
     counts and count line, and, when ``advance_to`` is given, the cursor. An ``extracted`` run that stored nothing is
-    ``quiet``."""
+    ``quiet``. With ``held`` (the run's snapshot and the Profile it launched with), the schedule's row is locked first
+    (a change or a confirmation waits, or has committed) and the confirmation checked again: when it no longer holds
+    nothing is stored, the run is ``cancelled`` and the cursor stays."""
     from .subscriptions import digest
 
     now = runs._clock()
@@ -710,6 +800,12 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
             stream = await db_subs.get_run(run_id, db=conn)
             if run is None or stream is None or run["status"] != db_schedules.RUNNING:
                 raise _Finished
+            if store is not None and held is not None:
+                await conn.execute("SELECT 1 FROM schedules WHERE id = $1 FOR NO KEY UPDATE", run["schedule_id"])
+                if problem := await confirmation_problem(conn, run["schedule_id"], held["snapshot"],
+                                                         profile=held.get("profile")):
+                    store, advance_to, summary, status, outcome = None, None, None, "cancelled", "failed"
+                    error = f"nothing was stored: {problem}; the next confirmed run reads its window again"
             counts = dict(await store(conn)) if store is not None else None
             line = count_line(kind, counts) if counts is not None else None
             if counts is not None and outcome == "extracted" and not (counts["new"] or counts["merged"]):
@@ -733,7 +829,9 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
 async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: Mapping[str, Any],
                   picked: Mapping[str, Any]) -> bool:
     """Run the processor over the run's window and store what it found (the module's notes); whether the window
-    left rows for the next run (``more``), so the scheduler fires it again. A failure ends the run, leaves the cursor
+    left rows for the next run (``more``), so the scheduler fires it again. ``schedule`` carries the subscription
+    fields the run was planned with and ``picked`` (the window read with them) its ``snapshot``: the confirmation is
+    checked again before the processor and in the transaction that stores. A failure ends the run, leaves the cursor
     and returns False."""
     from . import subscriptions
 
@@ -741,10 +839,16 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     kind = subscriptions.output_kind(sub)
     pool = db_connection.get_pool()
     zone_name = schedule["timezone"]
+    snapshot = picked["snapshot"]
 
     async def end(**fields: Any) -> None:
         await _finish(runs, run_id, kind, **fields)
 
+    # The confirmation the run was planned under must still hold before anything is read for the processor.
+    if problem := await confirmation_problem(pool, schedule["id"], snapshot):
+        await end(status="cancelled", outcome="failed",
+                  error=f"nothing was read: {problem}; the next confirmed run reads its window again")
+        return False
     if not picked["rows"]:  # every message of it was deleted since the run was planned
         await end(status="completed", outcome="quiet", summary="the window's messages were deleted",
                   advance_to=picked["last_seq"])
@@ -793,5 +897,6 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                                    record_id=result.record_id, now=now, more=found.more)
 
     await end(status="completed", outcome="extracted", cost=result.cost_usd, advance_to=found.last_seq, store=store,
-              summary="没有可整理的（处理器回复了 NONE）" if parsed.state == "quiet" else None)
+              summary="没有可整理的（处理器回复了 NONE）" if parsed.state == "quiet" else None,
+              held={"snapshot": snapshot, "profile": result.profile})
     return found.more

@@ -76,7 +76,7 @@ from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
 from . import subscriptions
-from .extraction import CATCH_UP_MAX, Skipped
+from .extraction import CATCH_UP_MAX, Skipped, kind_on as extraction_on
 from .subscription_runs import OwnApps, Poster, SubscriptionRuns
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 
@@ -708,9 +708,11 @@ class Scheduler:
             return None
         return await self._fire(conn, schedule, firing, now)
 
-    async def run_now(self, schedule_id: str, *, expected_version: str | None = None) -> str | None:
-        """Fire a schedule now, enabled or not (``trigger`` manual); None if unknown or admission is refused.
-        Its ``next_fire_at`` stays. A gate runs in the background: the run is ``gating`` until it ends."""
+    async def run_now(self, schedule_id: str, *, expected_version: str | None = None,
+                      only_enabled: bool = False) -> str | None:
+        """Fire a schedule now, enabled or not (``trigger`` manual), or with ``only_enabled`` only while it is (checked
+        with its row locked); None if unknown, not enabled then, or admission is refused. Its ``next_fire_at`` stays.
+        A gate runs in the background: the run is ``gating`` until it ends."""
         now = self._clock()
         with ExitStack() as firing_guard:
             try:
@@ -718,7 +720,8 @@ class Scheduler:
                     schedule = await db_schedules.lock_schedule(conn, schedule_id)
                     if schedule is not None:
                         await db_schedules.check_configuration_version(conn, schedule, expected_version)
-                    if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
+                    if (schedule is None or (only_enabled and not schedule["enabled"])
+                            or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
                             or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                         return None
                     launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
@@ -916,9 +919,11 @@ class Scheduler:
             return
         schedule_id = run["schedule_id"]
         fired = self._catch_ups.pop(schedule_id, 0)
-        if more and fired < CATCH_UP_MAX:
+        # A catch-up fires only while the subscription is still enabled and its kind still on: a disabled one, or
+        # leads or intents turned off meanwhile, ends the series.
+        if more and fired < CATCH_UP_MAX and await extraction_on(run_id):
             self._catch_ups[schedule_id] = fired + 1
-            if await self.run_now(schedule_id) is None:
+            if await self.run_now(schedule_id, only_enabled=True) is None:
                 self._catch_ups.pop(schedule_id, None)
 
     async def _start_command(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], firing: Firing,

@@ -119,7 +119,8 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
     from . import extraction, leads_model, processor
     from .source_service import own_bot_app_ids
 
-    pool = await connection.init_pool(database_url, min_size=1, max_size=3)
+    pool = await connection.init_pool(database_url, min_size=1, max_size=4)
+    holder = None
     try:
         if not await pool.fetchval("SELECT to_regclass('message_leads') IS NOT NULL"):
             return 1, "the database has no message lead tables yet: start `looper serve` once to upgrade it"
@@ -127,6 +128,13 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
         if schedule is None:
             return 1, problem
         sid, sub, zone_name = schedule["id"], schedule["subscription"], schedule["timezone"]
+        if run:
+            # One runner per subscription, from before its progress is read until it ends (a session lock, released
+            # when its connection closes even if this process dies).
+            holder = await pool.acquire()
+            if not await holder.fetchval("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", backfill_lock(sid)):
+                return 1, (f"another `looper msgflow leads-backfill --run` of {sid} is running; wait for it to end, "
+                           "then run this again to resume")
         earliest = await pool.fetchval(
             "SELECT sr.from_seq FROM subscription_runs sr JOIN schedule_runs r ON r.id = sr.run_id "
             "WHERE r.schedule_id = $1 ORDER BY r.created_at, r.id LIMIT 1", sid)
@@ -169,7 +177,9 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
             return 0, "\n".join(lines)
         assert budget_usd is not None
         totals = {"new": 0, "merged": 0, "superseded": 0, "dropped": 0}
-        done, spent, windows, events = progress["done_seq"], float(progress["spent_usd"]), progress["windows"], 0
+        # ``budget_usd`` bounds this run of the command; ``total`` is every run's, kept with the progress.
+        done, total, windows = progress["done_seq"], float(progress["spent_usd"]), progress["windows"]
+        spent, events = 0.0, 0
         stopped = ""
         while True:
             picked = await db_subs.extraction_window(pool, scope, output_kind="leads", from_seq=done, to_seq=start,
@@ -183,6 +193,8 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
             if spent + estimate > budget_usd:
                 stopped = f"stopped before a window of {len(picked['rows'])} events would pass the budget"
                 break
+            # The estimate only decides whether to start; the processor's own cap is what is left of the budget.
+            cap = min(schedule["run_budget_usd"], budget_usd - spent)
             found = await extraction.batch(pool, "leads", scope, picked, zone_name=zone_name, now=now,
                                            own_apps=own_apps, to_seq=start,
                                            known_since=max(row["sent_at"] for row in picked["rows"]))
@@ -190,11 +202,12 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
                          "events": len(found.rows), "context": found.context, "known": found.known}
             result = await processor.run(
                 owner=f"{sid}:backfill", instructions=schedule["requirement"], input_text=found.text,
-                input_ref=reference, quiet_word=extraction.QUIET_WORD, budget_usd=schedule["run_budget_usd"],
+                input_ref=reference, quiet_word=extraction.QUIET_WORD, budget_usd=cap,
                 timeout_s=float(processor.PROCESSOR_TIMEOUT_SEC), runtime_root=runtime_root, claude_bin=claude_bin,
                 project_id=schedule["project_id"], schedule_id=sid, contract=extraction.LEADS_CONTRACT,
                 metadata={"backfill": reference})
             spent += result.cost_usd or 0.0
+            total += result.cost_usd or 0.0
             if result.failure is not None:
                 stopped = f"the processor gave no reply ({result.failure.value}): {result.detail}"
             parsed = None if stopped else extraction.parse(
@@ -213,17 +226,25 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
                 await conn.execute(
                     "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
                     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key,
-                    json.dumps({"done_seq": done, "spent_usd": round(spent, 6), "windows": windows}))
+                    json.dumps({"done_seq": done, "spent_usd": round(total, 6), "windows": windows}))
             if stopped or not found.more and done >= start:
                 break
         lines.append(f"ran {windows - progress['windows']} windows: {totals['new']} new leads, {totals['merged']} "
                      f"merged, {totals['superseded']} superseded, {totals['dropped']} dropped; spent {_usd(spent)} of "
-                     f"{_usd(budget_usd)}; done up to seq {done} of {start}")
+                     f"{_usd(budget_usd)} ({_usd(total)} in all); done up to seq {done} of {start}")
         if stopped:
             lines.append(f"  {stopped}; run it again to resume")
         return (1 if stopped and "budget" not in stopped else 0), "\n".join(lines)
     finally:
+        if holder is not None:
+            await holder.execute("SELECT pg_advisory_unlock_all()")
+            await pool.release(holder)
         await connection.close_pool()
+
+
+def backfill_lock(schedule_id: str) -> str:
+    """The advisory lock's key (``hashtextextended``) that one backfill runner of a subscription holds."""
+    return f"looper.leads.backfill:{schedule_id}"
 
 
 def leads_backfill(args: Any, load_ops: Any) -> int:

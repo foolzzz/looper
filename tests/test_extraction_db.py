@@ -17,7 +17,7 @@ from typing import Any
 import asyncpg
 import pytest
 
-from looper.agents import extraction, subscriptions
+from looper.agents import extraction, subscription_runs, subscriptions
 from looper.agents.extraction import parse
 from looper.agents.ops import ErrorCode, OpError
 from looper.db import subscriptions as db_subs
@@ -439,6 +439,102 @@ def test_an_unconfirmed_extraction_is_skipped_without_moving_its_cursor_and_a_ne
     scenario(check, monkeypatch, tmp_path)
 
 
+TWO_LEADS = json.dumps({"leads": [
+    {"kind": "decision", "summary": "From the first chat", "confidence": "high", "sources": ["m1"]},
+    {"kind": "decision", "summary": "From the second chat", "confidence": "high", "sources": ["m2"]}]})
+
+
+async def _two_chats(env: ScheduleEnv, sid: str) -> tuple[int, int]:
+    allowed = await add(env.pool, "in the allowed chat", chat_id="oc_allowed", sent_at=minutes_ago(env, 9))
+    other = await add(env.pool, "in the other chat", chat_id="oc_other", sent_at=minutes_ago(env, 8))
+    return allowed, other
+
+
+def test_a_scope_changed_after_planning_is_not_read_without_its_confirmation(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env, subscription={"include_chats": ["oc_allowed"]})
+        await _two_chats(env, sid)
+        before = await cursor(env, sid)
+        original = subscription_runs.SubscriptionRuns.execute
+
+        async def changed_first(self, run_id):  # between the plan and the execution, the scope is widened
+            await env.ok("POST", "/api/v1/schedule_admin/update",
+                         {"schedule_id": sid, "fields": {"subscription": {"include_chats": []}}})
+            return await original(self, run_id)
+
+        monkeypatch.setattr(subscription_runs.SubscriptionRuns, "execute", changed_first)
+        run = await fire(env, sid)
+        assert run["status"] == "cancelled" and "nothing was read" in run["error"]
+        assert fake.calls == [] and await env.pool.fetchval("SELECT count(*) FROM message_leads") == 0
+        assert await cursor(env, sid) == before
+        assert json.loads(run["execution_snapshot"])["subscription"]["include_chats"] == ["oc_allowed"]
+
+    scenario(check, monkeypatch, tmp_path, reply=TWO_LEADS)
+
+
+def test_a_scope_changed_while_the_processor_runs_stores_nothing_and_keeps_the_cursor(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env, subscription={"include_chats": ["oc_allowed"]})
+        await _two_chats(env, sid)
+        before = await cursor(env, sid)
+
+        async def widen():
+            await env.ok("POST", "/api/v1/schedule_admin/update",
+                         {"schedule_id": sid, "fields": {"subscription": {"include_chats": []}}})
+
+        fake.during = widen
+        fake.reply = json.dumps({"leads": [{"kind": "fact", "summary": "x", "confidence": "low", "sources": ["m1"]}]})
+        run = await fire(env, sid)
+        assert len(fake.calls) == 1 and "oc_other" not in fake.calls[0]["input_text"]
+        assert run["status"] == "cancelled" and "nothing was stored" in run["error"]
+        assert await env.pool.fetchval("SELECT count(*) FROM message_leads") == 0 and await cursor(env, sid) == before
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_chat_excluded_while_the_processor_runs_gets_nothing_written_from_it(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+        _, other = await _two_chats(env, sid)
+
+        async def exclude():
+            await env.pool.execute("UPDATE source_chats SET extraction = 'excluded', extraction_excluded_at = now() "
+                                   "WHERE chat_id = 'oc_allowed'")
+
+        fake.during = exclude
+        run = await fire(env, sid)
+        assert run["status"] == "completed"
+        counts = json.loads(run["stream"]["extract_counts"])
+        assert (counts["new"], counts["dropped"]) == (1, {"chat_excluded": 1})
+        assert await env.pool.fetchval("SELECT array_agg(event_seq) FROM message_lead_sources") == [other]
+        assert await env.pool.fetchval("SELECT summary FROM message_leads") == "From the second chat"
+
+    scenario(check, monkeypatch, tmp_path, reply=TWO_LEADS)
+
+
+@pytest.mark.parametrize("stop", ["disable", "switch_off"])
+def test_no_catch_up_fires_once_the_subscription_is_disabled_or_its_kind_turned_off(monkeypatch, tmp_path, stop):
+    async def check(env, poster, fake):
+        sid = await extractor(env, subscription={"max_events": 1})
+        for n in range(5):
+            await add(env.pool, f"message {n}", sent_at=minutes_ago(env, 30 - n))
+
+        async def stopping():
+            if len(fake.calls) == 1:
+                if stop == "disable":
+                    await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": False}})
+                else:
+                    await switch(env, "leads", False)
+
+        fake.during = stopping
+        await fire(env, sid)
+        assert len(fake.calls) == 1
+        assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs WHERE schedule_id = $1", sid) == 1
+        assert env.scheduler._catch_ups == {}
+
+    scenario(check, monkeypatch, tmp_path, reply="NONE")
+
+
 @pytest.mark.parametrize("kind", ["leads", "intents"])
 def test_a_run_whose_kind_is_turned_off_is_skipped_without_a_processor_and_keeps_its_cursor(monkeypatch, tmp_path,
                                                                                               kind):
@@ -584,3 +680,53 @@ def test_the_backfill_dry_run_counts_by_kind_and_day_and_writes_nothing(tmp_path
             in out and "实测均价" not in out
         assert len(asyncio.run(_rows(url, "SELECT key FROM system_settings"))) == settings
         assert asyncio.run(_rows(url, "SELECT count(*) AS n FROM message_leads"))[0]["n"] == 0
+
+
+def _held_lock(url: str, key: str) -> tuple[Any, Any]:
+    """Another backfill runner: a session holding the subscription's lock, in a thread of its own."""
+    import threading
+
+    locked, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        async def go() -> None:
+            conn = await asyncpg.connect(url)
+            try:
+                await conn.execute("SELECT pg_advisory_lock(hashtextextended($1, 0))", key)
+                locked.set()
+                await asyncio.get_running_loop().run_in_executor(None, release.wait)
+            finally:
+                await conn.close()
+        asyncio.run(go())
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert locked.wait(10)
+    return thread, release
+
+
+def test_a_second_backfill_runner_exits_while_one_holds_the_subscription(tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    with fresh_database_without_recording(DSN) as (url, _):
+        asyncio.run(_backfill_setup(url, str(tmp_path)))
+        sid = asyncio.run(_rows(url, "SELECT schedule_id FROM subscriptions"))[0]["schedule_id"]
+        # The lock every runner of this subscription takes (``msgflow_commands.backfill_lock``).
+        thread, release = _held_lock(url, f"looper.leads.backfill:{sid}")
+        try:
+            assert _cli(tmp_path, url, "--days", "30", "--run", "--budget-usd", "1") == 1
+            assert "another `looper msgflow leads-backfill --run`" in capsys.readouterr().err
+            assert fake.calls == []
+            assert not asyncio.run(_rows(url, "SELECT 1 FROM system_settings WHERE key LIKE 'leads.backfill.%'"))
+        finally:
+            release.set()
+            thread.join(10)
+        assert _cli(tmp_path, url, "--days", "30", "--run", "--budget-usd", "1") == 0 and len(fake.calls) == 1
+
+
+def test_the_backfill_caps_the_processor_at_what_is_left_of_its_budget(tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    with fresh_database_without_recording(DSN) as (url, _):
+        asyncio.run(_backfill_setup(url, str(tmp_path)))
+        assert _cli(tmp_path, url, "--days", "30", "--run", "--budget-usd", "0.01") == 0
+        # The subscription's own cap is $0.6 a run: the processor gets the smaller, what is left of $0.01.
+        assert [call["budget_usd"] for call in fake.calls] == [0.01]
