@@ -131,6 +131,7 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                          {"sequencename": "ledger_items_id_seq", "last_value": None},
                          {"sequencename": "manager_events_id_seq", "last_value": None},
                          {"sequencename": "agent_spawns_id_seq", "last_value": None},
+                         {"sequencename": "decision_snapshots_id_seq", "last_value": None},
                          {"sequencename": "message_leads_id_seq", "last_value": None},
                          {"sequencename": "intents_id_seq", "last_value": None},
                          {"sequencename": "intent_posts_id_seq", "last_value": None}],

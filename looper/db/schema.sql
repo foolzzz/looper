@@ -1929,6 +1929,30 @@ CREATE INDEX IF NOT EXISTS idx_advisor_advice_task ON advisor_advice (task_id);
 CREATE INDEX IF NOT EXISTS idx_advisor_advice_step ON advisor_advice (step_id, attempt) WHERE step_id IS NOT NULL;
 -- agent spawns end
 
+-- decision snapshots begin
+-- What a task's engine saw when it decided (the decision snapshot RFC), written only while the system setting
+-- decision_snapshots.enabled is true: a dispatch pass (kind dispatch: the steps as readiness reads them, the step
+-- workspace round's inputs, which steps were ready and which started) or the Planner's decision on a step's result
+-- (kind step_decision: what code computed for the turn, the turn's run record in digest, the decision and its
+-- reason as the activity line keeps it). No message text. record_id is the turn's llm_records row, without a foreign
+-- key: the snapshot keeps the digest it needs. Going with its task; housekeeping deletes rows after 30 days.
+-- connection.py applies this block to databases that predate it, so keep it between the markers.
+CREATE TABLE IF NOT EXISTS decision_snapshots (
+    id            BIGSERIAL PRIMARY KEY,
+    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL CHECK (kind IN ('dispatch', 'step_decision')),
+    step_id       TEXT,
+    record_id     BIGINT,
+    inputs        JSONB NOT NULL CHECK (jsonb_typeof(inputs) = 'object'),
+    inputs_sha256 TEXT NOT NULL,
+    decision      JSONB NOT NULL CHECK (jsonb_typeof(decision) = 'object'),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT decision_snapshots_step CHECK ((kind = 'step_decision') = (step_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_decision_snapshots_task ON decision_snapshots (task_id, kind, id);
+CREATE INDEX IF NOT EXISTS idx_decision_snapshots_created ON decision_snapshots (created_at);
+-- decision snapshots end
+
 -- Message leads and intents (message-leads-intents RFC, section 6): sourced notes and typed intents the processor
 -- extracts from source_events, the per-chat extraction switch, intent types with their append-only history, chat →
 -- project bindings, the alert-bot allowlist and the messages Looper sent about intents. Default off: no rows, no
