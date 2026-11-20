@@ -30,7 +30,7 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
                      "started_at": _STR, "state": _STR, "method": _NULL_STR,
                      "stopping": _BOOL, "can_interrupt": _BOOL})
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
-CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS})
+CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL})
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -55,11 +55,13 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read the chat settings: stopping a reply, and the Manager's completion turns.",
+    _op("chat_settings.get", "Read the chat settings: stopping a reply, the Manager's completion turns, and its "
+        "research order.",
         _object({}, closed=True), CHAT_SETTINGS),
     _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
-                 "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]}},
+                 "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
+                 "research_order": {"type": ["boolean", "null"]}},
                 [], closed=True), CHAT_SETTINGS, "high"),
 )
 
@@ -87,6 +89,15 @@ async def impact(server, operation, arguments, principal, headers):
                           "ended, in a read-only turn of its own, instead of the code notice; a group chat still "
                           "gets the code notice." if turns != "off" else
                           "From the next task end, every chat gets the code notice again."))
+    if "research_order" in values:
+        value = values["research_order"]
+        enabled = chat_settings.DEFAULT_RESEARCH_ORDER if value is None else value
+        changes.append(f"Set manager.research_order to {str(enabled).lower()}"
+                       f"{' (built-in default)' if value is None else ''}? "
+                       + ("From its next turn, the default Manager's instructions say where to look things up, in "
+                          "order, before it asks the user; its process starts again to read them." if enabled else
+                          "From its next turn, the default Manager's instructions no longer say where to look things "
+                          "up; its process starts again."))
     return " ".join(changes)
 
 

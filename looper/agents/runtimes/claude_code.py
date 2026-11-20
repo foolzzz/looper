@@ -75,8 +75,9 @@ from ... import child_env
 from .. import claude_cli
 from ..llmrec import TRANSLATED_BACKEND_ENV
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, ManagedHooks, Probe, PromptBlock, ProviderBinding,
-    ReadOnly, RunCost, RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
+    ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, LoadedSources, ManagedHooks, Probe,
+    PromptBlock, ProviderBinding, ReadOnly, RunCost, RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
+    library_mcp_servers, plugin_skills,
 )
 from .instructions import InstructionFile
 
@@ -111,6 +112,11 @@ MANAGED_SETTINGS = (Path("/Library/Application Support/ClaudeCode/managed-settin
                     Path("/etc/claude-code/managed-settings.json"))
 # Anthropic's own API: the endpoint Claude Code uses without a base URL.
 ANTHROPIC_HOSTS = frozenset({"api.anthropic.com"})
+
+
+def _switched_on(value: str | None) -> bool:
+    """Whether a Claude Code backend switch (``CLAUDE_CODE_USE_BEDROCK=1``) is on; unset, empty, 0 or false is off."""
+    return value is not None and value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def official_endpoint(base_url: str) -> bool:
@@ -343,6 +349,25 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                 env.setdefault("ENABLE_TOOL_SEARCH", "true")
             no_proxy(env)
         return env
+
+    def loaded_sources(self, launch: Launch) -> LoadedSources:
+        """Every plugin directory and every server of the ``--mcp-config`` file (``claude_cli.library_args``)."""
+        return LoadedSources(tuple(sorted(library_mcp_servers(launch.library))),
+                             plugin_skills(launch.library.plugin_dirs))
+
+    def web_tools(self, launch: Launch) -> bool:
+        """WebSearch is a tool of Anthropic's own API: only a launch whose model requests go there has it. Decided
+        from the final launch environment: a backend switch it keeps on (Bedrock, Vertex, Foundry and the others of
+        ``TRANSLATED_BACKEND_ENV``, from the settings or inherited) takes it away, and so does a compatible or
+        translated endpoint."""
+        try:
+            environment = self.environment(launch)
+        except RuntimeUnsupported:  # a launch that cannot run says so where it starts; it has no web here
+            return False
+        if any(_switched_on(environment.get(name)) for name, _ in TRANSLATED_BACKEND_ENV):
+            return False
+        upstream = self.llmrec_upstream(launch)
+        return upstream is not None and official_endpoint(upstream)
 
     def llmrec_upstream(self, launch: Launch) -> str | None:
         from . import Launcher
