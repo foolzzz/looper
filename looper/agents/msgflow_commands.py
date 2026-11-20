@@ -76,7 +76,57 @@ def import_history(database_url: str, *, source_id: str | None, days: int, dry_r
     return code
 
 
+async def _delete_message(database_url, *, source_id, message_id, runtime_root, dry_run=False):
+    from ..db import message_stream as store
+    from ..db.connection import close_pool, init_pool
+    from .ops import OpError
+    from .v1_domains.message_stream import preview_deletion, confirm_deletion, deletion_target
+
+    pool = await init_pool(database_url, min_size=1, max_size=3)
+    try:
+        if not await pool.fetchval("SELECT to_regclass('source_deletions') IS NOT NULL"):
+            print("the database has no deletion support yet: start `looper serve` once to upgrade it", file=sys.stderr)
+            return 1
+        sources = await store.list_sources()
+        found = [source for source in sources if source_id in (None, source["id"])]
+        if len(found) != 1:
+            print("name an existing, unambiguous message source with --source", file=sys.stderr)
+            return 1
+        target = deletion_target({"scope": "message", "message_id": message_id})
+        confirmations = {}
+        kwargs = {"runtime_root": runtime_root, "confirmations": confirmations, "owner": "cli", "db": pool}
+        preview = await preview_deletion(found[0]["id"], target, **kwargs)
+        backups = preview["backups"]
+        print(f"Delete message {message_id}: {preview['events']} stored event(s).")
+        for limit in preview["limits"]:
+            print(f"  {limit}")
+        print(f"  Upgrade backups: {backups['count']}; earliest: {backups['earliest_at'] or 'none'}")
+        if dry_run:
+            return 0
+        try:
+            answer = await asyncio.to_thread(input, "Type delete to permanently delete this message: ")
+        except (EOFError, OSError):
+            answer = ""
+        if answer.strip() != "delete":
+            print("Cancelled; no message was deleted.")
+            return 1
+        result = await confirm_deletion(found[0]["id"], target, preview["confirmation_token"], **kwargs)
+        print(f"Deleted {result['deleted']} stored event(s); the tombstone prevents reimport.")
+        return 0
+    except OpError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    finally:
+        await close_pool()
+
+
 def run(args: Any, load_ops: Any) -> int:
+    if args.msgflow_command == "delete":
+        ops = load_ops(args)
+        if ops is None:
+            return 1
+        return asyncio.run(_delete_message(ops.database_url, source_id=args.source, message_id=args.message,
+                                          runtime_root=ops.runtime_root, dry_run=args.dry_run))
     if not 1 <= args.days <= IMPORT_MAX_DAYS:
         print(f"error: --days is a whole number from 1 to {IMPORT_MAX_DAYS}", file=sys.stderr)
         return 2

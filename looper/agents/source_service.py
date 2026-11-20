@@ -441,6 +441,12 @@ class SourceService:
         now = (clock or (lambda: datetime.now(timezone.utc)))()
         ran = 0
         for source in await store.list_sources():
+            if source.get("retention_last_at") is None or now - source["retention_last_at"] >= timedelta(days=1):
+                try:
+                    dropped = await store.retain_bodies(source["id"], now=now)
+                    logger.info("source %s retention dropped %d raw bodies", source["id"], dropped)
+                except Exception:
+                    logger.warning("source %s retention failed; trying again later", source["id"], exc_info=True)
             if source["ingest_mode"] != "bridge" or source["id"] in self._busy:
                 continue
             try:

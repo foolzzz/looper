@@ -50,7 +50,7 @@ def test_an_event_is_unique_per_source_and_goes_with_its_source(monkeypatch):
 
 
 def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
-    tables = ("subscription_deliveries", "subscription_runs", "subscriptions", "source_events", "source_runs", "source_threads", "source_people", "source_chats", "event_sources")
+    tables = ("subscription_deliveries", "subscription_runs", "subscriptions", "source_deletions", "source_events", "source_runs", "source_threads", "source_people", "source_chats", "event_sources")
 
     async def check(pool):
         await pool.execute("; ".join(f"DROP TABLE {table}" for table in tables)
@@ -72,5 +72,21 @@ def test_deleting_a_run_does_not_scan_the_events(monkeypatch):
         index = await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE tablename = 'source_events' "
                                     "AND indexdef LIKE '%(run_id)%'")
         assert index and "WHERE" in index
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_existing_stream_gets_deletion_and_retention_schema(monkeypatch):
+    async def check(pool):
+        await pool.execute("DROP TABLE source_deletions; ALTER TABLE event_sources DROP COLUMN retention_last_at; "
+                           "DELETE FROM schema_migrations WHERE name = 'message_stream_deletions'")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+        await source(pool)
+        assert await pool.fetchval("SELECT retention_last_at FROM event_sources") is None
+        assert await pool.fetchval("SELECT count(*) FROM source_deletions") == 0
 
     run_db(check, monkeypatch, timeout=20)

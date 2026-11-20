@@ -1469,6 +1469,7 @@ CREATE TABLE IF NOT EXISTS event_sources (
     last_run_at             TIMESTAMPTZ,
     last_ok_at              TIMESTAMPTZ,
     last_listing_at         TIMESTAMPTZ,
+    retention_last_at       TIMESTAMPTZ,
     body_retention_days     INTEGER CHECK (body_retention_days > 0),
     app_body_retention_days INTEGER DEFAULT 30 CHECK (app_body_retention_days > 0),
     stale_alert_at          TIMESTAMPTZ,
@@ -1587,6 +1588,23 @@ CREATE INDEX IF NOT EXISTS idx_source_events_chat ON source_events (source_id, c
 CREATE INDEX IF NOT EXISTS idx_source_events_sent ON source_events (source_id, sent_at);
 CREATE INDEX IF NOT EXISTS idx_source_events_run ON source_events (run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_source_events_body ON source_events (sent_at) WHERE body IS NOT NULL;
+-- Durable predicates contain identifiers and bounds, never message content or chat names.
+CREATE TABLE IF NOT EXISTS source_deletions (
+    id          BIGSERIAL PRIMARY KEY,
+    source_id   TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+    scope       TEXT NOT NULL CHECK (scope IN ('message', 'range', 'chat')),
+    message_id  TEXT,
+    chat_id     TEXT,
+    start_at    TIMESTAMPTZ,
+    end_at      TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((scope = 'message' AND message_id IS NOT NULL AND chat_id IS NULL AND start_at IS NULL AND end_at IS NULL)
+        OR (scope = 'range' AND message_id IS NULL AND start_at IS NOT NULL AND end_at IS NOT NULL AND end_at > start_at)
+        OR (scope = 'chat' AND chat_id IS NOT NULL AND message_id IS NULL AND start_at IS NULL AND end_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_source_deletions_source ON source_deletions (source_id, scope);
+CREATE INDEX IF NOT EXISTS idx_source_deletions_message ON source_deletions (source_id, message_id) WHERE scope = 'message';
+CREATE INDEX IF NOT EXISTS idx_source_deletions_chat ON source_deletions (source_id, chat_id) WHERE scope = 'chat';
 -- message stream end
 
 -- Subscriptions (message-stream RFC, section 7): the schedule kind that turns the events a source ingested after a

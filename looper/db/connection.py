@@ -131,6 +131,7 @@ _TASK_CHAT_GROUP = "task_chat_group"
 _PROCESSOR_ROLE = "processor_role"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
+_MESSAGE_STREAM_DELETIONS = "message_stream_deletions"
 _SUBSCRIPTIONS = "subscriptions"
 _MANAGER_EVENTS = "manager_events"
 _RUN_TREE = "run_tree"
@@ -608,6 +609,10 @@ async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('event_sources') IS NOT NULL")
 
 
+async def _message_stream_deletions_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _MESSAGE_STREAM_DELETIONS, "event_sources", "retention_last_at")
+
+
 async def _column_pending(conn: asyncpg.Connection, marker: str, table: str, column: str) -> bool:
     """An unmarked database whose ``table`` lacks ``column`` needs its additive upgrade; recorded upgrades never
     repair DDL."""
@@ -1025,6 +1030,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _message_stream_pending(conn):
             await conn.execute(_message_stream_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM)
+        if await _message_stream_deletions_pending(conn):
+            await conn.execute("ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS retention_last_at TIMESTAMPTZ")
+            await conn.execute(_message_stream_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM_DELETIONS)
         if await _subscriptions_pending(conn):
             await conn.execute(_subscriptions_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTIONS)
@@ -1162,7 +1171,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
-            or await _subscriptions_pending(conn)
+            or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
