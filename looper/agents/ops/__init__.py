@@ -131,6 +131,8 @@ class Turn:
     group: bool = False  # the chat is a group chat
     envelope: MessageEnvelope | None = None
     blocks: list[str] = field(default_factory=list)
+    # The cards with buttons Looper sends with the reply (``card_actions.Card.to_dict``); each is one of ``blocks``.
+    cards: list[dict[str, Any]] = field(default_factory=list)
     # Created in this turn: their ready configuration blocks can change after a successful start.
     created_task_blocks: dict[str, str] = field(default_factory=dict)
     # What this turn's calls created (a schedule's id): the user sees it only after this turn's reply.

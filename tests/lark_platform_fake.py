@@ -228,8 +228,8 @@ class FakeLarkPlatform:
         if key is not None and key in self._uuids:
             return 200, {"code": 0, "data": {"message_id": self._uuids[key]}}
         kind = "send" if not suffix else "reply" if suffix.endswith("/reply") else (
-            "edit" if method == "PUT" else "reaction")
-        message_id = parent if kind in {"edit", "reaction"} else f"om_sent_{len(self.sent) + 1}"
+            {"PUT": "edit", "PATCH": "update"}.get(method, "reaction"))
+        message_id = parent if kind in {"edit", "update", "reaction"} else f"om_sent_{len(self.sent) + 1}"
         content = json.loads(body["content"]) if "content" in body else body.get("reaction_type")
         receive_type = query.get("receive_id_type", [None])[0]
         self.sent.append({"kind": kind, "chat": body.get("receive_id") if receive_type == "chat_id" else None,
@@ -314,6 +314,19 @@ class FakeLarkPlatform:
                               "event_type": "im.message.receive_v1"}, "event": {
                                   "sender": {"sender_id": {"open_id": sender}, "sender_type": "user"},
                                   "message": message}}, message_id=message_id, split=split)
+
+    async def push_card_action(self, value: str, *, operator: str = "ou_sender", chat_id: str = "oc_chat",
+                               message_id: str = "om_card", event_id: str | None = None,
+                               frame_id: str | None = None) -> None:
+        """Deliver a press of a card's button (schema 2.0 ``card.action.trigger``), as the platform does on the
+        long connection."""
+        event_id = event_id or f"ev_card_{self._event_count + 1}"
+        await self.push_event({"schema": "2.0", "header": {"event_id": event_id, "event_type": "card.action.trigger"},
+                               "event": {"operator": {"open_id": operator}, "token": "c-token",
+                                         "action": {"tag": "button", "value": {"looper": value}},
+                                         "host": "im_message",
+                                         "context": {"open_message_id": message_id, "open_chat_id": chat_id}}},
+                              message_id=frame_id)
 
     async def drop_connections(self) -> None:
         await asyncio.gather(*(client.close(code=1011) for client in tuple(self.clients)))

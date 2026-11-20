@@ -638,3 +638,76 @@ def test_unknown_and_broken_frames_do_not_block_later_messages() -> None:
             await fake.wait_acks(1)
             assert len(fake.acks) == 1
     asyncio.run(main())
+
+
+def _answer(ack: dict[str, Any]) -> Any:
+    import base64
+
+    return json.loads(base64.b64decode(ack["data"])) if "data" in ack else None
+
+
+def test_a_card_press_is_answered_in_its_acknowledgement_and_never_yielded() -> None:
+    """A card press rides the same long connection as an ``event`` frame (``card.action.trigger``): its answer
+    goes in the frame's acknowledgement as the official SDK sends it (``data``, base64 JSON), once per event."""
+    presses: list[dict[str, Any]] = []
+
+    async def on_card(event: dict[str, Any]) -> dict[str, Any]:
+        presses.append(event)
+        return {"toast": {"type": "success", "content": "已确认"}}
+
+    async def main() -> None:
+        async with FakeLarkPlatform() as fake, _stream(fake, on_card=on_card) as events:
+            following = asyncio.create_task(anext(events))
+            await fake.push_card_action("tok:confirm", operator="ou_a", chat_id="oc_dm", message_id="om_card",
+                                        event_id="ev-card", frame_id="card-1")
+            await fake.push_card_action("tok:confirm", event_id="ev-card", frame_id="card-2")  # redelivered
+            await fake.wait_acks(2)
+            await fake.push_message(text="after", message_id="om_after")
+            assert (await asyncio.wait_for(following, 2))["content"] == "after"
+            await fake.wait_acks(3)
+            acks = dict((frame, payload) for frame, payload in fake.acks)
+            assert set(acks["card-1"]) == {"code", "headers", "data"} and acks["card-1"]["code"] == 200
+            assert _answer(acks["card-1"]) == {"toast": {"type": "success", "content": "已确认"}}
+            assert acks["card-2"] == {"code": 200} and acks["om_after"] == {"code": 200}
+            assert presses == [{"type": "card.action.trigger", "event_id": "ev-card", "operator_id": "ou_a",
+                                "chat_id": "oc_dm", "message_id": "om_card", "value": "tok:confirm"}]
+    asyncio.run(main())
+
+
+def test_a_card_press_answered_too_late_or_failing_gets_a_plain_acknowledgement(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lark_stream, "CARD_ANSWER_SECONDS", 0.05)
+
+    async def on_card(event: dict[str, Any]) -> dict[str, Any]:
+        if event["value"] == "slow:x":
+            await asyncio.sleep(1)
+        raise RuntimeError("broken")
+
+    async def main() -> None:
+        async with FakeLarkPlatform() as fake, _stream(fake, on_card=on_card) as events:
+            pending = asyncio.create_task(anext(events))
+            await fake.push_card_action("slow:x", frame_id="card-slow")
+            await fake.push_card_action("fail:x", frame_id="card-fail")
+            await fake.wait_acks(2)
+            assert sorted(fake.acks) == [("card-fail", {"code": 200}), ("card-slow", {"code": 200})]
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+    asyncio.run(main())
+
+
+def test_a_frame_of_the_old_card_callback_is_acknowledged_and_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+    async def main() -> None:
+        async with FakeLarkPlatform() as fake, _stream(fake, on_card=None) as events:
+            pending = asyncio.create_task(anext(events))
+            for number in range(2):
+                await fake.push_frame(Frame(method=1, headers=[("type", "card"), ("message_id", f"card-{number}")],
+                                            payload=b"{}"))
+            await fake.wait_acks(2)
+            assert [payload for _, payload in fake.acks] == [{"code": 200}, {"code": 200}]
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+    with caplog.at_level(logging.INFO, logger="looper.agents.channels.lark_stream"):
+        asyncio.run(main())
+    assert [r.message for r in caplog.records if "old card callback" in r.message] == [
+        "Lark stream ignored a frame of the old card callback; card buttons are answered as card.action.trigger "
+        "events"]

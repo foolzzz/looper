@@ -1,0 +1,206 @@
+"""Card buttons in the channels (assistant card actions RFC): a reply's card goes after its text with buttons that
+carry only a token, and a press on the Lark bot's long connection (a local platform) or a Telegram callback query is
+answered in time and the card updated when its action ends. Only a sender the bot admits may press."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+
+from lark_platform_fake import FakeLarkPlatform
+from looper.agents import card_actions
+from looper.agents.bus import MessageBus
+from looper.agents.channels import lark
+from looper.agents.channels.allowlist import SenderAllowlist
+from looper.agents.channels.lark_bot import make_adapter
+from looper.agents.channels.telegram import TelegramChannelAdapter
+from looper.agents.message import MessageEnvelope, MessageType, channel_address, manager_address
+from tests.db_support import DSN, run_db
+
+ASKER = "ou_asker"
+BLOCK = "需要你确认：\n删除项目 sample。\n回复「确认」就执行；回复别的就不执行。"
+CARD = card_actions.Card(BLOCK, (card_actions.Button("确认", "tok:confirm", "primary"),
+                                 card_actions.Button("取消", "tok:cancel")))
+
+
+def _reply(channel_id: str, chat: str, cards: list[dict[str, Any]]) -> MessageEnvelope:
+    channel = channel_id.removeprefix("channel-")
+    return MessageEnvelope.create(source=manager_address("manager"), target=channel_address(channel, channel_id),
+                                  message_type=MessageType.AGENT_REPLY, payload={"text": f"好的。\n\n{BLOCK}"},
+                                  correlation_id="corr-1", metadata={"reply_route": {"chat_id": chat},
+                                                                     "cards": cards})
+
+
+def _answered(press: Any, seconds: float = 0) -> Any:
+    """``card_actions.press`` as a confirmation answers it: at once, with an action that ends after ``seconds``."""
+    async def answer(event: card_actions.Press) -> card_actions.Answer:
+        press.append(event)
+
+        async def later() -> card_actions.Card:
+            await asyncio.sleep(seconds)
+            return CARD.settled("✅ 已执行。")
+
+        return card_actions.Answer("已确认，正在执行", "success", card=CARD.settled("⏳ 已确认，正在执行…"), later=later())
+    return answer
+
+
+def test_lark_a_reply_sends_its_card_after_its_text_and_a_press_is_answered_then_updated(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lark, "observe_chat", AsyncMock())
+    presses: list[card_actions.Press] = []
+    monkeypatch.setattr(card_actions, "press", _answered(presses, seconds=0.3))
+    monkeypatch.setattr(card_actions, "ANSWER_SECONDS", 0.1)  # the action outlasts the answer
+
+    async def main() -> None:
+        async with FakeLarkPlatform() as fake:
+            bus = MessageBus(runtime_root=tmp_path)
+            adapter = make_adapter({"app_id": fake.app_id}, "test-secret", runtime_root=tmp_path,
+                                   allowlist=SenderAllowlist("channel-lark_bot", frozenset({ASKER})),
+                                   on_rejected=None, bot_open_id=fake.bot["open_id"], base_url=fake.base_url)
+            try:
+                await adapter.start(bus)
+                assert (await adapter.deliver(_reply("channel-lark_bot", "oc_dm", [CARD.to_dict()]))).success
+                text, card = fake.sent
+                assert (text["msg_type"], text["content"]["zh_cn"]["content"][0][0]["text"]) == ("post", "好的。")
+                assert card["msg_type"] == "interactive" and card["chat"] == "oc_dm"
+                (markdown, row) = card["content"]["body"]["elements"]
+                assert markdown == {"tag": "markdown", "content": BLOCK}
+                assert [column["elements"][0]["behaviors"] for column in row["columns"]] == [
+                    [{"type": "callback", "value": {"looper": "tok:confirm"}}],
+                    [{"type": "callback", "value": {"looper": "tok:cancel"}}]]
+
+                await fake.push_card_action("tok:confirm", operator="ou_stranger", frame_id="card-1")
+                await fake.push_card_action("tok:confirm", operator=ASKER, message_id=card["message_id"],
+                                            frame_id="card-2")
+                await fake.wait_acks(2)
+                answers = {frame: json.loads(base64.b64decode(ack["data"])) for frame, ack in fake.acks}
+                assert answers["card-1"] == {"toast": {"type": "error", "content": "只有发起人能确认"}}
+                assert answers["card-2"]["toast"] == {"type": "success", "content": "已确认，正在执行"}
+                assert answers["card-2"]["card"]["data"]["body"]["elements"] == [
+                    {"tag": "markdown", "content": f"{BLOCK}\n\n⏳ 已确认，正在执行…"}]
+                assert [(p.channel_id, p.presser, p.value) for p in presses] == [
+                    ("channel-lark_bot", ASKER, "tok:confirm")]
+                async with asyncio.timeout(2):
+                    while not any(sent["kind"] == "update" for sent in fake.sent):
+                        await asyncio.sleep(0.01)
+                (update,) = [sent for sent in fake.sent if sent["kind"] == "update"]
+                assert update["parent"] == card["message_id"]
+                assert update["content"]["body"]["elements"][0]["content"].endswith("✅ 已执行。")
+            finally:
+                await adapter.stop()
+                await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(main(), 10))
+
+
+def test_lark_cli_and_web_replies_keep_the_block_in_their_text() -> None:
+    text, cards = card_actions.shown(f"好的。\n\n{BLOCK}", [])
+    assert (text, cards) == (f"好的。\n\n{BLOCK}", [])
+    text, cards = card_actions.shown("（已隐藏）", [CARD.to_dict()])  # a group check replaced the reply
+    assert (text, cards) == ("（已隐藏）", [])
+
+
+def _telegram(tmp_path: Path) -> tuple[TelegramChannelAdapter, Any]:
+    adapter = TelegramChannelAdapter(bot_token="0:not-a-token",
+                                     allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
+    adapter._bus = SimpleNamespace(runtime_root=tmp_path)
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=lambda **kw: SimpleNamespace(message_id=55)),
+                          edit_message_text=AsyncMock())
+    adapter._app = SimpleNamespace(bot=bot)
+    return adapter, bot
+
+
+def test_telegram_a_reply_sends_its_card_with_an_inline_keyboard(tmp_path: Path) -> None:
+    adapter, bot = _telegram(tmp_path)
+    adapter._remember("corr-1", 99)
+    assert asyncio.run(adapter.deliver(_reply("channel-telegram", "99", [CARD.to_dict()]))).success
+    answer, card = bot.send_message.await_args_list
+    assert answer.kwargs["text"] == "好的。" and "reply_markup" not in answer.kwargs
+    assert card.kwargs["text"] == BLOCK
+    assert [[(key.text, key.callback_data) for key in row] for row in card.kwargs["reply_markup"].inline_keyboard] == [
+        [("确认", "tok:confirm"), ("取消", "tok:cancel")]]
+
+
+@pytest.mark.parametrize("presser", [7, 8])
+def test_telegram_a_press_is_answered_and_its_card_edited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         presser: int) -> None:
+    presses: list[card_actions.Press] = []
+    monkeypatch.setattr(card_actions, "press", _answered(presses))
+    adapter, bot = _telegram(tmp_path)
+    query = SimpleNamespace(data="tok:confirm", answer=AsyncMock(), message=SimpleNamespace(message_id=55))
+    update = SimpleNamespace(update_id=3, callback_query=query, effective_user=SimpleNamespace(id=presser),
+                             effective_chat=SimpleNamespace(id=99))
+
+    async def main() -> None:
+        await adapter._on_button(update, None)
+        await asyncio.gather(*card_actions._kept)
+
+    asyncio.run(main())
+    if presser == 8:
+        assert presses == [] and query.answer.await_args.kwargs == {"text": "只有发起人能确认"}
+        bot.edit_message_text.assert_not_awaited()
+        return
+    assert [(p.channel_id, p.presser, p.value) for p in presses] == [("channel-telegram", "7", "tok:confirm")]
+    assert query.answer.await_args.kwargs == {"text": "已确认，正在执行"}
+    # The action ended within the answer's time: the card is edited once, to what it came to.
+    assert [(call.kwargs["text"], call.kwargs["reply_markup"]) for call in bot.edit_message_text.await_args_list] == [
+        (f"{BLOCK}\n\n✅ 已执行。", None)]
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_lark_bot_a_confirmation_card_pressed_on_the_long_connection_runs_it_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole chain against a database and a local platform: the Manager asks, its reply's card goes out, the
+    asker presses 确认 twice on the long connection; the call runs once and the card says so."""
+    from looper.agents.ops import Turn
+    from looper.agents.ops.service import ManagerOps, Platform
+    from looper.agents.tiers.manager import _with_blocks
+    from looper.db import projects, system_settings
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="sample", work_dir="/srv/sample", pool=pool)
+        await system_settings.put_settings({card_actions.ENABLED_KEY: "true"}, pool=pool)
+        ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="test-token")
+        monkeypatch.setitem(card_actions._handlers, "confirmation", ops.press)
+        turn = Turn(channel="lark_bot", chat="oc_dm", message_id="om_ask", sender=ASKER, channel_id="channel-lark_bot")
+        ops.begin_turn(turn)
+        assert (await ops.call("looper_projects", {"action": "delete", "project": "sample"}))["status"] == \
+            "needs_confirmation"
+        ops.end_turn(turn)
+        reply = _reply("channel-lark_bot", "oc_dm", turn.cards)
+        reply = MessageEnvelope(**{**reply.__dict__, "payload": {"text": _with_blocks("好的。", turn.blocks)}})
+        async with FakeLarkPlatform() as fake:
+            bus = MessageBus(runtime_root=tmp_path)
+            adapter = make_adapter({"app_id": fake.app_id}, "test-secret", runtime_root=tmp_path,
+                                   allowlist=SenderAllowlist("channel-lark_bot", frozenset({ASKER})),
+                                   on_rejected=None, bot_open_id=fake.bot["open_id"], base_url=fake.base_url)
+            try:
+                await adapter.start(bus)
+                await adapter.deliver(reply)
+                (card,) = [sent for sent in fake.sent if sent["msg_type"] == "interactive"]
+                buttons = [column["elements"][0] for column in card["content"]["body"]["elements"][1]["columns"]]
+                confirm = buttons[0]["behaviors"][0]["value"]["looper"]
+                assert buttons[0]["text"]["content"] == "确认" and confirm.endswith(":confirm")
+                for number in (1, 2):
+                    await fake.push_card_action(confirm, operator=ASKER, message_id=card["message_id"],
+                                                event_id=f"ev-press-{number}", frame_id=f"press-{number}")
+                    await fake.wait_acks(number, timeout=5)
+                answers = {frame: json.loads(base64.b64decode(ack["data"])) for frame, ack in fake.acks}
+                first = answers["press-1"]
+                assert first["toast"]["type"] == "success"
+                assert first["card"]["data"]["body"]["elements"][0]["content"].endswith("✅ 已执行。")
+                assert answers["press-2"]["toast"]["content"] == "已处理"
+            finally:
+                await adapter.stop()
+                await bus.shutdown()
+        assert await projects.get_project(project["id"], pool=pool) is None
+        assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE status = 'ok'") == 1
+
+    run_db(test, monkeypatch, timeout=30)

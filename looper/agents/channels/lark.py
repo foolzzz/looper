@@ -22,6 +22,7 @@ from time import monotonic, time
 from typing import Any, Literal
 
 from ..bus import MessageBus
+from .. import card_actions
 from .. import chat_attachments as files
 from ..chat_attachments import Attachment, AttachmentKind, AttachmentState, TooLarge
 from ..message import (
@@ -323,10 +324,18 @@ class LarkChannelAdapter(ChannelAdapter):
         if not text:
             return DeliveryReceipt(channel=self.channel_type, success=True)
 
-        if corr_id in self._group_message:
+        cards: list[card_actions.Card] = []
+        if hasattr(self._transport, "send_card") and envelope.metadata.get("cards"):
+            text, cards = card_actions.shown(text, envelope.metadata["cards"])
+        receipt = DeliveryReceipt(channel=self.channel_type, success=True)
+        if text and corr_id in self._group_message:
             receipt = await self._send_reply(corr_id, text)
-        else:
+        elif text:
             receipt = await self._send_message(chat_id, text)
+        for card in cards:
+            sent = await self._answer_card(corr_id, chat_id, card)
+            if not text:
+                receipt = sent
         if not envelope.payload.get("autonomous"):
             await self._status.finish(corr_id, error=envelope.payload.get("error"),
                                       stopped=envelope.payload.get("outcome") == "stopped")
@@ -354,6 +363,68 @@ class LarkChannelAdapter(ChannelAdapter):
             logger.warning("%s: a reply in a group chat failed: %s", self.channel_id, exc)
             return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
         return DeliveryReceipt(channel=self.channel_type, success=True)
+
+    async def _answer_card(self, correlation_id: str, chat_id: str, card: card_actions.Card) -> DeliveryReceipt:
+        """Send a card a reply carries where the reply went (under the group message it answers); its text alone
+        when the card cannot be sent, so the user can still answer it by typing."""
+        content = card_actions.lark_card(replace(card, text=files.redact(card.text, self._runtime_root)))
+        message_id = self._group_message.get(correlation_id)
+        try:
+            if message_id is not None:
+                await self._transport.reply_card(message_id, content,  # type: ignore[attr-defined]
+                                                 reply_in_thread=message_id in self._thread_messages)
+            else:
+                await self._transport.send_card(content, chat_id=chat_id)  # type: ignore[attr-defined]
+        except LarkCliError as exc:
+            logger.warning("%s: a card failed, sending its text: %s", self.channel_id, exc)
+            if message_id is not None:
+                return await self._send_reply(correlation_id, card.text)
+            return await self._send_message(chat_id, card.text)
+        return DeliveryReceipt(channel=self.channel_type, success=True)
+
+    async def _card_action(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Answer a press of a card's button on the long connection (``card_actions.respond``): a toast and the card
+        as it is now, in time; a card whose action ends later is replaced then. Only a sender this bot admits in
+        that chat may press."""
+        presser, chat = str(event.get("operator_id") or ""), str(event.get("chat_id") or "")
+        route = self._resolve_chat(self.channel_id, chat) if self._resolve_chat is not None and chat else None
+        if presser not in self._allowlist.ids and (route is None or presser not in route.senders):
+            logger.info("%s: a card press by an unlisted sender %s was refused", self.channel_id, presser)
+            return card_actions.lark_answer(card_actions.Answer(card_actions.NOT_ALLOWED["confirmation"], "error"))
+        message_id = str(event.get("message_id") or "")
+
+        async def update(card: card_actions.Card) -> None:
+            if message_id:
+                await self._transport.update_card(message_id, card_actions.lark_card(card))  # type: ignore[attr-defined]
+
+        answer = await card_actions.respond(card_actions.Press(self.channel_id, presser, str(event.get("value") or "")),
+                                            update)
+        card_actions.follow(answer, update)  # sent after this answer's card unless the action outlasts its 3 s
+        return card_actions.lark_answer(answer)
+
+    async def post_card(self, target: NotifyTarget, card: Any, *, reply_to: str | None = None,
+                        idempotency_key: str | None = None) -> PostReceipt:
+        """Post ``card`` with its buttons through the bot token's transport (``post`` otherwise): a reply to
+        ``reply_to`` when given, else to the user or the group (the card @-mentions the requester)."""
+        if not hasattr(self._transport, "send_card"):
+            return await self.post(target, card.text, reply_to=reply_to, idempotency_key=idempotency_key)
+        content = card_actions.lark_card(replace(card, text=files.redact(card.text, self._runtime_root)))
+        try:
+            if reply_to:
+                message_id = await self._transport.reply_card(  # type: ignore[attr-defined]
+                    reply_to, content, idempotency_key=idempotency_key, reply_in_thread=reply_to in self._thread_messages)
+            elif target.kind is TargetKind.USER:
+                message_id = await self._transport.send_card(  # type: ignore[attr-defined]
+                    content, user_id=target.id, idempotency_key=idempotency_key)
+            else:
+                message_id = await self._transport.send_card(  # type: ignore[attr-defined]
+                    content, chat_id=target.id, idempotency_key=idempotency_key)
+        except LarkCliError as exc:
+            logger.warning("%s: a card post to %s failed: %s%s", self.channel_id, target.id, type(exc).__name__,
+                           f" (code {exc.code})" if exc.code is not None else "")
+            return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
+                               outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
+        return PostReceipt(True, external_ids=(message_id,) if message_id else ())
 
     async def _send_target(self, target: NotifyTarget, text: str, *,
                            idempotency_key: str | None = None, return_id: bool = False) -> str | None:

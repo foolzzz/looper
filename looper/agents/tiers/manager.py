@@ -778,9 +778,9 @@ class GoalSnapshot:
 
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
-                   snapshot: str | None = None) -> MessageEnvelope:
+                   snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
-    the chat's history (``record``)."""
+    the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
         record = _chat_record(original, f"{original.message_id}:reply")
@@ -792,7 +792,8 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
         correlation_id=original.correlation_id,
         reply_to=original.message_id,
         metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original), **record,
-                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
+                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {}),
+                  **({"cards": cards} if cards else {})},
     )
 
 
@@ -1392,7 +1393,7 @@ class ManagerAgent:
             return
         asked = self.ops is not None and self.ops.asks_in(envelope.message_id)
         await self._send_reply(envelope, _with_blocks(response, turn.blocks),
-                               outcome=ReplyOutcome.CONFIRM if asked else None)
+                               outcome=ReplyOutcome.CONFIRM if asked else None, cards=turn.cards)
 
     async def _answer_gate_command(self, envelope: MessageEnvelope, text: str) -> None:
         answer = await self._gate_command(envelope, text)
@@ -3266,7 +3267,7 @@ class ManagerAgent:
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True, outcome: ReplyOutcome | None = None,
-                          snapshot: str | None = None) -> None:
+                          snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
         history (a user gate keeps its own discussion). Web replies always retain their recovery identity.
@@ -3277,7 +3278,7 @@ class ManagerAgent:
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
-                                               record=record, snapshot=snapshot))
+                                               record=record, snapshot=snapshot, cards=cards))
 
     @property
     def leads_withheld(self) -> int:

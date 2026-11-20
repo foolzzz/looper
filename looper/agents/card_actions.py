@@ -1,0 +1,373 @@
+"""Buttons on chat cards: a Manager's confirmation and a user gate answered with one press (assistant card actions
+RFC, ``docs/architecture/rfcs/assistant-card-actions-v0.zh-CN.md``).
+
+Off until the system setting ``cards.actions.enabled`` is ``true``; off, nothing here runs and no card is sent.
+
+- **A card** (``Card``) is code's text and its buttons. A button carries only ``<token>:<choice>``: the token names
+  the card's row (``db.card_actions``), which holds what the buttons act on, a digest of the parameters they are
+  bound to, who may press them and until when. The choices are the buttons' own keys (``confirm``, ``cancel``, an
+  option, ``end``), never parameters.
+- **A press** (``Press``) comes from the channel that sent the card (Lark's ``card.action.trigger`` on the bot
+  token's long connection, a Telegram callback query). ``press`` answers it in code: someone not allowed is told
+  ``NOT_ALLOWED``; a card already handled, expired or bound to parameters that changed since is told it was handled
+  (``HANDLED``, ``STALE``); else the row is claimed once (``db.card_actions.claim``) and its kind's handler acts.
+  ``respond`` gives the channel an answer within its time (a toast and the card as it is now) and updates the card
+  again when the action ends later.
+- **Kinds.** ``gate``: an option of the gate's open questions, or ending the discussion, goes into the gate as the
+  user's message (``gate_service.post_message``), like ``/gate N``. ``confirmation``: the Manager's waiting
+  high-risk call (``ops.service.ManagerOps.press``), which the confirmation typed in the chat resolves too.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import secrets
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any
+
+from ..db import card_actions as db_cards
+from ..db import system_settings
+from ..db import user_gates as db_user_gates
+from .message import manager_address, parse_channel_id
+from .user_gates import GateState, MessageKind
+
+logger = logging.getLogger(__name__)
+
+ENABLED_KEY = "cards.actions.enabled"
+# The channel types whose adapter sends buttons and receives their presses; any other shows the card's text.
+BUTTON_CHANNELS = frozenset({"lark_bot", "telegram"})
+# How long a channel waits for a press's answer (Lark gives 3 s); past it the channel is told it was received and
+# the card is updated when the action ends.
+ANSWER_SECONDS = 2.5
+GATE_CARD_TTL = timedelta(days=7)
+# At most this many open questions, and options each, get buttons; the rest are answered by replying.
+GATE_ITEMS, GATE_OPTIONS = 3, 5
+OPTION_LABEL_CHARS = 30
+
+HANDLED = "已处理"
+STALE = "已失效，请看最新的消息"
+NOT_ALLOWED = {"confirmation": "只有发起人能确认", "gate": "只有发起人能回答"}
+TURNED_OFF = "按钮已关闭，请打字回复"
+RECEIVED = "已收到，正在处理"
+
+
+@dataclass(frozen=True)
+class Button:
+    label: str
+    value: str  # "<token>:<choice>", all a button carries
+    style: str = "default"  # primary | default | danger
+
+
+@dataclass(frozen=True)
+class Card:
+    """Code's text and its buttons; ``mention`` is the open_id a Lark group card @-mentions."""
+
+    text: str
+    buttons: tuple[Button, ...] = ()
+    mention: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"text": self.text, "buttons": [{"label": b.label, "value": b.value, "style": b.style}
+                                               for b in self.buttons], "mention": self.mention}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Card:
+        return cls(str(data.get("text") or ""), tuple(Button(str(b["label"]), str(b["value"]), str(b.get("style")
+                                                                                                    or "default"))
+                                                       for b in data.get("buttons") or ()), data.get("mention"))
+
+    def settled(self, line: str) -> Card:
+        """The card once handled: its text, what became of it, no buttons."""
+        return Card(f"{self.text}\n\n{line}", (), self.mention)
+
+
+@dataclass(frozen=True)
+class Press:
+    """Someone pressed a button: the channel (bot) it came through, who, and the button's value."""
+
+    channel_id: str
+    presser: str
+    value: str
+
+
+@dataclass
+class Answer:
+    """What the presser is told at once (a toast, ``level`` info/success/warning/error) and the card as it is now;
+    ``later`` is the card once the action that goes on ends."""
+
+    toast: str
+    level: str = "info"
+    card: Card | None = None
+    later: Awaitable[Card] | None = field(default=None, repr=False)
+
+
+Handler = Callable[[dict[str, Any], Press, str], Awaitable[Answer]]
+_handlers: dict[str, Handler] = {}
+
+
+def install(kind: str, handler: Handler) -> None:
+    """Who acts on a press of a ``kind`` card (``serve`` installs them through the Manager fleet)."""
+    _handlers[kind] = handler
+
+
+def value(token: str, choice: str) -> str:
+    return f"{token}:{choice}"
+
+
+def new_token() -> str:
+    return secrets.token_urlsafe(16)
+
+
+def digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+
+
+async def enabled(db: Any = None) -> bool:
+    """Whether card buttons are on (``cards.actions.enabled`` is ``true``; no row is off)."""
+    return (await system_settings.get_settings([ENABLED_KEY], pool=db)).get(ENABLED_KEY) == "true"
+
+
+def has_buttons(channel_id: str | None) -> bool:
+    parsed = parse_channel_id(channel_id)
+    return parsed is not None and parsed.channel_type in BUTTON_CHANNELS
+
+
+async def press(event: Press) -> Answer:
+    """The answer to a press, written by code (module docstring)."""
+    token, _, choice = event.value.partition(":")
+    if not token or not choice:
+        return Answer(HANDLED)
+    if not await enabled():
+        return Answer(TURNED_OFF, "warning")
+    row = await db_cards.get(token)
+    if row is None or row["channel_id"] != event.channel_id:
+        return Answer(HANDLED)
+    card = Card.from_dict(row["payload"].get("card") or {})
+    if choice not in {button.value.partition(":")[2] for button in card.buttons}:
+        return Answer(HANDLED)
+    if row["allowed"] and event.presser not in row["allowed"]:
+        return Answer(NOT_ALLOWED.get(row["kind"], NOT_ALLOWED["confirmation"]), "error")
+    if row["handled_at"] is not None or row["expired"]:
+        return Answer(HANDLED, card=card.settled(HANDLED))
+    handler = _handlers.get(row["kind"])
+    if handler is None:
+        logger.warning("no handler for a %s card's press", row["kind"])
+        return Answer(HANDLED)
+    return await handler(row, event, choice)
+
+
+async def respond(event: Press, update: Callable[[Card], Awaitable[None]], *,
+                  seconds: float | None = None) -> Answer:
+    """``press`` answered within ``seconds``, with the card as it is when the action ends in that time too. A press
+    that takes longer is told ``RECEIVED`` and ``update`` gets its card when it is answered; an action that goes on
+    longer comes back as the answer's ``later``, which the channel ``follow``s once it showed the answer."""
+    seconds = ANSWER_SECONDS if seconds is None else seconds
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    task = asyncio.create_task(press(event))
+    done, _ = await asyncio.wait({task}, timeout=seconds)
+    if not done:
+        _keep(_finish_late(task, update))
+        return Answer(RECEIVED)
+    try:
+        answer = task.result()
+    except Exception:
+        logger.exception("a card press failed")
+        return Answer("出错了，没有处理", "error")
+    if answer.later is None:
+        return answer
+    later = asyncio.ensure_future(answer.later)
+    done, _ = await asyncio.wait({later}, timeout=max(0.0, deadline - loop.time()))
+    if not done:
+        return Answer(answer.toast, answer.level, card=answer.card, later=later)
+    try:
+        return Answer(answer.toast, answer.level, card=later.result())
+    except Exception:
+        logger.exception("a card's action failed")
+        return Answer(answer.toast, answer.level, card=answer.card)
+
+
+def follow(answer: Answer, update: Callable[[Card], Awaitable[None]]) -> None:
+    """Update the card once the action that goes on after ``answer`` ends (``respond``)."""
+    if answer.later is not None:
+        _keep(_update_later(answer.later, update))
+
+
+_kept: set[asyncio.Task[Any]] = set()
+
+
+def _keep(work: Awaitable[Any]) -> None:
+    task = asyncio.ensure_future(work)
+    _kept.add(task)
+    task.add_done_callback(_kept.discard)
+
+
+async def _update_later(later: Awaitable[Card], update: Callable[[Card], Awaitable[None]]) -> None:
+    try:
+        await update(await later)
+    except Exception:
+        logger.warning("could not update a card after its action ended", exc_info=True)
+
+
+async def _finish_late(task: asyncio.Task[Answer], update: Callable[[Card], Awaitable[None]]) -> None:
+    try:
+        answer = await task
+    except Exception:
+        logger.exception("a card press failed")
+        return
+    if answer.card is not None:
+        await _update_later(_ready(answer.card), update)
+    if answer.later is not None:
+        await _update_later(answer.later, update)
+
+
+async def _ready(card: Card) -> Card:
+    return card
+
+
+# --- Gates ---
+
+
+def _gate_digest(gate: Mapping[str, Any]) -> str:
+    """What a gate card's buttons are bound to: the topic and the open questions with their options."""
+    return digest([gate.get("topic"), [[item.get("id"), item.get("question"), item.get("options")]
+                                       for item in gate.get("agenda") or [] if item.get("status") in (None, "open")]])
+
+
+def _clip(text: Any, limit: int) -> str:
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else f"{flat[:limit - 1]}…"
+
+
+async def gate_card(row: Mapping[str, Any], channel_id: str, target_id: str, *, mention: str | None, group: bool,
+                    text: str) -> Card | None:
+    """The card a gate's message is posted as (``gate_courier``): its text with a button per option of its open
+    questions and one that ends the discussion; None when the message gets none (cards off, a channel without
+    buttons, a message that does not ask for an answer, a gate that no longer waits)."""
+    try:
+        kind = MessageKind(row["kind"])
+    except ValueError:
+        return None
+    if (kind not in (MessageKind.OPENED, MessageKind.UPDATED, MessageKind.REMINDER, MessageKind.RESUMED)
+            or not GateState(row["state"]).waiting or not has_buttons(channel_id) or not await enabled()):
+        return None
+    token = new_token()
+    answers: dict[str, dict[str, Any]] = {}
+    buttons: list[Button] = []
+    items = [item for item in row.get("agenda") or [] if item.get("status") in (None, "open") and item.get("options")]
+    for number, item in enumerate(items[:GATE_ITEMS], 1):
+        for index, option in enumerate((item.get("options") or [])[:GATE_OPTIONS], 1):
+            choice = f"{number}.{index}"
+            label = _clip(option, OPTION_LABEL_CHARS)
+            buttons.append(Button(f"{number}. {label}" if len(items) > 1 else label, value(token, choice)))
+            answers[choice] = {"agenda_item": item.get("id"), "option": option,
+                               "text": f"{_clip(item.get('question'), 200)}：{option}"}
+    buttons.append(Button("按现在的结论结束", value(token, "end"), "default"))
+    if len(buttons) > 1:
+        buttons[0] = Button(buttons[0].label, buttons[0].value, "primary")
+    card = Card(text, tuple(buttons), mention if group else None)
+    # Only the requester may answer: a direct chat's user, or the group's requester; a group without one (Telegram)
+    # admits the senders the bot admits there. A Telegram group's id is negative, a person's chat is their user id.
+    group = group or target_id.startswith("-")
+    allowed = [mention] if mention else ([] if group else [target_id])
+    await db_cards.create(token=token, kind="gate", subject=row["step_id"], digest=_gate_digest(row),
+                          payload={"task_id": row["task_id"], "label": row["step_key"], "answers": answers,
+                                   "group": group, "card": card.to_dict()},
+                          manager_id=None, channel_id=channel_id, chat=target_id, allowed=allowed, ttl=GATE_CARD_TTL)
+    return card
+
+
+async def press_gate(row: dict[str, Any], event: Press, choice: str, *, bus: Any,
+                     has_planner: Callable[[str], bool]) -> Answer:
+    """An option, or ending the discussion, into the gate as the presser's message (``gate_commands`` does the same
+    for ``/gate N``)."""
+    from .gate_service import HTTP_400, post_message, receipt, task_name
+    from .projects import RequestError
+
+    payload, token = row["payload"], row["token"]
+    card = Card.from_dict(payload["card"])
+    task_id, label = payload["task_id"], payload["label"]
+    gate = await db_user_gates.get(task_id, label)
+    if gate is None or not GateState(gate["state"]).waiting:
+        await db_cards.claim(token, by=event.presser, via="button", choice=choice, outcome="stale")
+        return Answer("这个关卡已经不在等你了", "warning", card=card.settled("这个关卡已经不在等你了。"))
+    if _gate_digest(gate) != row["digest"]:
+        await db_cards.claim(token, by=event.presser, via="button", choice=choice, outcome="stale")
+        return Answer(STALE, "warning", card=card.settled("问题已经更新，这张卡片已失效。"))
+    end = choice == "end"
+    data = {"text": ""} if end else payload["answers"].get(choice)
+    if data is None:
+        return Answer(HANDLED)
+    if not await db_cards.claim(token, by=event.presser, via="button", choice=choice, outcome="answered"):
+        return Answer(HANDLED, card=card.settled(HANDLED))
+    parsed = parse_channel_id(row["channel_id"])
+    channel = parsed.channel_type if parsed is not None else ""
+    group = bool(payload.get("group"))
+    origin = {"author": event.presser if group else None, "channel": channel, "channel_id": row["channel_id"],
+              "chat": row["chat"], "external_id": None}
+    try:
+        posted = await post_message(task_id, label, data, has_planner=has_planner(task_id), bus=bus,
+                                    source=manager_address(row.get("manager_id") or "manager"),
+                                    via=f"button:{channel}", end=end, origin=origin)
+    except RequestError as exc:
+        await db_cards.finish(token, "error")
+        if exc.status == HTTP_400:
+            return Answer(f"没能交给规划者：{exc}", "error", card=card.settled(f"❌ 没能交给规划者：{exc}"))
+        return Answer("这个关卡已经不在等你了", "warning", card=card.settled("这个关卡已经不在等你了。"))
+    line = receipt(await task_name(task_id), label, end=end, kept=posted["delivered"] == "kept")
+    chosen = "" if end else f"你选了：{data['option']}。"
+    return Answer(line, "success", card=card.settled(f"✅ {chosen}{line}"))
+
+
+# --- How the channels show a card ---
+
+
+def lark_card(card: Card) -> dict[str, Any]:
+    """The card as Lark's card JSON 2.0: its text as Markdown, then its buttons in a row."""
+    text = f"<at id={card.mention}></at> {card.text}" if card.mention else card.text
+    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": text}]
+    if card.buttons:
+        styles = {"primary": "primary_filled", "danger": "danger", "default": "default"}
+        elements.append({"tag": "column_set", "flex_mode": "flow", "horizontal_spacing": "small", "columns": [
+            {"tag": "column", "width": "auto", "elements": [{
+                "tag": "button", "text": {"tag": "plain_text", "content": button.label},
+                "type": styles.get(button.style, "default"),
+                "behaviors": [{"type": "callback", "value": {"looper": button.value}}]}]}
+            for button in card.buttons]})
+    return {"schema": "2.0", "config": {"update_multi": True}, "body": {"elements": elements}}
+
+
+def lark_answer(answer: Answer) -> dict[str, Any]:
+    """The answer as a Lark card callback's response: a toast, and the card as it is now."""
+    response: dict[str, Any] = {"toast": {"type": answer.level, "content": answer.toast}}
+    if answer.card is not None:
+        response["card"] = {"type": "raw", "data": lark_card(answer.card)}
+    return response
+
+
+def telegram_markup(card: Card) -> Any:
+    """The card's buttons as a Telegram inline keyboard, three to a row; None without buttons."""
+    if not card.buttons:
+        return None
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    keys = [InlineKeyboardButton(button.label, callback_data=button.value) for button in card.buttons]
+    return InlineKeyboardMarkup([keys[i:i + 3] for i in range(0, len(keys), 3)])
+
+
+def shown(text: str, cards: Sequence[Mapping[str, Any]] | None) -> tuple[str, list[Card]]:
+    """A reply's text without the cards it carries, and those cards: a card goes as a message of its own only when
+    its text is in the reply as it is (a reply a group check replaced carries none)."""
+    found: list[Card] = []
+    for raw in cards or ():
+        card = Card.from_dict(raw)
+        if card.text and card.text in text:
+            joined = "\n\n" + card.text  # as ``tiers.manager._with_blocks`` adds a block
+            text = text.replace(joined if joined in text else card.text, "", 1)
+            found.append(card)
+    return (text.strip() if found else text), found
