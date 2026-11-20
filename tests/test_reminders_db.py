@@ -1,0 +1,468 @@
+"""One-time reminders on PostgreSQL (reminders RFC): the default Manager's three tools, only while
+``reminders.enabled`` is on and only in the user's own turns; the delivery by code at the time, once, with the
+catch-up after downtime; and the upgrade of a database without the table.
+
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from looper.agents import reminders
+from looper.agents.channels.base import PostOutcome, PostReceipt
+from looper.agents.managers_api import ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
+from looper.agents.ops import Turn
+from looper.agents.ops import reminders as ops_reminders
+from looper.agents.ops.service import MANAGER_TOOLS, ManagerOps, Platform, scope_for
+from looper.db import connection, reminders as store
+from tests.db_support import DSN, run_db, run_with_channel_configs
+from tests.test_manager_tools_db import _converse
+
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+UTC = timezone.utc
+OP = "ou_operatorsynthetic"
+ZONE = "America/Los_Angeles"
+NAMES = list(ops_reminders.TOOL_NAMES)
+
+
+async def _switch(pool: Any, on: bool = True) -> None:
+    await pool.execute("INSERT INTO system_settings (key, value) VALUES ('reminders.enabled', $1) "
+                       "ON CONFLICT (key) DO UPDATE SET value = $1", "true" if on else "false")
+
+
+async def _operator(pool: Any, *, enabled: bool = False, channel_id: str = "channel-lark", who: str = OP) -> None:
+    """``who`` as the operator of ``channel_id`` (the built-in Lark bot by default)."""
+    await pool.execute("UPDATE channel_configs SET enabled = $2, config = $3 WHERE channel_id = $1", channel_id,
+                       enabled, json.dumps({"allowed_open_ids": [who], "operator_sender_id": who}))
+
+
+def _ops(scope: Any = None) -> ManagerOps:
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok",
+                     **({"scope": scope} if scope is not None else {}))
+    ops._working_at = ops._clock()
+    return ops
+
+
+def _web(message_id: str = "m-web", **fields: Any) -> Turn:
+    return Turn(channel="web", chat="chat-1", message_id=message_id, **fields)
+
+
+def _dm(message_id: str = "m-dm", *, sender: str = OP, group: bool = False) -> Turn:
+    return Turn(channel="lark", chat="oc_group" if group else "oc_dm", message_id=message_id, sender=sender,
+                group=group, channel_id="channel-lark")
+
+
+async def _call(ops: ManagerOps, turn: Turn, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """A call in ``turn``, carrying its binding as the MCP bridge does."""
+    binding = f"b-{turn.message_id}-{id(turn)}"
+    ops.begin_turn(turn, binding=binding)
+    try:
+        return await ops.call(name, arguments, binding=binding)
+    finally:
+        ops.end_turn(turn)
+
+
+def _names(listing: list[dict[str, Any]]) -> list[str]:
+    return [tool["name"] for tool in listing]
+
+
+class _Channel:
+    """The channel registry's ``post``: records each post and answers with the next of ``outcomes`` (sent after)."""
+
+    def __init__(self, *outcomes: PostOutcome, delay: float = 0.0) -> None:
+        self.outcomes, self.delay, self.posts = list(outcomes), delay, []
+
+    async def post(self, channel_id: str, target: Any, text: str, *, reply_to: str | None = None,
+                   idempotency_key: str | None = None) -> PostReceipt:
+        self.posts.append({"channel_id": channel_id, "kind": target.kind.value, "to": target.id,
+                           "group": target.group, "text": text, "key": idempotency_key})
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        outcome = self.outcomes.pop(0) if self.outcomes else PostOutcome.SENT
+        if outcome is PostOutcome.SENT:
+            return PostReceipt(True, external_ids=(f"om_{len(self.posts)}",))
+        return PostReceipt(False, error=f"the channel answered {outcome.value}", outcome=outcome)
+
+
+class _Clock:
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+async def _stored(text: str, due_at: datetime, *, chat: str = OP, channel_id: str = "channel-lark") -> int:
+    row = await store.create(text=text, due_at=due_at, timezone=ZONE, channel_id=channel_id, chat=chat,
+                             created_channel="lark", created_message_id="m-0")
+    return row["id"]
+
+
+async def _statuses(pool: Any) -> dict[int, tuple[str, int, str | None]]:
+    return {row["id"]: (row["status"], row["attempts"], row["detail"])
+            for row in await pool.fetch("SELECT id, status, attempts, detail FROM reminders ORDER BY id")}
+
+
+def _prepared(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Every turn the Manager prepares to run (its system prompt and its process signature)."""
+    from looper.agents.tiers.manager import ManagerAgent
+
+    prepared: list[Any] = []
+    prepare = ManagerAgent._prepare_turn
+
+    async def keep(self: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await prepare(self, *args, **kwargs)
+        if result.signature is not None:
+            prepared.append(result)
+        return result
+
+    monkeypatch.setattr(ManagerAgent, "_prepare_turn", keep)
+    return prepared
+
+
+def test_off_the_manager_is_launched_as_before_and_on_only_its_tool_listing_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        prepared = _prepared(monkeypatch)
+        assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key LIKE 'reminders.%'") == 0
+        off = await _converse(tmp_path / "off", [[("looper_overview", {})]], ["hi"])
+        await _switch(pool)
+        on = await _converse(tmp_path / "on", [[("looper_overview", {})]], ["hi"])
+        before, after = prepared
+
+        # The listing: the catalog as it is; on, the three reminder tools are the ones added.
+        assert off.tools == [tool.name for tool in MANAGER_TOOLS]
+        assert on.tools == [*off.tools, *NAMES]
+        # The system prompt and the command line are the same either way: the tools explain themselves.
+        assert after.system_prompt.text == before.system_prompt.text
+        assert after.system_prompt.layers["contract"]["name"] == "TOOLS_CONTRACT"
+        def same(command: Any, root: str) -> list[str]:  # each Manager ran in its own directory
+            # and its MCP entry names its own port.
+            return [re.sub(r"\.local/mcp/[0-9a-f]+\.json$", "<mcp>", str(part).replace(str(tmp_path / root), "<root>"))
+                    for part in command]
+
+        assert same(after.signature[0], "on") == same(before.signature[0], "off")
+        assert "reminder" not in " ".join(before.signature[0]) + before.system_prompt.text
+        # The process signature gains only the listing's hash (so a group turn's listing restarts the process).
+        workflows = any(tool.name == "looper_task_create" and "workflow" in tool.schema.get("properties", {})
+                        for tool in MANAGER_TOOLS)
+        assert len(before.signature) == 6 + workflows
+        assert len(after.signature) == 7 and after.signature[1] == before.signature[1]
+
+    run_db(test, monkeypatch, timeout=60)
+
+
+def test_only_the_default_manager_has_them_only_while_on_and_only_in_the_users_own_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool)
+        ops = _ops()
+        assert not set(NAMES) & set(_names(await ops.current_listing(_web())))
+        await _switch(pool)
+        assert _names(await ops.current_listing(_web()))[-3:] == NAMES
+        assert _names(await ops.current_listing(_dm()))[-3:] == NAMES
+        for turn in (_dm(group=True), _dm(sender="ou_someoneelse"), _web(client_id="client-1")):
+            assert not set(NAMES) & set(_names(await ops.current_listing(turn)))
+            answer = await _call(ops, turn, ops_reminders.LIST, {})
+            assert answer["status"] == "error" and answer["error"] == {
+                "code": "forbidden",
+                "message": f"{ops_reminders.LIST} runs only in the user's own direct chat or on the dashboard"}
+        scenario = ManagerDefinition(
+            id="manager-desk", name="Desk", description="", system_prompt="p", profile_id=None,
+            tools=ManagerTools.ALL, task_scope=TaskScope.ALL, task_policy=TaskPolicy.FREE, enabled=True,
+            builtin=False, revision=-1)
+        desk = _ops(scope_for(scenario))
+        assert not set(NAMES) & set(_names(await desk.current_listing(_web())))
+        assert (await _call(desk, _web(), ops_reminders.LIST, {}))["error"]["code"] == "forbidden"
+        await _switch(pool, on=False)
+        answer = await _call(ops, _web(), ops_reminders.CREATE, {"text": "看 PR", "in_minutes": 5})
+        assert answer["error"]["message"] == f"this Manager no longer has {ops_reminders.CREATE}"
+        assert await pool.fetchval("SELECT count(*) FROM reminders") == 0
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_reminder_set_in_the_users_direct_chat_is_read_back_and_goes_back_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool)
+        await _switch(pool)
+        turn = _dm()
+        answer = await _call(_ops(), turn, ops_reminders.CREATE,
+                             {"text": "  看 PR  ", "at": "2099-01-02 15:00", "timezone": ZONE})
+        assert answer["status"] == "error" and "at most a year ahead" in answer["error"]["message"]
+        due = datetime.now(UTC).astimezone(reminders.cron.zone(ZONE)) + timedelta(days=2)
+        at = f"{due:%Y-%m-%d} 15:00"
+        answer = await _call(_ops(), turn, ops_reminders.CREATE, {"text": "  看 PR  ", "at": at, "timezone": ZONE})
+        assert answer["status"] == "ok", answer
+        stored = answer["result"]["reminder"]
+        assert stored["text"] == "看 PR" and stored["due"] == at and stored["timezone"] == ZONE
+        assert stored["status"] == "pending" and "do not repeat it" in answer["result"]["shown_to_user"]
+        row = await pool.fetchrow("SELECT * FROM reminders")
+        assert (row["channel_id"], row["chat"], row["created_channel"], row["created_message_id"]) == (
+            "channel-lark", OP, "lark", "m-dm")
+        assert turn.blocks == [f"已记下提醒 #{row['id']}：{reminders.when(row['due_at'], ZONE)}（{ZONE}），"
+                               "到时发到这个私聊：看 PR"]
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_reminder_set_on_the_dashboard_goes_to_the_users_direct_chat_with_a_bot_that_names_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _switch(pool)
+        answer = await _call(_ops(), _web(), ops_reminders.CREATE, {"text": "看 PR", "in_minutes": 30})
+        assert answer["error"]["code"] == "conflict" and "Settings → Channels" in answer["error"]["message"]
+        await _operator(pool, enabled=False)  # a bot that is off is not one to send through
+        assert (await _call(_ops(), _web(), ops_reminders.CREATE, {"text": "看 PR", "in_minutes": 30})
+                )["error"]["code"] == "conflict"
+        await _operator(pool, enabled=True)
+        turn = _web()
+        answer = await _call(_ops(), turn, ops_reminders.CREATE, {"text": "看 PR", "in_minutes": 30})
+        assert answer["status"] == "ok", answer
+        row = await pool.fetchrow("SELECT channel_id, chat, created_channel FROM reminders")
+        assert tuple(row) == ("channel-lark", OP, "web")
+        assert turn.blocks[0].endswith("到时发到你的 Lark 私聊：看 PR")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_the_user_lists_their_reminders_and_cancels_a_pending_one_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool)
+        await _switch(pool)
+        now = datetime.now(UTC)
+        later = await _stored("later", now + timedelta(hours=5))
+        sooner = await _stored("sooner", now + timedelta(hours=1))
+        sent = await _stored("sent", now + timedelta(hours=2))
+        await pool.execute("UPDATE reminders SET status = 'delivered', settled_at = now() WHERE id = $1", sent)
+        listed = (await _call(_ops(), _dm(), ops_reminders.LIST, {}))["result"]
+        assert [r["id"] for r in listed["reminders"]] == [sooner, later] and listed["more"] is False
+        assert listed["now"].endswith(reminders.default_timezone())
+        everything = (await _call(_ops(), _dm(), ops_reminders.LIST, {"status": "all", "limit": 2}))["result"]
+        assert [r["id"] for r in everything["reminders"]] == [later, sent] and everything["more"] is True
+
+        turn = _dm()
+        answer = await _call(_ops(), turn, ops_reminders.CANCEL, {"id": sooner})
+        assert answer["status"] == "ok" and answer["result"]["reminder"]["status"] == "cancelled"
+        assert turn.blocks[0].startswith(f"已取消提醒 #{sooner}（原定 ") and turn.blocks[0].endswith("：sooner")
+        for reminder_id, code in ((sooner, "conflict"), (sent, "conflict"), (999, "not_found")):
+            answer = await _call(_ops(), _dm(), ops_reminders.CANCEL, {"id": reminder_id})
+            assert answer["error"]["code"] == code, answer
+        assert (await _statuses(pool))[sent][0] == "delivered"
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_due_reminder_is_sent_once_by_code_to_the_users_direct_chat_and_survives_a_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        due = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        reminder_id = await _stored("看 PR", due)
+        channel, clock = _Channel(), _Clock(due - timedelta(seconds=5))
+        await reminders.ReminderService(channel, clock=clock).run_once()
+        assert channel.posts == []  # not yet due
+        clock.now = due + timedelta(seconds=4)
+        # A new service: a restart between setting it and its time loses nothing.
+        await reminders.ReminderService(channel, clock=clock).run_once()
+        await reminders.ReminderService(channel, clock=clock).run_once()
+        (post,) = channel.posts
+        row = await store.get(reminder_id)
+        assert post == {"channel_id": "channel-lark", "kind": "user", "to": OP, "group": False,
+                        "text": reminders.message_text(row, now=clock.now), "key": f"looper-reminder-{reminder_id}"}
+        assert post["text"].endswith("让我提醒你：看 PR") and "补发" not in post["text"]
+        assert (row["status"], row["attempts"], row["external_id"]) == ("delivered", 1, "om_1")
+        assert row["settled_at"] is not None
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_after_downtime_only_the_latest_reminder_missed_within_36_hours_is_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+        oldest = await _stored("oldest", now - timedelta(hours=40))
+        earlier = await _stored("earlier", now - timedelta(hours=6))
+        latest = await _stored("latest", now - timedelta(hours=2))
+        ahead = await _stored("ahead", now + timedelta(hours=1))
+        channel = _Channel(PostOutcome.REJECTED)  # the channel is not up yet at the first tick after the restart
+        service = reminders.ReminderService(channel, clock=_Clock(now))
+        await service.run_once()
+        await service.run_once()
+        assert [post["text"].split("：", 1)[1] for post in channel.posts] == [
+            "latest\n（原定 11-22 02:00，Looper 没能按时发出，现在补发。）"] * 2
+        assert await _statuses(pool) == {
+            oldest: ("missed", 0, reminders.MISSED_OLD), earlier: ("missed", 0, reminders.MISSED_LATER),
+            latest: ("delivered", 2, None), ahead: ("pending", 0, None)}
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_send_cut_off_by_a_stop_is_never_sent_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        reminder_id = await _stored("看 PR", now - timedelta(seconds=30))
+        # A server claimed it and stopped before the channel's answer was recorded.
+        await pool.execute("UPDATE reminders SET status = 'sending', attempts = 1 WHERE id = $1", reminder_id)
+        channel = _Channel()
+        await reminders.ReminderService(channel, clock=_Clock(now)).run_once()
+        assert channel.posts == []
+        assert (await _statuses(pool))[reminder_id] == (
+            "uncertain", 1, "the sender stopped before recording the answer")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_refused_send_is_tried_three_times_and_a_lost_answer_never_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        refused = await _stored("refused", now)
+        channel = _Channel(*[PostOutcome.REJECTED] * 5)
+        service = reminders.ReminderService(channel, clock=_Clock(now))
+        for _ in range(5):
+            await service.run_once()
+        assert len(channel.posts) == 3
+        assert (await _statuses(pool))[refused] == ("failed", 3, "the channel answered rejected")
+        lost = await _stored("lost", now)
+        channel = _Channel(PostOutcome.UNKNOWN)
+        service = reminders.ReminderService(channel, clock=_Clock(now))
+        await service.run_once()
+        await service.run_once()
+        assert len(channel.posts) == 1
+        assert (await _statuses(pool))[lost] == ("uncertain", 1, "the channel answered unknown")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_reminder_is_never_sent_to_someone_no_longer_the_bots_operator(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        reminder_id = await _stored("看 PR", now)
+        await _operator(pool, enabled=True, who="ou_newoperator")
+        channel = _Channel()
+        await reminders.ReminderService(channel, clock=_Clock(now)).run_once()
+        assert channel.posts == []
+        status, attempts, detail = (await _statuses(pool))[reminder_id]
+        assert (status, attempts) == ("failed", 0) and "no longer names this user" in detail
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_nothing_is_sent_while_reminders_are_off_or_the_server_drains(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        await _stored("看 PR", now)
+        channel = _Channel()
+        await reminders.ReminderService(channel, clock=_Clock(now)).run_once()  # no switch row: off
+        await _switch(pool, on=False)
+        await reminders.ReminderService(channel, clock=_Clock(now)).run_once()
+        await _switch(pool)
+        await reminders.ReminderService(channel, clock=_Clock(now), drain=SimpleNamespace(draining=True)).run_once()
+        assert channel.posts == []
+        await reminders.ReminderService(channel, clock=_Clock(now), drain=SimpleNamespace(draining=False)).run_once()
+        assert len(channel.posts) == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_two_servers_ticking_together_send_a_reminder_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        await _stored("看 PR", now)
+        channel = _Channel(delay=0.3)
+        await asyncio.gather(*(reminders.ReminderService(channel, clock=_Clock(now)).run_once() for _ in range(2)))
+        assert len(channel.posts) == 1
+
+    run_db(test, monkeypatch, setup=_seed_channels, max_size=4)
+
+
+async def _seed_channels(pool: Any) -> None:
+    from looper.agents.serve import seed_channel_configs
+
+    await seed_channel_configs(pool)
+
+
+def test_remind_me_at_three_reaches_the_users_chat_at_three(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The acceptance path: the user asks on the dashboard, the Manager sets it, Looper sends it at the time."""
+
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        chat = await _converse(tmp_path, [[(ops_reminders.CREATE, {"text": "看 PR", "at": "15:00",
+                                                                   "timezone": ZONE})]], ["三点提醒我看 PR"],
+                               bound=True)
+        (reply,) = chat.replies
+        row = await pool.fetchrow("SELECT * FROM reminders")
+        assert row is not None, reply
+        assert f"已记下提醒 #{row['id']}：" in reply and "15:00（America/Los_Angeles），到时发到你的 Lark 私聊：看 PR" in reply
+        assert f"{row['due_at'].astimezone(reminders.cron.zone(ZONE)):%H:%M}" == "15:00"
+        channel = _Channel()
+        await reminders.ReminderService(channel, clock=_Clock(row["due_at"] + timedelta(seconds=3))).run_once()
+        (post,) = channel.posts
+        assert post["to"] == OP and post["text"].endswith("让我提醒你：看 PR")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await pool.execute("DROP TABLE reminders; DELETE FROM schema_migrations WHERE name = 'reminders'")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+        assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'reminders'") == 1
+        await _stored("看 PR", datetime.now(UTC) + timedelta(hours=1))
+        await connection.ensure_schema(pool)  # and a second upgrade changes nothing
+        assert await pool.fetchval("SELECT count(*) FROM reminders") == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_the_table_refuses_a_settled_reminder_without_its_time_and_an_unknown_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncpg
+
+    async def test(pool: Any) -> None:
+        reminder_id = await _stored("看 PR", datetime.now(UTC) + timedelta(hours=1))
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute("UPDATE reminders SET status = 'delivered' WHERE id = $1", reminder_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute("UPDATE reminders SET status = 'snoozed', settled_at = now() WHERE id = $1",
+                               reminder_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute("UPDATE reminders SET channel_id = 'channel-web' WHERE id = $1", reminder_id)
+
+    run_db(test, monkeypatch)
