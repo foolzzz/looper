@@ -174,6 +174,30 @@ def test_editable_skill_modified_and_machine_item_immutable(tmp_path, monkeypatc
     run_db(run, monkeypatch, timeout=30)
 
 
+def test_an_api_client_installing_or_enabling_an_mcp_server_is_asked_first(tmp_path, monkeypatch):
+    async def run(pool):
+        server = (await mcp.create({"name": "search", "transport": "stdio", "command": "python3"}))["item"]
+        skill = await _skill()
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call("installs.create", {"item_id": skill["item_id"], "scope": "global"}, client=True)
+            assert status == 200  # a skill installs at once
+            status, asked = await call("installs.create", {"item_id": server["item_id"], "scope": "global"},
+                                       client=True)
+            assert status == 202 and "search" in asked["impact"] and "python3" in asked["impact"]
+            assert (await catalog.item_detail(server["item_id"]))["item"]["installs"] == []
+            status, done = await call("confirm", {"confirmation_id": asked["confirmation_id"]}, client=True)
+            assert status == 200, done
+            install_id = done["result"]["install"]["install_id"]
+            assert (await call("installs.update", {"install_id": install_id, "enabled": False}, client=True))[0] == 200
+            status, again = await call("installs.update", {"install_id": install_id, "enabled": True}, client=True)
+            assert status == 202 and "python3" in again["impact"]
+            # the operator on the dashboard installs at once, as before
+            await catalog.uninstall(install_id)
+            status, answer = await call("installs.create", {"item_id": server["item_id"], "scope": "global"})
+            assert status == 200, answer
+    run_db(run, monkeypatch, timeout=30)
+
+
 def test_delete_confirmation_and_ordinary_uninstall_preserve_unrelated_state(tmp_path, monkeypatch):
     async def run(pool):
         item, other = await _skill(), await _skill("other")

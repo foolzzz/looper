@@ -1531,6 +1531,17 @@ async def create_provider(data: Any) -> dict[str, Any]:
     return await _provider_answer(provider_id)
 
 
+async def preview_provider_update(provider_id: str, data: Any) -> dict[str, Any]:
+    """The provider's columns ``update_provider`` would write, validated the same way, without writing; raises what
+    it would raise. For asking the user before a change of where its runs connect."""
+    data = _fields(data, _PROVIDER_FIELDS)
+    if not data:
+        raise RegistryError(f"give at least one of {', '.join(_PROVIDER_FIELDS)}")
+    current = await _existing_provider(provider_id)
+    _not_builtin(current, "provider")
+    return _provider_fields(data, current)[0]
+
+
 async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
     """Change a provider; ``api_key`` ``***`` keeps the stored key, null removes it. Its profiles must still run."""
     import asyncpg

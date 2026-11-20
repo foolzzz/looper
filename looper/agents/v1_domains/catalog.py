@@ -89,7 +89,9 @@ RESULTS = {
 def _op(name, request, result, *, risk="read", credential=False):
     description = f"{name.replace('_', ' ').replace('.', ': ')}."
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), description, description,
-                     request, result, risk=risk, confirms=risk == "high",
+                     request, result, risk=risk,
+                     # an MCP server's install, or enabling one again, asks an API client first (``impact``)
+                     confirms=risk == "high" or name in ("installs.create", "installs.update"),
                      operator_only=credential, credential_write=credential)
 
 
@@ -135,6 +137,12 @@ async def _answer(request, *, credential=False, public=False):
 
 
 async def impact(server, operation, arguments, principal, headers):
+    # An MCP server runs on this machine in every run of its roles: an API client's install, or its enabling an
+    # install again, is confirmed first (the operator's dashboard runs it at once).
+    if operation.operation_id == "installs.create":
+        return await _answer(catalog.mcp_install_impact(arguments))
+    if operation.operation_id == "installs.update":
+        return await _answer(catalog.mcp_enable_impact(arguments["install_id"], arguments))
     if operation.operation_id != "catalog_items.delete":
         return None
     item = await _answer(_deletable(arguments["item_id"]))

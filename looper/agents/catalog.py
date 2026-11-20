@@ -322,6 +322,59 @@ async def install(data: Any) -> dict[str, Any]:
     return {"install": install_view(row), "item": await _item(item["id"])}
 
 
+def _launch_text(item: Mapping[str, Any]) -> str:
+    """How an MCP item runs, from its public view: the command line and its environment variables' names (never
+    their values), or the URL it connects to."""
+    server = item["mcp"] or {}
+    if server.get("transport") == "stdio":
+        line = " ".join([server.get("command") or "", *server.get("args", ())]).strip()
+        names = sorted(server.get("env") or {})
+        return f"在这台机器上运行 `{line}`" + (f"，带环境变量 {'、'.join(names)}（值不显示）" if names else "")
+    return f"连接 {server.get('url') or ''}"
+
+
+async def mcp_install_impact(data: Mapping[str, Any]) -> str | None:
+    """What installing (``install``'s ``data``) an MCP server does, for the user to confirm: every run of its roles
+    starts it on this machine. None for any other item, or a disabled install (enabling it is asked then)."""
+    from .library import ItemKind
+
+    item = await _item(str(data.get("item_id") or ""))
+    if item["kind"] != ItemKind.MCP.value or data.get("enabled") is False:
+        return None
+    scope = _scope(data.get("scope"))
+    roles = install_roles(data["roles"], scope) if "roles" in data else list(scope_roles(scope))
+    if any(i["scope"] == scope.value and i["project_id"] == data.get("project_id") for i in item["installs"]):
+        raise CatalogConflict("the item is installed there already; change that install instead")  # before asking
+    where = "全局"
+    if scope is Scope.PROJECT:
+        from ..db import projects as db_projects
+
+        project = await db_projects.get_project(str(data.get("project_id") or ""))
+        where = f"项目「{project['name'] if project else data.get('project_id')}」"
+    return (f"要把 MCP 服务器「{item['qualified_name']}」装到{where}，给 {'、'.join(roles)} 用吗？装上以后，这些角色的每次"
+            f"运行都会{_launch_text(item)}。")
+
+
+async def mcp_enable_impact(install_id: str, data: Mapping[str, Any]) -> str | None:
+    """What enabling an MCP server's install again (``update_install``'s ``data`` with ``enabled`` true) does, for the
+    user to confirm; None for any other change or item."""
+    from ..db import library as db_library
+    from .library import ItemKind
+
+    if data.get("enabled") is not True:
+        return None
+    current = await db_library.get_install(install_id)
+    if current is None or current["enabled"]:
+        return None
+    item = await _item(current["item_id"])
+    if item["kind"] != ItemKind.MCP.value:
+        return None
+    where = f"项目「{current['project_name']}」" if current["project_id"] else "全局"
+    roles = list(data["roles"]) if "roles" in data else list(current["roles"])
+    return (f"要重新启用 MCP 服务器「{item['qualified_name']}」在{where}的安装，给 {'、'.join(roles)} 用吗？启用以后，"
+            f"这些角色的每次运行都会{_launch_text(item)}。")
+
+
 async def update_install(install_id: str, data: Any) -> dict[str, Any]:
     """Change an install's ``roles`` or ``enabled``; returns the install and the item."""
     from ..db import library as db_library
