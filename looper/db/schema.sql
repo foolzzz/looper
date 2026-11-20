@@ -1213,6 +1213,7 @@ CREATE TABLE IF NOT EXISTS schedule_notifications (
     id          TEXT PRIMARY KEY,
     schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
     run_id      TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
+    -- 'check_alert' and 'check_recovered' are the leads check block's.
     kind        TEXT NOT NULL CHECK (kind IN ('run', 'failures_alert', 'failures_recovered', 'stale_alert',
                                               'stale_recovered',
                                               'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered')),
@@ -2143,29 +2144,55 @@ CREATE TRIGGER "A_intents_detach_merged" AFTER DELETE ON intents
 -- A second model's check of what an extraction found (message-leads-intents RFC, section 10.1): its typed verdict on
 -- each lead and intent (keep, fix, drop), why, and the check's run; a dropped item stays, in state 'dropped', so a
 -- wrong drop can be measured (its sources still take it with them). A dropped intent is handled by the system and
--- never pushed. The subscription's switch is off by default, and the checker has a role layer of its own.
--- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
+-- never pushed. Each extraction run records what its check did (check_status), a subscription whose checks keep
+-- failing is alerted once (check_alert_at), and the checker has a role layer of its own. The subscription's switch is
+-- off by default. connection.py applies this block to databases that predate it, so keep it between the markers and
+-- idempotent. Columns come without constraints and every constraint NOT VALID, so nothing is scanned under the
+-- migration's locks; connection._ONLINE_STEPS validates them after it commits (a fresh database, whose tables are
+-- empty, validates them in its own transaction).
 -- leads check begin
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS check_items BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS check_alert_at TIMESTAMPTZ;
+ALTER TABLE subscription_runs ADD COLUMN IF NOT EXISTS check_status TEXT;
+ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_verdict TEXT;
+ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_reason TEXT;
+ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_record_id BIGINT;
+ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_verdict TEXT;
+ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_reason TEXT;
+ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_record_id BIGINT;
 ALTER TABLE agent_setting_layers DROP CONSTRAINT IF EXISTS agent_setting_layers_role_check;
 ALTER TABLE agent_setting_layers ADD CONSTRAINT agent_setting_layers_role_check
-    CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check'));
-ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS check_items BOOLEAN NOT NULL DEFAULT false;
+    CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check'))
+    NOT VALID;
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_check_status_check;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_check_status_check
+    CHECK (check_status IN ('skipped', 'checked', 'failed')) NOT VALID;
+ALTER TABLE schedule_notifications DROP CONSTRAINT IF EXISTS schedule_notifications_kind_check;
+ALTER TABLE schedule_notifications ADD CONSTRAINT schedule_notifications_kind_check
+    CHECK (kind IN ('run', 'failures_alert', 'failures_recovered', 'stale_alert', 'stale_recovered', 'deadline_alert',
+                'deadline_recovered', 'overlap_alert', 'overlap_recovered', 'check_alert', 'check_recovered')) NOT VALID;
 ALTER TABLE message_leads DROP CONSTRAINT IF EXISTS message_leads_state_check;
-ALTER TABLE message_leads ADD CONSTRAINT message_leads_state_check
-    CHECK (state IN ('active', 'superseded', 'promoted', 'inaccurate', 'dropped'));
-ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_verdict TEXT CHECK (check_verdict IN ('keep', 'fix', 'drop'));
-ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_reason TEXT CHECK (char_length(check_reason) <= 200);
-ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL;
+ALTER TABLE message_leads ADD CONSTRAINT message_leads_state_check CHECK (state IN ('active', 'superseded', 'promoted', 'inaccurate', 'dropped')) NOT VALID;
+ALTER TABLE message_leads DROP CONSTRAINT IF EXISTS message_leads_check_verdict_check;
+ALTER TABLE message_leads ADD CONSTRAINT message_leads_check_verdict_check CHECK (check_verdict IN ('keep', 'fix', 'drop')) NOT VALID;
+ALTER TABLE message_leads DROP CONSTRAINT IF EXISTS message_leads_check_reason_check;
+ALTER TABLE message_leads ADD CONSTRAINT message_leads_check_reason_check CHECK (char_length(check_reason) <= 200) NOT VALID;
+ALTER TABLE message_leads DROP CONSTRAINT IF EXISTS message_leads_check_record_id_fkey;
+ALTER TABLE message_leads ADD CONSTRAINT message_leads_check_record_id_fkey FOREIGN KEY (check_record_id)
+    REFERENCES llm_records(id) ON DELETE SET NULL NOT VALID;
 ALTER TABLE message_leads DROP CONSTRAINT IF EXISTS message_leads_dropped;
 ALTER TABLE message_leads ADD CONSTRAINT message_leads_dropped
-    CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop'));
+    CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_state_check;
-ALTER TABLE intents ADD CONSTRAINT intents_state_check
-    CHECK (state IN ('pending', 'tasked', 'rejected', 'expired', 'merged', 'dropped'));
-ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_verdict TEXT CHECK (check_verdict IN ('keep', 'fix', 'drop'));
-ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_reason TEXT CHECK (char_length(check_reason) <= 200);
-ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL;
+ALTER TABLE intents ADD CONSTRAINT intents_state_check CHECK (state IN ('pending', 'tasked', 'rejected', 'expired', 'merged', 'dropped')) NOT VALID;
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_check_verdict_check;
+ALTER TABLE intents ADD CONSTRAINT intents_check_verdict_check CHECK (check_verdict IN ('keep', 'fix', 'drop')) NOT VALID;
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_check_reason_check;
+ALTER TABLE intents ADD CONSTRAINT intents_check_reason_check CHECK (char_length(check_reason) <= 200) NOT VALID;
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_check_record_id_fkey;
+ALTER TABLE intents ADD CONSTRAINT intents_check_record_id_fkey FOREIGN KEY (check_record_id)
+    REFERENCES llm_records(id) ON DELETE SET NULL NOT VALID;
 ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_dropped;
 ALTER TABLE intents ADD CONSTRAINT intents_dropped
-    CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop'));
+    CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
