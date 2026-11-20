@@ -48,11 +48,15 @@ replies continued discussing the requirement without mentioning the switch.
 This measures the model's next response to a supplied exit result; it does not
 measure live message collection, tool execution or general task performance.
 
-## Dependency gap
+## Agent-run refusal after updating from main
 
-Until #1451 lands, a real resolved Worker `Launch.environment()` has no
-`LOOPER_AGENT_RUN`: the CLI reaches configuration/database handling (exit 6
-with a missing disposable config). Adding the marker as a positive control
-returns exit 4. Three subprocess regressions build the real Launch environment
-and skip with an explicit #1451 reason while its marker is absent; they assert
-exit 4 once it is present. These skips are not passes.
+Main now includes #1451: a real resolved Worker `Launch.environment()` sets
+`LOOPER_AGENT_RUN`. All three subprocess regressions pass with that environment:
+search, mark and delete return exit 4 before reading configuration or connecting
+to the database.
+
+The five added or modified Python test files pass against a disposable PostgreSQL
+database: 85 passed, none skipped. The 12 frontend test files changed by the
+incoming main pass too: 306 passed. TypeScript checking and the frontend build
+pass. This update changes no model-visible content; the real-mode skill
+comparison above remains the existing evidence.
