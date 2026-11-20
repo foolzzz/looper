@@ -88,7 +88,7 @@ D1–D4 来自产品设计（安全层一节）；D5–D11 是本文为落实它
 | D3 | 审查和围栏是推荐的安全层，合入后尽快打开；**不是**线索、意图和 M9 的前置条件，异步交付，不挡任何功能 | 设计原为前置条件；维护者 2026-11-20 改定 |
 | D4 | 默认关闭；关闭时提示词、工具列表、命令行、行为逐字节不变 | 运维规则 |
 | D5 | 「是不是对外」只按工具上类型化的 `ActionLevel` 判断，不按工具名或命令里的子串；级别可以依赖参数（发到哪里），由代码算出 | 本文 |
-| D6 | 分类器是一个角色 `outbound_check`：种子 Profile `claude-code/sonnet-5-5`，在 Settings → Roles 可以换；角色提示词可改，回复契约是代码里的契约文件；输出是严格 JSON，解析成类型化的判定；动作和触发它的上下文放在转义过的数据块里 | 本文（照 `advice_check`） |
+| D6 | 分类器是一个角色 `outbound_check`：种子 Profile `claude-code/sonnet-5-5`，在 Settings → Roles 可以换；角色提示词可改，回复契约在代码里（`outbound.OUTBOUND_CONTRACT`）；输出是严格 JSON，解析成类型化的判定；动作和触发它的上下文放在转义过的数据块里 | 本文（照 `advice_check`） |
 | D7 | 审查在人工确认**之前**：先审查，拦了就不问操作者；放行后照旧走 `escalate` 和确认。审查不替代确认，确认也不替代审查 | 本文；Q4 确认 |
 | D8 | 拦截时分两路告知：模型拿到 `blocked` 错误（含理由，说明没执行、不要换个办法再做一次）；操作者另外收到通知，发到 dashboard 用户门所用的会话（`gate_service.dashboard_target`），不发到可能有别人的群 | 本文 |
 | D9 | 审计表 `outbound_reviews`，一次审查一行；保留方式和运行记录一样（随任务删除，随 Manager 清理删除） | 本文 |
@@ -161,8 +161,8 @@ class ActionLevel(str, Enum):
 
 - **角色：** `outbound_check`，加进 `AgentType`、`agent_setting_layers.role` 的约束、`role_configs` 的种子和 Settings → Roles（「审查 agent 要做的对外动作，不带工具」）。
 - **Profile：** 种子 `claude-code/sonnet-5-5`（`profile_registry.BUILTIN_ROLE_PROFILES`），和 `advice_check` 用同一个。只有它自己的角色层选 Profile 和环境，共享默认和项目层不管它（同 advisor 的两个角色）。没有可用的 Profile 时不运行，审查按「不可用」拦截。
-- **运行：** 通过 `spawn.run_child` 起一次不带工具的运行（`Access.ADVISOR`：`--tools ""`、密封的设置、空目录），`run_kind = 'outbound_check'`，`parent_record_id` 指向发起动作的那次运行。每次审查最多 30 秒（角色的超时，`role_configs`），最多 $0.05（`--max-budget-usd`）。不重跑：超时、出错、限流都直接拦截。
-- **契约：** 系统提示词是「角色提示词 + 回复契约」，回复契约在代码的契约文件 `looper/agents/contracts/outbound_check.md`，角色提示词可在 Settings → Roles 改（同 `advice_check`）。
+- **运行：** 通过 `spawn.run_child` 起一次不带工具的运行（`Access.ADVISOR`：`--tools ""`、密封的设置、空目录），`run_kind = 'outbound_check'`，`parent_record_id` 指向发起动作的那次运行。每次审查最多 30 秒（角色的超时，`role_configs`），最多 $0.10（`--max-budget-usd`；即 `spawn.MIN_RUN_USD`：上限是软的，剩余不到 $0.10 的运行不启动，实测一次审查约 $0.003）。不重跑：超时、出错、限流都直接拦截。
+- **契约：** 系统提示词是「角色提示词 + 回复契约」，回复契约是代码里的 `outbound.OUTBOUND_CONTRACT`（和其他角色的契约一样写在代码里），角色提示词可在 Settings → Roles 改（同 `advice_check`）。
 
 ### 5.2 输入
 
@@ -188,7 +188,7 @@ class ActionLevel(str, Enum):
 </context>
 ```
 
-- **`action`** 由代码按工具的类型化参数生成（`summary` 是代码写的，`content` 是要发出去的原文）；不含密钥、令牌、环境变量的值（复用 `advice_lint` 的密钥和路径检查，命中的部分打码）。
+- **`action`** 由代码按工具的类型化参数生成（`summary` 是代码写的，`content` 是要发出去的原文）；不含密钥、令牌、环境变量的值（复用 `advice_lint` 的密钥检查 `mask_secrets` 和已登记的密钥，命中的部分打码）。路径不打码：分类器要看路径才能判断一条命令是不是只在本机。
 - **`turn.who`** 由代码判断（`operator_identity`、频道类型、是否自发回合），不由模型说。任务里的 agent 以任务的来源为准：操作者本人建的任务和定时任务（操作者配置的）算 `operator`，群聊里或别人建的任务算对应的类型。
 - **Shell 调用**（第二层）的 `level` 是 `unknown`，`content` 是命令原文；分类器先判断它会不会作用到这台机器以外，只在本机读写的直接放行。
 - **转义：** 每个块的标签在内容里出现时都被转义（同 processor 的 `<messages>`）。
@@ -323,7 +323,7 @@ CREATE TABLE IF NOT EXISTS outbound_reviews (
     summary           TEXT NOT NULL CHECK (length(summary) <= 500),   -- 代码写的动作摘要，已打码
     verdict           TEXT NOT NULL CHECK (verdict IN ('allow', 'block')),
     failure           TEXT CHECK (failure IN ('not_operator', 'timeout', 'parse', 'runtime', 'rate_limited',
-                                              'unavailable', 'budget')),
+                                              'unavailable', 'budget', 'refused')),
     reason            TEXT NOT NULL CHECK (length(reason) <= 300),
     signals           TEXT[] NOT NULL DEFAULT '{}',
     profile_id        TEXT, model TEXT,
@@ -374,6 +374,7 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (cre
 | 回复不是合法的判定 JSON | 拦截 | `parse` |
 | 运行出错（不重跑） | 拦截 | `runtime` |
 | 模型限流或额度用完 | 拦截 | `rate_limited` |
+| 模型拒绝判断，或回答的是别的模型（CLI 的回退模型） | 拦截 | `refused` |
 | 角色被关闭、没有可用 Profile、运行时不支持无工具 | 拦截 | `unavailable` |
 | 花费超过上限或花费未知 | 拦截 | `budget` |
 | 审计写入失败 | 拦截（不能留下没有审计的放行） | 记日志 |
@@ -403,10 +404,10 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (cre
 
 ## 14. 花费
 
-- **推测**（按 `advice_check` 的实测：Sonnet 5.5 一次判别约 $0.007、几秒）：一次审查输入 2,000–6,000 token、输出约 100 token，约 $0.005–0.02，3–8 秒。第一层的对外动作很少，每天几次，可以忽略。
-- **第二层（D12）：** 外部 MCP 里声明为 external 的工具很少。Manager 的每次 Shell 调用，按一个活跃的 Manager 每天几十到上百次推算，每天 $0.5–2，每次调用多 3–8 秒。带线索的任务里，Worker、Reviewer 的每次 Shell 调用都审，一个任务几十到几百次，**推测**每个任务 $0.3–3、总耗时多几分钟到几十分钟；这类任务不多，评测时实测并在开关的说明里写明。
+- **实测**（PR3 的 `evals/outbound_check.py`，真实 Claude Code、种子 `claude-sonnet-5-5`，10 个合成用例跑 3 轮共 30 次）：每次审查中位数 $0.0027、均值 $0.0044、最多 $0.0145；耗时中位数 3.6 秒、P90 6.6 秒、最长 10.6 秒。最贵最慢的是模型拒绝判断、由回退模型作答的那一例（`refused`，照样拦截）；有判定的审查均值 $0.0033、最长 6.6 秒。第一层的对外动作很少，每天几次，可以忽略。
+- **第二层（D12）：** 外部 MCP 里声明为 external 的工具很少。Manager 的每次 Shell 调用，按一个活跃的 Manager 每天几十到上百次、每次约 $0.003–0.0045 推算，每天约 $0.1–0.5，每次调用多 3–7 秒。带线索的任务里，Worker、Reviewer 的每次 Shell 调用都审，一个任务几十到几百次，**推测**每个任务 $0.1–1.5、总耗时多几分钟到几十分钟；这类任务不多，评测时实测并在开关的说明里写明。
 - **钩子本身：** 实测每次调用多 20–90 毫秒（第 17.1 节），相对分类器可以忽略。
-- 评测之后用实测数替换本节。
+- 第二层按上面的单次实测推算；Manager 钩子接入后再按真实调用量实测替换。
 
 ## 15. PR 拆分
 
@@ -416,7 +417,7 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (cre
 |---|---|---|
 | PR1 | 本 RFC；线索 RFC 写明和审查的关系 | 否 |
 | PR1b | **先做、独立**（D16）：`looper_providers` 改 `base_url` 或 `env`、`looper_catalog` 安装 MCP 服务器加 `escalate`（要操作者确认）；和审查开关无关 | 否（只多一个确认） |
-| PR3 | `ActionLevel` 类型；`outbound_check` 角色（种子、契约文件、解析、运行）、`outbound_reviews` 迁移、`outbound.review()`；单测和数据库测试；不接入任何入口 | 否 |
+| PR3 | `ActionLevel` 类型；`outbound_check` 角色（种子、契约、解析、运行）、`outbound_reviews` 迁移、`outbound.review()`；单测和数据库测试；不接入任何入口 | 否 |
 | PR5 | **价值最高，提前**（第 1.1 节）：Manager 的钩子。Claude Code 的 PreToolUse 钩子（失败即拦截的包装、`--setting-sources ""`、保护 Looper 自己的文件）、`/api/agent/v1/outbound/check`、`outbound_review.enabled` 和关闭时逐字节不变的测试、`tool_hook` 能力和打开时的检查、运行时内置工具的级别（`Bash`、`Monitor` 为 `unknown`）、外部 MCP 工具的级别声明；Manager 的每次 Shell 调用和 external 级调用都审查；拦截结果和通知；分类器评测（真实模式，含注入用例） | 是：分类器的契约、钩子的拦截理由（评测） |
 | PR2 | Looper 自己工具的级别：`RestrictedTool.level` / `level_of`、`Operation.level`、全部工具的级别和清单测试 | 否 |
 | PR4 | 第一层接入（Manager、客户端、Planner 的入口里 external 级的类型化工具） | 是：拦截结果（评测） |
