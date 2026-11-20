@@ -477,8 +477,12 @@ def _requirement_has_the_lead(look: Look) -> str | None:
 
 # --- The research order: where the Manager looks before it asks the user ---
 
+# A reply that asks the user for something: a question, or a request to tell, give or add it.
+_ASKS = re.compile(r"[？?]|告诉我|请提供|请补充|你可以补充|麻烦提供|tell me|let me know", re.IGNORECASE)
+
+
 def _asks(reply: str) -> bool:
-    return "？" in reply or "?" in reply
+    return bool(_ASKS.search(reply))
 
 
 def _found_in_leads(look: Look) -> str | None:
