@@ -5,12 +5,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { LeadsTab } from "@/components/leads-tab";
+import { TabStrip } from "@/components/tab-strip";
 import { LABEL, SELECT } from "@/components/registry-ui";
+import { leadsSettingsGet } from "@/lib/api-leads";
 import {
   configureMessageStream, fetchMessageStream, fetchMessageStreamRuns,
   type MessageStreamRun, type MessageStreamSource,
 } from "@/lib/api";
 import { sinceText } from "@/lib/gates";
+import { cn } from "@/lib/utils";
 import { startPolling } from "@/lib/polling";
 import { errorText } from "@/lib/use-action";
 import { formatBytes } from "@/lib/utils";
@@ -158,6 +162,16 @@ export function MessageStreamPage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [leadsOn, setLeadsOn] = useState(false);
+  const [tab, setTab] = useState<"stream" | "leads">("stream");
+  useEffect(() => {
+    let live = true;
+    leadsSettingsGet().then(
+      (settings) => { if (live) setLeadsOn(settings.enabled === true); },
+      () => { if (live) setLeadsOn(false); },
+    );
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     return startPolling(async (signal) => {
@@ -194,22 +208,32 @@ export function MessageStreamPage() {
         <h1 className="text-xl font-semibold">Message stream</h1>
         <p className="text-sm text-muted-foreground">Messages Looper has read into its own database, for subscriptions to use.</p>
       </div>
-      {error && (
+      {leadsOn && (
+        <TabStrip label="Message stream" selected={tab} className="gap-1 border-b border-border [--gutter:--spacing(6)]">
+          {([["stream", "消息"], ["leads", "线索"]] as const).map(([id, text]) => (
+            <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => setTab(id)}
+              className={cn("-mb-px border-b-2 px-3 py-2 text-sm font-medium pointer-coarse:min-h-11 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                tab === id ? "border-primary text-foreground" : "border-transparent text-muted-foreground")}>{text}</button>
+          ))}
+        </TabStrip>
+      )}
+      {leadsOn && tab === "leads" ? <LeadsTab /> : null}
+      {(!leadsOn || tab === "stream") && error && (
         <div role="alert" className="flex flex-wrap items-center gap-3 text-sm text-destructive [overflow-wrap:anywhere]">
           <span>{sources ? "The last action failed" : "Cannot load the message stream"} ({error})</span>
           <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>
         </div>
       )}
-      {!sources && !error && (
+      {(!leadsOn || tab === "stream") && !sources && !error && (
         <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /> Loading…
         </p>
       )}
-      {sources && !source && (
+      {(!leadsOn || tab === "stream") && sources && !source && (
         <Card><CardHeader><CardTitle className="text-base text-foreground">Set up a source</CardTitle></CardHeader>
           <CardContent><SetupForm source={null} busy={busy} onStart={(f) => void apply({ ingest_mode: "bridge", ...f })} /></CardContent></Card>
       )}
-      {source && (
+      {(!leadsOn || tab === "stream") && source && (
         <>
           <StatusCard source={source} busy={busy}
             onSwitch={(on) => void apply({ source_id: source.source_id, ingest_mode: on ? "bridge" : "off" })} />

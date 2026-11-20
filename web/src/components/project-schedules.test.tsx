@@ -918,5 +918,73 @@ describe("subscription schedules", () => {
     });
     expect(writes[0]).not.toHaveProperty("work_dir");
     expect(writes[0]).not.toHaveProperty("notify_target");
+    expect((writes[0] as { subscription: object }).subscription).not.toHaveProperty("output_kind");
+  });
+
+  it("fills a new subscription from the leads and intents presets, and drops a group target for intents", async () => {
+    const writes: Record<string, unknown>[] = [];
+    const preset = (kind: "leads" | "intents") => ({
+      kind: "subscription", name: kind === "intents" ? "意图识别" : "消息线索",
+      cron: kind === "intents" ? "*/10 * * * *" : "7 * * * *", timezone: "UTC",
+      requirement: kind === "intents" ? "Find intents" : "Find leads",
+      run_budget_usd: kind === "intents" ? 0.3 : 0.6, daily_budget_usd: kind === "intents" ? 3 : 10, notify: "failures",
+      subscription: {
+        source_id: "lark-user", chat_kinds: ["p2p", "group", "topic"], sender_kinds: kind === "intents" ? ["user", "app"] : ["user"],
+        include_history: true, max_age_minutes: 10080, max_events: 500, text_max_chars: 500,
+        quiet_word: "NONE", output_header: "", output_kind: kind,
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      let result: unknown;
+      if (url === "/api/v1/schedule_admin/project_list") result = { schedules: [], limits: {
+        default_timezone: "UTC", name_max_chars: 80, requirement_max_chars: 10000, run_timeout_default_seconds: 60,
+        run_timeout_max_seconds: 2592000, roles: ["planner"], gate_command_max_chars: 2000, gate_timeout_default_seconds: 30,
+        gate_timeout_max_seconds: 300, max_parallel_runs_limit: 10, concurrency_max: 100,
+        notify_targets: [
+          { channel: "lark", chat: "oc_group", label: "Lark · oc_group (bound to manager)", channel_enabled: true },
+          { channel: "lark", chat: "ou_direct", label: "Lark · ou_direct", channel_enabled: true },
+        ],
+      } };
+      else if (url === "/api/v1/managers/list") result = { managers: [{ id: "manager", enabled: true }], max_enabled: 8 };
+      else if (url === "/api/v1/registry/view") result = { providers: [], profiles: [] };
+      else if (url === "/api/v1/schedule_admin/subscription_preset") result = { fields: preset(JSON.parse(String(init?.body)).output_kind) };
+      else if (url === "/api/v1/schedule_admin/create") {
+        writes.push(JSON.parse(String(init?.body)).fields);
+        result = { schedule: { ...subscription(null), ...JSON.parse(String(init?.body)).fields } };
+      } else if (url === "/api/v1/schedule_admin/preview") result = { valid: true, next: [], description: "Every ten minutes" };
+      else if (url === "/api/v1/schedule_admin/runs") result = { runs: [], next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 } };
+      else throw new Error(`Unexpected request: ${url}`);
+      return Response.json({ status: "ok", result });
+    }));
+    const project = { project_id: "project", name: "Example", work_dir: "/srv/example" } as Project;
+    await act(async () => root.render(<ProjectSchedulesSection project={project} linked="" onLink={() => {}} />));
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
+    await act(async () => button("New schedule").click());
+    await act(async () => container.querySelector<HTMLInputElement>('input[type="radio"][value="subscription"]')!.click());
+    const target = container.querySelector<HTMLSelectElement>('[id$="-target"]')!;
+    await act(async () => {
+      const value = [...target.options].find((option) => option.textContent?.includes("oc_group"))!.value;
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(target, value);
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => button("消息线索").click());
+    expect(container.querySelector<HTMLInputElement>('[id$="-name"]')!.value).toBe("消息线索");
+    expect(container.querySelector<HTMLInputElement>('[id$="-cron"]')!.value).toBe("7 * * * *");
+    expect(target.value).toContain("oc_group");
+    await act(async () => button("意图识别").click());
+    expect(container.querySelector<HTMLInputElement>('[id$="-name"]')!.value).toBe("意图识别");
+    expect(container.querySelector<HTMLInputElement>('[id$="-cron"]')!.value).toBe("*/10 * * * *");
+    expect(target.value).toBe("");
+    const labels = [...target.options].map((option) => option.textContent ?? "");
+    expect(labels.some((label) => label.includes("oc_group"))).toBe(false);
+    expect(labels.some((label) => label.includes("ou_direct"))).toBe(true);
+    expect(container.textContent).toContain("意图识别只推到私聊。");
+    await act(async () => button("Create").click());
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      name: "意图识别", cron: "*/10 * * * *",
+      subscription: { source_id: "lark-user", output_kind: "intents", quiet_word: "NONE" },
+    });
+    expect(writes[0]).not.toHaveProperty("notify_target");
   });
 });

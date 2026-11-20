@@ -79,7 +79,19 @@ const TOKEN_CHANNELS: Record<string, { label: string; hint: string }> = {
 };
 
 /** Config keys the server owns: shown elsewhere or not at all, never as an editable field. */
-const SERVER_KEYS = ["allowlist_app_id"];
+const SERVER_KEYS = ["allowlist_app_id", "operator_sender_id"];
+
+const OPERATOR_CHANNELS = new Set(["telegram", "lark", "lark_bot"]);
+
+function OperatorIdField({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <div>
+      <label htmlFor={id} className="block text-xs font-medium text-muted-foreground mb-1.5">我的 ID</label>
+      <Input id={id} value={value} spellCheck={false} autoComplete="off" onChange={(e) => onChange(e.target.value)} />
+      <p className="mt-1 text-[10px] text-muted-foreground">It must be one of the allowed senders.</p>
+    </div>
+  );
+}
 
 /** Placeholders and hints for config fields that are not environment variable names. */
 const FIELD_HELP: Record<string, { placeholder: string; hint: string }> = {
@@ -202,6 +214,9 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
   const tokenChannel = TOKEN_CHANNELS[channel.channel_type];
   // Prefilled with the mask when a token is stored: sending it back unchanged keeps it.
   const [botToken, setBotToken] = useState(channel.has_bot_token ? SECRET_MASK : "");
+  const showOperator = OPERATOR_CHANNELS.has(channel.channel_type);
+  const savedOperator = typeof saved.operator_sender_id === "string" ? saved.operator_sender_id : "";
+  const [operatorId, setOperatorId] = useState(savedOperator);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [justSaved, setJustSaved] = useState(freshlySaved);
@@ -236,6 +251,7 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
     enabled !== channel.enabled ||
     JSON.stringify(fields) !== JSON.stringify(stringFields(saved, skip)) ||
     JSON.stringify(ids) !== JSON.stringify(savedIds) ||
+    (showOperator && operatorId !== savedOperator) ||
     (!!tokenChannel && botToken !== savedToken);
   const idProblems = allowlistProblems(ids, allowlist);
   const invalid = idProblems.some(Boolean);
@@ -254,6 +270,11 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
     try {
       const config: Record<string, unknown> = { ...saved, ...fields };
       if (allowlist) config[allowlist.field] = ids.map((value) => value.trim());
+      if (showOperator) {
+        const value = operatorId.trim();
+        if (value) config.operator_sender_id = value;
+        else delete config.operator_sender_id;
+      }
       const payload: Partial<ChannelConfig> & { bot_token?: string } = { enabled, config };
       // Only send the token when it changed from the mask; the mask would keep it anyway, but this avoids a needless write.
       if (tokenChannel && botToken !== SECRET_MASK) payload.bot_token = botToken;
@@ -340,6 +361,8 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
             <p className="mt-1 text-[10px] text-muted-foreground">{tokenChannel.hint}</p>
           </div>
         )}
+
+        {showOperator && <OperatorIdField id={`${id}-operator`} value={operatorId} onChange={setOperatorId} />}
 
         {Object.keys(fields).map((key) => (
           <div key={key}>
@@ -727,6 +750,7 @@ function AddBotForm({
     type === "lark" ? { profile: "" } : type === "lark_bot" ? { app_id: "", domain: "feishu" } : {},
   );
   const [ids, setIds] = useState<string[]>([]);
+  const [operatorId, setOperatorId] = useState("");
   const [enabled, setEnabled] = useState(false);
   const { busy, error, run } = useAction();
 
@@ -759,6 +783,7 @@ function AddBotForm({
     const config: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(fields)) config[key] = value.trim();
     if (allowlist) config[allowlist.field] = ids.map((value) => value.trim());
+    if (operatorId.trim()) config.operator_sender_id = operatorId.trim();
     const body: Parameters<typeof createChannelBot>[0] = { channel_type: type, manager_id: managerId, enabled, config };
     if (displayName.trim()) body.display_name = displayName.trim();
     if (tokenChannel) body.bot_token = secret;
@@ -826,6 +851,8 @@ function AddBotForm({
             <p className="mt-1 text-[10px] text-muted-foreground">{tokenChannel.hint}</p>
           </div>
         )}
+
+        {OPERATOR_CHANNELS.has(type) && <OperatorIdField id={`${id}-operator`} value={operatorId} onChange={setOperatorId} />}
 
         {Object.keys(fields).map((key) => (
           <div key={key}>
