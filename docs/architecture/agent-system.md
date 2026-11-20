@@ -4808,8 +4808,8 @@ here pushes: the intent push service polls `intents`.
   leads it `supersedes` become `superseded`; its people are the senders and the
   @-mentioned of its sources and the participants it is `about`. An intent is
   `pending`, or `merged` into the intent it is `same_as` when that one is
-  pending or tasked within 6 hours or rejected within 30 days (its sources are
-  added to that one's too); it is `flagged` when a source is in
+  pending or tasked within 6 hours or rejected within 30 days (each keeps only
+  its own sources); it is `flagged` when a source is in
   `instructions_seen`, and takes its project from `message_chat_projects`. The
   run is `extracted` (or `quiet` when nothing was stored), with
   `extract_counts` (`new`, `merged`, `superseded`, `dropped` by reason,
