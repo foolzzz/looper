@@ -117,6 +117,28 @@ def test_projects_are_created_changed_and_read_back_as_the_dashboard_reads_them(
     run_db(test, monkeypatch)
 
 
+def test_a_project_without_the_advisor_reads_to_the_model_as_it_did_before_the_advisor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """With the switch off, the Manager's tool results keep the field set they had before the advisor (the advisor
+    RFC, section 13); with it on, the project's advisor settings are part of them."""
+    async def test(pool: Any) -> None:
+        chat = _Chat(tmp_path)
+        (created,) = await chat.say("建一个项目 tetris", ("looper_projects", {"action": "create", "name": "tetris"}))
+        (changed,) = await chat.say("背景改成 Blocks.", ("looper_projects", {
+            "action": "update", "project": "tetris", "background": "Blocks."}))
+        (got,) = await chat.say("看看 tetris", ("looper_projects", {"action": "get", "project": "tetris"}))
+        for answer in (created, changed, got):
+            assert answer["status"] == "ok", answer
+            assert not [key for key in answer["result"]["project"] if key.startswith("advisor")], answer
+        await pool.execute("UPDATE projects SET advisor = 'on' WHERE name = 'tetris'")
+        (on,) = await chat.say("再看看 tetris", ("looper_projects", {"action": "get", "project": "tetris"}))
+        assert on["result"]["project"]["advisor"] == "on"
+        assert on["result"]["project"]["advisor_consult_budget_usd"] is None
+
+    run_db(test, monkeypatch)
+
+
 @pytest.mark.parametrize(("arguments", "code", "message"), [
     ({"action": "create", "name": "calc"}, "conflict", "a project named 'calc' already exists"),
     ({"action": "create", "name": "x", "work_dir": "relative/dir"}, "invalid", "absolute"),

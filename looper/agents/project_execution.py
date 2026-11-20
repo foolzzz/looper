@@ -135,6 +135,8 @@ ADVISOR_COUNTS: dict[str, tuple[int, int, None, str]] = {
     "advisor_consults_per_step": (0, 10, None, "consults of the advisor a step may have"),
 }
 ADVISOR_DOMAINS_MAX = 20
+# Every advisor setting of a project; while ``advisor`` is off, what the models are given leaves them out.
+ADVISOR_FIELDS = ("advisor", *ADVISOR_BUDGETS, *ADVISOR_COUNTS, "advisor_fallback_profile", "advisor_internal_domains")
 _DOMAIN = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 
 
