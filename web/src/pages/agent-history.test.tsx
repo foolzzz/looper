@@ -71,6 +71,22 @@ describe("run system prompt mode", () => {
     expect(render(undefined, {}, { output_text: "retained evidence" })).toContain("retained evidence");
     expect(render(undefined, {}, { status: "running" })).toContain("Waiting for the first event");
   });
+  it("shows runtime catalog skips beside the loaded library, and no section without them", () => {
+    const shown = render(undefined, { runtime_catalog: { runtime: "pi", skipped: [
+      "skill demo: pi does not load catalog MCP servers, skills or plugins",
+      { name: "plugin/hooks", reason: "Claude plugin component is not translated" },
+    ] } });
+    expect(shown).toContain("Runtime catalog skips · 2");
+    expect(shown).toContain("skill demo: pi does not load catalog MCP servers, skills or plugins");
+    expect(shown).toContain("plugin/hooks: Claude plugin component is not translated");
+    for (const metadata of [
+      {},
+      { runtime_catalog: { runtime: "pi", skipped: [] } },
+      { runtime_catalog: { runtime: "codex", skills_as_documents: ["demo-lib:hello"] } },
+    ]) {
+      expect(render(undefined, metadata)).not.toContain("Runtime catalog skips");
+    }
+  });
   it("renders unknown library evidence and historical labels from the DTO", async () => {
     const host = document.createElement("div"), root = createRoot(host);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ status: "ok", result: { events: [] } })));

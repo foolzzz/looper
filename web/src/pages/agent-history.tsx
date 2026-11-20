@@ -673,6 +673,36 @@ function LoadedLibrary({ record }: { record: RunRecord }) {
   );
 }
 
+/** One recorded catalog skip: a line the runtime wrote, or a name with its reason. */
+function catalogSkipLine(item: unknown): string | null {
+  if (typeof item === "string") return item.trim() ? item : null;
+  if (!item || typeof item !== "object") return null;
+  const row = item as { name?: unknown; reason?: unknown; item?: unknown; path?: unknown };
+  const name = typeof row.name === "string" ? row.name : typeof row.item === "string" ? row.item : "";
+  const path = typeof row.path === "string" && row.path ? `/${row.path}` : "";
+  const reason = typeof row.reason === "string" ? row.reason : "";
+  const label = `${name}${path}`;
+  if (label && reason) return `${label}: ${reason}`;
+  return label || reason || null;
+}
+
+/** Catalog entries this run's runtime left unloaded. Nothing when it recorded no skips. */
+function RuntimeCatalogSkips({ record }: { record: RunRecord }) {
+  const skipped = record.metadata?.runtime_catalog?.skipped;
+  if (!Array.isArray(skipped)) return null;
+  const lines = skipped.map(catalogSkipLine).filter((line): line is string => line !== null);
+  if (!lines.length) return null;
+  return (
+    <Collapsible icon={<Library className="h-3 w-3" />} title={`Runtime catalog skips · ${lines.length}`} defaultOpen>
+      <ul className="space-y-0.5 font-mono text-[11px]">
+        {lines.map((line, index) => (
+          <li key={`${index}-${line}`} className="break-all">{line}</li>
+        ))}
+      </ul>
+    </Collapsible>
+  );
+}
+
 function toolSummary(input: Block) {
   for (const key of ["command", "file_path", "pattern", "url", "description", "prompt"]) {
     const value = input[key];
@@ -1200,6 +1230,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOp
           <LaunchCommand record={record} />
           <SystemPrompt record={record} />
           <LoadedLibrary record={record} />
+          <RuntimeCatalogSkips record={record} />
           {record.metadata?.ttadk_check && <p className="flex items-center gap-1 text-xs text-warning">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             TTADK sign-in check before this run started: {record.metadata.ttadk_check}

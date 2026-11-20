@@ -35,7 +35,7 @@ function RuntimeHint({ manager }: { manager: ManagerInfo }) {
           : `${profile.runtime_name}: ${runtime?.capabilities.includes("claude_plugins")
             ? "supports Claude plugin loading." : "only runtime-supported contents load."}`}
         {" "}<a className="underline" href={settingsHref("profiles")}>Agent Profiles</a>
-        {" · "}<a className="underline" href={historyHref("", null, "manager")}>History: loaded plugins and skills</a>
+        {" · "}<a className="underline" href={historyHref("", null, "manager")}>History: loaded contents and runtime catalog skips</a>
       </p>
       {runtime?.probe_error && <p role="alert">{runtime.probe_error}</p>}
       {profile?.warnings.map((warning) => <p key={warning}>{warning}</p>)}
