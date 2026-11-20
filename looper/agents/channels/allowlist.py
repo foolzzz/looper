@@ -32,6 +32,9 @@ from ...db.channel_configs import BUILTIN_CHANNEL_IDS
 
 logger = logging.getLogger(__name__)
 
+# The channel config key naming which allowlisted sender is the operator (the ledger's "me").
+OPERATOR_FIELD = "operator_sender_id"
+
 # A list longer than this is almost certainly not a list of people.
 MAX_SENDERS = 100
 
@@ -135,9 +138,29 @@ def normalized_config(channel_type: str, config: Any) -> dict[str, Any]:
         if type(age) is not int or age <= 0:
             raise AllowlistError("backlog_max_age_seconds must be a positive integer")
     fmt = SENDER_ID_FORMATS.get(channel_type)
+    if fmt is not None and OPERATOR_FIELD in config:
+        operator = _operator(channel_type, config)
+        config = {**config, OPERATOR_FIELD: operator}
     if fmt is None or fmt.field not in config:
         return dict(config)
     return {**config, fmt.field: (None if config[fmt.field] is None else list(sender_ids(channel_type, config[fmt.field])))}
+
+
+def _operator(channel_type: str, config: Mapping[str, Any]) -> str | None:
+    """The configured operator's sender id (None for none): one valid id that the allowlist lists. It is the one
+    sender whose direct messages count as the user's own in the ledger."""
+    fmt = SENDER_ID_FORMATS[channel_type]
+    raw = config[OPERATOR_FIELD]
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    if not isinstance(raw, str):
+        raise AllowlistError(f"{OPERATOR_FIELD} must be one {fmt.label} written as a string")
+    text = raw.strip()
+    if not fmt.pattern.fullmatch(text):
+        raise AllowlistError(f"{text[:80]!r} is not a {fmt.label}; {fmt.hint}")
+    if text not in sender_ids(channel_type, config.get(fmt.field)):
+        raise AllowlistError(f"{OPERATOR_FIELD} must be one of the senders in {fmt.field}")
+    return text
 
 
 def channel_view(row: Mapping[str, Any]) -> dict[str, Any]:

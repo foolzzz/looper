@@ -4,7 +4,7 @@ from ...db import channel_configs as db_configs
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..channels import bot_api, chat_routing
 from ...db.connection import get_pool
-from ..channels.allowlist import AllowlistError, SENDER_ID_FORMATS, channel_view, normalized_config
+from ..channels.allowlist import OPERATOR_FIELD, AllowlistError, SENDER_ID_FORMATS, channel_view, normalized_config
 from ..ops import ErrorCode, OpError, PublicOpError
 from ..projects import RequestError, HTTP_400, HTTP_404, HTTP_409
 
@@ -12,7 +12,7 @@ _ID = {"type": "string", "minLength": 1}
 _TYPE = {"type": "string", "enum": ["telegram", "lark", "lark_bot"]}
 _TELEGRAM_SENDERS = {"anyOf": [{"type": "null"}, _STR, _array({"type": ["string", "integer"]})]}
 _LARK_SENDERS = {"anyOf": [{"type": "null"}, _STR, _array(_STR)]}
-_COMMON = {"description": _STR}
+_COMMON = {"description": _STR, "operator_sender_id": _NULL_STR}
 _LARK = {**_COMMON, "allowed_open_ids": _LARK_SENDERS, "allowlist_app_id": _NULL_STR}
 CONFIGS = {
     "telegram": _object({**_COMMON, "bot_token_env": _NULL_STR,
@@ -87,12 +87,18 @@ async def impact(server, operation, arguments, principal, headers):
 
 
 def _check_allowlist(kind, config):
+    fmt = SENDER_ID_FORMATS[kind]
     try:
-        normalized_config(kind, config)
+        normalized_config(kind, {key: value for key, value in config.items() if key != OPERATOR_FIELD})
     except AllowlistError:
         # The service's error quotes the first bad entry, which may be a pasted
         # token. Keep its format hint, never the submitted entry.
-        raise PublicOpError(ErrorCode.INVALID, "invalid sender allowlist: " + SENDER_ID_FORMATS[kind].hint) from None
+        raise PublicOpError(ErrorCode.INVALID, "invalid sender allowlist: " + fmt.hint) from None
+    try:
+        normalized_config(kind, config)
+    except AllowlistError:
+        raise PublicOpError(ErrorCode.INVALID, f"invalid {OPERATOR_FIELD}: it must be one {fmt.label} of the "
+                                               f"senders in {fmt.field}") from None
 
 
 async def _save(request, *, creating=False):
