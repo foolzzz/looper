@@ -5441,8 +5441,11 @@ the system setting `ledger.enabled` is `true`. Settings → Chat and
 `chat_settings.update` turn it on and off; null removes the row and the ledger
 stays off. Turning it on returns `missing_operator_ids`: every enabled Lark or
 Telegram bot (`telegram`, `lark`, `lark_bot`) whose configuration has no
-`operator_sender_id` (`channels.operator_ids.missing`). In those bots' direct
-chats a decision is recorded as relayed until Settings → Channels has "My ID".
+`operator_sender_id` (`channels.operator_ids.missing`). A bot with no display
+name is listed by its channel id. In those bots' direct chats a decision is
+recorded as relayed until Settings → Channels has "My ID". Only the operator
+can set `ledger_enabled`; any other principal gets 403, and the other fields
+of `chat_settings.update` stay available.
 The ledger reads the row from the database; there is no second copy in memory.
 Off, no prompt, tool list or command line mentions it, and reading the setting
 writes nothing.
