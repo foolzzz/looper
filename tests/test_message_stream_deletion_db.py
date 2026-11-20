@@ -5,9 +5,9 @@ from datetime import timedelta
 
 import pytest
 
-from looper.agents import source_service
+from looper.agents import source_service, subscription_rules
 from looper.db import message_stream as store, subscriptions
-from tests import msgflow_support as sup
+from tests import leads_support, msgflow_support as sup
 from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -22,10 +22,12 @@ async def ingest(pool, **options):
     return await source_service.run_bridge_pass(await store.get_source("src", db=pool), db=pool, now=sup.NOW, **options)
 
 
-async def selected(pool):
+async def selected(pool, window="cursor", rules=False):
     sub = dict(source_id="src", max_age_minutes=10080, chat_kinds=["unknown"], include_chats=[], exclude_chats=[],
-               sender_kinds=["user", "app"], exclude_mentions_me=False, include_history=True, max_events=100)
-    result = await subscriptions.window(pool, sub, from_seq=0, to_seq=100000, now=sup.NOW, own_apps=[])
+               sender_kinds=["user", "app"], exclude_mentions_me=False, include_history=True, max_events=100, window=window)
+    result = await subscriptions.window(pool, sub, from_seq=0, to_seq=100000, now=sup.NOW, own_apps=[],
+                                        matcher=subscription_rules.Matcher(subscription_rules.parse_rules([{"name": "all"}]), me=None)
+                                        if rules else None)
     return [r["text"] for r in result["rows"]]
 
 
@@ -77,18 +79,21 @@ def test_chat_delete_clears_name_excludes_and_cannot_be_repopulated(monkeypatch,
     run_db(check, monkeypatch, setup=lambda p: setup(p, tmp_path), timeout=30)
 
 
-def test_exclusion_removes_existing_events_from_subscription_selection(monkeypatch, tmp_path):
+@pytest.mark.parametrize("window", ["cursor", "lookback"])
+@pytest.mark.parametrize("rules", [False, True])
+def test_exclusion_removes_existing_events_from_subscription_selection(monkeypatch, tmp_path, window, rules):
     async def check(pool):
         sup.append(tmp_path, "chat_synthetic", sup.message("m1"))
         await ingest(pool)
-        assert await selected(pool) == ["hello"]
+        assert await selected(pool, window, rules) == ["hello"]
         await pool.execute("UPDATE source_events SET sent_at = now()")
         chats = await store.list_chats("src", search="synthetic", db=pool)
         assert len(chats) == 1 and chats[0]["events_7d"] == 1
+        await pool.execute("UPDATE source_events SET sent_at = $1", sup.NOW - timedelta(minutes=5))
         await store.set_chat_inclusion("src", "chat_synthetic", False, db=pool)
-        assert await selected(pool) == []
+        assert await selected(pool, window, rules) == []
         await store.set_chat_inclusion("src", "chat_synthetic", True, db=pool)
-        assert await selected(pool) == ["hello"]
+        assert await selected(pool, window, rules) == ["hello"]
 
     run_db(check, monkeypatch, setup=lambda p: setup(p, tmp_path), timeout=30)
 
@@ -141,5 +146,31 @@ def test_delete_waits_for_an_ingest_chunk_then_removes_its_committed_event(monke
         assert (await writer).events_new == 1
         assert (await deletion)["deleted"] == 1
         assert await pool.fetchval("SELECT count(*) FROM source_events") == 0
+
+    run_db(check, monkeypatch, setup=lambda p: setup(p, tmp_path), timeout=30)
+
+
+@pytest.mark.parametrize("scope", ["message", "range", "chat"])
+def test_stream_deletion_detaches_intents_merged_into_deleted_targets(monkeypatch, tmp_path, scope):
+    async def check(pool):
+        sup.append(tmp_path, "chat_synthetic", sup.message("target_message"), sup.message("shared_message"))
+        sup.append(tmp_path, "other_synthetic", sup.message("kept_message"))
+        await ingest(pool)
+        seqs = {row["external_id"]: row["seq"] for row in await pool.fetch("SELECT seq, external_id FROM source_events")}
+        target = await leads_support.intent(pool, [seqs["target_message"]], source_id="src")
+        # Both the merge target and another intent share the message that will be deleted.
+        await pool.execute("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2)",
+                           target, seqs["shared_message"])
+        shared = await leads_support.intent(pool, [seqs["shared_message"]], source_id="src",
+                                            state="merged", merged_into=target)
+        kept = await leads_support.intent(pool, [seqs["kept_message"]], source_id="src",
+                                          state="merged", merged_into=target)
+        options = {"message_id": "shared_message"} if scope == "message" else {"chat_id": "chat_synthetic"}
+        if scope == "range":
+            options.update(start=sup.NOW - timedelta(hours=1), end=sup.NOW)
+        assert (await store.delete_events("src", scope, db=pool, **options))["deleted"] == (1 if scope == "message" else 2)
+        assert await pool.fetchval("SELECT count(*) FROM intents WHERE id = ANY($1::bigint[])", [target, shared]) == 0
+        assert dict(await pool.fetchrow("SELECT state, merged_into, handled_at FROM intents WHERE id = $1", kept)) == {
+            "state": "pending", "merged_into": None, "handled_at": None}
 
     run_db(check, monkeypatch, setup=lambda p: setup(p, tmp_path), timeout=30)

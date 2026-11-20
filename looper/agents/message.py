@@ -32,6 +32,9 @@ class MessageType(str, Enum):
     STATUS_UPDATE = "status_update"
     # Manager → Telegram or Lark: tell a chat, unprompted, that a task ended (``task_notice.Notice``).
     CHAT_NOTICE = "chat_notice"
+    # A Manager → itself: completion events of one chat wait for its completion turn (payload: ``manager_id``,
+    # ``channel_id``, ``chat``; ``completion_events``). Only a wake-up: the events are claimed from the table.
+    COMPLETION_DUE = "completion_due"
 
     # Manager ↔ Planner
     TASK_REQUEST = "task_request"

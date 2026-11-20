@@ -26,10 +26,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..db import subscriptions as db_subs
-from . import cron
+from . import cron, subscription_rules
 
 # Where lines_v1 writes its time: the same as lark-chat (``zh-CN``, 24-hour, numbers not padded but the clock's).
 RENDER = "lines_v1"
+RENDER_V2 = "lines_v2"  # lines_v1 with the tag of the rule that took the message: ``【label·area】``
 MAX_CHATS = 100
 CHAT_ID_MAX_CHARS = 200
 HEADER_MAX_CHARS = 200
@@ -84,7 +85,10 @@ def _quiet_word(raw: Any) -> str:
 def _header(raw: Any) -> str:
     if not isinstance(raw, str) or len(raw.strip()) > HEADER_MAX_CHARS or "\x00" in raw:
         raise ValueError(f"subscription.output_header must be text of at most {HEADER_MAX_CHARS} characters")
-    return raw.strip()
+    try:
+        return subscription_rules.check_header(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"subscription.{exc}") from None
 
 
 def _source(raw: Any) -> str:
@@ -93,16 +97,25 @@ def _source(raw: Any) -> str:
     return raw.strip()
 
 
-def _choice(field: str, allowed: str):
+def _choice(field: str, *allowed: str):
     def parse(raw: Any) -> str:
-        if raw != allowed:
-            raise ValueError(f"subscription.{field} must be {allowed!r}")
+        if raw not in allowed:
+            raise ValueError(f"subscription.{field} must be one of {', '.join(allowed)}")
         return raw
     return parse
 
 
+def _rules(raw: Any) -> list[dict[str, Any]]:
+    try:
+        return subscription_rules.parse_rules(raw)
+    except ValueError as exc:
+        raise ValueError(f"subscription.{exc}") from None
+
+
 _PARSERS = {
     "source_id": _source,
+    "window": _choice("window", "cursor", "lookback"),
+    "delivery_policy": _choice("delivery_policy", "per_run", "daily"),
     "chat_kinds": lambda raw: _enum_list("chat_kinds", raw, db_subs.CHAT_KINDS),
     "sender_kinds": lambda raw: _enum_list("sender_kinds", raw, db_subs.SENDER_KINDS),
     "include_chats": lambda raw: _chat_list("include_chats", raw),
@@ -112,7 +125,8 @@ _PARSERS = {
     "max_age_minutes": lambda raw: _bounded("max_age_minutes", raw, *_MAX_AGE),
     "max_events": lambda raw: _bounded("max_events", raw, *_MAX_EVENTS),
     "text_max_chars": lambda raw: _bounded("text_max_chars", raw, *_TEXT_CHARS),
-    "render": _choice("render", RENDER),
+    "render": _choice("render", RENDER, RENDER_V2),
+    "rules": _rules,
     "output_kind": _choice("output_kind", "push"),
     "quiet_word": _quiet_word,
     "output_header": _header,
@@ -132,12 +146,20 @@ def parse(raw: Any, *, update: bool) -> dict[str, Any]:
             if unknown[0] in _STATE_FIELDS else ""
         raise ValueError(f"unknown subscription field {unknown[0]!r}{state}; a subscription has {', '.join(_PARSERS)}")
     if not update:
-        missing = [name for name in _REQUIRED_ON_CREATE if name not in raw]
+        # With rules, the filter columns they replace (chat and sender kinds) default.
+        needed = [n for n in _REQUIRED_ON_CREATE if not (raw.get("rules") and n in ("chat_kinds", "sender_kinds"))]
+        missing = [name for name in needed if name not in raw]
         if missing:
             raise ValueError(f"subscription needs {', '.join(missing)}")
     if update and not raw:
         raise ValueError("give at least one subscription field to change")
-    return {name: _PARSERS[name](value) for name, value in raw.items()}
+    found = {name: _PARSERS[name](value) for name, value in raw.items()}
+    if found.get("rules") and not update:
+        # The rules select: the filter columns they replace default when the subscription is created (an update that
+        # names rules leaves the columns as they are, so removing the rules again gives back what it had).
+        found.setdefault("chat_kinds", list(db_subs.CHAT_KINDS))
+        found.setdefault("sender_kinds", list(db_subs.SENDER_KINDS))
+    return found
 
 
 def view(sub: Mapping[str, Any]) -> dict[str, Any]:
@@ -151,13 +173,18 @@ def view(sub: Mapping[str, Any]) -> dict[str, Any]:
 # --- What a request does to the confirmation ---
 
 
-def needs_confirmation(row: Mapping[str, Any], changes: Mapping[str, Any]) -> bool:
+def needs_confirmation(row: Mapping[str, Any], changes: Mapping[str, Any], *,
+                       stream: Mapping[str, Any] | None = None) -> bool:
     """Whether applying ``changes`` (schedule columns, ``enabled`` and ``notify_*`` as stored) to the subscription
     schedule ``row`` clears its push target's confirmation: enabling it, or a different target, rule or zone while it
     has a target."""
     if row.get("kind") != "subscription" or not (changes.get("notify_channel", row.get("notify_channel"))):
         return False
     if changes.get("enabled") and not row["enabled"]:
+        return True
+    current = row.get("subscription") or {}
+    if stream and any(name in stream and stream[name] != current.get(name, default)
+                      for name, default in (("window", "cursor"), ("delivery_policy", "per_run"))):
         return True
     return any(name in changes and changes[name] != row.get(name)
                for name in ("notify_channel", "notify_chat", "cron", "timezone"))
@@ -233,6 +260,20 @@ def clock(moment: datetime, zone_name: str) -> str:
     return f"{local.year}/{local.month}/{local.day} {local:%H:%M:%S}"
 
 
+def render_lines_v2(rows: Sequence[Mapping[str, Any]], *, text_max_chars: int, zone_name: str,
+                    rules: Sequence[Mapping[str, Any]]) -> str:
+    """``lines_v1`` with the tag of the rule that took each message after the time: ``[time] 【告警·领域】《chat》 ...``."""
+    matcher = subscription_rules.Matcher(rules, me=None)
+    lines = []
+    for row in rows:
+        sender = row.get("sender_name") or (row.get("sender_id") or "?")[:10]
+        text = _js_slice(_WHITESPACE.sub(" ", row.get("text") or ""), text_max_chars)
+        tag = matcher.tag(row) if row.get("rule") is not None else ""
+        lines.append(f"[{clock(row['sent_at'], zone_name)}]{' ' + tag if tag else ''}《{row.get('chat_name') or row['chat_id']}》 "
+                     f"{sender}: {text}")
+    return "\n".join(lines)
+
+
 def render_lines_v1(rows: Sequence[Mapping[str, Any]], *, text_max_chars: int, zone_name: str) -> str:
     """The window's lines, in the order given (newest first): ``[time]《chat》 sender: text``."""
     lines = []
@@ -244,9 +285,28 @@ def render_lines_v1(rows: Sequence[Mapping[str, Any]], *, text_max_chars: int, z
     return "\n".join(lines)
 
 
-def processor_input(rows: Sequence[Mapping[str, Any]], *, text_max_chars: int, zone_name: str) -> str:
+def processor_input(rows: Sequence[Mapping[str, Any]], *, text_max_chars: int, zone_name: str,
+                    render: str = RENDER, rules: Sequence[Mapping[str, Any]] = ()) -> str:
     """What the processor is given: the count, then the lines."""
-    return f"消息(共 {len(rows)} 条):\n{render_lines_v1(rows, text_max_chars=text_max_chars, zone_name=zone_name)}"
+    lines = (render_lines_v2(rows, text_max_chars=text_max_chars, zone_name=zone_name, rules=rules)
+             if render == RENDER_V2 else render_lines_v1(rows, text_max_chars=text_max_chars, zone_name=zone_name))
+    return f"消息(共 {len(rows)} 条):\n{lines}"
+
+
+# --- Private content stays with its operator ---
+
+
+def check_private_target(sub: Mapping[str, Any], channel: str | None, chat: str | None, operator: str | None) -> None:
+    """A subscription that can select private content (``subscription_rules.is_private``) may push only to the
+    operator's own direct chat: a Lark chat with ``operator``, the user its source is bound to (``user_open_id``). Any
+    other chat, a colleague's included, and any source without a bound user, is refused; ``ValueError`` saying why. No
+    target is fine: its output stays on the dashboard."""
+    if not (channel and chat and subscription_rules.is_private(sub)):
+        return
+    if channel not in ("lark", "lark_bot") or not operator or chat != operator:
+        raise ValueError("this subscription can select private messages (direct chats, messages that @-mention you, "
+                         "or a never_quiet list of the messages themselves): it may push only to your own direct chat "
+                         "(the user its message source is bound to), not a group or anyone else")
 
 
 def digest(text: str) -> str:
@@ -319,7 +379,14 @@ async def config_version(schedule: Mapping[str, Any], *, profile: Mapping[str, A
     profile = dict(profile) if profile is not None else await processor.run_facts(schedule["project_id"], schedule["id"])
     facts = {"channel": schedule.get("notify_channel"), "chat": schedule.get("notify_chat"), "cron": schedule["cron"],
              "timezone": schedule["timezone"], "source": (schedule.get("subscription") or {}).get("source_id"),
-             "processor": profile}
+             "processor": profile,
+             # Only when true, so a version made before this existed is still the version of a subscription that is not.
+             **({"private": True} if subscription_rules.is_private(schedule.get("subscription") or {}) else {})}
+    # Keep existing cursor confirmations byte-identical; opting in pins the new semantics too.
+    sub = schedule.get("subscription") or {}
+    for name, default in (("window", "cursor"), ("delivery_policy", "per_run")):
+        if sub.get(name, default) != default:
+            facts[name] = sub[name]
     return digest(json.dumps(facts, sort_keys=True, ensure_ascii=False))
 
 
@@ -342,9 +409,15 @@ async def confirmation_text(schedule: Mapping[str, Any], *, now: datetime, actio
     kind = "群聊" if (chat or "").startswith(("oc_", "-")) else "私聊"
     lines = [f"{action}订阅「{schedule['name']}」：它会把处理结果推送出去，目标需要你确认。",
              f"- 推送目标：{label}（{kind}）",
+             *([f"- {subscription_rules.PRIVATE_NOTE}"] if subscription_rules.is_private(sub) else []),
              f"- 机器人身份：{await bot_identity(channel)}",
              f"- 规则：{describe_zh(rule, zone_name)}；接下来 {len(fires)} 次：{'、'.join(fires)}",
-             f"- 每天最多推送：{fires_per_day(rule, zone_name, now)} 次（没有新消息或没有内容时不推送）"]
+             f"- 每天最多推送：{1 if sub.get('delivery_policy') == 'daily' else fires_per_day(rule, zone_name, now)} 次"
+             "（没有新消息或没有内容时不推送）"]
+    if sub.get("delivery_policy") == "daily":
+        lines.append("- 按触发时刻的本地日期占用名额（手动运行、补跑也计入；"
+                     "静默、仅留在面板或已发送/发送状态不确定时保留名额；"
+                     "失败或中断且无已发送/发送状态不确定的消息时释放名额）")
     profile = await processor.chosen_profile(schedule["project_id"], schedule["id"])
     named = f"{profile.get('name')}（{profile.get('runtime')} · {profile.get('model') or '默认模型'}）"
     lines.append(f"- 处理 Profile：{named}，来源：{profile.get('source')}（processor.chosen_profile）")

@@ -390,7 +390,11 @@ def test_a_lost_lock_session_stops_the_writes(monkeypatch, tmp_path):
             calls.append(1)
             if len(calls) == 2:
                 # The session that holds the writer lock goes away; the writes must go with it.
-                await pool.execute("SELECT pg_terminate_backend($1)", conn.get_server_pid())
+                # This schema's lock only: other tests of other workers take the same lock class in their own schemas.
+                holder = await pool.fetchval("SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                                             "AND classid = $1 AND objid = hashtext(current_schema() || ':' || 'src')::oid",
+                                             store._LOCK_CLASS)
+                await pool.execute("SELECT pg_terminate_backend($1)", holder)
             return await real(conn, source_id, run_id, batch)
 
         monkeypatch.setattr(store, "insert_events", losing)
