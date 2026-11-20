@@ -12,10 +12,10 @@ import pytest
 from looper.agents import processor
 from tests.db_support import DSN, run_db, v1_api
 from tests.subscription_support import (DM, GROUP, INSTRUCTIONS, SOURCE, UPDATE, add, confirm,
-                                        confirmed_at, fire, lark_targets, minutes_ago, scenario, source, started)
+                                        confirmed_at, fire, lark_targets, minutes_ago, scenario, source, started, version_of)
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-ME = "ou_operatorsynthetic_self"
+ME = DM  # the operator: the user the source is bound to, and whose own direct chat is DM
 HEADER = "🔔 速报 · 直接找你 {count:直接} / 告警 {count:告警} / 共 {count}"
 RULES = [
     {"name": "直接", "label": "单聊", "chat_kinds": ["p2p"], "sender_kinds": ["user"], "exclude_self": True,
@@ -29,7 +29,6 @@ DIGEST = {"source_id": SOURCE, "render": "lines_v2", "rules": RULES, "max_age_mi
 
 async def digest(env, **fields: Any) -> str:
     await source(env.pool)
-    await env.pool.execute("UPDATE event_sources SET user_open_id = $1 WHERE id = $2", ME, SOURCE)
     return await started(env, subscription=DIGEST, **fields)
 
 
@@ -181,19 +180,78 @@ def test_a_group_may_still_get_a_subscription_that_selects_nothing_private(monke
     scenario(check, monkeypatch, tmp_path)
 
 
-def test_a_run_pinned_to_a_group_before_its_subscription_became_private_pushes_nothing(monkeypatch, tmp_path):
-    async def check(env, poster, fake):
-        sid = await started(env, subscription={**DIGEST, "rules": [{"name": "w", "chat_kinds": ["group"]}]},
-                            target={"channel": "lark", "chat": GROUP})
-        await confirm(env, sid)
-        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+def test_a_config_round_trip_during_a_run_neither_widens_what_it_reads_nor_lets_it_push(monkeypatch, tmp_path):
+    secret = "PRIVATE-SECRET-TEXT"
+    public = {"name": "w", "chat_kinds": ["group"], "mentions_me": "exclude"}
+    private = {"name": "d", "chat_kinds": ["p2p"], "never_quiet": True}
+    group = {"channel": "lark", "chat": GROUP}
+    direct = {"channel": "lark", "chat": DM}
 
-        async def become_private() -> None:
-            await env.pool.execute("UPDATE subscriptions SET rules = jsonb_set(rules, '{0,never_quiet}', 'true') "
-                                   "WHERE schedule_id = $1", sid)
-        fake.during = become_private
+    async def check(env, poster, fake):
+        from looper.agents import subscription_runs
+
+        sid = await started(env, subscription={**DIGEST, "rules": [public]}, target=group)
+        await confirm(env, sid)
+        await add(env.pool, "a public remark", chat_id="oc_pub", sent_at=minutes_ago(env, 6))
+        await add(env.pool, secret, chat_id="oc_dm", kind="p2p", sender="ou_alice", sent_at=minutes_ago(env, 5))
+        original = subscription_runs.SubscriptionRuns._execute
+
+        async def swapped(self, run_id):
+            # Between the run's start and its window: private rules and the operator's DM, confirmed.
+            await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify_target": direct,
+                                                                          "subscription": {"rules": [private]}}})
+            await confirm(env, sid)
+            return await original(self, run_id)
+
+        async def back() -> None:
+            # While the processor runs: the public rules and the group again, confirmed: the configuration (and the
+            # version) the run started with.
+            await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify_target": group,
+                                                                          "subscription": {"rules": [public]}}})
+            await confirm(env, sid)
+        fake.during = back
+        monkeypatch.setattr(subscription_runs.SubscriptionRuns, "_execute", swapped)
+        pinned = await version_of(env, sid)
+        run = await fire(env, sid)
+        assert await version_of(env, sid) == pinned  # the round trip really did come back to the same version
+        assert all(secret not in call["input_text"] for call in fake.calls)  # selected with the run's own rules
+        assert poster.sent == [] and run["stream"]["outcome"] == "dashboard_only"
+        assert secret not in (run["stream"]["output_text"] or "")
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_colleagues_direct_chat_is_not_the_operators_for_private_content(monkeypatch, tmp_path):
+    colleague = "ou_colleaguesynthetic"
+
+    async def check(env, poster, fake):
+        await env.pool.execute("UPDATE channel_configs SET config = jsonb_set(config, '{allowed_open_ids}', $1::jsonb) "
+                               "WHERE channel_id = 'channel-lark'", __import__("json").dumps([DM, colleague]))
+        private = {**DIGEST, "rules": [{"name": "d", "chat_kinds": ["p2p"]}]}
+        await source(env.pool)
+        fields = {"name": "c", "cron": "5 * * * *", "kind": "subscription", "requirement": INSTRUCTIONS,
+                  "run_budget_usd": 0.5, "subscription": private}
+        status, answer = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": {
+            **fields, "notify_target": {"channel": "lark", "chat": colleague}}})
+        assert status == 400 and "your own direct chat" in answer["error"]["message"]
+        sid = await started(env, name="mine", subscription=private)
+        status, answer = await env.call("POST", UPDATE, {"schedule_id": sid, "fields": {
+            "notify_target": {"channel": "lark", "chat": colleague}}})
+        assert status == 400 and "your own direct chat" in answer["error"]["message"]
+        # The source's user changes after the target was confirmed: nothing private goes to the old chat.
+        await confirm(env, sid)
+        await add(env.pool, "private words", chat_id="oc_dm", kind="p2p", sender="ou_alice", sent_at=minutes_ago(env, 5))
+
+        async def rebind() -> None:
+            await env.pool.execute("UPDATE event_sources SET user_open_id = $1 WHERE id = $2", colleague, SOURCE)
+        fake.during = rebind
         run = await fire(env, sid)
         assert poster.sent == [] and run["stream"]["outcome"] == "dashboard_only"
+        # A source with no bound user cannot be told apart from anyone: private content is refused outright.
+        await env.pool.execute("UPDATE event_sources SET user_open_id = NULL WHERE id = $1", SOURCE)
+        status, answer = await env.call("POST", "/api/v1/schedule_admin/confirm_target",
+                                        {"schedule_id": sid, "config_version": "x"})
+        assert status == 400 and "your own direct chat" in answer["error"]["message"]
 
     scenario(check, monkeypatch, tmp_path)
 
@@ -256,7 +314,9 @@ def test_a_database_without_the_rules_column_gets_it_on_upgrade(monkeypatch):
     from looper.db import connection
 
     async def check(pool):
-        await pool.execute("ALTER TABLE subscriptions DROP COLUMN rules; ALTER TABLE subscriptions DROP CONSTRAINT "
+        await pool.execute("ALTER TABLE subscriptions DROP COLUMN rules, DROP COLUMN config_epoch; "
+                           "ALTER TABLE subscription_runs DROP COLUMN config, DROP COLUMN config_epoch; "
+                           "ALTER TABLE subscriptions DROP CONSTRAINT "
                            "subscriptions_render_check, ADD CONSTRAINT subscriptions_render_check CHECK (render IN ('lines_v1')); "
                            "DELETE FROM schema_migrations WHERE name = 'subscription_rules'")
         async with pool.acquire() as conn:

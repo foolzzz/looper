@@ -217,21 +217,45 @@ async def _rules_window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_s
             "rows": kept}
 
 
+async def bump_epoch(conn: asyncpg.Connection, schedule_id: str) -> None:
+    """Count a change to what a push depends on (``config_epoch`` in the schema)."""
+    await conn.execute("UPDATE subscriptions SET config_epoch = config_epoch + 1 WHERE schedule_id = $1", schedule_id)
+
+
+async def epoch(schedule_id: str, *, db: Db | None = None) -> int | None:
+    return await _db(db).fetchval("SELECT config_epoch FROM subscriptions WHERE schedule_id = $1", schedule_id)
+
+
+def snapshot(sub: Mapping[str, Any]) -> dict[str, Any]:
+    """What a run selects and writes with: the subscription's request fields, as they are when it starts."""
+    return {name: (list(sub[name]) if isinstance(sub[name], (list, tuple)) else sub[name]) for name in FIELDS}
+
+
 async def insert_run(conn: asyncpg.Connection, run_id: str, *, from_seq: int, to_seq: int, in_window: int,
                      selected: int, too_old: int, over_cap: int, target: tuple[str, str] | None = None,
-                     config_version: str | None = None) -> None:
+                     config_version: str | None = None, config: Mapping[str, Any] | None = None,
+                     config_epoch: int | None = None) -> None:
     """The run's window and, when it started with its push target confirmed, where it may push and under which
     configuration (``config_version``)."""
     await conn.execute(
         "INSERT INTO subscription_runs (run_id, from_seq, to_seq, events_in_window, events_selected, events_too_old, "
-        "events_over_cap, target_channel, target_chat, config_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "events_over_cap, target_channel, target_chat, config_version, config, config_epoch) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)",
         run_id, from_seq, to_seq, in_window, selected, too_old, over_cap, target[0] if target else None,
-        target[1] if target else None, config_version)
+        target[1] if target else None, config_version, json.dumps(config, ensure_ascii=False) if config is not None else None,
+        config_epoch)
+
+
+def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    found = dict(row)
+    if isinstance(found.get("config"), str):
+        found["config"] = json.loads(found["config"])
+    return found
 
 
 async def get_run(run_id: str, *, db: Db | None = None) -> dict[str, Any] | None:
     row = await _db(db).fetchrow("SELECT * FROM subscription_runs WHERE run_id = $1", run_id)
-    return dict(row) if row else None
+    return _run_row(row) if row else None
 
 
 async def get_runs(run_ids: Sequence[str], *, db: Db | None = None) -> dict[str, dict[str, Any]]:

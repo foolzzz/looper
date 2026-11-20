@@ -4718,16 +4718,24 @@ Manager's `looper_schedules` cannot create or change one.
   `[time] 【label·area】《chat》 sender: text`. `output_header` may hold
   `{count}` and `{count:RULE NAME}`, filled from what the window kept. A
   `text_match` is an operator-owned regular expression: at most 500 characters,
-  no repeated group inside a repeated group, run on the first 2,000 characters
-  of a message (Python's `re` has no time limit). When the processor answers
+  no repeated group that holds a repeat, an alternation or a group that does
+  (`(a+)+`, `(a|aa)+`), at most two unbounded repeats (`+`, `*`, `{n,}`), run on the
+  first 1,000 characters of a message and within a 2 s budget for a window
+  (Python's `re` cannot be interrupted, so the shapes that take exponential time
+  are refused where the pattern is saved). When the processor answers
   the quiet word but the window holds a message of a `never_quiet` rule, code
   writes the list of those messages (per label, at most 30, 200 characters
   each, the same @ stripping) and it is pushed and delivered like the
   processor's output. A subscription that can select private content (a direct
-  chat, `mentions_me` `only`, or `never_quiet`) may target only a direct chat:
-  a group target is refused when it is created, updated or confirmed (and a run
-  pinned to a group before it became private keeps its output on the dashboard),
-  and its confirmation says it includes private messages. Rules are set through
+  chat, `mentions_me` `only`, or `never_quiet`) may target only the operator's own direct chat (a Lark chat with the user the
+  source is bound to, `user_open_id`; a colleague's direct chat, a group, Telegram
+  and a source with no bound user are refused) when it is created, updated or
+  confirmed and again before every message of a push, and its confirmation says it
+  includes private messages. A run selects and writes with the configuration it
+  started with (`subscription_runs.config`) and pins the subscription's
+  `config_epoch`, which counts every change to its stream, rules, target, rule,
+  zone, notify, enabled state, processor Profile choice and every confirmation: a
+  change that is later undone still leaves the run's push on the dashboard. Rules are set through
   the API; the dashboard shows that they exist.
 - **The cursor** (`schedule_admin.reset_cursor` with `after`, a time with its
   offset; a confirmation shows how many events it will read): it moves to just

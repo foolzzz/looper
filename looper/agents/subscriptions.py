@@ -287,19 +287,17 @@ def processor_input(rows: Sequence[Mapping[str, Any]], *, text_max_chars: int, z
 # --- Private content stays with its operator ---
 
 
-def is_direct(channel: str | None, chat: str | None) -> bool:
-    """Whether a push target is one person's own chat: a Lark open_id, a Telegram user (positive id)."""
-    chat = chat or ""
-    return chat.startswith("ou_") or (channel == "telegram" and chat.isdigit())
-
-
-def check_private_target(sub: Mapping[str, Any], channel: str | None, chat: str | None) -> None:
-    """A subscription that can select private content (``subscription_rules.is_private``) may push to a direct chat
-    only; ``ValueError`` saying why not. No target is fine: its output stays on the dashboard."""
-    if channel and chat and subscription_rules.is_private(sub) and not is_direct(channel, chat):
+def check_private_target(sub: Mapping[str, Any], channel: str | None, chat: str | None, operator: str | None) -> None:
+    """A subscription that can select private content (``subscription_rules.is_private``) may push only to the
+    operator's own direct chat: a Lark chat with ``operator``, the user its source is bound to (``user_open_id``). Any
+    other chat, a colleague's included, and any source without a bound user, is refused; ``ValueError`` saying why. No
+    target is fine: its output stays on the dashboard."""
+    if not (channel and chat and subscription_rules.is_private(sub)):
+        return
+    if channel not in ("lark", "lark_bot") or not operator or chat != operator:
         raise ValueError("this subscription can select private messages (direct chats, messages that @-mention you, "
-                         "or a never_quiet list of the messages themselves): it may push only to your own direct chat, "
-                         "not a group")
+                         "or a never_quiet list of the messages themselves): it may push only to your own direct chat "
+                         "(the user its message source is bound to), not a group or anyone else")
 
 
 def digest(text: str) -> str:

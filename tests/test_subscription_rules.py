@@ -44,6 +44,36 @@ def test_too_many_rules_or_none_at_all_in_the_wrong_shape_are_refused():
     assert rules.parse_rules([]) == []
 
 
+CATASTROPHIC = ["(a+)+$", "(a|aa)+$", "(?:a|aa)+b", "((a|aa))*b", "(a|a)*c", "(.*)*x", "(x+x+)+y", "(.*a){12}",
+                "(\\w+\\s?)*$", "([a-z]+)*\\d", "(a|b|ab)+c", "a*a*a*a*b", ".*.*.*x", "(a+){2,}b", "(?:(?:a|b)c)*"]
+
+
+@pytest.mark.parametrize("pattern", CATASTROPHIC)
+def test_a_pattern_that_can_backtrack_without_bound_is_refused(pattern):
+    with pytest.raises(ValueError, match="repeats a group|unbounded repeats"):
+        rules.check_pattern(pattern)
+
+
+def test_a_pattern_that_is_only_quadratic_is_bounded_by_its_text_and_its_time_budget():
+    import time
+
+    # Two unbounded repeats are allowed and cost at most the square of the text, which is cut to MATCH_TEXT_CHARS.
+    assert rules.check_pattern(".*a.*b") == ".*a.*b"
+    matcher = rules.Matcher([rule(text_match=".*a.*b")], me=None)
+    started = time.monotonic()
+    for _ in range(40):
+        assert matcher({**ROW, "text": "a" * 50_000}) is None  # no b: the worst case, on the first 1,000 characters
+    assert time.monotonic() - started < rules.MATCH_BUDGET_SECONDS + 1.5
+    assert matcher._spent > 0
+
+
+def test_a_budget_that_is_spent_stops_every_pattern_of_the_window(monkeypatch):
+    matcher = rules.Matcher([rule(text_match="needle")], me=None)
+    assert matcher({**ROW, "text": "a needle"}) == 0
+    matcher._spent = rules.MATCH_BUDGET_SECONDS + 1
+    assert matcher({**ROW, "text": "a needle"}) is None
+
+
 @pytest.mark.parametrize("pattern", ["告警|故障", r"\b(P0|P1)\b", r"\[(critical|warning)\]", "MR|PR|CR", "(ab)+c", "a+b*"])
 def test_ordinary_patterns_are_accepted(pattern):
     assert rules.check_pattern(pattern) == pattern
@@ -134,18 +164,20 @@ def test_what_can_select_private_content(sub, private):
     assert rules.is_private(sub) is private
 
 
-@pytest.mark.parametrize("channel, chat, ok", [
-    ("lark", "ou_operator", True), ("lark_bot", "ou_operator", True), ("lark", "oc_group", False),
-    ("telegram", "123456", True), ("telegram", "-100123", False), ("telegram", "abc", False)])
-def test_a_private_subscription_may_push_to_a_direct_chat_only(channel, chat, ok):
+@pytest.mark.parametrize("channel, chat, operator, ok", [
+    ("lark", "ou_operator", "ou_operator", True), ("lark_bot", "ou_operator", "ou_operator", True),
+    ("lark", "ou_colleague", "ou_operator", False),  # a direct chat, but not the operator's
+    ("lark", "oc_group", "ou_operator", False), ("lark", "ou_operator", None, False),  # nobody to compare with
+    ("telegram", "123456", "ou_operator", False), ("telegram", "-100123", "ou_operator", False)])
+def test_a_private_subscription_may_push_to_the_operators_own_direct_chat_only(channel, chat, operator, ok):
     private = {"rules": [rule(never_quiet=True)]}
     if ok:
-        subscriptions.check_private_target(private, channel, chat)
+        subscriptions.check_private_target(private, channel, chat, operator)
     else:
         with pytest.raises(ValueError, match="only to your own direct chat"):
-            subscriptions.check_private_target(private, channel, chat)
-    subscriptions.check_private_target({"rules": [rule(chat_kinds=["group"])]}, channel, chat)  # nothing private
-    subscriptions.check_private_target(private, None, None)  # no target: the dashboard only
+            subscriptions.check_private_target(private, channel, chat, operator)
+    subscriptions.check_private_target({"rules": [rule(chat_kinds=["group"])]}, channel, chat, operator)  # nothing private
+    subscriptions.check_private_target(private, None, None, operator)  # no target: the dashboard only
 
 
 def test_rules_in_a_request_fill_the_filter_columns_they_replace():
