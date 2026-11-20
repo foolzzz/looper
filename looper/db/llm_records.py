@@ -84,8 +84,12 @@ def normalize_record_metadata(metadata: Any) -> Any:
                 "error": library.get("error"), "project_error": project.get("error")}}}
 
 
+# The run tree's columns, which no record view shows yet.
+_UNVIEWED = ("parent_record_id", "run_kind")
+
+
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
-    d = dict(row)
+    d = {key: value for key, value in dict(row).items() if key not in _UNVIEWED}
     for key in ("created_at", "finished_at", "last_output_at"):
         if d.get(key) is not None:
             d[key] = d[key].isoformat()
@@ -97,6 +101,44 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     return d
 
 
+# What kind of run a record is (``llm_records.run_kind``), and the agent ids that say it: every record but a spawned
+# run's (an advisor's or a judge's, which names its kind) takes its kind from these. Records from before the run tree
+# have no run_kind (its migration rewrites no row), and readers take theirs from these too (``RUN_KIND``). An agent
+# id none of them matches has no kind.
+RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check")
+_RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    # (kind, exact ids, id prefixes)
+    ("manager", ("manager",), ("manager-",)),
+    ("planner", (), ("planner-",)),
+    ("worker", (), ("worker-",)),
+    ("reviewer", (), ("reviewer-",)),
+    ("processor", (), ("processor:",)),
+    ("consult", (), ("consult-",)),
+)
+
+
+def run_kind_of(agent_id: str) -> str | None:
+    """The kind of a run recorded as ``agent_id`` (``_RUN_KIND_IDS``); None when its id does not say."""
+    return next((kind for kind, exact, prefixes in _RUN_KIND_IDS
+                 if agent_id in exact or agent_id.startswith(prefixes)), None)
+
+
+def run_kind_case(column: str) -> str:
+    """``run_kind_of`` as SQL over ``column``."""
+    def like(prefix: str) -> str:
+        return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    whens = []
+    for kind, exact, prefixes in _RUN_KIND_IDS:
+        tests = [f"{column} = '{value}'" for value in exact] + [f"{column} LIKE '{like(value)}'" for value in prefixes]
+        whens.append(f"WHEN {' OR '.join(tests)} THEN '{kind}'")
+    return f"CASE {' '.join(whens)} END"
+
+
+# A record's kind for a reader that filters or groups on it: its run_kind, else what its agent id says.
+RUN_KIND = f"COALESCE(run_kind, {run_kind_case('agent_id')})"
+
+
 async def start_record(
     *,
     agent_id: str,
@@ -104,20 +146,26 @@ async def start_record(
     session_id: str | None = None,
     input_text: str | None = None,
     metadata: dict[str, Any] | None = None,
+    run_kind: str | None = None,
+    parent_record_id: int | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> int:
-    """Open a ``running`` record for one Claude invocation; returns its id."""
+    """Open a ``running`` record for one Claude invocation; returns its id. Its kind is ``run_kind``, else what its
+    agent id says (``run_kind_of``); ``parent_record_id`` is the run that started it."""
+    if run_kind is not None and run_kind not in RUN_KINDS:
+        raise ValueError(f"unknown run kind {run_kind!r}")
     pool = pool or get_pool()
     row = await pool.fetchrow(
         """
         INSERT INTO llm_records
-            (agent_id, task_id, session_id, input_summary, input_text, metadata, status)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'running')
+            (agent_id, task_id, session_id, input_summary, input_text, metadata, status, run_kind, parent_record_id)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'running', $7, $8)
         RETURNING id
         """,
         agent_id, task_id, session_id,
         input_text[:500] if input_text else None, input_text,
         json.dumps(metadata) if metadata else None,
+        run_kind or run_kind_of(agent_id), parent_record_id,
     )
     return row["id"]
 
@@ -337,10 +385,13 @@ _ROLE_FILTERS = {
 }
 # A task's step runs: its Workers' and its Reviewers'.
 _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
-# The agents that work on one task, whose runs make up its cost; the Manager is not one of them.
+# The agents that work on one task, whose runs make up its cost; the Manager is not one of them. The runs the Planner's
+# consults of the advisor start (the advisor's and its judge's) are the Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
+_PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check')"
 _TASK_ROLE = (
-    "CASE " + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
+    f"CASE WHEN {_PLANNER_SPAWNS} THEN 'planner' "
+    + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
 )
 # A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"

@@ -14,7 +14,7 @@ from types import ModuleType
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary
 from looper.agents.profile_registry import (
@@ -174,7 +174,7 @@ def test_a_subclass_consults_the_state_subdirectory_and_syncs_its_home(
     sessions.mkdir()
     (sessions / "rollout.jsonl").write_text("{}\n")
     (kept / "st" / "state.sqlite").write_text("state")
-    command = fake_runtime.consult_command("fake", cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+    command = fake_runtime.consult_command("fake", cwd=tmp_path, prompt_file=prompt, launch=replace(launch, access=Access.CONSULT),
                                           session_id="thread", session_dir=kept, fork_dir=fork)
     assert command[:3] == ["env", f"FAKE_HOME={fork}", "fake"]
     assert command[-3:] == ["resume", "thread", "-"]
@@ -289,7 +289,7 @@ def test_codex_commands_and_config_match_the_original_adapter(
         "env", f"CODEX_HOME={home}", "codex", "app-server", "-c", 'model_reasoning_effort="low"']
     (home / "sessions").mkdir()
     fork = tmp_path / "fork"
-    assert runtime.consult_command("codex", cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+    assert runtime.consult_command("codex", cwd=tmp_path, prompt_file=prompt, launch=replace(launch, access=Access.CONSULT),
                                    session_id="thread", session_dir=home, fork_dir=fork) == [
         "env", f"CODEX_HOME={fork}", *_EXEC[:4], "-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"',
         *_EXEC[5:], "resume", "thread", "-"]

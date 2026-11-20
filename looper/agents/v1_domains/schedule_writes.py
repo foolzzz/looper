@@ -149,8 +149,8 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
         if not row["notify_channel"]:
             raise OpError(ErrorCode.INVALID, "the subscription has no notify_target to confirm")
         try:
-            subscriptions.check_private_target(row["subscription"], row["notify_channel"], row["notify_chat"])
-        except ValueError as exc:
+            await schedules.check_private_target(row["subscription"], row["notify_channel"], row["notify_chat"])
+        except schedules.RequestError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
         arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
         shown = await subscriptions.config_version(row)
@@ -185,9 +185,9 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
             {"profile_overrides": profiles} if "profile_overrides" in rest else {})})
         schedules._check_rule(fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"]), now,
                               gated=True)
-        schedules.check_private_target({**row["subscription"], **(stream or {})},
-                                       fields.get("notify_channel", row["notify_channel"]),
-                                       fields.get("notify_chat", row["notify_chat"]))
+        await schedules.check_private_target({**row["subscription"], **(stream or {})},
+                                             fields.get("notify_channel", row["notify_channel"]),
+                                             fields.get("notify_chat", row["notify_chat"]))
     except schedules.RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     asked = {**fields, **({"enabled": data["enabled"]} if "enabled" in data else {})}

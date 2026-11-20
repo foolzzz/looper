@@ -25,7 +25,7 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
 - **Its record** (``llm_records``): ``agent_id`` ``processor:<owner>``, no task, the caller's metadata; model
   requests are not recorded (llmrec), and ``input_text`` holds only a reference to the batch (the caller's window
   reference, the text's sha256 and length), never the batch, and of its stream only the runtime's own events and
-  the result's typed fields (``_kept``): the model's messages, whose thinking may restate the batch, are counted,
+  the result's typed fields (``typed_events``): the model's messages, whose thinking may restate the batch, are counted,
   never stored; its error is only what happened, never what the process wrote (``single_run`` ``quiet``), its
   failure's category in ``metadata.processor_failure``.
   Deleting the messages deletes their text from every place Looper keeps it but the outputs.
@@ -98,7 +98,7 @@ _RESULT_FIELDS = ("type", "subtype", "is_error", "duration_ms", "duration_api_ms
                   "total_cost_usd", "usage", "modelUsage", "stop_reason", "uuid")
 
 
-def _kept(event: Mapping[str, Any]) -> dict[str, Any] | None:
+def typed_events(event: Mapping[str, Any]) -> dict[str, Any] | None:
     """What a processor run's record keeps of its stream: the runtime's own events (its init, with its tools and MCP
     servers) and the result's typed fields (``_RESULT_FIELDS``); never the model's messages."""
     if event.get("type") == "system":
@@ -363,7 +363,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
             return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
         recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
                                      input_text=reference, system_prompt=system_prompt, launch=launch,
-                                     whole_process=True, keep=_kept)
+                                     whole_process=True, keep=typed_events)
         await recorder.start()
         noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
         if noted:

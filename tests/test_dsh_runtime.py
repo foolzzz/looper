@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from looper.agents.agent_settings import Access
 from looper.agents import runtimes
 from looper.agents.profile_registry import (
     CatalogModel, LegacyProviderSpec as ProviderSpec, RegistryError, RuntimeSpec, check_pairing,
@@ -2096,7 +2097,7 @@ def test_dsh_parallel_consults_resume_opaque_copies_and_leave_owner_unchanged(tm
     prompt.write_text("fresh consult system prompt")
     mcp = Path(launch.library.mcp_config)
     mcp.write_text(mcp.read_text().replace("test-run-token", "fresh-consult-token"))
-    consult = replace(launch, consult=True)
+    consult = replace(launch, access=Access.CONSULT)
 
     def ask(number):
         fork = tmp_path / f"fork-{number}"
@@ -2146,7 +2147,7 @@ def test_dsh_consult_refuses_invalid_snapshot_without_creating_a_fork(tmp_path, 
         os.mkfifo(directory / "dsh/pipe")
     fork = tmp_path / "fork"
     with pytest.raises(RuntimeUnsupported):
-        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, access=Access.CONSULT),
                                 session_id=sid, session_dir=directory, fork_dir=fork)
     assert not fork.exists()
 
@@ -2169,7 +2170,7 @@ def test_dsh_consult_copy_or_launch_failure_cleans_only_its_new_fork(tmp_path, m
         monkeypatch.setattr(dsh.shutil, "copytree", failed_copy if fail_copy else copytree)
         with pytest.raises((RuntimeUnsupported, OSError)):
             runtime.consult_command(executable if fail_copy else str(tmp_path / "absent"), cwd=tmp_path,
-                                    prompt_file=prompt, launch=replace(launch, consult=True), session_id=sid,
+                                    prompt_file=prompt, launch=replace(launch, access=Access.CONSULT), session_id=sid,
                                     session_dir=directory, fork_dir=fork)
         assert not fork.exists()
         assert _tree_bytes(directory) == before
@@ -2177,7 +2178,7 @@ def test_dsh_consult_copy_or_launch_failure_cleans_only_its_new_fork(tmp_path, m
     existing.mkdir()
     (existing / "keep").write_bytes(b"keep")
     with pytest.raises((RuntimeUnsupported, FileExistsError)):
-        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, access=Access.CONSULT),
                                 session_id=sid, session_dir=directory, fork_dir=existing)
     assert (existing / "keep").read_bytes() == b"keep"
 
@@ -2195,7 +2196,7 @@ def test_dsh_consult_refuses_an_active_source_and_accepts_it_after_exit(tmp_path
         before = _tree_bytes(directory)
         try:
             with pytest.raises(RuntimeUnsupported, match="active"):
-                runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+                runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, access=Access.CONSULT),
                                         session_id=sid, session_dir=directory, fork_dir=tmp_path / "active-fork")
             assert not (tmp_path / "active-fork").exists()
             assert _tree_bytes(directory) == before
@@ -2206,7 +2207,7 @@ def test_dsh_consult_refuses_an_active_source_and_accepts_it_after_exit(tmp_path
             if process.returncode is None:
                 process.kill()
             await process.wait()
-        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, access=Access.CONSULT),
                                 session_id=sid, session_dir=directory, fork_dir=tmp_path / "ended-fork")
 
     asyncio.run(asyncio.wait_for(check(), 8))
@@ -2223,7 +2224,7 @@ def test_dsh_consult_uses_permissions_without_advertising_native_read_tools(tmp_
     # The guard is trusted, so a consult runs in the step directory. A non-git
     # smoke project has no snapshot to fall back on.
     assert runtime.type in RUNTIME_READ_ONLY
-    consult = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+    consult = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, access=Access.CONSULT),
                                       session_id=sid, session_dir=directory, fork_dir=tmp_path / "fork")
     assert consult[-3:] == ["--session-id", sid, "-"]
     module = Path(consult[consult.index("--patch") + 1]).with_name("looper-bootstrap.mjs").read_text()
@@ -2237,7 +2238,7 @@ def test_dsh_consult_resumes_without_the_original_runs_mcp_library(tmp_path):
 
     runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
     source = _tree_bytes(directory)
-    consult = replace(launch, library=EMPTY_LIBRARY, consult=True)
+    consult = replace(launch, library=EMPTY_LIBRARY, access=Access.CONSULT)
     argv = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=consult,
                                    session_id=sid, session_dir=directory, fork_dir=tmp_path / "consult")
     env = consult.environment()
@@ -2252,7 +2253,7 @@ def test_dsh_consult_resumes_without_the_original_runs_mcp_library(tmp_path):
     assert _tree_bytes(directory) == source
     with pytest.raises(RuntimeUnsupported, match="Looper stdio bridge"):
         runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt,
-                            launch=replace(consult, consult=False, role=AgentType.PLANNER))
+                            launch=replace(consult, access=None, role=AgentType.PLANNER))
 
 
 @pytest.mark.parametrize("consult,missing,with_mcp", [
@@ -2262,7 +2263,7 @@ def test_dsh_tool_free_consult_has_a_price_only_with_complete_usage(tmp_path, co
     from looper.agents.run_usage import run_usage
 
     launch = _run_launch(tmp_path)
-    launch = replace(launch, consult=consult, library=launch.library if with_mcp else EMPTY_LIBRARY)
+    launch = replace(launch, access=Access.CONSULT if consult else None, library=launch.library if with_mcp else EMPTY_LIBRARY)
     payload = (Path(__file__).parent / "fixtures/dsh_json/success.jsonl").read_text()
     rows = [json.loads(line) for line in payload.splitlines()]
     for row in rows:
@@ -2334,7 +2335,7 @@ def test_dsh_installed_tool_free_consult_counts_all_requests_and_refuses_auxilia
         assert "separate read-only consult" in system
         sid = next(row["sessionId"] for row in first if row["type"] == "session")
         source = _tree_bytes(tmp_path / "owner")
-        consult = replace(launch, consult=True, library=EMPTY_LIBRARY)
+        consult = replace(launch, access=Access.CONSULT, library=EMPTY_LIBRARY)
         runtime = consult.runtime
         command = runtime.consult_command(installed_dsh[0], cwd=tmp_path,
             prompt_file=tmp_path / ".local/prompts/system.md", launch=consult, session_id=sid,
@@ -2383,7 +2384,7 @@ def test_dsh_failed_native_restore_cleans_the_fork_and_preserves_source(tmp_path
     monkeypatch.setattr(runtime, "read_only", ReadOnly.PERMISSIONS)
     before = _tree_bytes(directory)
     fork = tmp_path / "failed-restore"
-    readonly = replace(launch, consult=True)
+    readonly = replace(launch, access=Access.CONSULT)
     argv = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=readonly,
                                    session_id="not-in-the-snapshot", session_dir=directory, fork_dir=fork)
 
@@ -2579,7 +2580,7 @@ def test_dsh_official_registry_refuses_mutations_before_dispatch(tmp_path, consu
     if executable is None:
         pytest.skip("Installed DSH is required for execution guard validation")
     launch = _run_launch(tmp_path, role="worker" if consult else "planner")
-    launch = replace(launch, consult=consult)
+    launch = replace(launch, access=Access.CONSULT if consult else None)
     # Use the exact platform contract recorded by this run, including optional room/vault groups.
     platform = dsh._platform_tools(launch.role.value)
     names = platform["expectedTools"]
@@ -2609,7 +2610,7 @@ for line in sys.stdin:
         runtime, worker, stand_in, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
         before = _tree_bytes(directory)
         argv = runtime.consult_command(stand_in, cwd=tmp_path, prompt_file=prompt,
-                                       launch=replace(worker, consult=True), session_id=sid,
+                                       launch=replace(worker, access=Access.CONSULT), session_id=sid,
                                        session_dir=directory, fork_dir=tmp_path / "consult-fork")
         module = Path(argv[argv.index("--patch") + 1]).with_name("looper-bootstrap.mjs").read_text()
         assert '"readOnly": true' in module

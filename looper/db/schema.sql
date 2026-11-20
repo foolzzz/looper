@@ -350,6 +350,8 @@ CREATE TABLE IF NOT EXISTS task_steps (
     review_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
     review_position INTEGER,
     kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'gate', 'wait', 'review')),
+    -- How hard the Planner says the step is; only critical does anything yet (the advisor's checkpoint).
+    difficulty TEXT CHECK (difficulty IN ('routine', 'hard', 'critical')),
     CONSTRAINT task_steps_review_roles_reviewed
         CHECK (jsonb_typeof(review_roles) = 'array' AND (jsonb_array_length(review_roles) = 0 OR review))
 );
@@ -684,7 +686,8 @@ CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (pro
 -- (looper/agents/agent_settings.py). One row per layer and place.
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
-    role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor')),
+    role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor',
+                                         'advice_check')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
     profile_id      TEXT REFERENCES agent_profiles(id),
@@ -1237,11 +1240,17 @@ CREATE TABLE IF NOT EXISTS llm_records (
     cache_creation_tokens BIGINT,
     context_tokens INTEGER,
     compactions JSONB,
-    cost_source TEXT CHECK (cost_source IN ('runtime', 'provider_price'))
+    cost_source TEXT CHECK (cost_source IN ('runtime', 'provider_price')),
+    -- The run that started this one (an advisor's or a judge's run: the Planner's turn that asked), and what kind
+    -- of run it is (llm_records.RUN_KINDS; NULL on rows from before it, whose readers take it from their agent id).
+    parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    run_kind TEXT CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'consult', 'advisor',
+                                      'advice_check'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_records_parent ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL;
 
 -- The run's stream-json events, appended as they arrive.
 CREATE TABLE IF NOT EXISTS llm_record_events (
@@ -1609,6 +1618,9 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     target_confirmed_version TEXT,
     -- Selection rules (agents/subscription_rules.py): empty, the subscription's own filter above applies.
     rules               JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array'),
+    -- Counts every change to what a push depends on (the stream, the target, the rule, the zone, whether it runs, a
+    -- confirmation): a run pins it, and a push needs it unchanged, so a change and its undoing both stop the run.
+    config_epoch        BIGINT NOT NULL DEFAULT 0,
     "window"            TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
     delivery_policy     TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'))
 );
@@ -1638,7 +1650,11 @@ CREATE TABLE IF NOT EXISTS subscription_runs (
     target_channel    TEXT,
     target_chat       TEXT,
     config_version    TEXT,
-    window_mode       TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback'))
+    window_mode       TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
+    -- The subscription's configuration and epoch as the run started: its window is selected with these, not with what
+    -- the subscription is by then.
+    config            JSONB,
+    config_epoch      BIGINT
 );
 -- One message of a run's push: pending, then sending (written before the channel is asked), then sent, failed (the
 -- channel said no: asked again) or uncertain (it was being sent when the process died, or the channel's answer was
@@ -1797,3 +1813,64 @@ CREATE INDEX IF NOT EXISTS idx_manager_events_created ON manager_events (created
 CREATE INDEX IF NOT EXISTS idx_manager_events_schedule_run ON manager_events (schedule_run_id) WHERE schedule_run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_manager_events_record ON manager_events (record_id) WHERE record_id IS NOT NULL;
 -- manager events end
+
+-- agent spawns begin
+-- A run another run starts (the advisor RFC, section 5): one row per consult of the advisor, its state, what it was
+-- given and what came back. The Planner's turn that asked is parent_record_id; the last advisor round is
+-- child_record_id (every round's record names the parent in llm_records.parent_record_id). result holds typed
+-- outcomes only: rounds, check hits by category and position (never what they matched), and why it failed.
+CREATE TABLE IF NOT EXISTS agent_spawns (
+    id               BIGSERIAL PRIMARY KEY,
+    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id          TEXT REFERENCES task_steps(id) ON DELETE SET NULL,
+    parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    child_record_id  BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('advisor')),
+    brief            JSONB NOT NULL CHECK (jsonb_typeof(brief) = 'object'),
+    inputs           JSONB NOT NULL CHECK (jsonb_typeof(inputs) = 'object'),
+    budget_usd       NUMERIC(10, 4) NOT NULL CHECK (budget_usd > 0),
+    spent_usd        NUMERIC(10, 6) NOT NULL DEFAULT 0 CHECK (spent_usd >= 0),
+    state            TEXT NOT NULL CHECK (state IN ('drafting', 'linting', 'asking', 'needs_info',
+                                                    'answered', 'blocked', 'failed', 'over_budget')),
+    returns          INTEGER NOT NULL DEFAULT 0 CHECK (returns BETWEEN 0 AND 2),
+    rounds           INTEGER NOT NULL DEFAULT 0 CHECK (rounds BETWEEN 0 AND 3),
+    result           JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(result) = 'object'),
+    detail           TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at      TIMESTAMPTZ,
+    CONSTRAINT agent_spawns_finished CHECK ((state IN ('answered', 'blocked', 'failed', 'over_budget'))
+                                            = (finished_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_spawns_task ON agent_spawns (task_id, id);
+CREATE INDEX IF NOT EXISTS idx_agent_spawns_step ON agent_spawns (step_id) WHERE step_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_spawns_open ON agent_spawns (task_id) WHERE finished_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_spawns_parent ON agent_spawns (parent_record_id) WHERE parent_record_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_spawns_child ON agent_spawns (child_record_id) WHERE child_record_id IS NOT NULL;
+
+-- An advisor consult's question and advice, how the Planner adopted it, and whether the attempt it was for passed
+-- (unlocked). attempt is the step's attempt the advice is for (task_steps.retries + 1 at a checkpoint, + 2 after a
+-- failed attempt); attempt_id is left for step attempts (M1) to fill and constrain.
+CREATE TABLE IF NOT EXISTS advisor_advice (
+    spawn_id        BIGINT PRIMARY KEY REFERENCES agent_spawns(id) ON DELETE CASCADE,
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id         TEXT REFERENCES task_steps(id) ON DELETE SET NULL,
+    attempt         INTEGER NOT NULL CHECK (attempt >= 1),
+    attempt_id      BIGINT,
+    source          TEXT NOT NULL CHECK (source IN ('ladder', 'checkpoint', 'optional')),
+    kind            TEXT NOT NULL CHECK (kind IN ('diagnose', 'design_choice', 'plan_review', 'unblock')),
+    question        JSONB NOT NULL CHECK (jsonb_typeof(question) = 'object'),
+    advice          JSONB CHECK (advice IS NULL OR jsonb_typeof(advice) = 'object'),
+    adoption        TEXT CHECK (adoption IN ('adopted', 'partial', 'rejected')),
+    adoption_detail JSONB CHECK (adoption_detail IS NULL OR jsonb_typeof(adoption_detail) = 'object'),
+    unlocked        BOOLEAN,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    adopted_at      TIMESTAMPTZ,
+    unlocked_at     TIMESTAMPTZ,
+    CONSTRAINT advisor_advice_adoption CHECK (adoption IS NULL OR advice IS NOT NULL),
+    CONSTRAINT advisor_advice_adopted_at CHECK ((adoption IS NULL) = (adopted_at IS NULL)),
+    CONSTRAINT advisor_advice_unlocked CHECK ((unlocked IS NULL) = (unlocked_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_advisor_advice_task ON advisor_advice (task_id);
+CREATE INDEX IF NOT EXISTS idx_advisor_advice_step ON advisor_advice (step_id, attempt) WHERE step_id IS NOT NULL;
+-- agent spawns end

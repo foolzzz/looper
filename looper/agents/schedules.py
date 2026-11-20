@@ -746,10 +746,13 @@ async def list_all_schedules(*, runtime_root: Path | None = None) -> dict[str, A
     return {"schedules": await _schedule_views(await db_schedules.list_schedules(), runtime_root=runtime_root)}
 
 
-def check_private_target(sub: Mapping[str, Any], channel: str | None, chat: str | None) -> None:
-    """``subscriptions.check_private_target`` as a refusal (400)."""
+async def check_private_target(sub: Mapping[str, Any], channel: str | None, chat: str | None, db: Any = None) -> None:
+    """``subscriptions.check_private_target`` against the user the subscription's source is bound to, as a refusal
+    (400)."""
     try:
-        subscriptions.check_private_target(sub, channel, chat)
+        operator = (await db_subs.source_user(db or db_connection.get_pool(), sub["source_id"])
+                    if sub.get("source_id") else None)
+        subscriptions.check_private_target(sub, channel, chat, operator)
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
 
@@ -768,7 +771,7 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     _check_kind_fields(kind, {**fields, "profile_overrides": profiles,
                              **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
     if stream is not None:
-        check_private_target(stream, fields.get("notify_channel"), fields.get("notify_chat"))
+        await check_private_target(stream, fields.get("notify_channel"), fields.get("notify_chat"))
     profiles = (await _profile_overrides(profiles, roles=(*TASK_PROFILE_ROLES, "processor"))
                 if "profile_overrides" in data else None)
     manager_id = fields.pop("manager_id")
@@ -800,6 +803,9 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
             from None
     return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
+
+# The schedule fields whose change a push depends on (``subscriptions.config_epoch``).
+_EPOCH_FIELDS = ("notify_channel", "notify_chat", "notify", "cron", "timezone", "enabled")
 
 # Kinds whose firing creates no task: neither a gate nor a template, and a minimum interval like a gated schedule's.
 _NO_TASK_KINDS = (Kind.COMMAND.value, Kind.SUBSCRIPTION.value)
@@ -850,13 +856,14 @@ async def confirm_target(schedule_id: str, *, config_version: str, now: datetime
             raise RequestError(HTTP_400, "only a subscription has a push target to confirm")
         if not row["notify_channel"]:
             raise RequestError(HTTP_400, "the subscription has no notify_target: its output stays on the dashboard")
-        check_private_target(row["subscription"], row["notify_channel"], row["notify_chat"])
+        await check_private_target(row["subscription"], row["notify_channel"], row["notify_chat"], conn)
         current = await subscriptions.config_version(row)
         if config_version != current:
             raise RequestError(HTTP_409, "the subscription changed since it was shown (its target, rule, zone, source "
                                          "or processor Profile): read it again and confirm what it is now")
         await db_subs.update(conn, schedule_id, {"target_confirmed_at": now or _utcnow(),
                                                  "target_confirmed_version": current})
+        await db_subs.bump_epoch(conn, schedule_id)
     return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
@@ -968,9 +975,9 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                 raise RequestError(HTTP_400, "change the processor's Agent Profile in a request of its own: what the "
                                              "operator confirms is the profile that runs")
             if kind == Kind.SUBSCRIPTION.value:
-                check_private_target({**row["subscription"], **(stream or {})},
-                                     fields.get("notify_channel", row["notify_channel"]),
-                                     fields.get("notify_chat", row["notify_chat"]))
+                await check_private_target({**row["subscription"], **(stream or {})},
+                                           fields.get("notify_channel", row["notify_channel"]),
+                                           fields.get("notify_chat", row["notify_chat"]), conn)
             stream_changes = (await _subscription_changes(conn, row, fields, stream, enabled=enabled, now=now)
                               if kind == Kind.SUBSCRIPTION.value else {})
             if data != {"enabled": False} and kind != Kind.SUBSCRIPTION.value:
@@ -994,6 +1001,9 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
             if stream_changes:
                 await db_subs.update(conn, schedule_id, stream_changes)
+            if kind == Kind.SUBSCRIPTION.value and (
+                    stream or profiles is not None or any(name in fields for name in _EPOCH_FIELDS)):
+                await db_subs.bump_epoch(conn, schedule_id)
     except db_schedules.ConfigurationChanged as exc:
         raise RequestError(HTTP_409, str(exc)) from None
     except asyncpg.UniqueViolationError:

@@ -13,7 +13,7 @@ import pytest
 
 from looper import ops_config as ops
 from looper.agents import serve
-from looper.agents.agent_settings import AgentType
+from looper.agents.agent_settings import Access, AgentType
 from looper.agents.bus import MessageBus
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
@@ -198,7 +198,7 @@ def test_hosted_run_descriptor_environment_and_session(tmp_path, monkeypatch, ru
 @pytest.mark.parametrize("role", [AgentType.WORKER, AgentType.REVIEWER])
 def test_hosted_consult_forks_read_only_snapshot(tmp_path, runtime, role):
     adapter, executable = runtime
-    selected = replace(launch(provider()), role=role, consult=True)
+    selected = replace(launch(provider()), role=role, access=Access.CONSULT)
     prompt = tmp_path / ".local" / "prompts" / "input.md"
     prompt.parent.mkdir(parents=True)
     prompt.write_text("Consult prompt")
@@ -221,7 +221,7 @@ def test_hosted_consult_forks_read_only_snapshot(tmp_path, runtime, role):
 
 def test_hosted_consult_missing_source_leaves_no_fork(tmp_path, runtime):
     adapter, executable = runtime
-    selected = replace(launch(provider()), role=AgentType.REVIEWER, consult=True)
+    selected = replace(launch(provider()), role=AgentType.REVIEWER, access=Access.CONSULT)
     prompt = tmp_path / ".local" / "prompts" / "input.md"
     prompt.parent.mkdir(parents=True)
     prompt.write_text("Consult prompt")

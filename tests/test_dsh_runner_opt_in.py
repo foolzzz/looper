@@ -13,7 +13,7 @@ import pytest
 
 from looper import ops_config as ops
 from looper.agents import serve
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.profile_registry import CatalogModel, LegacyProviderSpec, RuntimeSpec
@@ -281,7 +281,7 @@ def test_hosted_run_and_consult_fork(tmp_path, runtime, role, max_turns, timeout
     source.mkdir()
     (source / "history").write_text("original history")
     fork = Fork("source-id", source, tmp_path / "forks" / "consult")
-    consult = adapter.hosted_run(executable, **{**kwargs, "launch": replace(selected, consult=True), "fork": fork})
+    consult = adapter.hosted_run(executable, **{**kwargs, "launch": replace(selected, access=Access.CONSULT), "fork": fork})
     descriptor = Descriptor.parse(consult.command)
     assert descriptor.read_only and descriptor.builtin == ("read", "glob", "grep")
     assert descriptor.fork_from == "source-id" and descriptor.system_prompt_mode == "append"
@@ -305,7 +305,7 @@ def test_hosted_fork_failure_removes_created_directory(tmp_path, monkeypatch, ru
     monkeypatch.setattr(adapter, "_descriptor", failed)
     with pytest.raises(ValueError, match="fixture descriptor failure"):
         adapter.hosted_run(executable, cwd=tmp_path, prompt_file=prompt_file(tmp_path),
-            launch=replace(launch(AgentType.REVIEWER), consult=True), session_dir=None,
+            launch=replace(launch(AgentType.REVIEWER), access=Access.CONSULT), session_dir=None,
             max_turns=0, timeout_s=0, tools=None, limits=AsyncMock(), fork=fork)
     assert not fork.fork_dir.exists()
 

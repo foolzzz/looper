@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict, replace
+from typing import Any
 
 import shutil
 import subprocess
@@ -749,3 +750,55 @@ console.log(JSON.stringify({requests, message}));
     # (100 - 40 - 8) * 2 + 10 * 10 + 40 * .2 + 8 * 2.5 = 232 per million.
     assert spend.usage == run_usage(result, price=pricer(provider)) == Usage(
         cost_usd=.000232, input_tokens=52, output_tokens=10, cache_read_tokens=40, cache_creation_tokens=8)
+
+
+# --- Cache writes by how long they last ---
+
+
+def _written(one_hour: int | None, written: int = 10_000) -> Any:
+    from looper.agents.run_usage import Usage
+
+    return Usage(input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_creation_tokens=written,
+                 cache_creation_1h_tokens=one_hour)
+
+
+@pytest.mark.parametrize(("one_hour", "cost"), [
+    (10_000, 0.16),  # Fable 5.2's one-hour write: 16 USD per million (measured)
+    (0, 0.10),  # its five-minute write: 10 USD per million
+    (4_000, 0.064 + 0.06),
+    (None, 0.16),  # a split not reported: priced as the dearer write, never below what was spent
+])
+def test_a_cache_write_is_priced_by_how_long_it_lasts(one_hour: int | None, cost: float) -> None:
+    from looper.agents.runtimes.pricing import BUILTIN_PRICES
+
+    assert BUILTIN_PRICES["claude-fable-5-2"].cost(_written(one_hour)) == pytest.approx(cost)
+
+
+def test_a_one_hour_write_without_its_price_is_unpriced_and_a_single_rate_model_is_unchanged() -> None:
+    from looper.agents.runtimes.pricing import BUILTIN_PRICES, ModelPrice
+
+    assert ModelPrice(1, 1, 1, 10).cost(_written(10_000)) is None
+    assert ModelPrice(1, 1, 1, 10).cost(_written(None)) == pytest.approx(0.10)
+    assert BUILTIN_PRICES["glm-5.3"].cost(_written(None)) == pytest.approx(0.014)
+
+
+def test_a_provider_priced_result_keeps_its_one_hour_writes_from_its_requests() -> None:
+    from looper.agents.run_usage import cache_split_known, reported_totals, request_tokens
+    from looper.agents.runtimes.pricing import BUILTIN_PRICES
+
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 10_000,
+             "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 10_000}}
+    assert request_tokens(usage).cache_creation_1h_tokens == 10_000
+    result = {"type": "result", "usage": usage, "total_cost_usd": 0.16, "modelUsage": {"claude-fable-5-2": {
+        "inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 10_000}}}
+
+    def price(model: str, tokens: Any) -> float | None:
+        return BUILTIN_PRICES[model].cost(tokens)
+
+    assert reported_totals(result, price).cost_usd == pytest.approx(0.16)  # not 0.10 at the five-minute rate
+    assert cache_split_known(result)
+    # A write beside the turn's (a subagent's, a compaction's) leaves the split unknown.
+    result["modelUsage"]["claude-fable-5-2"]["cacheCreationInputTokens"] = 12_000
+    assert not cache_split_known(result)
+    assert reported_totals(result, price).cost_usd == pytest.approx(0.192)

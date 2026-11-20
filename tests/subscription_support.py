@@ -93,8 +93,9 @@ async def lark_targets(pool: Any) -> None:
 
 
 async def source(pool: Any, source_id: str = SOURCE) -> None:
-    await pool.execute("INSERT INTO event_sources (id, kind, name) VALUES ($1, 'lark_user', 'Stream') "
-                       "ON CONFLICT DO NOTHING", source_id)
+    # Bound to the operator: the user whose own direct chat is DM.
+    await pool.execute("INSERT INTO event_sources (id, kind, name, user_open_id) VALUES ($1, 'lark_user', 'Stream', $2) "
+                       "ON CONFLICT DO NOTHING", source_id, DM)
 
 
 async def chat(pool: Any, chat_id: str, *, kind: str = "group", name: str = "Ops room", source_id: str = SOURCE) -> None:

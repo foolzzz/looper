@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import Launch
+from looper.agents.agent_settings import Access, Launch
 from looper.agents.profile_registry import (
     CatalogModel, LegacyProviderSpec as ProviderSpec, RegistryError, RuntimeSpec, servable_roles,
 )
@@ -779,7 +779,7 @@ console.log(JSON.stringify({requests, contextWindow: model.contextWindow, maxTok
 @pytest.mark.parametrize("read_only", [False, True])
 def test_every_launch_path_loads_the_same_packaged_extension(tmp_path: Path, read_only: bool) -> None:
     executable = _fake(tmp_path / "pi")
-    launch = replace(_launch(_provider()), consult=read_only)
+    launch = replace(_launch(_provider()), access=Access.CONSULT if read_only else None)
     _command(tmp_path, launch)
     prompt = tmp_path / ".local/prompts/prompt.md"
     sessions = tmp_path / "saved"

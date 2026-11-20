@@ -2213,7 +2213,13 @@ provider (Codex's own login too, at the built-in prices, shown as
 "equivalent" like Claude Code's): each model's tokens in the result's `modelUsage` (input, output,
 cache read, cache write) at the provider's prices, summed (`run_usage`
 `price`), so a resumed session still counts each turn's own share; a model
-without a price leaves the cost `null` and the tokens recorded. With
+without a price leaves the cost `null` and the tokens recorded. An Anthropic
+model bills a cache write by how long it lasts (five minutes at 1.25x input,
+one hour at 2x: `ModelPrice.cache_write_1h_usd_per_mtok`, from the built-in
+table). A request's usage says which (`cache_creation`), and so does a result
+whose turn made all of its writes; writes whose duration is not known are
+priced at the one-hour rate, so the cost is never below what was spent. A
+spawned run at provider prices whose writes do not say gives no output. With
 `provider_price` the per-run cap (`run_budget_usd`) is not `--max-budget-usd`
 (it would count Claude's prices): the run's recorder adds up its `usage`
 events (each request's final `message_delta` usage) at the provider's prices,
@@ -3585,6 +3591,14 @@ With none of these the backup fails before any DDL. The upgraded schema must
 not be opened by an older binary: the forward guard in this binary does not
 protect an older one.
 
+A migration of a large table holds the table's lock only for statements that
+neither scan nor rewrite it. The run tree columns of `llm_records`, for
+example, are added without a default, with their constraints `NOT VALID`, and
+no older row is updated. After the schema transaction commits, `ensure_schema`
+validates those constraints and builds the index concurrently, which lets
+reads and writes go on (`connection._ONLINE_STEPS`). Each of these steps has
+its own marker, and a start that stopped halfway resumes it.
+
 Rollback means stopping the new service, leaving the upgraded database
 unchanged, restoring the verified full backup into a separate database, and
 pointing the guarded older release at that database. Do not downgrade or
@@ -4720,16 +4734,24 @@ Manager's `looper_schedules` cannot create or change one.
   `[time] 【label·area】《chat》 sender: text`. `output_header` may hold
   `{count}` and `{count:RULE NAME}`, filled from what the window kept. A
   `text_match` is an operator-owned regular expression: at most 500 characters,
-  no repeated group inside a repeated group, run on the first 2,000 characters
-  of a message (Python's `re` has no time limit). When the processor answers
+  no repeated group that holds a repeat, an alternation or a group that does
+  (`(a+)+`, `(a|aa)+`), at most two unbounded repeats (`+`, `*`, `{n,}`), run on the
+  first 1,000 characters of a message and within a 2 s budget for a window
+  (Python's `re` cannot be interrupted, so the shapes that take exponential time
+  are refused where the pattern is saved). When the processor answers
   the quiet word but the window holds a message of a `never_quiet` rule, code
   writes the list of those messages (per label, at most 30, 200 characters
   each, the same @ stripping) and it is pushed and delivered like the
   processor's output. A subscription that can select private content (a direct
-  chat, `mentions_me` `only`, or `never_quiet`) may target only a direct chat:
-  a group target is refused when it is created, updated or confirmed (and a run
-  pinned to a group before it became private keeps its output on the dashboard),
-  and its confirmation says it includes private messages. Rules are set through
+  chat, `mentions_me` `only`, or `never_quiet`) may target only the operator's own direct chat (a Lark chat with the user the
+  source is bound to, `user_open_id`; a colleague's direct chat, a group, Telegram
+  and a source with no bound user are refused) when it is created, updated or
+  confirmed and again before every message of a push, and its confirmation says it
+  includes private messages. A run selects and writes with the configuration it
+  started with (`subscription_runs.config`) and pins the subscription's
+  `config_epoch`, which counts every change to its stream, rules, target, rule,
+  zone, notify, enabled state, processor Profile choice and every confirmation: a
+  change that is later undone still leaves the run's push on the dashboard. Rules are set through
   the API; the dashboard shows that they exist.
 - **Lookback and daily digests.** `window: "lookback"` reads messages sent between
   the firing time minus `max_age_minutes` and the firing time, inclusive, up to
@@ -5133,7 +5155,7 @@ before.
   the run kept; Pi a copy of that session file, resumed with `--session`;
   Grok a home of its own holding a copy of that one session
   from the run's home, resumed with `--fork-session`, and removed afterwards),
-  read only (`Launch.consult`: Claude Code has only `Read`, `Glob` and `Grep`,
+  read only (`Launch.access` `consult`: Claude Code has only `Read`, `Glob` and `Grep`,
   allowed without prompts; Bash and writing tools are refused, and MCP tools
   have no allow rule in manual mode with no prompts; not verified on a real
   run yet. Codex has its read-only sandbox; OMP `--tools read,glob,grep`;
@@ -5308,6 +5330,53 @@ will.
   lists runtimes, types and profiles without the processor among their roles,
   in their `used_by` or `no_tools` among their capabilities: what the Manager
   sees is what it saw before the role.
+
+### Consults of the advisor
+
+A consult (`looper/agents/advisor.py`; [advisor RFC](rfcs/advisor-v0.zh-CN.md)) asks a stronger model about one
+step, through an abstract request that code checks first. Nothing starts one yet: the Planner's side comes behind
+the project switch `advisor` (RFC section 11).
+
+- **Two roles with no tools.** `advisor` answers; `advice_check` judges a request before it is sent. Their
+  runtime needs `run` and `no_tools` (`ROLE_CAPABILITIES`). Only their role layer (Settings → Roles) chooses their
+  Agent Profile and environment: the shared defaults and the project layers are for the roles with tools. With
+  none chosen each runs its own built-in profile (`profile_registry.BUILTIN_ROLE_PROFILES`, seeded with the schema
+  in `seeds.sql`): `claude-code/fable-5-2` (`claude-fable-5-2`, effort `high`) and `claude-code/haiku-5-5`
+  (`claude-haiku-5-5`). Without its built-in profile a role does not run, and no other model takes its place.
+  Their system prompt replaces the runtime's: the role prompt (`role_configs`) and the reply contract
+  (`advice.ADVISOR_CONTRACT`, `advice.JUDGE_CONTRACT`), with no harness.
+- **A consult** is an `agent_spawns` row (`open_consult`, `drafting`). Each request (`submit`) passes three checks
+  in order while the row is `linting`:
+  - format (`advice.parse_request`, AdviceRequest v1: typed fields within their limits, the kind's required items,
+    at most 12,000 characters; a checkpoint takes only `plan_review`);
+  - code (`advice_lint.lint`: secrets, a binding's real value however short, absolute paths of any root, URIs of
+    any scheme and the project's internal domains, e-mail and IPv4 or IPv6 addresses and ids, raw logs and
+    Python, Java, JavaScript or Go stacks, dangling references, and more than 30% of the request's 12-character
+    windows copied from the local material). Each text is also read NFKC-normalized without zero-width
+    characters, with its escapes decoded and its Base64 runs decoded once; a hit there points at the characters
+    as written;
+  - the judge (one `advice_check` run over the request alone: standalone, no leak, answerable at least 0.6). Its
+    whole reply must be the one JSON object of `advice.JUDGE_CONTRACT`, every key and value typed: leaks by
+    category and field, what is missing by field and a reason code (`advice.MISSING_REASONS`). Anything else,
+    such as a verdict quoted inside other text, fails the judge.
+- **When a check fails**, the request goes back with what to fix. The message names the category and position,
+  never what was matched (a key the request should not have is named by its place among the keys), and the row
+  records the same. After 2 returns the consult is `blocked`. A judge that cannot judge fails the consult: no
+  request goes out unjudged.
+- **A request that passes** becomes the consult's question (`advisor_advice`) and starts a round of the advisor
+  (`spawn.run_child`, a fresh process each round). Its answer must fit AdviceResponse v1 (`advice.parse_response`:
+  every container and element of its type), or the consult fails with the round's spend booked.
+- **Rounds.** A `needs_info` answer waits for the Planner's supplement, which is checked again. A consult has at
+  most 3 rounds.
+- **Refusals.** A run whose model refused (`stop_reason: refusal`), or that another model answered, fails as
+  `refused`.
+- **Budget.** Each round's `--max-budget-usd` is what the consult has left (the judge's cost included). With less
+  than 0.10 USD left, the consult is `over_budget`.
+- **Records.** Every run's record has `run_kind` `advisor` or `advice_check` and the Planner's turn as its
+  `parent_record_id`. Its cost is the task's, counted in the Planner's share of `task_costs`. A judge's record keeps
+  none of the request: its input is the request's sha256 and length, its stream only the typed events
+  (`processor.typed_events`), and it has no output text.
+- **Restarts.** At startup, a consult a stopped server left `linting` or `asking` fails (`interrupted`).
 
 ### Turns Claude runs on its own
 
@@ -5488,7 +5557,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), the execution settings (`project_execution`), and nullable `default_workflow` |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `chat_group` (that chat is a group chat, told only the task's end; false for a task from before it), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)); `manager_id` (the Manager that created it, which hears of its progress and end), `template` (JSON snapshot of the task template it came from, NULL without one), `workflow` (immutable workflow snapshot, NULL without one) and `origin_thread` (the web chat thread it was asked for in) |
 | `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
-| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column) |
+| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column); `difficulty` (`routine`, `hard`, `critical`, null when unset; nothing reads it yet: [Advisor RFC](rfcs/advisor-v0.zh-CN.md)) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
@@ -5502,10 +5571,12 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
 | `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, and `sent_at`; kept 30 days |
+| `agent_spawns` | A run another run starts ([Advisor RFC](rfcs/advisor-v0.zh-CN.md), section 5.2; nothing starts one yet): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
+| `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at`; nothing writes it yet |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |

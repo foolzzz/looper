@@ -17,13 +17,16 @@ writes the messages themselves) makes the subscription private: it may push only
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 MAX_RULES = 20
 NAME_MAX_CHARS = 40
 MATCH_MAX_CHARS = 500
-MATCH_TEXT_CHARS = 2000
+MATCH_TEXT_CHARS = 1000
+MATCH_BUDGET_SECONDS = 2.0  # what all the patterns of one window may spend in all
+MAX_UNBOUNDED = 2  # ``+``, ``*`` and ``{n,}`` in one pattern: with these, a match takes at most quadratic time
 MAX_AREAS = 200
 CHAT_KINDS = ("p2p", "group", "topic", "unknown")
 SENDER_KINDS = ("user", "app")
@@ -33,8 +36,48 @@ FALLBACK_TEXT_CHARS = 200
 
 _KEYS = ("name", "label", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds", "exclude_self",
          "mentions_me", "text_match", "never_quiet", "areas")
-# A group that is itself repeated, with a repeat inside: ``(a+)+``, the shape that backtracks without bound.
-_NESTED = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*[+*{]")
+_BOUNDS = re.compile(r"\{(\d+)(,(\d*))?\}")
+
+
+def unsafe(pattern: str) -> str | None:
+    """Why a pattern may backtrack without bound, or None. ``re`` cannot be interrupted, so the shapes that make it
+    take exponential time are refused where the pattern is saved: a group that is repeated and holds a repeat, an
+    alternation or a group that does (``(a+)+``, ``(a|aa)+``, ``((a|aa))*``), and more than ``MAX_UNBOUNDED``
+    unbounded repeats (``a*a*a*a*b`` is polynomial of a high degree)."""
+    frames: list[dict[str, bool]] = [{"quant": False, "alt": False}]
+    unbounded, i = 0, 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char == "[":
+            i += 2 if pattern[i + 1:i + 2] in ("^", "]") else 1
+            while i < len(pattern) and pattern[i] != "]":
+                i += 2 if pattern[i] == "\\" else 1
+        elif char == "(":
+            frames.append({"quant": False, "alt": False})
+        elif char == "|":
+            frames[-1]["alt"] = True
+        elif char in "+*":
+            frames[-1]["quant"] = True
+            unbounded += 1
+        elif char == "{" and (found := _BOUNDS.match(pattern, i)):
+            frames[-1]["quant"] = True
+            unbounded += bool(found.group(2) and not found.group(3))
+            i = found.end() - 1
+        elif char == ")" and len(frames) > 1:
+            inner = frames.pop()
+            after = pattern[i + 1:i + 2]
+            repeated = after in ("+", "*") or (after == "{" and bool(_BOUNDS.match(pattern, i + 1)))
+            if repeated and (inner["quant"] or inner["alt"]):
+                return "text_match repeats a group that already repeats or branches (such as (a+)+ or (a|aa)+): rewrite it"
+            frames[-1]["quant"] |= inner["quant"] or repeated
+            frames[-1]["alt"] |= inner["alt"]
+        i += 1
+    if unbounded > MAX_UNBOUNDED:
+        return f"text_match has more than {MAX_UNBOUNDED} unbounded repeats (+, * or {{n,}}): use fewer"
+    return None
 _PLACEHOLDER = re.compile(r"\{count(?::([^{}]{1,%d}))?\}" % NAME_MAX_CHARS)
 
 
@@ -61,8 +104,8 @@ def check_pattern(pattern: Any) -> str:
     """A ``text_match`` pattern that is safe to save; ``ValueError`` saying why not."""
     if not isinstance(pattern, str) or not pattern or len(pattern) > MATCH_MAX_CHARS or "\x00" in pattern:
         raise ValueError(f"text_match must be a pattern of 1 to {MATCH_MAX_CHARS} characters")
-    if _NESTED.search(pattern):
-        raise ValueError("text_match repeats a group that already repeats (such as (a+)+): rewrite it")
+    if (why := unsafe(pattern)) is not None:
+        raise ValueError(why)
     try:
         re.compile(pattern, re.IGNORECASE)
     except re.error as exc:
@@ -135,6 +178,7 @@ class Matcher:
         self.rules = list(rules)
         self._me = me
         self._patterns = [re.compile(rule["text_match"], re.IGNORECASE) if rule["text_match"] else None for rule in self.rules]
+        self._spent = 0.0
 
     def __call__(self, row: Mapping[str, Any]) -> int | None:
         for index, rule in enumerate(self.rules):
@@ -147,10 +191,21 @@ class Matcher:
             if (rule["mentions_me"] == "only") != bool(row["mentions_me"]) and rule["mentions_me"] != "any":
                 continue
             pattern = self._patterns[index]
-            if pattern is not None and not pattern.search((row["text"] or "")[:MATCH_TEXT_CHARS]):
+            if pattern is not None and not self._search(pattern, row["text"] or ""):
                 continue
             return index
         return None
+
+    def _search(self, pattern: re.Pattern[str], text: str) -> bool:
+        """Whether ``pattern`` is in the first ``MATCH_TEXT_CHARS`` of ``text``, within the window's time budget: past
+        it a pattern takes nothing (a saved pattern is checked, this is the second bound)."""
+        if self._spent > MATCH_BUDGET_SECONDS:
+            return False
+        started = time.perf_counter()
+        try:
+            return pattern.search(text[:MATCH_TEXT_CHARS]) is not None
+        finally:
+            self._spent += time.perf_counter() - started
 
     def tag(self, row: Mapping[str, Any]) -> str:
         """``【label·area】`` (or ``【label】``, or nothing) for a selected row."""
