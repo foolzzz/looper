@@ -34,6 +34,7 @@ from ..message import (
     parse_channel_id,
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
+from ..ops.leads import for_group
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
@@ -277,7 +278,8 @@ class LarkChannelAdapter(ChannelAdapter):
             notice = Notice.from_payload(envelope.payload)
             if notice is None:
                 return DeliveryReceipt(channel=self.channel_type, success=False, error="a notice without a Lark target")
-            return await self._send_notice(notice.target, notice.text)
+            return await self._send_notice(notice.target,
+                                           for_group(notice.text) if notice.target.group else notice.text)
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None and envelope.target == self._address:

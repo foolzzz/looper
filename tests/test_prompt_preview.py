@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents import leads_model
 from looper.agents.profile_registry import BUILTIN_PROFILE, RegistryError, RegistryNotFound
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, adapter
 from tests.runtime_model_helpers import resolved_profile, with_model_name
@@ -56,6 +57,7 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worke
     monkeypatch.setattr(module.db_profiles, "get_api_key", AsyncMock(return_value="test-only"))
     monkeypatch.setattr(module.db_roles, "get_config", AsyncMock(return_value={
         "system_prompt": "Configured role", "default_prompt": "Configured role"}))
+    monkeypatch.setattr(leads_model, "leads_enabled", AsyncMock(return_value=False))
     return module, profile, layers
 
 
@@ -121,12 +123,14 @@ def test_preview_manager_has_no_project_context(monkeypatch):
     assert result["prompt_layers"]["project"] is None
 
 
-@pytest.mark.parametrize("root,custom", [("", False), ("/srv/projects", False), ("/srv/projects", True)])
-def test_manager_preview_matches_live_directory_guidance(monkeypatch, tmp_path, root, custom):
+@pytest.mark.parametrize("root,custom,leads", [("", False, False), ("/srv/projects", False, False),
+                                               ("/srv/projects", True, False), ("", False, True)])
+def test_manager_preview_matches_live_directory_guidance(monkeypatch, tmp_path, root, custom, leads):
     from looper.agents import projects
     from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT, ManagerAgent, ManagerConfig
 
     module, profile, _ = _dependencies(monkeypatch, role="manager")
+    monkeypatch.setattr(leads_model, "leads_enabled", AsyncMock(return_value=leads))
     monkeypatch.setattr(projects, "projects_root", lambda: root)
     role = "Custom role\n" + DEFAULT_SYSTEM_PROMPT if custom else DEFAULT_SYSTEM_PROMPT
     monkeypatch.setattr(module.db_roles, "get_config", AsyncMock(return_value={
@@ -144,6 +148,8 @@ def test_manager_preview_matches_live_directory_guidance(monkeypatch, tmp_path, 
         assert "an existing directory there is used as is" in shown
     if custom:
         assert role in shown
+    assert ("## Message leads (looper_leads_search)" in shown) is leads
+    assert ("LEADS_CONTRACT" in json.dumps(prompt.layers)) is leads
 
 
 @pytest.mark.parametrize("runtime", ["claude-code", "codex"])

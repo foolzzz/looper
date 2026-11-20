@@ -15,7 +15,8 @@ def test_no_agent_tool_or_default_prompt_mentions_the_message_stream():
     assert [text[:60] for text in texts if any(term in text.lower() for term in TERMS)] == []
 
 
-@pytest.mark.parametrize("name", ["message_stream.status", "message_stream.runs", "message_stream.configure"])
+@pytest.mark.parametrize("name", ["message_stream.status", "message_stream.runs", "message_stream.configure",
+    "message_stream.chats", "message_stream.chat_update", "message_stream.delete_preview", "message_stream.delete"])
 def test_the_operations_are_operator_dashboard_operations_not_agent_tools(name):
     from looper.agents import api_v1
 

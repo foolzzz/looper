@@ -105,6 +105,14 @@ def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
     imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
     imp.add_argument("--source", help="The source id (default: the only one).")
     _add_location_flags(imp)
+    delete = sub.add_parser("delete", allow_abbrev=False, help="Delete one message after reviewing its limits.",
+        description="Preview a message deletion, list copies it cannot reach, then type delete to confirm. "
+                    "A tombstone prevents a later import from restoring the message.")
+    delete.add_argument("--message", required=True, help="The exact message_id to delete.")
+    delete.add_argument("--source", help="The source id (default: the only one).")
+    delete.add_argument("--dry-run", action="store_true", help="Show the preview without asking to delete.")
+    _add_location_flags(delete)
+
     backfill = sub.add_parser(
         "leads-backfill", allow_abbrev=False, help="Count, or turn into leads, the history before a leads subscription.",
         description="Count the in-scope messages of the last N days up to where the leads subscription started, their "
