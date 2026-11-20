@@ -77,6 +77,7 @@ class ApiRuntime(RuntimeAdapter):
     auth_kinds = frozenset({AuthKind.API_KEY})
     roles = frozenset({"manager"})
     in_process = True
+    web_tools = False  # its model has Looper's tools only
     isolation_id = "api-v1"
     can_replace_system_prompt = True
     can_interrupt = True

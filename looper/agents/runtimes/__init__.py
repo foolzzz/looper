@@ -417,6 +417,9 @@ class RuntimeAdapter(ABC):
     roles: ClassVar[frozenset[str] | None] = None
     # Runs and calls tools inside looper serve, with no executable to find or probe.
     in_process: ClassVar[bool] = False
+    # Its agents can search the web and read pages with tools of their own (a profile may still turn them off:
+    # ``web_search``).
+    web_tools: ClassVar[bool] = True
     platform_tools_in_process: ClassVar[bool] = False
     # Worker, Reviewer and consult runs use hosted_run instead of their own process. Their platform tools
     # are passed in process by the caller, without an MCP entry.

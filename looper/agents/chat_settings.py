@@ -7,7 +7,10 @@
 in a read-only turn of its own (``dm_only``) instead of the code notice (``off``, the default; manager completion
 ledger RFC section 3.7).
 
-Stop and the completion events check them from synchronous code, so they are kept in memory: ``load`` reads them
+``manager.research_order``: whether the default Manager's contract says where to look things up, and in what order,
+before it asks the user (``research_order``; off by default).
+
+Stop, the completion events and the Manager's prompt check them from synchronous code, so they are kept in memory: ``load`` reads them
 at startup and ``update`` refreshes them. Until loaded, both are off.
 """
 
@@ -22,7 +25,9 @@ from ..db import system_settings as db_settings
 STOP_ENABLED_KEY = "chat.stop_enabled"
 DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
-FIELDS = ("stop_enabled", "completion_turns")
+RESEARCH_ORDER_KEY = "manager.research_order"
+DEFAULT_RESEARCH_ORDER = False
+FIELDS = ("stop_enabled", "completion_turns", "research_order")
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -38,6 +43,7 @@ DEFAULT_COMPLETION_TURNS = CompletionTurns.OFF
 
 _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
+_research_order = DEFAULT_RESEARCH_ORDER
 
 
 def stop_enabled() -> bool:
@@ -60,11 +66,22 @@ def set_completion_turns(value: CompletionTurns) -> None:
     _completion_turns = CompletionTurns(value)
 
 
+def research_order() -> bool:
+    return _research_order
+
+
+def set_research_order(value: bool) -> None:
+    """Apply a value in memory only (``load`` and ``update`` store it; tests use this directly)."""
+    global _research_order
+    _research_order = value
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY])
+    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
+    set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     try:
         turns = CompletionTurns(stored.get(COMPLETION_TURNS_KEY, DEFAULT_COMPLETION_TURNS.value))
     except ValueError:
@@ -74,7 +91,7 @@ async def load() -> bool:
 
 
 def settings_view() -> dict[str, Any]:
-    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value}
+    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value, "research_order": _research_order}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -94,6 +111,11 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and value not in {turns.value for turns in CompletionTurns}:
             raise ValueError("completion_turns must be " + ", ".join(t.value for t in CompletionTurns) + " or null")
         values["completion_turns"] = value
+    if "research_order" in body:
+        value = body["research_order"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("research_order must be true, false or null")
+        values["research_order"] = value
     return values
 
 
@@ -107,6 +129,9 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
         stored[STOP_ENABLED_KEY] = None if value is None else ("true" if value else "false")
     if "completion_turns" in values:
         stored[COMPLETION_TURNS_KEY] = values["completion_turns"]
+    if "research_order" in values:
+        value = values["research_order"]
+        stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
     await db_settings.put_settings(stored)
     await load()
     return settings_view()
