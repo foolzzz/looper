@@ -1836,7 +1836,7 @@ CREATE TABLE IF NOT EXISTS manager_events (
     state           TEXT NOT NULL CHECK (state IN ('pending', 'running', 'delivered', 'fallback', 'skipped')),
     reason          TEXT CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', 'turn_timeout',
                                            'turn_stopped', 'empty_reply', 'send_failed', 'queue_deadline',
-                                           'restart')),
+                                           'restart', 'no_chat', 'target_changed')),
     batch           UUID,
     record_id       BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1857,7 +1857,25 @@ CREATE INDEX IF NOT EXISTS idx_manager_events_task ON manager_events (task_id);
 CREATE INDEX IF NOT EXISTS idx_manager_events_created ON manager_events (created_at);
 CREATE INDEX IF NOT EXISTS idx_manager_events_schedule_run ON manager_events (schedule_run_id) WHERE schedule_run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_manager_events_record ON manager_events (record_id) WHERE record_id IS NOT NULL;
+-- The delivery of what tells the event (the completion turn's reply, or the code notice it falls back to), as
+-- subscription_deliveries: written `sending` (committed) before the channel is asked; `sent`; `failed` (the
+-- channel said it did not send it, or it never got that far: tried again from delivery_at); `uncertain` (it may
+-- have been sent: never again). NULL: no delivery yet (a skipped event's notice is sent inline and only sets sent_at).
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery TEXT
+    CHECK (delivery IN ('pending', 'sending', 'sent', 'failed', 'uncertain'));
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_at TIMESTAMPTZ;
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_error TEXT;
+-- The claim (one send) the delivery was taken by: only that send's answer settles it, and a success it reports late
+-- turns an `uncertain` it was settled as meanwhile into `sent` (it is never sent again either way).
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_claim UUID;
+-- The completion event that told a schedule run's message (the Manager's reply, or its fallback); NULL otherwise.
+ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT
+    REFERENCES manager_events(id) ON DELETE SET NULL;
 -- manager events end
+-- A database that gets the column above later builds this index online (connection.py ``_ONLINE_STEPS``).
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_manager_event ON schedule_notifications (manager_event_id)
+    WHERE manager_event_id IS NOT NULL;
 
 -- agent spawns begin
 -- A run another run starts (the advisor RFC, section 5): one row per consult of the advisor, its state, what it was

@@ -772,13 +772,18 @@ async def reset_overlaps(conn: Db, schedule_id: str) -> bool:
 
 
 async def insert_notification(conn: Db, *, schedule_id: str, run_id: str | None, kind: str, channel: str | None,
-                              chat: str | None, text: str, status: str, error: str | None) -> str:
-    """Record a message; ``created_at`` is the database's clock, so the outbox keeps the order they were sent in."""
+                              chat: str | None, text: str, status: str, error: str | None,
+                              manager_event_id: int | None = None, once: bool = False) -> str:
+    """Record a message; ``created_at`` is the database's clock, so the outbox keeps the order they were sent in.
+    ``manager_event_id``: the completion event that told the run (the Manager's reply, or its fallback); ``once``:
+    not when the event already has a row of this kind and status (an outbox repaired after a write that failed)."""
     notification_id = f"note-{uuid.uuid4().hex[:12]}"
     await conn.execute(
         "INSERT INTO schedule_notifications (id, schedule_id, run_id, kind, channel, chat, text, status, error, "
-        "created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp())",
-        notification_id, schedule_id, run_id, kind, channel, chat, text, status, error,
+        "manager_event_id, created_at) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::bigint, clock_timestamp() "
+        "WHERE NOT $11 OR NOT EXISTS (SELECT 1 FROM schedule_notifications WHERE manager_event_id = $10::bigint "
+        "AND kind = $4 AND status = $8)",
+        notification_id, schedule_id, run_id, kind, channel, chat, text, status, error, manager_event_id, once,
     )
     return notification_id
 

@@ -77,6 +77,10 @@ if args[:4] == ["im", "+messages-send", "--as", "bot"]:
         refuse("specify at least one of --chat-id or --user-id")
     if rest[1].endswith("gone"):
         refuse("Bot/User can NOT be out of the chat")
+    if rest[1].endswith("servertimeout"):  # the platform's time-out: whether it was sent is not known
+        print(json.dumps({{"ok": False, "identity": "bot", "error": {{"type": "network", "subtype": "timeout",
+            "message": "API call failed: server time out error"}}}}), file=sys.stderr)
+        sys.exit(4)
     with open({log!r}) as sent:
         count = sum(1 for line in sent if "+messages-send" in line)
     answer({{"ok": True, "identity": "bot", "data": {{"message_id": "om_%04d" % count, "chat_id": rest[1]}}}})
