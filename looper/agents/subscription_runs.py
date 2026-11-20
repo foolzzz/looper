@@ -73,14 +73,24 @@ class SubscriptionRuns:
     """The runs of subscriptions of one server: planning inside the scheduler's transaction, executing and settling."""
 
     def __init__(self, *, poster: Poster | None, own_apps: OwnApps, runtime_root: Path | None,
-                 clock: Callable[[], datetime], claude_bin: str = "claude") -> None:
+                 clock: Callable[[], datetime], claude_bin: str = "claude",
+                 day_start: Callable[[datetime], datetime] | None = None) -> None:
         self._poster = poster
         self._clock = clock
+        # Where the day a daily budget counts starts (``Scheduler.day_start``); None: midnight in this machine's zone.
+        self._day_start = day_start
         self._own_apps = own_apps
         self._runtime_root = runtime_root
         self._claude_bin = claude_bin
         self.instance = instance_token()
         self.active: set[str] = set()  # runs this process is executing
+
+    def day_start(self, now: datetime) -> datetime:
+        """The start of ``now``'s day, as the daily budget counts it."""
+        if self._day_start is not None:
+            return self._day_start(now)
+        zone = cron.zone(cron.local_zone_name())
+        return datetime.combine(now.astimezone(zone).date(), datetime.min.time(), tzinfo=zone)
 
     # --- Firing ---
 

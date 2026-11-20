@@ -22,6 +22,10 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
   (lowered by the layers' ``run_budget_usd``); its recorded cost is checked against the cap afterwards, and a run
   over it, or whose cost is unknown, gives no reply. A model at provider prices without a full price, or one that
   needs the local gateway, cannot run: no cap would hold, or its requests would be recorded.
+- **Another role** (``role``): the leads check (``leads_check``) runs the same way, as its own role: its role layer
+  alone chooses its Agent Profile (else its built-in one), its role prompt is ``role_configs.leads_check``, it runs
+  with the access level of the roles another run starts (``Access.ADVISOR``: no tool) and its record is
+  ``leads_check:<owner>``. The processor's own runs are unchanged by it.
 - **Its record** (``llm_records``): ``agent_id`` ``processor:<owner>``, no task, the caller's metadata; model
   requests are not recorded (llmrec), and ``input_text`` holds only a reference to the batch (the caller's window
   reference, the text's sha256 and length), never the batch, and of its stream only the runtime's own events and
@@ -44,7 +48,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .agent_settings import AgentSettings, AgentType, Launch, load_agent_settings, sha256_text
+from .agent_settings import Access, AgentSettings, AgentType, Launch, load_agent_settings, sha256_text
 from .runtimes import CostSource
 
 logger = logging.getLogger(__name__)
@@ -225,9 +229,26 @@ class ProcessorRun:
     profile: Mapping[str, Any] | None = None
 
 
+# The roles that run as the processor does (``run``'s ``role``) and the role prompt each is recommended.
+_ROLES = (AgentType.PROCESSOR, AgentType.LEADS_CHECK)
+
+
+def _recommended(role: AgentType) -> str:
+    if role is AgentType.PROCESSOR:
+        return PROCESSOR_ROLE_PROMPT
+    from .leads_check import LEADS_CHECK_ROLE_PROMPT
+
+    return LEADS_CHECK_ROLE_PROMPT
+
+
+def _named(role: AgentType) -> str:
+    """How messages name ``role``: the processor, or the leads_check role."""
+    return "the processor" if role is AgentType.PROCESSOR else f"the {role.value} role"
+
+
 @dataclass(frozen=True)
 class _Role:
-    """The processor's own settings (``role_configs.processor``), read for each run."""
+    """The role's own settings (``role_configs.<role>``), read for each run."""
 
     prompt: str
     recommended: bool
@@ -236,20 +257,21 @@ class _Role:
     enabled: bool
 
 
-async def _role() -> _Role:
+async def _role(role: AgentType = AgentType.PROCESSOR) -> _Role:
     from ..db import role_configs
     from .system_prompt import is_recommended
 
-    config = await role_configs.get_config(AgentType.PROCESSOR.value) or {}
-    prompt = str(config.get("system_prompt") or "").strip() or PROCESSOR_ROLE_PROMPT.strip()
-    return _Role(prompt, is_recommended(prompt, str(config.get("default_prompt") or "") or PROCESSOR_ROLE_PROMPT),
+    config = await role_configs.get_config(role.value) or {}
+    recommended = _recommended(role)
+    prompt = str(config.get("system_prompt") or "").strip() or recommended.strip()
+    return _Role(prompt, is_recommended(prompt, str(config.get("default_prompt") or "") or recommended),
                  int(config.get("timeout_seconds") or 0), int(config.get("max_turns") or 0),
                  bool(config.get("enabled", True)))
 
 
-def _problem(settings: AgentSettings) -> str | None:
-    """Why ``settings`` cannot run the processor: the layers could not be read (a run never falls back to the
-    built-in profile then), the profile cannot run the role, or its runtime's adapter has no tool-less mode."""
+def _problem(settings: AgentSettings, role: AgentType = AgentType.PROCESSOR) -> str | None:
+    """Why ``settings`` cannot run the processor (or ``role``): the layers could not be read (a run never falls back
+    to the built-in profile then), the profile cannot run the role, or its runtime's adapter has no tool-less mode."""
     from .runtimes import ADAPTERS, Capability
 
     if settings.error:
@@ -258,43 +280,52 @@ def _problem(settings: AgentSettings) -> str | None:
         return settings.profile_error
     adapter = ADAPTERS.get(settings.profile.runtime.type)
     if adapter is None or Capability.NO_TOOLS not in adapter.capabilities:
-        return (f"Agent Profile {settings.profile.name!r} cannot run the processor: its runtime "
+        return (f"Agent Profile {settings.profile.name!r} cannot run {_named(role)}: its runtime "
                 f"{settings.profile.runtime.type!r} has no mode without tools")
     return None
 
 
+def _check_role(role: AgentType) -> None:
+    if role not in _ROLES:
+        raise ValueError(f"{role.value} does not run as the processor does")
+
+
 async def chosen_profile(project_id: str | None = None, schedule_id: str | None = None, *,
-                         wait: bool = False) -> dict[str, Any]:
-    """The Agent Profile a processor run in ``project_id`` for ``schedule_id`` would use (``profile_id``, ``name``,
-    ``model``, ``effort``, ``runtime``, ``provider``), the layer it comes from (``source``), the managed hooks its
-    runtime has (``managed_hooks``: they see the messages; None for none) and why it cannot run (``problem``, None
-    when it can); login checks are cached unless ``wait``."""
-    settings = await load_agent_settings(AgentType.PROCESSOR, project_id, schedule_id=schedule_id, wait=wait)
+                         wait: bool = False, role: AgentType = AgentType.PROCESSOR) -> dict[str, Any]:
+    """The Agent Profile a processor run (or ``role``'s) in ``project_id`` for ``schedule_id`` would use
+    (``profile_id``, ``name``, ``model``, ``effort``, ``runtime``, ``provider``), the layer it comes from
+    (``source``), the managed hooks its runtime has (``managed_hooks``: they see the messages; None for none) and why
+    it cannot run (``problem``, None when it can); login checks are cached unless ``wait``. The leads check's comes
+    from its role layer alone, whatever the project and schedule."""
+    _check_role(role)
+    settings = await load_agent_settings(role, project_id, schedule_id=schedule_id, wait=wait)
     view = settings.view()["profile"]
     hooks = _managed_hooks(settings)
-    problem = _problem(settings) or (
+    problem = _problem(settings, role) or (
         _managed_refusal(hooks) if hooks is not None and await _refuses_managed_hooks() else None)
     return {**view["value"], "source": view["source"], "managed_hooks": hooks.view() if hooks is not None else None,
             "problem": problem}
 
 
-async def run_facts(project_id: str | None, schedule_id: str | None) -> dict[str, Any]:
-    """``profile_facts`` of the settings a run would launch with now."""
-    settings = await load_agent_settings(AgentType.PROCESSOR, project_id, schedule_id=schedule_id, wait=False)
+async def run_facts(project_id: str | None, schedule_id: str | None, *,
+                    role: AgentType = AgentType.PROCESSOR) -> dict[str, Any]:
+    """``profile_facts`` of the settings a run (of the processor, or ``role``) would launch with now."""
+    _check_role(role)
+    settings = await load_agent_settings(role, project_id, schedule_id=schedule_id, wait=False)
     hooks = _managed_hooks(settings)
     return profile_facts(settings, hooks.view() if hooks is not None else None)
 
 
 def _system_prompt(settings: AgentSettings, role: _Role, instructions: str, quiet_word: str,
-                   contract: str | None = None) -> Any:
+                   contract: str | None = None, agent: AgentType = AgentType.PROCESSOR) -> Any:
     from .system_prompt import SystemPrompt, compose_system_prompt, prompt_layers
 
     task = f"## Instructions\n{instructions.strip()}"
     contract = contract if contract is not None else reply_contract(quiet_word)
     custom = settings.profile.custom_prompt
     text = compose_system_prompt(role.prompt, custom_prompt=custom, task=task, contract=contract)
-    layers = prompt_layers(role_id=AgentType.PROCESSOR.value, role=role.prompt, recommended=role.recommended,
-                           contract_name="PROCESSOR_CONTRACT", contract=contract, custom_prompt=custom)
+    layers = prompt_layers(role_id=agent.value, role=role.prompt, recommended=role.recommended,
+                           contract_name=f"{agent.name}_CONTRACT", contract=contract, custom_prompt=custom)
     return SystemPrompt(text, {**layers, "instructions": {"sha256": sha256_text(instructions.strip())}})
 
 
@@ -313,13 +344,14 @@ def _check(owner: str, instructions: str, quiet_word: str, budget_usd: float, ti
 async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapping[str, Any], quiet_word: str,
               budget_usd: float, timeout_s: float, runtime_root: Path, claude_bin: str = "claude",
               project_id: str | None = None, schedule_id: str | None = None,
-              metadata: Mapping[str, Any] | None = None, contract: str | None = None) -> ProcessorRun:
+              metadata: Mapping[str, Any] | None = None, contract: str | None = None,
+              role: AgentType = AgentType.PROCESSOR) -> ProcessorRun:
     """One processor run (the module's notes) of ``instructions`` over ``input_text``, recorded as
     ``processor:<owner>`` with ``metadata`` and, as its input, ``input_ref`` (which must not hold the text) with the
     text's sha256 and length. ``budget_usd`` and ``timeout_s`` bound it. ``contract`` replaces the reply section
     (``reply_contract(quiet_word)``) for a caller whose code parses the reply (``extraction``); a push subscription
-    passes none. Raises ``ValueError`` for arguments no run should start with; any reason it gives no reply is in the
-    result."""
+    passes none. ``role`` runs it as the leads check instead (the module's notes). Raises ``ValueError`` for
+    arguments no run should start with; any reason it gives no reply is in the result."""
     from . import single_run
     from ..db import llm_records
     from .claude_cli import ClaudeRunRecorder
@@ -328,40 +360,43 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
     from .runtimes import RuntimeUnsupported
 
     _check(owner, instructions, quiet_word, budget_usd, timeout_s)
-    settings = await load_agent_settings(AgentType.PROCESSOR, project_id, schedule_id=schedule_id)
-    if problem := _problem(settings):
+    _check_role(role)
+    settings = await load_agent_settings(role, project_id, schedule_id=schedule_id)
+    if problem := _problem(settings, role):
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=problem)
     hooks = _managed_hooks(settings)
     if hooks is not None and await _refuses_managed_hooks():
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=_managed_refusal(hooks))
     facts = profile_facts(settings, hooks.view() if hooks is not None else None)
-    role = await _role()
-    if not role.enabled:
+    config = await _role(role)
+    if not config.enabled:
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED,
-                            detail="the processor role is turned off (Settings → Roles)")
+                            detail=f"{'the processor role' if role is AgentType.PROCESSOR else _named(role)} is "
+                                   "turned off (Settings → Roles)")
     cap = min(budget_usd, settings.max_budget_usd or budget_usd)
-    launch = Launch(replace(settings, max_budget_usd=cap), role=AgentType.PROCESSOR)
+    launch = Launch(replace(settings, max_budget_usd=cap), role=role,
+                    access=None if role is AgentType.PROCESSOR else Access.ADVISOR)
     if translated(launch):
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=(
-            f"Agent Profile {launch.profile.name!r} runs through the local gateway, which records its requests; the "
-            "processor runs without request recording"))
+            f"Agent Profile {launch.profile.name!r} runs through the local gateway, which records its requests; "
+            f"{_named(role)} runs without request recording"))
     basis = cost_basis(launch.profile)
     if basis["source"] == "provider_price" and launch.model in basis["unpriced"]:
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=(
             f"model {launch.model!r} has no full price with its provider, so the run's cap of {cap:g} USD cannot hold"))
-    deadline = min(timeout_s, role.timeout_seconds or timeout_s)
-    system_prompt = _system_prompt(settings, role, instructions, quiet_word, contract)
+    deadline = min(timeout_s, config.timeout_seconds or timeout_s)
+    system_prompt = _system_prompt(settings, config, instructions, quiet_word, contract, role)
     reference = json.dumps({**input_ref, "sha256": sha256_text(input_text), "chars": len(input_text)},
                            ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     run_id = uuid.uuid4().hex[:12]
-    agent_id = f"processor:{owner}"
+    agent_id = f"{role.value}:{owner}"
     directory = runtime_root.absolute() / ".local" / "processor" / run_id
     directory.mkdir(mode=0o700, parents=True)
     try:
         prompt_file = system_prompt.write_file(runtime_root)
         try:
             command = launch.runtime.run_command(launch.executable(claude_bin), cwd=directory, prompt_file=prompt_file,
-                                                 launch=launch, max_turns=role.max_turns)
+                                                 launch=launch, max_turns=config.max_turns)
         except RuntimeUnsupported as exc:
             return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
         recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
@@ -374,7 +409,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
         try:
             finished = await single_run.run_once(
                 recorder, command, cwd=str(directory), prompt=user_turn(input_text), launch=launch, timeout=deadline,
-                what="the processor run", label=f"processor {agent_id} {run_id}", quiet=True)
+                what=f"the {role.value} run", label=f"{role.value} {agent_id} {run_id}", quiet=True)
         except single_run.StartFailed as exc:
             await recorder.annotate({"processor_failure": ProcessorFailure.FAILED.value})
             return ProcessorRun(None, recorder.record_id, failure=ProcessorFailure.FAILED,
