@@ -112,6 +112,15 @@ describe("Chat settings", () => {
     expect(notice.textContent).not.toContain("channel-lark");
   });
 
+  it("lists a bot by its channel id when the display name is empty", async () => {
+    missing = [{ channel_id: "channel-lark", channel_type: "lark", name: "" }];
+    await act(async () => root.render(<ChatSettingsSection />));
+    const ledger = container.querySelectorAll("input[type=checkbox]")[1] as HTMLInputElement;
+    await act(async () => ledger.click());
+    const item = container.querySelector("[role=status] li");
+    expect(item?.textContent).toBe("channel-lark");
+  });
+
   it("shows no notice when turning the ledger on lists no bots", async () => {
     await act(async () => root.render(<ChatSettingsSection />));
     const ledger = container.querySelectorAll("input[type=checkbox]")[1] as HTMLInputElement;

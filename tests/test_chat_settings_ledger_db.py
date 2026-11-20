@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 async def _call(name: str, body: dict | None = None):
     operation = api_v1.find("POST", "/api/v1/" + name.replace(".", "/"))
     try:
-        result = await chat_controls.run(None, operation, body or {}, None, {})
+        result = await chat_controls.run(None, operation, body or {}, api_v1.OPERATOR, {})
     except OpError as exc:
         return exc
     api_v1.validate_arguments(operation.result, result)
@@ -41,7 +41,7 @@ def test_turning_the_ledger_on_stores_true_and_returns_the_bots(monkeypatch: pyt
             {"channel_id": "channel-lark", "channel_type": "lark", "name": "Example Lark"}]
         assert await pool.fetchval("SELECT value FROM system_settings WHERE key = $1", ledger.ENABLED_KEY) == "true"
         operation = api_v1.find("POST", "/api/v1/chat_settings/update")
-        impact = await chat_controls.impact(None, operation, {"ledger_enabled": True}, None, {})
+        impact = await chat_controls.impact(None, operation, {"ledger_enabled": True}, api_v1.OPERATOR, {})
         assert "Example Lark" in impact and "Example Telegram" not in impact
         again = await _call("chat_settings.update", {"stop_enabled": True})
         assert "missing_operator_ids" not in again and again["ledger_enabled"] is True

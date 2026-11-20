@@ -36,5 +36,7 @@ async def missing() -> list[BotRef]:
         value = config.get(OPERATOR_KEY) if isinstance(config, dict) else None
         if isinstance(value, str) and value.strip():
             continue
-        found.append(BotRef(row["channel_id"], row["channel_type"], row.get("display_name") or ""))
+        label = row.get("display_name")
+        name = label.strip() if isinstance(label, str) and label.strip() else row["channel_id"]
+        found.append(BotRef(row["channel_id"], row["channel_type"], name))
     return found

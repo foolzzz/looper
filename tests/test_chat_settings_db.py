@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from looper.agents import chat_settings
+from looper.db import ledger
 from tests.db_support import DSN
 from tests.db_support import run_db
 from tests.test_api_v1_chat_session_controls_db import _api
@@ -80,5 +81,25 @@ def test_the_research_order_setting_is_stored_alone_and_loaded(monkeypatch: pyte
             assert answer["result"]["research_order"] is False
             assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = $1",
                                        chat_settings.RESEARCH_ORDER_KEY) == 0
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_a_client_cannot_set_ledger_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``ledger_enabled`` is operator-only. The rest of the body is not applied."""
+
+    async def test(pool: Any) -> None:
+        async with _api(tmp_path, pool, None) as (call, _):
+            status, answer = await call("chat_settings.update",
+                                        {"ledger_enabled": True, "stop_enabled": True}, client=True)
+            assert status == 403 and answer["error"]["code"] == "forbidden"
+            assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = $1",
+                                       ledger.ENABLED_KEY) == 0
+            assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = $1",
+                                       chat_settings.STOP_ENABLED_KEY) == 0
+            status, answer = await call("chat_settings.update", {"ledger_enabled": True})
+            assert status == 200 and answer["result"]["ledger_enabled"] is True
+            assert await pool.fetchval("SELECT value FROM system_settings WHERE key = $1",
+                                       ledger.ENABLED_KEY) == "true"
 
     run_db(test, monkeypatch, timeout=30)

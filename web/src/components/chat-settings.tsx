@@ -144,7 +144,7 @@ function LedgerNotice({ bots }: { bots: MissingOperatorBot[] }) {
         {after}
       </p>
       <ul className="list-disc pl-5">
-        {bots.map((bot) => <li key={bot.channel_id}>{bot.name}</li>)}
+        {bots.map((bot) => <li key={bot.channel_id}>{bot.name.trim() || bot.channel_id}</li>)}
       </ul>
     </div>
   );

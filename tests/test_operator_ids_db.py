@@ -38,3 +38,13 @@ def test_missing_lists_only_enabled_bots_without_an_operator_id(
         assert found == ([BotRef(channel_id, channel_type, name)] if listed else [])
 
     run_db(test, monkeypatch, timeout=30)
+
+
+def test_missing_uses_the_channel_id_when_the_display_name_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool) -> None:
+        await pool.execute(
+            "INSERT INTO channel_configs (channel_id, channel_type, display_name, enabled, config) "
+            "VALUES ('channel-lark', 'lark', '', true, '{}')")
+        assert await missing() == [BotRef("channel-lark", "lark", "channel-lark")]
+
+    run_db(test, monkeypatch, timeout=30)

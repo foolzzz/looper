@@ -79,6 +79,8 @@ async def impact(server, operation, arguments, principal, headers):
         values = chat_settings.checked(arguments)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
+    if "ledger_enabled" in values and principal.kind != "operator":
+        raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
     changes = []
     if "stop_enabled" in values:
         value = values["stop_enabled"]
@@ -146,6 +148,8 @@ async def run(server, operation, arguments, principal, headers):
     if name == "chat_settings.get":
         return await chat_settings.settings_view()
     if name == "chat_settings.update":
+        if "ledger_enabled" in arguments and principal.kind != "operator":
+            raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
         try:
             return await chat_settings.update(arguments)
         except ValueError as exc:
