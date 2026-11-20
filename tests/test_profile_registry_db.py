@@ -209,7 +209,7 @@ def test_dsh_policy_refuses_invalid_profile_create_and_edit(
             invalid = change
         status, payload = await _call("POST", "/api/agent-profiles", {**valid, **invalid})
         assert status == 400, payload
-        assert len(await db.list_profiles()) == 1  # only the built-in profile
+        assert len(await db.list_profiles()) == 3  # only the built-in profiles (every role's, the advisor's, its judge's)
         profile_id = (await _ok("POST", "/api/agent-profiles", valid))["profile"]["profile_id"]
         before = await db.get_profile(profile_id)
         status, payload = await _call("PUT", f"/api/agent-profiles/{profile_id}", invalid)
@@ -294,7 +294,11 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         await pool.execute("DELETE FROM agent_profiles WHERE builtin")  # a missing one comes back
         await ensure_schema(pool)
         await ensure_schema(pool)
-        (profile,) = await db.list_profiles()
+        profiles = {row["name"]: row for row in await db.list_profiles()}
+        assert set(profiles) == {"claude-code/opus", "claude-code/fable-5-2", "claude-code/haiku-5-5"}
+        assert (profiles["claude-code/fable-5-2"]["effort"], profiles["claude-code/fable-5-2"]["model"]["name"]) == (
+            "high", "claude-fable-5-2")
+        profile = profiles["claude-code/opus"]
         spec = AgentProfile.from_row(profile)
         assert (spec.name, spec.runtime.id, spec.model_id) == (
             "claude-code/opus", "rt-claude-code", profile["model"]["id"])
@@ -389,7 +393,7 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
         builtin = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-claude-code"}, claude=claude))["runtime"]
         assert (builtin["version"], builtin["probe_error"]) == ("2.1.285 (Claude Code)", None)
         assert builtin["probed_at"] and set(builtin["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
-        assert builtin["roles"] == ["manager", "planner", "worker", "reviewer", "processor"]
+        assert builtin["roles"] == ["manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check"]
         assert (await _call("POST", "/api/v1/registry/view", {}, claude=claude))[1]["runtimes"][0]["path"] == claude
 
         # A type not on PATH has no runtime, and Re-detect says why; once it is on PATH, Re-detect adds it.
@@ -1330,7 +1334,7 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
                                                             "workflows": []}
         # What its runtime can run: the stand-in keeps no resident session.
         assert (profiles["claude-code/sonnet"]["roles"], profiles["si/sonnet"]["roles"]) == (
-            ["manager", "planner", "worker", "reviewer", "processor"], ["worker", "reviewer"])
+            ["manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check"], ["worker", "reviewer"])
         # A profile's own answer has it too.
         changed = (await _ok("PUT", f"/api/agent-profiles/{one_off}", {"effort": "high"}))["profile"]
         assert changed["used_by"] == profiles["si/sonnet"]["used_by"]
@@ -1492,7 +1496,7 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
         builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
         # Coco discovers its catalog from the CLI; the other logins have pinned models.
         assert {b["provider_id"]: (b["max_concurrency"], b["model_count"]) for b in builtins} == {
-            "prov-claude-subscription": (None, 3), "prov-coco-login": (None, 0),
+            "prov-claude-subscription": (None, 5), "prov-coco-login": (None, 0),
             "prov-codex-login": (None, 7), "prov-cursor-login": (None, 5), "prov-grok-login": (None, 4)}
 
     run_db(_test, monkeypatch)

@@ -2213,7 +2213,13 @@ provider (Codex's own login too, at the built-in prices, shown as
 "equivalent" like Claude Code's): each model's tokens in the result's `modelUsage` (input, output,
 cache read, cache write) at the provider's prices, summed (`run_usage`
 `price`), so a resumed session still counts each turn's own share; a model
-without a price leaves the cost `null` and the tokens recorded. With
+without a price leaves the cost `null` and the tokens recorded. An Anthropic
+model bills a cache write by how long it lasts (five minutes at 1.25x input,
+one hour at 2x: `ModelPrice.cache_write_1h_usd_per_mtok`, from the built-in
+table). A request's usage says which (`cache_creation`), and so does a result
+whose turn made all of its writes; writes whose duration is not known are
+priced at the one-hour rate, so the cost is never below what was spent. A
+spawned run at provider prices whose writes do not say gives no output. With
 `provider_price` the per-run cap (`run_budget_usd`) is not `--max-budget-usd`
 (it would count Claude's prices): the run's recorder adds up its `usage`
 events (each request's final `message_delta` usage) at the provider's prices,
@@ -5267,6 +5273,53 @@ will.
   lists runtimes, types and profiles without the processor among their roles,
   in their `used_by` or `no_tools` among their capabilities: what the Manager
   sees is what it saw before the role.
+
+### Consults of the advisor
+
+A consult (`looper/agents/advisor.py`; [advisor RFC](rfcs/advisor-v0.zh-CN.md)) asks a stronger model about one
+step, through an abstract request that code checks first. Nothing starts one yet: the Planner's side comes behind
+the project switch `advisor` (RFC section 11).
+
+- **Two roles with no tools.** `advisor` answers; `advice_check` judges a request before it is sent. Their
+  runtime needs `run` and `no_tools` (`ROLE_CAPABILITIES`). Only their role layer (Settings → Roles) chooses their
+  Agent Profile and environment: the shared defaults and the project layers are for the roles with tools. With
+  none chosen each runs its own built-in profile (`profile_registry.BUILTIN_ROLE_PROFILES`, seeded with the schema
+  in `seeds.sql`): `claude-code/fable-5-2` (`claude-fable-5-2`, effort `high`) and `claude-code/haiku-5-5`
+  (`claude-haiku-5-5`). Without its built-in profile a role does not run, and no other model takes its place.
+  Their system prompt replaces the runtime's: the role prompt (`role_configs`) and the reply contract
+  (`advice.ADVISOR_CONTRACT`, `advice.JUDGE_CONTRACT`), with no harness.
+- **A consult** is an `agent_spawns` row (`open_consult`, `drafting`). Each request (`submit`) passes three checks
+  in order while the row is `linting`:
+  - format (`advice.parse_request`, AdviceRequest v1: typed fields within their limits, the kind's required items,
+    at most 12,000 characters; a checkpoint takes only `plan_review`);
+  - code (`advice_lint.lint`: secrets, a binding's real value however short, absolute paths of any root, URIs of
+    any scheme and the project's internal domains, e-mail and IPv4 or IPv6 addresses and ids, raw logs and
+    Python, Java, JavaScript or Go stacks, dangling references, and more than 30% of the request's 12-character
+    windows copied from the local material). Each text is also read NFKC-normalized without zero-width
+    characters, with its escapes decoded and its Base64 runs decoded once; a hit there points at the characters
+    as written;
+  - the judge (one `advice_check` run over the request alone: standalone, no leak, answerable at least 0.6). Its
+    whole reply must be the one JSON object of `advice.JUDGE_CONTRACT`, every key and value typed: leaks by
+    category and field, what is missing by field and a reason code (`advice.MISSING_REASONS`). Anything else,
+    such as a verdict quoted inside other text, fails the judge.
+- **When a check fails**, the request goes back with what to fix. The message names the category and position,
+  never what was matched (a key the request should not have is named by its place among the keys), and the row
+  records the same. After 2 returns the consult is `blocked`. A judge that cannot judge fails the consult: no
+  request goes out unjudged.
+- **A request that passes** becomes the consult's question (`advisor_advice`) and starts a round of the advisor
+  (`spawn.run_child`, a fresh process each round). Its answer must fit AdviceResponse v1 (`advice.parse_response`:
+  every container and element of its type), or the consult fails with the round's spend booked.
+- **Rounds.** A `needs_info` answer waits for the Planner's supplement, which is checked again. A consult has at
+  most 3 rounds.
+- **Refusals.** A run whose model refused (`stop_reason: refusal`), or that another model answered, fails as
+  `refused`.
+- **Budget.** Each round's `--max-budget-usd` is what the consult has left (the judge's cost included). With less
+  than 0.10 USD left, the consult is `over_budget`.
+- **Records.** Every run's record has `run_kind` `advisor` or `advice_check` and the Planner's turn as its
+  `parent_record_id`. Its cost is the task's, counted in the Planner's share of `task_costs`. A judge's record keeps
+  none of the request: its input is the request's sha256 and length, its stream only the typed events
+  (`processor.typed_events`), and it has no output text.
+- **Restarts.** At startup, a consult a stopped server left `linting` or `asking` fails (`interrupted`).
 
 ### Turns Claude runs on its own
 

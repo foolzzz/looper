@@ -70,7 +70,7 @@ def test_nonempty_full_snapshot_preserves_collections_secrets_prices_and_usage(t
             assert account["env"] == [{"key": "EXAMPLE_VALUE", "value": "synthetic-env-value"}]
             assert account["endpoints"][0]["base_url"] == "https://example.invalid"
             assert {p["login"]["state"] for p in view["providers"] if p["login"]} == {"chatgpt", "unavailable"}
-            profile = view["profiles"][0]
+            profile = next(p for p in view["profiles"] if p["profile_id"] == "agent-claude-code-opus")
             assert profile["used_by"]["layers"] == [{"scope": "system", "role": None, "project_id": None, "project_name": None}]
             assert profile["used_by"]["managers"] == ["Example"]
             assert profile["used_by"]["manager_sessions"] == ["manager-example"]

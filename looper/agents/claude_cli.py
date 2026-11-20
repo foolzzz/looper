@@ -1461,6 +1461,7 @@ class ClaudeRunRecorder:
         keep: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
         run_kind: str | None = None,
         parent_record_id: int | None = None,
+        keep_output: bool = True,
     ) -> None:
         self._agent_id = agent_id
         # What kind of run it is (None: what its agent id says) and the run that started it (``llm_records``).
@@ -1469,6 +1470,7 @@ class ClaudeRunRecorder:
         # What the record keeps of each event: the event to store, or None for nothing (None: each one but usage
         # and partial deltas, whole); every event is still counted.
         self._keep = keep
+        self._keep_output = keep_output  # False: the record never holds the run's output text
         self._autonomous = autonomous
         # A fresh whole process reports its own totals; a fork/resume also reports its inherited history.
         self._whole_process = whole_process
@@ -1874,6 +1876,8 @@ class ClaudeRunRecorder:
         if self._record_id is None or self._closed:
             return
         self._closed = True
+        if not self._keep_output:
+            output_text = None
         from .llmrec.control import release
 
         release(self._record_id, end_route=self._whole_process)

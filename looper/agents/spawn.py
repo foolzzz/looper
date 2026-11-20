@@ -9,7 +9,8 @@ do:
 - **Bounds.** ``single_run.run_once`` with one deadline over writing the prompt, reading the reply and waiting for
   exit, the process tree ended however it ends; the per-run cap (``--max-budget-usd`` for a runtime whose own figure
   is the run's cost), then the run's recorded cost (else its runtime's own figure) checked against it. A cap the run
-  reached, a cost over it or a cost still unknown gives no output. Since that cap is soft (the request that crosses
+  reached, a cost over it or a cost still unknown gives no output; so does a cost at provider prices whose cache
+  writes do not say how long they last (``run_usage.cache_split_known``), since it is not exact. Since that cap is soft (the request that crosses
   it is already paid, and its answer dropped), a run with less than ``MIN_RUN_USD`` left does not start.
 - **Refusals.** A run that cannot start says why before any process starts (``ChildFailure.UNAVAILABLE``): its
   settings or Agent Profile cannot run, its runtime has no mode without tools or cannot replace its system prompt,
@@ -26,6 +27,7 @@ round, moves its row itself (``db.agent_spawns``) and calls ``run_child`` for ea
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import tempfile
@@ -91,10 +93,20 @@ class ChildRun:
     max_turns: int = 2
     role: AgentType | None = None
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    # Its kind of run in llm_records, when not its spawn kind's (a judge's run for an advisor's consult).
+    run_kind: str | None = None
+    # Whether its record keeps none of its text: its input only as a reference (its digest and length), its stream
+    # only as typed events (``processor.typed_events``), no output and no process output in its errors. A judge's
+    # run is private: what it reads may be a request it sends back.
+    private: bool = False
+
+    @property
+    def record_kind(self) -> str:
+        return self.run_kind or _KINDS[self.kind][1]
 
     @property
     def agent_id(self) -> str:
-        return f"{self.kind.value}-{self.run_id}"
+        return f"{self.record_kind}-{self.run_id}"
 
 
 @dataclass(frozen=True)
@@ -175,10 +187,12 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
     from . import single_run
     from ..db import llm_records
     from .claude_cli import ClaudeRunRecorder
-    from .processor import run_cost
-    from .runtimes import RuntimeUnsupported
+    from .processor import run_cost, typed_events
+    from .run_usage import cache_split_known
+    from .runtimes import CostSource, RuntimeUnsupported
+    from .system_prompt import sha256_text
 
-    access, run_kind, _ = _KINDS[child.kind]
+    access, run_kind = _KINDS[child.kind][0], child.record_kind
     cap = min(cap_usd, settings.max_budget_usd or cap_usd)
     if cap < MIN_RUN_USD:
         return ChildResult(None, failure=ChildFailure.BUDGET,
@@ -195,15 +209,20 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
                                                  launch=launch, max_turns=child.max_turns)
         except RuntimeUnsupported as exc:
             return ChildResult(None, failure=ChildFailure.UNAVAILABLE, detail=str(exc))
+        input_text = child.prompt
+        if child.private:
+            input_text = json.dumps({"sha256": sha256_text(child.prompt), "chars": len(child.prompt)},
+                                    separators=(",", ":"), sort_keys=True)
         recorder = ClaudeRunRecorder(agent_id=child.agent_id, task_id=parent.task_id, command=command,
-                                     cwd=str(directory), input_text=child.prompt, step_id=parent.step_id,
+                                     cwd=str(directory), input_text=input_text, step_id=parent.step_id,
                                      system_prompt=child.system_prompt, launch=launch, whole_process=True,
-                                     run_kind=run_kind, parent_record_id=parent.record_id)
+                                     run_kind=run_kind, parent_record_id=parent.record_id,
+                                     keep=typed_events if child.private else None, keep_output=not child.private)
         await recorder.start()
         try:
             finished = await single_run.run_once(
                 recorder, command, cwd=str(directory), prompt=child.prompt, launch=launch, timeout=child.timeout_s,
-                what=f"the {child.kind.value} run", label=f"{child.kind.value} {child.agent_id}")
+                what=f"the {child.kind.value} run", label=f"{child.kind.value} {child.agent_id}", quiet=child.private)
         except single_run.StartFailed as exc:
             return ChildResult(None, recorder.record_id, failure=ChildFailure.RUNTIME,
                                detail=f"its runtime does not start: {exc}")
@@ -229,6 +248,9 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
         failed = ChildFailure.BUDGET, f"it reached its spend cap of {cap:g} USD"
     elif (why := single_run.unsuccessful(result)) is not None:
         failed = ChildFailure.RUNTIME, why
+    elif launch.cost_source is CostSource.PROVIDER_PRICE and not cache_split_known(result):
+        failed = ChildFailure.BUDGET, ("its cache writes do not say how long they last, so its cost at its "
+                                       f"provider's prices is not exact and its cap of {cap:g} USD cannot be checked")
     elif cost is None:
         failed = ChildFailure.BUDGET, f"its cost is unknown, so its cap of {cap:g} USD cannot be checked"
     elif cost > cap:

@@ -326,8 +326,9 @@ class TestClaudeRunRecorder:
         assert saved["compactions"] == []
         assert (saved["input_tokens"], saved["output_tokens"], saved["cache_read_tokens"],
                 saved["cache_creation_tokens"]) == (18, 7, 36640, 6703)
-        # Only the visible requests, at Haiku's prices; never the session's total_cost_usd.
-        assert saved["cost_usd"] == pytest.approx((18 + 7 * 5 + 36640 * 0.1 + 6703 * 1.25) / 1_000_000)
+        # Only the visible requests, at Haiku's prices (their writes are one-hour ones); never the session's
+        # total_cost_usd.
+        assert saved["cost_usd"] == pytest.approx((18 + 7 * 5 + 36640 * 0.1 + 6703 * 2.0) / 1_000_000)
 
     @pytest.mark.parametrize(("prior_event", "cost"), [
         (None, 0.3),

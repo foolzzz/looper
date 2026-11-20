@@ -73,6 +73,9 @@ class Usage:
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
     cache_creation_tokens: int | None = None
+    # The part of ``cache_creation_tokens`` written for an hour rather than five minutes (a request's
+    # ``cache_creation.ephemeral_1h_input_tokens``); None when the split is not reported.
+    cache_creation_1h_tokens: int | None = None
 
     def since(self, earlier: Usage) -> Usage:
         """What was spent between ``earlier`` totals and these.
@@ -120,6 +123,7 @@ class Usage:
         return cls(
             cost_usd=_dollars(data.get("cost_usd")),
             **{name: _count(data.get(name)) for name in _TOKEN_FIELDS},
+            cache_creation_1h_tokens=_count(data.get("cache_creation_1h_tokens")),
         )
 
 
@@ -146,8 +150,15 @@ def reported_totals(result_event: dict[str, Any] | None, price: Price | None = N
     if not isinstance(models, dict) or not models:
         return totals
     per_model = {str(name): _model_tokens(usage) for name, usage in models.items() if isinstance(usage, dict)}
+    # modelUsage does not split a model's cache writes by how long they last; the turn's own usage does. When one
+    # model wrote them all and the turn's writes are all of them (no request beside the turn's), that is their split.
+    writers = [name for name, usage in per_model.items() if usage.cache_creation_tokens]
+    turn = turn_tokens(result)
+    if (len(writers) == 1 and turn.cache_creation_1h_tokens is not None
+            and per_model[writers[0]].cache_creation_tokens == turn.cache_creation_tokens):
+        per_model[writers[0]] = replace(per_model[writers[0]], cache_creation_1h_tokens=turn.cache_creation_1h_tokens)
     sums: dict[str, Any] = {}
-    for name, (model_key, _) in _TOKEN_FIELDS.items():
+    for name in (*_TOKEN_FIELDS, "cache_creation_1h_tokens"):
         counts = [getattr(usage, name) for usage in per_model.values()]
         if counts and all(count is not None for count in counts):
             sums[name] = sum(counts)
@@ -159,10 +170,22 @@ def reported_totals(result_event: dict[str, Any] | None, price: Price | None = N
 
 def request_tokens(usage: Any) -> Usage:
     """The tokens of one model request from its API ``usage`` (``input_tokens``, ``output_tokens``,
-    ``cache_read_input_tokens``, ``cache_creation_input_tokens``)."""
+    ``cache_read_input_tokens``, ``cache_creation_input_tokens``, and the one-hour part of the writes from
+    ``cache_creation``)."""
     if not isinstance(usage, dict):
         return Usage()
-    return Usage(**{name: _count(usage.get(key)) for name, (_, key) in _TOKEN_FIELDS.items()})
+    split = usage.get("cache_creation")
+    one_hour = _count(split.get("ephemeral_1h_input_tokens", 0)) if isinstance(split, dict) else None
+    return Usage(**{name: _count(usage.get(key)) for name, (_, key) in _TOKEN_FIELDS.items()},
+                 cache_creation_1h_tokens=one_hour)
+
+
+def cache_split_known(result_event: dict[str, Any] | None) -> bool:
+    """Whether every cache write the result reports is known to be a five-minute or a one-hour one."""
+    totals = reported_totals(result_event)
+    if totals.cache_creation_tokens is None:  # no modelUsage: the turn's own usage is all it reports
+        totals = turn_tokens(result_event)
+    return not totals.cache_creation_tokens or totals.cache_creation_1h_tokens is not None
 
 
 def turn_tokens(result_event: dict[str, Any] | None) -> Usage:

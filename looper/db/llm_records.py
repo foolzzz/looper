@@ -385,10 +385,13 @@ _ROLE_FILTERS = {
 }
 # A task's step runs: its Workers' and its Reviewers'.
 _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
-# The agents that work on one task, whose runs make up its cost; the Manager is not one of them.
+# The agents that work on one task, whose runs make up its cost; the Manager is not one of them. The runs the Planner's
+# consults of the advisor start (the advisor's and its judge's) are the Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
+_PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check')"
 _TASK_ROLE = (
-    "CASE " + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
+    f"CASE WHEN {_PLANNER_SPAWNS} THEN 'planner' "
+    + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
 )
 # A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"

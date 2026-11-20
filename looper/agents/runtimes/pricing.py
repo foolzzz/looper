@@ -54,12 +54,15 @@ PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """A model's four prices in USD per million tokens; None where unknown."""
+    """A model's four prices in USD per million tokens, None where unknown, and for a model whose cache writes are
+    billed by how long they last, the one-hour write's (``cache_write_usd_per_mtok`` is then the five-minute one's).
+    """
 
     input_usd_per_mtok: float | None = None
     output_usd_per_mtok: float | None = None
     cache_read_usd_per_mtok: float | None = None
     cache_write_usd_per_mtok: float | None = None
+    cache_write_1h_usd_per_mtok: float | None = None
 
     @property
     def complete(self) -> bool:
@@ -67,12 +70,22 @@ class ModelPrice:
         return all(getattr(self, name) is not None for name in PRICE_FIELDS)
 
     def cost(self, usage: Usage) -> float | None:
-        """What ``usage``'s tokens cost: None when it reports no tokens, or uses a kind whose price is unknown."""
+        """What ``usage``'s tokens cost: None when it reports no tokens, or uses a kind whose price is unknown.
+
+        With a one-hour write price, the writes ``usage`` says were for an hour are priced at it and the rest at the
+        five-minute price; writes whose duration it does not say are all priced at the one-hour price, the higher,
+        so the figure is never below what was spent. A one-hour write without that price is unpriced."""
         counts = (usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_creation_tokens)
         if all(count is None for count in counts):
             return None
+        written = usage.cache_creation_tokens or 0
+        one_hour = usage.cache_creation_1h_tokens
+        if self.cache_write_1h_usd_per_mtok is not None and one_hour is None:
+            one_hour = written  # its duration unknown: priced as the dearer write
+        one_hour = min(one_hour or 0, written)
         total = 0.0
-        for count, name in zip(counts, PRICE_FIELDS):
+        for count, name in (*zip(counts[:3], PRICE_FIELDS[:3]), (written - one_hour, "cache_write_usd_per_mtok"),
+                            (one_hour, "cache_write_1h_usd_per_mtok")):
             if not count:
                 continue
             price = getattr(self, name)
@@ -82,7 +95,11 @@ class ModelPrice:
         return round(total / 1_000_000, 10)
 
     def view(self) -> dict[str, float | None]:
-        return {item.name: getattr(self, item.name) for item in fields(self)}
+        """The four prices, and the one-hour write's when the model has one."""
+        view = {name: getattr(self, name) for name in PRICE_FIELDS}
+        if self.cache_write_1h_usd_per_mtok is not None:
+            view["cache_write_1h_usd_per_mtok"] = self.cache_write_1h_usd_per_mtok
+        return view
 
 
 PRICES_AS_OF = "2026-10-14"
@@ -95,17 +112,22 @@ PRICE_SOURCES = (
 )
 
 
-def _p(input_usd: float, output_usd: float, cache_read_usd: float, cache_write_usd: float) -> ModelPrice:
-    return ModelPrice(input_usd, output_usd, cache_read_usd, cache_write_usd)
+def _p(input_usd: float, output_usd: float, cache_read_usd: float, cache_write_usd: float,
+       cache_write_1h_usd: float | None = None) -> ModelPrice:
+    return ModelPrice(input_usd, output_usd, cache_read_usd, cache_write_usd, cache_write_1h_usd)
 
 
-# Model -> (input, output, cache read, cache write), USD per million tokens, as of PRICES_AS_OF.
+# Model -> (input, output, cache read, cache write[, one-hour cache write]), USD per million tokens, as of
+# PRICES_AS_OF.
 BUILTIN_PRICES: Mapping[str, ModelPrice] = {
-    # Anthropic: a 5-minute cache write is 1.25x input.
-    "claude-fable-5-1": _p(10.00, 50.00, 0.25, 12.50),
-    "claude-opus-5-5": _p(4.00, 20.00, 0.20, 5.00),
-    "claude-sonnet-5-5": _p(2.00, 10.00, 0.20, 2.50),
-    "claude-haiku-4-5": _p(1.00, 5.00, 0.10, 1.25),
+    # Anthropic: a five-minute cache write is 1.25x input, a one-hour one 2x input (Claude Code writes mostly
+    # one-hour entries). Matches Claude Code 2.1.328's own figure for its runs (checked 2026-11-19: Fable 5.2's
+    # one-hour write at 16 USD).
+    "claude-fable-5-2": _p(8.00, 40.00, 0.20, 10.00, 16.00),
+    "claude-fable-5-1": _p(10.00, 50.00, 0.25, 12.50, 20.00),
+    "claude-opus-5-5": _p(4.00, 20.00, 0.20, 5.00, 8.00),
+    "claude-sonnet-5-5": _p(2.00, 10.00, 0.20, 2.50, 4.00),
+    "claude-haiku-4-5": _p(1.00, 5.00, 0.10, 1.25, 2.00),
     # OpenAI, standard tier, up to 272K input tokens: GPT-5.6 and later bill a cache write at 1.25x input.
     "gpt-6.1-sol": _p(2.00, 10.00, 0.10, 2.50),
     "gpt-6-sol": _p(2.00, 10.00, 0.20, 2.50),
@@ -139,6 +161,7 @@ BUILTIN_PRICES: Mapping[str, ModelPrice] = {
 # The model each of Claude Code's aliases runs with Claude Code's own login, as of PRICES_AS_OF (what its runs
 # report).
 CLAUDE_CODE_ALIASES: Mapping[str, str] = {
+    "fable": "claude-fable-5-2",
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",
     "haiku": "claude-haiku-4-5",
@@ -201,8 +224,10 @@ def pricer(provider: LegacyProviderSpec | ProviderSpec | ResolvedModel, *,
     for entry in entries:
         base = base_model(entry.name)
         fallback = builtin.get(aliases.get(base, base), ModelPrice())
+        # A model's one-hour write price is the built-in one: a catalog entry sets only the four.
         price = ModelPrice(**{name: getattr(entry, name) if getattr(entry, name) is not None
-                             else getattr(fallback, name) for name in PRICE_FIELDS})
+                             else getattr(fallback, name) for name in PRICE_FIELDS},
+                           cache_write_1h_usd_per_mtok=fallback.cache_write_1h_usd_per_mtok)
         exact.setdefault(entry.name, price)
         normalized.setdefault(base, price)
     return PriceSnapshot(*(MappingProxyType(values) for values in (exact, normalized, builtin, aliases)))
