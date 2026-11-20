@@ -6,7 +6,7 @@ INSERT INTO managers (id, name, tools, task_scope, idle_timeout_seconds)
 -- Login endpoints use the CLI's own connection; no token or URL is copied.
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
 VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
-        ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'mcp',
+        ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'headless_compaction', 'mcp',
               'no_tools', 'resident_session', 'resume', 'run'], true)
 ON CONFLICT DO NOTHING;
 INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)

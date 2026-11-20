@@ -59,6 +59,7 @@ The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
 from __future__ import annotations
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -193,6 +194,7 @@ class Capability(str, Enum):
     MCP = "mcp"  # it loads the MCP servers Looper gives it
     ADD_DIRS = "add_dirs"  # it reads extra directories (project knowledge)
     COMPACTION_EVENTS = "compaction_events"  # it reports context compactions
+    HEADLESS_COMPACTION = "headless_compaction"  # /compact on a resumed resident session reports compact_boundary
     AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so
     READ_TOOLS = "read_tools"  # it can run with only the tools that read (OMP's --tools), keeping its MCP tools
     COST_REPORT = "cost_report"  # it reports what a run cost
@@ -409,6 +411,30 @@ def runtime_prompt_text(launch: Launch, looper_prompt: str, *prefixes: str, keep
     return first + "\n\n---\n\n".join(parts)
 
 
+@dataclass(frozen=True)
+class LoadedSources:
+    """What a launch's agent can use from the catalog, as its runtime really loads it: MCP servers by name (Looper's
+    own included when given) and skills by name. Nothing a runtime leaves out or was not checked to load."""
+
+    mcp_servers: tuple[str, ...] = ()
+    skills: tuple[str, ...] = ()
+
+
+def library_mcp_servers(library: Any) -> dict[str, dict[str, Any]]:
+    """The MCP servers of a run's ``--mcp-config`` file (``mcp.write_config``), by name, in Claude Code's shape."""
+    if not library.mcp_config:
+        return {}
+    return dict(json.loads(Path(library.mcp_config).read_text(encoding="utf-8")).get("mcpServers") or {})
+
+
+def plugin_skills(directories: Sequence[str | Path]) -> tuple[str, ...]:
+    """The skills of plugin directories: each ``skills/<name>/SKILL.md``, named ``<name>``."""
+    return tuple(sorted({skill.name for directory in map(Path, directories)
+                         for skill in ((Path(directory) / "skills").iterdir()
+                                       if (Path(directory) / "skills").is_dir() else ())
+                         if (skill / "SKILL.md").is_file()}))
+
+
 class RuntimeAdapter(ABC):
     """One runtime type. Instances are stateless; ``ADAPTERS`` holds one per type."""
 
@@ -428,6 +454,9 @@ class RuntimeAdapter(ABC):
     # Its usage events come while a run goes on (each model request, message or step), so the dashboard shows the
     # run's tokens per minute; False: they come only when a turn ends (Codex, Coco, Cursor), or it is not known.
     streams_usage: ClassVar[bool] = False
+    # Its resident stream reports request-local input context via request_context. Turn/session token totals
+    # (including Codex's codex_usage) cannot measure this. Unknown size must preserve resume without this signal.
+    reports_request_context: ClassVar[bool] = False
     # Its resident session's stream reports every compaction of the session's context (``system`` /
     # ``compact_boundary``), so the Manager knows when the session lost what its earlier turns showed. Not a
     # ``Capability``: those are stored with each runtime row (``agent_runtimes.capabilities``, whose CHECK lists them)
@@ -715,6 +744,16 @@ class RuntimeAdapter(ABC):
         """What the runtime adds to a run's record, such as the installed items it could not load; nothing
         unless the adapter says otherwise."""
         return {}
+
+    def loaded_sources(self, launch: Launch) -> LoadedSources:
+        """The catalog's MCP servers and skills this launch's agent really gets; none unless the adapter shows
+        which it loads (a runtime not checked claims nothing)."""
+        return LoadedSources()
+
+    def web_tools(self, launch: Launch) -> bool:
+        """Whether this launch's agent can search the web and read pages with tools of its own; False unless the
+        adapter shows it has them with this launch's configuration."""
+        return False
 
 
 def room_push(launch: Launch) -> RoomPush:
