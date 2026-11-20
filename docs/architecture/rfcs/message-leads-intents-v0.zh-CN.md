@@ -130,16 +130,16 @@ tasked、rejected、merged 是终态。
 
 ## 9. 并行切片与冻结接口
 
-**F 基础（#1452，先合入）：** 迁移 `message_leads`（第 3 节的全部表）；`looper/agents/leads_model.py`（类型、状态、编号、设置键 `leads.enabled`、`leads.valid_days`、`intents.enabled`、`NOTICE`、`shown_state`、`leads_enabled()`、`intents_enabled()`、`valid_days()`）；`looper/agents/leads.py` 的 `search()`、`lead_view()`、`source_view()`、`chat_link()`；`tests/leads_support.py`。五个切片都以它为基线，按下表各自拥有文件，只通过表和下列接口相互依赖；各自的 PR 默认关闭、可以独立回滚。
+**F 基础（#1452，先合入）：** 迁移 `message_leads`（第 3 节的全部表）；`looper/agents/leads_model.py`（类型、状态、编号、设置键 `leads.enabled`、`leads.valid_days`、`intents.enabled`、`NOTICE`、`shown_state`、`leads_enabled()`、`intents_enabled()`、`valid_days()`）；`looper/agents/leads.py` 的 `search()`、`lead_view()`、`source_view()`、`chat_link()`；`looper/agents/operator_identity.py`（`operator_sender_id(channel_id)`、`is_operator(...)`：操作者本人回合的唯一判断）；`tests/leads_support.py`。五个切片都以它为基线，按下表各自拥有文件，只通过表和下列接口相互依赖；各自的 PR 默认关闭、可以独立回滚。
 
 | 切片 | 交付 | 提供给别人的接口 | 依赖 |
 |---|---|---|---|
-| **a** 线索的命令行与操作接口 | `looper leads search\|mark\|delete`；v1 `leads.search`、`leads.mark`、`leads.delete`、`leads.settings_get`、`leads.settings_put`、`message_stream.extraction_chats`、`message_stream.set_extraction`；关闭线索时停用线索订阅；客户端 skill 一句话 | 上述 v1 操作的 JSON（e 用） | F |
+| **a** 线索的命令行与操作接口 | `looper leads search\|mark\|delete`；v1 `leads.search`、`leads.mark`、`leads.delete`、`leads.settings_get`、`leads.settings_put`、`leads.chats`、`leads.set_chat`；关闭线索时停用线索订阅；客户端 skill 一句话 | 上述 v1 操作的 JSON（e 用） | F |
 | **b** 抽取运行 | `processor.run(contract=)`；`output_kind` 的 `leads`、`intents` 和预设；抽取窗口、渲染、解析、入库、补跑；启用确认；`looper msgflow leads-backfill`；v1 `schedule_admin.subscription_preset`；processor 评测 | 写入的 `message_leads`、`intents` 行（d、c 读）；预设 JSON（e 用） | F |
-| **c** Manager 工具 | `looper_leads_search`、`Tool.audience`、`Tool.audit_result`、契约一节、追加的查询行、群聊兜底、进程签名；渠道配置 `operator_sender_id` 的校验与读取（账本 L2 先合入就复用）；对话评测 | `looper.agents.operator_identity`：`operator_sender_id(channel_id)`、`is_operator(...)`（d 用；签名冻结在 d 的任务卡里，c 实现，d 在 c 合入前用同签名的本地替身） | F |
-| **d** 意图对象、类型与推送 | `db.intents.transition`；建任务；推送服务（推送、新进展、过期、最终状态与兜底）；Manager 里的回复路由；v1 `intents.*`、`intent_types.*`、`intent_bindings.*`、`intent_alert_senders.*`、`intents.settings_*` | 上述 v1 操作的 JSON（e 用） | F；c 的 `operator_identity` |
-| **e** 界面 | 意图页（意图、类型与历史、会话绑定、告警机器人、采纳率）；消息流页的「线索」标签和整理范围；Schedules 新建订阅的两个预设；Settings 里两个开关 | — | F；a、b、d 的 JSON（先按冻结的形状写测试，接口合入后做真实路径截图） |
+| **c** Manager 工具 | `looper_leads_search`、`Tool.audience`、`Tool.audit_result`、契约一节、追加的查询行、群聊兜底、进程签名；渠道配置 `operator_sender_id` 的校验（账本 L2 先合入就复用）；对话评测 | — | F |
+| **d** 意图对象、类型与推送 | `db.intents.transition`；建任务；推送服务（推送、新进展、过期、最终状态与兜底）；`ChannelRegistry.edit`；Manager 里的回复路由；v1 `intents.*`、`intent_types.*`、`intent_bindings.*`、`intent_alert_senders.*`、`intents.settings_*` | 上述 v1 操作的 JSON（e 用） | F；读 b 写的 `intents` 行（测试里用合成行） |
+| **e** 界面 | 意图页（意图、类型与历史、会话绑定、告警机器人、采纳率）；消息流页的「线索」标签和整理范围；Schedules 新建订阅的两个预设；Settings 里两个开关；渠道设置里的「我的 ID」 | — | F；a、b、d 的 JSON（先按冻结的形状写测试，接口合入后做真实路径截图） |
 
-五张任务卡写清了每个切片的文件、函数签名、JSON 形状、测试、真实路径（各用自己的端口和一次性数据库）和分支基线。合入顺序：F → a、b、c 任意顺序 → d（若 c 未合入，d 合入前改用 c 的实现）→ e。b 合入后，协调者先跑回填的 dry-run 报给维护者。
+五张任务卡写清了每个切片的文件、函数签名、JSON 形状、测试、真实路径（各用自己的端口和一次性数据库）和分支基线。合入顺序：F → a、b、c、d 任意顺序 → e。b 合入后，协调者先跑回填的 dry-run 报给维护者。
 
 **需要核实：** 飞书和 Telegram 机器人编辑自己消息的时限（d）；飞书消息级链接的格式（v0 先给会话链接）；来源的 `user_open_id` 和机器人的操作者 ID 是否同一个 open_id（按应用区分，分开存）；Sonnet 在 500 条窗口上的 JSON 丢弃率和每条的实际花费（b）。
