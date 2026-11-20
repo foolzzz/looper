@@ -1,7 +1,7 @@
 # RFC：记忆写入路径 v0（记忆候选 → 操作者确认 → 写进 vault）
 
-- **状态：** 草案，只有文档。第 2 节的 P1–P5 是已定的产品决定，不再讨论；D1–D14 是本文的选择；第 14 节的问题各附推荐答案，等维护者答复后按第 13 节的 PR 顺序实现。
-- **需求：** 值得长期记住的内容（操作者和 Manager 的对话、结束的任务的经验、消息线索）先变成**记忆候选**；操作者逐条确认（dashboard 的记忆页，或在自己的私聊里回复，和意图的「建 / 驳回 I-NNNN」一样）；只有确认过的候选才由 Looper 写进操作者 vault 的权威区（下文的「记忆区」，例如 `codex-mem/`）。没确认的永远不写。Looper 的 PostgreSQL 只暂存候选和索引，vault 仍是权威。
+- **状态：** 决定已定，只有文档。第 2 节的 P1–P6 是产品决定；D1–D14 是本文的选择，其中被第 14 节问到的都已由维护者在 2026-11-20 确认；D15–D24 是维护者对 Q1–Q14 的其余答复和本文为分层记忆留的位置。本文合入后按第 13 节的 PR 顺序实现。
+- **需求：** 值得长期记住的内容（操作者和 Manager 的对话、结束的任务的经验、消息线索）先变成**记忆候选**；操作者逐条确认（dashboard 的记忆页，或在自己的私聊里回复，和意图的「建 / 驳回 I-NNNN」一样）；只有确认过的候选才由 Looper 写进操作者 vault 的权威区（下文的「记忆区」，例如 `codex-mem/`）。没确认的永远不写进 vault。Looper 的 PostgreSQL 只暂存候选和索引，vault 仍是权威。分层记忆里在 PG 中自动生效的任务级经验（P6）由之后的 RFC 设计，本文只在表里给它留好位置（第 4.4 节）。
 - **相关：** [Obsidian 知识库 RFC](obsidian-knowledge-v0.zh-CN.md)（读写工具、`[VAULT]` 收尾）、[消息线索与意图 RFC](message-leads-intents-v0.zh-CN.md)（线索、意图的推送与回复、操作者本人的回合、群聊兜底、R-6 上线门槛）、对外动作审查 RFC（评审中的 #1469：动作级别、不可信内容围栏）、[Manager 收尾、账本与晨报 RFC](manager-completion-ledger-v0.zh-CN.md)（「只有你本人能确认」的数据层保证）、[Agent 系统架构](../agent-system.md) 的 "The knowledge vault"。
 - **核对基线：** `main` `4abf182a1`。第 1.1 节的现状是读代码得出的，每项标了出处；第 6 节依赖的 git 行为已在临时仓库实测（第 15 节）。
 - **最近更新：** 2026-11-20
@@ -10,6 +10,8 @@
   - **种子（seed）：** 来源交给 Looper 的一条类型化的「想记住什么」：类型、陈述、理由、关键词、出处。还不是对 vault 的改动。
   - **记忆候选（candidate）：** 一个种子加上它的当前修订：对 vault 的一组类型化改动（第 3.6 节）。编号显示成 `M-0042`。
   - **内容哈希：** 一次修订的改动的规范化哈希（第 5.1 节）。确认绑定的就是它。
+  - **出处类别（`source_class`）：** 代码按出处的类型定的可信等级：`operator`（操作者本人的 Manager 回合）、`agent`（任务收尾）、`external`（线索，即外部内容）、`system`（Looper 代码生成的，v0 没有）。一条候选的类别是它所有出处里最不可信的那个。
+  - **指纹和墓碑：** 指纹是类型加规范化陈述的哈希（第 7 节）；操作者删除一条候选后只留它的指纹，即墓碑（D23）。
 
 ## 1. 背景与目标
 
@@ -25,7 +27,7 @@
 ### 1.2 目标
 
 - **G1** 三种来源（操作者本人的 Manager 对话、任务收尾、线索晋升）产出同一种候选，同一处起草、同一处确认、同一处写入。
-- **G2** 只写确认过的内容：确认绑定内容哈希，内容一变确认就失效；数据库约束保证「已确认」一定指向操作者本人的一次确认，且哈希一致。
+- **G2** 只把确认过的内容写进 vault：确认绑定内容哈希，内容一变确认就失效；数据库约束保证「已确认」一定指向操作者本人的一次确认，且哈希一致。
 - **G3** 写入完全照 vault 的规则：自己的 worktree 和分支、只暂存明确路径、只做快进合并、索引在同一个提交里、主目录的未提交改动挡路就停。
 - **G4** 每条信息只有一个家：起草前先看目录索引和相关笔记，能改已有笔记就不新建，重复的不提。
 - **G5** 来自消息的文本只进不带工具的运行、套围栏；它永远不会不经操作者读过就变成偏好或规则。
@@ -34,7 +36,8 @@
 ### 1.3 不做
 
 - 删除、移动、改名笔记（改成 `status: obsolete` 之类的状态标记属于编辑，可以做）；
-- 自动整理对话历史（定期批量回看对话，见第 14 节 Q8）；
+- 自动整理对话历史（定期批量回看对话，D17）；
+- 分层记忆的自动生效层（P6）：任务级经验在 PG 里自动生效、不写 vault、可撤销、每周批量回看。它由之后的 RFC 设计；本文只在 `memory_candidates` 里留位置，v0 不写这些保留的值（第 4.4 节）；
 - 交互式会话的写入：vault 规则允许操作者在场的交互式会话按规则直接写记忆区，不经 Looper；
 - 改 `looper_vault_write` 本身（vault 规则「无人值守写入只放行登记过的 `generated/` 目录」在代码里落实，另记待办）；
 - 写 vault 以外的地方，例如全局指令文件：候选是硬规则时只在确认页提示「这条可能该写进全局指令」，Looper 不写。
@@ -50,25 +53,36 @@
 | P3 | 线索在对外动作审查打开之前不在线上打开（线索 RFC R-6） |
 | P4 | 当前安装的知识库是只读的（记忆区，所有项目），Looper 今天不写 |
 | P5 | vault 规则：无人值守只能提议，确认后由代码按 worktree 流程提交、快进合并 |
+| P6 | 分层记忆（维护者 2026-11-20 批准方向，之后的阶段实现）：偏好、硬规则和跨项目结论走本文的「确认后写进 vault」；任务级经验（先只做从 `task_journal` 提炼的）在 PG 里自动生效，不写 vault，带出处和 90 天有效期，可以撤销，每周批量回看。P1 对写进 vault 的内容不变；自动生效层和 P1 的关系由那份 RFC 写明 |
 
 **本文的选择：**
 
 | 编号 | 内容 | 理由 |
 |---|---|---|
 | D1 | 一个对象：记忆候选（`memory_candidates`，`M-0042`）。三种来源都只产出种子，形状相同 | 确认、写入、去重各只有一份实现 |
-| D2 | 种子交给代码，由代码检索 vault，再由一个**不带工具**的角色 `memory_draft` 起草成具体改动；代码校验（第 3.5 节）。备选见第 3.7 节 | 不可信文本只进无工具运行；vault 原文不进 Manager 的共享会话；格式和去重一处实现、一份评测 |
+| D2 | 种子交给代码，由代码检索 vault，再由一个**不带工具**的角色 `memory_draft` 起草成具体改动；代码校验（第 3.5 节）。备选见第 3.7 节 | 不可信文本只进无工具运行；vault 原文不进 Manager 的共享会话；格式和去重一处实现、一份评测。维护者确认（Q1） |
 | D3 | 改动是四种类型化操作：`create_note`、`replace_note`、`append_line`、`replace_line`，不是自由格式的 diff | 可以校验、可以按当前文件重放，确认的含义确定 |
 | D4 | 确认绑定内容哈希。确认是一条 `actor_kind = 'user'` 的事件，带哈希；候选的「已确认」状态用外键指向它，且必须等于当前哈希；任何改动（编辑、重新起草）换哈希，约束逼它回到待确认 | 第 5.5 节：这样写入才不是「无人值守」 |
-| D5 | 只能在 dashboard 和操作者本人的私聊里确认；Manager、Planner、API 客户端、命令行都不能确认（数据库约束：确认事件的 `via` 只能是 `dashboard`、`lark`、`telegram`） | 模型不能确认它自己起草、操作者没看过的内容；Looper 启动的 agent 和操作者是同一个系统用户，命令行拦不住 |
-| D6 | 私聊里只能确认推送里**完整**展示过每一行改动的候选；放不下的只能去记忆页确认 | 所见即所得（同意图的「需求只用推送里展示过的字段」） |
+| D5 | 只能在 dashboard 和操作者本人的私聊里确认；Manager、Planner、API 客户端、命令行都不能确认（数据库约束：确认事件的 `via` 只能是 `dashboard`、`lark`、`telegram`） | 模型不能确认它自己起草、操作者没看过的内容；Looper 启动的 agent 和操作者是同一个系统用户，命令行拦不住。维护者确认（Q4） |
+| D6 | 私聊里只能确认推送里**完整**展示过每一行改动的候选；放不下的只能去记忆页确认 | 所见即所得（同意图的「需求只用推送里展示过的字段」）。维护者确认（Q3） |
 | D7 | 写入走 vault 的 worktree：新分支、只暂存改动的路径、提交、核对提交只含这些路径和字节、`merge --ff-only` 合回主分支、删 worktree 和分支；主目录有挡路的未提交改动就停，告诉操作者 | vault 规则（P5） |
 | D8 | 写入位置是白名单：`memory_write.root` 之下、按类型配置的目录和文件；`root` 不能和 `knowledge_vault.writable` 重叠；规则文件永远不能是目标 | 只靠一份类型化配置判断，不靠路径子串 |
-| D9 | 类型和来源的组合由代码限定：偏好和反馈只来自操作者本人的 Manager 回合；线索只能变成决定、承诺、事实、人物、项目；任务收尾只能提经验和项目（第 3.6 节） | 别人的话不能变成操作者的偏好；任务日志里没有类型化的「这是操作者本人说的」 |
+| D9 | 类型和出处类别的组合由代码限定（`memory_model.ALLOWED_CLASSES`）：偏好和反馈只能是 `operator`（操作者本人的 Manager 回合）；`external`（线索）只能变成决定、承诺、事实、人物、项目，永远不是偏好和反馈；`agent`（任务收尾）只能提经验和项目（第 3.6 节） | 别人的话不能变成操作者的偏好；任务日志里没有类型化的「这是操作者本人说的」。维护者确认（Q2） |
 | D10 | Manager 的工具 `looper_memory_propose` 只给默认 Manager，只在操作者本人的回合列出和执行；Manager 仍然没有 vault 的读工具 | 沿用线索的可用性规则和 Obsidian RFC D3 |
-| D11 | 项目打开 `memory_closeout` 时，任务结束的 `[VAULT]` 收尾换成 `[MEMORY]` 收尾：只提种子，不写 | 一个任务一次收尾；记忆区不允许直接写 |
+| D11 | 项目打开 `memory_closeout` 时，任务结束的 `[VAULT]` 收尾换成 `[MEMORY]` 收尾：只提种子，不写 | 一个任务一次收尾；记忆区不允许直接写。维护者确认（Q7） |
 | D12 | 线索晋升由操作者发起（线索页的按钮，或在本人回合里让 Manager 用 `from_lead`）；种子文本由代码从线索行取，不用模型的转述，起草时套不可信围栏 | 不让模型改写别人的话；P2、P3 |
 | D13 | 全部默认关闭；关闭时提示词、工具列表、回合消息逐字节不变（有测试） | 运维规则 |
-| D14 | 出处被删时：没写入的候选跟着删；已写入的候选在 PG 里只留元数据，vault 里的笔记不动 | 摘要可能在复述被删的消息（同线索 R-3）；写进 vault 的内容是操作者确认过的权威，Looper 从不删 vault 的内容 |
+| D14 | 出处被删时：没写入的候选跟着删；已写入的候选在 PG 里只留元数据，vault 里的笔记不动 | 摘要可能在复述被删的消息（同线索 R-3）；写进 vault 的内容是操作者确认过的权威，Looper 从不删 vault 的内容。维护者确认（Q12） |
+| D15 | 待确认的候选 7 天过期，过期后可以在记忆页恢复 | 维护者（Q5） |
+| D16 | 写入时目标笔记变了：自动重新起草一次，之后照样要重新确认；再冲突就等操作者；不自动三方合并整篇内容 | 维护者（Q6）：合并的结果是操作者没看过的内容 |
+| D17 | v0 不定期批量回看对话，只靠对话里的工具 | 维护者（Q8） |
+| D18 | `knowledge_vault.path` 保持指向记忆区（`root = ""`）；vault 级规则里约束写入的几条由代码执行 | 维护者（Q9）：改指 vault 根目录会让任务的 agent 也读到个人笔记 |
+| D19 | worktree 默认放在 `<runtime_root>/vault-worktrees`；`worktree_root` 可以设成 vault 规则要求的位置 | 维护者（Q10） |
+| D20 | 推送只发操作者私聊（`push_channel`，必须填了「我的 ID」）；没设置就只进记忆页 | 维护者（Q11），同意图 |
+| D21 | 账本里确认过的决定不自动变成候选 | 维护者（Q13）：账本是「现在要处理什么」，记忆是长期的 |
+| D22 | 私聊里的确认命令是「记」（「记 M-0042」），不用「确认」 | 维护者（Q14）：不和 Manager 的高影响确认、账本的「确认 L-…」混淆 |
+| D23 | 操作者可以删除一条候选：这一行连同修订、事件、推送立刻删掉，只留墓碑（指纹、类型、时间，没有文字和出处）。之后来自 `agent`、`external`、`system` 的同一条种子直接拒绝，不入库；操作者本人再提时照常收下，并清掉墓碑 | 删除要真的删掉文字，又不能让自动来源再把它提出来；操作者本人的新意愿优先 |
+| D24 | 分层记忆的自动生效层和本文共用 `memory_candidates`：现在就加出处类别、指纹、`supersedes`、`destination`、`valid_until`、`project_id` 和三个保留状态，v0 不写保留的值（第 4.4 节） | 晋升、替代、去重和墓碑都横跨两层；分成两张表就要重复一套，或者跨表做多态引用 |
 
 ## 3. 候选从哪里来
 
@@ -78,13 +92,13 @@
 
 | 字段 | 约束 | 说明 |
 |---|---|---|
-| `kind` | 第 3.6 节的枚举，且允许这个来源 | |
+| `kind` | 第 3.6 节的枚举，且允许这个出处类别 | |
 | `statement` | 1–300 字 | 要记住的事，一两句话，用操作者的语言 |
 | `why` | 0–300 字 | 理由或背景 |
 | `keywords` | 1–6 个，每个 1–40 字 | 检索用（第 7 节：vault 的搜索按空白分词，一整句中文是一个词，所以要短词） |
 | 出处 | 至少一条 | Manager 回合的调用、任务日志条目、线索（第 4.2 节） |
 
-代码对 `statement`、`why`、`quote` 做密钥检查（复用 `advice_lint._SECRETS`，只用这一条：路径、链接在记忆里是正常内容），命中就拒绝，说明「Looper 不往记忆里存凭据」。
+代码对 `statement`、`why`、`quote` 做密钥检查（复用 `advice_lint._SECRETS`，只用这一条：路径、链接在记忆里是正常内容），命中就拒绝，说明「Looper 不往记忆里存凭据」。代码再算指纹（第 7 节）：指纹在墓碑里时，`agent`、`external` 类的种子直接丢弃并计数，不入库；`operator` 类的照常收下并清掉墓碑（D23）。
 
 ### 3.2 操作者本人的 Manager 对话：`looper_memory_propose`
 
@@ -103,7 +117,7 @@
 **代码检查：**
 
 - `quote` 必须出现在**这个会话**里操作者本人最近 24 小时的消息中（`chat_messages` 里 `role = 'user'`、同一会话和会话通道的行，含本回合；比较前做 NFKC 并合并空白）。找不到就 `invalid`：「quote 必须是用户自己在这段对话里说的话」。这把「引用的消息、线索、文件、工具结果说的」挡在偏好之外。
-- 每个回合最多 3 条，每天最多 20 条；种子的类型必须允许 `manager_turn` 这个来源。
+- 每个回合最多 3 条，每天最多 20 条；种子的类型必须允许 `operator` 这个出处类别。
 - `revise` 的候选必须是 `pending` 且出自这个 Manager；改动成为新的种子修订，重新起草，确认（如果有）失效。
 - 写一行 `manager_actions`（参数照常记）和一行 `memory_candidate_sources`。
 
@@ -218,7 +232,7 @@ Reply with one JSON object only:
 **结果：**
 
 - `duplicate`、`skip`：`dropped`（`duplicate`、`rejected_before`），记下 `of` 指的路径，操作者在页面上看得到；
-- `same_as`：`dropped`（`same_as`，`merged_into` 指向那条），出处并到那条上；
+- `same_as`：`dropped`（`same_as`，`merged_into` 指向那条），出处并到那条上；并过去会让那条的出处类别变成它的类型不允许的（例如线索并进一条偏好）时，出处不并，这条按 `duplicate` 丢弃；
 - `revise`：那条（必须还是 `pending`）得到一个新修订（`made_by = 'redraft'`），出处并过去，确认（如果有）失效，重新推送；这条 `dropped`（`same_as`）。那条已经 `confirmed`、`writing` 或 `blocked` 时，这条留在 `drafting`，等那条写完或结束再起草；
 - `change`：存修订（第 4 节），候选进 `pending`，推送（第 5.3 节）。
 
@@ -226,18 +240,18 @@ Reply with one JSON object only:
 
 位置是 `memory_write.targets` 的类型化配置（路径相对记忆区），不是代码里的常量；下表是一个按知识、记忆分区的记忆区的示例配置。形状 `note` 是一篇一条、带索引；`entry` 是在已有页面里加或改一行。
 
-| 类型 | 含义 | 允许的来源 | 示例位置 | 形状 |
+| 类型 | 含义 | 允许的出处类别 | 示例位置 | 形状 |
 |---|---|---|---|---|
-| `preference` | 操作者的长期偏好及理由 | Manager 本人回合 | `偏好/`，索引 `偏好/_index.md` | note |
-| `feedback` | 对 agent 做事方式的纠正（「以后别…」）及理由 | Manager 本人回合 | `偏好/`（同上） | note |
-| `decision` | 重要选择、取舍和原因 | Manager 本人回合、线索 | `决策/`，及其索引 | note |
-| `lesson` | 跨项目验证过的经验、排查方法、踩坑 | Manager 本人回合、任务收尾 | `经验/`、`工作流/`、`topic/`，各自的索引 | note |
-| `fact` | 关于操作者本人和当前处境、会变的事实 | Manager 本人回合、线索 | `记忆/画像.md` | entry |
-| `commitment` | 操作者答应别人的事和期限 | Manager 本人回合、线索 | `记忆/承诺.md` | entry |
-| `person` | 和操作者有关的人：角色、找操作者做过什么 | Manager 本人回合、线索 | `记忆/人物/` | note |
-| `project` | 项目的稳定路径、命令、环境差异、状态 | 三种都可以 | `项目/`，及其索引 | note |
+| `preference` | 操作者的长期偏好及理由 | operator | `偏好/`，索引 `偏好/_index.md` | note |
+| `feedback` | 对 agent 做事方式的纠正（「以后别…」）及理由 | operator | `偏好/`（同上） | note |
+| `decision` | 重要选择、取舍和原因 | operator、external | `决策/`，及其索引 | note |
+| `lesson` | 跨项目验证过的经验、排查方法、踩坑 | operator、agent | `经验/`、`工作流/`、`topic/`，各自的索引 | note |
+| `fact` | 关于操作者本人和当前处境、会变的事实 | operator、external | `记忆/画像.md` | entry |
+| `commitment` | 操作者答应别人的事和期限 | operator、external | `记忆/承诺.md` | entry |
+| `person` | 和操作者有关的人：角色、找操作者做过什么 | operator、external | `记忆/人物/` | note |
+| `project` | 项目的稳定路径、命令、环境差异、状态 | operator、agent、external | `项目/`，及其索引 | note |
 
-- 「允许的来源」是 `memory_model.ALLOWED_SOURCES`，代码按它拒绝（D9），不在设置里，操作者改不了。
+- 「允许的出处类别」是 `memory_model.ALLOWED_CLASSES`，代码按候选的出处类别拒绝（D9），不在设置里，操作者改不了。`system` 类 v0 不产出，表里也不允许任何类型用它；之后的 RFC 要用时再加。
 - 种子是 `preference`、`feedback` 时，起草可以回 `hard_rule: true`；确认页和推送多一行「这条像是每次都要遵守的硬规则：可能还要写进全局指令（Looper 不写）」。这对应记忆区规则里「同时判断是否属于硬规则」。
 - 条目行的格式（例如带 `kind`、`source`、`confidence` 字段的一行）由规则文件和条目页自己规定，起草照着写；代码只校验第 3.5 节的通用约束。
 
@@ -261,8 +275,15 @@ CREATE TABLE IF NOT EXISTS memory_candidates (
     kind               TEXT NOT NULL CHECK (kind IN ('preference', 'feedback', 'decision', 'lesson', 'fact',
                                                      'commitment', 'person', 'project')),
     source_kind        TEXT NOT NULL CHECK (source_kind IN ('manager_turn', 'task', 'lead')),   -- the first source
+    -- The least trusted class among its sources, set by code (operator > system > agent > external); D9 reads it.
+    source_class       TEXT NOT NULL CHECK (source_class IN ('operator', 'agent', 'external', 'system')),
+    -- Where it takes effect. 'vault': written after confirmation (this RFC). 'looper': a tiered lesson in effect in
+    -- PostgreSQL only (a later RFC; v0 never writes it).
+    destination        TEXT NOT NULL DEFAULT 'vault' CHECK (destination IN ('vault', 'looper')),
     state              TEXT NOT NULL DEFAULT 'drafting' CHECK (state IN ('drafting', 'pending', 'confirmed', 'writing',
-                           'written', 'rejected', 'expired', 'conflict', 'blocked', 'dropped')),
+                           'written', 'rejected', 'expired', 'conflict', 'blocked', 'dropped',
+                           -- 'looper' only, reserved for the later RFC: v0 enters none of them
+                           'in_effect', 'revoked', 'superseded')),
     reason             TEXT CHECK (reason IN (
                            -- dropped
                            'duplicate', 'rejected_before', 'same_as', 'invalid', 'secret', 'draft_failed',
@@ -275,6 +296,11 @@ CREATE TABLE IF NOT EXISTS memory_candidates (
     statement          TEXT NOT NULL CHECK (char_length(statement) <= 300),
     why                TEXT NOT NULL DEFAULT '' CHECK (char_length(why) <= 300),
     keywords           TEXT[] NOT NULL DEFAULT '{}',
+    fingerprint        TEXT NOT NULL CHECK (fingerprint ~ '^[0-9a-f]{64}$'),   -- kind + normalized statement (section 7)
+    project_id         TEXT REFERENCES projects(id) ON DELETE SET NULL,   -- a task's project; NULL: not from a project
+    supersedes         BIGINT REFERENCES memory_candidates(id) ON DELETE SET NULL,   -- the candidate or lesson it
+                                                                                     -- replaces; v0 writes none
+    valid_until        TIMESTAMPTZ,                      -- 'looper' only: when the lesson stops applying; v0 writes none
     manager_id         TEXT REFERENCES managers(id) ON DELETE SET NULL,   -- who proposed it (manager_turn); revise checks it
     untrusted          BOOLEAN NOT NULL DEFAULT false,   -- its seed's text came from messages (a lead)
     flagged            BOOLEAN NOT NULL DEFAULT false,   -- its drafting listed instructions_seen
@@ -295,8 +321,14 @@ CREATE TABLE IF NOT EXISTS memory_candidates (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     written_at         TIMESTAMPTZ,
     CONSTRAINT memory_candidates_text CHECK (purged_at IS NOT NULL OR btrim(statement) <> ''),
-    CONSTRAINT memory_candidates_content CHECK (state IN ('drafting', 'dropped')
+    CONSTRAINT memory_candidates_content CHECK (destination = 'looper' OR state IN ('drafting', 'dropped')
                                                 OR (revision >= 1 AND content_hash IS NOT NULL)),
+    -- Two lifecycles, never mixed: a 'looper' row has no revision, confirmation, note or commit.
+    CONSTRAINT memory_candidates_tier CHECK (CASE destination
+        WHEN 'vault' THEN state NOT IN ('in_effect', 'revoked', 'superseded') AND valid_until IS NULL
+        ELSE state IN ('in_effect', 'revoked', 'superseded', 'expired', 'dropped')
+             AND revision = 0 AND note_path IS NULL END),
+    CONSTRAINT memory_candidates_supersedes CHECK (supersedes IS NULL OR supersedes <> id),
     CONSTRAINT memory_candidates_confirmed CHECK (
         (confirmed_event_id IS NULL) = (confirmed_actor IS NULL) AND (confirmed_event_id IS NULL) = (confirmed_hash IS NULL)
         AND (state IN ('confirmed', 'writing', 'written', 'blocked')) = (confirmed_event_id IS NOT NULL)
@@ -353,6 +385,8 @@ CREATE TABLE IF NOT EXISTS memory_candidate_sources (
     id                 BIGSERIAL PRIMARY KEY,
     candidate_id       BIGINT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
     kind               TEXT NOT NULL CHECK (kind IN ('manager_turn', 'journal', 'lead')),
+    source_class       TEXT GENERATED ALWAYS AS (CASE kind WHEN 'manager_turn' THEN 'operator'
+                           WHEN 'journal' THEN 'agent' WHEN 'lead' THEN 'external' END) STORED,
     manager_action_id  BIGINT REFERENCES manager_actions(id) ON DELETE CASCADE,   -- the propose call: chat, message
     journal_id         BIGINT REFERENCES task_journal(id) ON DELETE CASCADE,      -- a task's journal entry
     lead_id            BIGINT REFERENCES message_leads(id) ON DELETE CASCADE,
@@ -384,6 +418,15 @@ CREATE TABLE IF NOT EXISTS memory_posts (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- What is left after the operator deletes a candidate (D23): no text, no source.
+CREATE TABLE IF NOT EXISTS memory_tombstones (
+    fingerprint  TEXT PRIMARY KEY CHECK (fingerprint ~ '^[0-9a-f]{64}$'),
+    kind         TEXT NOT NULL,
+    destination  TEXT NOT NULL CHECK (destination IN ('vault', 'looper')),
+    deleted_via  TEXT NOT NULL CHECK (deleted_via IN ('dashboard', 'cli')),
+    deleted_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_memory_candidates_open ON memory_candidates (state, updated_at DESC)
     WHERE state NOT IN ('written', 'rejected', 'dropped');
 CREATE INDEX IF NOT EXISTS idx_memory_candidates_expiry ON memory_candidates (expires_at) WHERE state = 'pending';
@@ -391,6 +434,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_candidates_expiry ON memory_candidates (ex
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_candidates_note ON memory_candidates (note_path)
     WHERE note_path IS NOT NULL AND state IN ('pending', 'confirmed', 'writing', 'conflict', 'blocked');
 CREATE INDEX IF NOT EXISTS idx_memory_candidates_drafting ON memory_candidates (id) WHERE state = 'drafting';
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_fingerprint ON memory_candidates (fingerprint);
 CREATE INDEX IF NOT EXISTS idx_memory_events_candidate ON memory_candidate_events (candidate_id, id);
 CREATE INDEX IF NOT EXISTS idx_memory_sources_candidate ON memory_candidate_sources (candidate_id);
 CREATE INDEX IF NOT EXISTS idx_memory_sources_action ON memory_candidate_sources (manager_action_id)
@@ -427,8 +471,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_posts_external ON memory_posts (cha
 | `conflict` → `drafting` | 写入服务（自动一次）、操作者「重新起草」 | 按当前 vault 重写，之后要重新确认 |
 | `blocked` → `confirmed` | 操作者「重试」 | 内容和确认都没变，`attempts` 归零 |
 | `dropped`（`draft_failed`）→ `drafting` | 操作者「重新起草」 | |
+| 除 `writing` 外的任何状态 → 删除 | 操作者（记忆页、命令行） | 行和修订、事件、推送、出处一起删掉，写墓碑（D23）；已写入的 vault 笔记不动 |
 
-`written`、`rejected`、`dropped`（`draft_failed` 以外）是终态。
+`written`、`rejected`、`dropped`（`draft_failed` 以外）是终态。`in_effect`、`revoked`、`superseded` 和 `destination = 'looper'` 的转换由之后的 RFC 定义；v0 没有任何代码路径写它们，有测试守住。
 
 ### 4.3 出处被删与保留
 
@@ -438,6 +483,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_posts_external ON memory_posts (cha
   - Manager 被清理（`db/manager_cleanup.py`）→ `manager_actions` 级联 → 经 `manager_action_id`。**需要核实：** 会话删除（#1449）是否删除 `manager_actions`；不删的话，本文的 PR2 在会话删除里按 `(channel, chat)` 删掉对应的出处。
 - **vault 里的笔记不动：** 写进 vault 的是操作者确认过的权威内容，Looper 从不删 vault 的内容；需要改由操作者自己改。
 - **保留：** `rejected`、`dropped`、`expired` 在 `updated_at` 之后 30 天由 housekeeping 删除；`written` 留元数据，`written_at` 之后 30 天清掉修订的 `changes` 和推送的 `text`（内容在 vault 和它的 git 历史里）；`conflict`、`blocked` 不自动删，记忆页一直列着。删之前可以用 `looper memory eval-export` 把驳回的候选（含理由）导出到被 git 忽略的本机目录当评测样例，永远不进仓库。
+- **墓碑：** 不过期；记忆页的设置里显示条数，操作者可以清空。出处被删（D14）不写墓碑：同一件事从别的消息里再出现，是新的出处。
+
+### 4.4 为分层记忆留的位置
+
+方向见 P6，由之后的 RFC 实现；本节只说表里现在留什么、为什么这样留。
+
+**推荐两层共用 `memory_candidates`：**
+
+- 两层的条目是同一种东西：类型、陈述、理由、出处和出处类别。
+- 有几件事横跨两层：
+  - 一条任务级经验被证实是跨项目的结论时，晋升进 vault：新建一条 `destination = 'vault'` 的候选，`supersedes` 指向那条经验，候选写入后经验变成 `superseded`。不在同一行上换 `destination`，所以每一行只走一条生命周期；
+  - 新经验替代旧经验，也用 `supersedes`；
+  - 指纹去重和墓碑要同时看两层：操作者删掉的经验，不能被下一个任务或每周回看重新提出来，也不能再被提议进 vault。
+- 分成两张表，就要两份出处表、两套指纹和墓碑，或者跨表的多态引用（`supersedes_kind` 加 id）。
+- **代价：** 一个状态列装两条生命周期。类型化的 `destination` 把它们分开，约束 `memory_candidates_tier` 保证不混用：`vault` 行只用写入路径的状态；`looper` 行只用 `in_effect`、`revoked`、`superseded`、`expired`、`dropped`，修订、确认、笔记路径和提交一律为空。`memory_model` 里的转换表也按 `destination` 分开。
+- **备选：** 单独一张 `task_lessons` 表，只共用墓碑表和指纹函数。约束更简单，但晋升和替代要跨表引用，去重要查两张表。如果那份 RFC 发现运行时读取经验（每个任务开始时按项目和有效期取）要很多专用的列，就另加一张子表放它们，这张主表不动。
+
+**现在留下的列和值：**
+
+| 列或值 | v0 | 之后 |
+|---|---|---|
+| `source_class`（`operator`、`agent`、`external`、`system`），出处上是生成列 | 写：按出处算出，D9 和墓碑都用它 | 自动生效只给 `agent` 类的任务经验 |
+| 出处（`memory_candidate_sources`，即证据的 id） | 写 | 经验的证据是日志条目，`journal_id` 已经有了；新的证据种类是这张表加一个可空外键和 `kind` 的一个值 |
+| `fingerprint`、`memory_tombstones` | 写：去重、删除 | 同样用，也拦每周回看 |
+| `project_id` | 写：任务来源的候选记它的项目，记忆页用来筛选 | 经验的作用范围 |
+| `supersedes` | 不写：v0 的改写都是同一行的新修订 | 晋升、替代 |
+| `destination` | 只写 `vault` | `looper` |
+| `valid_until` | 不写 | 90 天有效期 |
+| 状态 `in_effect`、`revoked`、`superseded` | 不进入 | 生效、撤销、被替代 |
+
+每周回看的记录可以是事件表的一个新动作（`review`），改一个 CHECK 就行，不用改表结构。
 
 ## 5. 确认
 
@@ -604,7 +680,8 @@ Looper-Content-Sha256: 3f9a…（64 位）
 ## 7. 去重与「每条信息只有一个家」
 
 - **起草前代码先找：** 目录的索引文件总是带上（索引按一行一条列出目录里的每篇笔记，是最可靠的去重依据），再按关键词搜笔记（第 3.5 节）。`vault.search` 按空白分词，一整句中文只是一个词，所以种子带短关键词；搜不到时还有索引兜底。
-- **代码先挡完全重复：** 陈述规范化（NFKC、去空白和标点）后和这个类型里开着的候选相同的，直接并入那条（`same_as`），不跑起草。
+- **指纹：** `fingerprint = sha256(kind + "\n" + 规范化陈述)`，规范化是 NFKC、转小写、去掉所有空白和标点（Unicode 的 `Z*`、`P*` 类）。陈述改了（`revise`、操作者编辑），指纹跟着改。
+- **代码先挡完全重复：** 指纹和这个类型里一条开着的候选相同，就直接并入那条（`same_as`），不跑起草；指纹在墓碑里的按 D23 处理。
 - **起草优先改已有笔记**（契约第 2 条），重复就回 `duplicate`，被驳回过的回 `skip`，和开着的候选重叠就并入或一起改（`same_as`、`revise`）。
 - **一篇笔记同时只有一条开着的候选**（唯一索引 `idx_memory_candidates_note`）：同一篇的第二个种子只能改第一条，不能另起一条；索引和条目页用行操作，几条候选同时往里加行互不冲突。
 - **被推翻的不删：** 种子和已有内容矛盾时，起草按规则把旧内容标成被推翻或过时（`status: obsolete`、条目的 `superseded`），diff 里看得到。
@@ -654,6 +731,7 @@ looper memory list [--state open|pending|blocked|all] [--kind K] [--limit N] [--
 looper memory show M-0042 [--json]        # 当前修订的 diff、出处、标记、事件
 looper memory reject M-0042 [--reason …]
 looper memory retry M-0042                # blocked → confirmed
+looper memory delete M-0042               # 删掉这一行，只留墓碑（D23）
 looper memory check                       # 只读：设置、git 仓库、分支、进行中的操作、worktree 目录
 looper memory eval-export --out FILE      # 驳回的候选和理由，只能写到被 git 忽略的目录
 ```
@@ -662,7 +740,7 @@ looper memory eval-export --out FILE      # 驳回的候选和理由，只能写
 
 ### 9.3 `/api/v1` 操作
 
-都是 `operator_only`：`memory.list`、`memory.get`、`memory.confirm`、`memory.confirm_many`、`memory.reject`、`memory.edit`（`{candidate, content_hash, changes, confirm?}`，`content_hash` 是被编辑的那一版）、`memory.retry`、`memory.redraft`、`memory.revive`、`memory.propose_from_lead`、`memory.settings_get`、`memory.settings_put`、`memory.check`。
+都是 `operator_only`：`memory.list`、`memory.get`、`memory.confirm`、`memory.confirm_many`、`memory.reject`、`memory.edit`（`{candidate, content_hash, changes, confirm?}`，`content_hash` 是被编辑的那一版）、`memory.retry`、`memory.redraft`、`memory.revive`、`memory.delete`、`memory.tombstones_clear`、`memory.propose_from_lead`、`memory.settings_get`、`memory.settings_put`、`memory.check`。
 
 ### 9.4 Manager 的可用性
 
@@ -676,7 +754,7 @@ looper memory eval-export --out FILE      # 驳回的候选和理由，只能写
 
 ### 9.6 界面（最小可用）
 
-- **记忆页**（`#/memory`）：按状态分组的列表，待确认的在最前；每行：编号、类型、标题、目标路径、出处（会话、任务或线索，可点）、时间、标记（⚠️ 来自消息、有指令、大段删除、硬规则）。受阻和冲突的单独一组，写明原因和操作者要做什么。详情：每个文件的 diff、陈述和理由、出处、事件；按钮：确认写入、驳回（理由）、编辑（保存、保存并写入）、重试、重新起草、恢复。勾选几条可以批量确认。
+- **记忆页**（`#/memory`）：按状态分组的列表，待确认的在最前；每行：编号、类型、标题、目标路径、出处（会话、任务或线索，可点）、时间、标记（⚠️ 来自消息、有指令、大段删除、硬规则）。受阻和冲突的单独一组，写明原因和操作者要做什么。详情：每个文件的 diff、陈述和理由、出处、事件；按钮：确认写入、驳回（理由）、编辑（保存、保存并写入）、重试、重新起草、恢复、删除（说明会留墓碑，已写入的 vault 笔记不动）。勾选几条可以批量确认。
 - **Settings → Knowledge vault** 加「记忆写入」一节：开关、记忆区、类型与位置、规则文件、三个来源、推送目标、分支和 worktree 目录（只读显示，旁边「检查」按钮跑 `memory.check`）。
 - **项目执行设置**加「任务结束时提议记忆」开关。
 - **线索页**（切片 e 合入后）每条线索加「提议记入记忆」。
@@ -709,6 +787,9 @@ looper memory eval-export --out FILE      # 驳回的候选和理由，只能写
 - 起草校验：编号不存在、路径出界（`..`、`mine/`、规则文件、没配的目录、符号链接）、新笔记缺 frontmatter 键、新笔记没更新索引、锚点不唯一、长度；
 - 写入（真实 git）：成功路径和提交信息、只提交这些路径；主检出不相关文件脏时照常、目标脏或未跟踪时 `blocked` 且主检出不变；主分支前进但没碰目标时 rebase 后合并、碰了时 `conflict`；hook 拒绝；hook 改了文件 → `commit_mismatch`；分离 HEAD、分支不对、合并进行中；`index.lock` 重试；超时；中途退出后按 trailer 核对；清理残留的 worktree 和分支；两条候选同时往一个索引加行，先后都写入；
 - 出处被删：未写入的候选删除、已写入的清文字留元数据；
+- 删除和墓碑：删除后只剩墓碑；同指纹的 `agent`、`external` 种子被拒绝且不入库；`operator` 种子收下并清掉墓碑；
+- 出处类别：生成列的映射；合并后取最不可信的类别；线索并进偏好时不并；
+- 分层的约束：`looper` 行用 `vault` 的状态、`vault` 行用保留状态或 `valid_until`，都被数据库拒绝；v0 的代码路径从不写 `destination = 'looper'` 和三个保留状态；
 - 关闭时逐字节不变（第 9.5 节）。
 
 **真实模型评测：**
@@ -734,8 +815,8 @@ looper memory eval-export --out FILE      # 驳回的候选和理由，只能写
 | PR | 内容 | 依赖 | 模型可见 |
 |---|---|---|---|
 | 1 | 本 RFC | — | 否 |
-| 2 | 基础：迁移 `memory_candidates`（第 4 节的表、约束、触发器）；`looper/agents/memory_model.py`（类型、状态、原因、编号、`ALLOWED_SOURCES`、`content_hash()`、`check_settings`）；`db/memory.py` 的状态转换；设置的读写和 `memory.check`；`looper memory list/show/check`；只读的 `memory.list/get` | — | 否 |
-| 3 | 写入：`looper/agents/memory_write.py`（第 6 节全部，含启动核对和清理）；`memory.confirm/confirm_many/reject/edit/retry/revive`；`looper memory reject/retry` | 2 | 否 |
+| 2 | 基础：迁移 `memory_candidates`（第 4 节的表、约束、触发器、墓碑表，第 4.4 节的保留列）；`looper/agents/memory_model.py`（类型、状态、原因、编号、`ALLOWED_CLASSES`、`content_hash()`、`fingerprint()`、`check_settings`）；`db/memory.py` 的状态转换；设置的读写和 `memory.check`；`looper memory list/show/check`；只读的 `memory.list/get` | — | 否 |
+| 3 | 写入：`looper/agents/memory_write.py`（第 6 节全部，含启动核对和清理）；`memory.confirm/confirm_many/reject/edit/retry/revive/delete`；`looper memory reject/retry/delete` | 2 | 否 |
 | 4 | 起草：`memory_draft` 角色、内置 Profile、契约文件、检索（`vault.search` 的 `under`）、输入组装、解析和校验、起草服务、`run_kind`；起草评测 | 2 | 是：起草评测 |
 | 5a | Manager 来源：`looper_memory_propose`、`RestrictedTool.refusal`、契约一节、追加的一行、群聊兜底扩展、进程签名 | 4 | 是：Manager 对话评测 |
 | 5b | 任务来源：`[MEMORY]` 回合、带编号的日志渲染、`projects.memory_closeout` | 4 | 是：任务收尾评测 |
@@ -745,24 +826,26 @@ looper memory eval-export --out FILE      # 驳回的候选和理由，只能写
 
 **并行：** PR2 合入后，3 和 4 同时开工；4 合入后 5a、5b、5c 同时开工；6 依赖 3；7 先按冻结的 JSON 写组件和测试，接口合入后做真实路径截图。线上打开顺序：先只开 `sources.manager`（操作者本人说的，风险最小），用一周看采纳率；再开 `sources.tasks`；`sources.leads` 要等线索在线上打开（P3）。
 
-## 14. 待定问题（各附推荐答案，协调者带给维护者）
+## 14. 维护者的答复（2026-11-20）
 
-| 编号 | 问题 | 推荐 |
-|---|---|---|
-| Q1 | 谁起草具体改动：来源自己（A）、种子加无工具起草（B）、代码模板（C） | **B**（第 3.7 节）。代价是每条多一次约几美分的运行和几十秒的延迟 |
-| Q2 | 线索能变成哪些类型 | **决定、承诺、事实、人物、项目**；永远不能是偏好和反馈（别人的话不是操作者的偏好）。操作者真想把线索里的一条做法变成自己的偏好，就在对话里用自己的话说一遍 |
-| Q3 | 私聊里能不能确认放不下全文的长改动 | **不能**：私聊只确认完整展示过的（改动行合计 ≤ 1,500 字），其余去记忆页看 diff。这是「确认的就是看到的」的前提 |
-| Q4 | 命令行能不能确认 | **不能**：只有 dashboard 和私聊。Looper 启动的 agent 能跑命令行，`LOOPER_AGENT_RUN` 只是减速带；伪造出一条「操作者确认过」的记录比它直接改文件更糟 |
-| Q5 | 待确认多久过期 | **7 天**，过期后可以在记忆页恢复 |
-| Q6 | 写入时目标笔记变了怎么办 | **自动重新起草一次**，之后照样要重新确认；再冲突就等操作者。不自动三方合并整篇内容：合并结果是操作者没看过的内容 |
-| Q7 | 打开 `memory_closeout` 的项目还跑不跑 `[VAULT]` | **不跑**，换成 `[MEMORY]`；记忆区不能同时是直接可写的目录（设置校验拒绝重叠） |
-| Q8 | 要不要定期批量回看对话、自动找出该记的 | **v0 不做**，只靠对话里的工具；先看一段时间的采纳率和漏记的情况再决定。批量回看要读全部对话，花费和隐私面都更大 |
-| Q9 | `knowledge_vault.path` 保持指向记忆区，还是改指 vault 根目录 | **保持现状**（`root = ""`）：vault 级规则里约束写入的几条由代码执行；改指根目录会让任务的 agent 也读到个人笔记 |
-| Q10 | worktree 放哪里 | **默认 `<runtime_root>/vault-worktrees`**；vault 规则写明了 worktree 位置的，把 `worktree_root` 设成它（目录结构 `<worktree_root>/<候选>/<仓库名>` 已经和常见约定一致） |
-| Q11 | 推送发到哪里 | **和意图一样只发操作者私聊**（`push_channel`，必须填了「我的 ID」）；没设置就只进记忆页 |
-| Q12 | 已写入的候选，出处被删时 | **vault 里的笔记不动，PG 只留元数据**（D14）；要改由操作者自己改 |
-| Q13 | 账本里操作者确认过的决定要不要自动变成记忆候选 | **不自动**；以后在待办页的决定上加「提议记入记忆」按钮（记为非核心待办）。账本是「现在要处理什么」，记忆是长期的，两者的有效期不同 |
-| Q14 | 确认命令用哪个词 | **「记」**（「记 M-0042」）；不用「确认」，避免和 Manager 的高影响确认、账本的「确认 L-…」混淆 |
+本节保留当时的问题和推荐。维护者全部按推荐答复，记为第 2 节的决定（最后一列）；Q2 的答复同时写明线索永远不能变成偏好和反馈。
+
+| 编号 | 问题 | 当时的推荐 | 决定 |
+|---|---|---|---|
+| Q1 | 谁起草具体改动：来源自己（A）、种子加无工具起草（B）、代码模板（C） | **B**（第 3.7 节）。代价是每条多一次约几美分的运行和几十秒的延迟 | D2 |
+| Q2 | 线索能变成哪些类型 | **决定、承诺、事实、人物、项目**；永远不能是偏好和反馈（别人的话不是操作者的偏好）。操作者真想把线索里的一条做法变成自己的偏好，就在对话里用自己的话说一遍 | D9 |
+| Q3 | 私聊里能不能确认放不下全文的长改动 | **不能**：私聊只确认完整展示过的（改动行合计 ≤ 1,500 字），其余去记忆页看 diff。这是「确认的就是看到的」的前提 | D6 |
+| Q4 | 命令行能不能确认 | **不能**：只有 dashboard 和私聊。Looper 启动的 agent 能跑命令行，`LOOPER_AGENT_RUN` 只是减速带；伪造出一条「操作者确认过」的记录比它直接改文件更糟 | D5 |
+| Q5 | 待确认多久过期 | **7 天**，过期后可以在记忆页恢复 | D15 |
+| Q6 | 写入时目标笔记变了怎么办 | **自动重新起草一次**，之后照样要重新确认；再冲突就等操作者。不自动三方合并整篇内容：合并结果是操作者没看过的内容 | D16 |
+| Q7 | 打开 `memory_closeout` 的项目还跑不跑 `[VAULT]` | **不跑**，换成 `[MEMORY]`；记忆区不能同时是直接可写的目录（设置校验拒绝重叠） | D11 |
+| Q8 | 要不要定期批量回看对话、自动找出该记的 | **v0 不做**，只靠对话里的工具；先看一段时间的采纳率和漏记的情况再决定。批量回看要读全部对话，花费和隐私面都更大 | D17 |
+| Q9 | `knowledge_vault.path` 保持指向记忆区，还是改指 vault 根目录 | **保持现状**（`root = ""`）：vault 级规则里约束写入的几条由代码执行；改指根目录会让任务的 agent 也读到个人笔记 | D18 |
+| Q10 | worktree 放哪里 | **默认 `<runtime_root>/vault-worktrees`**；vault 规则写明了 worktree 位置的，把 `worktree_root` 设成它（目录结构 `<worktree_root>/<候选>/<仓库名>` 已经和常见约定一致） | D19 |
+| Q11 | 推送发到哪里 | **和意图一样只发操作者私聊**（`push_channel`，必须填了「我的 ID」）；没设置就只进记忆页 | D20 |
+| Q12 | 已写入的候选，出处被删时 | **vault 里的笔记不动，PG 只留元数据**（D14）；要改由操作者自己改 | D14 |
+| Q13 | 账本里操作者确认过的决定要不要自动变成记忆候选 | **不自动**；以后在待办页的决定上加「提议记入记忆」按钮（记为非核心待办）。账本是「现在要处理什么」，记忆是长期的，两者的有效期不同 | D21 |
+| Q14 | 确认命令用哪个词 | **「记」**（「记 M-0042」）；不用「确认」，避免和 Manager 的高影响确认、账本的「确认 L-…」混淆 | D22 |
 
 ## 15. 已核实与需要核实
 
