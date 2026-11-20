@@ -95,6 +95,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             async with conn.transaction():
                 upgraded_at = await conn.fetchval("SELECT now()")
                 await connection.ensure_schema(conn)
+            # Online DDL is deferred until the caller's transaction commits.
+            await connection.ensure_schema(conn)
             after = await witness(conn)
             for table in ("task_plans", "system_settings", "library_items", "library_files", "library_installs",
                           "chat_messages", "llm_model_migration_map", "agent_setting_layers", "agent_runtimes",
