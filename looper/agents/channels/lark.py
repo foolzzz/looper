@@ -35,9 +35,11 @@ from ..message import (
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from ..ops.leads import for_group
+from .. import chat_settings
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
+from .proactive import record_delivery
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
@@ -296,7 +298,9 @@ class LarkChannelAdapter(ChannelAdapter):
                         logger.warning("%s: a recovered task progress reply failed: %s", self.channel_id, exc)
                         if exc.code in MESSAGE_GONE_CODES:
                             return await self._send_message(route["chat_id"], str(envelope.payload["text"]))
-                        return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+                        return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if exc.refused
+                                            else PostOutcome.UNKNOWN))
                     return DeliveryReceipt(channel=self.channel_type, success=True)
                 chat_id = route["chat_id"]
                 self._correlation_chat[corr_id] = chat_id
@@ -349,11 +353,14 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _send_reply(self, correlation_id: str, text: str) -> DeliveryReceipt:
         """Answer a group message with a Markdown reply to it."""
         try:
-            await self._answer(correlation_id, markdown=text)
+            message_id = await self._answer(
+                correlation_id, markdown=text, **({"return_id": True} if chat_settings.metrics_enabled() else {}))
         except LarkCliError as exc:
             logger.warning("%s: a reply in a group chat failed: %s", self.channel_id, exc)
-            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
-        return DeliveryReceipt(channel=self.channel_type, success=True)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if exc.refused
+                                            else PostOutcome.UNKNOWN))
+        return DeliveryReceipt(channel=self.channel_type, success=True, external_id=message_id)
 
     async def _send_target(self, target: NotifyTarget, text: str, *,
                            idempotency_key: str | None = None, return_id: bool = False) -> str | None:
@@ -379,12 +386,16 @@ class LarkChannelAdapter(ChannelAdapter):
             # requester. A part that fails ends the notice; the parts before it are not sent again.
             parts = split_message(rendered) if target.group else [rendered]
             for number, part in enumerate(parts):
-                await self._send_target(target if number == 0 else replace(target, mention=None), part)
+                message_id = await self._send_target(
+                    target if number == 0 else replace(target, mention=None), part,
+                    **({"return_id": True} if chat_settings.metrics_enabled() else {}))
         except LarkCliError as exc:
             logger.warning("%s: a task's end notice to %s failed%s: %s", self.channel_id, target.id,
                            f" at part {number + 1} of {len(parts)}" if len(parts) > 1 else "", exc)
-            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
-        return DeliveryReceipt(channel=self.channel_type, success=True)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if exc.refused
+                                            else PostOutcome.UNKNOWN))
+        return DeliveryReceipt(channel=self.channel_type, success=True, external_id=message_id)
 
     async def _turned_off(self, chat_id: str, group_message: str | None, *, manager_id: str,
                           explicit: bool = False, stop: bool = False) -> bool:
@@ -424,11 +435,17 @@ class LarkChannelAdapter(ChannelAdapter):
 
     async def _send_message(self, chat_id: str, text: str) -> DeliveryReceipt:
         try:
-            await self._send_lark_message(chat_id, text)
-            return DeliveryReceipt(channel=self.channel_type, success=True)
+            message_id = None
+            if chat_settings.metrics_enabled():
+                message_id = await self._transport.send(chat_id=chat_id, markdown=text, return_id=True)
+            else:
+                await self._send_lark_message(chat_id, text)
+            return DeliveryReceipt(channel=self.channel_type, success=True, external_id=message_id)
         except Exception as exc:
             logger.warning("%s delivery failed: %s", self.channel_id, exc)
-            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if isinstance(exc, LarkCliError) and exc.refused
+                                            else PostOutcome.UNKNOWN))
 
     async def _send_status(self, correlation_id: str, text: str) -> str | None:
         return await self._answer(correlation_id, text=text, return_id=True)
@@ -450,11 +467,14 @@ class LarkChannelAdapter(ChannelAdapter):
                 destination = {"user_id": chat}
             else:
                 raise LarkCliError("notification target must be a Lark chat ID (oc_) or user open ID (ou_)")
-            await self._transport.send(**destination, text=text)
+            message_id = await self._transport.send(
+                **destination, text=text, **({"return_id": True} if chat_settings.metrics_enabled() else {}))
         except LarkCliError as exc:
             logger.warning("%s notification to %s failed: %s", self.channel_id, chat, exc)
-            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
-        return DeliveryReceipt(channel=self.channel_type, success=True)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if exc.refused
+                                            else PostOutcome.UNKNOWN))
+        return DeliveryReceipt(channel=self.channel_type, success=True, external_id=message_id)
 
     async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
                    idempotency_key: str | None = None) -> PostReceipt:
@@ -1146,7 +1166,14 @@ class LarkChannelAdapter(ChannelAdapter):
                 if not self._running:
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
-                await record_reply(self.channel_type, envelope, await self.deliver(envelope),
+                receipt = await self.deliver(envelope)
+                if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
+                    route = envelope.metadata.get("reply_route")
+                    route = route if isinstance(route, dict) else {}
+                    chat = str(route.get("chat_id") or self._correlation_chat.get(envelope.correlation_id) or "")
+                    group = envelope.correlation_id in self._group_message or bool(route.get("reply_to"))
+                    record_delivery(self.channel_id, envelope, receipt, chat=chat, group=group)
+                await record_reply(self.channel_type, envelope, receipt,
                                    runtime_root=self._runtime_root)
         except asyncio.CancelledError:
             pass

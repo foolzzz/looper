@@ -2223,3 +2223,25 @@ ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_dropped;
 ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
+
+-- proactive deliveries begin
+CREATE TABLE IF NOT EXISTS proactive_deliveries (
+    id          BIGSERIAL PRIMARY KEY,
+    source      TEXT NOT NULL CHECK (source IN ('task_notice', 'completion', 'progress', 'gate', 'gate_reminder',
+                                                'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous')),
+    source_ref  TEXT,                 -- 任务、关卡、订阅运行、意图或定时任务运行的 id；管家自己说的话为空
+    manager_id  TEXT,
+    channel_id  TEXT NOT NULL,        -- 'web' 或机器人的渠道 id
+    chat        TEXT NOT NULL,        -- 飞书、Telegram 的会话 id；控制台的会话 id
+    group_chat  BOOLEAN NOT NULL,
+    external_id TEXT,                 -- 发送方知道时：平台消息 id
+    outcome     TEXT NOT NULL CHECK (outcome IN ('sent', 'rejected', 'unknown')),
+    sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    replied_at  TIMESTAMPTZ,
+    reply_match TEXT CHECK (reply_match IN ('quoted', 'next_message')),
+    CONSTRAINT proactive_deliveries_reply CHECK ((replied_at IS NULL) = (reply_match IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_open
+    ON proactive_deliveries (channel_id, chat, sent_at DESC) WHERE replied_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_sent ON proactive_deliveries (sent_at);
+-- proactive deliveries end

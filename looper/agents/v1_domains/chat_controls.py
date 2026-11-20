@@ -30,7 +30,7 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
                      "started_at": _STR, "state": _STR, "method": _NULL_STR,
                      "stopping": _BOOL, "can_interrupt": _BOOL})
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
-CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL})
+CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL, "metrics_enabled": _BOOL})
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -61,8 +61,9 @@ OPERATIONS = (
     _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
-                 "research_order": {"type": ["boolean", "null"]}},
-                [], closed=True), CHAT_SETTINGS, "high"),
+                 "research_order": {"type": ["boolean", "null"]},
+                 "metrics_enabled": {"type": ["boolean", "null"]}},
+                [], closed=True), CHAT_SETTINGS, "high", operator_only=True),
 )
 
 
@@ -98,6 +99,10 @@ async def impact(server, operation, arguments, principal, headers):
                           "order, before it asks the user; its process starts again to read them." if enabled else
                           "From its next turn, the default Manager's instructions no longer say where to look things "
                           "up; its process starts again."))
+    if "metrics_enabled" in values:
+        enabled = bool(values["metrics_enabled"])
+        changes.append(f"Set manager.metrics.enabled to {str(enabled).lower()}? "
+                       "This records Manager turn latency and proactive delivery metrics without changing delivery.")
     return " ".join(changes)
 
 

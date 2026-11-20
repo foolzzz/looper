@@ -14,7 +14,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
-from ..db import connection as db_connection, manager_events, schedules as db_schedules, llm_requests
+from ..db import connection as db_connection, manager_events, proactive_deliveries, schedules as db_schedules, llm_requests
 from . import chat_attachments, scheduler_settings
 from .command_runs import CommandRuns, Finished, Lost, LOGS_DIR, RUNNER_DIR, RUNS_DIR
 from .llmrec import ROUTES_DIR, RouteFile
@@ -38,6 +38,7 @@ class Report:
     runs: int = 0
     notifications: int = 0
     manager_events: int = 0
+    proactive_deliveries: int = 0
     logs: int = 0
     log_bytes: int = 0
     run_dirs: int = 0
@@ -265,6 +266,16 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             report.manager_events += count
             if count == 0:
                 break
+
+    from . import chat_settings
+
+    if chat_settings.metrics_enabled():
+        with _step(report, "proactive deliveries"):
+            while True:
+                count = await proactive_deliveries.purge(now - timedelta(days=90))
+                report.proactive_deliveries += count
+                if count == 0:
+                    break
 
     with _step(report, "llm requests"):
         await _prune_llm_requests(report, now)
