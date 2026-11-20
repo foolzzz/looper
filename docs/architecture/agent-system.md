@@ -2213,7 +2213,13 @@ provider (Codex's own login too, at the built-in prices, shown as
 "equivalent" like Claude Code's): each model's tokens in the result's `modelUsage` (input, output,
 cache read, cache write) at the provider's prices, summed (`run_usage`
 `price`), so a resumed session still counts each turn's own share; a model
-without a price leaves the cost `null` and the tokens recorded. With
+without a price leaves the cost `null` and the tokens recorded. An Anthropic
+model bills a cache write by how long it lasts (five minutes at 1.25x input,
+one hour at 2x: `ModelPrice.cache_write_1h_usd_per_mtok`, from the built-in
+table). A request's usage says which (`cache_creation`), and so does a result
+whose turn made all of its writes; writes whose duration is not known are
+priced at the one-hour rate, so the cost is never below what was spent. A
+spawned run at provider prices whose writes do not say gives no output. With
 `provider_price` the per-run cap (`run_budget_usd`) is not `--max-budget-usd`
 (it would count Claude's prices): the run's recorder adds up its `usage`
 events (each request's final `message_delta` usage) at the provider's prices,
@@ -3589,6 +3595,14 @@ dump is proved readable by, in order, `backup.verify_command` (dump on stdin),
 With none of these the backup fails before any DDL. The upgraded schema must
 not be opened by an older binary: the forward guard in this binary does not
 protect an older one.
+
+A migration of a large table holds the table's lock only for statements that
+neither scan nor rewrite it. The run tree columns of `llm_records`, for
+example, are added without a default, with their constraints `NOT VALID`, and
+no older row is updated. After the schema transaction commits, `ensure_schema`
+validates those constraints and builds the index concurrently, which lets
+reads and writes go on (`connection._ONLINE_STEPS`). Each of these steps has
+its own marker, and a start that stopped halfway resumes it.
 
 Rollback means stopping the new service, leaving the upgraded database
 unchanged, restoring the verified full backup into a separate database, and
@@ -5126,15 +5140,23 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   in order while the row is `linting`:
   - format (`advice.parse_request`, AdviceRequest v1: typed fields within their limits, the kind's required items,
     at most 12,000 characters; a checkpoint takes only `plan_review`);
-  - code (`advice_lint.lint`: secrets, a binding's real value, local paths, URLs, addresses and ids, raw logs,
-    dangling references, text copied from the local material);
-  - the judge (one `advice_check` run over the request alone: standalone, no leak, answerable at least 0.6).
+  - code (`advice_lint.lint`: secrets, a binding's real value however short, absolute paths of any root, URIs of
+    any scheme and the project's internal domains, e-mail and IPv4 or IPv6 addresses and ids, raw logs and
+    Python, Java, JavaScript or Go stacks, dangling references, and more than 30% of the request's 12-character
+    windows copied from the local material). Each text is also read NFKC-normalized without zero-width
+    characters, with its escapes decoded and its Base64 runs decoded once; a hit there points at the characters
+    as written;
+  - the judge (one `advice_check` run over the request alone: standalone, no leak, answerable at least 0.6). Its
+    whole reply must be the one JSON object of `advice.JUDGE_CONTRACT`, every key and value typed: leaks by
+    category and field, what is missing by field and a reason code (`advice.MISSING_REASONS`). Anything else,
+    such as a verdict quoted inside other text, fails the judge.
 - **When a check fails**, the request goes back with what to fix. The message names the category and position,
-  never what was matched, and the row records the same. After 2 returns the consult is `blocked`. A judge that
-  cannot judge fails the consult: no request goes out unjudged.
+  never what was matched (a key the request should not have is named by its place among the keys), and the row
+  records the same. After 2 returns the consult is `blocked`. A judge that cannot judge fails the consult: no
+  request goes out unjudged.
 - **A request that passes** becomes the consult's question (`advisor_advice`) and starts a round of the advisor
-  (`spawn.run_child`, a fresh process each round). Its answer must fit AdviceResponse v1 (`advice.parse_response`),
-  or the consult fails.
+  (`spawn.run_child`, a fresh process each round). Its answer must fit AdviceResponse v1 (`advice.parse_response`:
+  every container and element of its type), or the consult fails with the round's spend booked.
 - **Rounds.** A `needs_info` answer waits for the Planner's supplement, which is checked again. A consult has at
   most 3 rounds.
 - **Refusals.** A run whose model refused (`stop_reason: refusal`), or that another model answered, fails as
@@ -5142,7 +5164,9 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
 - **Budget.** Each round's `--max-budget-usd` is what the consult has left (the judge's cost included). With less
   than 0.10 USD left, the consult is `over_budget`.
 - **Records.** Every run's record has `run_kind` `advisor` or `advice_check` and the Planner's turn as its
-  `parent_record_id`. Its cost is the task's, counted in the Planner's share of `task_costs`.
+  `parent_record_id`. Its cost is the task's, counted in the Planner's share of `task_costs`. A judge's record keeps
+  none of the request: its input is the request's sha256 and length, its stream only the typed events
+  (`processor.typed_events`), and it has no output text.
 - **Restarts.** At startup, every consult a stopped server left unfinished fails (`interrupted`); the Planner takes
   its decision again.
 
@@ -5343,7 +5367,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`: what the record's agent id says, or what a spawned run names; older rows were backfilled from their agent id, and an id that says none leaves it null) and `parent_record_id` (the run that started it: a spawned run's parent) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |

@@ -81,9 +81,10 @@ class TestTokensAndContext:
     def test_a_result_reports_the_processs_running_totals_over_every_request(self) -> None:
         first, second = _turns("multi_request_turns")
         # Three requests: 10+8+8 input, 13970+18328+18527 cache read, 4358+199+129 cache creation.
+        # The turn's own writes are all the process's, so their split (all one-hour ones) is the totals'.
         assert reported_totals(_result(first)) == Usage(
             cost_usd=0.0157805, input_tokens=26, output_tokens=260, cache_read_tokens=50825,
-            cache_creation_tokens=4686,
+            cache_creation_tokens=4686, cache_creation_1h_tokens=4686,
         )
         # modelUsage keeps counting across the process's turns, like total_cost_usd.
         totals = reported_totals(_result(second))

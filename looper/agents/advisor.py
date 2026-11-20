@@ -80,11 +80,12 @@ class Brief:
 @dataclass(frozen=True)
 class Context:
     """What the code checks compare a request with: the local material the Planner had, this machine's directories,
-    and the task's ids."""
+    the task's ids and the project's internal domains."""
 
     material: str = ""
     local_paths: Sequence[str] = ()
     ids: Sequence[str] = ()
+    domains: Sequence[str] = ()  # the project's internal domains
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,7 @@ async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, c
     except AdviceError as exc:
         return await _return(row, list(exc.problems), [{"stage": "format", "category": "format"}])
     hits = lint(request, bindings=bindings, material=context.material, local_paths=context.local_paths,
-                ids=context.ids)
+                ids=context.ids, domains=context.domains)
     if hits:
         return await _return(row, describe(hits), [hit.view() for hit in hits])
     if _left(row) < MIN_RUN_USD:
@@ -214,7 +215,7 @@ async def _judge(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *
     child = ChildRun(SpawnKind.ADVISOR, _system_prompt(AgentType.ADVICE_CHECK, settings, config, JUDGE_CONTRACT,
                                                        "JUDGE_CONTRACT"),
                      judge_turn(request), timeout_s=min(JUDGE_TIMEOUT_SEC, config.timeout_seconds or JUDGE_TIMEOUT_SEC),
-                     max_turns=1, role=AgentType.ADVICE_CHECK, run_kind="advice_check")
+                     max_turns=1, role=AgentType.ADVICE_CHECK, run_kind="advice_check", private=True)
     done = await run_child(child, parent=_parent(brief), settings=settings, cap_usd=_left(row),
                            runtime_root=runtime_root, claude_bin=claude_bin)
     spent = done.cost_usd or 0.0
@@ -227,6 +228,11 @@ async def _judge(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *
         verdict = parse_verdict(done.output or "")
     except AdviceError as exc:
         return await _end(row, SpawnState.FAILED, spent_usd=spent, failure="judge", detail=str(exc),
+                          append={"judges": {**judged, "failure": "parse"}})
+    except Exception:  # whatever the reply was, the run's spend is booked and the consult ends
+        logger.warning("cannot read the judge's verdict of consult %s", row["id"], exc_info=True)
+        return await _end(row, SpawnState.FAILED, spent_usd=spent, failure="judge",
+                          detail="the judge's reply could not be read",
                           append={"judges": {**judged, "failure": "parse"}})
     return verdict, spent, {**judged, **verdict.view(), "passed": verdict.passed}
 
@@ -258,6 +264,10 @@ async def _ask(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *, 
     except AdviceError as exc:
         return await _end(row, SpawnState.FAILED, spent_usd=done.cost_usd or 0.0, child=done, failure="parse",
                           detail=f"the advisor's answer does not fit AdviceResponse v1: {exc}", append=rounds)
+    except Exception:  # whatever the reply was, the run's spend is booked and the consult ends
+        logger.warning("cannot read the advisor's answer of consult %s", row["id"], exc_info=True)
+        return await _end(row, SpawnState.FAILED, spent_usd=done.cost_usd or 0.0, child=done, failure="parse",
+                          detail="the advisor's answer could not be read", append=rounds)
     if response.status is AdviceStatus.NEEDS_INFO:
         if row["rounds"] >= ROUNDS_MAX:
             return await _end(row, SpawnState.FAILED, spent_usd=done.cost_usd or 0.0, child=done,
