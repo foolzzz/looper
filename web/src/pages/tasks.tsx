@@ -716,8 +716,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
             const count = f === "all" ? total : counts[f] || 0;
             const pressed = f === "all" ? selected.length === 0 : selected.includes(f);
             // Only a project with user gates has tasks that wait for the user.
-            // The default selection includes it, and that alone does not show the chip while its count is 0.
-            if (f === "waiting_user" && count === 0 && (!pressed || isDefaultSelection(selected))) return null;
+            // An empty chip stays hidden unless this filter is the only selection; it can still be selected.
+            if (f === "waiting_user" && count === 0 && !(selected.length === 1 && selected[0] === "waiting_user")) return null;
             return (
               <button
                 key={f}

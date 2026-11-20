@@ -215,17 +215,22 @@ describe("task list polling and pagination", () => {
       expect(requests.at(-1)?.filters?.statuses).toBeUndefined();
     });
 
-    it("shows Waiting for you when its count is above zero, or when a selection other than the default includes it", async () => {
+    it("hides an empty Waiting for you chip unless that filter is the only selection", async () => {
       await showNavigating();
       expect(requests[0].filters?.statuses).toContain("waiting_user");
       expect(button("Waiting for you")).toBeUndefined();
-      await finish(0, { ...page([]), counts: { waiting_user: 0, init: 1 } });
+      await click("Failed");
+      expect(requests[1].filters?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending", "failed"]);
       expect(button("Waiting for you")).toBeUndefined();
+      await finish(1, { ...page([]), counts: { waiting_user: 0, failed: 1, init: 1 } });
+      expect(button("Waiting for you")).toBeUndefined();
+      expect(pressed("Failed1")).toBe("true");
       await showNavigating("project=p1");
       await finish(requests.length - 1, { ...page([]), counts: { waiting_user: 2, init: 1 } });
       expect(button("Waiting for you2")).toBeDefined();
       expect(pressed("Waiting for you2")).toBe("true");
       await showNavigating("status=waiting_user");
+      expect(requests.at(-1)?.filters?.status).toBe("waiting_user");
       expect(button("Waiting for you")).toBeDefined();
       expect(pressed("Waiting for you")).toBe("true");
     });
