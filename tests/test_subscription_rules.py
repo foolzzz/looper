@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -11,6 +12,13 @@ from looper.agents import subscription_rules as rules, subscriptions
 ROW = {"chat_kind": "group", "sender_kind": "user", "sender_id": "ou_alice", "chat_id": "oc_a", "mentions_me": False,
        "text": "hello", "chat_name": "Room", "sent_at": datetime(2026, 11, 19, 16, 5, 3, tzinfo=timezone.utc),
        "sender_name": "Alice"}
+
+
+def pick(matcher, row):
+    """The index of the rule that takes ``row`` (the text patterns run in their own process, as in a window)."""
+    row = {"seq": 1, **row}
+    asyncio.run(matcher.prepare([row]))
+    return matcher(row)
 
 
 def rule(**fields):
@@ -45,45 +53,51 @@ def test_too_many_rules_or_none_at_all_in_the_wrong_shape_are_refused():
 
 
 CATASTROPHIC = ["(a+)+$", "(a|aa)+$", "(?:a|aa)+b", "((a|aa))*b", "(a|a)*c", "(.*)*x", "(x+x+)+y", "(.*a){12}",
-                "(\\w+\\s?)*$", "([a-z]+)*\\d", "(a|b|ab)+c", "a*a*a*a*b", ".*.*.*x", "(a+){2,}b", "(?:(?:a|b)c)*"]
+                "(\\w+\\s?)*$", "([a-z]+)*\\d", "(a|b|ab)+c", "a*a*a*a*b", ".*.*.*x", "(a+){2,}b",
+                # The ways round a text scan of the pattern, as Python parses them:
+                "(a+){,50}b", "(?x)(a+) *b", "(?x)(a+) # comment\n *b", "a{0,1000}a{0,1000}a{0,1000}b", "(a?){30}a{30}",
+                "a?a?a?a?a?a?a?a?a?b", "(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)c", "(?:a{1,2}){1,20}b",
+                "(a{,5}){,5}b"]
 
 
 @pytest.mark.parametrize("pattern", CATASTROPHIC)
 def test_a_pattern_that_can_backtrack_without_bound_is_refused(pattern):
-    with pytest.raises(ValueError, match="repeats a group|unbounded repeats"):
+    with pytest.raises(ValueError, match="repeats a group|repeats that can run long|more than \\d+ (repeats|alternations)"):
         rules.check_pattern(pattern)
 
 
-def test_a_pattern_that_is_only_quadratic_is_bounded_by_its_text_and_its_time_budget():
+def test_a_pattern_that_is_only_quadratic_runs_on_a_bounded_text():
     import time
 
     # Two unbounded repeats are allowed and cost at most the square of the text, which is cut to MATCH_TEXT_CHARS.
     assert rules.check_pattern(".*a.*b") == ".*a.*b"
     matcher = rules.Matcher([rule(text_match=".*a.*b")], me=None)
     started = time.monotonic()
-    for _ in range(40):
-        assert matcher({**ROW, "text": "a" * 50_000}) is None  # no b: the worst case, on the first 1,000 characters
-    assert time.monotonic() - started < rules.MATCH_BUDGET_SECONDS + 1.5
-    assert matcher._spent > 0
+    assert pick(matcher, {**ROW, "text": "a" * 50_000}) is None  # no b: the worst case, on the first 1,000 characters
+    assert time.monotonic() - started < rules.REGEX_TIMEOUT_SECONDS
 
 
-def test_a_budget_that_is_spent_stops_every_pattern_of_the_window(monkeypatch):
-    matcher = rules.Matcher([rule(text_match="needle")], me=None)
-    assert matcher({**ROW, "text": "a needle"}) == 0
-    matcher._spent = rules.MATCH_BUDGET_SECONDS + 1
-    assert matcher({**ROW, "text": "a needle"}) is None
+def test_a_search_that_overruns_its_deadline_is_killed_and_no_pattern_takes_anything(monkeypatch):
+    import time
+
+    monkeypatch.setattr(rules, "_WORKER", "import time\ntime.sleep(60)")
+    monkeypatch.setattr(rules, "REGEX_TIMEOUT_SECONDS", 0.5)
+    matcher = rules.Matcher([rule(text_match="needle"), rule(name="all")], me=None)
+    started = time.monotonic()
+    assert pick(matcher, {**ROW, "text": "a needle"}) == 1  # the pattern rule took nothing; the one without a pattern did
+    assert time.monotonic() - started < 5 and matcher.timed_out
 
 
-@pytest.mark.parametrize("pattern", ["告警|故障", r"\b(P0|P1)\b", r"\[(critical|warning)\]", "MR|PR|CR", "(ab)+c", "a+b*"])
+@pytest.mark.parametrize("pattern", ["告警|故障", r"\b(P0|P1)\b", r"\[(critical|warning)\]", "MR|PR|CR", "(ab)+c", "a+b*", "(?:(?:a|b)c)*", "(?x) 告警 | 故障 # either"])
 def test_ordinary_patterns_are_accepted(pattern):
     assert rules.check_pattern(pattern) == pattern
 
 
 def test_a_pattern_runs_on_a_bounded_text():
     matcher = rules.Matcher([rule(text_match="needle")], me=None)
-    assert matcher({**ROW, "text": "x" * rules.MATCH_TEXT_CHARS + "needle"}) is None  # past the bound: not read
-    assert matcher({**ROW, "text": "a needle"}) == 0
-    assert rules.Matcher([rule(text_match="NEEDLE")], me=None)({**ROW, "text": "a needle"}) == 0  # any case
+    assert pick(matcher, {**ROW, "text": "x" * rules.MATCH_TEXT_CHARS + "needle"}) is None  # past the bound: not read
+    assert pick(matcher, {**ROW, "text": "a needle"}) == 0
+    assert pick(rules.Matcher([rule(text_match="NEEDLE")], me=None), {**ROW, "text": "a needle"}) == 0  # any case
 
 
 def test_the_first_rule_that_takes_an_event_names_it_and_each_condition_holds_alone():
@@ -94,15 +108,15 @@ def test_the_first_rule_that_takes_an_event_names_it_and_each_condition_holds_al
                rule(name="quiet-chats", chat_kinds=["group"], exclude_chats=["oc_a"], mentions_me="exclude")]
     matcher = rules.Matcher(ruleset, me=me)
     p2p = {**ROW, "chat_kind": "p2p", "chat_id": "oc_dm"}
-    assert matcher(p2p) == 0
-    assert matcher({**p2p, "sender_id": me}) is None  # my own reply
-    assert matcher({**p2p, "sender_kind": "app", "sender_id": "cli_x"}) is None  # a bot's notification
-    assert matcher({**ROW, "mentions_me": True}) == 1
-    assert matcher({**ROW, "chat_id": "oc_alerts", "text": "磁盘告警"}) == 2
-    assert matcher({**ROW, "chat_id": "oc_alerts", "text": "all good"}) == 3
-    assert matcher({**ROW, "chat_id": "oc_alerts", "text": "磁盘告警", "mentions_me": True}) == 1  # first rule wins
-    assert matcher(ROW) is None  # oc_a is excluded by the last rule, taken by no other
-    assert matcher({**ROW, "chat_id": "oc_b", "chat_kind": "topic"}) is None
+    assert pick(matcher, p2p) == 0
+    assert pick(matcher, {**p2p, "sender_id": me}) is None  # my own reply
+    assert pick(matcher, {**p2p, "sender_kind": "app", "sender_id": "cli_x"}) is None  # a bot's notification
+    assert pick(matcher, {**ROW, "mentions_me": True}) == 1
+    assert pick(matcher, {**ROW, "chat_id": "oc_alerts", "text": "磁盘告警"}) == 2
+    assert pick(matcher, {**ROW, "chat_id": "oc_alerts", "text": "all good"}) == 3
+    assert pick(matcher, {**ROW, "chat_id": "oc_alerts", "text": "磁盘告警", "mentions_me": True}) == 1  # first rule wins
+    assert pick(matcher, ROW) is None  # oc_a is excluded by the last rule, taken by no other
+    assert pick(matcher, {**ROW, "chat_id": "oc_b", "chat_kind": "topic"}) is None
 
 
 def test_a_line_carries_the_tag_of_the_rule_and_the_area_of_the_chat():
@@ -159,7 +173,10 @@ def test_the_fallback_lists_only_the_rules_that_must_not_be_quiet_one_block_each
     ({"rules": [rule(chat_kinds=["group"])]}, False), ({"rules": [rule(chat_kinds=["p2p"])]}, True),
     ({"rules": [rule(chat_kinds=["group"], mentions_me="only")]}, True),
     ({"rules": [rule(chat_kinds=["group"], never_quiet=True)]}, True),
-    ({"rules": [rule(chat_kinds=["group"], mentions_me="exclude")]}, False)])
+    ({"rules": [rule(chat_kinds=["group"], mentions_me="exclude")]}, False),
+    # A direct chat the directory does not list yet is stored as kind unknown: it may be one.
+    ({"rules": [], "chat_kinds": ["group", "unknown"]}, True), ({"rules": [rule(chat_kinds=["group", "unknown"])]}, True),
+    ({"rules": [rule()]}, True)])
 def test_what_can_select_private_content(sub, private):
     assert rules.is_private(sub) is private
 

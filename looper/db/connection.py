@@ -651,7 +651,8 @@ async def _subscription_rules_pending(conn: asyncpg.Connection) -> bool:
 _SUBSCRIPTION_RULES_DDL = """
 ALTER TABLE subscriptions ADD COLUMN rules JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array');
 ALTER TABLE subscriptions ADD COLUMN config_epoch BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE subscription_runs ADD COLUMN config JSONB, ADD COLUMN config_epoch BIGINT;
+ALTER TABLE subscription_runs ADD COLUMN config JSONB, ADD COLUMN config_epoch BIGINT,
+    ADD COLUMN match_timeouts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_render_check,
     ADD CONSTRAINT subscriptions_render_check CHECK (render IN ('lines_v1', 'lines_v2'));
 """

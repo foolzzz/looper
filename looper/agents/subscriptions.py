@@ -152,7 +152,9 @@ def parse(raw: Any, *, update: bool) -> dict[str, Any]:
     if update and not raw:
         raise ValueError("give at least one subscription field to change")
     found = {name: _PARSERS[name](value) for name, value in raw.items()}
-    if found.get("rules"):  # the rules select: the subscription's own chat and sender filter has nothing to say
+    if found.get("rules") and not update:
+        # The rules select: the filter columns they replace default when the subscription is created (an update that
+        # names rules leaves the columns as they are, so removing the rules again gives back what it had).
         found.setdefault("chat_kinds", list(db_subs.CHAT_KINDS))
         found.setdefault("sender_kinds", list(db_subs.SENDER_KINDS))
     return found
@@ -370,7 +372,9 @@ async def config_version(schedule: Mapping[str, Any], *, profile: Mapping[str, A
     profile = dict(profile) if profile is not None else await processor.run_facts(schedule["project_id"], schedule["id"])
     facts = {"channel": schedule.get("notify_channel"), "chat": schedule.get("notify_chat"), "cron": schedule["cron"],
              "timezone": schedule["timezone"], "source": (schedule.get("subscription") or {}).get("source_id"),
-             "processor": profile}
+             "processor": profile,
+             # Only when true, so a version made before this existed is still the version of a subscription that is not.
+             **({"private": True} if subscription_rules.is_private(schedule.get("subscription") or {}) else {})}
     return digest(json.dumps(facts, sort_keys=True, ensure_ascii=False))
 
 

@@ -185,7 +185,7 @@ async def window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int
     fresh = [dict(row) for row in found if row["fresh"]]
     kept = fresh[:sub["max_events"]]
     return {"in_window": in_window, "too_old": len(found) - len(fresh), "over_cap": len(fresh) - len(kept),
-            "rows": kept}
+            "rows": kept, "match_timed_out": False}
 
 
 async def _rules_window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int, now: datetime,
@@ -206,6 +206,9 @@ async def _rules_window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_s
         sub["source_id"], from_seq, to_seq, now, sub["max_age_minutes"], sub["include_history"], list(own_apps))
     in_window = await conn.fetchval("SELECT count(*) FROM source_events WHERE source_id = $1 AND seq > $2 AND seq <= $3",
                                     sub["source_id"], from_seq, to_seq)
+    prepare = getattr(matcher, "prepare", None)
+    if prepare is not None:  # the text patterns run in a process that is killed at its deadline
+        await prepare(found)
     chosen = []
     for row in found:
         rule = matcher(row)
@@ -214,7 +217,7 @@ async def _rules_window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_s
     fresh = [row for row in chosen if row["fresh"]]
     kept = fresh[:sub["max_events"]]
     return {"in_window": in_window, "too_old": len(chosen) - len(fresh), "over_cap": len(fresh) - len(kept),
-            "rows": kept}
+            "rows": kept, "match_timed_out": bool(getattr(matcher, "timed_out", False))}
 
 
 async def bump_epoch(conn: asyncpg.Connection, schedule_id: str) -> None:
@@ -234,16 +237,16 @@ def snapshot(sub: Mapping[str, Any]) -> dict[str, Any]:
 async def insert_run(conn: asyncpg.Connection, run_id: str, *, from_seq: int, to_seq: int, in_window: int,
                      selected: int, too_old: int, over_cap: int, target: tuple[str, str] | None = None,
                      config_version: str | None = None, config: Mapping[str, Any] | None = None,
-                     config_epoch: int | None = None) -> None:
+                     config_epoch: int | None = None, match_timeouts: int = 0) -> None:
     """The run's window and, when it started with its push target confirmed, where it may push and under which
     configuration (``config_version``)."""
     await conn.execute(
         "INSERT INTO subscription_runs (run_id, from_seq, to_seq, events_in_window, events_selected, events_too_old, "
-        "events_over_cap, target_channel, target_chat, config_version, config, config_epoch) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)",
+        "events_over_cap, target_channel, target_chat, config_version, config, config_epoch, match_timeouts) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)",
         run_id, from_seq, to_seq, in_window, selected, too_old, over_cap, target[0] if target else None,
         target[1] if target else None, config_version, json.dumps(config, ensure_ascii=False) if config is not None else None,
-        config_epoch)
+        config_epoch, match_timeouts)
 
 
 def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:

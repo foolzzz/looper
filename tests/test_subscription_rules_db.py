@@ -315,7 +315,7 @@ def test_a_database_without_the_rules_column_gets_it_on_upgrade(monkeypatch):
 
     async def check(pool):
         await pool.execute("ALTER TABLE subscriptions DROP COLUMN rules, DROP COLUMN config_epoch; "
-                           "ALTER TABLE subscription_runs DROP COLUMN config, DROP COLUMN config_epoch; "
+                           "ALTER TABLE subscription_runs DROP COLUMN config, DROP COLUMN config_epoch, DROP COLUMN match_timeouts; "
                            "ALTER TABLE subscriptions DROP CONSTRAINT "
                            "subscriptions_render_check, ADD CONSTRAINT subscriptions_render_check CHECK (render IN ('lines_v1')); "
                            "DELETE FROM schema_migrations WHERE name = 'subscription_rules'")
@@ -338,3 +338,124 @@ def test_a_database_without_the_rules_column_gets_it_on_upgrade(monkeypatch):
 
 def test_the_processor_run_it_is_given_needs_no_new_handling_for_a_blank_batch():
     assert processor.is_quiet("**SKIP**", "SKIP")  # the quiet word the fallback is judged against is the same one
+
+
+# --- Review findings ---
+
+GATEWAY = {**DIGEST, "output_header": "h"}
+
+
+def test_a_direct_chat_the_directory_does_not_list_yet_is_private_and_cannot_reach_a_group(monkeypatch, tmp_path):
+    secret = "DM-SECRET-FROM-ALICE"
+
+    async def check(env, poster, fake):
+        await source(env.pool)
+        fields = {"name": "g", "cron": "5 * * * *", "kind": "subscription", "requirement": INSTRUCTIONS,
+                  "run_budget_usd": 0.5, "notify_target": {"channel": "lark", "chat": GROUP}}
+        for sub in ({**GATEWAY, "rules": [{"name": "g", "chat_kinds": ["group", "unknown"]}]},
+                    {**GATEWAY, "chat_kinds": ["group", "unknown"], "sender_kinds": ["user"], "rules": []}):
+            status, answer = await env.call("POST", "/api/v1/schedule_admin/create", {
+                "project_id": env.project_id, "fields": {**fields, "subscription": sub}})
+            assert status == 400 and "your own direct chat" in answer["error"]["message"], sub
+        sid = await started(env, subscription={**GATEWAY, "rules": [{"name": "g", "chat_kinds": ["group", "unknown"]}]})
+        await confirm(env, sid)
+        await add(env.pool, secret, chat_id="oc_newdm", kind="unknown", sender="ou_alice", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)  # to the operator's own direct chat it is fine
+        assert poster.sent[0]["target"].id == DM and secret in fake.calls[0]["input_text"] and run["stream"]["outcome"] == "delivered"
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_adding_rules_and_removing_them_again_leaves_the_filter_it_had(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env, target={"channel": "lark", "chat": GROUP})
+        before = await env.pool.fetchval("SELECT chat_kinds FROM subscriptions WHERE schedule_id = $1", sid)
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"subscription": {
+            "rules": [{"name": "g", "chat_kinds": ["group"]}]}}})
+        assert await env.pool.fetchval("SELECT chat_kinds FROM subscriptions WHERE schedule_id = $1", sid) == before
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"subscription": {"rules": []}}})
+        assert await env.pool.fetchval("SELECT chat_kinds FROM subscriptions WHERE schedule_id = $1", sid) == before
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_private_subscription_can_always_be_disabled_or_renamed_whatever_its_source_user_became(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env, subscription={**GATEWAY, "rules": [{"name": "d", "chat_kinds": ["p2p"]}]})
+        await confirm(env, sid)
+        await env.pool.execute("UPDATE event_sources SET user_open_id = 'ou_rebound' WHERE id = $1", SOURCE)
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"name": "renamed"}})
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"enabled": False}})
+        assert await env.pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid) is False
+        # Changing what it reads or where it goes still needs the operator's own chat.
+        status, answer = await env.call("POST", UPDATE, {"schedule_id": sid, "fields": {"subscription": {"max_events": 5}}})
+        assert status == 400 and "your own direct chat" in answer["error"]["message"]
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_request_that_changes_nothing_does_not_count_as_a_change(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+
+        async def epoch() -> int:
+            return await env.pool.fetchval("SELECT config_epoch FROM subscriptions WHERE schedule_id = $1", sid)
+        start = await epoch()
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"name": "renamed", "enabled": True}})
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"cron": "*/5 * * * *", "notify": "failures"}})
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"subscription": {"max_events": 500}}})
+        assert await epoch() == start
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"cron": "6 * * * *"}})
+        assert await epoch() == start + 1
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"subscription": {"max_events": 100}}})
+        assert await epoch() == start + 2
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_window_whose_patterns_were_stopped_at_their_deadline_is_counted_on_its_run(monkeypatch, tmp_path):
+    from looper.agents import subscription_rules
+
+    async def check(env, poster, fake):
+        monkeypatch.setattr(subscription_rules, "_WORKER", "import time\ntime.sleep(60)")
+        monkeypatch.setattr(subscription_rules, "REGEX_TIMEOUT_SECONDS", 0.5)
+        sid = await digest(env)
+        await confirm(env, sid)
+        await add(env.pool, "磁盘告警", chat_id="oc_alerts", sent_at=minutes_ago(env, 5))  # only the pattern rule would take it
+        await add(env.pool, "hello", chat_id="oc_dm", kind="p2p", sent_at=minutes_ago(env, 4), sender="ou_alice")
+        run = await fire(env, sid)
+        assert run["stream"]["match_timeouts"] == 1 and run["stream"]["events_selected"] == 1  # the direct message only
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_change_to_what_a_subscription_may_select_needs_the_target_confirmed_again(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env, subscription={**GATEWAY, "rules": [{"name": "g", "chat_kinds": ["group"]}]})
+        await confirm(env, sid)
+        shown = await version_of(env, sid)
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"subscription": {
+            "rules": [{"name": "g", "chat_kinds": ["group"], "never_quiet": True}]}}})
+        assert await version_of(env, sid) != shown  # it became private: the operator confirms what that means
+        plain = await started(env, name="plain")  # a subscription that is not private keeps the version it always had
+        await confirm(env, plain)
+        before = await version_of(env, plain)
+        await env.ok("POST", UPDATE, {"schedule_id": plain, "fields": {"subscription": {"quiet_word": "NONE"}}})
+        assert await version_of(env, plain) == before
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_manager_sees_how_many_rules_a_subscription_has_not_their_chats_or_patterns(monkeypatch, tmp_path):
+    from looper.agents.ops import schedules as ops
+
+    async def check(env, poster, fake):
+        sub = {**GATEWAY, "include_chats": ["oc_secret_chat"],
+               "rules": [{"name": "d", "include_chats": ["oc_secret_chat"], "text_match": "SECRET-PATTERN"}]}
+        sid = await started(env, subscription=sub)
+        view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+        shown = ops._subscription_for_manager(view["subscription"])
+        assert shown["rules_count"] == 1 and "rules" not in shown and "confirmation" not in shown
+        assert "SECRET-PATTERN" not in str(shown) and "oc_secret_chat" not in str(shown)
+
+    scenario(check, monkeypatch, tmp_path)

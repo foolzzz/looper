@@ -1645,7 +1645,9 @@ CREATE TABLE IF NOT EXISTS subscription_runs (
     -- The subscription's configuration and epoch as the run started: its window is selected with these, not with what
     -- the subscription is by then.
     config            JSONB,
-    config_epoch      BIGINT
+    config_epoch      BIGINT,
+    -- Windows whose text_match pattern run was stopped at its deadline: no pattern took anything in them.
+    match_timeouts    INTEGER NOT NULL DEFAULT 0
 );
 -- One message of a run's push: pending, then sending (written before the channel is asked), then sent, failed (the
 -- channel said no: asked again) or uncertain (it was being sent when the process died, or the channel's answer was

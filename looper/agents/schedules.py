@@ -807,6 +807,22 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
 # The schedule fields whose change a push depends on (``subscriptions.config_epoch``).
 _EPOCH_FIELDS = ("notify_channel", "notify_chat", "notify", "cron", "timezone", "enabled")
 
+def touches_target(row: Mapping[str, Any], fields: Mapping[str, Any], stream: Mapping[str, Any] | None) -> bool:
+    """Whether a change of a subscription schedule changes what it reads (its stream) or where it pushes."""
+    return stream is not None or any(name in fields and fields[name] != row[name]
+                                     for name in ("notify_channel", "notify_chat"))
+
+
+def changes_config(row: Mapping[str, Any], fields: Mapping[str, Any], stream: Mapping[str, Any] | None,
+                   profiles: Mapping[str, str] | None) -> bool:
+    """Whether a change of a subscription schedule changes a value a push depends on (``config_epoch``): a request
+    that says what is already so changes nothing."""
+    current = row["subscription"]
+    return (any(stream[name] != current.get(name) for name in stream or ())
+            or any(name in fields and fields[name] != row.get(name) for name in _EPOCH_FIELDS)
+            or (profiles is not None and dict(profiles) != dict(row["profile_overrides"])))
+
+
 # Kinds whose firing creates no task: neither a gate nor a template, and a minimum interval like a gated schedule's.
 _NO_TASK_KINDS = (Kind.COMMAND.value, Kind.SUBSCRIPTION.value)
 
@@ -971,7 +987,8 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             if "profile_overrides" in data and kind == Kind.SUBSCRIPTION.value and confirm_version is not None:
                 raise RequestError(HTTP_400, "change the processor's Agent Profile in a request of its own: what the "
                                              "operator confirms is the profile that runs")
-            if kind == Kind.SUBSCRIPTION.value:
+            if kind == Kind.SUBSCRIPTION.value and touches_target(row, fields, stream):
+                # Only a change of what it reads or where it goes is checked: disabling and renaming always work.
                 await check_private_target({**row["subscription"], **(stream or {})},
                                            fields.get("notify_channel", row["notify_channel"]),
                                            fields.get("notify_chat", row["notify_chat"]), conn)
@@ -998,8 +1015,7 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
             if stream_changes:
                 await db_subs.update(conn, schedule_id, stream_changes)
-            if kind == Kind.SUBSCRIPTION.value and (
-                    stream or profiles is not None or any(name in fields for name in _EPOCH_FIELDS)):
+            if kind == Kind.SUBSCRIPTION.value and changes_config(row, fields, stream, profiles):
                 await db_subs.bump_epoch(conn, schedule_id)
     except db_schedules.ConfigurationChanged as exc:
         raise RequestError(HTTP_409, str(exc)) from None
