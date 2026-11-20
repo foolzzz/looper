@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -477,5 +479,19 @@ def test_daily_confirmation_explains_retry_after_failure_without_delivery(monkey
         text = await subscriptions.confirmation_text(await schedules.get_schedule(sid), now=env.clock.now, action="启用")
         assert "失败或中断且无已发送/发送状态不确定的消息时释放名额" in text
         assert "静默、仅留在面板或已发送/发送状态不确定时保留名额" in text
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_documented_daily_recipe_expands_its_count_placeholder(monkeypatch, tmp_path):
+    document = (Path(__file__).parents[1] / "docs/architecture/agent-system.md").read_text()
+    section = document.split("- **Lookback and daily digests.**", 1)[1]
+    recipe = json.loads(section.split("```json\n", 1)[1].split("```", 1)[0])
+
+    async def check(env, poster, fake):
+        sid = await started(env, subscription=recipe)
+        await add(env.pool, "report", sent_at=minutes_ago(env, 1))
+        run = await fire(env, sid)
+        assert run["stream"]["output_text"].splitlines()[0] == "Daily digest · 2026-01-15 · 1 messages"
 
     scenario(check, monkeypatch, tmp_path)

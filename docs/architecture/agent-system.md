@@ -4732,7 +4732,8 @@ Manager's `looper_schedules` cannot create or change one.
   by the source's own user), `mentions_me` (`any`, `only`, `exclude`),
   `text_match`, `never_quiet` and `areas` (chat id to a name). `lines_v2` writes
   `[time] 【label·area】《chat》 sender: text`. `output_header` may hold
-  `{count}` and `{count:RULE NAME}`, filled from what the window kept. A
+  `{count}` and `{count:RULE NAME}`, filled from what the window kept only when
+  `rules` is nonempty; without rules these placeholders remain literal text. A
   `text_match` is an operator-owned regular expression: at most 500 characters,
   no repeated group that holds a repeat, an alternation or a group that does
   (`(a+)+`, `(a|aa)+`), at most two unbounded repeats (`+`, `*`, `{n,}`), run on the
@@ -4763,20 +4764,26 @@ Manager's `looper_schedules` cannot create or change one.
   on creation and bounded as above; a partial update retains the stored age.
   All existing source exclusions, history/import selection, rules, caps and the
   private-content guard still apply. `{date}` in `output_header` expands to the
-  firing's local date (`YYYY-MM-DD`, in the schedule's timezone), with or without
-  rules, and can be combined with the count placeholders.
+  scheduled fire's local date (`YYYY-MM-DD`, in the schedule's timezone; manual
+  runs use their request time), with or without rules. Count placeholders still
+  require nonempty `rules`.
 
   `delivery_policy: "daily"` reserves `(schedule_id, local_date)` in
   `subscription_daily_claims` before starting the processor, in the firing's
-  transaction. Its database primary key covers manual runs, queued fires and
-  catch-up (`catch_up: "once"` collapses missed fires into one attempt on the
-  current local date). A repeated attempt is `skipped_gate` with its reason on
-  the dashboard. Reservations survive restart, quiet output, processor failure,
-  uncertain delivery and dashboard-only output: a nonempty attempt consumes the
-  day even if nothing was pushed. Confirm the target before the first attempt.
-  Empty windows reserve nothing. In-flight delivery recovery uses the same run
-  and segment claims, without starting another daily attempt. This favors
-  at-most-once delivery over retrying a failed digest that day. `per_run` allows
+  transaction. The claim date is saved on `subscription_runs.daily_date`; ending
+  a run never recomputes it from the current timezone. The guard covers manual
+  runs, queued fires and catch-up (`catch_up: "once"` collapses missed fires into
+  one attempt on the latest missed firing's local date). A retained claim also
+  blocks earlier dates, so moving the timezone backwards does not reopen them.
+  A repeated attempt is `skipped_gate` with its reason on the dashboard; it does
+  not clear a failure streak or update `last_ok_at`. Only a genuinely empty
+  window counts as a healthy skip and reserves nothing.
+  Quiet output, dashboard-only output and any sent or uncertain message retain
+  the claim across restart. Failure or restart interruption with nothing sent
+  or uncertain releases that run's recorded date in the same transaction that
+  ends it, allowing a retry. Confirm the target before the first attempt.
+  In-flight delivery recovery uses the same run and segment claims, without
+  starting another daily attempt. `per_run` allows
   multiple lookback runs when that is wanted. The two options are independent;
   existing cursor subscriptions and gossip keep their input, order and delivery
   behavior, processor prompt, tool list and launch flags.
@@ -4793,6 +4800,7 @@ Manager's `looper_schedules` cannot create or change one.
     "render": "lines_v2",
     "max_events": 600,
     "text_max_chars": 300,
+    "rules": [{"name": "all", "chat_kinds": ["group", "topic"]}],
     "output_header": "Daily digest · {date} · {count} messages"
   }
   ```
