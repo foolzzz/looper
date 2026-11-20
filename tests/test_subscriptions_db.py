@@ -1067,8 +1067,8 @@ def _lark_poster(adapter):
     ("lost", "uncertain", 1),  # lark-cli took the message and its answer could not be read
     ("refused", "failed", 3),  # the platform said no: asked again, three asks in all
 ])
-def test_the_lark_adapter_tells_a_refusal_from_a_lost_answer(  # noqa: F811
-        monkeypatch, tmp_path, lark_cli_stand_in, answer, outcome, asks):
+def test_the_lark_adapter_tells_a_refusal_from_a_lost_answer(
+        monkeypatch, tmp_path, lark_cli_stand_in, answer, outcome, asks):  # noqa: F811
     import shutil
 
     from looper.agents.channels.allowlist import SenderAllowlist
