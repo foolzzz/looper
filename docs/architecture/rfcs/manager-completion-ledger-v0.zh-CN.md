@@ -177,7 +177,7 @@ CREATE INDEX IF NOT EXISTS idx_manager_events_created ON manager_events (created
 4. 限时 120 秒，从回合开始算。成功且回复去掉空白后非空：回复加代码块（第 3.6 节）发到目标，整批 `delivered`，写 `record_id`、`sent_at`。
 5. 其他情况整批 `fallback`，逐个事件发代码通知：回合出错 `turn_failed`；超时 `turn_timeout`；你停止 `turn_stopped`；空回复 `empty_reply`；回复交给渠道失败 `send_failed`（再试一次代码通知，失败的照现在记日志）。超时时，能中断的运行时（`can_interrupt`）按 `/stop` 的路径中断；不能中断的（按轮启动的运行时）让它跑完，回复只进运行记录，不发。
 
-**「至少一次」的边界：** 回复已经交给渠道、写 `delivered` 之前服务崩溃，重启后这批按 `restart` 再发一次代码通知。宁可多发一条，不丢。
+**送达的边界：** 回复和代码通知都按订阅推送的做法记送达状态：交给渠道之前先提交 `sending`；渠道明确没发出的（`failed`）才重试，可能已发出的（超时、读不到回答、拆开发送时已发出一部分，或停在 `sending` 的）记 `uncertain`，不再发送。回复已经在 `sending`、写 `delivered` 之前服务崩溃的，重启后记为 `delivered`、`uncertain`，不补发代码通知。
 
 ### 3.5 `[COMPLETION]` 回合（模型可见）
 

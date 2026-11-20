@@ -4268,28 +4268,37 @@ message, so a change answers `needs_user_turn` (still recorded in
 without touching an operation waiting in the chat. Its run record is the
 Manager's (no task), with `metadata.completion` (`batch`, `event_ids`,
 `task_ids`). It is the chat's live turn while it runs, so `/stop` there stops
-it; nothing streams to the chat. A reply goes where the notice would: into the
-dashboard chat session, as the `CHAT_NOTICE` of the recorded target with its
-text replaced (stored in that chat's history), or for a schedule's run through
-the scheduler, as the run's message (its outbox row, `kind = run`, names the
-event in `manager_event_id`; another schedule run in the same batch records the
-same reply as sent). A batch with a schedule run whose schedule no longer sends
-to the chat its event recorded (its target changed, or the chat is no longer
-allowed) is not sent: it falls back with `target_changed`, and each run's
-message goes where its schedule sends now. A run's message that went out but
-whose outbox row could not be written is not sent again: the row is written
-once more, by the event. A reply whose channel failed without saying whether it
-went (the channel raised) counts as delivered, marked `send_uncertain`, and is
-never sent again; code appends each task's link
-line (and a worktree task's branch line) after it, and the events become
-`delivered` with the run's `record_id`. Otherwise the batch falls back and
-every event's recorded notice is sent unchanged (a schedule run's through the
-scheduler, its outbox row naming the event). A notice known not to have been
-handed to its channel (its queue refused it, the schedule's target or channel is
-gone) is tried again by the completion service after 5 s, then 15 s, 45 s and so
-on (at most 15 minutes apart, 8 tries; `send_attempts`, `send_retry_at`, a pass
-taking it for a minute); one that may have reached the chat (the channel raised)
-is marked `send_uncertain` and never tried again, a restart included. Reasons:
+it; nothing streams to the chat. Every message that tells an event (the reply,
+or a code notice) has a typed delivery, as subscription pushes do: `delivery`
+is `pending`, written `sending` (committed) before its channel is asked, then
+`sent`, `failed` (the channel said it did not send it, or it never got that
+far: tried again) or `uncertain` (it may have been sent: never again). A reply
+goes where the notice would: into the dashboard chat session or as the
+`CHAT_NOTICE` of the recorded target with its text replaced (stored in that
+chat's history), both through the bus (`sent` once journaled and queued); or,
+for a schedule's run, through the channels' `post` to the chat the event
+recorded (never one the schedule names later), its typed answer kept (a refusal
+with nothing sent is `REJECTED`; a time-out, an answer that could not be read,
+or any part of a split message sent is `UNKNOWN`), its outbox row (`kind = run`)
+naming the event in `manager_event_id`; another schedule run in the same batch
+records the same reply as sent. A batch with a schedule run whose schedule no
+longer sends to the chat its event recorded (its target changed, or the chat is
+no longer allowed) is not sent: it falls back with `target_changed`. A message
+that went but whose bookkeeping failed is never sent again: its outbox row is
+written once more by the event, and a delivery left `sending` becomes
+`uncertain`. Code appends each task's link line (and a worktree task's branch
+line) after the reply; a reply `sent` (or `uncertain`) makes the events
+`delivered` with the run's `record_id`, and nothing more is sent for them; one
+refused falls back. Otherwise the batch falls back and every event's recorded
+notice is delivered, to the chat the event recorded, through the one claim
+(`claim_deliveries`) that the turn, the completion service's passes and its
+retries share: a `failed` one is tried again after 5 s, then 15 s, 45 s and so on
+(at most 15 minutes apart, 8 tries in all); an error before the channel is asked
+(the run or the allowed chats cannot be read, no channel can post) is `failed`
+too. When the service starts, a notice left `sending` by the server before is
+`uncertain`, and a pass turns one `sending` for 10 minutes `uncertain`; a
+Manager that starts makes an event whose reply was being sent `delivered` and
+`uncertain`. Reasons:
 `turn_failed` (the turn
 failed, or the tools' token was refused), `turn_timeout` (no reply within 120
 seconds of the claim: the notices go at once, then the turn is stopped as a stop
@@ -4304,10 +4313,10 @@ the channel), and, at the claim, `off` (the setting was turned off) or
 `manager_off` (the Manager was turned off). A wake-up whose events cannot be
 read (the database fails) queues a new `COMPLETION_DUE` after 5 seconds, before
 it is acknowledged. When a Manager starts, before its message loop, the events
-its earlier turns left `running` fall back with `restart` and every fallen-back
-event of the last 24 hours whose notice was never sent sends it: a turn a
-restart cut off may cost an extra notice, never the notice; its pending events
-wait for the completion service. A Manager retired with a `COMPLETION_DUE`
+its earlier turns left `running` fall back with `restart`, their notices
+waiting for the completion service (an event whose reply was being sent is
+`uncertain` instead: it may have been told); its pending events wait for the
+service too. A Manager retired with a `COMPLETION_DUE`
 queued or in hand sends the notices of that chat's open events
 (`manager_off`). Settings → Chat sets the switch ("When a task ends") and
 shows the last 24 hours (`manager_events.summary`): ends told by the Manager,
@@ -6086,7 +6095,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
 | `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
-| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and for a notice not handed to its channel `send_attempts`, `send_retry_at` and `send_uncertain`; kept 30 days |
+| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and the typed delivery of its message: `delivery` (`pending`, `sending`, `sent`, `failed`, `uncertain`), `delivery_attempts`, `delivery_at` (sending since, or tried again from) and `delivery_error`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
