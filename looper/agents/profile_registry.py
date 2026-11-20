@@ -52,6 +52,7 @@ import re
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import MISSING, dataclass, field, fields, replace
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
@@ -191,6 +192,21 @@ BUILTIN_PROVIDER = LegacyProviderSpec("prov-claude-subscription", "claude-subscr
                                 frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), "claude-code")
 BUILTIN_PROFILE = LegacyAgentProfile("agent-claude-code-opus", "claude-code/opus", BUILTIN_RUNTIME, BUILTIN_PROVIDER,
                                "opus", agent_teams=True)
+# The built-in Agent Profile of each role whose runs another run starts (the advisor RFC, section 8), seeded with the
+# schema (seeds.sql) like BUILTIN_PROFILE, which every other role runs when no layer chooses one; Settings → Roles
+# changes it. The advisor's names its model in full, never the alias: an alias maps to another model with another
+# provider, or in another release.
+BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
+    "advisor": LegacyAgentProfile("agent-claude-code-fable-5-2", "claude-code/fable-5-2", BUILTIN_RUNTIME,
+                                  BUILTIN_PROVIDER, "claude-fable-5-2", effort="high"),
+    "advice_check": LegacyAgentProfile("agent-claude-code-haiku-5-5", "claude-code/haiku-5-5", BUILTIN_RUNTIME,
+                                       BUILTIN_PROVIDER, "claude-haiku-5-5"),
+})
+
+
+def builtin_profile(role: str | None) -> LegacyAgentProfile:
+    """The Agent Profile ``role`` runs when no layer chooses one."""
+    return BUILTIN_ROLE_PROFILES.get(role or "", BUILTIN_PROFILE)
 
 
 # The normalized declarations keep account metadata, endpoint identity and model settings separate.

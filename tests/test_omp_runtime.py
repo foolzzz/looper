@@ -25,7 +25,7 @@ from fake_claude import fake_claude
 from looper.agents.profile_registry import (
     Endpoint, ModelSpec, ProviderSpec, RegistryError, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
 )
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
@@ -955,7 +955,7 @@ def test_a_consult_resumes_a_copy_of_the_runs_session_with_only_the_reading_tool
     (kept / "session.jsonl").write_text("{}\n")
     fork = tmp_path / "runtime" / ".local" / "omp" / "consult-sessions" / "task-1" / "consult-1"
     command = OMP.consult_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path),
-                                  launch=replace(_launch(), consult=True), session_id="s-1", session_dir=kept,
+                                  launch=replace(_launch(), access=Access.CONSULT), session_id="s-1", session_dir=kept,
                                   fork_dir=fork)
     assert _flag(command, "--tools") == ["read,glob,grep"]
     assert command[-4:] == ["--session-dir", str(fork), "--resume", "s-1"] and (fork / "session.jsonl").is_file()

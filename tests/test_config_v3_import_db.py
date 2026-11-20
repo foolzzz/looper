@@ -280,7 +280,7 @@ async def test_exported_custom_runtime_preserves_profiles_and_layers_on_fresh_in
             FROM agent_runtimes WHERE id = 'rt-claude-code';
             INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt)
             SELECT 'agent-custom', 'Portable custom', 'rt-custom', model_id, 'high', false, 'Check carefully.'
-            FROM agent_profiles WHERE builtin;
+            FROM agent_profiles WHERE id = 'agent-claude-code-opus';
             INSERT INTO agent_setting_layers (scope, role, profile_id, harness_prompt)
             VALUES ('role', 'worker', 'agent-custom', 'Portable instructions.');
         """)

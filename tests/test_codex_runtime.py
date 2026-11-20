@@ -25,7 +25,7 @@ from fake_claude import fake_claude
 from looper.agents.profile_registry import (
     Endpoint, ModelSpec, ProviderSpec, RegistryError, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
 )
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
@@ -202,7 +202,7 @@ def test_only_a_planner_approves_every_mcp_server(
         ("looper", {"type": "stdio", "command": "looper-mcp"}),
         ("docs", {"type": "http", "url": "https://docs.example.test/mcp"}),
     ])))
-    launch = replace(_launch(library=library), role=role, consult=consult)
+    launch = replace(_launch(library=library), role=role, access=Access.CONSULT if consult else None)
     servers = tomllib.loads(config_toml(launch))["mcp_servers"]
     assert set(servers) == {"looper", "docs"}
     for server in servers.values():
@@ -697,7 +697,7 @@ def test_a_consult_resumes_a_copy_of_the_runs_session_in_the_read_only_sandbox(t
     for name in ("state_5.sqlite", "state_5.sqlite-wal", "auth.json"):
         (kept / name).write_text("")
     fork = root / ".local" / "codex" / "consult-sessions" / "task-1" / "consult-1"
-    launch = replace(_launch(), consult=True)
+    launch = replace(_launch(), access=Access.CONSULT)
     command = CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=launch,
                                     session_id="thread-1", session_dir=kept, fork_dir=fork)
     assert command[:4] == ["env", f"CODEX_HOME={fork}", "codex", "exec"] and command[-3:] == ["resume", "thread-1", "-"]
@@ -725,7 +725,7 @@ def test_a_login_consult_links_the_operators_login_and_copies_no_auth_file(
     (kept / "auth.json").write_text('{"tokens": "a copy Codex wrote over the link"}')
     fork = root / ".local" / "codex" / "consult-sessions" / "task-1" / "consult-1"
     CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root),
-                          launch=replace(_launch(provider=_login_provider()), consult=True),
+                          launch=replace(_launch(provider=_login_provider()), access=Access.CONSULT),
                           session_id="thread-1", session_dir=kept, fork_dir=fork)
     link = fork / "auth.json"
     # The consult's home links the operator's login like any login run's; nothing of the run's auth.json reaches it.

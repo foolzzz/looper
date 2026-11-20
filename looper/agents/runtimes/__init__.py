@@ -249,6 +249,9 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
     "worker": frozenset({Capability.RUN}),
     "reviewer": frozenset({Capability.RUN}),
     "processor": frozenset({Capability.RUN, Capability.NO_TOOLS}),
+    # The advisor and its judge run once with no tools, over a request another run wrote (the advisor RFC).
+    "advisor": frozenset({Capability.RUN, Capability.NO_TOOLS}),
+    "advice_check": frozenset({Capability.RUN, Capability.NO_TOOLS}),
 }
 # The roles whose runs have tools: every role but the processor. A profile chosen for all of them at once (the
 # shared defaults) or as another profile's fallback is checked against these; a profile is checked for the processor

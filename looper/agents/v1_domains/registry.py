@@ -21,7 +21,8 @@ API_PROTOCOL = {"type": "string", "enum": [protocol.value for protocol in ApiPro
 API_FAMILY = {"type": "string", "enum": [family.value for family in ApiFamily]}
 VENDOR_KIND = {"type": "string", "enum": [vendor.value for vendor in VendorKind]}
 PRICE_FIELD = {"type": "string", "enum": list(profile_registry.PRICE_FIELDS)}
-PRICE = _object(dict.fromkeys(profile_registry.PRICE_FIELDS, _NULL_NUMBER), closed=True)
+PRICE = _object({**dict.fromkeys(profile_registry.PRICE_FIELDS, _NULL_NUMBER),
+                 "cache_write_1h_usd_per_mtok": _NULL_NUMBER}, profile_registry.PRICE_FIELDS, closed=True)
 PROVIDER_ENV_ENTRY = _object({"key": _STR, "value": _STR}, closed=True)
 PROVIDER_LOGIN = _object({"state": {"type": "string", "enum": [
     "chatgpt", "logged_in", "other_method", "not_logged_in", "checking", "unknown", "unavailable"]},

@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.library import AgentLibrary
 from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec
 from tests.runtime_model_helpers import resolved_profile
@@ -384,7 +384,7 @@ def test_installed_dsh_write_positive_control_then_resumed_read_only_guard(tmp_p
         canary.unlink()
         sid = next(row["sessionId"] for row in first if row["type"] == "session")
         prompt = tmp_path / ".local" / "prompts" / "system.md"
-        readonly = replace(launch, consult=True)
+        readonly = replace(launch, access=Access.CONSULT)
         resumed = launch.runtime.run_command(installation[0], cwd=tmp_path, prompt_file=prompt,
                                              launch=readonly, session_dir=tmp_path / "owner")
         resumed = [*resumed[:-1], "--session-id", sid, "-"]
