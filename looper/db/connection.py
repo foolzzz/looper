@@ -145,6 +145,7 @@ _ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ACTIVITY = "project_activity"
 _LEDGER = "ledger"
 _MESSAGE_LEADS = "message_leads"
+_INTENT_MERGES = "intent_merges"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
@@ -348,6 +349,17 @@ def _subscriptions_ddl() -> str:
 
 _LEDGER_BLOCK = re.compile(r"-- ledger begin\n(.*?)-- ledger end", re.S)
 _MESSAGE_LEADS_BLOCK = re.compile(r"-- message leads begin\n(.*?)-- message leads end", re.S)
+
+
+_INTENT_MERGES_BLOCK = re.compile(r"-- intent merges begin\n(.*?)-- intent merges end", re.S)
+
+
+def _intent_merges_ddl() -> str:
+    """How a merged intent survives the intent it was merged into, as schema.sql defines it."""
+    found = _INTENT_MERGES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its intent merges block")
+    return found.group(1)
 
 
 def _message_leads_ddl() -> str:
@@ -678,6 +690,21 @@ async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
     return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
+
+
+async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
+    """Whether the intents table lacks the AFTER DELETE detach trigger ``A_intents_detach_merged``, still has the
+    earlier BEFORE trigger, or has a merge key that cascades. Judged by the catalog, not the marker, so a database that
+    ran an earlier version of this block is upgraded too."""
+    if not await conn.fetchval("SELECT to_regclass('intents') IS NOT NULL"):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'intents'::regclass "
+        "AND tgname = 'A_intents_detach_merged') "
+        "AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'intents'::regclass "
+        "AND tgname = 'intents_detach_merged') "
+        "AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'intents_merged_into_fkey' "
+        "AND conrelid = 'intents'::regclass AND confdeltype = 'c')")
 
 
 async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
@@ -1165,6 +1192,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _message_leads_pending(conn):
             await conn.execute(_message_leads_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_LEADS)
+        if await _intent_merges_pending(conn):
+            await conn.execute(_intent_merges_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                               _INTENT_MERGES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1211,6 +1242,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscriptions_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _message_leads_pending(conn)
+            or await _intent_merges_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _llm_requests_pending(conn)

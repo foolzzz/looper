@@ -183,9 +183,11 @@ def test_turn_keeps_working_when_the_setting_is_off(monkeypatch: pytest.MonkeyPa
 
 def test_the_dashboard_reads_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chat_settings, "_stop_enabled", False)
-    assert _call(_Manager(), "POST", "/api/v1/chat_settings/get") == (200, {"stop_enabled": False})
+    assert _call(_Manager(), "POST", "/api/v1/chat_settings/get") == (
+        200, {"stop_enabled": False, "completion_turns": "off"})
     monkeypatch.setattr(chat_settings, "_stop_enabled", True)
-    assert _call(_Manager(), "POST", "/api/v1/chat_settings/get") == (200, {"stop_enabled": True})
+    assert _call(_Manager(), "POST", "/api/v1/chat_settings/get") == (
+        200, {"stop_enabled": True, "completion_turns": "off"})
 
 
 @pytest.mark.parametrize("body", [b"{}", b'{"stop_enabled": "yes"}', b'{"stop_enabled": 1}', b'{"other": true}'])
