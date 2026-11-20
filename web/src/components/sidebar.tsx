@@ -9,7 +9,6 @@ import {
   CalendarClock,
   Radio,
   ChevronDown,
-  History,
   Sliders,
   Folder,
   Loader2,
@@ -25,16 +24,15 @@ import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { cn } from "@/lib/utils";
 
-/** "history" is an agent's session history, reached from a task or a run; "projects" is one project, from the
+/** "history" is one agent's session, or every run of one role; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page = "dashboard" | "chat" | "tasks" | "gates" | "projects" | "runs" | "schedules" | "messages" | "settings" | "history";
+export type Page = "dashboard" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { page: "chat", label: "Chat", icon: MessageSquare },
   { page: "tasks", label: "Tasks", icon: ListTodo },
   { page: "gates", label: "User Gates", icon: MessageCircleQuestion },
-  { page: "runs", label: "Runs", icon: History },
   { page: "schedules", label: "Schedules", icon: CalendarClock },
   { page: "messages", label: "Message stream", icon: Radio },
 ];

@@ -14,14 +14,16 @@ vi.mock("@/components/drain-banner", () => ({ DrainBanner: () => null }));
 vi.mock("@/lib/session", () => ({ useSessionEnded: () => false }));
 vi.mock("@/pages/chat", () => ({ ChatPage: () => null }));
 vi.mock("@/pages/dashboard", () => ({ DashboardPage: () => <div>Dashboard view</div> }));
-vi.mock("@/pages/runs", () => ({ RunsPage: ({ sub }: { sub: string }) => <div>Runs {sub}</div> }));
+vi.mock("@/pages/agent-history", async (original) => ({
+  ...await original<typeof import("@/pages/agent-history")>(),
+  AgentHistoryPage: ({ sub, query }: { sub: string; query?: string }) => <div>History {sub}|{query ?? ""}</div>,
+}));
 vi.mock("@/pages/tasks", () => ({ TasksPage: ({ query }: { query: string }) => <div>Tasks {query}</div> }));
 vi.mock("@/pages/settings", () => ({ SettingsPage: ({ sub }: { sub: string }) => <div>Settings {sub}</div> }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 it.each([
-  ["runs/manager?task=t1", "Runs manager?task=t1", "runs/manager?task=t1"],
   ["tasks?project=p1&manager=m1", "Tasks project=p1&manager=m1", "tasks?project=p1&manager=m1"],
   ["settings/providers?focus=p1", "Settings providers?focus=p1", "settings/providers?focus=p1"],
   ["settings/unknown", "Settings roles", "settings/roles"],
@@ -30,7 +32,29 @@ it.each([
   ["settings/mcp/old", "Settings roles", "settings/roles"],
   ["settings/channel/old", "Settings roles", "settings/roles"],
   ["agents/manager/sessions", "Dashboard view", "agents/manager/sessions"],
-])("routes #%s without retired aliases", async (hash, content, finalHash) => {
+])("routes #%s", async (hash, content, finalHash) => {
+  window.history.replaceState(null, "", `#${hash}`);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<App />));
+    expect(container.textContent).toContain(content);
+    expect(window.location.hash).toBe(`#${finalHash}`);
+  } finally {
+    act(() => root.unmount());
+  }
+});
+
+it.each([
+  ["runs", "History |", "history"],
+  ["runs/", "History |", "history"],
+  ["runs?task=t1", "History |", "history"],
+  ["runs/not-a-role", "History |", "history"],
+  ["runs/manager", "History |role=manager", "history?role=manager"],
+  ["runs/manager?task=t1", "History |role=manager", "history?role=manager"],
+  ["runs/planner/extra", "History |role=planner", "history?role=planner"],
+  ["runs/processor", "History |role=processor", "history?role=processor"],
+])("redirects #%s to History", async (hash, content, finalHash) => {
   window.history.replaceState(null, "", `#${hash}`);
   const container = document.createElement("div");
   const root = createRoot(container);

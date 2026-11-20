@@ -123,6 +123,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                          {"sequencename": "llm_requests_id_seq", "last_value": None},
                          {"sequencename": "source_events_seq_seq", "last_value": None},
                          {"sequencename": "source_runs_id_seq", "last_value": None},
+                         {"sequencename": "ledger_events_id_seq", "last_value": None},
+                         {"sequencename": "ledger_items_id_seq", "last_value": None},
                          {"sequencename": "manager_events_id_seq", "last_value": None},
                          {"sequencename": "agent_spawns_id_seq", "last_value": None}],
                         key=lambda row: row["sequencename"])
