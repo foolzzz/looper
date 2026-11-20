@@ -115,7 +115,7 @@ def test_dashboard_build_records_dashboard_origin_and_queues_the_real_start_path
             assert result["intent"]["state"] == "tasked"
             assert result["intent"]["handled_via"] == "dashboard"
             task = await pool.fetchrow("SELECT * FROM tasks WHERE id=$1", result["task_id"])
-            assert task["origin_channel_id"] == "channel-web" and task["origin_reply_route"] is None
+            assert task["origin_channel_id"] == "" and task["origin_reply_route"] is None
             assert task["chat_id"] is None and task["project_id"] == project["id"]
             assert "意图 I-0001" in task["requirement"]
             assert len(sent) == 1 and sent[0].target == TASK_ROUTER_ADDRESS
@@ -163,6 +163,7 @@ def test_binding_templates_and_alert_allowlist_round_trip_with_declared_schemas(
     ("tasked", "I-0001 已经建过任务 task-synthetic。"),
     ("rejected", "I-0001 已驳回过。"),
     ("merged", "I-0001 已合并到 I-0002，请处理那一条。"),
+    ("expired", "I-0001 已过期，要建任务请回『建 I-0001』。"),
 ])
 def test_api_conflict_names_the_existing_outcome(monkeypatch, tmp_path, state, expected):
     async def check(pool):
@@ -181,7 +182,7 @@ def test_api_conflict_names_the_existing_outcome(monkeypatch, tmp_path, state, e
             await pool.execute("UPDATE intents SET state=$2,handled_at=now(),handled_via='dashboard',"
                                "task_id=$3 WHERE id=$1", iid, state, "task-synthetic" if state == "tasked" else None)
         async with v1_api(tmp_path, pool) as call:
-            for action in ("build", "reject"):
+            for action in (("reject",) if state == "expired" else ("build", "reject")):
                 status, answer = await call(f"intents.{action}", {"intent_id": "I-1"})
                 assert status == 409, answer
                 assert answer["error"] == {"code": "conflict", "message": expected}

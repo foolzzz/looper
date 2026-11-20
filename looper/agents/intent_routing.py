@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +13,7 @@ from ..db.connection import get_pool
 from ..db.intents import IntentRefused
 from . import gate_routing, intents, leads_model, operator_identity
 from .message import MessageEnvelope, is_lark
+from .projects import RequestError
 from .subscriptions import strip_mentions
 
 _BUILD = re.compile(r"建(?:\s*(I-?\d+))?(?:\s+(\d{1,2}))?", re.IGNORECASE)
@@ -22,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RouteResult:
-    reply: str
+    reply: str = ""
+    action: Callable[[], Awaitable[str]] | None = None
 
 
 def _state_reply(row: dict[str, Any]) -> str | None:
@@ -89,15 +92,13 @@ async def route(envelope: MessageEnvelope, *, platform: Any) -> RouteResult | No
     row = await pool.fetchrow("SELECT * FROM intents WHERE id=$1", number)
     if row is None:
         return RouteResult(f"没有 {label} 这条意图。")
-    if build and row["state"] == "tasked":
-        try:
-            await intents.resume_start(dict(row), platform=platform)
-        except Exception:
-            logger.exception("intent task start retry failed intent=%s task=%s", number, row["task_id"])
-            return RouteResult(f"任务 {row['task_id']} 已建，但启动请求失败，请重试「建 {label}」。")
-    state_reply = _state_reply(dict(row))
-    if state_reply:
-        return RouteResult(state_reply)
+    # Preparation only reads. The Manager runs this action after its final stop check.
+    return RouteResult(action=lambda: _execute(envelope, platform=platform, number=number, label=label,
+        build=bool(build), argument=match.group(2), channel=channel, context=context, sender=sender, group=group))
+
+
+async def _execute(envelope: MessageEnvelope, *, platform: Any, number: int, label: str, build: bool,
+                   argument: str | None, channel: str, context: dict, sender: Any, group: bool) -> str:
     via = "dashboard" if channel == "web" else "lark" if is_lark(channel) else "telegram"
     origin = None if channel == "web" else {
         "channel": channel, "channel_id": envelope.source.agent_id,
@@ -105,23 +106,36 @@ async def route(envelope: MessageEnvelope, *, platform: Any) -> RouteResult | No
         "group": group, "manager_id": envelope.target.agent_id, "correlation_id": envelope.correlation_id,
         "message_id": context.get("message_id")}
     try:
+        row = await get_pool().fetchrow("SELECT * FROM intents WHERE id=$1", number)
+        if row is None:
+            return f"没有 {label} 这条意图。"
+        if build and row["state"] == "tasked":
+            try:
+                await intents.resume_start(dict(row), platform=platform)
+            except Exception:
+                logger.exception("intent task start retry failed intent=%s task=%s", number, row["task_id"])
+                return f"任务 {row['task_id']} 已建，但启动请求失败，请重试「建 {label}」。"
+        state_reply = _state_reply(dict(row))
+        if state_reply:
+            return state_reply
         if build:
             result = await intents.build(number, via=via, origin=origin,
-                candidate=int(match.group(2)) if match.group(2) else None, now=datetime.now(timezone.utc),
+                candidate=int(argument) if argument else None, now=datetime.now(timezone.utc),
                 platform=platform)
-            return RouteResult(strip_mentions(
-                f"已建任务 {result['task_id']}：{result['intent']['title']}，已开始。"))
-        await intents.reject(number, via=via, reason=match.group(2))
-        return RouteResult(f"{label} 已驳回。")
+            return strip_mentions(f"已建任务 {result['task_id']}：{result['intent']['title']}，已开始。")
+        await intents.reject(number, via=via, reason=argument)
+        return f"{label} 已驳回。"
     except intents.NeedsProject as exc:
-        return RouteResult(_needs_project(label, exc.candidates))
+        return _needs_project(label, exc.candidates)
     except intents.NeedsDirectory as exc:
-        return RouteResult(f"项目 {strip_mentions(exc.project['name'])} 没有默认目录，请到意图页建任务。")
+        return f"项目 {strip_mentions(exc.project['name'])} 没有默认目录，请到意图页建任务。"
     except intents.CandidateOutOfRange as exc:
-        return RouteResult(f"没有第 {exc.candidate} 个候选项目。")
+        return f"没有第 {exc.candidate} 个候选项目。"
     except IntentRefused as exc:
         # Another operator turn can have handled it since our read; the transition's locked row wins.
         if exc.code == "not_found":
-            return RouteResult(f"没有 {label} 这条意图。")
+            return f"没有 {label} 这条意图。"
         state_reply = _state_reply(exc.row) if exc.row else None
-        return RouteResult(state_reply or strip_mentions(str(exc)))
+        return state_reply or strip_mentions(str(exc))
+    except (RequestError, ValueError) as exc:
+        return f"无法建任务：{strip_mentions(str(exc))}"

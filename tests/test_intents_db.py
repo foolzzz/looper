@@ -133,7 +133,7 @@ def test_build_candidates_and_project_errors(monkeypatch, tmp_path):
             await intents.build(iid, via="dashboard", candidate=2, platform=platform)
         result = await intents.build(iid, via="dashboard", candidate=1, platform=platform)
         task = await pool.fetchrow("SELECT * FROM tasks WHERE id=$1", result["task_id"])
-        assert task["project_id"] == p["id"] and task["origin_channel_id"] == "channel-web"
+        assert task["project_id"] == p["id"] and task["origin_channel_id"] == ""
         assert task["chat_id"] is None
     run_db(check, monkeypatch)
 

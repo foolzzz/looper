@@ -50,6 +50,12 @@ class CandidateOutOfRange(IntentRefused):
         super().__init__(f"没有第 {candidate} 个候选项目。")
 
 
+class CandidateDeleted(IntentRefused):
+    def __init__(self, candidate: int) -> None:
+        self.candidate = candidate
+        super().__init__(f"第 {candidate} 个候选项目已删除。", code="candidate_deleted")
+
+
 async def _require_row(table: str, key: str, value: str, db: Any) -> dict:
     row = await db.fetchrow(f"SELECT * FROM {table} WHERE {key}=$1", value)
     if row is None:
@@ -74,7 +80,7 @@ async def candidates(intent_id: int, *, db: Any = None, now: datetime | None = N
     if posted is not None:
         rows = await db.fetch("SELECT id,name FROM projects WHERE id=ANY($1::text[])", posted["candidates"])
         indexed = {r["id"]: dict(r) for r in rows}
-        return [indexed[p] for p in posted["candidates"] if p in indexed]
+        return [indexed.get(p, {"id": p, "name": "（已删除）"}) for p in posted["candidates"]]
     rows = await db.fetch("SELECT p.id,p.name FROM projects p JOIN tasks t ON t.project_id=p.id "
                           "WHERE t.created_at >= $1 GROUP BY p.id ORDER BY max(t.created_at) DESC,p.id LIMIT 5",
                           (now or _now()) - timedelta(days=30))
@@ -130,7 +136,7 @@ async def list_intents(*, state: list[str] | None = None, type: str | None = Non
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     states = ["pending"] if state is None else state
-    if any(s not in leads_model.IntentState for s in states):
+    if any(s not in tuple(leads_model.IntentState) for s in states):
         raise ValueError("unknown intent state")
     rows = await _db(db).fetch("SELECT i.* FROM intents i LEFT JOIN source_chats c "
         "ON c.source_id=i.source_id AND c.chat_id=i.chat_id WHERE i.state=ANY($1::text[]) "
@@ -199,10 +205,14 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
         if project_id is None and candidate is not None:
             # Positions refer to the stored push, including projects removed since that push.
             ids = await conn.fetchval("SELECT candidates FROM intent_posts WHERE intent_id=$1 AND kind='push' "
-                                     "ORDER BY id DESC LIMIT 1", intent_id) or []
+                                     "ORDER BY id DESC LIMIT 1", intent_id)
+            if ids is None:
+                ids = [choice["id"] for choice in choices]
             if not 1 <= candidate <= len(ids):
                 raise CandidateOutOfRange(candidate)
             project_id = ids[candidate - 1]
+            if not await conn.fetchval("SELECT id FROM projects WHERE id=$1 FOR KEY SHARE", project_id):
+                raise CandidateDeleted(candidate)
         project_id = project_id or row["project_id"]
         if project_id is None:
             raise NeedsProject(choices)
@@ -220,7 +230,7 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
             label = "私聊" if item["chat_kind"] == "p2p" else f"《{item['chat']}》"
             clock = raw["sent_at"].astimezone(ZoneInfo(zone_name)).strftime("%Y-%m-%d %H:%M")
             lines.append(f"- {label} · {item['sender']} · {clock} · {item['link'] or item['message_id']}")
-        fields: dict[str, Any] = {"origin_channel_id": "channel-web", "manager_id": "manager"}
+        fields: dict[str, Any] = {"manager_id": "manager"}
         if origin:
             channel = origin.get("channel") or via
             channel_id = origin.get("channel_id") or builtin_channel_id(channel)
@@ -254,7 +264,13 @@ async def reject(intent_id: int, *, via: str, reason: str | None = None, now: da
         raise ValueError("reason must have at most 200 characters")
     async with _db(db).acquire() as conn, conn.transaction():
         await _enabled(conn)
-        await store.transition(conn, intent_id, "rejected", via=via, now=now or _now(), reason=reason)
+        try:
+            await store.transition(conn, intent_id, "rejected", via=via, now=now or _now(), reason=reason)
+        except IntentRefused as exc:
+            if exc.state == "expired":
+                label = leads_model.format_intent_id(intent_id)
+                raise IntentRefused(f"{label} 已过期，要建任务请回『建 {label}』。", state=exc.state, row=exc.row) from None
+            raise
     await _final(intent_id)
     return {"intent": (await get(intent_id, db=db))["intent"]}
 

@@ -1368,11 +1368,16 @@ class ManagerAgent:
             if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
-            intent = await token.keep("route_intent", self._route_intent(envelope), 60)
-            if intent is not None:
-                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+            try:
+                intent = await token.keep("route_intent", self._route_intent(envelope), 60)
+                if intent is not None:
+                    await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                    self._acting(token)
+                    return Prepared(action=lambda: self._answer_intent(envelope, intent))
+            except TimeoutError:
                 self._acting(token)
-                return Prepared(action=lambda: self._send_reply(envelope, intent.reply))
+                return Prepared(action=lambda: self._send_reply(
+                    envelope, "意图处理准备超时，请重试。", error="intent preparation timed out"))
             quote_ref = lark_quote.QuoteRef.from_payload(envelope.payload.get("quote_ref"))
             if not text.strip() and quote_ref is None:  # a bare forward or @-mention under a message is answered
                 return Prepared()
@@ -2895,6 +2900,10 @@ class ManagerAgent:
         except Exception as exc:
             logger.exception("%s: the gate command %r failed", self._log, text[:40])
             return f"关卡命令出错：{exc}"
+
+    async def _answer_intent(self, envelope: MessageEnvelope, intent) -> None:
+        reply = await intent.action() if intent.action is not None else intent.reply
+        await self._send_reply(envelope, reply)
 
     async def _route_intent(self, envelope: MessageEnvelope):
         from .. import intent_routing, leads_model

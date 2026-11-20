@@ -1,6 +1,6 @@
 """Intent replies add no model-facing prompt, tool or launch-signature content.
 
-These hashes pin the main baseline before intent routing was added. The routing
+These baselines pin main's prompts, tools, command and signature. The routing
 suite separately exercises the absent-setting branch through a real Manager turn.
 """
 
@@ -30,18 +30,47 @@ def test_default_prompts_and_tool_list_equal_the_main_baseline():
     assert _digest(tools) == "76a6006374afaae65cb1525742bf74c3c99dc0a7954e441d51844e7668655346"
 
 
+# Source snapshots use the same AST parser as the implementation on every supported
+# Python version. They were read back from main; adding a preparation step cannot
+# alter the resident command or the inputs that restart its process.
+_MAIN_COMMAND = """\
+def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
+    \"\"\"The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session.\"\"\"
+    runtime = launch.runtime
+    command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
+                                       prompt_file=prompt_file, launch=launch)
+    if resume and self._session_id:
+        command.extend(runtime.resume_args(self._session_id))
+    return command
+"""
+_MAIN_SIGNATURE = """\
+signature = (
+    tuple(await token.step("claude_command", asyncio.to_thread(
+        self._claude_command, prompt_file, launch, resume=False))),
+    system_prompt.sha256, launch.env_sha256,
+    launch.library.sha256, launch.binding_sha256,
+    launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
+)
+if self._has_templates or has_workflows or self.agent_id != DEFAULT_MANAGER_ID:
+    listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
+    signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
+"""
+
+
 def test_the_manager_launch_command_and_signature_equal_the_main_baseline():
     command = ast.parse(textwrap.dedent(inspect.getsource(manager.ManagerAgent._claude_command)))
     preparation = ast.parse(textwrap.dedent(inspect.getsource(manager.ManagerAgent._prepare_turn)))
-    signature = []
-    for node in ast.walk(preparation):
-        if not isinstance(node, (ast.Assign, ast.AugAssign)):
-            continue
-        targets = [node.target] if isinstance(node, ast.AugAssign) else node.targets
-        if any(isinstance(part, ast.Name) and part.id == "signature"
-               for target in targets for part in ast.walk(target)):
-            signature.append(ast.dump(node, include_attributes=False))
-    assert _digest(ast.dump(command, include_attributes=False)) == (
-        "93e8547693d876bcff1e6f898216cd844829f11eba29ebe6feab1f10098771d3"
-    )
-    assert _digest(signature) == "b5f239ff88634e134bb4a465b9fc635852d4ddc60953c2fb11494d66ba453a76"
+
+    def assignments(tree):
+        signature = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AugAssign)):
+                continue
+            targets = [node.target] if isinstance(node, ast.AugAssign) else node.targets
+            if any(isinstance(part, ast.Name) and part.id == "signature"
+                   for target in targets for part in ast.walk(target)):
+                signature.append(ast.dump(node, include_attributes=False))
+        return signature
+
+    assert ast.dump(command, include_attributes=False) == ast.dump(ast.parse(_MAIN_COMMAND), include_attributes=False)
+    assert assignments(preparation) == assignments(ast.parse(_MAIN_SIGNATURE))
