@@ -279,6 +279,32 @@ def check_switch_off(read: dict[str, Any], row: dict[str, Any]) -> list[dict[str
     return checks
 
 
+def turned_off(api: runner.Api, task_id: str) -> dict[str, Any]:
+    """A project that had consults turns the advisor off: the task's page keeps its consults and their cost (its
+    history), and the Manager's view of the task names the advisor nowhere."""
+    checks: list[dict[str, Any]] = []
+    detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
+    api.post("/api/v1/project_admin/update", {"project_id": detail["project_id"], "fields": {"advisor": "off"}})
+    page = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
+    manager = api.post("/api/v1/ops/tasks/get", {"task_id": task_id})["result"]
+    _check(checks, "the task's page keeps its consults and their cost", bool((page.get("advisor") or {}).get("consults")))
+    keys: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            keys.update(k for k in value if re.search(r"(?i)advis|consult", k))
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(manager)
+    _check(checks, "the Manager's view of the task has no advisor field", not keys, sorted(keys))
+    _check(checks, "nor the advisor's line in the task's result", "## Advisor" not in str(manager.get("result")))
+    return {"passed": all(c["ok"] for c in checks), "checks": checks}
+
+
 # --- Running ----------------------------------------------------------------------------------------------------
 
 
@@ -357,11 +383,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "duration_s": row.get("duration_s"), "consults": consult_costs(read),
                 "summary_line": (detail.get("advisor") or {}).get("summary"),
             })
+        if "rate_limited" in task_ids:
+            report["turned_off"] = turned_off(api, task_ids["rate_limited"])
         if args.shots is not None:
             shown = [task_ids[name] for name in ("diagnose", "blocked", "timeout") if name in task_ids]
             report["screenshots"] = screenshots(api.base_url + "/", args.shots, shown) if shown else {}
         report["total_cost_usd"] = round(asyncio.run(_spent(database_url)), 6)
-    report["passed"] = all(case.get("passed") for case in report["cases"] if "skipped" not in case)
+    report["passed"] = all(case.get("passed") for case in report["cases"] if "skipped" not in case) and \
+        report.get("turned_off", {}).get("passed", True)
     consults = [c for case in report["cases"] for c in case.get("consults", ())]
     report["consult_cost_usd"] = {"consults": len(consults),
                                   "total": round(sum(c["spent_usd"] for c in consults), 6),
@@ -394,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
         for check in case.get("checks", ()):
             if not check["ok"]:
                 print(f"  failed: {check['check']} {check.get('detail', '')}")
+    if "turned_off" in report:
+        print(f"turned off: {'PASS' if report['turned_off']['passed'] else 'FAIL'}")
     print(f"consults: {report['consult_cost_usd']}; total {report['total_cost_usd']:.4f} USD; {report['path']}")
     return 0 if report["passed"] else 1
 

@@ -898,6 +898,7 @@ after another:
 | `timeout` | a critical step's checkpoint, with an advisor that never answers (a stand-in) and its role's timeout lowered to 20 s: the consult fails as `timeout`, the advisor ran once, the step still starts and passes, and the task shows 检查点请教未完成 |
 | `blocked` | the same, with a judge that finds a leak in every request: two returns, then `blocked`; the judge ran 3 times and the advisor never |
 | `rate_limited` | the same, with an advisor its model's rate limit stops (HTTP 429): failed as `rate_limited`, not run again |
+| (after `rate_limited`) | its project turns the advisor off: the task's page keeps its consults and their cost, and the Manager's view of the task (`ops/tasks/get`) names the advisor nowhere |
 | `switch_off` | a task with the advisor off: the advisor-off contracts are the ones `tests/test_advisor_off.py` pins, the Planner's system prompt holds one of them byte for byte, and nothing the Planner or its Workers are given names the advisor (the words are first found in an advisor-on contract, so the check can fail) |
 
 The stand-ins are in the `claude` the server runs (`evals/advisor_acceptance_claude.py`): it tells the advisor's

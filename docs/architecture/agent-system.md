@@ -5356,8 +5356,11 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   (`question`), the advisor's questions back (`needs_info`), its answer (`advice`), the adoption with each point's
   use and reason (`adoption_items`) and `unlocked`; never a request's bindings, a request that failed its checks,
   nor where a check matched) and `summary` (`advisor_advice.summary_line`: how many consults, their spend, the
-  points taken, the consults whose attempt then passed, and the steps whose checkpoint consult ended without an
-  answer). The Planner adds that line to the task's final summary or closing note (`## Advisor`). `runs.for_task`
+  points taken, those of them whose attempt then passed, and the steps whose checkpoint consult ended without an
+  answer, a refusal included). The Planner adds that line to the task's final summary or closing note
+  (`## Advisor`). A project that turns the advisor off keeps its tasks' consults on their pages (their history
+  and cost), while what the models see leaves the advisor out: the Manager's view of a task (`ops/tasks/get`)
+  drops the `## Advisor` line from its result. `runs.for_task`
   gives each run its `kind` and `parent_record_id`. The task page shows them:
   - the Pipeline draws each consult as a small dashed node beside its step, tied to it by a dashed line of its
     own, not a dependency edge: a checkpoint before the step, the others after it, the plan's beside the Planner,
