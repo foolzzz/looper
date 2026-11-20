@@ -144,9 +144,8 @@ async def _add(call: Call) -> dict[str, Any]:
         new = store.NewItem(kind=args["kind"], title=args["title"], detail=args.get("detail") or "",
                             owner_kind=owner_kind, owner_ref=owner_ref, project_id=project, due_at=due,
                             refs=[await _ref(text) for text in args.get("refs") or ()])
-        item = await store.apply("add", actor, new=new, quote=quote)
-        if old is not None:
-            await store.apply("supersede", actor, item_id=old, superseded_by=item["number"], quote=quote)
+        item = (await store.add_superseding(actor, new, old, quote=quote) if old is not None
+                else await store.apply("add", actor, new=new, quote=quote))
     except store.LedgerRefused as refused:
         raise _refused(refused) from None
     call.turn.blocks.append(_added_line(item, actor))

@@ -229,3 +229,22 @@ def test_arguments_owner_refs_due_project_and_supersedes(monkeypatch):
         assert [e["action"] for e in got["result"]["events"]] == ["add", "amend"]
 
     run_db(check, monkeypatch, timeout=60)
+
+
+def test_a_failed_supersede_leaves_no_new_decision_and_a_retry_does_not_duplicate(monkeypatch):
+    async def check(pool):
+        await enable(pool)
+        ops = make_ops()
+        settled = await say(ops, "looper_ledger_add", {"kind": "decision", "title": "Use Redis", "quote": "use Redis"},
+                            turn("use Redis"))
+        await ledger.apply("cancel", tools.store.Actor("user", "dashboard"), item_id=1, db=pool)  # no longer open
+        for message_id in ("m2", "m3"):  # a retry changes nothing either
+            answer = await say(ops, "looper_ledger_add", {
+                "kind": "decision", "title": "Use SQLite", "quote": "use SQLite", "supersedes": "L-1"},
+                turn("use SQLite", message_id=message_id))
+            assert answer["status"] == "error" and answer["error"]["code"] == "conflict", answer
+        assert settled["status"] == "ok"
+        assert [r["id"] for r in await pool.fetch("SELECT id FROM ledger_items")] == [1]
+        assert await pool.fetchval("SELECT count(*) FROM ledger_events") == 2  # the add and the cancel only
+
+    run_db(check, monkeypatch, timeout=30)

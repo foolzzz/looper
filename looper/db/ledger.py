@@ -517,6 +517,19 @@ async def _add(conn: asyncpg.Connection, new: NewItem, actor: Actor, note: str |
     return {**item_view(await conn.fetchrow(_SELECT + " WHERE i.id = $1", item_id)), "created": True}
 
 
+async def add_superseding(actor: Actor, new: NewItem, old_id: int, *, quote: str | None = None,
+                          db: Db | None = None) -> dict[str, Any]:
+    """Add the decision ``new`` and mark decision ``old_id`` superseded by it, in one transaction: the old decision
+    is locked and checked first, and whatever fails leaves nothing of either."""
+    async with _transaction(db) as conn:
+        row = await conn.fetchrow("SELECT id FROM ledger_items WHERE id = $1 FOR UPDATE", old_id)
+        if row is None:
+            raise LedgerRefused("not_found", f"{format_id(old_id)} does not exist")
+        item = await apply("add", actor, new=new, quote=quote, db=conn)
+        await apply("supersede", actor, item_id=old_id, superseded_by=item["number"], quote=quote, db=conn)
+        return item
+
+
 def _amend(item: Mapping[str, Any], fields: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, list[Any]]]:
     allowed = SOURCED_AMEND_FIELDS if item["source_kind"] else OWN_AMEND_FIELDS
     unknown = set(fields) - set(allowed)

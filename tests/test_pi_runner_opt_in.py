@@ -188,6 +188,7 @@ def test_hosted_run_descriptor_environment_and_session(tmp_path, monkeypatch, ru
     assert "Looper prompt" in text and "platform tools are named looper_*" in text
     assert "mcp__looper__" not in text and KEY not in " ".join(handle.command)
     assert written.stat().st_mode & 0o777 == 0o600
+    assert handle._env["LOOPER_AGENT_RUN"] == role.value  # the hosted run carries the run marker
     environment = adapter.environment(selected)
     assert environment[KEY_ENV] == KEY
     assert not {"LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN"} & environment.keys()
