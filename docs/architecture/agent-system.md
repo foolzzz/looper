@@ -20,14 +20,19 @@ marks deliveries in that chat from the preceding 30 minutes. All writes run in
 bounded background tasks and failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
-counts in the server timezone and mature-delivery reply rates for 1–30 days. Housekeeping retains
-proactive rows for 90 days. This feature owns the table's single named migration:
-one row per message, with the send receipt in `outcome`. Nullable `decision`,
-`reason`, deduplication, cap and digest fields are reserved for the delivery layer's
-future single `decide()` write point; metrics sends leave them unset.
+counts in the server timezone and mature, successfully sent delivery reply rates
+for 1–30 days. Housekeeping retains proactive rows for 90 days. This feature owns the table's single named migration:
+one row per message, with the send receipt in `outcome`. `source` includes
+`completion` and `user_reminder`; `chat_kind` is `direct` or `group`.
+Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
+idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries update
+only the receipt, preserving the first decision. Nullable `decision`, `reason`,
+cap and digest fields are reserved for the delivery layer's future `decide()`
+write point.
 Off, turns have no metrics key and sends add no writes.
-`chat_settings.update` requires operator identity, including updates to its existing
-chat controls. The dashboard presentation is a separate change.
+Only `metrics_enabled` in `chat_settings.update` requires operator identity;
+existing stop, completion and research controls retain their client access.
+The dashboard presentation is a separate change.
 
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
