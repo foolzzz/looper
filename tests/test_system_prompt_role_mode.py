@@ -10,7 +10,7 @@ import pytest
 
 from looper.agents import claude_cli
 from looper.agents.agent_settings import (
-    Access,
+    Access, NO_HARNESS_ROLES,
     BUILTIN_SETTINGS, BUILTIN_SYSTEM_PROMPT_MODE, AgentSettings, AgentType, Launch, Layer, LayerValues, SettingsError,
     layer_update, resolve, role_system_prompt_mode, system_prompt_mode_choice,
 )
@@ -34,8 +34,8 @@ def test_builtin_value_per_role(role: AgentType | None, expected: SystemPromptMo
     assert resolve(role, {}).system_prompt_mode is expected
 
 
-# The processor always replaces (tests/test_processor.py).
-@pytest.mark.parametrize("role", [role for role in AgentType if role is not AgentType.PROCESSOR])
+# The processor (tests/test_processor.py), the advisor and its judge (tests/test_advisor_db.py) always replace.
+@pytest.mark.parametrize("role", [role for role in AgentType if role not in NO_HARNESS_ROLES])
 @pytest.mark.parametrize("mode", [APPEND, REPLACE])
 def test_role_layer_overrides_the_builtin_value(role: AgentType, mode: SystemPromptMode) -> None:
     assert resolve(role, _layers(role, mode)).system_prompt_mode is mode

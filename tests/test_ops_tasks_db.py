@@ -322,7 +322,8 @@ def test_root_does_not_assign_a_directory_to_an_existing_project(monkeypatch, tm
     ({"project": "calc", "work_dir": "relative/dir"}, "work_dir"),
     ({"project": "  "}, "project must not be empty"),
     ({"project": "x" * 81}, "ask the user which project"),
-    ({"project": "calc", "profiles": {"worker": "claude-code/nope"}}, "registered: claude-code/opus"),
+    ({"project": "calc", "profiles": {"worker": "claude-code/nope"}},
+     "registered: claude-code/fable-5-2, claude-code/haiku-5-5, claude-code/opus"),
     ({"project": "calc", "profiles": {"worker": None}}, "give an Agent Profile"),
     ({"project": "calc", "requirement": "x" * 32_001}, "requirement has 32001 characters; at most 32000"),
 ])

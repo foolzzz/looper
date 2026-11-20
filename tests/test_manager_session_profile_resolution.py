@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from looper.agents import agent_settings
-from looper.agents.agent_settings import AgentType, Layer, _chain, index_layers, resolve
+from looper.agents.agent_settings import SPAWN_ROLES, AgentType, Layer, _chain, index_layers, resolve
 from tests.db_support import DSN, run_db
 from tests.test_agent_settings import _profile, _row
 
@@ -51,6 +51,8 @@ def test_only_the_managers_chain_gains_the_session_layer(role: AgentType) -> Non
     if role is AgentType.MANAGER:
         assert chain == [(Layer.SYSTEM, None), (Layer.ROLE, AgentType.MANAGER),
                          (Layer.MANAGER, AgentType.MANAGER), (Layer.SESSION, AgentType.MANAGER)]
+    elif role in SPAWN_ROLES:
+        assert chain == [(Layer.ROLE, role)]  # only their role layer chooses for the advisor's roles
     else:
         assert chain[-1] == ((Layer.SCHEDULE, role) if role is AgentType.PROCESSOR else (Layer.TASK, role))
 

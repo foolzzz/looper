@@ -136,6 +136,7 @@ _MANAGER_EVENTS = "manager_events"
 _RUN_TREE = "run_tree"
 _AGENT_SPAWNS = "agent_spawns"
 _STEP_DIFFICULTY = "step_difficulty"
+_ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ACTIVITY = "project_activity"
 _LEDGER = "ledger"
 _LLM_REQUESTS = "llm_requests"
@@ -410,6 +411,24 @@ ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check
 ALTER TABLE schedule_profile_overrides DROP CONSTRAINT schedule_profile_overrides_role_check,
     ADD CONSTRAINT schedule_profile_overrides_role_check CHECK (role IN ('planner', 'worker', 'reviewer', 'processor'));
 """
+
+
+# The advisor and its judge: their role layers. No row changes.
+_ADVISOR_ROLES_DDL = """
+ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check,
+    ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor',
+        'advisor', 'advice_check'));
+"""
+
+
+async def _advisor_roles_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _ADVISOR_ROLES):
+        return False
+    # Fresh baselines already admit the advisor's roles; only the released CHECK needs widening.
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_setting_layers') "
+        "AND conname = 'agent_setting_layers_role_check' "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'advice_check'")
 
 
 async def _processor_role_pending(conn: asyncpg.Connection) -> bool:
@@ -979,6 +998,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _processor_role_pending(conn):
             await conn.execute(_PROCESSOR_ROLE_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROCESSOR_ROLE)
+        if await _advisor_roles_pending(conn):
+            await conn.execute(_ADVISOR_ROLES_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _ADVISOR_ROLES)
         if await _llm_requests_pending(conn):
             await conn.execute(_LLM_REQUESTS_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS)
@@ -1144,7 +1166,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
-            or await _agent_spawns_pending(conn)
+            or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)

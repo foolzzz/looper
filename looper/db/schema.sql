@@ -686,7 +686,8 @@ CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (pro
 -- (looper/agents/agent_settings.py). One row per layer and place.
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
-    role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor')),
+    role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor',
+                                         'advice_check')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
     profile_id      TEXT REFERENCES agent_profiles(id),
