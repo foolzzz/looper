@@ -5411,6 +5411,44 @@ Off, no prompt, tool list or command line mentions it.
   the Manager's system prompt (the tool descriptions are all it has), HTTP
   writes.
 
+### What needs you
+
+One read-only summary of what waits for the operator
+([RFC](rfcs/assistant-needs-you-v0.zh-CN.md), `looper/agents/attention.py`),
+gathered by code from what Looper already keeps: no model call, nothing
+stored. It is off until the system setting `attention.enabled` is `true`
+(there is no dashboard switch). Off, `attention.summary` answers `conflict`,
+the dashboard lists no page for it, `/todo` is an ordinary message for the
+Manager's model and Telegram drops the command as before; no prompt, tool
+list or command line changes either way.
+
+- **Sections**, in order: `gates` (user gates waiting for the operator,
+  `gate_service.list_gates` with `waiting_on=user`), `confirmations` (each
+  Manager's operation waiting for the operator's word,
+  `ManagerOps.waiting_confirmations`, read from memory, so a restart drops
+  them), `schedules` (`db.schedules.failing`, the Schedules card's list),
+  `logins` (the Claude Code CLI or login, or a runtime login an Agent
+  Profile uses, failing in the checks `system/status` reads; `looper serve`
+  hands the reader over with `attention.use_status_checks`), `intents`
+  (pending, only while intents are on), `ledger` (own open items that wait
+  for the user: a to-do, an unconfirmed relayed decision, anything overdue;
+  only while the ledger is on) and `deliveries` (`uncertain` subscription
+  pushes, intent messages and task-end messages of the last 72 hours). A
+  section is `ok`, `error` (its source could not be read, with the reason;
+  never shown as empty) or `unknown` (this caller cannot read it); a
+  feature that is off leaves its section out. Each lists up to 20 items and
+  counts them all.
+- **API:** `POST /api/v1/attention/summary`, read-only and operator-only:
+  `{read_at, total, sections: [{kind, state, count, items, error}]}`, each
+  item `{key, title, context, since, href, ref, facts}`.
+- **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
+  only while the summary answers. Failing logins are left to the startup
+  check banner every page shows.
+- **Chat:** `/todo` (and Telegram's `/todo@bot`) is answered by code next to
+  `/new` and `/gates`, only in the operator's own turns
+  (`operator_identity.is_operator`); a group, another sender and an API
+  client get a refusal.
+
 ### User gates
 
 In a project with `user_gates` `on`, also when unset (the default), a task's
