@@ -617,7 +617,8 @@ class Scheduler:
         assert job is not None
         try:
             server_major = await self._message_backup_server_major()
-            path, checked = await asyncio.to_thread(db_backup.run_message_backup, job, server_major, now)
+            # An asyncio subprocess, so cancellation terminates pg_dump and reaps it before stop returns.
+            path, checked = await db_backup.run_message_backup(job, server_major, now)
         except Exception:
             logger.exception("daily message backup failed; the next attempt is in one day, or at the next start "
                              "when the newest copy is already a day old")

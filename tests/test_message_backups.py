@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import signal
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -125,7 +129,7 @@ def test_a_schema_dump_excludes_source_events_data(tmp_path: Path, monkeypatch: 
     assert dump["PGPASSWORD"] == "p@ss"
     assert "p@ss" not in "".join(dump["argv"])
     assert not any(arg.startswith("--exclude-table=") or arg.startswith("--table=") for arg in dump["argv"])
-    assert path.name.startswith("looper-loopx-") and "-messages-" not in path.name
+    assert path.name.startswith("looper-loopx-") and not path.name.endswith(".messages.dump")
     assert path.stat().st_mode & 0o777 == 0o600
 
 
@@ -179,8 +183,8 @@ def test_a_message_backup_dumps_only_source_events(tmp_path: Path, monkeypatch: 
     assert EXCLUDE not in dump["argv"]
     assert dump["PGPASSWORD"] == "p@ss"
     assert _argv(docker_calls)[0] == ["exec", "pgc", "pg_dump", "--format=custom", "loopx", TABLE]
-    assert path.name == f"looper-loopx-messages-{_stamp(NOW)}.dump"
-    assert docker_path.name.startswith("looper-loopx-messages-")
+    assert path.name == f"looper-loopx-{_stamp(NOW)}.messages.dump"
+    assert docker_path.name.startswith("looper-loopx-") and docker_path.name.endswith(".messages.dump")
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent == backups
 
@@ -208,22 +212,22 @@ def test_message_backup_rotation_keeps_seven_and_touches_nothing_else(
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     backups = tmp_path / "backups"
     backups.mkdir()
-    old = [_touch(backups, f"looper-loopx-messages-2026110{day}T120000.000000Z.dump") for day in range(1, 9)]
+    old = [_touch(backups, f"looper-loopx-2026110{day}T120000.000000Z.messages.dump") for day in range(1, 9)]
     kept_others = [
         _touch(backups, "looper-loopx-20261101T120000.000000Z.dump"),
-        _touch(backups, "looper-loopx_other-messages-20261101T120000.000000Z.dump"),
+        _touch(backups, "looper-loopx_other-20261101T120000.000000Z.messages.dump"),
         _touch(backups, "looper-other-20261101T120000.000000Z.dump"),
-        _touch(backups, "loopx-loopx-messages-20261101T120000.000000Z.dump"),
+        _touch(backups, "loopx-loopx-20261101T120000.000000Z.messages.dump"),
         _touch(backups, "loopx-loopx-20261101T120000.000000Z.dump"),
-        _touch(backups, "looper-loopx-messages-20261101T120000.000000Z.dump.partial"),
+        _touch(backups, "looper-loopx-20261101T120000.000000Z.messages.dump.partial"),
         _touch(backups, "notes.txt"),
     ]
 
     new, _ = db_backup.back_up_messages(db_backup.find_dumper(16), DSN, backups, now=NOW)
 
     assert sorted(backups.iterdir()) == sorted([*old[-6:], new, *kept_others])
-    assert len([path for path in backups.iterdir() if path.name.startswith("looper-loopx-messages-")
-                and path.suffix == ".dump"]) == 7
+    assert len([path for path in backups.iterdir() if path.name.startswith("looper-loopx-")
+                and path.name.endswith(".messages.dump")]) == 7
 
 
 def test_schema_rotation_does_not_delete_message_backups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,7 +236,7 @@ def test_schema_rotation_does_not_delete_message_backups(tmp_path: Path, monkeyp
     backups = tmp_path / "backups"
     backups.mkdir()
     schema = [_touch(backups, f"looper-loopx-2026100{day}T120000.000000Z.dump") for day in range(1, 7)]
-    messages = [_touch(backups, f"looper-loopx-messages-2026110{day}T120000.000000Z.dump") for day in range(1, 4)]
+    messages = [_touch(backups, f"looper-loopx-2026110{day}T120000.000000Z.messages.dump") for day in range(1, 4)]
     note = _touch(backups, "notes.txt")
 
     new, _ = db_backup.back_up(db_backup.find_dumper(16), DSN, backups, now=NOW)
@@ -244,7 +248,7 @@ def test_a_message_backup_younger_than_a_day_is_not_due(tmp_path: Path) -> None:
     backups = tmp_path / "backups"
     backups.mkdir()
     assert db_backup.message_backup_due(backups, "loopx", NOW)
-    fresh = _touch(backups, f"looper-loopx-messages-{_stamp(NOW - timedelta(hours=23))}.dump")
+    fresh = _touch(backups, f"looper-loopx-{_stamp(NOW - timedelta(hours=23))}.messages.dump")
     _touch(backups, "looper-loopx-20261101T120000.000000Z.dump")
     _touch(backups, "notes.txt")
     assert not db_backup.message_backup_due(backups, "loopx", NOW)
@@ -296,7 +300,7 @@ def test_message_backups_default_off_dumps_nothing(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(db_backup, "back_up_messages", refuse)
     backups = tmp_path / "backups"
     backups.mkdir()
-    kept = [_touch(backups, f"looper-loopx-messages-2026110{day}T120000.000000Z.dump") for day in range(1, 10)]
+    kept = [_touch(backups, f"looper-loopx-2026110{day}T120000.000000Z.messages.dump") for day in range(1, 10)]
     note = _touch(backups, "notes.txt")
     scheduler = Scheduler(bus=None, runtime_root=tmp_path)
 
@@ -310,9 +314,9 @@ def test_message_backups_default_off_dumps_nothing(tmp_path: Path, monkeypatch: 
 def test_a_daily_backup_runs_once_until_the_next_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[datetime] = []
 
-    def dump(job: db_backup.MessageBackup, server_major: int | None, now: datetime) -> tuple[Path, str]:
+    async def dump(job: db_backup.MessageBackup, server_major: int | None, now: datetime) -> tuple[Path, str]:
         calls.append(now)
-        path = job.backup_dir / f"looper-{job.dbname}-messages-{_stamp(now)}.dump"
+        path = job.backup_dir / f"looper-{job.dbname}-{_stamp(now)}.messages.dump"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"PGDMP")
         return path, "listed"
@@ -341,7 +345,7 @@ def test_a_daily_backup_runs_once_until_the_next_day(tmp_path: Path, monkeypatch
 def test_a_failed_daily_backup_is_not_retried_every_tick(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[datetime] = []
 
-    def fail(_job: object, _server_major: object, now: datetime) -> None:
+    async def fail(_job: object, _server_major: object, now: datetime) -> None:
         calls.append(now)
         raise db_backup.BackupFailed("disk full")
 
@@ -371,9 +375,9 @@ def test_a_recent_message_backup_is_not_repeated_and_a_restart_retries_an_old_on
 ) -> None:
     calls: list[datetime] = []
 
-    def dump(job: db_backup.MessageBackup, _server_major: object, now: datetime) -> tuple[Path, str]:
+    async def dump(job: db_backup.MessageBackup, _server_major: object, now: datetime) -> tuple[Path, str]:
         calls.append(now)
-        path = job.backup_dir / f"looper-{job.dbname}-messages-{_stamp(now)}.dump"
+        path = job.backup_dir / f"looper-{job.dbname}-{_stamp(now)}.messages.dump"
         path.write_bytes(b"PGDMP")
         return path, "listed"
 
@@ -386,7 +390,7 @@ def test_a_recent_message_backup_is_not_repeated_and_a_restart_retries_an_old_on
     job = db_backup.message_backup_for(_ops(tmp_path, 'messages = "daily"\n'), root)
     assert job is not None
     job.backup_dir.mkdir(parents=True)
-    fresh = _touch(job.backup_dir, f"looper-loopx-messages-{_stamp(NOW - timedelta(hours=2))}.dump")
+    fresh = _touch(job.backup_dir, f"looper-loopx-{_stamp(NOW - timedelta(hours=2))}.messages.dump")
     scheduler = Scheduler(bus=None, runtime_root=tmp_path, message_backup=job)
 
     scheduler._consider_message_backup(NOW)
@@ -396,7 +400,7 @@ def test_a_recent_message_backup_is_not_repeated_and_a_restart_retries_an_old_on
     assert scheduler._message_backup_not_before == NOW - timedelta(hours=2) + db_backup.MESSAGE_INTERVAL
 
     fresh.unlink()
-    _touch(job.backup_dir, f"looper-loopx-messages-{_stamp(NOW - timedelta(days=2))}.dump")
+    _touch(job.backup_dir, f"looper-loopx-{_stamp(NOW - timedelta(days=2))}.messages.dump")
     restarted = Scheduler(bus=None, runtime_root=tmp_path, message_backup=job)
 
     async def run() -> None:
@@ -406,3 +410,91 @@ def test_a_recent_message_backup_is_not_repeated_and_a_restart_retries_an_old_on
     import asyncio
     asyncio.run(run())
     assert calls == [NOW]
+
+
+def test_rotations_leave_the_other_databases_files_alone(tmp_path: Path) -> None:
+    """``demo``'s message backups and ``demo-messages``'s schema backups must not be the same names.
+
+    Each rotation deletes only its own excess and leaves the other database's files in the same directory.
+    """
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    demo_messages = [_touch(backups, f"looper-demo-2026110{day}T120000.000000Z.messages.dump")
+                     for day in range(1, 9)]
+    other_schema = [_touch(backups, f"looper-demo-messages-2026110{day}T120000.000000Z.dump")
+                    for day in range(1, 9)]
+    other_messages = [_touch(backups, f"looper-demo-messages-2026100{day}T120000.000000Z.messages.dump")
+                      for day in range(1, 9)]
+    demo_schema = [_touch(backups, f"looper-demo-2026100{day}T120000.000000Z.dump") for day in range(1, 9)]
+
+    removed_messages = db_backup.prune_messages(backups, "demo")
+    removed_schema = db_backup.prune(backups, "demo-messages")
+
+    assert removed_messages == demo_messages[:1]
+    assert removed_schema == other_schema[:3]
+    assert [path for path in demo_messages[1:] + other_schema[3:] + other_messages + demo_schema if not path.exists()] == []
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_stopping_the_scheduler_reaps_a_running_message_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``scheduler.stop`` ends a daily ``pg_dump`` within the service's shutdown bound and leaves no process."""
+    from looper.agents.serve import SHUTDOWN_DEADLINE_SEC
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pid_path = tmp_path / "dump.pid"
+    script = bin_dir / "pg_dump"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import os, signal, sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('pg_dump (PostgreSQL) 99.1')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(120)\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    async def major(_self: Scheduler) -> int:
+        return 16
+
+    monkeypatch.setattr(Scheduler, "_message_backup_server_major", major)
+    job = db_backup.message_backup_for(_ops(tmp_path, 'messages = "daily"\n'), tmp_path / "runtime")
+    scheduler = Scheduler(bus=None, runtime_root=tmp_path, message_backup=job)
+    pid = 0
+
+    async def run() -> None:
+        nonlocal pid
+        scheduler._consider_message_backup(NOW)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if pid_path.exists():
+                pid = int(pid_path.read_text())
+                if _alive(pid):
+                    break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("the daily dump did not start")
+        try:
+            await asyncio.wait_for(scheduler.stop(), SHUTDOWN_DEADLINE_SEC)
+            assert not _alive(pid)
+        finally:
+            if pid and _alive(pid):
+                os.kill(pid, signal.SIGKILL)
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+
+    asyncio.run(run())
