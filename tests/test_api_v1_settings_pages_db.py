@@ -74,7 +74,7 @@ def _vault(tmp_path):
     ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds", "run_retention_days",
                             "session_context_max_tokens"}),
     ("wait_settings", {"max_wait_seconds", "min_check_seconds"}),
-    ("knowledge_vault", {"configured", "path", "writable", "rules_file", "git", "problem"}),
+    ("knowledge_vault", {"configured", "path", "writable", "rules_file", "manager_read", "git", "problem"}),
 ])
 @pytest.mark.parametrize("client", [False, True])
 def test_full_get_views_are_nonempty_and_typed(tmp_path, monkeypatch, family, fields, client):
@@ -243,7 +243,8 @@ def test_vault_git_problem_clear_and_execution_revalidation_leave_notes_untouche
             assert problem["configured"] is False and problem["problem"] and problem["path"] == data["path"]
             status, body = await post("knowledge_vault/update", clear)
             assert status == 200 and body["result"] == {"configured": False, "path": None, "writable": [],
-                                                       "rules_file": None, "git": False, "problem": None}
+                                                       "rules_file": None, "manager_read": False, "git": False,
+                                                       "problem": None}
             assert (root / "rules.md").read_text() == "Example rules\n"
             assert subprocess.run(["git", "-C", data["path"], "log", "--oneline"], capture_output=True,
                                   timeout=10).returncode != 0
