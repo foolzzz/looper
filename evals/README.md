@@ -538,12 +538,12 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 62 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- haiku on all 63 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
-- sonnet on all 62 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+- sonnet on all 63 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all 62 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 63 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
   --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
 
@@ -856,7 +856,7 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode now selects all 62 dialogs by
+MCP; it takes about two minutes. Real mode now selects all 63 dialogs by
 default. The committed cost references cover only 24 dialogs (see the release
 tiers above), so neither they nor the default `--total-cap-usd` (0.50)
 establish a sufficient cap. Use an explicitly authorized measurement ceiling
@@ -872,7 +872,7 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
-does not establish a cap for the current 62 dialogs; give it
+does not establish a cap for the current 63 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
