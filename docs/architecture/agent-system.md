@@ -5337,12 +5337,25 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   (`processor.typed_events`), and it has no output text.
 - **Restarts.** At startup, every consult a stopped server left unfinished fails (`interrupted`); the Planner takes
   its decision again.
-- **Where they show.** A task's detail has `advisor.consults` (only in a task with some;
-  `advisor_advice.consults_view`): each consult's source, attempt, state and why it failed, rounds, returns, spend,
-  the checks its request failed (stage, category and count), the advisor's conclusions, the adoption and
-  `unlocked`; never the request's text, nor where a check matched. The task page shows them in
-  their step's card; Settings → Roles lists the Advisor and Advice check roles, and a project's settings its
-  `advisor` switch and limits.
+- **Where they show.** A task's detail has `advisor` (only in a task with some): `consults`
+  (`advisor_advice.consults_view`: each consult's source, kind, attempt, state and why it failed, rounds, returns,
+  spend and duration, the checks its request failed (stage, category and count), the request that was sent
+  (`question`), the advisor's questions back (`needs_info`), its answer (`advice`), the adoption with each point's
+  use and reason (`adoption_items`) and `unlocked`; never a request's bindings, a request that failed its checks,
+  nor where a check matched) and `summary` (`advisor_advice.summary_line`: how many consults, their spend, the
+  points taken, the consults whose attempt then passed, and the steps whose checkpoint consult ended without an
+  answer). The Planner adds that line to the task's final summary or closing note (`## Advisor`). `runs.for_task`
+  gives each run its `kind` and `parent_record_id`. The task page shows them:
+  - the Pipeline draws each consult as a small dashed node beside its step, tied to it by a dashed line of its
+    own, not a dependency edge: a checkpoint before the step, the others after it, the plan's beside the Planner,
+    several in time order; its label is its kind and how it ended, its colour its state, and its card the rest;
+  - a `consulting` step reads 请教中, and a step whose checkpoint consult ended without an answer is marked
+    检查点请教未完成, on the Overview and in the Pipeline;
+  - the Overview has the summary line and each step's consults; the Agents tab lists the advisor's and the advice
+    check's runs under the Planner run that asked.
+
+  Settings → Roles lists the Advisor and Advice check roles, and a project's settings its `advisor` switch, limits,
+  fallback profile and internal domains.
 
 ### Turns Claude runs on its own
 
