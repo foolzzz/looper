@@ -4629,9 +4629,11 @@ source that is `off`, the server does one query per tick.
   N days; `--dry-run` rolls back what it counted.
 - **Backups:** a schema-change `pg_dump` keeps the `source_events` schema and
   leaves out its rows. `[backup] messages = "daily"` (off unless the ops file
-  says so; no environment variable) writes `looper-<database>-messages-<stamp>.dump`
+  says so; no environment variable) writes `looper-<database>-<stamp>.messages.dump`
   in the same `backups/` directory at most once a day and keeps the newest 7.
-  Rotation deletes only those files.
+  That suffix cannot match a schema-change dump (`looper-<database>-<stamp>.dump`),
+  so each rotation deletes only its own files. Stopping the service terminates
+  the daily `pg_dump`, kills it if it is still running, and reaps it.
 - **Not yet:** a retention job for bodies already stored, deleting a chat, the
   collector. There is no deletion confirmation yet. When exclude-and-delete
   exists, its confirmation says delivered output remains, and that a daily

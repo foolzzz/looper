@@ -142,7 +142,7 @@
 
 - **保留期：** 每个来源两个设置：人发消息的原文（`body_retention_days`，默认不限）和机器人消息的原文（`app_body_retention_days`，默认 30）。机器人消息（告警、卡片）通常占大部分字节。每天一个任务在到期时把 `body` 置 NULL，`text` 保留。
 - **删除：** 排除一个会话会停止采集它。「排除并删除」在二次确认后删除它的事件和名字，确认文案同时说明哪些仍会留下：已经投递的输出（许多会话的汇总）。结构变更前的备份不含 `source_events` 的数据，表结构还在。运维文件把 `[backup] messages` 设为 `"daily"` 时（默认不写，即关闭），原文在每天的消息备份里保留最近 7 份，更旧的会被轮换删掉；没开启时，删除之后没有备份留着原文。
-- **备份：** 结构变更前的 `pg_dump` 用 `--exclude-table-data=source_events` 去掉消息原文，表结构保留。其余消息流表（`event_sources`、`source_chats`、`source_threads`、`source_people`、`source_runs`）是元数据和游标，连同数据留在这份备份里。`[backup] messages = "daily"` 时，serve 每天把 `source_events`（含原文）单独备份到同一个 `backups/` 目录，文件名 `looper-<库>-messages-<时间>.dump`，保留最近 7 份，轮换只删这些文件。
+- **备份：** 结构变更前的 `pg_dump` 用 `--exclude-table-data=source_events` 去掉消息原文，表结构保留。其余消息流表（`event_sources`、`source_chats`、`source_threads`、`source_people`、`source_runs`）是元数据和游标，连同数据留在这份备份里。`[backup] messages = "daily"` 时，serve 每天把 `source_events`（含原文）单独备份到同一个 `backups/` 目录，文件名 `looper-<库>-<时间>.messages.dump`，保留最近 7 份，轮换只删这些文件。这个后缀和 schema 变更备份的 `looper-<库>-<时间>.dump` 对不上，所以名为 `demo-messages` 的库不会和 `demo` 的消息备份抢同一个文件名。
 
 ## 10. 从外部采集器迁移
 

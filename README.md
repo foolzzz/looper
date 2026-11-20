@@ -275,13 +275,16 @@ is off until the ops file asks for it. There is no environment variable:
 messages = "daily"
 ```
 
-`looper serve` then writes `looper-<database>-messages-<UTC stamp>.dump` in the
-same `backups/` directory, at most once a day, and keeps the newest 7. Rotation
-deletes only those files. Schema-change dumps, other databases and any other
-name stay. Omit `messages`, or set `"off"`, and serve does not take this backup
-and does not delete one. A failed attempt is not retried until a day later,
-or at the next start when the newest copy is already a day old. Restore a message backup
-into a database that already has the source's chats.
+`looper serve` then writes `looper-<database>-<UTC stamp>.messages.dump` in the
+same `backups/` directory, at most once a day, and keeps the newest 7. The name
+ends in `.messages.dump`, which a schema-change dump
+(`looper-<database>-<UTC stamp>.dump`) cannot match, so rotating one database
+cannot delete the other's files. Rotation deletes only those message backups.
+Schema-change dumps, other databases and any other name stay. Omit `messages`,
+or set `"off"`, and serve does not take this backup and does not delete one.
+A failed attempt is not retried until a day later, or at the next start when
+the newest copy is already a day old. Restore a message backup into a database
+that already has the source's chats.
 
 Without a usable `pg_dump`, or when the backup fails, serve exits before it
 changes anything. A bridge upgrade refuses `looper serve --skip-backup`. A

@@ -177,8 +177,9 @@ verify_command = ["docker", "exec", "-i", "looper-postgres", "pg_restore", "--li
 messages = "daily"
 ```
 
-`looper serve` 然后最多每天一次，把 `looper-<库名>-messages-<UTC 时间>.dump` 写到同一个 `backups/` 目录，保留最近 7 份。
-轮换只删除这些文件。schema 变更备份、其他库的文件和其他名字都留着。不写 `messages`，或写成 `"off"`，serve 不做这份备份，
+`looper serve` 然后最多每天一次，把 `looper-<库名>-<UTC 时间>.messages.dump` 写到同一个 `backups/` 目录，保留最近 7 份。
+文件名以 `.messages.dump` 结尾，schema 变更备份（`looper-<库名>-<UTC 时间>.dump`）对不上这个名字，所以轮换一个库不会删掉另一个库的文件。
+轮换只删除这些消息备份。schema 变更备份、其他库的文件和其他名字都留着。不写 `messages`，或写成 `"off"`，serve 不做这份备份，
 也不删除已有的。失败后一天内不再试；下次启动时，只有最新一份已经超过一天才会再试。把消息备份恢复进一个已经有这些会话行的库。
 
 没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出。桥接升级拒绝 `looper serve --skip-backup`。不是这次升级的 schema 变化仍可能警告后带着 `--skip-backup` 继续；这里不要用它。升级后的 schema 不能再用旧二进制打开。回退时停掉新服务，保持已升级的数据库不变，把校验过的 schema 变更备份恢复到另一个数据库（有 `source_events` 的结构，没有它的行）：
