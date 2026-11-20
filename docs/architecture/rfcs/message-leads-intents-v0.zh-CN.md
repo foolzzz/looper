@@ -154,3 +154,59 @@ tasked、rejected、merged 是终态。
 **需要核实：** 飞书消息级链接的格式（v0 先给会话链接）；来源的 `user_open_id` 和机器人的操作者 ID 是否同一个 open_id（按应用区分，分开存）；Sonnet 在真实流量的 500 条窗口上的 JSON 丢弃率（评测和合成数据上没有丢弃）。
 
 **已知缺口：** 跑在 DSH 运行时上的 Manager 没有 `looper_leads_search`。
+
+## 10. 补充：第二道检查与常驻内容的稳定块
+
+维护者 2026-11-20 同意派发（产品设计的「其他改进方向」）。两项都默认关闭，关闭时 prompt 和行为逐字节不变；上线前用真实运行测数。线索在线上打开还要等「对外动作审查」打开（决定记录 2026-11-20，见 outbound-review RFC），本节不改上线顺序。
+
+### 10.1 第二道检查
+
+**目标：** 抽取出的每条线索和意图，由另一个模型对照它的出处消息复核一遍：保留、丢弃或改置信度，并给出理由。只有复核器的类型化结论能改变条目的状态；它写的任何东西都不会被执行。
+
+- **角色：** 新增 `leads_check`，和 `advice_check` 一样是不带工具、系统 prompt 整个替换、没有 harness 的派生角色（`SPAWN_ROLES`），有自己的内置 Profile（`profile_registry.BUILTIN_ROLE_PROFILES`），在 Settings → Roles 里可以换。内置 Profile 选一个和抽取（Sonnet）不同的模型：PR2 在评测集上同时测 Haiku 5.5 和 Opus 5.5，取达到目标（下一条）里最便宜的那个写进种子，测数写进 PR。
+- **目标：** 在评测集上，被标「不准确」的线索至少丢掉或降级 70%，看作正确的线索至少保留 95%。
+- **开关：** 订阅新增 `check_items BOOLEAN NOT NULL DEFAULT false`，线索和意图订阅各自打开；预设默认关闭。打开后复核器也会读消息，所以 `config_version` 加入 `check_items` 和复核器的 Profile，确认文字列出复核器的 Profile、来源和企业管理的 hooks。推送订阅不受影响。
+- **在哪一步：** 在同一次抽取运行里、入库之前：抽取 → 解析 → 复核 → 一个事务入库。意图因此在推送前就复核过。复核器只看这次解析出的条目和它们的出处，不看整个窗口，所以输入很小。
+- **输入：** 数据块里每个条目一个局部编号（`X1…`），列出它的种类、摘要、置信度，以及它引用的消息（含前文）和参与者，格式同第 4 节，块标记照旧转义。
+- **回复契约（模型可见，草案）：** `NONE` 不合法；回复一个 JSON 对象 `{"verdicts": [{"item": "X1", "verdict": "keep|drop|fix", "confidence": "high|medium|low", "reason": "≤ 200 字"}]}`，每个条目恰好一条。`fix` 必须带新的置信度；理由只说出处支不支持这条，不复述消息。
+- **解析与结果：** 少了条目、编号不存在、字段不合法，那一条按「没有复核」处理（见失败策略），其余照用。结论只改三件事：`drop` 的条目以新状态 `dropped` 入库（线索默认不出现在搜索里，意图不推送）；`fix` 改置信度；`keep` 不变。都记下 `check_verdict`、`check_reason` 和复核运行的 `check_record_id`。
+- **失败策略：** 复核器超时、超支、回复不合法时，条目照常入库，`check_verdict` 为空，`extract_counts.check_failed` 计数——和没有复核时一样，不让复核器的故障挡住线索和意图。连续 3 次复核失败沿用订阅的失败告警。
+- **花费：** 复核和抽取共用这次运行的花费上限（取剩余预算）；`extract_counts` 记 `check_cost_usd`、保留、丢弃、改置信度的条数。
+
+**数据：** 一个命名迁移：`message_leads.state` 和 `intents.state` 都加 `dropped`；两表各加 `check_verdict TEXT CHECK (check_verdict IN ('keep', 'fix', 'drop'))`、`check_reason TEXT`（≤ 200）、`check_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL`；约束 `(state = 'dropped') = (check_verdict = 'drop')`。被丢弃的条目留在库里，是为了评测「错丢」和让操作者翻看；它们的出处照样受第 6.1 节的触发器约束，删消息就删掉。`intents` 的 `dropped` 记 `handled_via = 'system'`。
+
+**评测集：**
+
+- **仓库里只有合成用例**（`evals/processor`）：出处不支持的线索 → `drop`；出处支持 → `keep`；过度自信 → `fix`；出处里有让复核器「全部保留」的注入 → 被忽略且记入复核器的 `instructions_seen`；不成立的意图 → `drop`。
+- **本机真实样例：** `looper leads eval-export --out FILE [--sample N]` 把标了「不准确」的线索连同出处消息原文写进本机文件，再随机加 N 条没标过的有效线索作「看作正确」的样本；文件只能写到 `evals/runs/` 这类被 git 忽略的目录，永远不进仓库。`evals/processor --cases-file FILE` 用它跑复核器（以及在同样的出处上重跑抽取），只报告计数：丢掉或降级的比例、保留的比例、每个窗口的花费。线上现在还没有线索，所以这个集合一开始是空的；PR2 先用合成集给出数字，线上有标记后再补测。
+
+### 10.2 常驻内容的稳定块
+
+**现状：** 默认 Manager 每个回合的用户消息前面都带同一批常驻内容：项目、任务模板、工作流预设、待开始的任务、在等你的关卡、活跃目标（`ManagerAgent._build_user_message`）。常驻会话的历史只增不减，这段内容每个回合写一次缓存，之后每个回合又要读回所有旧副本。
+
+**做法：** 常驻内容做成一个带版本号的块「Looper state（rev N）」，只在需要时整块发：
+
+- 新会话、进程（重新）启动、`/new`、Looper 自己换会话（context full），以及运行时报告了压缩（流里的 `compact_boundary`）之后的第一个回合，发整块。
+- 其余回合，把当前内容和最近一次整块逐行比较：没变，只发一行「Looper state: unchanged since rev N」；变了而且变化不大，发「Looper state: changes since rev N」，列出增加和去掉的行（总是相对最近一次整块，不会一条接一条地累积）；变化超过门槛就发新的整块（rev N+1）。
+- **门槛：** 变化的行数超过整块行数的 30%，或者变化说明的长度超过整块的 40%，就重发整块。PR3 用真实运行的数据检查这两个数，需要时调整并在 PR 里说明。
+- **模型可见：** 开关打开时，`TOOLS_CONTRACT` 后追加一句：最新的「Looper state rev N」整块加上它之后最新的一条变化说明是当前的状态，更早的都已过期。
+- 以后新增的常驻内容（例如账本摘要）也放进这个块。
+- **开关：** 系统设置 `manager.stable_context`，默认关闭；关闭时用户消息和 prompt 逐字节不变。整块的状态只存在 Manager 的内存里：服务重启后第一个回合一定发整块。
+
+**测量：** 用真实 Claude CLI，在同一组合成项目、任务和关卡上跑同样的 10 个回合的对话（中间改一次项目、开一个关卡），开关关和开各一次，从 `llm_records` 读每个回合的缓存读取、缓存写入、输入 token 和花费，PR 里给出逐回合的表和合计。
+
+### 10.3 PR 与评测
+
+| PR | 内容 | 默认关闭时 | 模型可见 |
+|---|---|---|---|
+| 1 | 本节 | — | 否 |
+| 2 | 第二道检查：`leads_check` 角色与内置 Profile、`check_items`、复核契约与解析、`dropped` 状态与迁移、确认文字、`looper leads eval-export` 与 `--cases-file` | `check_items` 为假时抽取运行的 prompt 和结果不变 | 是：processor 评测加复核器用例，Haiku 5.5 和 Opus 5.5 各跑一遍，报告每窗口花费和精确率 |
+| 3 | 常驻内容稳定块：`manager.stable_context`、版本号与变化说明、压缩和换会话时重发、契约一句 | 用户消息和 prompt 逐字节不变 | 是：Manager 对话评测（sonnet `--reps 2`、opus xhigh `--reps 1`）加开关前后的逐回合 token 和花费 |
+
+两个 PR 互不依赖，可以并行。
+
+**待定（各有推荐答案）：**
+
+1. **复核器失败时：** 推荐放行，条目照常入库并计数，理由见上。备选是这次运行失败、游标不动、下一轮重来，但这样复核器一出故障，线索和意图就全停了。
+2. **复核器默认模型：** 推荐以 PR2 的实测为准，在 Haiku 5.5 和 Opus 5.5 之间取达到目标里最便宜的；两个都达不到就报告，不自动换别的。
+3. **被丢弃的条目要不要留：** 推荐留（`dropped` 状态），用来评测错丢；它们的出处被删时照样跟着删。
