@@ -5294,7 +5294,8 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   its activity says the checkpoint consult did not finish.
 - **Alerts** (`advisor_alerts`, to the chat the dashboard's user gates use): the day's advisor spend over
   `advisor_daily_alert_usd` (a system setting, 30 USD when unset), a task consulting about more than half of its
-  steps, and 3 consults in a row failing across tasks. They never stop a consult.
+  steps, and 3 consults in a row failing across tasks. Each kind goes out at most once a local day (the day is
+  stored, so a restart does not send it again), and they never stop a consult.
 
 - **Two roles with no tools.** `advisor` answers; `advice_check` judges a request before it is sent. Their
   runtime needs `run` and `no_tools` (`ROLE_CAPABILITIES`). Only their role layer (Settings → Roles) chooses their
@@ -5335,8 +5336,12 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   `parent_record_id`. Its cost is the task's, counted in the Planner's share of `task_costs`. A judge's record keeps
   none of the request: its input is the request's sha256 and length, its stream only the typed events
   (`processor.typed_events`), and it has no output text.
-- **Restarts.** At startup, every consult a stopped server left unfinished fails (`interrupted`); the Planner takes
-  its decision again.
+- **Restarts.** At startup, every consult a stopped server left unfinished fails (`interrupted`), keeping what its
+  runs spent (each run's spend is booked when it ends; a run cut off is booked from its record); the Planner takes
+  its decision again, and a first plan that waited for its consult is planned in a [PLAN] turn that says the consult
+  was interrupted, without offering advise again.
+- **Time.** A consult has one deadline, 15 minutes after it opened: the judge's and the advisor's runs get only what
+  is left of it, and a request sent back or a question asked that waits for the Planner past it ends the consult.
 
 ### Turns Claude runs on its own
 
