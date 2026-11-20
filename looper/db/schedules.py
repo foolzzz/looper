@@ -300,26 +300,70 @@ async def claim_planner_session(task_id: str) -> dict[str, Any] | None:
         await conn.execute("UPDATE schedules SET planner_session_task_id = $2 WHERE id = $1", schedule_id, task_id)
         await conn.execute("UPDATE tasks SET planner_session_label = $2 WHERE id = $1", task_id,
                            planner_storage_label(schedule_id))
-        previous = await conn.fetchrow(
+        from ..agents import scheduler_settings
+        history = await conn.fetch(
             "SELECT status, summary, error FROM schedule_runs WHERE schedule_id = $1 AND finished_at IS NOT NULL "
-            "AND task_id IS DISTINCT FROM $2 ORDER BY finished_at DESC, id DESC LIMIT 1", schedule_id, task_id,
+            "AND task_id IS DISTINCT FROM $2 ORDER BY finished_at DESC, id DESC LIMIT $3", schedule_id, task_id,
+            await scheduler_settings.session_history_runs(conn),
         )
+        previous = history[0] if history else None
         return {"claimed": True, "session_id": row["planner_session_id"], "session_totals": totals,
                 "runtime_type": row["planner_session_runtime"], "provider_id": row["planner_session_provider"],
-                "profile_id": row["planner_session_profile"], "previous": dict(previous) if previous else None}
+                "profile_id": row["planner_session_profile"], "previous": dict(previous) if previous else None,
+                "recent_runs": [dict(run) for run in history],
+                "context_tokens": row["planner_session_context_tokens"],
+                "run_cost_usd": row["planner_session_run_cost_usd"], "run_budget_usd": row["run_budget_usd"]}
 
 
 async def save_planner_session(task_id: str, session_id: str | None, totals: Mapping[str, Any], *,
-                               runtime_type: str | None, provider_id: str | None, profile_id: str | None) -> None:
+                               runtime_type: str | None, provider_id: str | None, profile_id: str | None,
+                               context_tokens: int | None = None, run_cost_usd: float | None = None) -> None:
     """Write through only while this task holds the schedule, and never in parallel mode."""
     await get_pool().execute(
         "UPDATE schedules s SET planner_session_id = $1, planner_session_totals = $2::jsonb, "
         "planner_session_runtime = $3, planner_session_provider = $4, planner_session_profile = $5, "
         "planner_session_since = CASE WHEN s.planner_session_id IS DISTINCT FROM $1 THEN now() "
-        "ELSE s.planner_session_since END FROM tasks t "
+        "ELSE s.planner_session_since END, "
+        "planner_session_context_tokens = CASE WHEN s.planner_session_id IS DISTINCT FROM $1 THEN $7 "
+        "ELSE COALESCE($7, s.planner_session_context_tokens) END, "
+        "planner_session_run_cost_usd = CASE WHEN s.planner_session_id IS DISTINCT FROM $1 THEN $8 "
+        "ELSE COALESCE($8, s.planner_session_run_cost_usd) END FROM tasks t "
         "WHERE t.id = $6 AND s.id = t.schedule_id AND s.planner_session_task_id = $6 AND s.overlap <> 'parallel'",
-        session_id, json.dumps(dict(totals)), runtime_type, provider_id, profile_id, task_id,
+        session_id, json.dumps(dict(totals)), runtime_type, provider_id, profile_id, task_id, context_tokens, run_cost_usd,
     )
+
+
+async def record_planner_session_run(task_id: str, *, context_tokens: int | None,
+                                     planner_cost_usd: float | None) -> None:
+    """Keep this run's measured last request and own Planner spend; only its holder publishes to the session."""
+    async with get_pool().acquire() as conn, conn.transaction():
+        recorded = await conn.fetchrow(
+            "SELECT count(*) AS records, CASE WHEN count(*) FILTER (WHERE cost_usd IS NULL) = 0 "
+            "THEN sum(cost_usd) END AS cost FROM llm_records WHERE task_id=$1 AND agent_id=$2",
+            task_id, f"planner-{task_id}")
+        if recorded["records"]:
+            planner_cost_usd = recorded["cost"]
+        await conn.execute(
+            "UPDATE schedules s SET planner_session_context_tokens = COALESCE($2, s.planner_session_context_tokens), "
+            "planner_session_run_cost_usd = $3 FROM tasks t WHERE t.id = $1 AND s.id = t.schedule_id "
+            "AND s.planner_session_task_id = $1 AND s.overlap <> 'parallel'",
+            task_id, context_tokens, planner_cost_usd)
+        await conn.execute(
+            "UPDATE schedule_runs SET planner_context_tokens = COALESCE($2, planner_context_tokens), "
+            "planner_cost_usd = $3, planner_session_after_tokens = CASE WHEN planner_session_action = 'rotated' "
+            "THEN COALESCE(planner_session_after_tokens, $2) ELSE planner_session_after_tokens END "
+            "WHERE task_id = $1", task_id, context_tokens, planner_cost_usd)
+
+
+async def record_planner_session_bound(task_id: str, *, action: str, reason: str,
+                                       before_tokens: int | None, after_tokens: int | None) -> None:
+    """Record the verified compaction or fresh-session fallback on the task's own schedule run."""
+    if action not in ("compacted", "rotated") or reason not in ("context", "cost"):
+        raise ValueError("invalid planner session bound action or reason")
+    await get_pool().execute(
+        "UPDATE schedule_runs SET planner_session_action=$2, planner_session_reason=$3, "
+        "planner_session_before_tokens=$4, planner_session_after_tokens=$5 WHERE task_id=$1",
+        task_id, action, reason, before_tokens, after_tokens)
 
 
 async def reset_planner_session(schedule_id: str) -> bool | None:
@@ -331,7 +375,8 @@ async def reset_planner_session(schedule_id: str) -> bool | None:
         await conn.execute(
             "UPDATE schedules SET planner_session_id = NULL, planner_session_totals = '{}'::jsonb, "
             "planner_session_runtime = NULL, planner_session_provider = NULL, planner_session_profile = NULL, "
-            "planner_session_task_id = NULL, planner_session_since = NULL WHERE id = $1", schedule_id,
+            "planner_session_task_id = NULL, planner_session_since = NULL, planner_session_context_tokens = NULL, "
+            "planner_session_run_cost_usd = NULL WHERE id = $1", schedule_id,
         )
         return row["planner_session_id"] is not None
 
@@ -397,7 +442,9 @@ async def insert_run(conn: Db, *, schedule_id: str, scheduled_for: datetime, tri
 
 _RUN_COLUMNS = ("status", "fired_at", "task_id", "summary", "cost_usd", "error", "finished_at", "gate_output",
                 "carried_from", "run_timeout_seconds", "execution_snapshot", "started_at", "exit_code", "exit_signal",
-                "log_path", "log_bytes", "log_truncated", "log_tail", "runner_pid", "runner_started")
+                "log_path", "log_bytes", "log_truncated", "log_tail", "runner_pid", "runner_started",
+                "planner_context_tokens", "planner_cost_usd", "planner_session_action", "planner_session_reason",
+                "planner_session_before_tokens", "planner_session_after_tokens", "failure_kind")
 
 
 def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -532,7 +579,7 @@ async def latest_runs(schedule_ids: list[str], *, pool: Db | None = None) -> dic
 
 
 async def finish_run(conn: Db, run_id: str, *, status: str, at: datetime, summary: str | None = None,
-                     cost_usd: float | None = None, error: str | None = None) -> bool:
+                     cost_usd: float | None = None, error: str | None = None, failure_kind: str | None = None) -> bool:
     """Write a running run's final status, once, and the schedule's counters with it (``count_outcome``). False
     when the run is not running (it was finished already), or its schedule was deleted. The schedule's row is
     locked first, as every other writer of a schedule and its runs locks them: a delete, which locks the schedule
@@ -542,10 +589,10 @@ async def finish_run(conn: Db, run_id: str, *, status: str, at: datetime, summar
         return False
     schedule_id = await conn.fetchval(
         """
-        UPDATE schedule_runs SET status = $2, summary = $3, cost_usd = $4, error = $5, finished_at = $6
+        UPDATE schedule_runs SET status = $2, summary = $3, cost_usd = $4, error = $5, finished_at = $6, failure_kind = $7
         WHERE id = $1 AND status = 'running' RETURNING schedule_id
         """,
-        run_id, status, summary, cost_usd, error, at,
+        run_id, status, summary, cost_usd, error, at, failure_kind,
     )
     if schedule_id is None:
         return False

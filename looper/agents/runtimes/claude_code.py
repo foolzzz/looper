@@ -141,7 +141,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     default_executable = "claude"
     image_input = ImageInput.READ_TOOL
     # Verified against Claude Code 2.1.285 (claude_cli), no_tools against 2.1.328 (claude_cli.NO_TOOLS_ARGS); its
-    # replies follow Looper's contracts by prompt, so no structured_output.
+    # replies follow Looper's contracts by prompt, so no structured_output. Headless /compact on resume
+    # was verified with 2.1.329: a manual compact_boundary and a later turn recalling the summary.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
     room_push = RoomPush.USER_TURN
     run_input = True  # stdin can stay open between a Worker's waiting turns

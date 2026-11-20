@@ -112,6 +112,7 @@ _ONLINE_LOCK_WAIT_SECONDS = 5.0
 REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _SCHEDULE_NOTIFY_FORMAT = "schedule_notify_format"
+_SCHEDULE_SESSION_BOUNDS = "schedule_session_bounds"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
 _PROFILE_WEB_SEARCH = "profile_web_search"
@@ -824,6 +825,15 @@ async def _command_schedules_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _schedule_session_bounds_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_SESSION_BOUNDS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('schedules') "
+        "AND attname = 'planner_session_context_tokens' AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _task_reply_route_pending(conn: asyncpg.Connection) -> bool:
     """An unmarked task baseline lacks the original reply route; recorded upgrades never repair DDL."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _TASK_REPLY_ROUTE):
@@ -1298,6 +1308,21 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute(_intent_merges_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _INTENT_MERGES)
+        if await _schedule_session_bounds_pending(conn):
+            await conn.execute("""
+                ALTER TABLE schedules
+                  ADD COLUMN planner_session_context_tokens BIGINT CHECK (planner_session_context_tokens >= 0),
+                  ADD COLUMN planner_session_run_cost_usd DOUBLE PRECISION CHECK (planner_session_run_cost_usd >= 0);
+                ALTER TABLE schedule_runs
+                  ADD COLUMN planner_context_tokens BIGINT CHECK (planner_context_tokens >= 0),
+                  ADD COLUMN planner_cost_usd DOUBLE PRECISION CHECK (planner_cost_usd >= 0),
+                  ADD COLUMN planner_session_action TEXT CHECK (planner_session_action IN ('compacted', 'rotated')),
+                  ADD COLUMN planner_session_reason TEXT CHECK (planner_session_reason IN ('context', 'cost')),
+                  ADD COLUMN planner_session_before_tokens BIGINT CHECK (planner_session_before_tokens >= 0),
+                  ADD COLUMN planner_session_after_tokens BIGINT CHECK (planner_session_after_tokens >= 0),
+                  ADD COLUMN failure_kind TEXT CHECK (failure_kind IN ('task_budget'));
+            """)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_SESSION_BOUNDS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1332,6 +1357,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _schedule_notify_format_pending(conn)
+            or await _schedule_session_bounds_pending(conn)
             or await _cursor_login_pending(conn)
             or await _model_name_parameters_pending(conn)
             or await _coco_login_pending(conn)

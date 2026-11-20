@@ -18,6 +18,8 @@ SCHEDULER_SETTINGS = _object({
         [*SCHEDULER_SETTING["required"], "gated_value"], closed=True),
     "run_timeout_seconds": SCHEDULER_SETTING,
     "run_retention_days": SCHEDULER_SETTING,
+    "session_context_max_tokens": SCHEDULER_SETTING,
+    "session_history_runs": SCHEDULER_SETTING,
 }, closed=True)
 WAIT_SETTING = _object({
     "value": _INT, "default": _INT, "min": _INT, "max": _INT,
@@ -70,6 +72,7 @@ _SCHEDULER_UPDATE = _object({
     "min_interval_seconds": _seconds(1),
     "run_timeout_seconds": _seconds(1, scheduler_settings.RUN_TIMEOUT_MAX_SECONDS),
     "run_retention_days": _seconds(1, scheduler_settings.RUN_RETENTION_MAX_DAYS),
+    **{name: _seconds(1, high) for name, high in scheduler_settings.SESSION_SETTING_LIMITS.items()},
 }, [], closed=True) | {"minProperties": 1}
 _WAIT_UPDATE = _object({
     "max_wait_seconds": _seconds(*waits.MAX_WAIT_RANGE),

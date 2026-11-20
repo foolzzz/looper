@@ -71,7 +71,8 @@ def _vault(tmp_path):
 
 
 @pytest.mark.parametrize("family,fields", [
-    ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds", "run_retention_days"}),
+    ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds", "run_retention_days",
+                            "session_context_max_tokens", "session_history_runs"}),
     ("wait_settings", {"max_wait_seconds", "min_check_seconds"}),
     ("knowledge_vault", {"configured", "path", "writable", "rules_file", "git", "problem"}),
 ])
