@@ -95,6 +95,13 @@ class ChannelRegistry:
             return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
         return await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
 
+    async def edit(self, channel_id: str, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
+        """Edit one message through its running adapter, preserving the platform's delivery result."""
+        adapter = self._channels.get(channel_id)
+        if adapter is None:
+            return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
+        return await adapter.edit(target, external_id, text)
+
     async def read_quote(self, ref: QuoteRef, *, after: int) -> QuoteRead:
         """What a received message quotes, read by the running channel that received it (``QuoteReader``); raises
         ``QuoteUnavailable`` when that channel is not running or reads no quotes."""

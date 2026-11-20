@@ -476,6 +476,15 @@ class LarkChannelAdapter(ChannelAdapter):
         # was sent, and replies to it just cannot be routed when its id was not given.
         return PostReceipt(True, external_ids=(message_id,) if message_id else ())
 
+    async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
+        text = files.redact(text, self._runtime_root)
+        try:
+            await self._transport.edit(external_id, text=text)
+        except LarkCliError as exc:
+            return PostReceipt(False, error=str(exc),
+                               outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
+        return PostReceipt(True, external_ids=(external_id,))
+
     def healthcheck(self) -> dict[str, Any]:
         info = {
             "channel": self.channel_type,
