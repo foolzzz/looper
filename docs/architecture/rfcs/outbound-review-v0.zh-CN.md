@@ -212,6 +212,7 @@ ManagerOps.call / 客户端工具 / PlannerOps.call:
 - **级别从哪来：**
   - **外部 MCP 工具：** 操作者在安装 MCP 服务器时声明它的工具级别（目录项的类型化字段，默认 `inside`；可以按工具覆盖）。只按声明的类型判断。
   - **Shell（`Bash`）：** 一条命令会不会对外，没有类型可看。按 D5 不能按命令里的子串判断，所以只有两个选择：要么把每次 Shell 调用都交给分类器（由分类器判断是不是对外、该不该做），要么不覆盖 Shell。这是 Q1。
+- **实测和要求：** 钩子在 Looper 的权限模式下拦得住 Shell、外部 MCP 和子 agent 的调用，但超时或出错时会放行，而且读项目设置时模型能写设置文件把它关掉。据此的要求（失败即拦截的包装、审查打开时不读项目设置、保护 Looper 自己的文件）见第 17.1 节。
 - **其他运行时：** DSH、Pi 的运行器可以在执行内置工具前做同样的检查；Codex、OMP、Cursor、Grok 没有拦截点。审查打开时这些运行时怎么办是 Q2。
 
 ## 7. 被拦以后
@@ -396,7 +397,36 @@ PR2、PR3 可以并行；PR4 依赖二者；PR5 依赖 PR4；PR6 只依赖 PR2 �
 
 ## 17. 开工前验证
 
-- Claude Code 当前版本里，`--settings` 传入的 PreToolUse 钩子在 `--dangerously-skip-permissions` 下能否拦住 `Bash` 和 MCP 调用，deny 的理由模型能否看到（PR5 前实测，记版本号）；
-- 钩子的命令延迟（启动一次本地命令加一次 HTTP 请求）；
-- `RestrictedTool` 加字段后热升级的探针是否仍能读取（`looper/_component_probe.py`）；
-- DSH、Pi 运行器的 guard 能否调用 Looper 的检查接口并等待结果。
+### 17.1 钩子（已实测，2026-11-20，Claude Code 2.1.329）
+
+做法：真实 Claude CLI，用 Looper 启动 Manager 的权限模式（`--dangerously-skip-permissions`，钩子收到的 `permission_mode` 是 `bypassPermissions`），加上 Looper 的隔离参数（`--strict-mcp-config`、`--settings` JSON、拒绝 ListAgents 和 SendMessage），`--no-session-persistence`，空的临时工作目录，一个只返回固定字符串、什么都不发的 stdio MCP 服务器，钩子用 `--settings` 的 `hooks.PreToolUse`（`matcher: "*"`）注册。所有命令都是 `echo`、`touch` 这类本机动作，没有网络副作用。一共 19 次运行，合计约 $0.61。
+
+| 问题 | 结果 |
+|---|---|
+| (a) 钩子对 Shell 和外部 MCP 工具都运行吗 | **都运行。** `Bash`、外部 MCP 工具（`mcp__<server>__<tool>`）、`Monitor`（也是跑 Shell 命令的工具）、`Write`、`ToolSearch`、`Agent` 都触发；子 agent 里的工具调用也触发（钩子收到的 `agent_id` 不为空），子 agent 继承钩子 |
+| (b) 返回 deny 能拦住吗 | **能。** 返回 JSON `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "…"}}` 或退出码 2 都拦住了。验证了没有执行：`touch` 的文件没有出现，MCP 服务器没有收到 `tools/call` |
+| (c) 理由能回到模型、模型能据此行动吗 | **能。** 模型收到一个出错的工具结果：`PreToolUse:<工具名> hook error: <理由>`。用 JSON 时只有理由；用退出码 2 时还带上钩子命令的完整路径，会把本机路径带进模型上下文，所以**只用 JSON**。几次试验里模型都照理由停下，告诉用户被拦了，没有换办法再做 |
+| (d) 一个空钩子加多少延迟 | 每次工具调用多 **约 20–90 毫秒**：8 次连续 `Bash` 调用，非 API 时间（`duration_ms - duration_api_ms`）没有钩子时每次 152–154 毫秒，加一个 `sh` 空钩子时每次 222–245 毫秒，加一个 Python 的记录钩子时每次 173–183 毫秒；钩子进程本身 10–40 毫秒。真正的开销是分类器（几秒），不是钩子 |
+| 钩子看得到什么 | `tool_name`、完整的 `tool_input`（Shell 的整条命令、MCP 的全部参数、`Write` 的路径和全文）、MCP 的 `mcp_server`、`session_id`、`tool_use_id`、`cwd`、`transcript_path`、`permission_mode`；子 agent 还有 `agent_id`。Looper 每次启动时可以在钩子命令里带上这次运行自己的令牌，把调用对应到运行 |
+| 钩子超时或出错时 | **会放行（fail-open）。** 钩子的超时设 3 秒、钩子睡 8 秒：工具照常执行。钩子以退出码 1 退出：工具照常执行 |
+| 模型能绕过吗 | 见下面三条 |
+
+**绕过：**
+
+1. **改设置关掉钩子：能，除非不读项目设置。** 用 Looper 现在的 `--setting-sources project`，模型用 `Write` 写 `.claude/settings.json`（`{"disableAllHooks": true}`）后，下一次 `Bash` 就**不再被拦**（设置是热加载的）。改成 `--setting-sources ""` 后，同样的写入没有效果，`Bash` 照样被拦。改 `--settings` 指向的文件也没有效果（会话中不重新读取）。
+2. **子 shell、子 agent、换个工具：拦得住。** `bash -c '…'` 时钩子看到整条命令；子 agent 的 `Bash` 也经过钩子；`Monitor` 也经过钩子。
+3. **间接执行：钩子能拦，但分类器可能看不懂。** 先用 `Write` 写一个脚本、再 `sh s.sh` 时，钩子在 `Bash` 那一次只看到 `sh s.sh`；脚本的内容是在前一次 `Write` 时看到的。
+
+**对设计的要求**（PR5 照做；第 6.2 节以此为准）：
+
+- **失败即拦截要自己保证：** 钩子命令是一个包装：检查程序缺失、崩溃或返回非零时，包装输出 deny 的 JSON。实测检查程序不存在、检查程序以退出码 1 退出时，都被拦住了。检查程序自己的截止时间（30 秒的分类器加余量）要短于 Claude Code 给钩子的超时，因为钩子被 Claude Code 超时杀掉时会放行。
+- **审查打开时不读项目设置：** 被审查的运行用 `--setting-sources ""` 启动，钩子和其他设置只从 Looper 每次启动时重写的 `--settings` 来。Manager 的工作目录不是项目仓库，不受影响。
+- **保护 Looper 自己的文件：** `Write`、`Edit` 的目标在 Looper 的设置目录或钩子程序上时，代码直接拦截（按 `file_path` 的类型化判断，不调用分类器）。用 Shell 改这些文件要靠分类器判断；和线索 RFC 第 7 节第 7 条一样，这不是系统隔离：agent 和操作者是同一个系统用户。
+- **给分类器的上下文：** 审查 Shell 调用时，带上这次运行最近几次 `Write`、`Edit` 的路径和内容摘录，这样 `sh s.sh` 这类间接执行也能判断。
+- **其他内置工具也要有级别：** 实测的工具列表里，除了 `Bash`、`Monitor`，还有 `WebSearch`（查询词会离开本机）、`RemoteTrigger`、`PushNotification`、`CronCreate` 等。PR2 给运行时内置工具也定级别（`Bash`、`Monitor` 为 `unknown`），清单测试覆盖 Looper 启动 Claude Code 时会出现的全部工具。
+
+### 17.2 还没验证
+
+- `RestrictedTool` 加字段后，热升级的探针是否仍能读取（`looper/_component_probe.py`），PR2 开工时验证；
+- DSH、Pi 运行器的 guard 能否调用 Looper 的检查接口并等待结果，PR5 开工时验证；
+- 钩子加上一次本机 HTTP 请求和分类器以后的整体延迟，在 PR5 的真实路径里测。
