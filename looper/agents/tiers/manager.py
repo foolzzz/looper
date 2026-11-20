@@ -80,7 +80,8 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, session_switch
+from .. import leads_model, research_order, session_switch
+from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
@@ -93,6 +94,7 @@ from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered, StateShown
 from ..ops import Turn, TurnOrigin, leads as ops_leads
+from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
 from ..message import (
@@ -818,6 +820,7 @@ class ManagerAgent:
         self._turned_off_told = False
         self._has_templates = False  # from the last read of the Manager's task templates
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
+        self._research: ResearchSources | None = None  # where the turn being prepared may look things up, when on
         self._stable_context = False  # manager.stable_context, from the last read
         # The last whole "Looper state" block the session got (``state_view``); in memory only, so the first turn
         # after a restart sends it whole. None: none a turn may refer to, for ``_state_lost``'s reason.
@@ -1504,7 +1507,6 @@ class ManagerAgent:
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         await token.step("templates", self._read_templates())
-        system_prompt = self._composed_prompt(agent_settings)
         library = await token.step("library", load_installed(
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
@@ -1513,6 +1515,10 @@ class ManagerAgent:
             launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
         if ask.turn is not None:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
+        # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
+        tools = await token.step("tool_listing", self.ops.current_listing(ask.turn)) if self.ops is not None else []
+        self._research = self._research_sources(tools, launch)
+        system_prompt = self._composed_prompt(agent_settings)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
@@ -1528,8 +1534,6 @@ class ManagerAgent:
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
-        # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
-        tools = await token.step("tool_listing", self.ops.current_listing(ask.turn)) if self.ops is not None else []
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] == ops_leads.LEADS_TOOL for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
@@ -1739,7 +1743,8 @@ class ManagerAgent:
                 if prepared.run.recorder is not None:
                     await prepared.run.recorder.end_left_open(failure)
             finally:
-                self._publish_binding(None)  # drained or boundedly abandoned, even if closing the record is cancelled
+                if not token.abandoned:  # (a turn the Manager let go of: another may hold the binding by now)
+                    self._publish_binding(None)  # drained or boundedly abandoned, even if closing the record is cancelled
                 self._last_activity = self._clock()
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
@@ -1782,7 +1787,7 @@ class ManagerAgent:
         """The turn ends stopped (its token already settled): the record finishes as interrupted, with what it
         spent, the session is saved, and the reply is the partial text. The writes get ``STOP_FINISH_SEC``: a
         database that holds them holds neither the reply nor the Manager's lock."""
-        if turn is not None:
+        if turn is not None and not token.abandoned:
             self._session_totals = self._claude.totals
         # Drained assistant events may not have streamed after the stop; use deltas only if none were handled.
         partial = "".join(text_parts) or token.partial
@@ -1809,12 +1814,13 @@ class ManagerAgent:
             "usage_complete": turn is None or (turn.usage_complete and turn.usage.cost_usd is not None),
         }})
         await self._link_turn_task(recorder, ops_turn)
-        await self._save_session_state()
+        if not token.abandoned:
+            await self._save_session_state()
 
-    def _settle(self) -> None:
-        """The running turn's end is decided (an answer or a failure): ``stop_turn`` refuses it from now on."""
-        if self._running_token is not None:
-            self._running_token.settle()
+    def _settle(self, token: TurnToken) -> None:
+        """The turn's end is decided (an answer or a failure): ``stop_turn`` refuses it from now on. Its own token:
+        a turn the Manager let go of never settles the one running now."""
+        token.settle()
 
     async def _finish_stopped_early(self, token: TurnToken, recorder: ClaudeRunRecorder,
                                     ops_turn: Turn | None) -> None:
@@ -1854,8 +1860,8 @@ class ManagerAgent:
                 recorded = await completion_events.record_web_end(self.agent_id, envelope, thread, text,
                                                                   available=self._takes_completion_turns)
             if completion_events.waits_for_turn(recorded):
-                await self._bus.publish(completion_events.due(self.agent_address, recorded))
-                return  # the completion turn tells it
+                completion_events.poke()
+                return  # the completion turn tells it, once its chat's gathering window closes
             if recorded is not None and not recorded.send_fallback:
                 return  # a replay of an end that was already told
             await self._web_thread_reply(envelope, thread, text)
@@ -1880,8 +1886,8 @@ class ManagerAgent:
                 self.agent_id, envelope, notice, available=self._takes_completion_turns) \
                 if ends_task(envelope.payload.get("status")) else None
             if completion_events.waits_for_turn(recorded):
-                await self._bus.publish(completion_events.due(self.agent_address, recorded))
-                return  # the completion turn tells it
+                completion_events.poke()
+                return  # the completion turn tells it, once its chat's gathering window closes
             if recorded is not None and not recorded.send_fallback:
                 return  # a replay of an end that was already told
             await self._bus.publish(MessageEnvelope.create(
@@ -1971,6 +1977,7 @@ class ManagerAgent:
             await cancel_and_wait(run)
             raise
         reason: str | None = None
+        rejected = False  # the channel refused the reply: its notices may go
         text = ""
         if not done:
             reason = "turn_timeout"
@@ -1998,19 +2005,27 @@ class ManagerAgent:
                 body = "\n\n".join(part for part in (
                     text, completion_events.link_block(rows, base=self._config.dashboard_url)) if part)
                 try:
-                    await completion_events.send_reply(self._bus, self.agent_address, rows, body,
-                                                       metadata=state.get("chat_record"))
-                except Exception:
+                    outcome, error = await completion_events.send_reply(self._bus, self.agent_address, rows, body,
+                                                                        metadata=state.get("chat_record"))
+                except completion_events.TargetChanged as exc:
+                    logger.warning("%s: the completion turn %s's reply is not sent: %s", self._log, batch, exc)
+                    reason = "target_changed"
+                except Exception:  # before its events were ``sending``: nothing went
                     logger.exception("%s: the completion turn %s's reply could not be sent", self._log, batch)
                     reason = "send_failed"
                 else:
-                    try:
-                        await db_manager_events.deliver(batch, record_id=state.get("record_id"))
-                    except Exception:
-                        logger.exception("%s: could not record that the completion turn %s was delivered",
-                                         self._log, batch)
+                    if outcome is PostOutcome.REJECTED:  # the channel did not send it: its notices may go
+                        logger.warning("%s: the completion turn %s's reply was refused: %s", self._log, batch, error)
+                        reason, rejected = "send_failed", True
+                    else:  # sent, or it may have been (an unknown post is final: nothing more is sent)
+                        if outcome is not PostOutcome.SENT:
+                            logger.warning("%s: the completion turn %s's reply may not have been sent: %s",
+                                           self._log, batch, error)
+                        # The record only is tried again; one never written stays ``sending`` until the service
+                        # settles it ``uncertain``: the reply is not sent again.
+                        await completion_events.record_reply(rows, outcome, error, record_id=state.get("record_id"))
             if reason is not None:
-                await self._fall_back_completion(batch, reason, state)
+                await self._fall_back_completion(batch, reason, state, rejected=rejected)
         cost = None
         if state.get("record_id") is not None:
             try:
@@ -2020,6 +2035,13 @@ class ManagerAgent:
                 pass
         logger.info("completion turn ended batch=%s outcome=%s reason=%s seconds=%.1f cost_usd=%s", batch,
                     "fallback" if reason else "delivered", reason, time.monotonic() - started, cost)
+        if reason in db_manager_events.FAILING_REASONS:
+            try:
+                if await db_manager_events.failing():
+                    logger.warning("completion turns failing: the last %d batches all fell back to their notices",
+                                   db_manager_events.FAILING_BATCHES)
+            except Exception:
+                pass
 
     async def _end_late_completion(self, run: asyncio.Task[str], batch: uuid.UUID, state: dict[str, Any]) -> None:
         """End a completion turn past its deadline (its notices are out) within ``END_SECONDS`` twice, so the
@@ -2055,6 +2077,8 @@ class ManagerAgent:
             return
         logger.error("%s: the completion turn %s did not end once cancelled; it is left to end on its own",
                      self._log, batch)
+        if token is not None:
+            token.abandoned = True
         self._late_turns.add(run)
         run.add_done_callback(self._late_turns.discard)
         if self._lock_owner is token:
@@ -2069,11 +2093,12 @@ class ManagerAgent:
         self._late_turns.add(stopping)
         stopping.add_done_callback(self._late_turns.discard)
 
-    async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any]) -> None:
+    async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any], *,
+                                    rejected: bool = False) -> None:
         assert self._bus is not None
         try:
             await completion_events.fall_back(self._bus, self.agent_address, reason=reason, batch=batch,
-                                              record_id=state.get("record_id"))
+                                              record_id=state.get("record_id"), rejected=rejected)
         except Exception:
             logger.exception("%s: the completion turn %s's events could not fall back", self._log, batch)
 
@@ -2183,6 +2208,13 @@ class ManagerAgent:
             raise RuntimeError(settings.error or settings.profile_error)
         return {"run_cap": settings.max_budget_usd, "task_cap": None, "task_spent": 0}
 
+    def _research_sources(self, tools: list[dict[str, Any]], launch: Launch) -> ResearchSources | None:
+        """Where a turn with ``tools`` and ``launch`` may look things up (Settings → Chat, research order): the
+        default Manager's only, from its own tools, library and runtime; None when the setting is off."""
+        if not chat_settings.research_order() or self.agent_id != DEFAULT_MANAGER_ID:
+            return None
+        return ResearchSources.of(tools, launch)
+
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
         contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
@@ -2191,6 +2223,9 @@ class ManagerAgent:
             contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
         elif getattr(self, "_leads_on", False):  # a Manager without the switch read is leads-off
             contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
+        if (research := getattr(self, "_research", None)) is not None:  # the turn's sources (``_prepare_turn``)
+            contract_name += f"+{research_order.CONTRACT_NAME}"
+            contract += "\n" + research_order.section(research)
         if getattr(self, "_stable_context", False):  # last, so every part before it reads as it does without it
             contract_name += "+STABLE_CONTEXT_CONTRACT"
             contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
@@ -2258,7 +2293,7 @@ class ManagerAgent:
             # slow persistence) still saves it, and the next process resumes it.
             session_id = payload.get("session_id")
             if (payload.get("session_started") is not False and isinstance(session_id, str)
-                    and session_id and session_id != self._session_id):
+                    and session_id and session_id != self._session_id and not token.abandoned):
                 self._session_id, self._clean_start = session_id, False
                 if self._session_runtime != "api" or not self._pending_handoff:
                     self._pending_switch = self._pending_handoff = None  # CLI sessions own the prompt at init
@@ -2274,7 +2309,7 @@ class ManagerAgent:
                     self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
 
         async def on_event(payload: dict[str, Any]) -> None:
-            if payload.get("type") == "system" and payload.get("subtype") == "transport":
+            if payload.get("type") == "system" and payload.get("subtype") == "transport" and not token.abandoned:
                 self._publish_binding(token)
             observe(payload)
             events.put_nowait(payload)
@@ -2321,7 +2356,7 @@ class ManagerAgent:
             nonlocal streamed_partials, session_unsaved
             await recorder.persist(payload)
 
-            if session_unsaved:
+            if session_unsaved and not token.abandoned:
                 session_unsaved = False
                 await self._save_session_state()
 
@@ -2409,7 +2444,7 @@ class ManagerAgent:
             # until they have, and a stop meanwhile is not too late.
             await handled()
         except asyncio.CancelledError as exc:
-            self._settle()
+            self._settle(token)
             try:
                 await abandon_handling()
             finally:
@@ -2421,13 +2456,14 @@ class ManagerAgent:
             raise
         except BaseException as exc:
             if not isinstance(exc, TurnStopped):
-                self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
+                self._settle(token)  # the turn failed: a stop that comes while it is cleaned up is too late
             try:
                 await abandon_handling()
                 if isinstance(exc, TurnStopped):
                     raise
-                # Never leave Claude running once the Manager gives up on it.
-                await self._claude.stop(kill=True)
+                # Never leave Claude running once the Manager gives up on it (a turn it let go of stopped its own).
+                if not token.abandoned:
+                    await self._claude.stop(kill=True)
             except asyncio.CancelledError as cancelled:
                 await recorder.end_left_open(cancelled, output_text="".join(text_parts) or token.partial or None)
                 raise
@@ -2496,7 +2532,7 @@ class ManagerAgent:
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
                                         token=token, quoted=prepared.quoted)
 
-        self._settle()
+        self._settle(token)
 
         result_event = turn.result_event
         # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
@@ -2527,9 +2563,9 @@ class ManagerAgent:
             usage=turn.usage,
         )
         await self._link_turn_task(recorder, ops_turn)
-        if over_cap:
+        if over_cap and not token.abandoned:
             await self._claude.stop()
-        if not exited:
+        if not exited and not token.abandoned:
             self._session_totals = self._claude.totals
             await self._save_session_state()
 

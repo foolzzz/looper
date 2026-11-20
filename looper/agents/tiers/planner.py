@@ -133,6 +133,8 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from .. import scheduler_settings
+from ..schedule_session import SessionBound, session_bound
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..scheduler import continuing_run_preface
 from .. import vault
@@ -145,9 +147,9 @@ from ..operator_notes import notes_note
 from ..library import AgentLibrary, items_label, load_installed
 from ..log_redaction import redact
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
-from ..run_usage import Usage
+from ..run_usage import Usage, compaction, request_context
 from ..room import REF_MAX_CHARS, seat_key
-from ..runtimes import CLAUDE_CODE, Capability, InProcessTools, ReadOnly, RuntimeUnsupported
+from ..runtimes import ADAPTERS, CLAUDE_CODE, Capability, InProcessTools, ReadOnly, RuntimeUnsupported
 from ..runtimes.cursor_agent import cursor_failure
 from ..runtimes.runner.bridge import RpcFailure
 from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
@@ -1001,6 +1003,10 @@ class PlannerAgent:
         self._schedule_id: str | None = None
         self._schedule_session_id: str | None = None
         self._schedule_previous: Mapping[str, Any] | None = None
+        self._schedule_bound: SessionBound | None = None
+        self._schedule_max_tokens = scheduler_settings.SESSION_CONTEXT_MAX_TOKENS
+        self._schedule_run_cost: float | None = None
+        self._schedule_compacted_tokens: int | None = None
         self._schedule_session_writes = False
         # Where this task's session files live. The schedule directory is used only for the stored
         # schedule session: this process claimed that conversation and is still writing it, or a resume
@@ -4662,6 +4668,10 @@ class PlannerAgent:
         switch = session_switch.profile_switch(plan.session_id, plan.session_runtime, plan.session_profile, launch,
                                                session_provider=plan.session_provider, command=base,
                                                label=self._directory_label(plan))
+        if switch is not None and self._schedule_bound:
+            await self._rotate_schedule_session(plan)
+            message = self._plan_message(plan, await self._template_lines(plan))
+            switch = None
         if switch is not None and switch.reason is SwitchReason.INSTRUCTIONS_CHANGED and not self._claude.started:
             # Restore the saved chat with its retained instructions for the handoff after a server restart.
             await self._claude.stop()
@@ -4680,6 +4690,20 @@ class PlannerAgent:
                 await self._activity("phase", ("Schedule Planner session replaced: the stored session cannot be "
                                               f"resumed ({switch.describe()}); this run starts fresh")[:500])
             await self._switch_session(plan, switch, settings.timeout_seconds)
+        if self._schedule_bound and plan.session_id:
+            context = self._schedule_bound.before_tokens
+            price = launch.price
+            estimated_cost = price(launch.model, Usage(input_tokens=context)) if price and context is not None else None
+            budget = self._execution.task_budget_usd
+            if (Capability.HEADLESS_COMPACTION not in launch.runtime.capabilities
+                    or context is None or self._schedule_run_cost is None
+                    or context > self._schedule_max_tokens * 3
+                    # Native Claude reports its own cost rather than using launch pricing. With no price,
+                    # the three-times-context guard above bounds compaction; its actual cost is still charged.
+                    or (budget is not None and price is not None
+                        and (estimated_cost is None or estimated_cost > budget / 2))):
+                await self._rotate_schedule_session(plan)
+                message = self._plan_message(plan, await self._template_lines(plan))
         label = self._directory_label(plan)
         if label == self.agent_id and not plan.session_id:
             # This fresh session is the task's, not the schedule's: the run gave the session up, it is
@@ -4738,6 +4762,18 @@ class PlannerAgent:
                 details.append("resuming the stored session" if self._scheduled else f"resuming session {plan.session_id}")
             suffix = f" ({', '.join(details)})" if details else ""
             await self._activity("phase", f"Planner {process.launch.runtime.label} started{suffix}")
+
+        if self._schedule_bound and plan.session_id:
+            bound = self._schedule_bound
+            try:
+                await self._exchange("/compact", process, settings.timeout_seconds, maintenance=True)
+            except PlannerTurnError:
+                logger.warning("schedule %s: compaction failed; rotating the Planner session", self._schedule_id,
+                               exc_info=True)
+                await self._rotate_schedule_session(plan)
+                return await self._run_turn(self._plan_message(plan, await self._template_lines(plan)), retried=True)
+            self._schedule_bound = None
+            await self._record_schedule_bound(bound, "compacted", self._schedule_compacted_tokens)
 
         # Grok reports compaction in its headless stream only; its ACP resident path has no verified
         # compaction signal. Keep unchanged steps in every turn, including after a silent compaction.
@@ -4804,13 +4840,15 @@ class PlannerAgent:
 
     async def _exchange(self, text: str, process: _Process, limit: int, *, resuming: str | None = None,
                         fallbacks: Sequence[Mapping[str, Any]] = (),
-                        annotation: Mapping[str, Any] | None = None) -> str:
+                        annotation: Mapping[str, Any] | None = None, maintenance: bool = False) -> str:
         """Run ``text`` as one turn on the running Claude (started with ``process``) and return its final
         message, recorded as one run; raises ``PlannerTurnError``, or ``_SessionNotResumed`` when Claude never
         started ``resuming``, the session it was told to resume."""
         plan = self._plan
         assert plan is not None
         recorder = self._recorder(plan, text, process)
+        last_context: int | None = None
+        compacted: dict[str, Any] | None = None
         async with recorder:  # however the turn ends, its task's stop cutting it off too, its record ends
             self._last_record_id = recorder.record_id  # the turn a consult of the advisor it asks for names as parent
             if annotation is not None:
@@ -4822,7 +4860,12 @@ class PlannerAgent:
             watched = await self._watch_files(plan, process.launch)
 
             async def on_event(event: dict[str, Any]) -> None:
+                nonlocal last_context, compacted
                 await recorder.record(event)
+                if (context := request_context(event)) is not None:
+                    last_context = context
+                if (boundary := compaction(event)) is not None:
+                    compacted = boundary
                 if event.get("type") == "system" and event.get("subtype") == "compact_boundary":
                     self._plan_compacted = True
                 if event.get("subtype") == "cursor_run_retry":
@@ -4925,13 +4968,15 @@ class PlannerAgent:
                                                                command=process.command)
                 error = (f"{label} turn did not succeed: {detail}"[:500] if detail else
                          f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
+            if maintenance and compacted is None:
+                error = error or "The runtime did not confirm headless compaction"
             # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
             # keeps what it spent.
             # A successful empty reply is recorded as before, but its contract parser gets to request a repair.
             await recorder.finish(
                 output_text=final_text or None,
                 result_event=result_event,
-                error=error or (f"{label} returned an empty reply" if not final_text.strip() else None),
+                error=error or (f"{label} returned an empty reply" if not final_text.strip() and not maintenance else None),
                 usage=turn.usage,
             )
             changed, check = await self._changed_files(plan, watched)
@@ -4946,6 +4991,15 @@ class PlannerAgent:
             if result_event is not None:
                 plan.session_totals = self._claude.totals
                 await self._save_session(plan)
+            if self._scheduled and self._schedule_session_writes:
+                if maintenance and compacted is not None:
+                    self._schedule_compacted_tokens = compacted.get("post_tokens")
+                    last_context = self._schedule_compacted_tokens
+                try:
+                    await db_schedules.record_planner_session_run(
+                        self._task_id, context_tokens=last_context, planner_cost_usd=turn.usage.cost_usd)
+                except Exception:
+                    logger.exception("cannot record schedule Planner usage for %s", self._task_id)
             if error:
                 raise PlannerTurnError(error)
             return final_text
@@ -6086,6 +6140,7 @@ class PlannerAgent:
     async def _claim_schedule_session(self, plan: TaskPlan) -> None:
         """Only a new non-parallel schedule plan borrows the stored conversation."""
         self._schedule_session_id, self._schedule_previous = None, None
+        self._schedule_bound = None
         self._schedule_session_writes = False
         self._schedule_directory_adopted = False
         if not self._scheduled:
@@ -6114,9 +6169,35 @@ class PlannerAgent:
             plan.session_runtime, plan.session_provider = claimed["runtime_type"], claimed["provider_id"]
             plan.session_profile = claimed["profile_id"]
             self._schedule_previous = claimed["previous"]
+            if plan.session_id:
+                self._schedule_max_tokens = await scheduler_settings.session_context_max_tokens()
+                self._schedule_run_cost = claimed.get("run_cost_usd")
+                runtime = ADAPTERS.get(plan.session_runtime or "claude-code")
+                self._schedule_bound = session_bound(
+                    claimed.get("context_tokens"), self._schedule_run_cost, self._execution.task_budget_usd,
+                    self._schedule_max_tokens, reports_context=bool(runtime and runtime.reports_request_context))
         except Exception as exc:
             logger.exception("failed to claim the schedule session of %s", self.agent_id)
             await self._activity("phase", f"Schedule Planner session not claimed: {exc}; this run starts fresh"[:500])
+
+    async def _record_schedule_bound(self, bound: SessionBound, action: str, after: int | None) -> None:
+        await db_schedules.record_planner_session_bound(
+            self._task_id, action=action, reason=bound.reason.value,
+            before_tokens=bound.before_tokens, after_tokens=after)
+        logger.info("schedule %s Planner session %s: reason=%s context=%s -> %s",
+                    self._schedule_id, action, bound.reason.value, bound.before_tokens, after)
+        await self._activity("phase", f"Schedule Planner session {action}: {bound.reason.value}, "
+                                     f"context {bound.before_tokens} -> {after}")
+
+    async def _rotate_schedule_session(self, plan: TaskPlan) -> None:
+        bound = self._schedule_bound
+        assert bound is not None
+        await self._claude.stop()
+        plan.session_id = self._schedule_session_id = None
+        plan.session_totals = Usage()
+        self._schedule_bound = None
+        await self._save_session(plan)
+        await self._record_schedule_bound(bound, "rotated", None)
 
     async def _save_session(self, plan: TaskPlan) -> None:
         """Save the Planner's Claude session and its running totals."""

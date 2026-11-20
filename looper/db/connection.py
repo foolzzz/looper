@@ -112,6 +112,7 @@ _ONLINE_LOCK_WAIT_SECONDS = 5.0
 REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _SCHEDULE_NOTIFY_FORMAT = "schedule_notify_format"
+_SCHEDULE_SESSION_BOUNDS = "schedule_session_bounds"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
 _PROFILE_WEB_SEARCH = "profile_web_search"
@@ -134,6 +135,7 @@ _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _TASK_CHAT_GROUP = "task_chat_group"
 _PROCESSOR_ROLE = "processor_role"
+_HEADLESS_COMPACTION = "headless_compaction"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _MESSAGE_STREAM_DELETIONS = "message_stream_deletions"
@@ -141,6 +143,13 @@ _SUBSCRIPTIONS = "subscriptions"
 _SUBSCRIPTION_RULES = "subscription_rules"
 _SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
+_SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
+_MANAGER_EVENT_REASONS_MIGRATION = "manager_event_reasons"
+_MANAGER_EVENT_DELIVERY = "manager_event_delivery"
+_SCHEDULE_NOTIFICATION_EVENTS_ONLINE = "schedule_notification_events_online"
+# The reasons a completion event may record (schema.sql's manager events block lists the same).
+_MANAGER_EVENT_REASONS = ("off", "group_chat", "manager_off", "turn_failed", "turn_timeout", "turn_stopped",
+                          "empty_reply", "send_failed", "queue_deadline", "restart", "no_chat", "target_changed")
 _RUN_TREE = "run_tree"
 _AGENT_SPAWNS = "agent_spawns"
 _STEP_DIFFICULTY = "step_difficulty"
@@ -312,6 +321,16 @@ _ONLINE_STEPS = (
                           "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL"),)),
     _OnlineStep(_STEP_DIFFICULTY, "step_difficulty_online",
                 validate=(("task_steps", "task_steps_difficulty_check"),)),
+    # The outbox can be large: its new foreign key is validated, and its index (for ON DELETE SET NULL) built,
+    # without blocking writes.
+    _OnlineStep(_SCHEDULE_NOTIFICATION_EVENTS, _SCHEDULE_NOTIFICATION_EVENTS_ONLINE,
+                validate=(("schedule_notifications", "schedule_notifications_manager_event_id_fkey"),),
+                indexes=(("idx_schedule_notifications_manager_event",
+                          "ON schedule_notifications (manager_event_id) WHERE manager_event_id IS NOT NULL"),)),
+    _OnlineStep(_MANAGER_EVENT_REASONS_MIGRATION, "manager_event_reasons_online",
+                validate=(("manager_events", "manager_events_reason_check"),)),
+    _OnlineStep(_MANAGER_EVENT_DELIVERY, "manager_event_delivery_online",
+                validate=(("manager_events", "manager_events_delivery_check"),)),
     # The leads check block adds these NOT VALID (a fresh database validates them as it is created).
     _OnlineStep(_LEADS_CHECK, _LEADS_CHECK_ONLINE,
                 validate=(("agent_setting_layers", "agent_setting_layers_role_check"),
@@ -320,6 +339,8 @@ _ONLINE_STEPS = (
                           *((table, f"{table}_{name}") for table in ("message_leads", "intents")
                             for name in ("state_check", "check_verdict_check", "check_reason_check",
                                          "check_record_id_fkey", "dropped")))),
+    _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
+                validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
 )
 
 
@@ -495,6 +516,14 @@ ALTER TABLE schedule_profile_overrides DROP CONSTRAINT schedule_profile_override
 """
 
 
+_HEADLESS_COMPACTION_DDL = """
+ALTER TABLE agent_runtimes DROP CONSTRAINT agent_runtimes_capabilities_check,
+    ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume',
+        'structured_output', 'claude_plugins', 'mcp', 'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
+        'read_tools', 'steer', 'no_tools', 'headless_compaction']) NOT VALID;
+"""
+
+
 # The advisor and its judge: their role layers. No row changes.
 _ADVISOR_ROLES_DDL = """
 ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check,
@@ -540,6 +569,15 @@ async def _processor_role_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_setting_layers') "
         "AND conname = 'agent_setting_layers_role_check' "
         "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'processor'")
+
+
+async def _headless_compaction_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _HEADLESS_COMPACTION):
+        return False
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_runtimes') "
+        "AND conname = 'agent_runtimes_capabilities_check' "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'headless_compaction'")
 
 
 _CURSOR_LOGIN_DDL = """
@@ -860,6 +898,39 @@ async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
 
 
+async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
+    """A database whose completion events cannot record every reason (``no_chat``, ``target_changed``)."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _MANAGER_EVENT_REASONS_MIGRATION):
+        return False
+    # This schema's table only: another schema of the database has a constraint of the same name.
+    definition = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                                     "WHERE conname = 'manager_events_reason_check' "
+                                     "AND conrelid = to_regclass('manager_events')")
+    return definition is not None and any(f"'{reason}'" not in definition for reason in _MANAGER_EVENT_REASONS)
+
+
+async def _manager_event_delivery_pending(conn: asyncpg.Connection) -> bool:
+    """A database whose completion events predate the typed delivery of their messages."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _MANAGER_EVENT_DELIVERY):
+        return False
+    return await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL") and not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('manager_events') "
+        "AND attname = 'delivery' AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _schedule_notification_events_pending(conn: asyncpg.Connection) -> bool:
+    """A database whose completion events predate ``schedule_notifications.manager_event_id`` (the block above
+    adds it to one that gets the table now, and schema.sql to a new one)."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_NOTIFICATION_EVENTS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('schedule_notifications') "
+        "AND attname = 'manager_event_id' AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
     """Only older databases need this additive table; fresh schemas already contain it."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROJECT_ACTIVITY):
@@ -876,6 +947,15 @@ async def _command_schedules_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('schedules') AND attname = 'kind' "
         "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _schedule_session_bounds_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_SESSION_BOUNDS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('schedules') "
+        "AND attname = 'planner_session_context_tokens' AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _task_reply_route_pending(conn: asyncpg.Connection) -> bool:
@@ -1208,6 +1288,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _processor_role_pending(conn):
             await conn.execute(_PROCESSOR_ROLE_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROCESSOR_ROLE)
+        if await _headless_compaction_pending(conn):
+            await conn.execute(_HEADLESS_COMPACTION_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _HEADLESS_COMPACTION)
         if await _advisor_roles_pending(conn):
             await conn.execute(_ADVISOR_ROLES_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _ADVISOR_ROLES)
@@ -1259,6 +1342,27 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _manager_events_pending(conn):
             await conn.execute(_manager_events_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
+            # The block added the outbox's column too: its index is built online, as for a later database.
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFICATION_EVENTS)
+        if await _schedule_notification_events_pending(conn):
+            await conn.execute("ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT, "
+                               "ADD CONSTRAINT schedule_notifications_manager_event_id_fkey FOREIGN KEY "
+                               "(manager_event_id) REFERENCES manager_events(id) ON DELETE SET NULL NOT VALID")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFICATION_EVENTS)
+        if await _manager_event_reasons_pending(conn):
+            reasons = ", ".join(f"'{reason}'" for reason in _MANAGER_EVENT_REASONS)
+            # NOT VALID: no scan under this transaction's lock; the online step validates it after the commit.
+            await conn.execute("ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
+                               f"manager_events_reason_check CHECK (reason IN ({reasons})) NOT VALID")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_REASONS_MIGRATION)
+        if await _manager_event_delivery_pending(conn):
+            await conn.execute(
+                "ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery TEXT, ADD COLUMN IF NOT EXISTS "
+                "delivery_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS delivery_at TIMESTAMPTZ, "
+                "ADD COLUMN IF NOT EXISTS delivery_error TEXT, ADD COLUMN IF NOT EXISTS delivery_claim UUID, "
+                "ADD CONSTRAINT manager_events_delivery_check CHECK (delivery IN ('pending', 'sending', 'sent', "
+                "'failed', 'uncertain')) NOT VALID")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_DELIVERY)
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():
                 await conn.execute(ddl)
@@ -1368,6 +1472,21 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _LEADS_CHECK)
             await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
+        if await _schedule_session_bounds_pending(conn):
+            await conn.execute("""
+                ALTER TABLE schedules
+                  ADD COLUMN planner_session_context_tokens BIGINT CHECK (planner_session_context_tokens >= 0),
+                  ADD COLUMN planner_session_run_cost_usd DOUBLE PRECISION CHECK (planner_session_run_cost_usd >= 0);
+                ALTER TABLE schedule_runs
+                  ADD COLUMN planner_context_tokens BIGINT CHECK (planner_context_tokens >= 0),
+                  ADD COLUMN planner_cost_usd DOUBLE PRECISION CHECK (planner_cost_usd >= 0),
+                  ADD COLUMN planner_session_action TEXT CHECK (planner_session_action IN ('compacted', 'rotated')),
+                  ADD COLUMN planner_session_reason TEXT CHECK (planner_session_reason IN ('context', 'cost')),
+                  ADD COLUMN planner_session_before_tokens BIGINT CHECK (planner_session_before_tokens >= 0),
+                  ADD COLUMN planner_session_after_tokens BIGINT CHECK (planner_session_after_tokens >= 0),
+                  ADD COLUMN failure_kind TEXT CHECK (failure_kind IN ('task_budget'));
+            """)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_SESSION_BOUNDS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1402,6 +1521,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _schedule_notify_format_pending(conn)
+            or await _schedule_session_bounds_pending(conn)
             or await _cursor_login_pending(conn)
             or await _model_name_parameters_pending(conn)
             or await _coco_login_pending(conn)
@@ -1414,7 +1534,9 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn)
-            or await _manager_events_pending(conn) or await _message_leads_pending(conn)
+            or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
+            or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
+            or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
@@ -1428,4 +1550,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
-            or await _processor_role_pending(conn)))
+            or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)))

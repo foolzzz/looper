@@ -105,6 +105,12 @@ _SLOW_FAKE = {
               "acceptance_criteria": ["done.txt holds done"], "depends_on": [], "review": False}],
     "attempts": {"s1": [{"status": "completed", "seconds": 60, "files": {"done.txt": "done\n"}}]},
 }
+# The same, quick: for a dialog that only needs its task to end (``Dialog.fake_task``).
+_QUICK_FAKE = {
+    "plan": [{"id": "s1", "instruction": "Create hello.py.", "acceptance_criteria": ["hello.py exists"],
+              "depends_on": [], "review": False}],
+    "attempts": {"s1": [{"status": "completed", "seconds": 1, "files": {"hello.py": "print('hello')\n"}}]},
+}
 ACTIVE = ("pending", "assigned", "running", "planning", "executing", "verifying", "stopping")
 
 
@@ -183,7 +189,9 @@ class Dialog:
     client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
     tags: tuple[str, ...] = field(default=())
     projects_root: bool = False  # the server has [projects] root set to a directory of the case
+    fake_task: dict[str, Any] | None = None  # fake mode: the stand-in Planner's script for its tasks (else slow)
     leads: bool = False  # leads are on, and the database holds the synthetic leads (``_seed_leads``)
+    research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -493,6 +501,96 @@ def _requirement_has_the_lead(look: Look) -> str | None:
         return found
     requirement = str(look.detail(look.new_tasks()[0]["task_id"]).get("requirement") or "")
     return None if "ZX-42" in requirement else "the task's requirement lacks the background the lead gave (ZX-42)"
+
+
+# --- The research order: where the Manager looks before it asks the user ---
+
+RECORD_TOOLS = ("looper_tasks", "looper_projects")
+# A reply that asks the user for something: a question, or a request to tell, give or add it.
+_ASKS = re.compile(r"[？?]|告诉我|请提供|请补充|你可以补充|麻烦提供|tell me|let me know", re.IGNORECASE)
+# A reply that asks the user to supply or confirm facts; an offer of more help ("需要的话告诉我", "let me know if you
+# want …") is not one.
+_REQUESTS = re.compile(
+    r"请提供|请补充|你可以补充|麻烦提供|请告诉我|请确认|告诉我(?:最终|具体|准确|正确|实际)|能(?:否|不能)告诉我"
+    r"|(?:please|could you|can you|would you)\s+(?:provide|tell me|confirm|share|send)"
+    r"|let me know (?:the|what|which|whether)", re.IGNORECASE)
+
+
+def asks_back(reply: str, fact: str) -> bool:
+    """Whether ``reply`` asks the user for an answer it has (``fact``): a request to supply or confirm it, or a
+    question about the fact itself ("是 done 吗？", "is it done?")."""
+    if _REQUESTS.search(reply):
+        return True
+    return any(fact.lower() in sentence.lower() and sentence.rstrip().endswith(("？", "?"))
+               for sentence in re.split(r"(?<=[。！!？?\n])", reply))
+
+
+def _asks(reply: str) -> bool:
+    return bool(_ASKS.search(reply))
+
+
+def research_lookups(actions: list[dict[str, Any]]) -> list[str]:
+    """The turn's successful lookups, in the order they were made: Looper's records and the leads."""
+    return [a["tool"] for a in actions if a["status"] == "ok" and a["tool"] in (*RECORD_TOOLS, LEADS_TOOL)]
+
+
+def research_order_problem(lookups: list[str]) -> str | None:
+    """Looper's own records come before the leads: a leads search before any records read is out of order."""
+    if LEADS_TOOL in lookups and not set(lookups[:lookups.index(LEADS_TOOL)]) & set(RECORD_TOOLS):
+        return f"the Manager searched the leads before Looper's own records: {lookups}"
+    return None
+
+
+def _found_in_leads(look: Look) -> str | None:
+    """The answer is only in a lead: the Manager reads Looper's records first, then searches the leads, answers from
+    them, and asks the user nothing."""
+    lookups = research_lookups(look.turn_actions())
+    if LEADS_TOOL not in lookups:
+        return f"the Manager did not search the leads before answering: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    if "ZX-42" not in look.reply:
+        return "the reply does not give what the lead says (ZX-42)"
+    return "the reply asks the user for what the lead says" if asks_back(look.reply, "ZX-42") else None
+
+
+def _found_in_records(look: Look) -> str | None:
+    """The answer is in a ready task's requirement: the Manager reads its tasks, stops there (no leads search after
+    it found the answer), answers from it, and asks the user nothing."""
+    lookups = research_lookups(look.turn_actions())
+    if "looper_tasks" not in lookups:
+        return f"the Manager did not read its tasks before answering: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
+    # Any later try counts, also one that failed: it went on looking after its records had the answer.
+    attempts = [a["tool"] for a in look.turn_actions() if a["tool"] in (*RECORD_TOOLS, LEADS_TOOL)]
+    if LEADS_TOOL in attempts:
+        return f"the Manager went on to the leads after its records had the answer: {attempts}"
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    if "done" not in look.reply:
+        return "the reply does not give what the task's requirement says (done)"
+    return "the reply asks the user for what the task says" if asks_back(look.reply, "done") else None
+
+
+def _looked_then_asked(look: Look) -> str | None:
+    """Nothing anywhere answers it: the Manager reads Looper's records, then searches the leads, then asks the user."""
+    lookups = research_lookups(look.turn_actions())
+    if not set(lookups) & set(RECORD_TOOLS) or LEADS_TOOL not in lookups:
+        return f"the Manager asked before looking in both its records and the leads: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    return None if _asks(look.reply) else "the reply does not ask the user"
 
 
 def _manager_capabilities(look: Look) -> str | None:
@@ -2090,6 +2188,8 @@ def _completion_delivered(look: Look) -> str | None:
         event = facts["event"]
         if facts["status"] in ACTIVE or facts["status"] == "init":
             return f"the task is {facts['status']}, not {' or '.join(ready)}"
+        if look.fake:  # the path only: the end waits for its turn (the minute's window is not waited for here)
+            return None if event is not None else "the task's end has no manager_events row"
         if event is None or not (event["finished_at"] or event["sent_at"]):
             return "the task's manager_events row is not finished"
         return None if facts["message"] is not None else "the chat has no message since the task ended"
@@ -2101,6 +2201,9 @@ def _completion_delivered(look: Look) -> str | None:
     event = facts["event"]
     if facts["status"] not in ready:
         return f"the task is {facts['status']}, not {' or '.join(ready)}"
+    if look.fake:
+        return None if event["state"] in ("pending", "running", "delivered") else (
+            f"the event row is {event['state']} ({event['reason']}), not waiting for its turn or delivered")
     if event["state"] != "delivered":
         return f"the event row is {event['state']} ({event['reason']}), not delivered"
     # The message itself, for whoever reads the run's log (the JSON keeps only the problems).
@@ -2382,6 +2485,18 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("leads_background", (
         Say("Nebula 项目的上线日期定下来了吗？", _leads_used_with_sources, ((LEADS_TOOL, {"query": "Nebula"}),)),
     ), leads=True, tags=("manager", "leads")),
+    Dialog("research_leads", (
+        Say("Nebula 发布前要跑哪个回归套件？", _found_in_leads,
+            (("looper_tasks", {"action": "list"}), (LEADS_TOOL, {"query": "Nebula"}))),
+    ), leads=True, research=True, tags=("manager", "research")),
+    Dialog("research_records", (
+        Say("done.txt 那个任务，文件里最后要写什么内容？", _found_in_records,
+            (("looper_tasks", {"action": "list"}),)),
+    ), ready_task=True, leads=True, research=True, tags=("manager", "research")),
+    Dialog("research_ask", (
+        Say("Orion 项目的预算上限是多少？", _looked_then_asked,
+            (("looper_projects", {"action": "list"}), (LEADS_TOOL, {"query": "Orion"}))),
+    ), leads=True, research=True, tags=("manager", "research")),
     Dialog("leads_dont_search", (
         Say("别查消息，直接说你知道的：Nebula 项目的上线日期定了吗？", _no_search),
     ), leads=True, tags=("manager", "leads")),
@@ -2495,7 +2610,7 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。", "title": "hello 脚本",
                                      "project": PROJECT}),
              ("looper_task_control", {"task_id": "<task id>", "action": "start"}))),
-    ), seed=_seed_completion_failed),
+    ), seed=_seed_completion_failed, fake_task=_QUICK_FAKE),
     Dialog("gate_relay", (
         Say("关于那个任务在等我回答的问题：存储就用 PostgreSQL。", _relayed_to_the_gate,
             (("looper_task_gate_reply", {"task_id": "<task>", "gate": GATE_LABEL}),)),
@@ -3194,6 +3309,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _seed_login_runtime(database_url)
         if dialog.leads:
             _seed_leads(database_url)
+        if dialog.research:
+            api.post("/api/v1/chat_settings/update", {"research_order": True})
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
@@ -3404,7 +3521,7 @@ def run(
             work_dir = case / "work" / "calc"
             work_dir.mkdir(parents=True)
             scenarios = case / "scenarios.json"
-            scenarios.write_text(json.dumps({os.path.realpath(work_dir): _SLOW_FAKE, "manager": {}}),
+            scenarios.write_text(json.dumps({os.path.realpath(work_dir): dialog.fake_task or _SLOW_FAKE, "manager": {}}),
                                  encoding="utf-8")
             install_claude(case / "bin", mode=mode, scenarios=scenarios,
                            max_budget_usd=None if register is not None else max_budget_usd,
