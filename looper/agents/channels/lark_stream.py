@@ -381,8 +381,9 @@ def _flat_event(payload: bytes) -> dict[str, Any] | None:
 
 
 def _card_event(payload: bytes) -> dict[str, Any] | None:
-    """A press of a card's button (schema 2.0 ``card.action.trigger``): who pressed, in which chat and card, and the
-    button's ``looper`` value; None for any other event."""
+    """A press of a button of Looper's card (schema 2.0 ``card.action.trigger``): who pressed, in which chat and
+    card, and the button's ``looper`` value; None for any other event, a card another sender of the app made
+    included (it is acknowledged and ignored as before)."""
     try:
         data = _object(json.loads(payload))
     except (ValueError, TypeError):
@@ -393,10 +394,12 @@ def _card_event(payload: bytes) -> dict[str, Any] | None:
     event = _object(data.get("event"))
     context, action = _object(event.get("context")), _object(event.get("action"))
     found = _object(action.get("value")).get("looper")
+    if not isinstance(found, str) or not found:
+        return None
     return {"type": CARD_EVENT, "event_id": header.get("event_id") or "",
             "operator_id": _object(event.get("operator")).get("open_id") or "",
             "chat_id": context.get("open_chat_id") or "", "message_id": context.get("open_message_id") or "",
-            "value": found if isinstance(found, str) else ""}
+            "value": found}
 
 
 def _card_ack(frame: Frame, start: float, response: dict[str, Any] | None) -> bytes:

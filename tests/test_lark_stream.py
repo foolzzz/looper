@@ -661,14 +661,17 @@ def test_a_card_press_is_answered_in_its_acknowledgement_and_never_yielded() -> 
             await fake.push_card_action("tok:confirm", operator="ou_a", chat_id="oc_dm", message_id="om_card",
                                         event_id="ev-card", frame_id="card-1")
             await fake.push_card_action("tok:confirm", event_id="ev-card", frame_id="card-2")  # redelivered
-            await fake.wait_acks(2)
+            await fake.push_event({"schema": "2.0", "header": {"event_id": "ev-foreign",  # a card Looper did not make
+                                   "event_type": "card.action.trigger"},
+                                   "event": {"action": {"tag": "button", "value": {"key": "v"}}}}, message_id="card-3")
+            await fake.wait_acks(3)
             await fake.push_message(text="after", message_id="om_after")
             assert (await asyncio.wait_for(following, 2))["content"] == "after"
-            await fake.wait_acks(3)
+            await fake.wait_acks(4)
             acks = dict((frame, payload) for frame, payload in fake.acks)
             assert set(acks["card-1"]) == {"code", "headers", "data"} and acks["card-1"]["code"] == 200
             assert _answer(acks["card-1"]) == {"toast": {"type": "success", "content": "已确认"}}
-            assert acks["card-2"] == {"code": 200} and acks["om_after"] == {"code": 200}
+            assert acks["card-2"] == acks["card-3"] == acks["om_after"] == {"code": 200}
             assert presses == [{"type": "card.action.trigger", "event_id": "ev-card", "operator_id": "ou_a",
                                 "chat_id": "oc_dm", "message_id": "om_card", "value": "tok:confirm"}]
     asyncio.run(main())
