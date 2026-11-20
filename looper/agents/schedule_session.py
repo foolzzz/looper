@@ -16,9 +16,11 @@ class SessionBound:
 
 
 def session_bound(context_tokens: int | None, run_cost_usd: float | None, budget_usd: float | None,
-                  max_tokens: int) -> SessionBound | None:
-    # A stored session without measurements must not get one more unbounded resume after an upgrade.
-    if context_tokens is None or context_tokens > max_tokens:
+                  max_tokens: int, *, reports_context: bool) -> SessionBound | None:
+    if context_tokens is None:
+        # Only a runtime that can supply a new measurement can recover from rotating an unmeasured session.
+        return SessionBound(BoundReason.CONTEXT, None) if reports_context else None
+    if context_tokens > max_tokens:
         return SessionBound(BoundReason.CONTEXT, context_tokens)
     if (context_tokens >= max_tokens / 2 and budget_usd is not None
             and (run_cost_usd is None or run_cost_usd > budget_usd / 2)):

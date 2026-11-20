@@ -149,7 +149,7 @@ from ..log_redaction import redact
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage, compaction, request_context
 from ..room import REF_MAX_CHARS, seat_key
-from ..runtimes import CLAUDE_CODE, Capability, InProcessTools, ReadOnly, RuntimeUnsupported
+from ..runtimes import ADAPTERS, CLAUDE_CODE, Capability, InProcessTools, ReadOnly, RuntimeUnsupported
 from ..runtimes.cursor_agent import cursor_failure
 from ..runtimes.runner.bridge import RpcFailure
 from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
@@ -4698,7 +4698,10 @@ class PlannerAgent:
             if (Capability.HEADLESS_COMPACTION not in launch.runtime.capabilities
                     or context is None or self._schedule_run_cost is None
                     or context > self._schedule_max_tokens * 3
-                    or (budget is not None and (estimated_cost is None or estimated_cost > budget / 2))):
+                    # Native Claude reports its own cost rather than using launch pricing. With no price,
+                    # the three-times-context guard above bounds compaction; its actual cost is still charged.
+                    or (budget is not None and price is not None
+                        and (estimated_cost is None or estimated_cost > budget / 2))):
                 await self._rotate_schedule_session(plan)
                 message = self._plan_message(plan, await self._template_lines(plan))
         label = self._directory_label(plan)
@@ -6169,9 +6172,10 @@ class PlannerAgent:
             if plan.session_id:
                 self._schedule_max_tokens = await scheduler_settings.session_context_max_tokens()
                 self._schedule_run_cost = claimed.get("run_cost_usd")
+                runtime = ADAPTERS.get(plan.session_runtime or "claude-code")
                 self._schedule_bound = session_bound(
                     claimed.get("context_tokens"), self._schedule_run_cost, self._execution.task_budget_usd,
-                    self._schedule_max_tokens)
+                    self._schedule_max_tokens, reports_context=bool(runtime and runtime.reports_request_context))
         except Exception as exc:
             logger.exception("failed to claim the schedule session of %s", self.agent_id)
             await self._activity("phase", f"Schedule Planner session not claimed: {exc}; this run starts fresh"[:500])

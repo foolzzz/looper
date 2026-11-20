@@ -26,6 +26,8 @@ def test_startup_refresh_admits_headless_compaction_and_continues_registration(m
             monkeypatch.setattr(connection, "_pool", conn)
             monkeypatch.setattr(profile_registry, "_detected_runtime", detected)
             if upgraded:
+                await conn.execute("UPDATE agent_runtimes SET capabilities=array_remove(capabilities, "
+                                   "'headless_compaction')")
                 constraint = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
                     "WHERE conrelid='agent_runtimes'::regclass AND conname='agent_runtimes_capabilities_check'")
                 await conn.execute("ALTER TABLE agent_runtimes DROP CONSTRAINT agent_runtimes_capabilities_check, "

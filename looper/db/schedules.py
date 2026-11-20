@@ -292,12 +292,20 @@ async def claim_planner_session(task_id: str) -> dict[str, Any] | None:
             return {"claimed": False, "reason": "another active task holds it"}
         totals = row["planner_session_totals"]
         totals = json.loads(totals) if isinstance(totals, str) else dict(totals or {})
+        context = row["planner_session_context_tokens"]
+        if context is None and row["planner_session_id"] and holder and holder != task_id:
+            # Recover an upgrade's last measurement before moving the holder. Persist it once; a replacement
+            # session clears it, and later claims can only consult their immediate predecessor's records.
+            context = await conn.fetchval(
+                "SELECT context_tokens FROM llm_records WHERE agent_id=$1 AND task_id=$2 ORDER BY id DESC LIMIT 1",
+                f"planner-{holder}", holder)
         await agent_sessions.save_session(
             f"planner-{task_id}", row["planner_session_id"], totals,
             runtime_type=row["planner_session_runtime"], provider_id=row["planner_session_provider"],
             profile_id=row["planner_session_profile"], pool=conn,
         )
-        await conn.execute("UPDATE schedules SET planner_session_task_id = $2 WHERE id = $1", schedule_id, task_id)
+        await conn.execute("UPDATE schedules SET planner_session_task_id = $2, planner_session_context_tokens = $3 "
+                           "WHERE id = $1", schedule_id, task_id, context)
         await conn.execute("UPDATE tasks SET planner_session_label = $2 WHERE id = $1", task_id,
                            planner_storage_label(schedule_id))
         previous = await conn.fetchrow(
@@ -307,7 +315,7 @@ async def claim_planner_session(task_id: str) -> dict[str, Any] | None:
         return {"claimed": True, "session_id": row["planner_session_id"], "session_totals": totals,
                 "runtime_type": row["planner_session_runtime"], "provider_id": row["planner_session_provider"],
                 "profile_id": row["planner_session_profile"], "previous": dict(previous) if previous else None,
-                "context_tokens": row["planner_session_context_tokens"],
+                "context_tokens": context,
                 "run_cost_usd": row["planner_session_run_cost_usd"]}
 
 

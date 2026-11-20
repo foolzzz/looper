@@ -26,7 +26,9 @@ from looper.db import schedules, tasks
     (50_000, 0.6, 1, "success", "compacted", 10),
     (49_999, 0.9, 1, "unsupported", None, .1),
     (50_000, None, 1, "success", "rotated", .1),
-    (100_001, 0.1, 1, "success", "rotated", None),
+    (100_001, 0.1, 1, "success", "compacted", None),
+    (300_000, 0.1, 1, "success", "compacted", None),
+    (300_001, 0.1, 1, "success", "rotated", None),
     (49_999, None, 1, "unsupported", None, .1),
 ])
 def test_next_run_bounds_only_an_expensive_stored_session(
@@ -45,8 +47,10 @@ def test_next_run_bounds_only_an_expensive_stored_session(
         "provider_id": "prov-claude-subscription", "previous": None,
         "context_tokens": context, "run_cost_usd": cost,
     })
-    monkeypatch.setattr(Launch, "price", property(lambda launch: None if rate is None else PriceSnapshot(
-        {launch.model: ModelPrice(rate, rate, rate, rate)}, {}, {}, {})))
+    # None exercises native OAuth pricing, without replacing Launch.price.
+    if rate is not None:
+        monkeypatch.setattr(Launch, "price", property(lambda launch: PriceSnapshot(
+            {launch.model: ModelPrice(rate, rate, rate, rate)}, {}, {}, {})))
     monkeypatch.setattr(schedules, "claim_planner_session", claim)
     monkeypatch.setattr(tasks, "set_continues_schedule_session", AsyncMock())
     monkeypatch.setattr(schedules, "save_planner_session", AsyncMock())
@@ -94,8 +98,8 @@ def test_next_run_bounds_only_an_expensive_stored_session(
         assert facts["reason"] == ("context" if context is None or context > 100_000 else "cost")
         assert facts["before_tokens"] == context
         assert facts["after_tokens"] == (4000 if outcome == "compacted" else None)
-        direct = (context is None or context > 300_000 or cost is None or rate is None
-                  or context * rate / 1e6 > (budget or float("inf")) / 2)
+        direct = (context is None or context > 300_000 or cost is None
+                  or (isinstance(rate, (int, float)) and context * rate / 1e6 > (budget or float("inf")) / 2))
         assert bool(compactions) is (compact != "unsupported" and not direct)
         if outcome == "rotated":
             assert "--resume" not in claude.argvs()[-1]
@@ -106,6 +110,28 @@ def test_next_run_bounds_only_an_expensive_stored_session(
         assert "--resume" in claude.argvs()[0]
     assert telemetry.await_count >= 1
     assert telemetry.await_args.kwargs["context_tokens"] == 140
+
+
+@pytest.mark.parametrize("runtime,rotates", [
+    ("claude-code", True), ("omp", True), ("pi", True), ("api", True),
+    ("codex", False), ("cursor-agent", False), ("grok", False), ("coco", False), ("dsh", False),
+])
+def test_unknown_context_preserves_runtimes_without_request_measurements(monkeypatch, agent_db, tmp_path,
+                                                                         runtime, rotates):
+    from looper.agents.tiers.planner import PlannerAgent, TaskPlan
+
+    monkeypatch.setattr(tasks, "set_continues_schedule_session", AsyncMock())
+    monkeypatch.setattr(schedules, "claim_planner_session", AsyncMock(return_value={
+        "claimed": True, "session_id": "stored", "session_totals": {}, "runtime_type": runtime,
+        "provider_id": None, "profile_id": None, "previous": None,
+        "context_tokens": None, "run_cost_usd": None,
+    }))
+    agent = PlannerAgent(task_id="next", runtime_root=tmp_path)
+    agent._scheduled = True
+    plan = TaskPlan("plan", "goal", "Read", str(tmp_path))
+    asyncio.run(agent._claim_schedule_session(plan))
+    assert plan.session_id == "stored" and agent._schedule_session_writes
+    assert (agent._schedule_bound is not None) is rotates
 
 
 def test_replanning_does_not_reuse_a_previous_rotation_decision(monkeypatch, agent_db, tmp_path):

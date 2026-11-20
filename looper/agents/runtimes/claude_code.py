@@ -138,6 +138,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     type = "claude-code"
     label = "Claude Code"
     streams_usage = True
+    reports_request_context = True
     default_executable = "claude"
     image_input = ImageInput.READ_TOOL
     # Verified against Claude Code 2.1.285 (claude_cli), no_tools against 2.1.328 (claude_cli.NO_TOOLS_ARGS); its

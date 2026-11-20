@@ -80,6 +80,30 @@ def test_claim_carries_last_run_measurements_without_duplicate_history_or_budget
     run_scheduled(test, monkeypatch, tmp_path)
 
 
+@pytest.mark.parametrize("context", [None, 20_000, 120_000])
+def test_upgrade_claim_recovers_only_the_old_holders_last_planner_context(monkeypatch, tmp_path, context):
+    async def test(env):
+        sid = (await env.schedule())["schedule_id"]
+        for task_id in ("old", "next", "later"):
+            await tasks.create_task(task_id=task_id, requirement="Read", project_id=env.project_id,
+                                    work_dir=env.work_dir)
+            await env.pool.execute("UPDATE tasks SET schedule_id=$1, status='completed' WHERE id=$2", sid, task_id)
+        await env.pool.execute("UPDATE schedules SET planner_session_id='stored', planner_session_task_id='old', "
+                               "planner_session_runtime='codex' WHERE id=$1", sid)
+        for agent, task_id, tokens in (("planner-old", "old", 999_000), ("planner-old", "old", context),
+                                        ("worker-old", "old", 888_000), ("planner-old", "next", 777_000)):
+            await env.pool.execute("INSERT INTO llm_records (agent_id, task_id, context_tokens) VALUES ($1,$2,$3)",
+                                   agent, task_id, tokens)
+        claim = await schedules.claim_planner_session("next")
+        assert claim["context_tokens"] == context
+        assert (await schedules.get_schedule(sid))["planner_session_context_tokens"] == context
+        # A replacement session discards the old measurement; the next claim must not resurrect it.
+        await schedules.save_planner_session("next", "replacement", {}, runtime_type="codex",
+                                             provider_id=None, profile_id=None)
+        assert (await schedules.claim_planner_session("later"))["context_tokens"] is None
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
 def test_budget_failure_alert_uses_typed_reason_and_effective_context_threshold(monkeypatch, tmp_path):
     async def test(env):
         sid = (await env.schedule(notify="alerts"))["schedule_id"]

@@ -427,6 +427,9 @@ class RuntimeAdapter(ABC):
     # Its usage events come while a run goes on (each model request, message or step), so the dashboard shows the
     # run's tokens per minute; False: they come only when a turn ends (Codex, Coco, Cursor), or it is not known.
     streams_usage: ClassVar[bool] = False
+    # Its resident stream reports request-local input context via request_context. Turn/session token totals
+    # (including Codex's codex_usage) cannot measure this. Unknown size must preserve resume without this signal.
+    reports_request_context: ClassVar[bool] = False
     # Its resident session's stream reports every compaction of the session's context (``system`` /
     # ``compact_boundary``), so the Manager knows when the session lost what its earlier turns showed. Not a
     # ``Capability``: those are stored with each runtime row (``agent_runtimes.capabilities``, whose CHECK lists them)
