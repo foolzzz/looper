@@ -21,6 +21,9 @@ _COMMAND_RUN_DEFAULTS = {
     "log_truncated": False, "log_tail": None, "runner_pid": None, "runner_started": None,
     "missed_since": None,
     "deferred_by_drain": False,
+    "planner_context_tokens": None, "planner_cost_usd": None, "planner_session_action": None,
+    "planner_session_reason": None, "planner_session_before_tokens": None,
+    "planner_session_after_tokens": None, "failure_kind": None,
 }
 
 
