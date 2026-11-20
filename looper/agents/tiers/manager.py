@@ -80,7 +80,7 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import session_switch
+from .. import leads_model, session_switch
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
@@ -90,7 +90,7 @@ from ..session_switch import SessionSwitch, SwitchReason
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
-from ..ops import Turn
+from ..ops import Turn, leads as ops_leads
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
 from ..message import (
@@ -770,6 +770,9 @@ class ManagerAgent:
         self._turned_off = False
         self._turned_off_told = False
         self._has_templates = False  # from the last read of the Manager's task templates
+        self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
+        # Group replies not sent because they quoted a message lead this session searched (``_group_safe``).
+        self.leads_withheld = 0
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
         # Reads what a channel's message quotes, by the channel's id; the fleet sets it (``ChannelRegistry``).
@@ -946,6 +949,10 @@ class ManagerAgent:
                 logger.debug("loaded manager system prompt from database")
         except Exception:
             logger.debug("could not load manager config from database", exc_info=True)
+        try:
+            self._leads_on = await leads_model.leads_enabled()
+        except Exception:
+            logger.debug("could not read leads.enabled; keeping the last value", exc_info=True)
 
     def _receive(self, envelope: MessageEnvelope) -> bool:
         """Bus consumer, run in ``bus.publish`` before the queue: take a ``/stop`` addressed to the Manager out of
@@ -1446,7 +1453,8 @@ class ManagerAgent:
         )
         tools = await token.step("tool_listing", self.ops.current_listing()) if self.ops is not None else []
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
-        if self._has_templates or has_workflows or self.agent_id != DEFAULT_MANAGER_ID:
+        has_leads = any(t["name"] == ops_leads.LEADS_TOOL for t in tools)
+        if self._has_templates or has_workflows or has_leads or self.agent_id != DEFAULT_MANAGER_ID:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
@@ -1872,6 +1880,8 @@ class ManagerAgent:
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
             contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
+        elif self._leads_on:
+            contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
@@ -2259,6 +2269,7 @@ class ManagerAgent:
             self._stopped_notes = []
             if self.ops is not None:
                 self.ops.forget_confirmations()
+            ops_leads.forget(self.agent_id)
             await self._record_new_session(envelope, origin, previous[0], chosen)
         logger.info("%s: a new session on /new from %s (sender %s); the previous one was %s", self._log,
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
@@ -2657,7 +2668,7 @@ class ManagerAgent:
         if last is None or self._bus is None:
             logger.info("%s: Claude spoke on its own before any message; its words are only recorded", self._log)
             return
-        payload: dict[str, Any] = {"text": text, "autonomous": True}
+        payload: dict[str, Any] = {"text": self._group_safe(last, text), "autonomous": True}
         context = last.payload.get("channel_context")
         if isinstance(context, dict) and context.get("session_id"):
             payload["chat_session_id"] = context["session_id"]
@@ -2874,10 +2885,21 @@ class ManagerAgent:
         ``outcome`` is how the turn ended; by default
         failed with an ``error``, else answered."""
         assert self._bus is not None
+        text = self._group_safe(original, text)
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                                record=record, snapshot=snapshot))
+
+    def _group_safe(self, original: MessageEnvelope, text: str) -> str:
+        """``text``, or ``WITHHELD_REPLY`` when it goes to a group chat and quotes a message lead this Manager's
+        session searched in the last day (RFC R-2: the session is shared by the user's chats and the groups)."""
+        if not text or not _message_origin(original)["group"] or not ops_leads.quotes_a_lead(self.agent_id, text):
+            return text
+        self.leads_withheld += 1
+        logger.warning("%s: a reply to a group chat quoted a message lead found in the user's own chat; Looper sent "
+                       "a notice instead (%d so far)", self._log, self.leads_withheld)
+        return ops_leads.WITHHELD_REPLY
 
     async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
         """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""

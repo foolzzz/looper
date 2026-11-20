@@ -8,6 +8,7 @@ from ..db import agent_setting_layers, project_documents as db_documents
 from .agent_settings import (
     SPAWN_ROLES, AgentType, Launch, index_layers, profile_problem, resolve, system_prompt_mode_choice,
 )
+from . import leads_model
 from .knowledge import AgentKnowledge, SourceKind, StoredSet, _entry, clipped_index
 from .profile_registry import AgentProfile, ResolvedAgentProfile, RegistryError, RegistryNotFound
 from .system_prompt import work_contract, REVIEW_CONTRACT, build_system_prompt, is_recommended
@@ -86,6 +87,10 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
         from .tiers.manager import TOOLS_CONTRACT, root_adjusted
 
         contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
+        if await leads_model.leads_enabled():  # the default Manager's, as ManagerAgent._composed_prompt adds it
+            from .ops.leads import LEADS_CONTRACT
+
+            contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + LEADS_CONTRACT
         if recommended:
             role_text = root_adjusted(role_text)
     elif agent is AgentType.PLANNER:

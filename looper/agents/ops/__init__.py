@@ -40,6 +40,14 @@ class Risk(str, Enum):
     HIGH = "high"
 
 
+class Audience(str, Enum):
+    """Whose turns may run a tool: any turn, or only the user's own (``operator_identity.is_operator``: the web
+    chat without an API client, or the direct chat of the bot's operator)."""
+
+    ANY = "any"
+    OPERATOR = "operator"
+
+
 class RetrySafety(str, Enum):
     """Whether a possibly executed call can be repeated, independently of its permission tier."""
 
@@ -205,6 +213,20 @@ class Tool:
     def listing(self) -> dict[str, Any]:
         """The tool as MCP's ``tools/list`` names it."""
         return {"name": self.name, "description": self.description, "inputSchema": dict(self.schema)}
+
+
+@dataclass(frozen=True)
+class RestrictedTool(Tool):
+    """A ``Tool`` that says whose turns may run it and what the audit trail keeps of its answers.
+
+    A subclass rather than new ``Tool`` fields: an upgrade reads ``Tool``'s exact declaration from its target
+    (``looper/_component_probe.py``), and a running Looper refuses a target whose ``Tool`` it cannot read.
+    """
+
+    # Whose turns may run it (``ManagerOps.call`` refuses the others with ``forbidden``).
+    audience: Audience = Audience.ANY
+    # What ``manager_actions.result`` keeps of a successful call's answer; None: what a plain tool's call keeps.
+    audit_result: Callable[[Any], Any] | None = None
 
 
 _TYPES: dict[str, tuple[type, ...]] = {"string": (str,), "boolean": (bool,), "object": (dict,), "array": (list,)}
