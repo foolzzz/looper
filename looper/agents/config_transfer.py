@@ -422,7 +422,8 @@ async def stored_scheduler_settings(conn: Any) -> dict[str, int]:
 
     keys = {"min_interval_seconds": scheduler_settings.MIN_INTERVAL_KEY,
             "run_timeout_seconds": scheduler_settings.RUN_TIMEOUT_KEY,
-            "run_retention_days": scheduler_settings.RUN_RETENTION_KEY}
+            "run_retention_days": scheduler_settings.RUN_RETENTION_KEY,
+            "session_context_max_tokens": scheduler_settings.SESSION_CONTEXT_KEY}
     if not await conn.fetchval("SELECT to_regclass('system_settings') IS NOT NULL"):
         return {}  # a database not set up yet: a preview before the first start
     stored = await db_settings.get_settings(list(keys.values()), pool=conn)
