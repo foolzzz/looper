@@ -18,6 +18,31 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.22] - 2026-11-20
+
+### Added
+
+- **Message leads, usable and off by default.** ([#1456](https://github.com/foolzzz/looper/pull/1456), [#1460](https://github.com/foolzzz/looper/pull/1460), [#1461](https://github.com/foolzzz/looper/pull/1461), [#1458](https://github.com/foolzzz/looper/pull/1458)) `leads.enabled` absent or not `true` extracts nothing, lists no Manager tool and shows no Leads tab. `looper leads search` and `mark` refuse while it is off; `delete`, settings, and excluding a chat with deletion stay available. Turning leads off disables leads subscriptions; turning them back on leaves those subscriptions disabled. A leads subscription runs only after it is created from the preset, enabled and confirmed. Confirmation needs no push target. `looper msgflow leads-backfill --days 30` is a read-only dry run unless `--run --budget-usd` is given. The default Manager's `looper_leads_search` is offered only on the operator's own turns.
+- **Intent recognition, off by default.** ([#1460](https://github.com/foolzzz/looper/pull/1460), [#1457](https://github.com/foolzzz/looper/pull/1457), [#1458](https://github.com/foolzzz/looper/pull/1458)) `intents.enabled` absent or not `true` extracts nothing, pushes nothing and hides the Intents page. An intents subscription is confirmed only for the operator's own Lark direct chat. The private-target guard applies. Rules, a lookback window and a daily delivery are refused for both leads and intents. Replies `建` and `驳回` (with `I-NNNN`) are handled before the model, and only for the operator.
+- **Advisor phase 1, off until a project turns it on.** ([#1439](https://github.com/foolzzz/looper/pull/1439), [#1441](https://github.com/foolzzz/looper/pull/1441)) Additive migration `project_advisor` adds nullable `projects.advisor` (`off` or `on`), `advisor_consult_budget_usd`, `advisor_budget_usd`, `advisor_consults_per_task`, `advisor_consults_per_step`, `advisor_fallback_profile` and `advisor_internal_domains`. With `advisor` unset, no Planner consults. One consult defaults to 1 USD; the task total and the consult counts have no limit until set. Startup inserts, if absent, the model `claude-sonnet-5-5` and the profile `claude-code/sonnet-5-5` for `advice_check`. The advisor profile stays `claude-code/fable-5-2` (`claude-fable-5-2`, effort `high`).
+- **Manager ledger tools, off by default.** ([#1451](https://github.com/foolzzz/looper/pull/1451)) `ledger.enabled` must be `true`. Absent, or any other value, leaves the ledger off. While it is on, the default Manager gains `looper_ledger_add` and `looper_ledger_update`. There is still no dashboard switch. No new table.
+- **Message stream: chats, retention and deletion.** ([#1449](https://github.com/foolzzz/looper/pull/1449)) Additive migration `message_stream_deletions` adds `event_sources.retention_last_at`, `source_runs.skipped_by_deletion` (bigint, default 0) and the table `source_deletions` (`message`, `range` or `chat`). No source is created on its own. Excluding a chat drops it from later ingestion and from every later subscription selection. A chat excluded from extraction stays in the stream and out of leads and intents runs.
+
+### Changed
+
+- **Every agent process carries `LOOPER_AGENT_RUN`.** ([#1451](https://github.com/foolzzz/looper/pull/1451)) `Launch.environment()` sets it to the run's role, or `agent` when the launch has none. It is not shown to the model. It is set whether or not the ledger is on, so `looper ledger` and `looper leads` keep refusing agent writes (exit 4).
+- **The built-in `advice_check` profile is `claude-code/sonnet-5-5`.** ([#1439](https://github.com/foolzzz/looper/pull/1439)) v2.15.21 seeded `claude-code/haiku-5-5`. That row is left in place on an upgraded database and is no longer the built-in choice. Nothing runs the judge until a project sets `advisor` to `on` and no role layer selects another profile.
+- **Extraction cost labels say 2026-11-20.** ([#1465](https://github.com/foolzzz/looper/pull/1465)) The unit prices are unchanged: about 0.005–0.008 USD a run and about 0.0002 USD an event.
+
+### Fixed
+
+- **A bridge pass whose writer session is terminated ends as a failed pass.** ([#1466](https://github.com/foolzzz/looper/pull/1466)) Fixes [#1448](https://github.com/foolzzz/looper/issues/1448). A pooled connection whose `is_closed()` raises after the backend is terminated is treated as closed, instead of leaking an asyncpg interface error. Committed chunks stay. The next lock holder marks the unfinished run interrupted. No schema change. Sources stay off until one is configured.
+
+### Documentation
+
+- **Measured extraction cost, edit limits and the DSH gap.** ([#1462](https://github.com/foolzzz/looper/pull/1462)) Docs only. A Manager on the DSH runtime still has no `looper_leads_search`.
+- **Leads second check and a stable Manager context block (RFC addendum).** ([#1467](https://github.com/foolzzz/looper/pull/1467)) Docs only: section 10 of the leads RFC designs a tool-less `leads_check` role and the `manager.stable_context` block. Neither is implemented in this release.
+
 ## [2.15.21] - 2026-11-20
 
 ### Added
