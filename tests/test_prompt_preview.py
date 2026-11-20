@@ -123,14 +123,17 @@ def test_preview_manager_has_no_project_context(monkeypatch):
     assert result["prompt_layers"]["project"] is None
 
 
-@pytest.mark.parametrize("root,custom,leads", [("", False, False), ("/srv/projects", False, False),
-                                               ("/srv/projects", True, False), ("", False, True)])
-def test_manager_preview_matches_live_directory_guidance(monkeypatch, tmp_path, root, custom, leads):
+@pytest.mark.parametrize("root,custom,leads,stable", [
+    ("", False, False, False), ("/srv/projects", False, False, False), ("/srv/projects", True, False, False),
+    ("", False, True, False), ("", False, True, True)])
+def test_manager_preview_matches_live_directory_guidance(monkeypatch, tmp_path, root, custom, leads, stable):
     from looper.agents import projects
+    from looper.agents.tiers import state_view
     from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT, ManagerAgent, ManagerConfig
 
     module, profile, _ = _dependencies(monkeypatch, role="manager")
     monkeypatch.setattr(leads_model, "leads_enabled", AsyncMock(return_value=leads))
+    monkeypatch.setattr(state_view, "enabled", AsyncMock(return_value=stable))
     monkeypatch.setattr(projects, "projects_root", lambda: root)
     role = "Custom role\n" + DEFAULT_SYSTEM_PROMPT if custom else DEFAULT_SYSTEM_PROMPT
     monkeypatch.setattr(module.db_roles, "get_config", AsyncMock(return_value={
@@ -150,6 +153,7 @@ def test_manager_preview_matches_live_directory_guidance(monkeypatch, tmp_path, 
         assert role in shown
     assert ("## Message leads (looper_leads_search)" in shown) is leads
     assert ("LEADS_CONTRACT" in json.dumps(prompt.layers)) is leads
+    assert shown.endswith(state_view.STABLE_CONTEXT_CONTRACT) is stable
 
 
 @pytest.mark.parametrize("runtime", ["claude-code", "codex"])

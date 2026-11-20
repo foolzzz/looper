@@ -105,6 +105,12 @@ _SLOW_FAKE = {
               "acceptance_criteria": ["done.txt holds done"], "depends_on": [], "review": False}],
     "attempts": {"s1": [{"status": "completed", "seconds": 60, "files": {"done.txt": "done\n"}}]},
 }
+# The same, quick: for a dialog that only needs its task to end (``Dialog.fake_task``).
+_QUICK_FAKE = {
+    "plan": [{"id": "s1", "instruction": "Create hello.py.", "acceptance_criteria": ["hello.py exists"],
+              "depends_on": [], "review": False}],
+    "attempts": {"s1": [{"status": "completed", "seconds": 1, "files": {"hello.py": "print('hello')\n"}}]},
+}
 ACTIVE = ("pending", "assigned", "running", "planning", "executing", "verifying", "stopping")
 
 
@@ -183,6 +189,7 @@ class Dialog:
     client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
     tags: tuple[str, ...] = field(default=())
     projects_root: bool = False  # the server has [projects] root set to a directory of the case
+    fake_task: dict[str, Any] | None = None  # fake mode: the stand-in Planner's script for its tasks (else slow)
     leads: bool = False  # leads are on, and the database holds the synthetic leads (``_seed_leads``)
     vault: bool = False  # a synthetic knowledge vault the Manager may read (``_seed_vault``: ``manager_read`` on)
 
@@ -315,17 +322,38 @@ def _ledger_item_closed(look: Look) -> str | None:
 
 
 def _enable_ledger(database_url: str) -> None:
+    _turn_on(database_url, "ledger.enabled")
+
+
+def _turn_on(database_url: str, key: str) -> None:
+    """The system setting ``key`` is ``true`` in the dialog's database (read by the server per turn)."""
     import asyncpg
 
     async def seed() -> None:
         conn = await asyncpg.connect(database_url)
         try:
-            await conn.execute("INSERT INTO system_settings (key, value) VALUES ('ledger.enabled', 'true') "
-                               "ON CONFLICT (key) DO UPDATE SET value = 'true'")
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true') "
+                               "ON CONFLICT (key) DO UPDATE SET value = 'true'", key)
         finally:
             await conn.close()
 
     asyncio.run(seed())
+
+
+def _state_views(database_url: str) -> list[str]:
+    """What the Manager's turns started with (``looper_state`` of their records: whole, unchanged, changes), in order."""
+    import asyncpg
+
+    async def read() -> list[str]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            rows = await conn.fetch("SELECT metadata->'looper_state'->>'view' AS view FROM llm_records "
+                                    "WHERE agent_id LIKE 'manager%' AND metadata ? 'looper_state' ORDER BY id")
+        finally:
+            await conn.close()
+        return [row["view"] for row in rows]
+
+    return asyncio.run(read())
 
 
 # --- Message leads (looper_leads_search): synthetic leads over synthetic messages, leads turned on ---
@@ -2108,6 +2136,8 @@ def _completion_delivered(look: Look) -> str | None:
         event = facts["event"]
         if facts["status"] in ACTIVE or facts["status"] == "init":
             return f"the task is {facts['status']}, not {' or '.join(ready)}"
+        if look.fake:  # the path only: the end waits for its turn (the minute's window is not waited for here)
+            return None if event is not None else "the task's end has no manager_events row"
         if event is None or not (event["finished_at"] or event["sent_at"]):
             return "the task's manager_events row is not finished"
         return None if facts["message"] is not None else "the chat has no message since the task ended"
@@ -2119,6 +2149,9 @@ def _completion_delivered(look: Look) -> str | None:
     event = facts["event"]
     if facts["status"] not in ready:
         return f"the task is {facts['status']}, not {' or '.join(ready)}"
+    if look.fake:
+        return None if event["state"] in ("pending", "running", "delivered") else (
+            f"the event row is {event['state']} ({event['reason']}), not waiting for its turn or delivered")
     if event["state"] != "delivered":
         return f"the event row is {event['state']} ({event['reason']}), not delivered"
     # The message itself, for whoever reads the run's log (the JSON keeps only the problems).
@@ -2521,7 +2554,7 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。", "title": "hello 脚本",
                                      "project": PROJECT}),
              ("looper_task_control", {"task_id": "<task id>", "action": "start"}))),
-    ), seed=_seed_completion_failed),
+    ), seed=_seed_completion_failed, fake_task=_QUICK_FAKE),
     Dialog("gate_relay", (
         Say("关于那个任务在等我回答的问题：存储就用 PostgreSQL。", _relayed_to_the_gate,
             (("looper_task_gate_reply", {"task_id": "<task>", "gate": GATE_LABEL}),)),
@@ -3390,12 +3423,15 @@ def run(
     manager_agent: dict[str, Any] | None = None,
     pi_runtime: str = "cli",
     dsh_runtime: str = "cli",
+    stable_context: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a
     database, a server, a working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
     ``out_dir``, however the run ends (``runner.run``). With ``manager_model`` the Manager alone runs Claude Code
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
-    every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only."""
+    every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only. With
+    ``stable_context`` every dialog's database has ``manager.stable_context`` on, and each row lists what the
+    Manager's turns started with (``state_views``)."""
     if manager_agent is not None and mode != "real":
         raise EvalError("--manager-agent needs --mode real; the api runtime's fake runs are its own tests")
     if reps < 1:
@@ -3429,7 +3465,7 @@ def run(
             work_dir = case / "work" / "calc"
             work_dir.mkdir(parents=True)
             scenarios = case / "scenarios.json"
-            scenarios.write_text(json.dumps({os.path.realpath(work_dir): _SLOW_FAKE, "manager": {}}),
+            scenarios.write_text(json.dumps({os.path.realpath(work_dir): dialog.fake_task or _SLOW_FAKE, "manager": {}}),
                                  encoding="utf-8")
             install_claude(case / "bin", mode=mode, scenarios=scenarios,
                            max_budget_usd=None if register is not None else max_budget_usd,
@@ -3463,6 +3499,8 @@ def run(
                         configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
                                                    if manager_model else picked)
                     project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
+                    if stable_context:
+                        _turn_on(database_url, "manager.stable_context")
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,
@@ -3470,6 +3508,8 @@ def run(
                     if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
                         row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)
+                if stable_context:
+                    row["state_views"] = _state_views(database_url)
                 if "runtime_evidence" in row:
                     # DSH's full bill is unknown. Use reported root spend for the
                     # suite's observable soft cap rather than a null bill as zero.
@@ -3495,7 +3535,7 @@ def run(
             "manager_model": model_name(manager.get("model")) if mode == "real" else None,
             "started_at": stamp, "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "reps": reps,
-            "stopped_by_cap": stopped, "aborted": aborted,
+            "stable_context": stable_context, "stopped_by_cap": stopped, "aborted": aborted,
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6), "dialogs": results,
         }, path, roots=(root, raw_root), rows="dialogs")
         if aborted:
@@ -3507,7 +3547,8 @@ def markdown(result: dict[str, Any]) -> str:
     """The run as a table: each (dialog, rep)'s outcome, its tool calls per turn and its cost."""
     lines = [f"Manager dialogs: {result['mode']}/{result.get('manager_agent') or result['agent']} "
              f"(other roles {result.get('model') or result['agent']}) @ "
-             f"{(result['git'].get('commit') or '')[:9]}{'+local changes' if result['git'].get('dirty') else ''}",
+             f"{(result['git'].get('commit') or '')[:9]}{'+local changes' if result['git'].get('dirty') else ''}"
+             f"{', manager.stable_context on' if result.get('stable_context') else ''}",
              "", "| dialog | rep | outcome | turns | tool calls | cost (USD) |", "|---|---|---|---|---|---|"]
     for dialog in result["dialogs"]:
         rep = dialog.get("rep", 1)

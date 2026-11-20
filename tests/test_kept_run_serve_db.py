@@ -38,14 +38,15 @@ CLI = _CLI.replace(
     '        answer(json.dumps({"passed": True, "findings": [], "summary": "verified"}))\n'
     '        sys.exit(0)',
 ).replace(
-    'if variant in ("restart", "deadline") and label == "s1":',
+    'if variant == "restart" or (variant == "deadline" and label == "s1"):',
     'if variant in ("held", "pair", "plugin"):',
 ).replace(
     '(state / ("release-" + variant)).exists()', '(state / ("release-" + label)).exists()',
 ).replace(
     '"review": False', '"review": variant == "review"',
 ).replace(
-    'if variant == "restart" else []', 'if variant == "pair" else []',
+    'json.loads((state / "restart-steps.json").read_text()) if variant == "restart" else ["s1"]',
+    '["s1", "s2"] if variant == "pair" else ["s1"]',
 ).replace(
     'elif text.startswith("[DECISION]"):\n',
     'elif text.startswith("[DECISION]"):\n'

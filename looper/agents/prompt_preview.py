@@ -94,6 +94,15 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
 
         if await manager_vault() is not None:  # as ManagerAgent._composed_prompt adds it
             contract_name, contract = contract_name + "+VAULT_CONTRACT", contract + "\n" + VAULT_CONTRACT
+        from .tiers import state_view
+
+        try:
+            stable = await state_view.enabled()
+        except Exception:  # no database: off, as for a Manager that could not read it
+            stable = False
+        if stable:  # last, as ManagerAgent._composed_prompt adds it
+            contract_name += "+STABLE_CONTEXT_CONTRACT"
+            contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
         if recommended:
             role_text = root_adjusted(role_text)
     elif agent is AgentType.PLANNER:
