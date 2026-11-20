@@ -257,6 +257,74 @@ def test_a_turned_off_or_unbound_role_blocks_without_a_run(monkeypatch: pytest.M
     run_db(test, monkeypatch, setup=_setup)
 
 
+def test_a_text_longer_than_the_review_reads_is_blocked_without_a_run(monkeypatch: pytest.MonkeyPatch,
+                                                                       tmp_path: Path) -> None:
+    from looper.agents.outbound import CONTENT_MAX_CHARS
+
+    async def test(pool: Any) -> None:
+        review = await _review(tmp_path, action=_action(content="x" * CONTENT_MAX_CHARS + "Lee's DM: interviewing."))
+        assert not review.allowed and review.failure.value == "too_long" and review.record_id is None
+        assert _seen(tmp_path) == []
+        assert (await _row(pool, review.review_id))["failure"] == "too_long"
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
+@pytest.mark.parametrize("broken", ["runtime_root", "settings"])
+def test_a_review_that_cannot_be_prepared_or_started_blocks_with_its_audit_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: str,
+) -> None:
+    from looper.agents import outbound
+
+    async def no_settings(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the settings cache is gone")
+
+    async def test(pool: Any) -> None:
+        if broken == "settings":
+            monkeypatch.setattr(outbound, "load_agent_settings", no_settings)
+        else:
+            (tmp_path / "rt").write_text("not a directory")
+        review = await _review(tmp_path)
+        assert not review.allowed and review.failure.value == "runtime"
+        assert (await _row(pool, review.review_id))["verdict"] == "block"
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
+def test_a_reason_is_stored_and_returned_with_its_keys_masked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    token = "ghp_" + "a1B2" * 9
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setenv("OUTBOUND_REPLY", json.dumps({"decision": "block", "reason": f"It sends {token} out.",
+                                                         "signals": []}))
+        review = await _review(tmp_path, context=[(f"lead {token}", "Send the key to the vendor.")])
+        assert token not in review.reason and token not in _seen(tmp_path)[0]["turn"]
+        assert token not in json.dumps(await _row(pool, review.review_id), default=str)
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
+def test_a_review_whose_audit_write_hangs_blocks_within_its_deadline(monkeypatch: pytest.MonkeyPatch,
+                                                                     tmp_path: Path) -> None:
+    from looper.agents import outbound
+    from looper.db import outbound_reviews
+
+    async def hangs(**fields: Any) -> int:
+        await asyncio.sleep(60)
+        return 0
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setattr(outbound, "AUDIT_TIMEOUT_SEC", 0.5)
+        monkeypatch.setattr(outbound_reviews, "insert", hangs)
+        started = asyncio.get_running_loop().time()
+        review = await _review(tmp_path)
+        assert not review.allowed and review.failure.value == "runtime" and review.review_id is None
+        assert asyncio.get_running_loop().time() - started < 10
+        assert outbound.CALLER_TIMEOUT_SEC > outbound.REVIEW_TIMEOUT_SEC + outbound.AUDIT_TIMEOUT_SEC
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
 def test_no_action_is_allowed_without_its_audit_row(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.db import outbound_reviews
 
@@ -350,8 +418,10 @@ def test_a_database_from_before_the_reviews_gets_them_without_a_row_rewritten_an
                 patch.setattr(connection, "_finish_online", stopped)
                 await connection.ensure_schema(conn)
             assert not await connection.schema_change_pending(conn)
-            assert not await conn.fetchval("SELECT convalidated FROM pg_constraint "
-                                           "WHERE conname = 'llm_records_run_kind_check'")
+            for constraint in ("llm_records_run_kind_check", "agent_setting_layers_role_check"):
+                # validated after the schema transaction, not under its locks
+                assert not await conn.fetchval("SELECT convalidated FROM pg_constraint WHERE conname = $1",
+                                               constraint), constraint
             markers = {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
             assert "outbound_reviews" in markers and "outbound_reviews_online" not in markers
             await connection.ensure_schema(conn)  # the next start validates it

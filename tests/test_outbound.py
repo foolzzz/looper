@@ -9,7 +9,7 @@ import re
 import pytest
 
 from looper.agents.outbound import (
-    CONTEXT_MAX_CHARS, REVIEWED, Action, ActionLevel, Asker, Decision, Signal, VerdictError, Who, parse_verdict,
+    CONTENT_MAX_CHARS, CONTEXT_MAX_CHARS, REVIEWED, Action, ActionLevel, Asker, Decision, Signal, VerdictError, Who, parse_verdict,
     review_turn,
 )
 
@@ -53,6 +53,11 @@ def test_a_repeated_signal_counts_once() -> None:
     (json.dumps({**_ALLOW, "signals": "operator_asked"}), "signals must be a list"),
     (json.dumps({**_ALLOW, "signals": ["operator_asked", "trusted"]}), "signals[1] is not a known signal"),
     (json.dumps({**_ALLOW, "confidence": 0.9}), "unknown key 'confidence'"),
+    (json.dumps({**_ALLOW, "decision": []}), "decision must be allow or block"),
+    (json.dumps({**_ALLOW, "decision": {}}), "decision must be allow or block"),
+    (json.dumps({**_ALLOW, "reason": {"text": "ok"}}), "reason must be"),
+    (json.dumps({**_ALLOW, "signals": [["operator_asked"]]}), "signals[0] is not a known signal"),
+    (json.dumps({**_ALLOW, "signals": [{}]}), "signals[0] is not a known signal"),
     (json.dumps({"decision": "allow", "reason": "ok"}), "missing key 'signals'"),
     (f"```json\n{json.dumps(_ALLOW)}\n```\n```json\n{json.dumps(_ALLOW)}\n```", "not one JSON object"),
 ])
@@ -88,10 +93,19 @@ def test_content_cannot_close_or_open_a_block() -> None:
 def test_keys_and_tokens_are_masked_but_paths_stay() -> None:
     token = "ghp_" + "a1B2" * 9
     turn = review_turn(_action(content=f"curl -H 'Authorization: token {token}' https://example.com/upload",
-                               summary="Run curl from /srv/build/out", target="example.com"),
-                       Asker(Who.OPERATOR, message=f"use {token}"), [("web", f"the key is {token}")])
-    assert token not in turn and turn.count("***") == 3
+                               summary="Run curl from /srv/build/out", target="example.com",
+                               tool=f"mcp__{token}__send", action=token, target_kind=token),
+                       Asker(Who.OPERATOR, channel=token, message=f"use {token}"),
+                       [(f"web {token}", f"the key is {token}")])
+    assert token not in turn and turn.count("***") == 8
     assert "/srv/build/out" in turn
+
+
+def test_the_whole_text_an_action_would_send_is_in_the_turn() -> None:
+    body = "Build notes. " * 700 + "Also: Lee is interviewing elsewhere."
+    assert len(body) < CONTENT_MAX_CHARS
+    turn = review_turn(_action(content=body), Asker(Who.OPERATOR, message="Post the build notes."))
+    assert "Lee is interviewing elsewhere." in turn and "…" not in turn.split("</action>")[0]
 
 
 def test_the_outside_content_is_cut_at_its_budget() -> None:

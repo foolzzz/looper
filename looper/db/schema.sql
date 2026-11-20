@@ -2222,7 +2222,7 @@ CREATE TABLE IF NOT EXISTS outbound_reviews (
     summary           TEXT NOT NULL CHECK (length(summary) <= 500),
     verdict           TEXT NOT NULL CHECK (verdict IN ('allow', 'block')),
     failure           TEXT CHECK (failure IN ('not_operator', 'timeout', 'parse', 'runtime', 'rate_limited',
-                                              'unavailable', 'budget', 'refused')),
+                                              'unavailable', 'budget', 'too_long', 'refused')),
     reason            TEXT NOT NULL CHECK (length(reason) <= 300),
     signals           TEXT[] NOT NULL DEFAULT '{}',
     profile_id        TEXT,
