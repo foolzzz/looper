@@ -115,6 +115,25 @@ def test_the_policy_moves_each_rule(policy: DeliveryPolicy, state: DeliveryState
     assert deliver(notice(), policy, state) == expected
 
 
+@pytest.mark.parametrize(("spoke", "now", "expected"), [
+    # Spring forward (02:00 -> 03:00): 01:58 to 03:02 on the wall is 4 minutes.
+    (datetime(2026, 3, 29, 1, 58, tzinfo=ZONE), datetime(2026, 3, 29, 3, 2, tzinfo=ZONE),
+     Decision(Outcome.SEND, Reason.RECENT_REPLY)),
+    # Fall back (03:00 -> 02:00): 02:00 (summer time) to 02:04 (winter time) is 64 minutes.
+    (datetime(2026, 10, 25, 2, 0, tzinfo=ZONE), datetime(2026, 10, 25, 2, 4, fold=1, tzinfo=ZONE),
+     Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=date(2026, 10, 25))),
+    # ... and 02:58 (summer time) to 02:02 (winter time) is 4.
+    (datetime(2026, 10, 25, 2, 58, tzinfo=ZONE), datetime(2026, 10, 25, 2, 2, fold=1, tzinfo=ZONE),
+     Decision(Outcome.SEND, Reason.RECENT_REPLY)),
+    # The same moments given in different zones.
+    (datetime(2026, 3, 29, 0, 58, tzinfo=timezone.utc), datetime(2026, 3, 29, 3, 2, tzinfo=ZONE),
+     Decision(Outcome.SEND, Reason.RECENT_REPLY)),
+])
+def test_the_grace_after_the_user_wrote_is_real_time_across_dst(spoke: datetime, now: datetime,
+                                                                  expected: Decision) -> None:
+    assert deliver(notice(), POLICY, DeliveryState(now, last_user_message_at=spoke)) == expected
+
+
 @pytest.mark.parametrize(("now", "expected"), [
     (datetime(2026, 3, 29, 1, 30, tzinfo=ZONE), date(2026, 3, 29)),  # the night clocks go forward
     (datetime(2026, 10, 25, 7, 59, tzinfo=ZONE), date(2026, 10, 25)),  # the night clocks go back

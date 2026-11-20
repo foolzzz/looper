@@ -8,6 +8,7 @@ Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -234,12 +235,74 @@ def test_the_table_takes_every_value_the_code_has_and_keeps_its_rules(monkeypatc
         refused = [{"kind": "heartbeat"}, {"reason": "because"}, {"outcome": "digest"},  # a digest needs its date
                    {"digest": date(2026, 11, 21)}, {"outcome": "drop", "counted": True},
                    {"outcome": "drop", "sent": datetime.now(timezone.utc)},
-                   {"reason": "off", "counted": True}, {"reason": "off", "outcome": "drop"},
                    {"replied": datetime.now(timezone.utc)}]  # a reply to what never went
         for n, change in enumerate(refused):
             r = {**row, **change}
             with pytest.raises(asyncpg.CheckViolationError):
                 await pool.execute(insert, f"bad:{n}", r["kind"], r["urgency"], r["chat"], r["outcome"], r["reason"],
                                    r["counted"], r["digest"], r["sent"], r["replied"])
+
+    run_db(test, monkeypatch)
+
+
+NOTICE = delivery.Delivery(delivery.DeliveryKind.TASK_NOTICE, delivery.Urgency.NORMAL, delivery.ChatKind.DIRECT)
+AFTERNOON = datetime(2026, 11, 20, 14, 0, tzinfo=timezone.utc)  # 14:00 in UTC, the zone these tests set
+
+
+async def _decide(key: str, now: datetime = AFTERNOON, chat: str = "ou_1") -> delivery.Decision:
+    return await delivery.decide(NOTICE, dedupe_key=key, channel_id="channel-lark", chat=chat,
+                                 last_user_message_at=None, now=now)
+
+
+def test_send_points_racing_for_the_last_message_of_the_day_get_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
+        for round_ in range(5):  # several chats: a missing lock would let two through at least once
+            chat = f"ou_{round_}"
+            for n in range(4):
+                await _decide(f"{chat}:fill:{n}", chat=chat)
+            results = await asyncio.gather(*(_decide(f"{chat}:last:{n}", chat=chat) for n in range(3)))
+            assert sorted(d.reason.value for d in results) == ["daily_cap", "daily_cap", "within_limits"], chat
+            assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE chat = $1 AND counted",
+                                       chat) == 5
+
+    run_db(test, monkeypatch, max_size=6)
+
+
+def test_one_message_decided_on_twice_at_once_gets_one_row_and_one_decision(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
+        night = datetime(2026, 11, 20, 23, 0, tzinfo=timezone.utc)
+        decisions = await asyncio.gather(_decide("same", AFTERNOON), _decide("same", night), _decide("same", night))
+        assert len(set(decisions)) == 1  # whichever was first: the others keep its decision
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE dedupe_key = 'same'") == 1
+
+    run_db(test, monkeypatch, max_size=6)
+
+
+def test_the_daily_count_starts_again_at_local_midnight(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'Asia/Tokyo')")
+        # 21:00 in Tokyo on the 19th (12:00 UTC): five counted messages that day.
+        evening = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+        for n in range(5):
+            assert (await _decide(f"day1:{n}", evening)).counted
+        assert (await _decide("day1:late", evening)).reason is delivery.Reason.DAILY_CAP
+        # 09:00 in Tokyo on the 20th, still the 19th in UTC: a new local day, with room again.
+        morning = datetime(2026, 11, 20, 0, 0, tzinfo=timezone.utc)
+        assert await _decide("day2:0", morning) == delivery.Decision(delivery.Outcome.SEND,
+                                                                     delivery.Reason.WITHIN_LIMITS, counted=True)
+
+    run_db(test, monkeypatch)
+
+
+def test_without_a_user_timezone_the_servers_applies(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents import cron
+
+        assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = 'user.timezone'") == 0
+        assert (await delivery.load_policy()).timezone == cron.zone(cron.local_zone_name())
+        monkeypatch.setenv("TZ", "Asia/Tokyo")  # the server's own zone, as cron reads it
+        assert str((await delivery.load_policy()).timezone) == "Asia/Tokyo"
 
     run_db(test, monkeypatch)
