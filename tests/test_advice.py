@@ -271,9 +271,13 @@ def test_a_command_the_request_quotes_may_name_the_files_it_runs_and_writes() ->
         attempts=[{"approach": "Ran `sh build.sh > build.log` once under the default environment",
                    "signal": "Exit code 1 and the E-COLL error about byte order; the log is empty"}]))
     assert [h for h in lint(request, secrets=()) if h.category == "dangling"] == []
-    for problem in ("the bug is in `importer.py`", "the bug is in importer.py, see `importer.py`"):
+    for problem in ("the bug is in `importer.py`", "the bug is in importer.py, see `importer.py`",
+                    # prose between two code spans is no command: the file it names is still a reference
+                    "`cfg` reads settings.yaml from `loader`"):
         hits = lint(parse_request(_request(problem=problem)), secrets=())
         assert [h.category for h in hits] and {h.category for h in hits} == {"dangling"}, problem
+    beside = parse_request(_request(problem="The `loader` step ran `sh build.sh > build.log` and stopped."))
+    assert [h for h in lint(beside, secrets=()) if h.category == "dangling"] == []
 
 
 def test_the_code_checks_find_bindings_registered_secrets_local_dirs_and_ids_written_out() -> None:

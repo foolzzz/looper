@@ -80,8 +80,9 @@ _DANGLING = re.compile(
     r"|\bthe attached\b|见上|如上所述|上面(?:提到|说的|的日志|的代码)|见日志|看日志|日志里|前面提到", re.IGNORECASE)
 _FILE_NAME = re.compile(r"(?<![\w/.-])[\w-]+(?:/[\w.-]+)*\.(?:py|pyi|ts|tsx|js|jsx|go|rs|java|kt|rb|php|c|cc|cpp|h|hpp"
                         r"|cs|swift|sql|yaml|yml|toml|ini|cfg|json|md|sh|txt|log|csv)\b")
-# A command the request quotes: a code span with an argument (whitespace in it); a lone `importer.py` is no command.
-_COMMAND = re.compile(r"`[^`\n]*\s[^`\n]*`")
+# The code spans of a text, paired in order; one with whitespace inside (an argument) is a command the request
+# quotes. A lone `importer.py` is no command, nor is the prose between two spans.
+_CODE_SPAN = re.compile(r"`([^`\n]*)`")
 _ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})|\\x([0-9a-fA-F]{2})|%([0-9a-fA-F]{2})"
                      r"|&#x([0-9a-fA-F]{1,6});|&#(\d{1,7});")
 _BASE64 = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{8,}={0,2}")
@@ -286,7 +287,7 @@ def lint(request: AdviceRequest, *, bindings: Sequence[Binding] = (), material: 
         add("raw_log", log_spans)
         dangling = _found(_DANGLING, views[:1])
         if not field.startswith("artifacts["):
-            commands = [(m.start(), m.end()) for m in _COMMAND.finditer(text)]
+            commands = [(m.start(), m.end()) for m in _CODE_SPAN.finditer(text) if re.search(r"\s", m.group(1))]
             dangling += [(m.start(), m.end()) for m in _FILE_NAME.finditer(text) if m.group(0) not in shown
                          and not any(start <= m.start() and m.end() <= end for start, end in commands)]
         add("dangling", dangling)
