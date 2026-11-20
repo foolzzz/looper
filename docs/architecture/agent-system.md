@@ -4775,19 +4775,30 @@ is stopped, with `--chat`, `--person`, `--since YYYY-MM-DD` or `--days N`,
 3 disabled, 4 refused inside `LOOPER_AGENT_RUN` (reads included), 5 missing
 lead, 6 unusable database or missing tables (start serve once to migrate).
 Dates without times use the machine's zone, at midnight.
+Invalid arguments return exit 2 before reading configuration, connecting or
+checking whether leads are enabled. Marking a promoted lead is refused (exit 4).
+Deletion remains available while leads are disabled.
 
 Operator-only POST operations under `/api/v1/leads/` are `search`, `mark`,
 `delete`, `settings_get`, `settings_put`, `chats` and `set_chat`; API clients
-cannot call them. All but settings conflict while `leads.enabled` is absent or
-false. Settings include validity (1–365 days, default 90) and leads subscriptions;
+cannot call them. While `leads.enabled` is absent or false, only settings,
+lead deletion and chat exclusion with deletion are allowed; other operations
+conflict. Marking a promoted lead conflicts. `leads.mark` opts out of operator
+audit so lead content and inaccuracy notes do not remain in `manager_actions`.
+Other leads writes return only ids, counts, switches and subscription settings.
+Settings include validity (1–365 days, default 90) and leads subscriptions;
 disabling leads disables those subscriptions atomically, and enabling leaves
 them disabled. Source-scoped operations default to the only message source,
 require its id if several exist, and conflict if none exists. `chats` lists
 collected, included chats with extraction state and lead/pending-intent counts.
-`set_chat` changes `source_chats.extraction`: excluding sets its timestamp;
+`set_chat` changes `source_chats.extraction`: excluding preserves its first timestamp;
 including clears it. Optional `delete_extracted` with exclusion deletes the
 chat's leads and non-tasked intents in the same transaction; messages and tasked
-intents remain. This stage adds no extraction, UI or Manager tool, and changes
+intents remain. Other-chat intents merged into deleted targets are detached in
+the same transaction and return to pending. The optional `detached_intents`
+result field counts them; an info log records each intent id, former merge target
+and transition reason without lead or message text.
+This stage adds no extraction, UI or Manager tool, and changes
 no agent prompt, tool list or launch command.
 
 ### The ledger
