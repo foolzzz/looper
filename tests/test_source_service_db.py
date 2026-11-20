@@ -80,3 +80,62 @@ def test_every_configured_lark_channel_counts_as_the_bots_own_app_enabled_or_not
         assert await own_bot_app_ids() == {"cli_on", "cli_off"}
 
     run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("scope", ["message", "chat", "range", "global_range"])
+def test_dry_run_honors_each_deletion_scope_without_writing(monkeypatch, tmp_path, scope):
+    from looper.agents.source_service import run_bridge_pass
+
+    async def check(pool):
+        sent = sup.NOW - timedelta(minutes=5)
+        target = {"scope": "range" if scope == "global_range" else scope}
+        if scope == "message":
+            target["message_id"] = "deleted"
+        elif scope != "global_range":
+            target["chat_id"] = "chat_synthetic"
+        if scope in ("range", "global_range"):
+            target.update(start=sent, end=sent + timedelta(minutes=1))
+        await store.delete_events("bridged", db=pool, **target)
+        sup.append(tmp_path, "chat_synthetic", sup.message("deleted", sent_at=sent))
+        sup.append(tmp_path, "other_chat_synthetic", sup.message("fresh", sent_at=sup.NOW))
+        source = await store.get_source("bridged", db=pool)
+        before = await pool.fetchval("SELECT count(*) FROM source_runs")
+        dry = await run_bridge_pass(source, db=pool, days=7, dry_run=True, now=sup.NOW)
+        assert dry.status == "ok"
+        assert dry.events_new == 1
+        assert await pool.fetchval("SELECT count(*) FROM source_events") == 0
+        assert await pool.fetchval("SELECT count(*) FROM source_runs") == before
+        real = await run_bridge_pass(source, db=pool, days=7, now=sup.NOW)
+        assert real.status == "ok"
+        assert real.events_new == dry.events_new
+        assert [r[0] for r in await pool.fetch("SELECT external_id FROM source_events")] == ["fresh"]
+
+    run_db(check, monkeypatch, setup=lambda pool: sources(pool, tmp_path), timeout=30)
+
+
+@pytest.mark.parametrize("chunk_bytes", [8 * 1024 * 1024, 1])
+def test_deleted_rows_have_their_own_count_and_reconcile_in_both_modes(monkeypatch, tmp_path, chunk_bytes):
+    from looper.agents.source_service import run_bridge_pass
+
+    async def check(pool):
+        monkeypatch.setattr("looper.agents.source_service.CHUNK_BYTES", chunk_bytes)
+        sup.append(tmp_path, "chat_synthetic", sup.message("stored"))
+        source = await store.get_source("bridged", db=pool)
+        await run_bridge_pass(source, db=pool, now=sup.NOW)
+        await store.delete_events("bridged", "message", message_id="deleted", db=pool)
+        # Both occurrences are stopped by deletion, rather than counted as duplicates.
+        sup.append(tmp_path, "chat_synthetic", sup.message("deleted"), sup.message("deleted"),
+                   sup.message("fresh"), sup.message("fresh"),
+                   sup.message("too_old", sent_at=sup.NOW - timedelta(days=40)))
+        dry = await run_bridge_pass(source, db=pool, days=7, dry_run=True, now=sup.NOW)
+        real = await run_bridge_pass(source, db=pool, days=7, now=sup.NOW)
+        for report in (dry, real):
+            assert report.status == "ok"
+            assert (report.events_new, report.events_seen, report.events_skipped, report.skipped_by_deletion) == (1, 2, 1, 2)
+            file = report.file_reports[0]
+            assert (file.lines, file.new, file.duplicates, file.skipped, file.skipped_by_deletion) == (6, 1, 2, 1, 2)
+            assert file.reconciled
+        run = (await store.list_runs("bridged", limit=1, db=pool))[0]
+        assert (run["events_new"], run["events_seen"], run["events_skipped"], run["skipped_by_deletion"]) == (1, 2, 1, 2)
+
+    run_db(check, monkeypatch, setup=lambda pool: sources(pool, tmp_path), timeout=30)
