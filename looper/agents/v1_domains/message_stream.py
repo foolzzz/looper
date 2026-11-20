@@ -78,7 +78,8 @@ OPERATIONS = (
 )
 OPERATIONS += (
     Operation("message_stream.chats", "POST", "/api/v1/message_stream/chats",
-              "List chats and their recent event counts.", "List chat names, inclusion, state and seven-day counts; never bodies.",
+              "List chats and their recent event counts.",
+              "List chats and their recent event counts. List chat names, inclusion, state and seven-day counts; never bodies.",
               _object({"source_id": _STR, "search": _STR}, [], closed=True),
               _object({"source_id": _STR, "chats": _array(_CHAT)}, closed=True), risk="read", operator_only=True),
     Operation("message_stream.chat_update", "POST", "/api/v1/message_stream/chat_update",
@@ -88,10 +89,12 @@ OPERATIONS += (
               _CHAT, risk="write", operator_only=True, audit_operator=False),
     Operation("message_stream.delete_preview", "POST", "/api/v1/message_stream/delete_preview",
               "Preview deletion and its limits, then request a short-lived confirmation token.",
+              "Preview deletion and its limits, then request a short-lived confirmation token. "
               "Preview one message, a half-open sent-time range or a whole chat, without returning message bodies.",
               _object(_TARGET, ["scope"], closed=True), _PREVIEW, risk="read", operator_only=True),
     Operation("message_stream.delete", "POST", "/api/v1/message_stream/delete",
               "Confirm a previewed deletion and keep a tombstone against reimport.",
+              "Confirm a previewed deletion and keep a tombstone against reimport. "
               "Permanently delete the previewed scope using its single-use confirmation token. Chat deletion also excludes it.",
               _object({**_TARGET, "confirmation_token": _STR}, ["scope", "confirmation_token"], closed=True),
               _object({"source_id": _STR, "deleted": _INT, "deletion_id": _INT}, closed=True),
