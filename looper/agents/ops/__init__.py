@@ -152,6 +152,8 @@ class Turn:
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
     # Why the turn runs; by default a user's when it answers a message, else Claude's own.
     origin: TurnOrigin | None = None
+    # The outside content its calls brought in (source, text), as the outbound review reads it: the leads it found.
+    outside: list[tuple[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.origin is None:

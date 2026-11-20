@@ -140,6 +140,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     streams_usage = True
     default_executable = "claude"
     image_input = ImageInput.READ_TOOL
+    # A PreToolUse hook in --settings, verified against 2.1.329 (the outbound-review RFC, section 17.1): it runs for
+    # the built-in tools, MCP tools and subagents' calls, and a JSON deny stops the call, its reason shown to the model.
+    tool_hook = True
     # Verified against Claude Code 2.1.285 (claude_cli), no_tools against 2.1.328 (claude_cli.NO_TOOLS_ARGS); its
     # replies follow Looper's contracts by prompt, so no structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
@@ -221,7 +224,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             if isinstance(launch.llmrec, LlmrecRoute) and launch.llmrec.kind is RouteKind.TRANSLATE:
                 env[BASE_URL] = launch.llmrec.url
                 env[AUTH_TOKEN] = launch.llmrec.local_token
-        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir, sealed=sealed)
+        hook = launch.tool_hook if launch is not None else None
+        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir, sealed=sealed,
+                                         hooks=hook.settings() if hook is not None else None)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
                       executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:

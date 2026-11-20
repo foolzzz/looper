@@ -44,7 +44,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -229,6 +229,14 @@ class ManagerOps:
         self._matches: Counter[tuple[str, str]] = Counter()
         self._observing: set[asyncio.Task[None]] = set()
         self._executing = 0
+        # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
+        # later shell command may run one), and the turns already told the operator of a block.
+        from ..outbound_hook import CONTENT_TOOLS_KEPT
+
+        self._review_root: Path | None = None
+        self._review_bin = "claude"
+        self._writes: deque[Any] = deque(maxlen=CONTENT_TOOLS_KEPT)
+        self._notified: OrderedDict[tuple[str | None, str | None, str | None], None] = OrderedDict()
 
     @property
     def executing(self) -> bool:
@@ -491,6 +499,9 @@ class ManagerOps:
                                          "It has not run: do not say it did."}
             answer = await self._run_tool(tool, call)
             result = _plain(answer)
+            if tool.name == LEADS_TOOL and isinstance(result, Mapping) and result.get("leads"):
+                # What the outbound review of a later call in this turn sees came from the leads.
+                turn.outside.append(("leads", json.dumps(result["leads"], ensure_ascii=False)))
             audited = isinstance(tool, RestrictedTool) and tool.audit_result is not None
             audit = tool.audit_result(answer) if audited else None  # type: ignore[union-attr]
         except _Recorded as exc:
@@ -744,6 +755,59 @@ class ManagerOps:
     def forget_confirmations(self) -> None:
         """Drop every waiting confirmation (the Manager's session was reset)."""
         self._pending.clear()
+
+    # --- The outbound review's hook ---
+
+    def tool_hook(self, runtime_root: Path, claude_bin: str) -> Any:
+        """The PreToolUse hook (``outbound_hook.ToolHook``) for this Manager's Claude Code, its config written; the
+        reviews it asks for run under ``runtime_root`` with ``claude_bin``."""
+        from .. import outbound_hook
+
+        self._review_root, self._review_bin = runtime_root, claude_bin
+        return outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token,
+                                        turn_file=self._turn_file)
+
+    async def check_outbound(self, payload: Any, *, binding: str | None) -> dict[str, Any]:
+        """The hook's answer for one tool call of this Manager (``outbound_hook.answer``), in the turn it belongs to;
+        anything that goes wrong blocks the call."""
+        from .. import outbound_hook
+        from ..outbound import Who
+
+        try:
+            turn = (self._bindings.get(binding) if binding else None) or self._turn
+            if turn is None or turn.autonomous:
+                who = Who.AUTONOMOUS
+            elif await _operator_turn(turn):
+                who = Who.OPERATOR
+            else:
+                who = Who.GROUP_MEMBER if turn.group else Who.ALLOWLISTED_PERSON
+            message = str((turn.envelope.payload.get("text") if turn and turn.envelope else "") or "")
+            answer, review = await outbound_hook.answer(
+                payload, agent_id=self._scope.manager_id, who=who, message=message,
+                channel=(turn.channel if turn else None) or "", chat=turn.chat if turn else None,
+                context=list(turn.outside) if turn else [], writes=list(self._writes),
+                runtime_root=self._review_root or self._platform.runtime_root or Path.cwd(),
+                claude_bin=self._review_bin)
+        except Exception:
+            logger.exception("the outbound check of a call of %s failed", self._scope.manager_id)
+            return {"decision": "block", "message": outbound_hook.BLOCKED_MESSAGE.format(
+                reason="the check could not run")}
+        if answer["decision"] == "allow":
+            if (write := outbound_hook.write_of(payload)) is not None:
+                self._writes.append(write)
+        elif review is not None:
+            key = (turn.channel, turn.chat, turn.message_id) if turn else (None, None, None)
+            if key not in self._notified:  # once a turn
+                self._notified[key] = None
+                while len(self._notified) > BINDINGS_KEPT:
+                    self._notified.popitem(last=False)
+                data = payload if isinstance(payload, Mapping) else {}
+                tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
+                await outbound_hook.notify_blocked(
+                    self._scope.manager_id, str(data.get("tool_name") or ""),
+                    str(tool_input.get("command") or tool_input.get("file_path") or ""), review.reason,
+                    review.review_id)
+        return answer
 
     # --- The Manager's MCP entry ---
 

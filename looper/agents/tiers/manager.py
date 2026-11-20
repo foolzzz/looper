@@ -72,7 +72,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import chat_attachments, chat_commands, chat_settings, completion_events, gate_commands
+from .. import chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook
 from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
@@ -1510,6 +1510,14 @@ class ManagerAgent:
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        if self.ops is not None and await token.step("outbound_review", outbound_hook.enabled()):
+            # The review hooks every tool call of the Manager; a runtime it cannot hook does not run while it is on.
+            if not launch.runtime.tool_hook:
+                raise ProfileUnavailable(
+                    f"the outbound review is on, and this Manager's Agent Profile runs on {launch.runtime.label}, "
+                    "which has no tool hook: choose a Claude Code profile, or turn the review off",
+                    agent_settings.profile_source)
+            launch = replace(launch, tool_hook=self.ops.tool_hook(self._runtime_root, self._config.claude_bin))
         launch = await token.step("llmrec_attach", llmrec.attach(
             launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
         if ask.turn is not None:
