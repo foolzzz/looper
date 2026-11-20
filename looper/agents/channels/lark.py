@@ -34,6 +34,7 @@ from ..message import (
     parse_channel_id,
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
+from ..ops.leads import for_group
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
@@ -277,7 +278,8 @@ class LarkChannelAdapter(ChannelAdapter):
             notice = Notice.from_payload(envelope.payload)
             if notice is None:
                 return DeliveryReceipt(channel=self.channel_type, success=False, error="a notice without a Lark target")
-            return await self._send_notice(notice.target, notice.text)
+            return await self._send_notice(notice.target,
+                                           for_group(notice.text) if notice.target.group else notice.text)
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None and envelope.target == self._address:
@@ -475,6 +477,15 @@ class LarkChannelAdapter(ChannelAdapter):
         # Only a successful answer (lark-cli ``ok: true``, the Bot API's HTTP 200 with ``code`` 0) gets here: the message
         # was sent, and replies to it just cannot be routed when its id was not given.
         return PostReceipt(True, external_ids=(message_id,) if message_id else ())
+
+    async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
+        text = files.redact(text, self._runtime_root)
+        try:
+            await self._transport.edit(external_id, markdown=text)
+        except LarkCliError as exc:
+            return PostReceipt(False, error=str(exc),
+                               outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
+        return PostReceipt(True, external_ids=(external_id,))
 
     def healthcheck(self) -> dict[str, Any]:
         info = {

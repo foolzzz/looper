@@ -77,15 +77,17 @@ def _free_port() -> int:
 
 
 @contextlib.asynccontextmanager
-async def manager_endpoint(manager: Any, bus: Any, task_router: Any, root: Path) -> AsyncIterator[Any]:
+async def manager_endpoint(manager: Any, bus: Any, task_router: Any, root: Path, *,
+                           turn_file: Path | None = None) -> AsyncIterator[Any]:
     """``manager.ops`` acting on ``bus`` and ``task_router``, behind an ``AgentHTTPServer`` on a free port; yields
-    the ops."""
+    the ops. With ``turn_file`` each call carries its turn's binding, as under ``looper serve``."""
     from looper.agents.channels.web import WebChannelAdapter
     from looper.agents.http_server import AgentHTTPServer
     from looper.agents.ops.service import ManagerOps, Platform
 
     port = _free_port()
-    ops = ManagerOps(Platform(bus=bus, task_router=task_router, manager=manager), url=f"http://127.0.0.1:{port}")
+    ops = ManagerOps(Platform(bus=bus, task_router=task_router, manager=manager), url=f"http://127.0.0.1:{port}",
+                     turn_file=turn_file)
     manager.ops = ops
     server = AgentHTTPServer(host="127.0.0.1", port=port, web_adapter=WebChannelAdapter(), task_router=task_router,
                              supervisor=SimpleNamespace(bus=bus), manager=manager, runtime_root=root,

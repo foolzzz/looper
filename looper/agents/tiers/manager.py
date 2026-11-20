@@ -80,7 +80,7 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import session_switch
+from .. import leads_model, session_switch
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
@@ -90,7 +90,7 @@ from ..session_switch import SessionSwitch, SwitchReason
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
-from ..ops import Turn, TurnOrigin
+from ..ops import Turn, TurnOrigin, leads as ops_leads
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
 from ..message import (
@@ -377,7 +377,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "route_to_gate", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
@@ -805,6 +805,7 @@ class ManagerAgent:
         self._turned_off = False
         self._turned_off_told = False
         self._has_templates = False  # from the last read of the Manager's task templates
+        self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
         # Reads what a channel's message quotes, by the channel's id; the fleet sets it (``ChannelRegistry``).
@@ -988,6 +989,10 @@ class ManagerAgent:
                 logger.debug("loaded manager system prompt from database")
         except Exception:
             logger.debug("could not load manager config from database", exc_info=True)
+        try:
+            self._leads_on = await leads_model.leads_enabled()
+        except Exception:
+            logger.debug("could not read leads.enabled; keeping the last value", exc_info=True)
 
     def _receive(self, envelope: MessageEnvelope) -> bool:
         """Bus consumer, run in ``bus.publish`` before the queue: take a ``/stop`` addressed to the Manager out of
@@ -1412,6 +1417,16 @@ class ManagerAgent:
             if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
+            try:
+                intent = await token.keep("route_intent", self._route_intent(envelope), 60)
+                if intent is not None:
+                    await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                    self._acting(token)
+                    return Prepared(action=lambda: self._answer_intent(envelope, intent))
+            except TimeoutError:
+                self._acting(token)
+                return Prepared(action=lambda: self._send_reply(
+                    envelope, "意图处理准备超时，请重试。", error="intent preparation timed out"))
             quote_ref = lark_quote.QuoteRef.from_payload(envelope.payload.get("quote_ref"))
             if not text.strip() and quote_ref is None:  # a bare forward or @-mention under a message is answered
                 return Prepared()
@@ -1488,10 +1503,12 @@ class ManagerAgent:
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
-        tools = await token.step("tool_listing", self.ops.current_listing()) if self.ops is not None else []
+        # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
+        tools = await token.step("tool_listing", self.ops.current_listing(ask.turn)) if self.ops is not None else []
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
+        has_leads = any(t["name"] == ops_leads.LEADS_TOOL for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
-        if self._has_templates or has_workflows or has_ledger or self.agent_id != DEFAULT_MANAGER_ID:
+        if self._has_templates or has_workflows or has_leads or has_ledger or self.agent_id != DEFAULT_MANAGER_ID:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
@@ -2093,6 +2110,8 @@ class ManagerAgent:
 
     async def _handle_task_result(self, envelope: MessageEnvelope) -> None:
         summary = envelope.payload.get("summary", "任务完成")
+        if _group_task(envelope):
+            summary = ops_leads.for_group(summary)
         origin = envelope.metadata.get("origin_channel_id")
         if origin:
             await self._bus.publish(MessageEnvelope.create(
@@ -2135,6 +2154,8 @@ class ManagerAgent:
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
             contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
+        elif getattr(self, "_leads_on", False):  # a Manager without the switch read is leads-off
+            contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
@@ -2524,6 +2545,7 @@ class ManagerAgent:
             self._stopped_notes = []
             if self.ops is not None:
                 self.ops.forget_confirmations()
+            ops_leads.forget(self.agent_id)
             await self._record_new_session(envelope, origin, previous[0], chosen)
         logger.info("%s: a new session on /new from %s (sender %s); the previous one was %s", self._log,
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
@@ -2922,7 +2944,7 @@ class ManagerAgent:
         if last is None or self._bus is None:
             logger.info("%s: Claude spoke on its own before any message; its words are only recorded", self._log)
             return
-        payload: dict[str, Any] = {"text": text, "autonomous": True}
+        payload: dict[str, Any] = {"text": self._group_safe(last, text), "autonomous": True}
         context = last.payload.get("channel_context")
         if isinstance(context, dict) and context.get("session_id"):
             payload["chat_session_id"] = context["session_id"]
@@ -3139,10 +3161,22 @@ class ManagerAgent:
         ``outcome`` is how the turn ended; by default
         failed with an ``error``, else answered."""
         assert self._bus is not None
+        text = self._group_safe(original, text)
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                                record=record, snapshot=snapshot))
+
+    @property
+    def leads_withheld(self) -> int:
+        """Group texts not sent because they quoted a message lead this Manager's session searched."""
+        return ops_leads.withheld(self.agent_id)
+
+    def _group_safe(self, original: MessageEnvelope, text: str) -> str:
+        """``text``, or ``WITHHELD_REPLY`` when it answers a group chat's message and quotes a message lead this
+        Manager's session searched in the last day (RFC R-2: the session is shared by the user's chats and the
+        groups). A task's end notice and a gate's post are checked where the channel sends them."""
+        return ops_leads.for_group(text, manager_id=self.agent_id) if _message_origin(original)["group"] else text
 
     async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
         """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""
@@ -3155,6 +3189,17 @@ class ManagerAgent:
         except Exception as exc:
             logger.exception("%s: the gate command %r failed", self._log, text[:40])
             return f"关卡命令出错：{exc}"
+
+    async def _answer_intent(self, envelope: MessageEnvelope, intent) -> None:
+        reply = await intent.action() if intent.action is not None else intent.reply
+        await self._send_reply(envelope, reply)
+
+    async def _route_intent(self, envelope: MessageEnvelope):
+        from .. import intent_routing, leads_model
+
+        if self.ops is None or not await leads_model.intents_enabled():
+            return None
+        return await intent_routing.route(envelope, platform=self.ops.platform)
 
     async def _route_to_gate(self, envelope: MessageEnvelope) -> Route:
         """Where a reply to a user gate's message goes (``gate_routing``); any other message is the Manager's."""

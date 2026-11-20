@@ -77,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_service_parser(commands)
     _add_msgflow_parser(commands)
     _add_ledger_parser(commands)
+    _add_leads_parser(commands)
     commands.add_parser(
         "mcp-server",
         allow_abbrev=False,
@@ -104,6 +105,14 @@ def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
     imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
     imp.add_argument("--source", help="The source id (default: the only one).")
     _add_location_flags(imp)
+    delete = sub.add_parser("delete", allow_abbrev=False, help="Delete one message after reviewing its limits.",
+        description="Preview a message deletion, list copies it cannot reach, then type delete to confirm. "
+                    "A tombstone prevents a later import from restoring the message.")
+    delete.add_argument("--message", required=True, help="The exact message_id to delete.")
+    delete.add_argument("--source", help="The source id (default: the only one).")
+    delete.add_argument("--dry-run", action="store_true", help="Show the preview without asking to delete.")
+    _add_location_flags(delete)
+
     backfill = sub.add_parser(
         "leads-backfill", allow_abbrev=False, help="Count, or turn into leads, the history before a leads subscription.",
         description="Count the in-scope messages of the last N days up to where the leads subscription started, their "
@@ -159,6 +168,34 @@ def _add_ledger_parser(commands: argparse._SubParsersAction) -> None:
     for command in (close, confirm):
         command.add_argument("--note")
     for command in (listing, show, add, close, confirm):
+        _add_location_flags(command)
+
+
+def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
+    leads = commands.add_parser(
+        "leads", allow_abbrev=False, help="Search and administer sourced message leads.",
+        description="Read and write message leads directly in PostgreSQL, also with the service stopped. "
+                    "Exit codes: 0 done, 1 no results, 2 usage, 3 disabled, 4 refused inside an agent run, "
+                    "5 no such lead, 6 database unusable.")
+    sub = leads.add_subparsers(dest="leads_command", required=True)
+    search = sub.add_parser("search", allow_abbrev=False, help="Search unconfirmed message leads.")
+    search.add_argument("words", nargs="*")
+    search.add_argument("--chat")
+    search.add_argument("--person")
+    dates = search.add_mutually_exclusive_group()
+    dates.add_argument("--since", help="YYYY-MM-DD, from midnight in this machine's zone.")
+    dates.add_argument("--days", type=int, help="1 to 3650 days back.")
+    search.add_argument("--kind", help="Lead kind (decision, commitment, request, status, issue, fact).")
+    search.add_argument("--state", default="active", help="Lead state, or all (default active).")
+    search.add_argument("--limit", type=int, default=10, help="1 to 50 (default 10).")
+    search.add_argument("--json", action="store_true")
+    mark = sub.add_parser("mark", allow_abbrev=False, help="Mark a lead inaccurate.")
+    mark.add_argument("lead", help="lead-123 or 123.")
+    mark.add_argument("--inaccurate", action="store_true", required=True)
+    mark.add_argument("--note", help="Up to 500 characters.")
+    delete = sub.add_parser("delete", allow_abbrev=False, help="Delete a lead and its sources.")
+    delete.add_argument("lead", help="lead-123 or 123.")
+    for command in (search, mark, delete):
         _add_location_flags(command)
 
 
@@ -271,6 +308,10 @@ def main(argv: list[str] | None = None) -> int:
         from .agents import ledger_commands
 
         return ledger_commands.run(args, _load_ops)
+    if args.command == "leads":
+        from .agents import leads_commands
+
+        return leads_commands.run(args, _load_ops)
     if args.command == "mcp-server":
         from .agents import mcp_server
 

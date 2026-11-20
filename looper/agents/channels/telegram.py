@@ -41,6 +41,7 @@ from ..message import (
     parse_channel_id,
 )
 from ..task_notice import Notice, NotifyTarget, split_message
+from ..ops.leads import for_group
 from .allowlist import SenderAllowlist
 from .. import chat_attachments, chat_commands
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
@@ -334,6 +335,19 @@ class TelegramChannelAdapter(ChannelAdapter):
             return PostReceipt(False, external_ids=tuple(sent), error=error, outcome=_post_outcome(exc))
         return PostReceipt(True, external_ids=tuple(sent))
 
+    async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
+        if self._app is None:
+            return PostReceipt(False, error="the Telegram bot is not started", outcome=PostOutcome.REJECTED)
+        try:
+            chat, message_id = int(target.id), int(external_id)
+        except ValueError:
+            return PostReceipt(False, error="invalid Telegram chat or message id", outcome=PostOutcome.REJECTED)
+        try:
+            await self._app.bot.edit_message_text(chat_id=chat, message_id=message_id, text=self._redact(text))
+        except Exception as exc:
+            return PostReceipt(False, error=redact(str(exc)), outcome=_post_outcome(exc))
+        return PostReceipt(True, external_ids=(external_id,))
+
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
         its own, or send the answer to the Telegram user who wrote and close its status line."""
@@ -352,7 +366,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                 return await self._send_answer(chat, str(envelope.payload.get("text") or ""))
             # A group's notice carries the whole summary: several messages in order. A part that fails ends the
             # notice; the parts before it are not sent again.
-            parts = split_message(notice.text)
+            parts = split_message(for_group(notice.text))
             for number, part in enumerate(parts):
                 receipt = await self._send_answer(chat, part)
                 if not receipt.success:

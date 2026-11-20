@@ -57,8 +57,8 @@ class StubTransport:
         return await self._call("reply", message_id=message_id, text=text, markdown=markdown,
                                 idempotency_key=idempotency_key, **({"return_id": True} if return_id else {}))
 
-    async def edit(self, message_id: str, *, text: str) -> None:
-        await self._call("edit", message_id=message_id, text=text)
+    async def edit(self, message_id: str, *, text: str | None = None, markdown: str | None = None) -> None:
+        await self._call("edit", message_id=message_id, text=text, markdown=markdown)
 
     async def react(self, message_id: str) -> None:
         await self._call("react", message_id=message_id)
@@ -597,6 +597,7 @@ def test_bot_transport_delegates_calls_and_reuses_seen_events_across_connections
         assert await transport.send(user_id=OPEN_ID, markdown="hello", idempotency_key="send-1", return_id=True) == "om_sent"
         assert await transport.reply("om_parent", text="reply", idempotency_key="reply-1", return_id=True) == "om_sent"
         await transport.edit("om_edit", text="updated")
+        await transport.edit("om_post", markdown="**updated**")
         await transport.react("om_in")
         assert await transport.names(iter([OPEN_ID])) == {OPEN_ID: "Ada Lovelace"}
         for _ in range(2):
@@ -606,6 +607,7 @@ def test_bot_transport_delegates_calls_and_reuses_seen_events_across_connections
             ("send", {"user_id": OPEN_ID, "markdown": "hello", "idempotency_key": "send-1"}),
             ("reply", {"message_id": "om_parent", "text": "reply", "idempotency_key": "reply-1"}),
             ("edit", {"message_id": "om_edit", "text": "updated"}),
+            ("edit", {"message_id": "om_post", "markdown": "**updated**"}),
             ("react", {"message_id": "om_in"}),
             ("names", {"open_ids": [OPEN_ID]}),
         ]

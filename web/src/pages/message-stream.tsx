@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,8 +10,10 @@ import { TabStrip } from "@/components/tab-strip";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import { leadsSettingsGet } from "@/lib/api-leads";
 import {
-  configureMessageStream, fetchMessageStream, fetchMessageStreamRuns,
-  type MessageStreamRun, type MessageStreamSource,
+  configureMessageStream, fetchMessageStream, fetchMessageStreamRuns, fetchMessageStreamChats,
+  setMessageStreamChat, previewMessageStreamDeletion, deleteMessageStream,
+  type MessageStreamRun, type MessageStreamSource, type MessageStreamChat,
+  type MessageStreamDeletion, type MessageStreamDeletionPreview,
 } from "@/lib/api";
 import { sinceText } from "@/lib/gates";
 import { cn } from "@/lib/utils";
@@ -124,8 +126,16 @@ function StatusCard({ source, busy, onSwitch }: { source: MessageStreamSource; b
             hint={`${source.chats_excluded} excluded · ${source.chats_failing} failing`} />
         </dl>
         <p className="break-all font-mono text-xs text-muted-foreground">{source.bridge_dir}</p>
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+          <Fact label="Raw storage" value={formatBytes(source.body_bytes)} hint={`${formatBytes(source.body_bytes_last_day)} added in 24 h`} />
+          <Fact label="Daily events" value={source.events_last_day.toLocaleString()} hint="Ingested in the last 24 h" />
+          <Fact label="Bodies expired" value={source.bodies_dropped.toLocaleString()} hint="Message text is kept" />
+          <Fact label="Retention last ran" value={when(source.retention_last_at)} />
+        </dl>
         <p className="text-xs text-muted-foreground">
-          Raw messages take {formatBytes(source.body_bytes)}. This page shows counts and states only, never message text.
+          Retention: human raw messages {source.body_retention_days == null ? "kept indefinitely" : `kept for ${source.body_retention_days} days`};
+          bot raw messages {source.app_body_retention_days == null ? "kept indefinitely" : `kept for ${source.app_body_retention_days} days`}.
+          Expired raw bodies are cleared daily. Text is kept. This page never shows message text.
         </p>
       </CardContent>
     </Card>
@@ -144,7 +154,7 @@ function RunList({ runs }: { runs: MessageStreamRun[] }) {
             <span className="text-muted-foreground">{run.mode}{run.trigger === "manual" ? " · manual" : ""}{duration(run) && ` · ${duration(run)}`}</span>
             <span className="flex-1" />
             <span className="tabular-nums">
-              {run.events_new} new · {run.events_seen} already stored · {run.events_skipped} skipped
+              {run.events_new} new · {run.events_seen} already stored · {run.events_skipped} skipped · {run.skipped_by_deletion} skipped by deletion
               {run.files_rescanned ? ` · ${run.files_rescanned} file${run.files_rescanned === 1 ? "" : "s"} read again` : ""}
             </span>
           </div>
@@ -152,6 +162,173 @@ function RunList({ runs }: { runs: MessageStreamRun[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+function Chats({ sourceId, refresh }: { sourceId: string; refresh: number }) {
+  const [chats, setChats] = useState<MessageStreamChat[]>([]);
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => startPolling(async (signal) => {
+    try {
+      const result = await fetchMessageStreamChats(sourceId, query, signal);
+      if (!signal.aborted) { setChats(result.chats); setError(""); setLoading(false); }
+    } catch (err) {
+      if (!signal.aborted) { setError(errorText(err)); setLoading(false); }
+    }
+  }, REFRESH_MS), [sourceId, query, attempt, refresh]);
+  const include = async (chat: MessageStreamChat, included: boolean) => {
+    setBusy(true);
+    try {
+      await setMessageStreamChat(sourceId, chat.chat_id, included);
+      setAttempt((n) => n + 1);
+    } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Card>
+      <CardHeader><CardTitle className="text-base text-foreground">Chats</CardTitle></CardHeader>
+      <CardContent className="space-y-3">
+        <form aria-label="Search chats" className="flex gap-2" onSubmit={(event) => { event.preventDefault(); setQuery(search.trim()); }}>
+          <Input aria-label="Search chats" placeholder="Search chat name or ID" value={search} onChange={(event) => setSearch(event.target.value)} />
+          <Button type="submit" variant="outline">Search</Button>
+        </form>
+        <p className="text-xs text-muted-foreground">Excluding a chat stops collection and removes it from every subscription window. Stored messages remain until deleted. Up to 200 matching chats are shown; search to narrow the list.</p>
+        {error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">Cannot update chats ({error}) <Button variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>Retry chats</Button></p>}
+        {loading ? <p role="status" className="text-sm text-muted-foreground">Loading chats…</p> : error && chats.length === 0 ? null : chats.length === 0 ?
+          <p className="text-sm text-muted-foreground">No chats found.</p> : (
+            <div role="region" aria-label="Chat table" tabIndex={0} className="overflow-x-auto focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+              <table className="w-full min-w-xl text-left text-sm">
+                <thead className="text-xs text-muted-foreground"><tr>
+                  <th scope="col" className="px-2 py-2 font-medium">Chat</th>
+                  <th scope="col" className="px-2 py-2 font-medium">State</th>
+                  <th scope="col" className="px-2 py-2 text-right font-medium">7-day events</th>
+                  <th scope="col" className="px-2 py-2 font-medium">Included</th>
+                </tr></thead>
+                <tbody className="divide-y divide-border">{chats.map((chat) => (
+                  <tr key={chat.chat_id}>
+                    <td className="min-w-40 max-w-48 px-2 py-3 [overflow-wrap:anywhere]">
+                      <span className="font-medium">{chat.name || (chat.purged_at ? "Deleted chat" : "Unnamed chat")}</span>
+                      <span className="block font-mono text-xs text-muted-foreground">{chat.chat_id}</span>
+                      <span className="text-xs text-muted-foreground">{chat.kind}</span>
+                    </td>
+                    <td className="px-2 py-3"><Badge variant={chat.state === "failing" ? "warning" : "outline"}>{chat.state}</Badge></td>
+                    <td className="px-2 py-3 text-right tabular-nums">{chat.events_7d.toLocaleString()}</td>
+                    <td className="px-2 py-3">
+                      <label className="flex min-h-11 items-center gap-2 text-xs">
+                        <Switch checked={chat.inclusion === "included"} disabled={busy || !!chat.purged_at} label={`Include ${chat.name || chat.chat_id}`}
+                          onChange={(included) => void include(chat, included)} />
+                        {chat.purged_at ? "Deleted" : chat.inclusion === "included" ? "Included" : "Excluded"}
+                      </label>
+                    </td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Deletion({ sourceId, onDeleted }: { sourceId: string; onDeleted: () => void }) {
+  const id = useId();
+  const [scope, setScope] = useState<MessageStreamDeletion["scope"]>("message");
+  const [messageId, setMessageId] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [review, setReview] = useState<{ target: MessageStreamDeletion; preview: MessageStreamDeletionPreview } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState("");
+  const reviewHeading = useRef<HTMLHeadingElement>(null);
+  const reviewButton = useRef<HTMLButtonElement>(null);
+  const hadReview = useRef(false);
+  useEffect(() => {
+    if (review) reviewHeading.current?.focus();
+    else if (hadReview.current) reviewButton.current?.focus();
+    hadReview.current = !!review;
+  }, [review]);
+  const now = new Date();
+  const maxDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const valid = scope === "message" ? !!messageId.trim() : scope === "chat" ? !!chatId.trim() :
+    !!start && !!end && Date.parse(start) < Date.parse(end) && Date.parse(end) <= now.getTime();
+  const preview = async () => {
+    setBusy(true); setError(""); setResult("");
+    try {
+      const target: MessageStreamDeletion = { source_id: sourceId, scope,
+        ...(scope === "message" ? { message_id: messageId.trim() } : scope === "chat" ? { chat_id: chatId.trim() } :
+          { start: new Date(start).toISOString(), end: new Date(end).toISOString(), ...(chatId.trim() ? { chat_id: chatId.trim() } : {}) }) };
+      setReview({ target, preview: await previewMessageStreamDeletion(target) });
+    } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  };
+  const remove = async () => {
+    if (!review) return;
+    setBusy(true); setError("");
+    try {
+      const response = await deleteMessageStream({ ...review.target, confirmation_token: review.preview.confirmation_token }, review.preview.session);
+      setResult(`Deleted ${response.deleted} events. A deletion tombstone prevents re-import.`);
+      setReview(null); onDeleted();
+    } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Card>
+      <CardHeader><CardTitle className="text-base text-foreground">Delete stored messages</CardTitle></CardHeader>
+      <CardContent className="space-y-3">
+        {error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">Deletion failed ({error})</p>}
+        {result && <p role="status" className="text-sm">{result}</p>}
+        {!review ? (
+          <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); if (valid) void preview(); }}>
+            <div className="space-y-1.5">
+              <label className={LABEL} htmlFor={`${id}-scope`}>1. Choose what to delete</label>
+              <select id={`${id}-scope`} className={SELECT} disabled={busy} value={scope} onChange={(event) => setScope(event.target.value as MessageStreamDeletion["scope"])}>
+                <option value="message">One message</option><option value="range">Time range</option><option value="chat">Whole chat</option>
+              </select>
+            </div>
+            {scope === "message" ? (
+              <div className="space-y-1.5"><label className={LABEL} htmlFor={`${id}-message`}>Message ID</label>
+                <Input id={`${id}-message`} aria-label="Message ID" required value={messageId} disabled={busy} onChange={(event) => setMessageId(event.target.value)} /></div>
+            ) : (
+              <div className="space-y-1.5"><label className={LABEL} htmlFor={`${id}-chat`}>Chat ID{scope === "range" ? " (optional; blank means all chats)" : ""}</label>
+                <Input id={`${id}-chat`} aria-label="Chat ID" required={scope === "chat"} value={chatId} disabled={busy} onChange={(event) => setChatId(event.target.value)} /></div>
+            )}
+            {scope === "range" && <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5"><label className={LABEL} htmlFor={`${id}-start`}>From (inclusive, local time)</label>
+                <Input id={`${id}-start`} type="datetime-local" max={maxDate} required value={start} disabled={busy} onChange={(event) => setStart(event.target.value)} /></div>
+              <div className="space-y-1.5"><label className={LABEL} htmlFor={`${id}-end`}>Until (exclusive, local time)</label>
+                <Input id={`${id}-end`} type="datetime-local" max={maxDate} required value={end} disabled={busy} onChange={(event) => setEnd(event.target.value)} /></div>
+            </div>}
+            <p className="text-xs text-muted-foreground">Whole-chat deletion also erases its name and excludes it. Deletions cannot be undone and block matching messages from future imports.</p>
+            <Button ref={reviewButton} type="submit" variant="outline" disabled={busy || !valid}>Review deletion</Button>
+          </form>
+        ) : (
+          <div className="space-y-3" aria-labelledby={`${id}-review`}>
+            <h3 ref={reviewHeading} tabIndex={-1} id={`${id}-review`} className="text-sm font-medium focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">2. Confirm deletion of {review.preview.events.toLocaleString()} events</h3>
+            <p className="break-all text-sm">{review.target.scope === "message" ? `Message: ${review.target.message_id}` : review.target.scope === "chat" ? `Whole chat: ${review.target.chat_id}` :
+              `${review.target.start} to ${review.target.end} (end excluded), ${review.target.chat_id || "all chats"}`}</p>
+            <p className="text-sm font-medium">This deletion cannot reach:</p>
+            <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              <li>Already pushed outputs in destination chats.</li>
+              <li>Processor run outputs stored in run history.</li>
+              <li>{review.preview.backups.count} upgrade backups; earliest: {review.preview.backups.earliest_at || "none"}. Older backups retain their contents until rotated away; schema-change backups now exclude message rows.</li>
+              <li>When enabled, daily message backups keep the newest 7 copies; older copies age out through rotation. When disabled, no new message backup is created.</li>
+              <li>The external lark-chat archive and other collector files.</li>
+            </ul>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="destructive" disabled={busy} onClick={() => void remove()}>Confirm deletion</Button>
+              <Button variant="outline" disabled={busy} onClick={() => { setReview(null); setError(""); }}>Back</Button>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -241,6 +418,8 @@ export function MessageStreamPage() {
             <Card><CardContent className="pt-5"><SetupForm source={source} busy={busy}
               onStart={(f) => void apply({ source_id: source.source_id, ingest_mode: "bridge", ...f })} /></CardContent></Card>
           )}
+          <Chats sourceId={source.source_id} refresh={attempt} />
+          <Deletion key={source.source_id} sourceId={source.source_id} onDeleted={() => setAttempt((n) => n + 1)} />
           <section aria-labelledby="runs-title" className="space-y-2">
             <h2 id="runs-title" className="text-sm font-medium text-muted-foreground">Recent passes</h2>
             <RunList runs={runs} />
