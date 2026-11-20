@@ -159,8 +159,8 @@ export function consultCard(consult: AdvisorConsult, look: CardLook): NodeCard {
         consult.rounds > 0 && { label: "Rounds", value: String(consult.rounds) },
         consult.returns > 0 && { label: "Sent back", value: `${consult.returns}×` },
       ]),
-      ...kept("Checks the request failed", consult.checks.map(({ stage, category, count }) => ({
-        key: `${stage}:${category}`, label: checkText(category), value: `${stage} check · ${count}×` }))),
+      ...lines("Checks the request failed", consult.checks.map(({ stage, category, count }) =>
+        `${checkText(category)} (${stage} check, ${count}×)`)),
       ...(ask ? [
         ...words("Problem", ask.problem),
         ...words("Goal", ask.goal),

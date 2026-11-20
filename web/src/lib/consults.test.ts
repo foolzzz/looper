@@ -104,8 +104,8 @@ describe("consultCard", () => {
       checks: [{ stage: "code", category: "local_path", count: 3 }, { stage: "judge", category: "internal_name", count: 1 }] };
     const card = consultCard(blocked, LOOK);
     expect(card.sections.map((s) => s.title)).toEqual(["Consult", "Checks the request failed", "Cost and time"]);
-    expect(section(card.sections, "Checks the request failed")).toMatchObject({ facts: [
-      { label: "a local path", value: "code check · 3×" }, { label: "an internal name", value: "judge check · 1×" }] });
+    expect(section(card.sections, "Checks the request failed")).toMatchObject({ items: [
+      "a local path (code check, 3×)", "an internal name (judge check, 1×)"] });
     expect(shown(card.sections)).toContain("Blocked: the request failed its checks");
   });
 });
