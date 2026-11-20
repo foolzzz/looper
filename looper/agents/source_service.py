@@ -29,6 +29,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import asyncpg
+
 from ..db import message_stream as store
 from . import cron
 from .bridge_reader import BridgeMessage, FileState, baseline_file, scan_file
@@ -316,6 +318,14 @@ async def run_bridge_pass(source: Mapping[str, Any], *, trigger: str = "schedule
                 logger.debug("the writer lock was already gone")
 
 
+def _connection_closed(conn: Any) -> bool:
+    try:
+        return conn.is_closed()
+    except asyncpg.InterfaceError:
+        # A lost session detaches its pooled proxy; even is_closed() then raises.
+        return True
+
+
 async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: str, days: int | None, dry_run: bool,
                 own_apps: Collection[str], now: datetime, conn: Any, retention_days: int | None) -> PassReport:
     report = PassReport(status="running")
@@ -345,11 +355,11 @@ async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: 
                 # Name the failure by chat and kind, never by its text: a database error can quote a message.
                 logger.warning("bridge read of chat %s failed: %s", path.stem, type(exc).__name__)
                 failures.append(f"{path.stem}: {type(exc).__name__}")
-                if conn.is_closed():
+                if _connection_closed(conn):
                     break
         report.files_failed = len(failures)
         report.failed_chats = [item.split(":", 1)[0] for item in failures]
-        if report.error is not None or (failures and len(failures) == report.files) or conn.is_closed():
+        if report.error is not None or (failures and len(failures) == report.files) or _connection_closed(conn):
             report.status = "failed"
         else:
             report.status = "partial" if failures else "ok"
@@ -360,7 +370,7 @@ async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: 
             await asyncio.shield(store.finish_run(conn, run_id, "interrupted", now=datetime.now(timezone.utc),
                                                   files_rescanned=report.files_rescanned))
         raise
-    if run_id is not None and not conn.is_closed():
+    if run_id is not None and not _connection_closed(conn):
         await store.finish_run(conn, run_id, report.status, now=datetime.now(timezone.utc), error=report.error,
                                files_rescanned=report.files_rescanned,
                                ok_for=source["id"] if report.status in ("ok",) else None)
