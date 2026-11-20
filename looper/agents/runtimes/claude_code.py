@@ -114,6 +114,11 @@ MANAGED_SETTINGS = (Path("/Library/Application Support/ClaudeCode/managed-settin
 ANTHROPIC_HOSTS = frozenset({"api.anthropic.com"})
 
 
+def _switched_on(value: str | None) -> bool:
+    """Whether a Claude Code backend switch (``CLAUDE_CODE_USE_BEDROCK=1``) is on; unset, empty, 0 or false is off."""
+    return value is not None and value.strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def official_endpoint(base_url: str) -> bool:
     """Whether ``base_url`` is Anthropic's own API: none given, or its host."""
     return not base_url or (urlsplit(base_url).hostname or "").lower() in ANTHROPIC_HOSTS
@@ -348,8 +353,16 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                              plugin_skills(launch.library.plugin_dirs))
 
     def web_tools(self, launch: Launch) -> bool:
-        """WebSearch is a tool of Anthropic's own API: only a launch whose model requests go there has it (a
-        compatible or translated endpoint does not)."""
+        """WebSearch is a tool of Anthropic's own API: only a launch whose model requests go there has it. Decided
+        from the final launch environment: a backend switch it keeps on (Bedrock, Vertex, Foundry and the others of
+        ``TRANSLATED_BACKEND_ENV``, from the settings or inherited) takes it away, and so does a compatible or
+        translated endpoint."""
+        try:
+            environment = self.environment(launch)
+        except RuntimeUnsupported:  # a launch that cannot run says so where it starts; it has no web here
+            return False
+        if any(_switched_on(environment.get(name)) for name, _ in TRANSLATED_BACKEND_ENV):
+            return False
         upstream = self.llmrec_upstream(launch)
         return upstream is not None and official_endpoint(upstream)
 

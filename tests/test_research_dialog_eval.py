@@ -46,9 +46,30 @@ def test_an_answer_in_the_records_stops_there(calls: list[str], passes: bool) ->
     assert (problem is None) is passes, problem
 
 
-def test_a_found_answer_is_not_asked_for() -> None:
-    assert "asks the user" in dialogs._found_in_records(_look(["looper_tasks"], "要写 done，请提供文件路径。"))
-    assert dialogs._found_in_records(_look(["looper_tasks"], "要写 done。需要的话告诉我，我再改。")) is None
+@pytest.mark.parametrize("reply", [
+    "要写 done，请提供文件路径。",
+    "文件内容是 done 吗？告诉我最终内容。",
+    "任务里写的是 done，请确认一下。",
+    "The requirement says done. Could you confirm the final content?",
+    "It should contain done, right? Please tell me the exact text.",
+    "Is it done?",
+])
+def test_a_found_answer_is_not_asked_for_again(reply: str) -> None:
+    assert "asks the user" in dialogs._found_in_records(_look(["looper_tasks"], reply))
+
+
+@pytest.mark.parametrize("reply", [
+    "要写 done。需要的话告诉我，我再改。",
+    "文件内容要写 done。要我帮你开始这个任务吗？",
+    "It should contain done. Let me know if you want me to change it.",
+])
+def test_an_answer_with_an_offer_of_more_help_passes(reply: str) -> None:
+    assert dialogs._found_in_records(_look(["looper_tasks"], reply)) is None
+
+
+def test_going_on_to_the_leads_after_the_answer_was_found_fails_even_when_that_search_failed() -> None:
+    problem = dialogs._found_in_records(_look(["looper_tasks", LEADS], "要写 done。", failed=(LEADS,)))
+    assert problem and "went on to the leads" in problem
 
 
 @pytest.mark.parametrize("calls, reply, passes", [

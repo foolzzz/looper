@@ -480,8 +480,21 @@ def _requirement_has_the_lead(look: Look) -> str | None:
 RECORD_TOOLS = ("looper_tasks", "looper_projects")
 # A reply that asks the user for something: a question, or a request to tell, give or add it.
 _ASKS = re.compile(r"[？?]|告诉我|请提供|请补充|你可以补充|麻烦提供|tell me|let me know", re.IGNORECASE)
-# A reply that asks the user to supply facts (an offer of more help, "需要的话告诉我", is not one).
-_REQUESTS = re.compile(r"请提供|请补充|你可以补充|麻烦提供|please provide", re.IGNORECASE)
+# A reply that asks the user to supply or confirm facts; an offer of more help ("需要的话告诉我", "let me know if you
+# want …") is not one.
+_REQUESTS = re.compile(
+    r"请提供|请补充|你可以补充|麻烦提供|请告诉我|请确认|告诉我(?:最终|具体|准确|正确|实际)|能(?:否|不能)告诉我"
+    r"|(?:please|could you|can you|would you)\s+(?:provide|tell me|confirm|share|send)"
+    r"|let me know (?:the|what|which|whether)", re.IGNORECASE)
+
+
+def asks_back(reply: str, fact: str) -> bool:
+    """Whether ``reply`` asks the user for an answer it has (``fact``): a request to supply or confirm it, or a
+    question about the fact itself ("是 done 吗？", "is it done?")."""
+    if _REQUESTS.search(reply):
+        return True
+    return any(fact.lower() in sentence.lower() and sentence.rstrip().endswith(("？", "?"))
+               for sentence in re.split(r"(?<=[。！!？?\n])", reply))
 
 
 def _asks(reply: str) -> bool:
@@ -514,7 +527,7 @@ def _found_in_leads(look: Look) -> str | None:
         return None
     if "ZX-42" not in look.reply:
         return "the reply does not give what the lead says (ZX-42)"
-    return "the reply asks the user for what the lead says" if _REQUESTS.search(look.reply) else None
+    return "the reply asks the user for what the lead says" if asks_back(look.reply, "ZX-42") else None
 
 
 def _found_in_records(look: Look) -> str | None:
@@ -525,15 +538,17 @@ def _found_in_records(look: Look) -> str | None:
         return f"the Manager did not read its tasks before answering: {lookups}"
     if found := research_order_problem(lookups):
         return found
-    if LEADS_TOOL in lookups:
-        return f"the Manager went on to the leads after its records had the answer: {lookups}"
+    # Any later try counts, also one that failed: it went on looking after its records had the answer.
+    attempts = [a["tool"] for a in look.turn_actions() if a["tool"] in (*RECORD_TOOLS, LEADS_TOOL)]
+    if LEADS_TOOL in attempts:
+        return f"the Manager went on to the leads after its records had the answer: {attempts}"
     if _writes(look):
         return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
     if look.fake:
         return None
     if "done" not in look.reply:
         return "the reply does not give what the task's requirement says (done)"
-    return "the reply asks the user for what the task says" if _REQUESTS.search(look.reply) else None
+    return "the reply asks the user for what the task says" if asks_back(look.reply, "done") else None
 
 
 def _looked_then_asked(look: Look) -> str | None:

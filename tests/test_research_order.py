@@ -79,20 +79,21 @@ def _launch(runtime: str, library: AgentLibrary, *, web_search: bool = True, env
                            profile=SimpleNamespace(web_search=web_search))
 
 
-def _claude_launch(library: AgentLibrary, *, base_url: str | None = None) -> Any:
-    """A real Claude Code launch: the built-in login, or an API key for a compatible endpoint at ``base_url``."""
+def _claude_launch(library: AgentLibrary, *, base_url: str | None = None, env: tuple = ()) -> Any:
+    """A real Claude Code launch: the built-in login, or an API key for a compatible endpoint at ``base_url``; ``env``
+    is the settings' environment."""
     from looper.agents.agent_settings import AgentSettings, Launch
     from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec, builtin_resolved_profile
     from looper.agents.runtimes import ApiProtocol, AuthKind
     from tests.runtime_model_helpers import resolved_profile
 
     if base_url is None:
-        return Launch(AgentSettings(profile=builtin_resolved_profile()), library)
+        return Launch(AgentSettings(profile=builtin_resolved_profile(), env=env), library)
     provider = LegacyProviderSpec("compatible", "Compatible", AuthKind.API_KEY, frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
                                   base_url=base_url, api_key="synthetic-key")
     profile = resolved_profile("compatible-agent", "Compatible agent",
                                RuntimeSpec("rt-claude", "Claude Code", "claude-code"), provider, "model-x")
-    return Launch(AgentSettings(profile=profile), library)
+    return Launch(AgentSettings(profile=profile, env=env), library)
 
 
 def test_the_installed_tools_are_what_the_runtime_really_loads(library: AgentLibrary) -> None:
@@ -106,6 +107,22 @@ def test_the_installed_tools_are_what_the_runtime_really_loads(library: AgentLib
     # Pi loads no catalog server or skill; the API runtime nothing; a runtime not checked claims nothing.
     for runtime in ("pi", "api", "omp", "dsh", "cursor-agent"):
         assert ResearchSources.of(OPERATOR, _launch(runtime, library)).installed == (), runtime
+
+
+@pytest.mark.parametrize("switch", ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"])
+@pytest.mark.parametrize("base_url", [None, "https://api.anthropic.com"])
+def test_claude_code_on_another_backend_has_no_web_search(monkeypatch: pytest.MonkeyPatch, library: AgentLibrary,
+                                                          switch: str, base_url: str | None) -> None:
+    """Bedrock, Vertex or Foundry, chosen in the settings' environment or inherited from the server's, take
+    WebSearch away whatever the profile's endpoint; a switch set off does not."""
+    from looper import child_env
+
+    on = ResearchSources.of(OPERATOR, _claude_launch(library, base_url=base_url, env=((switch, "1"),)))
+    assert not on.web
+    assert ResearchSources.of(OPERATOR, _claude_launch(library, base_url=base_url, env=((switch, "0"),))).web
+    inherited = child_env.inherited
+    monkeypatch.setattr(child_env, "inherited", lambda: {**inherited(), switch: "true"})
+    assert not ResearchSources.of(OPERATOR, _claude_launch(library, base_url=base_url)).web
 
 
 def test_the_web_is_named_only_where_the_launch_has_web_tools(library: AgentLibrary) -> None:
