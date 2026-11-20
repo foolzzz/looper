@@ -27,7 +27,7 @@ import asyncpg
 
 from ..db import (connection as db_connection, managers as db_managers, projects as db_projects,
                   schedules as db_schedules, tasks as db_tasks)
-from . import completion_events, cron
+from . import completion_events, cron, scheduler_settings
 from .links import run_link, schedule_link, task_link
 from .channels.base import PostOutcome
 from .message import builtin_channel_id, parse_channel_id
@@ -250,13 +250,20 @@ def command_run_text(schedule: Mapping[str, Any], project_name: str, run: Mappin
 
 
 def failures_alert_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any] | None, *,
-                        base: str = "") -> str:
+                        base: str = "", context_max_tokens: int = scheduler_settings.SESSION_CONTEXT_MAX_TOKENS) -> str:
     last = ""
     if run is not None:
         last = f"最近一次：{STATUS_WORDS.get(run['status'], run['status'])}"
         if (text := snippet(run.get("summary") or run.get("error"))) and schedule.get("kind") != "subscription":
             last += f" · {text}"
         last += "\n"
+        if run.get("failure_kind") == "task_budget":
+            last += "原因：已达到任务预算上限。\n"
+            context = run.get("planner_context_tokens")
+            if context is None:
+                context = schedule.get("planner_session_context_tokens")
+            if context is not None and context > context_max_tokens:
+                last += f"Planner 会话上下文为 {context} tokens，超过 {context_max_tokens} tokens 的上限。\n"
     return (f"告警：定时任务「{schedule['name']}」（项目 {project_name}）已连续失败 "
             f"{schedule['consecutive_failures']} 次。\n{last}{schedule_link(base, schedule)}")
 
@@ -325,7 +332,9 @@ class Notifier:
         if status in db_schedules.FAILURES and schedule["consecutive_failures"] >= alert_policy(schedule).failures_after:
             if await self._switch(schedule["id"], "failures_alert_at", now):
                 await self._deliver(schedule, Kind.FAILURES_ALERT,
-                                    failures_alert_text(schedule, project_name, run, base=self._base), run_id=run_id)
+                                    failures_alert_text(schedule, project_name, run, base=self._base,
+                                                        context_max_tokens=await scheduler_settings.session_context_max_tokens()),
+                                    run_id=run_id)
         if status in db_schedules.OK and await self._switch(schedule["id"], "failures_alert_at", None):
             await self._deliver(schedule, Kind.FAILURES_RECOVERED,
                                 recovered_text(schedule, project_name, run, Kind.FAILURES_RECOVERED, base=self._base),

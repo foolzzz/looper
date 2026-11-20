@@ -112,6 +112,7 @@ _ONLINE_LOCK_WAIT_SECONDS = 5.0
 REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _SCHEDULE_NOTIFY_FORMAT = "schedule_notify_format"
+_SCHEDULE_SESSION_BOUNDS = "schedule_session_bounds"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
 _PROFILE_WEB_SEARCH = "profile_web_search"
@@ -134,6 +135,7 @@ _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _TASK_CHAT_GROUP = "task_chat_group"
 _PROCESSOR_ROLE = "processor_role"
+_HEADLESS_COMPACTION = "headless_compaction"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _MESSAGE_STREAM_DELETIONS = "message_stream_deletions"
@@ -338,6 +340,8 @@ _ONLINE_STEPS = (
                           *((table, f"{table}_{name}") for table in ("message_leads", "intents")
                             for name in ("state_check", "check_verdict_check", "check_reason_check",
                                          "check_record_id_fkey", "dropped")))),
+    _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
+                validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
 )
 
 
@@ -522,6 +526,14 @@ ALTER TABLE schedule_profile_overrides DROP CONSTRAINT schedule_profile_override
 """
 
 
+_HEADLESS_COMPACTION_DDL = """
+ALTER TABLE agent_runtimes DROP CONSTRAINT agent_runtimes_capabilities_check,
+    ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume',
+        'structured_output', 'claude_plugins', 'mcp', 'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
+        'read_tools', 'steer', 'no_tools', 'headless_compaction']) NOT VALID;
+"""
+
+
 # The advisor and its judge: their role layers. No row changes.
 _ADVISOR_ROLES_DDL = """
 ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check,
@@ -567,6 +579,15 @@ async def _processor_role_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_setting_layers') "
         "AND conname = 'agent_setting_layers_role_check' "
         "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'processor'")
+
+
+async def _headless_compaction_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _HEADLESS_COMPACTION):
+        return False
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_runtimes') "
+        "AND conname = 'agent_runtimes_capabilities_check' "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'headless_compaction'")
 
 
 _CURSOR_LOGIN_DDL = """
@@ -944,6 +965,15 @@ async def _command_schedules_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _schedule_session_bounds_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_SESSION_BOUNDS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('schedules') "
+        "AND attname = 'planner_session_context_tokens' AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _task_reply_route_pending(conn: asyncpg.Connection) -> bool:
     """An unmarked task baseline lacks the original reply route; recorded upgrades never repair DDL."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _TASK_REPLY_ROUTE):
@@ -1274,6 +1304,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _processor_role_pending(conn):
             await conn.execute(_PROCESSOR_ROLE_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROCESSOR_ROLE)
+        if await _headless_compaction_pending(conn):
+            await conn.execute(_HEADLESS_COMPACTION_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _HEADLESS_COMPACTION)
         if await _advisor_roles_pending(conn):
             await conn.execute(_ADVISOR_ROLES_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _ADVISOR_ROLES)
@@ -1458,6 +1491,21 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _LEADS_CHECK)
             await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
+        if await _schedule_session_bounds_pending(conn):
+            await conn.execute("""
+                ALTER TABLE schedules
+                  ADD COLUMN planner_session_context_tokens BIGINT CHECK (planner_session_context_tokens >= 0),
+                  ADD COLUMN planner_session_run_cost_usd DOUBLE PRECISION CHECK (planner_session_run_cost_usd >= 0);
+                ALTER TABLE schedule_runs
+                  ADD COLUMN planner_context_tokens BIGINT CHECK (planner_context_tokens >= 0),
+                  ADD COLUMN planner_cost_usd DOUBLE PRECISION CHECK (planner_cost_usd >= 0),
+                  ADD COLUMN planner_session_action TEXT CHECK (planner_session_action IN ('compacted', 'rotated')),
+                  ADD COLUMN planner_session_reason TEXT CHECK (planner_session_reason IN ('context', 'cost')),
+                  ADD COLUMN planner_session_before_tokens BIGINT CHECK (planner_session_before_tokens >= 0),
+                  ADD COLUMN planner_session_after_tokens BIGINT CHECK (planner_session_after_tokens >= 0),
+                  ADD COLUMN failure_kind TEXT CHECK (failure_kind IN ('task_budget'));
+            """)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_SESSION_BOUNDS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1492,6 +1540,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _schedule_notify_format_pending(conn)
+            or await _schedule_session_bounds_pending(conn)
             or await _cursor_login_pending(conn)
             or await _model_name_parameters_pending(conn)
             or await _coco_login_pending(conn)
@@ -1521,4 +1570,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
-            or await _processor_role_pending(conn)))
+            or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)))
