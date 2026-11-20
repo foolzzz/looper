@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from ... import __version__
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 
+from .. import completion_service
 from .drain import DRAIN
 
 ORDER = 1
@@ -37,8 +38,18 @@ _STATUS = _object({
                                 ["id", "name", "running", "busy", "healthy", "sync", "turn_binding"]))},
     ["status", "agents", "tasks", "channels", "checks", "can_sign_out"])
 
+_COUNTS = {"type": "object", "additionalProperties": _INT}
+# The Manager's completion turns (manager completion ledger RFC, section 6), as the completion service last read
+# them (from memory: health never waits for the database); null before its first pass.
+_COMPLETION = {"type": ["object", "null"], "properties": {
+    "pending": _INT, "oldest_pending_seconds": {"type": ["number", "null"]}, "window_hours": _INT,
+    "by_state": _COUNTS, "by_reason": _COUNTS, "turn_cost_usd": {"type": "number"}, "failing": _BOOL,
+    "checked_at": _STR},
+    "required": ["pending", "oldest_pending_seconds", "window_hours", "by_state", "by_reason", "turn_cost_usd",
+                 "failing", "checked_at"], "additionalProperties": False}
 _HEALTH = _object({
     "status": {"const": "ok"}, "version": _STR, "pid": _INT, "started_at": _STR, "now": _STR,
+    "completion": _COMPLETION,
     "scheduler": _object({
         "running": _BOOL, "tick_seconds": {"type": ["number", "null"]},
         "last_tick_at": _NULL_STR, "last_ok_tick_at": _NULL_STR,
@@ -52,8 +63,9 @@ OPERATIONS = (
     Operation("system.status", "POST", "/api/v1/system/status", "Read dashboard status.",
               "Read dashboard status.", _object({}, closed=True), _STATUS, risk="read"),
     Operation("system.health", "POST", "/api/v1/system/health",
-              "Read the server's liveness: its scheduler's latest tick.",
-              "Read the server's liveness: its scheduler's latest tick.",
+              "Read the server's liveness: its scheduler's latest tick, and the Manager's completion turns.",
+              "Read the server's liveness: its scheduler's latest tick, and the Manager's completion turns "
+              "(waiting events, the last 24 hours by state and reason, and whether they keep falling back).",
               _object({}, closed=True), _HEALTH, risk="read"),
 )
 
@@ -61,6 +73,7 @@ OPERATIONS = (
 async def run(server, operation, arguments, principal, headers):
     if operation.operation_id == "system.health":
         return {
+            "completion": completion_service.health(),
             "status": "ok", "version": __version__, "pid": os.getpid(),
             "started_at": server._started_at.isoformat(), "now": datetime.now(timezone.utc).isoformat(),
             "scheduler": server._scheduler.health() if server._scheduler else {

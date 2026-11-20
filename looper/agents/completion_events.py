@@ -161,14 +161,25 @@ async def record_web_end(manager_id: str, envelope: MessageEnvelope, thread: str
                    "origin_channel_id": envelope.metadata.get("origin_channel_id")}])
 
 
+async def _schedule_state(target: str) -> tuple[str, str | None]:
+    """A schedule run's end waits for the default Manager's completion turn when its message goes to a direct
+    chat; to a chat bound to a Manager (a group) it is sent at once."""
+    if chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF:
+        return "skipped", "off"
+    if target != "dm":
+        return "skipped", "group_chat"
+    return "pending", None
+
+
 async def record_schedule_run(manager_id: str, *, task_id: str | None, run_id: str, target: str, channel_id: str,
-                              chat: str, text: str, name: str, status: str) -> store.Recorded | None:
-    """A schedule run's end, whose message ``text`` goes to a chat."""
+                              chat: str, text: str, name: str, status: str,
+                              summary: str | None = None) -> store.Recorded | None:
+    """A schedule run's end, whose message ``text`` goes to a chat; ``summary`` is its task's result."""
     return await _record(
         manager_id, task_id, origin="schedule", schedule_run_id=run_id, target_kind=target, channel_id=channel_id,
-        chat=chat, dedupe_key=f"schedule_run:{run_id}",
+        chat=chat, dedupe_key=f"schedule_run:{run_id}", decide=lambda: _schedule_state(target),
         payload={"version": "completion_v1", "task_id": task_id, "name": name, "status": status,
-                 "schedule_run_id": run_id},
+                 "schedule_run_id": run_id, "result": {"lead": lead(summary)[:LEAD_CHARS]}},
         fallback=[{"via": "schedule", "run_id": run_id, "kind": "run", "text": text}])
 
 
@@ -187,9 +198,36 @@ def waits_for_turn(recorded: store.Recorded | None) -> bool:
     return recorded is not None and recorded.row["state"] == "pending"
 
 
-def due(source: AgentAddress, recorded: store.Recorded) -> MessageEnvelope:
-    """The wake-up of the Manager whose completion turn the event waits for (``source`` is that Manager)."""
-    return wake(source, Target.of(recorded.row))
+# Called when an event waits for a turn: the completion service looks at once instead of at its next tick.
+_poke: Any = None
+# Sends a schedule run's message (the code notice, or the Manager's reply) through the scheduler and records it in
+# the schedule's outbox: (run id, text, event id) -> its outbox status (``sent``, ``failed``, ``dashboard``).
+_schedule_delivery: Any = None
+
+
+def set_poke(poke: Any) -> None:
+    global _poke
+    _poke = poke
+
+
+def set_schedule_delivery(deliver: Any) -> None:
+    global _schedule_delivery
+    _schedule_delivery = deliver
+
+
+def poke() -> None:
+    """An event waits for its turn: wake the completion service (none runs here: its next start finds it)."""
+    if _poke is not None:
+        _poke()
+
+
+async def _deliver_schedule(run_id: str, text: str, event_id: int, *, send: bool = True) -> None:
+    """Through the scheduler: send ``text`` as the run's message and record it in the schedule's outbox, or (not
+    ``send``: the chat got it in a message the Manager sent for other tasks too) only record it as sent."""
+    if _schedule_delivery is None:
+        raise RuntimeError("no scheduler sends schedule messages here")
+    if await _schedule_delivery(run_id, text, event_id, send=send) == "failed":
+        raise RuntimeError(f"schedule run {run_id}: its message was not handed to a channel")
 
 
 def wake(source: AgentAddress, target: Target) -> MessageEnvelope:
@@ -199,15 +237,13 @@ def wake(source: AgentAddress, target: Target) -> MessageEnvelope:
 
 
 async def recover(bus: Any, source: AgentAddress) -> None:
-    """A Manager starts (``source``): the events its earlier turns left ``running`` fall back (``restart``), every
-    fallen-back event whose notice was never sent sends it, and each chat whose events still wait gets a wake-up.
-    Done before its message loop, so a replayed wake-up finds them settled."""
-    unsent, waiting = await asyncio.wait_for(store.recover(source.agent_id), DB_TIMEOUT_SECONDS)
+    """A Manager starts (``source``): the events its earlier turns left ``running`` fall back (``restart``), and
+    every fallen-back event whose notice was never sent sends it. Done before its message loop, so a replayed
+    wake-up finds them settled; its pending events wait for the completion service."""
+    unsent = await asyncio.wait_for(store.recover(source.agent_id), DB_TIMEOUT_SECONDS)
     for row in unsent:
         logger.info("completion fallback id=%s reason=%s", row["id"], row["reason"])
     await send_fallbacks(bus, source, unsent)
-    for key in waiting:
-        await bus.publish(wake(source, Target(*key)))
 
 
 def _json(value: Any) -> Any:
@@ -280,8 +316,11 @@ def completion_message(rows: Sequence[Mapping[str, Any]], *, channel_line: str,
             f"in {extra['duration']}" if extra.get("duration") else None,
             f"${extra['cost_usd']:.2f}" if extra.get("cost_usd") is not None else None) if part]
         where = f" (project {extra['project']})" if extra.get("project") else ""
-        lines.append(f'{number}. {task_id} "{name}"{where}: {how}{" " + ", ".join(spent) if spent else ""}; '
-                     "asked for in this chat.")
+        if row.get("origin") == "schedule":
+            label, asked = task_id, f'a run of the schedule "{name}", whose messages come to this chat.'
+        else:
+            label, asked = f'{task_id} "{name}"', "asked for in this chat."
+        lines.append(f'{number}. {label}{where}: {how}{" " + ", ".join(spent) if spent else ""}; {asked}')
         result = payload.get("result") or {}
         if result.get("lead"):
             lines.append(f"   Result (the start of its summary): {_indented(result['lead'])}")
@@ -315,6 +354,10 @@ async def send_reply(bus: Any, source: AgentAddress, rows: Sequence[Mapping[str,
     """Hand the completion turn's reply to the chat its events name, the way their notice would go: into the web
     chat session, or as a ``CHAT_NOTICE`` to the person (or chat) the notice names, with its text replaced."""
     first = _json(rows[0]["fallback"])[0]
+    if first["via"] == "schedule":
+        await _deliver_schedule(first["run_id"], text, rows[0]["id"])
+        await _record_schedule_replies(rows[1:], text)
+        return
     if first["via"] == "web_thread":
         envelope = MessageEnvelope.create(
             source=source, target=channel_address("web"), message_type=MessageType.AGENT_REPLY,
@@ -332,6 +375,20 @@ async def send_reply(bus: Any, source: AgentAddress, rows: Sequence[Mapping[str,
     else:
         raise ValueError(f"manager event {rows[0]['id']}: a {first['via']} event has no completion turn")
     await bus.publish(envelope)
+    await _record_schedule_replies(rows[1:], text)
+
+
+async def _record_schedule_replies(rows: Sequence[Mapping[str, Any]], text: str) -> None:
+    """The schedule runs among a batch's other events: their outbox records the reply that told them (logged when
+    it cannot: the reply is out)."""
+    for row in rows:
+        item = _json(row["fallback"])[0]
+        if item["via"] != "schedule":
+            continue
+        try:
+            await _deliver_schedule(item["run_id"], text, row["id"], send=False)
+        except Exception:
+            logger.exception("manager_event %s: its schedule outbox could not record the reply", row["id"])
 
 
 async def send_fallbacks(bus: Any, source: AgentAddress, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -353,8 +410,10 @@ async def send_fallbacks(bus: Any, source: AgentAddress, rows: Sequence[Mapping[
                         payload={"text": item["text"], "chat_session_id": item["thread"]},
                         correlation_id=item.get("correlation_id") or "",
                         metadata={"origin_channel_id": item.get("origin_channel_id")}))
+                elif item["via"] == "schedule":
+                    await _deliver_schedule(item["run_id"], item["text"], row["id"])
                 else:
-                    raise ValueError(f"a {item['via']} notice is sent by the scheduler")
+                    raise ValueError(f"manager event {row['id']}: an unknown notice ({item['via']})")
         except Exception:
             logger.exception("manager_event %s: its notice could not be sent", row["id"])
             continue

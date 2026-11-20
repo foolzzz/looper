@@ -1212,6 +1212,10 @@ class Scheduler:
 
     # --- Ending ---
 
+    async def deliver_run_message(self, run_id: str, text: str, manager_event_id: int, *, send: bool = True) -> str:
+        """A run's message as its completion event tells it (``Notifier.deliver_run_message``)."""
+        return await self._notifier.deliver_run_message(run_id, text, manager_event_id, send=send)
+
     async def task_ended(self, task_id: str, status: str) -> None:
         """The TaskRouter's report that a task ended: finish its run, then start the schedule's queued run."""
         try:

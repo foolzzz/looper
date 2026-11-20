@@ -25,6 +25,13 @@ RETENTION_DAYS = 30
 CLAIM_LIMIT = 10
 # A Manager that starts sends the notices of fallen-back events this recent that were never sent.
 UNSENT_HOURS = 24
+# A chat's first pending event waits this long for the others ending soon after it: one turn tells them all.
+WINDOW_SECONDS = 60
+# A pending event that waited this long for its turn (the Manager is held by a long one) gets its notice instead.
+QUEUE_SECONDS = 15 * 60
+# The fallbacks of this many batches in a row, for these reasons, make the completion turns a failing feature (P3).
+FAILING_BATCHES = 5
+FAILING_REASONS = ("turn_failed", "turn_timeout", "empty_reply")
 PRUNE_BATCH = 5000
 SUMMARY_HOURS = 24
 
@@ -62,11 +69,12 @@ async def record(*, manager_id: str, task_id: str, origin: str, target_kind: str
               "state": state, "reason": reason}
     marks = ", ".join(f"${n}" + ("::jsonb" if name in ("payload", "fallback") else "")
                       for n, name in enumerate(_COLUMNS, 1))
-    # A pending event is due at once (no gathering window yet).
+    # A pending event is due when its gathering window closes.
     row = await db.fetchrow(
         f"INSERT INTO manager_events ({', '.join(_COLUMNS)}, due_at) VALUES ({marks}, "
-        f"CASE WHEN ${_COLUMNS.index('state') + 1} = 'pending' THEN now() END) "
-        "ON CONFLICT (dedupe_key) DO NOTHING RETURNING *", *(values[name] for name in _COLUMNS))
+        f"CASE WHEN ${_COLUMNS.index('state') + 1} = 'pending' "
+        f"THEN now() + make_interval(secs => ${len(_COLUMNS) + 1}) END) "
+        "ON CONFLICT (dedupe_key) DO NOTHING RETURNING *", *(values[name] for name in _COLUMNS), float(WINDOW_SECONDS))
     if row is not None:
         return Recorded(dict(row), True)
     existing = await db.fetchrow("SELECT * FROM manager_events WHERE dedupe_key = $1", dedupe_key)
@@ -121,20 +129,52 @@ async def fall_back(*, reason: str, batch: UUID | None = None, target: Sequence[
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
-async def recover(manager_id: str, *, pool: Db | None = None) -> tuple[list[dict[str, Any]], list[tuple[str, str, str]]]:
+async def recover(manager_id: str, *, pool: Db | None = None) -> list[dict[str, Any]]:
     """What a Manager that starts finds of the turns it took before: its ``running`` events (their turn was cut off)
     fall back with ``restart``. Answers the fallen-back events of the last ``UNSENT_HOURS`` whose notice was never
-    handed to the channel (those just moved among them), oldest first, and the chats whose events still wait for a
-    turn (``pending``)."""
+    handed to the channel (those just moved among them), oldest first. Its ``pending`` events wait for the
+    completion service, as before the restart."""
     db = pool or get_pool()
     await db.execute("UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now() "
                      "WHERE manager_id = $1 AND state = 'running'", manager_id)
     unsent = await db.fetch(
         "SELECT * FROM manager_events WHERE manager_id = $1 AND state = 'fallback' AND sent_at IS NULL "
         "AND created_at >= now() - make_interval(hours => $2) ORDER BY id", manager_id, UNSENT_HOURS)
-    waiting = await db.fetch("SELECT DISTINCT manager_id, channel_id, chat FROM manager_events "
-                             "WHERE manager_id = $1 AND state = 'pending'", manager_id)
-    return [dict(row) for row in unsent], [(row["manager_id"], row["channel_id"], row["chat"]) for row in waiting]
+    return [dict(row) for row in unsent]
+
+
+async def due_targets(now: datetime, *, pool: Db | None = None) -> list[tuple[str, str, str]]:
+    """The chats whose gathering window closed (their oldest pending event is due) and that no turn tells now."""
+    rows = await (pool or get_pool()).fetch(
+        "SELECT manager_id, channel_id, chat FROM manager_events p WHERE state = 'pending' "
+        "GROUP BY manager_id, channel_id, chat HAVING min(due_at) <= $1 AND NOT EXISTS ("
+        "SELECT 1 FROM manager_events r WHERE r.state = 'running' AND r.manager_id = p.manager_id "
+        "AND r.channel_id = p.channel_id AND r.chat = p.chat) ORDER BY min(id)", now)
+    return [(row["manager_id"], row["channel_id"], row["chat"]) for row in rows]
+
+
+async def expire(now: datetime, *, pool: Db | None = None) -> list[dict[str, Any]]:
+    """Pending events that waited ``QUEUE_SECONDS`` for their turn fall back (``queue_deadline``); answers them,
+    oldest first, for the caller to send their notices."""
+    rows = await (pool or get_pool()).fetch(
+        "UPDATE manager_events SET state = 'fallback', reason = 'queue_deadline', finished_at = now() "
+        "WHERE state = 'pending' AND created_at <= $1::timestamptz - make_interval(secs => $2) RETURNING *",
+        now, float(QUEUE_SECONDS))
+    return sorted((dict(row) for row in rows), key=lambda row: row["id"])
+
+
+async def recover_stopped(running: Sequence[str], *, pool: Db | None = None) -> list[dict[str, Any]]:
+    """At the service's start: the ``running`` events of Managers that do not run (none will start their turn
+    again) fall back with ``restart``; answers every recent fallen-back event of theirs whose notice was never
+    sent. A running Manager recovered its own when it started (``recover``)."""
+    db = pool or get_pool()
+    await db.execute("UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now() "
+                     "WHERE state = 'running' AND NOT (manager_id = ANY($1::text[]))", list(running))
+    rows = await db.fetch(
+        "SELECT * FROM manager_events WHERE state = 'fallback' AND sent_at IS NULL "
+        "AND NOT (manager_id = ANY($1::text[])) AND created_at >= now() - make_interval(hours => $2) ORDER BY id",
+        list(running), UNSENT_HOURS)
+    return [dict(row) for row in rows]
 
 
 async def prune(conn: Db, before: datetime) -> int:
@@ -157,4 +197,22 @@ async def summary(*, hours: int = SUMMARY_HOURS, pool: Db | None = None) -> dict
         by_state[row["state"]] = by_state.get(row["state"], 0) + row["n"]
         if row["reason"]:
             by_reason[row["reason"]] = by_reason.get(row["reason"], 0) + row["n"]
-    return {"window_hours": hours, "total": sum(by_state.values()), "by_state": by_state, "by_reason": by_reason}
+    cost = await db.fetchval(
+        "SELECT round(sum(cost_usd)::numeric, 6) FROM llm_records WHERE id IN (SELECT DISTINCT record_id "
+        "FROM manager_events WHERE record_id IS NOT NULL AND created_at >= now() - make_interval(hours => $1))", hours)
+    waiting = await db.fetchrow("SELECT count(*) AS n, extract(epoch FROM now() - min(created_at)) AS oldest "
+                                "FROM manager_events WHERE state = 'pending'")
+    return {"window_hours": hours, "total": sum(by_state.values()), "by_state": by_state, "by_reason": by_reason,
+            "turn_cost_usd": float(cost) if cost is not None else 0.0, "pending": waiting["n"],
+            "oldest_pending_seconds": round(float(waiting["oldest"]), 1) if waiting["oldest"] is not None else None,
+            "failing": await failing(pool=db)}
+
+
+async def failing(*, pool: Db | None = None) -> bool:
+    """Whether the last ``FAILING_BATCHES`` completion turns all fell back for one of ``FAILING_REASONS``: the
+    feature spends and does not work (the chats still got their notices)."""
+    rows = await (pool or get_pool()).fetch(
+        "SELECT bool_and(state = 'fallback' AND reason = ANY($2::text[])) AS failed FROM manager_events "
+        "WHERE batch IS NOT NULL GROUP BY batch ORDER BY max(started_at) DESC NULLS LAST LIMIT $1",
+        FAILING_BATCHES, list(FAILING_REASONS))
+    return len(rows) == FAILING_BATCHES and all(row["failed"] for row in rows)

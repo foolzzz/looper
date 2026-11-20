@@ -1801,8 +1801,8 @@ class ManagerAgent:
                 recorded = await completion_events.record_web_end(self.agent_id, envelope, thread, text,
                                                                   available=self._takes_completion_turns)
             if completion_events.waits_for_turn(recorded):
-                await self._bus.publish(completion_events.due(self.agent_address, recorded))
-                return  # the completion turn tells it
+                completion_events.poke()
+                return  # the completion turn tells it, once its chat's gathering window closes
             if recorded is not None and not recorded.send_fallback:
                 return  # a replay of an end that was already told
             await self._web_thread_reply(envelope, thread, text)
@@ -1827,8 +1827,8 @@ class ManagerAgent:
                 self.agent_id, envelope, notice, available=self._takes_completion_turns) \
                 if ends_task(envelope.payload.get("status")) else None
             if completion_events.waits_for_turn(recorded):
-                await self._bus.publish(completion_events.due(self.agent_address, recorded))
-                return  # the completion turn tells it
+                completion_events.poke()
+                return  # the completion turn tells it, once its chat's gathering window closes
             if recorded is not None and not recorded.send_fallback:
                 return  # a replay of an end that was already told
             await self._bus.publish(MessageEnvelope.create(
@@ -1967,6 +1967,13 @@ class ManagerAgent:
                 pass
         logger.info("completion turn ended batch=%s outcome=%s reason=%s seconds=%.1f cost_usd=%s", batch,
                     "fallback" if reason else "delivered", reason, time.monotonic() - started, cost)
+        if reason in db_manager_events.FAILING_REASONS:
+            try:
+                if await db_manager_events.failing():
+                    logger.warning("completion turns failing: the last %d batches all fell back to their notices",
+                                   db_manager_events.FAILING_BATCHES)
+            except Exception:
+                pass
 
     async def _end_late_completion(self, run: asyncio.Task[str], batch: uuid.UUID, state: dict[str, Any]) -> None:
         """End a completion turn past its deadline (its notices are out) within ``END_SECONDS`` twice, so the

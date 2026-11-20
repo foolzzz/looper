@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -85,10 +86,22 @@ async def _events(pool: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in await pool.fetch("SELECT * FROM manager_events ORDER BY id")]
 
 
+def _service(bus: Any, *, running: Any = lambda manager_id: True) -> Any:
+    from looper.agents.completion_service import CompletionService
+
+    return CompletionService(bus=bus, manager_running=running, running_managers=lambda: ["manager"])
+
+
+async def _due(bus: Any, *, after: float = 61.0, service: Any = None) -> list[MessageEnvelope]:
+    """The wake-ups the completion service queues ``after`` seconds from now (past the gathering window)."""
+    await (service or _service(bus)).run_once(now=datetime.now(timezone.utc) + timedelta(seconds=after))
+    return [e for e in _drain(bus, "manager") if e.message_type is MessageType.COMPLETION_DUE]
+
+
 async def _end_and_tell(chat: Any, envelope: MessageEnvelope) -> None:
-    """The task's end reaches the Manager, then the wake-up it queued for itself."""
+    """The task's end reaches the Manager, then the wake-up the completion service queues once its window closed."""
     await chat.manager._handle(envelope)
-    (due,) = [e for e in _drain(chat.bus, "manager") if e.message_type is MessageType.COMPLETION_DUE]
+    (due,) = await _due(chat.bus)
     await chat.manager._handle(due)
 
 
@@ -112,8 +125,8 @@ def test_the_dashboard_chat_gets_the_managers_message_and_the_tasks_link_instead
             assert [e.message_type for e in _drain(chat.bus, "channel-web")] == []  # no code notice
             (row,) = await _events(pool)
             assert (row["state"], row["reason"], row["due_at"] is not None) == ("pending", None, True)
-            (due,) = _drain(chat.bus, "manager")
-            assert due.message_type is MessageType.COMPLETION_DUE
+            assert _drain(chat.bus, "manager") == [] and await _due(chat.bus, after=59) == []  # the window is open
+            (due,) = await _due(chat.bus)
             assert due.payload == {"manager_id": "manager", "channel_id": "channel-web", "chat": THREAD}
             await chat.manager._handle(due)
             (reply,) = _drain(chat.bus, "channel-web")
@@ -195,7 +208,7 @@ def test_a_turn_that_does_not_reply_falls_back_to_the_notice_as_recorded(monkeyp
         async with _manager(pool, tmp_path, monkeypatch, [script]) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
-            (due,) = _drain(chat.bus, "manager")
+            (due,) = await _due(chat.bus)
             telling = asyncio.create_task(chat.manager._handle(due))
             if case == "stop":
                 await asyncio.wait_for(script.gate_reached.wait(), 20)
@@ -246,7 +259,7 @@ def test_a_manager_turned_off_or_a_switch_turned_off_before_the_turn_sends_the_n
                 chat_settings.set_completion_turns(chat_settings.CompletionTurns.DM_ONLY)
                 chat.manager._turned_off = False
                 await chat.manager._handle(_goal_status())
-                (due,) = _drain(chat.bus, "manager")
+                (due,) = await _due(chat.bus)
                 turn_off()
                 await chat.manager._handle(due)
                 (notice,) = _drain(chat.bus, "channel-web")
@@ -289,15 +302,14 @@ def test_ends_a_turn_cannot_tell_are_skipped_and_their_notice_sent_at_once(monke
     run_db(run, monkeypatch, timeout=60)
 
 
-def test_a_replayed_end_that_waits_for_its_turn_wakes_the_manager_again_and_sends_nothing(monkeypatch, tmp_path,
-                                                                                         turns_on):
+def test_a_replayed_end_that_waits_for_its_turn_records_once_and_sends_nothing(monkeypatch, tmp_path, turns_on):
     async def run(pool):
         async with _manager(pool, tmp_path, monkeypatch, []) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             envelope = _goal_status()
             await chat.manager._handle(envelope)
             await chat.manager._handle(envelope)  # the bus replays it
-            assert [e.message_type for e in _drain(chat.bus, "manager")] == [MessageType.COMPLETION_DUE] * 2
+            assert len(await _due(chat.bus)) == 1
             assert _drain(chat.bus, "channel-web") == []
             assert [row["state"] for row in await _events(pool)] == ["pending"]
 
@@ -311,7 +323,7 @@ def test_a_retired_managers_waiting_events_send_their_notices(monkeypatch, tmp_p
         async with _manager(pool, tmp_path, monkeypatch, []) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
-            (due,) = _drain(chat.bus, "manager")
+            (due,) = await _due(chat.bus)
             fleet = ManagerFleet.__new__(ManagerFleet)
             fleet._supervisor = SimpleNamespace(bus=chat.bus)
             await fleet._deal_with("manager", [due])  # the Manager was turned off with the wake-up queued
@@ -383,7 +395,7 @@ def test_a_turn_a_restart_cut_off_sends_its_notice_before_a_replayed_wake_up(mon
         async with _manager(pool, tmp_path, monkeypatch, []) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
-            (due,) = _drain(chat.bus, "manager")
+            (due,) = await _due(chat.bus)
             # The turn took the event, then the service stopped before it ended.
             (taken,) = await store.claim("manager", "channel-web", THREAD, uuid.uuid4())
             restarted = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
@@ -422,7 +434,7 @@ def test_a_wake_up_whose_events_cannot_be_read_is_queued_again(monkeypatch, tmp_
         async with _manager(pool, tmp_path, monkeypatch, [_text(REPLY)]) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
-            (due,) = _drain(chat.bus, "manager")
+            (due,) = await _due(chat.bus)
             await chat.manager._handle(due)
             (again,) = _drain(chat.bus, "manager")  # queued before the first is acknowledged
             assert again.message_type is MessageType.COMPLETION_DUE and again.payload == due.payload
@@ -500,7 +512,7 @@ def test_a_turn_past_its_deadline_on_a_runtime_without_interrupt_does_not_hold_t
                                runtime_root=tmp_path)
         manager._bus, manager._claude = bus, hung
         await manager._handle(_goal_status())
-        (due,) = _drain(bus, "manager")
+        (due,) = await _due(bus)
         await asyncio.wait_for(manager._handle(due), 10)  # the message loop goes on
         (notice,) = _drain(bus, "channel-web")
         assert notice.payload["text"] == web_end_text("completed", "calc", "## Done\nadd and sub pass")

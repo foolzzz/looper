@@ -296,7 +296,9 @@ class Notifier:
                 schedule["kind"] == "subscription" and status in db_schedules.SUCCESS):
             text = run_text(schedule, project_name, run, base=self._base)
             recorded = await self._record_end(schedule, run, text)
-            if recorded is None or recorded.send_fallback:
+            if completion_events.waits_for_turn(recorded):
+                completion_events.poke()  # the default Manager's completion turn tells it, or its fallback does
+            elif recorded is None or recorded.send_fallback:
                 if await self._deliver(schedule, Kind.RUN, text, run_id=run_id) != "failed":
                     await completion_events.mark_sent(recorded)
         now = self._clock()
@@ -333,9 +335,28 @@ class Notifier:
             return None
         if target is None:
             return None
+        task = await db_tasks.get_task(run["task_id"])
         return await completion_events.record_schedule_run(
             db_managers.DEFAULT_MANAGER_ID, task_id=run["task_id"], run_id=run["id"], target=target,
-            channel_id=builtin_channel_id(channel), chat=chat, text=text, name=schedule["name"], status=run["status"])
+            channel_id=builtin_channel_id(channel), chat=chat, text=text, name=schedule["name"], status=run["status"],
+            summary=(task or {}).get("result_summary") or (task or {}).get("error"))
+
+    async def deliver_run_message(self, run_id: str, text: str, manager_event_id: int, *, send: bool = True) -> str:
+        """A run's message told by its completion event ``manager_event_id``: the Manager's reply, or the code notice
+        it falls back to; sent and recorded in the outbox as ``_deliver`` does, the row naming the event. Not
+        ``send``: the chat got it in a reply the Manager sent for other tasks too, so it is only recorded, as sent.
+        Answers its outbox status."""
+        run = await db_schedules.get_run(run_id)
+        schedule = await db_schedules.get_schedule(run["schedule_id"]) if run is not None else None
+        if schedule is None:
+            raise LookupError(f"schedule run {run_id} or its schedule is gone")
+        if not send:
+            await db_schedules.insert_notification(
+                db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=Kind.RUN.value,
+                channel=schedule.get("notify_channel"), chat=schedule.get("notify_chat"), text=text, status="sent",
+                error=None, manager_event_id=manager_event_id)
+            return "sent"
+        return await self._deliver(schedule, Kind.RUN, text, run_id=run_id, manager_event_id=manager_event_id)
 
     async def check_stale(self, now: datetime) -> None:
         """Start the stale alert of each enabled schedule past its deadline. A schedule whose run is in progress
@@ -439,7 +460,8 @@ class Notifier:
     async def _switch(schedule_id: str, column: str, at: datetime | None) -> bool:
         return await db_schedules.set_alert(db_connection.get_pool(), schedule_id, column, at)
 
-    async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> str:
+    async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None,
+                       manager_event_id: int | None = None) -> str:
         """Send and record the message; its status: ``sent``, ``failed`` (not handed to a channel) or ``dashboard``."""
         from .schedules import notify_targets
 
@@ -469,7 +491,7 @@ class Notifier:
         try:
             await db_schedules.insert_notification(
                 db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=kind.value, channel=channel,
-                chat=chat, text=text, status=status, error=error,
+                chat=chat, text=text, status=status, error=error, manager_event_id=manager_event_id,
             )
         except asyncpg.ForeignKeyViolationError:
             # Deleted since the message was written: its outbox went with it.

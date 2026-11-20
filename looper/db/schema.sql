@@ -1794,6 +1794,9 @@ CREATE INDEX IF NOT EXISTS idx_manager_events_task ON manager_events (task_id);
 CREATE INDEX IF NOT EXISTS idx_manager_events_created ON manager_events (created_at);
 CREATE INDEX IF NOT EXISTS idx_manager_events_schedule_run ON manager_events (schedule_run_id) WHERE schedule_run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_manager_events_record ON manager_events (record_id) WHERE record_id IS NOT NULL;
+-- The completion event that told a schedule run's message (the Manager's reply, or its fallback); NULL otherwise.
+ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT
+    REFERENCES manager_events(id) ON DELETE SET NULL;
 -- manager events end
 
 -- agent spawns begin

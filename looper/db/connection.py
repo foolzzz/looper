@@ -138,6 +138,7 @@ _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _SUBSCRIPTIONS = "subscriptions"
 _MANAGER_EVENTS = "manager_events"
+_SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
 _RUN_TREE = "run_tree"
 _AGENT_SPAWNS = "agent_spawns"
 _STEP_DIFFICULTY = "step_difficulty"
@@ -719,6 +720,17 @@ async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
 
 
+async def _schedule_notification_events_pending(conn: asyncpg.Connection) -> bool:
+    """A database whose completion events predate ``schedule_notifications.manager_event_id`` (the block above
+    adds it to one that gets the table now, and schema.sql to a new one)."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_NOTIFICATION_EVENTS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('schedule_notifications') "
+        "AND attname = 'manager_event_id' AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
     """Only older databases need this additive table; fresh schemas already contain it."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROJECT_ACTIVITY):
@@ -1103,6 +1115,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _manager_events_pending(conn):
             await conn.execute(_manager_events_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
+        if await _schedule_notification_events_pending(conn):
+            await conn.execute("ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT "
+                               "REFERENCES manager_events(id) ON DELETE SET NULL")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFICATION_EVENTS)
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():
                 await conn.execute(ddl)
@@ -1241,7 +1257,8 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
             or await _subscriptions_pending(conn)
             or await _ledger_pending(conn)
-            or await _manager_events_pending(conn) or await _message_leads_pending(conn)
+            or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
+            or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)

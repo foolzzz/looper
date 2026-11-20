@@ -729,13 +729,15 @@ async def reset_overlaps(conn: Db, schedule_id: str) -> bool:
 
 
 async def insert_notification(conn: Db, *, schedule_id: str, run_id: str | None, kind: str, channel: str | None,
-                              chat: str | None, text: str, status: str, error: str | None) -> str:
-    """Record a message; ``created_at`` is the database's clock, so the outbox keeps the order they were sent in."""
+                              chat: str | None, text: str, status: str, error: str | None,
+                              manager_event_id: int | None = None) -> str:
+    """Record a message; ``created_at`` is the database's clock, so the outbox keeps the order they were sent in.
+    ``manager_event_id``: the completion event that told the run (the Manager's reply, or its fallback)."""
     notification_id = f"note-{uuid.uuid4().hex[:12]}"
     await conn.execute(
         "INSERT INTO schedule_notifications (id, schedule_id, run_id, kind, channel, chat, text, status, error, "
-        "created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp())",
-        notification_id, schedule_id, run_id, kind, channel, chat, text, status, error,
+        "manager_event_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp())",
+        notification_id, schedule_id, run_id, kind, channel, chat, text, status, error, manager_event_id,
     )
     return notification_id
 

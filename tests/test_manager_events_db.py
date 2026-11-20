@@ -324,15 +324,24 @@ def test_an_event_is_unique_by_its_dedupe_key_and_goes_with_its_task(monkeypatch
     run_db(check, monkeypatch, timeout=30)
 
 
-def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch):
+HAS_EVENT_COLUMN = ("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = "
+                    "'schedule_notifications' AND column_name = 'manager_event_id')")
+
+
+@pytest.mark.parametrize("before", ["no_table", "no_column"])
+def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(monkeypatch, before):
     async def check(pool):
-        await pool.execute("DROP TABLE manager_events; DELETE FROM schema_migrations WHERE name = 'manager_events'")
+        await pool.execute("ALTER TABLE schedule_notifications DROP COLUMN manager_event_id; "
+                           "DELETE FROM schema_migrations WHERE name = 'schedule_notification_events'")
+        if before == "no_table":  # older than completion events
+            await pool.execute("DROP TABLE manager_events; DELETE FROM schema_migrations WHERE name = 'manager_events'")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
+        assert await pool.fetchval(HAS_EVENT_COLUMN)
 
     run_db(check, monkeypatch, timeout=30)
 
@@ -348,7 +357,8 @@ def test_events_older_than_thirty_days_are_pruned_and_the_summary_counts_a_day(m
         await pool.execute("UPDATE manager_events SET created_at = now() - interval '31 days' "
                            "WHERE dedupe_key = 'month-old'")
         assert await store.summary() == {"window_hours": 24, "total": 1, "by_state": {"skipped": 1},
-                                         "by_reason": {"off": 1}}
+                                         "by_reason": {"off": 1}, "turn_cost_usd": 0.0, "pending": 0,
+                                         "oldest_pending_seconds": None, "failing": False}
         cutoff = datetime.now(timezone.utc) - timedelta(days=store.RETENTION_DAYS)
         assert await store.prune(pool, cutoff) == 1
         assert [row["dedupe_key"] for row in await events(pool)] == ["new", "day-old"]
@@ -365,7 +375,9 @@ def test_the_summary_is_an_operator_operation(monkeypatch, tmp_path):
             assert status == 403
             status, answer = await call("manager_events.summary")
             assert (status, answer["result"]) == (200, {"window_hours": 24, "total": 1,
-                                                        "by_state": {"skipped": 1}, "by_reason": {"off": 1}})
+                                                        "by_state": {"skipped": 1}, "by_reason": {"off": 1},
+                                                        "turn_cost_usd": 0.0, "pending": 0,
+                                                        "oldest_pending_seconds": None, "failing": False})
 
     run_db(check, monkeypatch, timeout=30)
 
