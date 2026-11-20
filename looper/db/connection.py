@@ -693,15 +693,18 @@ async def _ledger_pending(conn: asyncpg.Connection) -> bool:
 
 
 async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
-    """A database whose leads block made the merge key cascade, without the trigger that detaches merged intents."""
-    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _INTENT_MERGES):
-        return False
+    """Whether the intents table lacks the AFTER DELETE detach trigger ``A_intents_detach_merged``, still has the
+    earlier BEFORE trigger, or has a merge key that cascades. Judged by the catalog, not the marker, so a database that
+    ran an earlier version of this block is upgraded too."""
     if not await conn.fetchval("SELECT to_regclass('intents') IS NOT NULL"):
         return False
     return not await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'intents_detach_merged' "
-        "AND tgrelid = 'intents'::regclass) AND NOT EXISTS (SELECT 1 FROM pg_constraint "
-        "WHERE conname = 'intents_merged_into_fkey' AND conrelid = 'intents'::regclass AND confdeltype = 'c')")
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'intents'::regclass "
+        "AND tgname = 'A_intents_detach_merged') "
+        "AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'intents'::regclass "
+        "AND tgname = 'intents_detach_merged') "
+        "AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'intents_merged_into_fkey' "
+        "AND conrelid = 'intents'::regclass AND confdeltype = 'c')")
 
 
 async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
@@ -1191,7 +1194,8 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_LEADS)
         if await _intent_merges_pending(conn):
             await conn.execute(_intent_merges_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _INTENT_MERGES)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                               _INTENT_MERGES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))

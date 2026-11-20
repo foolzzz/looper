@@ -220,7 +220,7 @@ def test_an_intent_merged_into_a_deleted_one_is_pending_again_whatever_deletes_i
 def test_a_database_whose_merge_key_cascades_is_upgraded(monkeypatch):
     async def check(pool):
         await pool.execute(
-            "DROP TRIGGER intents_detach_merged ON intents; ALTER TABLE intents DROP CONSTRAINT intents_merged_into_fkey; "
+            "DROP TRIGGER \"A_intents_detach_merged\" ON intents; ALTER TABLE intents DROP CONSTRAINT intents_merged_into_fkey; "
             "ALTER TABLE intents ADD CONSTRAINT intents_merged_into_fkey FOREIGN KEY (merged_into) REFERENCES intents(id) "
             "ON DELETE CASCADE; DELETE FROM schema_migrations WHERE name = 'intent_merges'")
         async with pool.acquire() as conn:
@@ -234,5 +234,40 @@ def test_a_database_whose_merge_key_cascades_is_upgraded(monkeypatch):
         await pool.execute("DELETE FROM source_events WHERE seq = $1", ours)
         assert await pool.fetchval("SELECT state FROM intents WHERE id = $1", merged) == "pending"
         await connection.ensure_schema(pool)  # and a second upgrade changes nothing
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_a_chain_of_merges_deleted_in_one_statement_detaches_what_stays(monkeypatch):
+    async def check(pool):
+        a_seq, b_seq, c_seq = await _events(pool, "first report", "second report", "third report")
+        a = await sup.intent(pool, [a_seq])
+        b = await sup.intent(pool, [b_seq], state="merged", merged_into=a)
+        c = await sup.intent(pool, [c_seq], state="merged", merged_into=b)
+        await pool.execute("DELETE FROM intents WHERE id = ANY($1::bigint[])", [a, b])  # C -> B -> A, A and B at once
+        assert await pool.fetchval("SELECT count(*) FROM intents WHERE id = ANY($1::bigint[])", [a, b]) == 0
+        assert dict(await pool.fetchrow("SELECT state, merged_into FROM intents WHERE id = $1", c)) == {
+            "state": "pending", "merged_into": None}
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_a_database_with_the_earlier_before_trigger_is_upgraded(monkeypatch):
+    async def check(pool):
+        await pool.execute(
+            "DROP TRIGGER \"A_intents_detach_merged\" ON intents; "
+            "CREATE OR REPLACE FUNCTION intents_detach_merged() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            "UPDATE intents SET state = 'pending', merged_into = NULL WHERE merged_into = OLD.id; RETURN OLD; END $$; "
+            "CREATE TRIGGER intents_detach_merged BEFORE DELETE ON intents FOR EACH ROW "
+            "EXECUTE FUNCTION intents_detach_merged(); "
+            "INSERT INTO schema_migrations (name) VALUES ('intent_merges') ON CONFLICT DO NOTHING")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)  # the marker alone does not hide it
+        await connection.ensure_schema(pool)
+        names = {row["tgname"] for row in await pool.fetch(
+            "SELECT tgname FROM pg_trigger WHERE tgrelid = 'intents'::regclass AND NOT tgisinternal")}
+        assert "A_intents_detach_merged" in names and "intents_detach_merged" not in names
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
 
     run_db(check, monkeypatch, timeout=30)

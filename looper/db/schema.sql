@@ -2067,18 +2067,21 @@ ON CONFLICT DO NOTHING;
 
 -- An intent merged into another is its own matter, made from its own messages: deleting the intent it was merged
 -- into (its messages deleted, its chat purged, any code path) makes it pending again instead of deleting it. The key
--- takes no action of its own, so a path that skipped the trigger would fail rather than cascade. connection.py applies
--- this block to databases whose leads block predates it (their key cascaded), so keep it between the markers and
--- idempotent.
+-- takes no action of its own, so a path that skipped the trigger would fail rather than cascade. The trigger runs
+-- AFTER each deleted row (a BEFORE trigger could not update a row the same statement deletes, as in a chain of merges
+-- deleted at once) and its name sorts before the key's own RI_ConstraintTrigger_* triggers, which PostgreSQL fires in
+-- name order, so the merged rows are detached before the key is checked. connection.py applies this block to
+-- databases whose leads block predates it, so keep it between the markers and idempotent.
 -- intent merges begin
 ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_merged_into_fkey;
 ALTER TABLE intents ADD CONSTRAINT intents_merged_into_fkey FOREIGN KEY (merged_into) REFERENCES intents(id);
 CREATE OR REPLACE FUNCTION intents_detach_merged() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     UPDATE intents SET state = 'pending', merged_into = NULL, updated_at = now() WHERE merged_into = OLD.id;
-    RETURN OLD;
+    RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS intents_detach_merged ON intents;
-CREATE TRIGGER intents_detach_merged BEFORE DELETE ON intents
+DROP TRIGGER IF EXISTS "A_intents_detach_merged" ON intents;
+CREATE TRIGGER "A_intents_detach_merged" AFTER DELETE ON intents
     FOR EACH ROW EXECUTE FUNCTION intents_detach_merged();
 -- intent merges end
