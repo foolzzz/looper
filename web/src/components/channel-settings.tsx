@@ -258,8 +258,10 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
       const config: Record<string, unknown> = { ...saved, ...fields };
       if (allowlist) {
         config[allowlist.field] = ids.map((value) => value.trim());
-        // Only a sender still on the list can be the operator.
-        config.operator_sender_id = ids.map((value) => value.trim()).includes(operator) ? operator : null;
+        // Only a sender still on the list can be the operator; an unchanged, unset one is left out of the config.
+        if (operator !== savedOperator || savedOperator) {
+          config.operator_sender_id = ids.map((value) => value.trim()).includes(operator) ? operator : null;
+        }
       }
       const payload: Partial<ChannelConfig> & { bot_token?: string } = { enabled, config };
       // Only send the token when it changed from the mask; the mask would keep it anyway, but this avoids a needless write.
