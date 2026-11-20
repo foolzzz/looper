@@ -1497,7 +1497,8 @@ class ManagerAgent:
         tools = await token.step("tool_listing", self.ops.current_listing(ask.turn)) if self.ops is not None else []
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] == ops_leads.LEADS_TOOL for t in tools)
-        if self._has_templates or has_workflows or has_leads or self.agent_id != DEFAULT_MANAGER_ID:
+        has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
+        if self._has_templates or has_workflows or has_leads or has_ledger or self.agent_id != DEFAULT_MANAGER_ID:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)

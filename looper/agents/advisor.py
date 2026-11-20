@@ -12,6 +12,8 @@ three checks in order, the consult ``linting``:
 
 A request that fails one goes back to the Planner with what to fix (``Returned``), at most ``RETURNS_MAX`` times;
 after that the consult is ``blocked``. A judge that cannot judge fails the consult: no request goes out unjudged.
+A run that ends in error (``ChildFailure.RUNTIME``) is run once more; a rate-limited one is not, and fails the
+consult (``rate_limited``). ``expire`` ends a consult that ran past its time.
 A request that passes is the consult's question (``advisor_advice``) and starts a round of the advisor (the
 ``advisor`` role, ``spawn.run_child``, a fresh process each round): its answer (``advice.parse_response``) makes the
 consult ``answered``; a question back makes it ``needs_info`` while rounds are left (``ROUNDS_MAX`` in all), else
@@ -23,8 +25,10 @@ parent, and its cost is the task's.
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -44,7 +48,8 @@ logger = logging.getLogger(__name__)
 
 RETURNS_MAX = 2
 ROUNDS_MAX = 3  # the first round and two that answer what the advisor asked
-ADVISOR_TIMEOUT_SEC = 300
+ADVISOR_TIMEOUT_SEC = 300  # a round's
+CONSULT_MAX_SEC = 900  # a whole consult's, its rounds and the Planner's turns about it included
 JUDGE_TIMEOUT_SEC = 120
 
 
@@ -58,14 +63,17 @@ class Source(str, Enum):
 
 @dataclass(frozen=True)
 class Brief:
-    """What a consult is about: its task's step, the attempt its advice is for, what started it, and the run that
-    asked (the Planner's turn)."""
+    """What a consult is about: its task's step (None: the plan), the attempt its advice is for, what started it,
+    the run that asked (the Planner's turn), the kind of request the Planner first wrote and what was known when
+    it asked (``planner_advice.Evidence.fingerprint``)."""
 
     task_id: str
     step_id: str | None
     attempt: int
     source: Source
     parent_record_id: int | None = None
+    asked: str | None = None
+    evidence: str | None = None
 
     @property
     def kind(self) -> AdviceKind | None:
@@ -74,7 +82,8 @@ class Brief:
 
     def row(self) -> dict[str, Any]:
         return {"task_id": self.task_id, "step_id": self.step_id, "attempt": self.attempt,
-                "source": self.source.value}
+                "source": self.source.value, **({"asked": self.asked} if self.asked else {}),
+                **({"evidence": self.evidence} if self.evidence else {})}
 
 
 @dataclass(frozen=True)
@@ -145,7 +154,8 @@ async def open_consult(brief: Brief, *, budget_usd: float) -> int:
 
 def _brief(row: Mapping[str, Any]) -> Brief:
     data = row["brief"]
-    return Brief(row["task_id"], row["step_id"], int(data["attempt"]), Source(data["source"]), row["parent_record_id"])
+    return Brief(row["task_id"], row["step_id"], int(data["attempt"]), Source(data["source"]), row["parent_record_id"],
+                 data.get("asked"), data.get("evidence"))
 
 
 def _left(row: Mapping[str, Any]) -> float:
@@ -156,11 +166,62 @@ def _failure_state(failure: ChildFailure) -> SpawnState:
     return SpawnState.OVER_BUDGET if failure is ChildFailure.BUDGET else SpawnState.FAILED
 
 
+async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentSettings, cap_usd: float,
+               runtime_root: Path, claude_bin: str, deadline: float | None = None) -> tuple[ChildResult, float]:
+    """Run ``child``, and once more when it ended in error (not when it was refused, rate-limited, over budget or
+    out of time), within ``deadline``; the last run's result, and what both spent. Each run is noted on the consult
+    when it starts and its spend booked when it ends, so a consult stopped meanwhile keeps what its runs spent
+    (``reconcile``)."""
+    async def started(record_id: int) -> None:
+        await agent_spawns.note_run(spawn_id, record_id)
+
+    done = await run_child(child, parent=_parent(brief), settings=settings, cap_usd=cap_usd, runtime_root=runtime_root,
+                           claude_bin=claude_bin, on_record=started)
+    await _book(spawn_id, done)
+    spent = done.cost_usd or 0.0
+    left = _time_left(deadline)
+    if done.failure is ChildFailure.RUNTIME and round(cap_usd - spent, 6) >= MIN_RUN_USD and (left is None or left >= 1):
+        logger.info("%s run %s ended in error (%s); running it once more", child.record_kind, done.record_id,
+                    done.detail)
+        again = replace(child, run_id=uuid.uuid4().hex[:12],
+                        timeout_s=child.timeout_s if left is None else min(child.timeout_s, left))
+        done = await run_child(again, parent=_parent(brief),
+                               settings=settings, cap_usd=round(cap_usd - spent, 6), runtime_root=runtime_root,
+                               claude_bin=claude_bin, on_record=started)
+        await _book(spawn_id, done)
+        spent = round(spent + (done.cost_usd or 0.0), 6)
+    return done, spent
+
+
+async def _book(spawn_id: int, done: ChildResult) -> None:
+    if done.record_id is not None and done.cost_usd:
+        await agent_spawns.book(spawn_id, done.record_id, done.cost_usd)
+
+
+async def reconcile(spawn_id: int) -> None:
+    """Book what each run the consult started spent and is not booked yet (one stopped while it ran): what its
+    record says, once per run, so it can be called again."""
+    from ..db import llm_records
+
+    row = await agent_spawns.get(spawn_id)
+    if row is None:
+        return
+    booked = set(row["result"].get("booked", ()))
+    for record_id in row["result"].get("runs", ()):
+        if record_id in booked:
+            continue
+        record = await llm_records.get_record(record_id)
+        if record and record.get("cost_usd"):
+            await agent_spawns.book(spawn_id, record_id, float(record["cost_usd"]))
+
+
 async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, context: Context = Context(),
                  runtime_root: Path, claude_bin: str = "claude", timeout_s: float = ADVISOR_TIMEOUT_SEC,
-                 ) -> Returned | Ended:
+                 deadline: float | None = None) -> Returned | Ended:
     """Check the request a consult waits for (``drafting``, or ``needs_info`` for one that answers the advisor) and,
-    once it passes, run a round of the advisor. Raises ``ValueError`` for a consult that waits for no request."""
+    once it passes, run a round of the advisor. ``deadline`` (``time.monotonic``) is the end of the consult's whole
+    time: no run goes past it, and none starts after it. Raises ``ValueError`` for a consult that waits for no
+    request."""
     row = await agent_spawns.get(spawn_id)
     if row is None or row["state"] not in (SpawnState.DRAFTING.value, SpawnState.NEEDS_INFO.value):
         raise ValueError(f"consult {spawn_id} waits for no request")
@@ -180,31 +241,44 @@ async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, c
     if _left(row) < MIN_RUN_USD:
         return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
                           detail=f"{_left(row):.2f} USD is left, less than a run needs")
-    judged = await _judge(row, brief, request, runtime_root=runtime_root, claude_bin=claude_bin)
+    if (left := _time_left(deadline)) is not None and left <= 0:
+        return await _end(row, SpawnState.FAILED, failure="timeout", detail=_PAST)
+    judged = await _judge(row, brief, request, runtime_root=runtime_root, claude_bin=claude_bin, deadline=deadline)
     if isinstance(judged, Ended):
         return judged
     verdict, spent, judge = judged
     if not verdict.passed:
         return await _return(row, verdict.problems(),
-                             [{"stage": "judge", "category": c, "field": f} for c, f in verdict.leaks]
+                             [{"stage": "judge", **leak} for leak in verdict.view()["leaks"]
+                              if (leak["category"], leak["field"]) in verdict.blocking]
                              or [{"stage": "judge", "category": "not_standalone" if not verdict.standalone
-                                  else "unanswerable"}], spent_usd=spent, append={"judges": judge})
+                                  else "unanswerable"}], append={"judges": judge})
     inputs = {"request": dict(request.fields), "bindings": [{"alias": b.alias, "refers_to": b.refers_to}
                                                             for b in bindings]}
     await advisor_advice.record_question(spawn_id=spawn_id, task_id=brief.task_id, step_id=brief.step_id,
                                          attempt=brief.attempt, source=brief.source.value, kind=request.kind.value,
                                          question=request.fields)
     if round(_left(row) - spent, 6) < MIN_RUN_USD:
-        return await _end(row, SpawnState.OVER_BUDGET, spent_usd=spent, failure="budget",
+        return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
                           detail="too little is left for a round of the advisor after the judge",
                           append={"judges": judge})
-    row = await agent_spawns.move(spawn_id, SpawnState.ASKING, expect=SpawnState.LINTING, spent_usd=spent,
+    if (left := _time_left(deadline)) is not None and left <= 0:
+        return await _end(row, SpawnState.FAILED, failure="timeout", detail=_PAST, append={"judges": judge})
+    row = await agent_spawns.move(spawn_id, SpawnState.ASKING, expect=SpawnState.LINTING,
                                   inputs=inputs, append={"judges": judge})
-    return await _ask(row, brief, request, runtime_root=runtime_root, claude_bin=claude_bin, timeout_s=timeout_s)
+    return await _ask(row, brief, request, runtime_root=runtime_root, claude_bin=claude_bin,
+                      timeout_s=timeout_s if left is None else min(timeout_s, left), deadline=deadline)
+
+
+_PAST = f"the consult ran past {CONSULT_MAX_SEC // 60} minutes"
+
+
+def _time_left(deadline: float | None) -> float | None:
+    return None if deadline is None else deadline - time.monotonic()
 
 
 async def _judge(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *, runtime_root: Path,
-                 claude_bin: str) -> Ended | tuple[Any, float, dict[str, Any]]:
+                 claude_bin: str, deadline: float | None = None) -> Ended | tuple[Any, float, dict[str, Any]]:
     """The judge's verdict on ``request``, what it cost and its entry in the consult's result; else how the consult
     ended."""
     settings = await load_agent_settings(AgentType.ADVICE_CHECK, wait=True)
@@ -214,24 +288,25 @@ async def _judge(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *
                           detail="the advice_check role is turned off (Settings → Roles): no request goes out unjudged")
     child = ChildRun(SpawnKind.ADVISOR, _system_prompt(AgentType.ADVICE_CHECK, settings, config, JUDGE_CONTRACT,
                                                        "JUDGE_CONTRACT"),
-                     judge_turn(request), timeout_s=min(JUDGE_TIMEOUT_SEC, config.timeout_seconds or JUDGE_TIMEOUT_SEC),
+                     judge_turn(request), timeout_s=min(JUDGE_TIMEOUT_SEC, config.timeout_seconds or JUDGE_TIMEOUT_SEC,
+                                                        JUDGE_TIMEOUT_SEC if deadline is None else _time_left(deadline)),
                      max_turns=1, role=AgentType.ADVICE_CHECK, run_kind="advice_check", private=True)
-    done = await run_child(child, parent=_parent(brief), settings=settings, cap_usd=_left(row),
-                           runtime_root=runtime_root, claude_bin=claude_bin)
-    spent = done.cost_usd or 0.0
-    judged = {"record_id": done.record_id, "cost_usd": done.cost_usd, "round": row["rounds"] + 1}
+    done, spent = await _run(child, spawn_id=row["id"], brief=brief, settings=settings, cap_usd=_left(row),
+                             runtime_root=runtime_root, claude_bin=claude_bin, deadline=deadline)
+    judged = {"record_id": done.record_id, "cost_usd": spent, "round": row["rounds"] + 1}
     if done.failure is not None:
-        return await _end(row, _failure_state(done.failure), spent_usd=spent, failure="judge",
+        return await _end(row, _failure_state(done.failure),
+                          failure="rate_limited" if done.failure is ChildFailure.RATE_LIMITED else "judge",
                           detail=f"the judge could not judge the request: {done.detail}",
                           append={"judges": {**judged, "failure": done.failure.value}})
     try:
         verdict = parse_verdict(done.output or "")
     except AdviceError as exc:
-        return await _end(row, SpawnState.FAILED, spent_usd=spent, failure="judge", detail=str(exc),
+        return await _end(row, SpawnState.FAILED, failure="judge", detail=str(exc),
                           append={"judges": {**judged, "failure": "parse"}})
     except Exception:  # whatever the reply was, the run's spend is booked and the consult ends
         logger.warning("cannot read the judge's verdict of consult %s", row["id"], exc_info=True)
-        return await _end(row, SpawnState.FAILED, spent_usd=spent, failure="judge",
+        return await _end(row, SpawnState.FAILED, failure="judge",
                           detail="the judge's reply could not be read",
                           append={"judges": {**judged, "failure": "parse"}})
     return verdict, spent, {**judged, **verdict.view(), "passed": verdict.passed}
@@ -242,7 +317,7 @@ def _parent(brief: Brief) -> SpawnParent:
 
 
 async def _ask(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *, runtime_root: Path, claude_bin: str,
-               timeout_s: float) -> Ended:
+               timeout_s: float, deadline: float | None = None) -> Ended:
     """One round of the advisor over ``request``, the consult ``asking``."""
     settings = await load_agent_settings(AgentType.ADVISOR, wait=True)
     config = await _role(AgentType.ADVISOR, ADVISOR_ROLE_PROMPT)
@@ -253,32 +328,33 @@ async def _ask(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *, 
                                                        "ADVISOR_CONTRACT"),
                      advisor_turn(request), timeout_s=min(timeout_s, config.timeout_seconds or timeout_s),
                      max_turns=2, role=AgentType.ADVISOR)
-    done = await run_child(child, parent=_parent(brief), settings=settings, cap_usd=_left(row),
-                           runtime_root=runtime_root, claude_bin=claude_bin)
-    rounds = {"rounds": done.round()}
+    done, spent = await _run(child, spawn_id=row["id"], brief=brief, settings=settings, cap_usd=_left(row),
+                             runtime_root=runtime_root, claude_bin=claude_bin, deadline=deadline)
+    rounds = {"rounds": {**done.round(), "cost_usd": spent}}
     if done.failure is not None:
-        return await _end(row, _failure_state(done.failure), spent_usd=done.cost_usd or 0.0, child=done,
+        return await _end(row, _failure_state(done.failure), child=done,
                           failure=done.failure.value, detail=done.detail, append=rounds)
     try:
         response = parse_response(done.output or "", request)
     except AdviceError as exc:
-        return await _end(row, SpawnState.FAILED, spent_usd=done.cost_usd or 0.0, child=done, failure="parse",
+        return await _end(row, SpawnState.FAILED, child=done, failure="parse",
                           detail=f"the advisor's answer does not fit AdviceResponse v1: {exc}", append=rounds)
     except Exception:  # whatever the reply was, the run's spend is booked and the consult ends
         logger.warning("cannot read the advisor's answer of consult %s", row["id"], exc_info=True)
-        return await _end(row, SpawnState.FAILED, spent_usd=done.cost_usd or 0.0, child=done, failure="parse",
+        return await _end(row, SpawnState.FAILED, child=done, failure="parse",
                           detail="the advisor's answer could not be read", append=rounds)
     if response.status is AdviceStatus.NEEDS_INFO:
         if row["rounds"] >= ROUNDS_MAX:
-            return await _end(row, SpawnState.FAILED, spent_usd=done.cost_usd or 0.0, child=done,
+            return await _end(row, SpawnState.FAILED, child=done,
                               failure="rounds_exhausted", detail="the advisor still needs more after its last round",
                               append=rounds, response=response)
         moved = await agent_spawns.move(row["id"], SpawnState.NEEDS_INFO, expect=SpawnState.ASKING,
-                                        child_record_id=done.record_id, spent_usd=done.cost_usd or 0.0,
-                                        append=rounds, result={"status": response.status.value})
+                                        child_record_id=done.record_id,
+                                        append=rounds, result={"status": response.status.value,
+                                                               "needs_info": list(response.needs_info)})
         return Ended(SpawnState.NEEDS_INFO, response, row=moved or {})
     await advisor_advice.record_advice(row["id"], response.fields)
-    return await _end(row, SpawnState.ANSWERED, spent_usd=done.cost_usd or 0.0, child=done, append=rounds,
+    return await _end(row, SpawnState.ANSWERED, child=done, append=rounds,
                       response=response)
 
 
@@ -301,16 +377,16 @@ async def _return(row: Mapping[str, Any], problems: list[str], checks: list[dict
     one by one, by category and position."""
     number = row["returns"] + 1
     marked = [{**check, "return": number, "round": row["rounds"] + 1} for check in checks]
+    # Appended to the result as it is now: ``row`` was read before this round's runs were noted and booked.
+    appended = {**(append or {}), "checks": marked}
     if row["returns"] >= RETURNS_MAX:
-        result = {**row["result"], "failure": "blocked", "checks": [*row["result"].get("checks", []), *marked]}
         moved = await agent_spawns.move(row["id"], SpawnState.BLOCKED, expect=SpawnState.LINTING,
-                                        spent_usd=spent_usd, result=result, append=append,
+                                        spent_usd=spent_usd, result={"failure": "blocked"}, append=appended,
                                         detail=f"its request failed the checks after {RETURNS_MAX} returns")
         return Ended(SpawnState.BLOCKED, failure="blocked", detail="the request failed the checks again",
                      row=moved or {})
-    result = {**row["result"], "checks": [*row["result"].get("checks", []), *marked]}
     await agent_spawns.move(row["id"], SpawnState.DRAFTING, expect=SpawnState.LINTING, returned=True,
-                            spent_usd=spent_usd, result=result, append=append)
+                            spent_usd=spent_usd, result=None, append=appended)
     return Returned(tuple(problems), RETURNS_MAX - number)
 
 
@@ -323,12 +399,23 @@ async def withdraw(spawn_id: int, reason: str) -> Ended | None:
     return await _end(row, SpawnState.FAILED, failure=failure, detail=reason[:1000])
 
 
+async def expire(spawn_id: int, *, failure: str = "timeout", detail: str = "") -> Ended | None:
+    """End a consult wherever it is, as ``failure``: by default one that ran past ``CONSULT_MAX_SEC``; None when it
+    had ended."""
+    await reconcile(spawn_id)
+    row = await agent_spawns.get(spawn_id)
+    if row is None or row["state"] in {s.value for s in agent_spawns.FINISHED}:
+        return None
+    return await _end(row, SpawnState.FAILED, failure=failure, detail=detail or _PAST)
+
+
 async def fail_interrupted() -> int:
-    """At the server's start: the consults a stopped server left checking or asking failed (their runs are gone);
-    how many."""
+    """At the server's start: every consult a stopped server left unfinished failed (its runs are gone, and the
+    Planner's turn that was writing its request with them; the Planner takes its decision again); how many."""
     count = 0
-    for state in (SpawnState.LINTING, SpawnState.ASKING):
+    for state in (SpawnState.DRAFTING, SpawnState.LINTING, SpawnState.ASKING, SpawnState.NEEDS_INFO):
         for spawn_id in await agent_spawns.ids_in(state):
+            await reconcile(spawn_id)
             if await agent_spawns.move(spawn_id, SpawnState.FAILED, expect=state, result={"failure": "interrupted"},
                                        detail="interrupted by a restart") is not None:
                 count += 1

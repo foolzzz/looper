@@ -9,7 +9,7 @@ and never moves again. ``result`` holds typed outcomes only: each round, each ch
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Any
 
@@ -98,13 +98,14 @@ async def for_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[di
 
 async def move(spawn_id: int, to: SpawnState, *, expect: SpawnState, child_record_id: int | None = None,
                spent_usd: float = 0.0, result: Mapping[str, Any] | None = None,
-               append: Mapping[str, Mapping[str, Any]] | None = None, inputs: Mapping[str, Any] | None = None,
+               append: Mapping[str, Mapping[str, Any] | Sequence[Mapping[str, Any]]] | None = None,
+               inputs: Mapping[str, Any] | None = None,
                detail: str | None = None, returned: bool = False,
                pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     """Move the row from ``expect`` to ``to``; None, changing nothing, when it is no longer in ``expect``.
 
     With the move: ``spent_usd`` is added to what it spent; ``result``'s keys replace the result's, and each item of
-    ``append`` is added to the list under its key; ``inputs`` replaces its inputs; ``detail`` replaces its detail; a
+    ``append`` (one, or a list of them) is added to the list under its key, all as the row is now; ``inputs`` replaces its inputs; ``detail`` replaces its detail; a
     move to ``asking`` counts a round, and ``returned`` (``linting`` to ``drafting``) a return. Raises
     ``TransitionError`` for a move ``TRANSITIONS`` does not have."""
     if to not in TRANSITIONS.get(expect, frozenset()):
@@ -120,7 +121,8 @@ async def move(spawn_id: int, to: SpawnState, *, expect: SpawnState, child_recor
             return None
         merged = {**current["result"], **(result or {})}
         for key, item in (append or {}).items():
-            merged[key] = [*merged.get(key, []), dict(item)]
+            items = item if isinstance(item, (list, tuple)) else [item]
+            merged[key] = [*merged.get(key, []), *(dict(entry) for entry in items)]
         row = await conn.fetchrow(
             """UPDATE agent_spawns
                   SET state = $2, child_record_id = COALESCE($3, child_record_id), spent_usd = spent_usd + $4,
@@ -133,3 +135,55 @@ async def move(spawn_id: int, to: SpawnState, *, expect: SpawnState, child_recor
             json.dumps(dict(inputs)) if inputs is not None else None, detail,
             1 if to is SpawnState.ASKING else 0, 1 if returned else 0, to in FINISHED)
     return _row(row)
+
+
+async def note_run(spawn_id: int, record_id: int, *, pool: asyncpg.Pool | None = None) -> None:
+    """A run the spawn started (its ``llm_records`` id, under ``result.runs``), so what it spends can be booked even
+    when the spawn is stopped while it runs."""
+    pool = pool or get_pool()
+    await pool.execute(
+        """UPDATE agent_spawns SET result = jsonb_set(result, '{runs}', COALESCE(result->'runs', '[]') || to_jsonb($2::bigint))
+            WHERE id = $1 AND NOT COALESCE(result->'runs', '[]') @> to_jsonb($2::bigint)""", spawn_id, record_id)
+
+
+async def book(spawn_id: int, record_id: int, cost_usd: float, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Add what run ``record_id`` spent to the spawn's spend, once per run (``result.booked``); False when it was
+    booked before."""
+    if cost_usd < 0:
+        raise ValueError("cost_usd cannot be negative")
+    pool = pool or get_pool()
+    status = await pool.execute(
+        """UPDATE agent_spawns SET spent_usd = spent_usd + $3, updated_at = now(),
+                  result = jsonb_set(result, '{booked}', COALESCE(result->'booked', '[]') || to_jsonb($2::bigint))
+            WHERE id = $1 AND NOT COALESCE(result->'booked', '[]') @> to_jsonb($2::bigint)""",
+        spawn_id, record_id, cost_usd)
+    return status == "UPDATE 1"
+
+
+async def usage(task_id: str, step_id: str | None, *, kind: str = "advisor",
+                pool: asyncpg.Pool | None = None) -> tuple[int, int, float]:
+    """A task's spawns of ``kind``: how many it has, how many of them are about ``step_id``, and what they spent."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        "SELECT count(*) AS task, count(*) FILTER (WHERE step_id = $2) AS step, COALESCE(sum(spent_usd), 0) AS spent "
+        "FROM agent_spawns WHERE task_id = $1 AND kind = $3", task_id, step_id, kind)
+    return int(row["task"]), int(row["step"]), float(row["spent"])
+
+
+async def has_source(step_id: str, source: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Whether the step has a spawn that ``source`` started (a checkpoint's, whatever became of it)."""
+    pool = pool or get_pool()
+    return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM agent_spawns WHERE step_id = $1 "
+                                    "AND brief->>'source' = $2)", step_id, source))
+
+
+async def asked(task_id: str, step_id: str | None, *, kind: str | None = None, evidence: str,
+                states: tuple[str, ...] = (), pool: asyncpg.Pool | None = None) -> bool:
+    """Whether the task has a consult about ``step_id`` (None: the plan) asked with ``evidence``, of ``kind`` when
+    given, in one of ``states`` when given."""
+    pool = pool or get_pool()
+    return bool(await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM agent_spawns WHERE task_id = $1 AND step_id IS NOT DISTINCT FROM $2 "
+        "AND brief->>'evidence' = $3 AND ($4::text IS NULL OR brief->>'asked' = $4) "
+        "AND (cardinality($5::text[]) = 0 OR state = ANY($5::text[])))",
+        task_id, step_id, evidence, kind, list(states)))

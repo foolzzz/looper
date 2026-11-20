@@ -144,6 +144,7 @@ _RUN_TREE = "run_tree"
 _AGENT_SPAWNS = "agent_spawns"
 _STEP_DIFFICULTY = "step_difficulty"
 _ADVISOR_ROLES = "advisor_roles"
+_PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
 _LEDGER = "ledger"
 _MESSAGE_LEADS = "message_leads"
@@ -469,6 +470,25 @@ ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check
     ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor',
         'advisor', 'advice_check'));
 """
+
+
+# The advisor's project switch and limits, as schema.sql defines them.
+_PROJECT_ADVISOR_DDL = (
+    "ALTER TABLE projects ADD COLUMN advisor TEXT CHECK (advisor IN ('off', 'on')), "
+    "ADD COLUMN advisor_consult_budget_usd DOUBLE PRECISION "
+    "CHECK (advisor_consult_budget_usd >= 0.01 AND advisor_consult_budget_usd <= 5), "
+    "ADD COLUMN advisor_budget_usd DOUBLE PRECISION CHECK (advisor_budget_usd >= 0.01 AND advisor_budget_usd <= 50), "
+    "ADD COLUMN advisor_consults_per_task INTEGER "
+    "CHECK (advisor_consults_per_task >= 0 AND advisor_consults_per_task <= 100), "
+    "ADD COLUMN advisor_consults_per_step INTEGER "
+    "CHECK (advisor_consults_per_step >= 0 AND advisor_consults_per_step <= 10), "
+    "ADD COLUMN advisor_fallback_profile TEXT CHECK (length(advisor_fallback_profile) BETWEEN 1 AND 200), "
+    "ADD COLUMN advisor_internal_domains TEXT[] CHECK (cardinality(advisor_internal_domains) <= 20)"
+)
+
+
+async def _project_advisor_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _PROJECT_ADVISOR, "projects", "advisor")
 
 
 async def _advisor_roles_pending(conn: asyncpg.Connection) -> bool:
@@ -1122,6 +1142,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _advisor_roles_pending(conn):
             await conn.execute(_ADVISOR_ROLES_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _ADVISOR_ROLES)
+        if await _project_advisor_pending(conn):
+            await conn.execute(_PROJECT_ADVISOR_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ADVISOR)
         if await _llm_requests_pending(conn):
             await conn.execute(_LLM_REQUESTS_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS)
@@ -1304,6 +1327,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _intent_merges_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
+            or await _project_advisor_pending(conn)
             or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)

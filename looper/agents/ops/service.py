@@ -55,12 +55,13 @@ from typing import Any
 
 from ... import child_env
 from .. import chat_settings
-from ...db import manager_actions as db_actions, managers as db_managers, tasks as db_tasks, workflows as db_workflows
+from ...db import ledger as db_ledger, manager_actions as db_actions, managers as db_managers, tasks as db_tasks, workflows as db_workflows
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
+from . import ledger as ledger_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
 from .schedules import TOOLS as SCHEDULE_TOOLS
@@ -142,6 +143,7 @@ READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Every tool a Manager may have had: a call of one it no longer has is told so. The leads search is the default
 # Manager's while leads are on (``ManagerOps._with_leads``).
 _MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH)}
+_LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
 
 
 @dataclass(frozen=True)
@@ -285,6 +287,7 @@ class ManagerOps:
                 task_workflow_tool(tool, keys) if tool.name == "looper_task_create" else tool
                 for tool in scope.tools.values()]))
             self._scope = scope
+        scope = await self._with_ledger_tools(scope)
         scope = await self._with_leads(scope)
         if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
             return scope
@@ -307,6 +310,24 @@ class ManagerOps:
         if self._scope is scope:  # not replaced meanwhile by the fleet
             self.set_scope(current)
         return current
+
+    async def _with_ledger_tools(self, scope: OpsScope) -> OpsScope:
+        """The default Manager has the ledger's two tools exactly while ``ledger.enabled`` is on; no other Manager
+        does. Off, the scope is returned as it is, so its tool list is what it was before the ledger existed."""
+        if scope.manager_id != DEFAULT_MANAGER_ID or scope.tool_scope is not ManagerTools.ALL:
+            return scope
+        try:
+            wanted = await db_ledger.enabled()
+        except Exception:  # no database to read the switch from: the ledger counts as off
+            logger.debug("could not read ledger.enabled", exc_info=True)
+            wanted = False
+        if wanted == (ledger_tools.TOOL_NAMES[0] in scope.tools):
+            return scope
+        kept = [tool for tool in scope.tools.values() if tool.name not in _LEDGER_TOOLS]
+        adjusted = replace(scope, tools=_tool_map([*kept, *(ledger_tools.TOOLS if wanted else ())]))
+        if self._scope is scope:
+            self._scope = adjusted
+        return adjusted
 
     async def _with_leads(self, scope: OpsScope) -> OpsScope:
         """``scope`` with ``looper_leads_search`` exactly while ``leads.enabled`` is on, for the default Manager; any
@@ -412,7 +433,7 @@ class ManagerOps:
         runtime's write call runs only when it matches a tool_use of that turn's stream. Off (the default), the
         binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
         and each disagreement is logged and counted (``binding_report``), never refused."""
-        tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name)
+        tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
 
@@ -461,7 +482,9 @@ class ManagerOps:
             if impact is not None:
                 risk = Risk.HIGH
                 pending = self._ask(tool, arguments, impact, turn, confirmation=call.confirmation)
-                await self._record(turn, tool, arguments, risk, "needs_confirmation", confirmation_id=pending.id)
+                action_id = await self._record(turn, tool, arguments, risk, "needs_confirmation",
+                                               confirmation_id=pending.id)
+                await db_ledger.register_confirmation(action_id)
                 return {"status": "needs_confirmation", "confirmation_id": pending.id,
                         "expires_in_seconds": CONFIRMATION_SECONDS,
                         "shown_to_user": "Looper adds what this does and the request to confirm it after your reply. "
@@ -538,12 +561,14 @@ class ManagerOps:
         return pending
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
-                      error_code: str | None = None, result: Any = None, confirmation_id: str | None = None) -> None:
+                      error_code: str | None = None, result: Any = None,
+                      confirmation_id: str | None = None) -> int | None:
+        """Record the call; its row's id (None when it could not be written)."""
         task_id = tool.task_id(arguments)
         turn.task_ids.add(task_id)
         task_id = task_id or _created_task(result)
         try:
-            await db_actions.record(
+            return await db_actions.record(
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
                 confirmation_id=confirmation_id, task_id=task_id, manager_id=self._scope.manager_id,
@@ -551,6 +576,7 @@ class ManagerOps:
             )
         except Exception:
             logger.warning("could not record the Manager's call of %s", tool.name, exc_info=True)
+            return None
 
     # --- The Manager's turns ---
 

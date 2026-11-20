@@ -56,6 +56,8 @@ const ROLE_LABELS: Record<string, string> = {
   worker: "Worker",
   reviewer: "Reviewer",
   processor: "Processor",
+  advisor: "Advisor",
+  advice_check: "Advice check",
 };
 
 export function roleLabel(role: string): string {
