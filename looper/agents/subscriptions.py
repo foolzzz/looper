@@ -4,7 +4,8 @@ A subscription turns the events its source ingested after its cursor into one to
 (``processor.run``) and, once its push target is confirmed, into a message. This module holds what is pure or
 validates: the fields of a request, the selection a window applies, the ``lines_v1`` text the processor reads, what
 is made of its reply, the rule in words, and the text the operator confirms a push target with. The runs are in
-``subscription_runs`` (``SubscriptionRuns``), fired by the scheduler.
+``subscription_runs`` (``SubscriptionRuns``), fired by the scheduler. A subscription whose ``output_kind`` is
+``leads`` or ``intents`` stores what it finds instead of pushing (``extraction``); its presets are ``PRESETS``.
 
 ``lines_v1`` is the line format of lark-chat's hourly digest, kept exactly: ``[time]《chat》 sender: text`` with
 the text's whitespace collapsed and cut to ``text_max_chars`` UTF-16 units, newest message first, under a line that
@@ -26,7 +27,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..db import subscriptions as db_subs
-from . import cron
+from . import cron, extraction
 
 # Where lines_v1 writes its time: the same as lark-chat (``zh-CN``, 24-hour, numbers not padded but the clock's).
 RENDER = "lines_v1"
@@ -101,6 +102,24 @@ def _choice(field: str, allowed: str):
     return parse
 
 
+OUTPUT_KINDS = ("push", "leads", "intents")
+
+
+def _output_kind(raw: Any) -> str:
+    if raw not in OUTPUT_KINDS:
+        raise ValueError(f"subscription.output_kind must be one of {', '.join(OUTPUT_KINDS)}")
+    return raw
+
+
+def output_kind(sub: Mapping[str, Any] | None) -> str:
+    """What a subscription makes of its window: ``push``, or an extraction (``leads``, ``intents``)."""
+    return (sub or {}).get("output_kind") or "push"
+
+
+def is_extraction(sub: Mapping[str, Any] | None) -> bool:
+    return output_kind(sub) != "push"
+
+
 _PARSERS = {
     "source_id": _source,
     "chat_kinds": lambda raw: _enum_list("chat_kinds", raw, db_subs.CHAT_KINDS),
@@ -113,7 +132,7 @@ _PARSERS = {
     "max_events": lambda raw: _bounded("max_events", raw, *_MAX_EVENTS),
     "text_max_chars": lambda raw: _bounded("text_max_chars", raw, *_TEXT_CHARS),
     "render": _choice("render", RENDER),
-    "output_kind": _choice("output_kind", "push"),
+    "output_kind": _output_kind,
     "quiet_word": _quiet_word,
     "output_header": _header,
 }
@@ -151,10 +170,24 @@ def view(sub: Mapping[str, Any]) -> dict[str, Any]:
 # --- What a request does to the confirmation ---
 
 
+_EXTRACTION_CONFIRMS = ("source_id", "include_chats", "exclude_chats")
+
+
+def _differs(new: Any, old: Any) -> bool:
+    return list(new) != list(old or []) if isinstance(new, (list, tuple)) else new != old
+
+
 def needs_confirmation(row: Mapping[str, Any], changes: Mapping[str, Any]) -> bool:
     """Whether applying ``changes`` (schedule columns, ``enabled`` and ``notify_*`` as stored) to the subscription
     schedule ``row`` clears its push target's confirmation: enabling it, or a different target, rule or zone while it
-    has a target."""
+    has a target. An extraction (leads, intents) reads the operator's own messages, target or not: enabling it, or a
+    different rule, zone, source or chat list (``changes`` also carries its subscription fields) clears it."""
+    if row.get("kind") == "subscription" and is_extraction(row.get("subscription")):
+        sub = row["subscription"]
+        if changes.get("enabled") and not row["enabled"]:
+            return True
+        return (any(name in changes and changes[name] != row.get(name) for name in ("cron", "timezone"))
+                or any(name in changes and _differs(changes[name], sub.get(name)) for name in _EXTRACTION_CONFIRMS))
     if row.get("kind") != "subscription" or not (changes.get("notify_channel", row.get("notify_channel"))):
         return False
     if changes.get("enabled") and not row["enabled"]:
@@ -317,9 +350,12 @@ async def config_version(schedule: Mapping[str, Any], *, profile: Mapping[str, A
 
     # ``profile``: the facts of the Profile a run actually launched with; else what the schedule would use now.
     profile = dict(profile) if profile is not None else await processor.run_facts(schedule["project_id"], schedule["id"])
+    sub = schedule.get("subscription") or {}
     facts = {"channel": schedule.get("notify_channel"), "chat": schedule.get("notify_chat"), "cron": schedule["cron"],
-             "timezone": schedule["timezone"], "source": (schedule.get("subscription") or {}).get("source_id"),
-             "processor": profile}
+             "timezone": schedule["timezone"], "source": sub.get("source_id"), "processor": profile}
+    if is_extraction(sub):  # only an extraction's facts grow: a push subscription stays confirmed under its version
+        facts.update(output_kind=output_kind(sub), include_chats=sorted(sub.get("include_chats") or []),
+                     exclude_chats=sorted(sub.get("exclude_chats") or []))
     return digest(json.dumps(facts, sort_keys=True, ensure_ascii=False))
 
 
@@ -332,6 +368,8 @@ async def confirmation_text(schedule: Mapping[str, Any], *, now: datetime, actio
     from .schedules import notify_targets
 
     sub = schedule.get("subscription") or {}
+    if is_extraction(sub):
+        return await _extraction_confirmation(schedule, now=now, action=action)
     channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
     rule, zone_name = cron.parse(schedule["cron"]), schedule["timezone"]
     tz = cron.zone(zone_name)
@@ -362,6 +400,73 @@ async def confirmation_text(schedule: Mapping[str, Any], *, now: datetime, actio
     return "\n".join(lines)
 
 
+# What the confirmation says an extraction reads (message-leads-intents RFC, decision 5 and R-1).
+SCOPE_ZH = {
+    "leads": "群和话题群里人发的消息、别人发给你的单聊和你自己发的消息；不读机器人和 Looper 自己的推送",
+    "intents": "单聊、@ 你的消息和你自己发的消息，以及勾选的告警机器人（只用于「监控异常排查」）；不读其他机器人和 "
+               "Looper 自己的推送",
+}
+
+
+def _usd(value: float) -> str:
+    return f"{value:.1f}" if value >= 1 else f"{value:.2f}"
+
+
+async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime, action: str) -> str:
+    """``confirmation_text`` of an extraction: what it reads, the chats excluded from extraction, the rule, the
+    processor's Profile, the caps and what a day of the last 24 hours' messages would cost (inferred)."""
+    from ..db.connection import get_pool
+    from . import processor
+    from .schedules import notify_targets
+    from .source_service import own_bot_app_ids
+
+    sub = schedule.get("subscription") or {}
+    kind = output_kind(sub)
+    rule, zone_name = cron.parse(schedule["cron"]), schedule["timezone"]
+    tz = cron.zone(zone_name)
+    fires = [moment.astimezone(tz).strftime("%Y-%m-%d %H:%M") for moment in
+             cron.next_fires(rule, tz, now, NEXT_FIRES_SHOWN)]
+    pool = get_pool()
+    excluded = await pool.fetchval("SELECT count(*) FROM source_chats WHERE source_id = $1 AND extraction = 'excluded'",
+                                   sub.get("source_id"))
+    committed = await db_subs.committed_seq(pool, sub.get("source_id")) or 0
+    day = sum(row["events"] for row in await db_subs.extraction_tally(
+        pool, sub, output_kind=kind, since=now - timedelta(days=1), to_seq=committed, own_apps=await own_bot_app_ids(),
+        include_import=False, zone_name=zone_name))
+    chats = []
+    if sub.get("include_chats"):
+        chats.append(f"只读其中 {len(sub['include_chats'])} 个指定会话")
+    if sub.get("exclude_chats"):
+        chats.append(f"另排除 {len(sub['exclude_chats'])} 个会话")
+    verb = action.replace("推送目标：", "")  # "确认推送目标：" is a push's word; an extraction confirms itself
+    lines = [f"{verb}订阅「{schedule['name']}」：它会用不带工具的处理器整理你的消息"
+             f"（{'消息线索' if kind == 'leads' else '意图识别'}）。",
+             f"- 读取范围：{SCOPE_ZH[kind]}{'；' + '，'.join(chats) if chats else ''}；最长回看 "
+             f"{sub.get('max_age_minutes', '-')} 分钟，每次最多 {sub.get('max_events', '-')} 条（读不完的下一次接着读）",
+             f"- 不整理的会话：{excluded} 个（消息流页设置）",
+             f"- 规则：{describe_zh(rule, zone_name)}；接下来 {len(fires)} 次：{'、'.join(fires)}"]
+    profile = await processor.chosen_profile(schedule["project_id"], schedule["id"])
+    named = f"{profile.get('name')}（{profile.get('runtime')} · {profile.get('model') or '默认模型'}）"
+    lines.append(f"- 处理 Profile：{named}，来源：{profile.get('source')}（processor.chosen_profile）")
+    if profile.get("problem"):
+        lines.append(f"- 它现在不能运行：{profile['problem']}")
+    if profile.get("managed_hooks"):
+        lines.append("- 本机有企业管理的 hooks，会看到处理的消息"
+                     f"（{', '.join(profile['managed_hooks'].get('events') or []) or '无法读取'}）")
+    cap, daily = schedule.get("run_budget_usd"), schedule.get("daily_budget_usd")
+    lines.append(f"- 花费上限：单次 ${cap:g}；每日 " + (f"${daily:g}" if daily is not None else "未设置"))
+    low, high = (day * rate for rate in extraction.COST_PER_EVENT_USD)
+    lines.append(f"- 预计花费：约 ${_usd(low)}–{_usd(high)} 每天（按最近 24 小时 {day:,} 条估算，推测）")
+    if kind == "intents":
+        channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
+        label = next((t["label"] for t in await notify_targets()
+                      if (t["channel"], t["chat"]) == (channel, chat)), f"{channel} · {chat}")
+        lines.append(f"- 推送目标：{label}（私聊）" if channel else "- 推送目标：未设置（意图识别要一个私聊目标）")
+        lines.append(f"- 机器人身份：{await bot_identity(channel)}")
+    lines.append("确认后按规则无人值守地整理；改规则、来源、会话范围或 Profile 都要再确认。")
+    return "\n".join(lines)
+
+
 async def bot_identity(channel: str | None) -> str:
     """The bot a push goes out as: its name and the channel it is."""
     from ..db import channel_configs as db_channel_configs
@@ -382,3 +487,31 @@ async def bot_identity(channel: str | None) -> str:
         return f"{name}（{channel_id}）" if name else channel_id
     except Exception:
         return f"{channel_id}（读不到机器人名称）"
+
+
+# --- Presets: the extraction subscriptions as the dashboard creates them ---
+
+_PRESET_STREAM = {"chat_kinds": ["p2p", "group", "topic"], "include_history": True, "max_age_minutes": 10080,
+                  "max_events": 500, "text_max_chars": 500, "quiet_word": "NONE", "output_header": ""}
+PRESETS: dict[str, dict[str, Any]] = {
+    "leads": {"kind": "subscription", "name": "消息线索", "cron": "7 * * * *",
+              "requirement": extraction.LEADS_INSTRUCTIONS, "run_budget_usd": 0.6, "daily_budget_usd": 10,
+              "notify": "failures",
+              "subscription": {**_PRESET_STREAM, "sender_kinds": ["user"], "output_kind": "leads"}},
+    "intents": {"kind": "subscription", "name": "意图识别", "cron": "*/10 * * * *",
+                "requirement": extraction.INTENTS_INSTRUCTIONS, "run_budget_usd": 0.3, "daily_budget_usd": 3,
+                "notify": "failures",
+                "subscription": {**_PRESET_STREAM, "sender_kinds": ["user", "app"], "output_kind": "intents"}},
+}
+
+
+def preset(kind: str, *, source_id: str, zone_name: str) -> dict[str, Any]:
+    """The ``fields`` of ``schedule_admin.create`` for an extraction subscription, all but ``project_id`` and, for
+    intents, ``notify_target``: ``PRESETS`` with the source and the server's zone. Its chat kinds, sender kinds and
+    the rest of the stream filter only satisfy validation: an extraction's scope is fixed by its kind."""
+    if kind not in PRESETS:
+        raise ValueError(f"output_kind must be leads or intents, not {kind!r}")
+    found = json.loads(json.dumps(PRESETS[kind]))
+    found["timezone"] = zone_name
+    found["subscription"]["source_id"] = source_id
+    return found

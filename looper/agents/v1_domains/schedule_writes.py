@@ -32,7 +32,7 @@ _SUBSCRIPTION = _object({
     "text_max_chars": {"type": "integer", "minimum": 20, "maximum": 4000},
     "quiet_word": {"type": "string", "minLength": 1, "maxLength": 40},
     "output_header": {"type": "string", "maxLength": subscriptions.HEADER_MAX_CHARS},
-    "output_kind": _enum("push")}, [], closed=True)
+    "output_kind": _enum(*subscriptions.OUTPUT_KINDS)}, [], closed=True)
 _BUDGET = _nullable({"type": "number", "exclusiveMinimum": 0, "maximum": BUDGET_MAX_USD})
 _FIELDS = {
     "kind": _enum("agent", "command", "subscription"), "subscription": _SUBSCRIPTION,
@@ -132,10 +132,13 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
         arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
         pushes = "pushes it to its confirmed target" if row["subscription"]["target_confirmed_at"] else \
             "keeps it on the dashboard (its push target is not confirmed)"
+        if subscriptions.is_extraction(row["subscription"]):
+            pushes = (f"stores what it finds as {subscriptions.output_kind(row['subscription'])} (only once it is "
+                      "confirmed; until then the run is skipped)")
         return (f"Run {subject} once now: it reads the events after its cursor, runs its processor within its caps and "
                 f"{pushes}. Its next fire stays.")
     if action == "confirm_target":
-        if not row["notify_channel"]:
+        if not row["notify_channel"] and not subscriptions.is_extraction(row["subscription"]):
             raise OpError(ErrorCode.INVALID, "the subscription has no notify_target to confirm")
         arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
         shown = await subscriptions.config_version(row)
@@ -171,6 +174,8 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
     except schedules.RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     asked = {**fields, **({"enabled": data["enabled"]} if "enabled" in data else {})}
+    if subscriptions.is_extraction(row["subscription"]):  # its chats and source are confirmed too
+        asked.update(stream or {})
     enabling = bool(data.get("enabled")) and not row["enabled"]
     if not (enabling or subscriptions.needs_confirmation(row, asked)):
         return None
@@ -189,7 +194,9 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
     # Only a client that was asked and confirmed has the operator's word, and only for what it was shown: the
     # dashboard's own request is not asked, and its operator confirms the target after (``confirm_target``).
     arguments["_confirm_version"] = (await subscriptions.config_version(after)
-                                     if principal.kind == "client" and after.get("notify_channel") else None)
+                                     if principal.kind == "client" and (after.get("notify_channel") or
+                                                                        subscriptions.is_extraction(after["subscription"]))
+                                     else None)
     return await subscriptions.confirmation_text(after, now=now, action=f"{'启用并更新' if enabling else '更新'}")
 
 

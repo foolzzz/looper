@@ -75,6 +75,8 @@ from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, Message
 from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
+from . import subscriptions
+from .extraction import CATCH_UP_MAX, Skipped
 from .subscription_runs import OwnApps, Poster, SubscriptionRuns
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 
@@ -447,6 +449,7 @@ class Scheduler:
         # What subscriptions push through (``poster``: the channels' ``post``) and which Lark apps are Looper's own.
         self._subscriptions = SubscriptionRuns(poster=poster, own_apps=own_apps or no_apps, runtime_root=runtime_root,
                                                clock=clock, claude_bin=claude_bin)
+        self._catch_ups: dict[str, int] = {}  # an extraction's catch-up firings in a row, by schedule
 
     def drain_waiting(self) -> dict[str, int]:
         return {"gates": self._gates, "starting": self._starting}
@@ -833,14 +836,17 @@ class Scheduler:
         firing is a ``skipped_gate`` (counted on the day's latest one) with the cursor moved past the window; else the
         run is ``running`` and ``SubscriptionRuns.execute`` takes it after the commit."""
         window = await self._subscriptions.plan(conn, schedule, now=now)
-        if window is None:
+        if window is None or isinstance(window, Skipped):
+            error = window.error if window is not None else "no new messages in the window"
             if run_id is None:
                 assert common is not None
                 skipped = await self._skip(conn, "skipped_gate", now, common, kind="subscription", fired_at=now,
-                                           error="no new messages in the window")
+                                           error=error)
+                if subscriptions.is_extraction(schedule["subscription"]):  # a merged skip says the latest reason
+                    await db_schedules.update_run(conn, skipped, error=error)
             else:
                 await db_schedules.update_run(conn, run_id, status="skipped_gate", fired_at=now, finished_at=now,
-                                              error="no new messages in the window")
+                                              error=error)
                 skipped = run_id
             await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
             return _Launched(skipped)
@@ -851,9 +857,20 @@ class Scheduler:
         return _Launched(run_id, overlap_recovered=recovered, subscription=True)
 
     async def _run_subscription(self, run_id: str) -> None:
-        """A subscription's run after its firing committed: its processor and push, then its message and alerts."""
-        await self._subscriptions.execute(run_id)
+        """A subscription's run after its firing committed: its processor and push, then its message and alerts. An
+        extraction whose window was full fires again at once, at most ``extraction.CATCH_UP_MAX`` times in a row (the
+        daily budget still admits each); a run that read everything ends the series."""
+        more = await self._subscriptions.execute(run_id)
         await self._notifier.run_ended(run_id)
+        run = await db_schedules.get_run(run_id) if more or self._catch_ups else None
+        if run is None:
+            return
+        schedule_id = run["schedule_id"]
+        fired = self._catch_ups.pop(schedule_id, 0)
+        if more and fired < CATCH_UP_MAX:
+            self._catch_ups[schedule_id] = fired + 1
+            if await self.run_now(schedule_id) is None:
+                self._catch_ups.pop(schedule_id, None)
 
     async def _start_command(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], firing: Firing,
                              now: datetime, *, common: Mapping[str, Any] | None = None,

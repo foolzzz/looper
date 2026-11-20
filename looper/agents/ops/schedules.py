@@ -167,6 +167,7 @@ def _check_project(call: Call, project: Mapping[str, Any]) -> None:
                                            "Manager or the dashboard")
 
 
+EXTRACTION_REFUSAL = "create message-lead and intent subscriptions on the dashboard, from their preset"
 SUBSCRIPTION_REFUSAL = ("a subscription pushes the messages of a chat source to a chat: the operator manages it in "
                         "the dashboard or with loopercli (schedule_admin), not through a Manager")
 
@@ -176,6 +177,10 @@ async def _authorize(call: Call) -> None:
     arguments, action = call.arguments, call.arguments["action"]
     if call.confirmation:
         arguments = {**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
+    stream = (arguments.get("fields") or {}).get("subscription")
+    if action in ("create", "update") and isinstance(stream, Mapping) and stream.get("output_kind") in ("leads",
+                                                                                                         "intents"):
+        raise OpError(ErrorCode.INVALID, EXTRACTION_REFUSAL)
     if action in ("create", "update") and (arguments.get("fields") or {}).get("kind") == schedules.Kind.SUBSCRIPTION.value:
         raise OpError(ErrorCode.FORBIDDEN, SUBSCRIPTION_REFUSAL)
     if action not in ("list", "create", "get") and (

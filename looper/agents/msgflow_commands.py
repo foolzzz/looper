@@ -3,6 +3,13 @@
 ``import`` reads an outside collector's per-chat files from their start and stores the last ``--days`` days of them
 (``--dry-run`` stores nothing and reports what it would). It takes the source's writer lock; while the server is
 in a pass it says so and exits.
+
+``leads-backfill`` turns the history before a leads subscription started into leads (message-leads-intents RFC,
+decision D-②). By default it only counts: the in-scope events of the last ``--days`` days up to where the
+subscription started, by chat kind and day, its windows and what they would cost. ``--run --budget-usd X`` runs
+them oldest first through the subscription's own rendering, processor, parsing and storing (leads marked
+``backfill``), keeps its progress after each window (``leads.backfill.<schedule id>``) and stops before a window
+would pass the budget; run again, it resumes.
 """
 
 from __future__ import annotations
@@ -76,7 +83,167 @@ def import_history(database_url: str, *, source_id: str | None, days: int, dry_r
     return code
 
 
+BACKFILL_MAX_DAYS = 365
+BACKFILL_WINDOW = 500
+BACKFILL_KEY = "leads.backfill.{}"
+
+
+async def _leads_schedule(pool: Any, schedule_id: str | None) -> tuple[dict[str, Any] | None, str]:
+    rows = await pool.fetch("SELECT s.id, s.name FROM schedules s JOIN subscriptions u ON u.schedule_id = s.id "
+                            "WHERE u.output_kind = 'leads' ORDER BY s.created_at, s.id")
+    if schedule_id is not None:
+        rows = [row for row in rows if row["id"] == schedule_id]
+        if not rows:
+            return None, f"no leads subscription {schedule_id!r}"
+    if not rows:
+        return None, "there is no leads subscription: create one on the dashboard, from its preset"
+    if len(rows) > 1:
+        return None, (f"there are {len(rows)} leads subscriptions ({', '.join(row['id'] for row in rows)}); "
+                      "name one with --schedule")
+    from ..db import schedules as db_schedules
+
+    return await db_schedules.get_schedule(rows[0]["id"]), ""
+
+
+def _usd(value: float) -> str:
+    return f"${value:.2f}" if value < 10 else f"${value:.1f}"
+
+
+async def _backfill(database_url: str, *, days: int, schedule_id: str | None, run: bool, budget_usd: float | None,
+                    claude_bin: str, runtime_root: Any) -> tuple[int, str]:
+    import json
+    import math
+    from datetime import datetime, timedelta, timezone
+
+    from ..db import connection, subscriptions as db_subs, system_settings
+    from . import extraction, leads_model, processor
+    from .source_service import own_bot_app_ids
+
+    pool = await connection.init_pool(database_url, min_size=1, max_size=3)
+    try:
+        if not await pool.fetchval("SELECT to_regclass('message_leads') IS NOT NULL"):
+            return 1, "the database has no message lead tables yet: start `looper serve` once to upgrade it"
+        schedule, problem = await _leads_schedule(pool, schedule_id)
+        if schedule is None:
+            return 1, problem
+        sid, sub, zone_name = schedule["id"], schedule["subscription"], schedule["timezone"]
+        earliest = await pool.fetchval(
+            "SELECT sr.from_seq FROM subscription_runs sr JOIN schedule_runs r ON r.id = sr.run_id "
+            "WHERE r.schedule_id = $1 ORDER BY r.created_at, r.id LIMIT 1", sid)
+        start = earliest if earliest is not None else sub["cursor_seq"]
+        key = BACKFILL_KEY.format(sid)
+        stored = (await system_settings.get_settings([key], pool=pool)).get(key)
+        progress = {"done_seq": 0, "spent_usd": 0.0, "windows": 0, **(json.loads(stored) if stored else {})}
+        now = datetime.now(timezone.utc)
+        scope = {**sub, "max_age_minutes": days * 1440, "max_events": BACKFILL_WINDOW}
+        own_apps = await own_bot_app_ids()
+        tally = await db_subs.extraction_tally(pool, scope, output_kind="leads", since=now - timedelta(days=days),
+                                               to_seq=start, own_apps=own_apps, include_import=True,
+                                               zone_name=zone_name, from_seq=progress["done_seq"])
+        count = sum(row["events"] for row in tally)
+        by_kind: dict[str, int] = {}
+        by_day: dict[Any, int] = {}
+        for row in tally:
+            by_kind[row["chat_kind"]] = by_kind.get(row["chat_kind"], 0) + row["events"]
+            by_day[row["day"]] = by_day.get(row["day"], 0) + row["events"]
+        low, high = (count * rate for rate in extraction.COST_PER_EVENT_USD)
+        lines = [f"{'' if run else 'dry run: '}leads backfill of {schedule['name']} ({sid}), the last {days} days "
+                 f"up to seq {start}" + (f", resuming after seq {progress['done_seq']} ({progress['windows']} windows, "
+                                        f"{_usd(progress['spent_usd'])} spent)" if progress["done_seq"] else ""),
+                 f"  in-scope events: {count:,} ("
+                 + (", ".join(f"{kind} {n:,}" for kind, n in sorted(by_kind.items())) or "none") + ")",
+                 f"  windows: {math.ceil(count / BACKFILL_WINDOW)} of at most {BACKFILL_WINDOW} events",
+                 f"  estimate: {_usd(low)}–{_usd(high)} (推测, {extraction.COST_PER_EVENT_USD[0]}–"
+                 f"{extraction.COST_PER_EVENT_USD[1]} USD per event)"]
+        measured = await pool.fetchrow(
+            "SELECT sum(r.cost_usd) AS cost, sum(sr.events_selected) AS events FROM schedule_runs r "
+            "JOIN subscription_runs sr ON sr.run_id = r.id WHERE r.schedule_id = $1 AND r.status = 'completed' "
+            "AND r.cost_usd IS NOT NULL AND sr.events_selected > 0", sid)
+        if measured["events"]:
+            mean = float(measured["cost"]) / measured["events"]
+            lines.append(f"  estimate: {_usd(count * mean)} (实测均价 {mean:.5f} USD per event over "
+                         f"{measured['events']:,} events of its runs)")
+        lines += [f"  {day}: {n:,}" for day, n in sorted(by_day.items())]
+        if not run:
+            return 0, "\n".join(lines)
+        assert budget_usd is not None
+        totals = {"new": 0, "merged": 0, "superseded": 0, "dropped": 0}
+        done, spent, windows, events = progress["done_seq"], float(progress["spent_usd"]), progress["windows"], 0
+        stopped = ""
+        while True:
+            picked = await db_subs.extraction_window(pool, scope, output_kind="leads", from_seq=done, to_seq=start,
+                                                     now=now, own_apps=own_apps, include_import=True)
+            if not picked["rows"]:
+                done = start
+                break
+            # The next window's cost, by the running mean of this backfill's (or the inferred top rate before any).
+            estimate = len(picked["rows"]) * (spent / events if events else extraction.COST_PER_EVENT_USD[1])
+            if spent + estimate > budget_usd:
+                stopped = f"stopped before a window of {len(picked['rows'])} events would pass the budget"
+                break
+            found = await extraction.batch(pool, "leads", scope, picked, zone_name=zone_name, now=now,
+                                           own_apps=own_apps, to_seq=start,
+                                           known_since=max(row["sent_at"] for row in picked["rows"]))
+            reference = {"kind": "leads_backfill", "schedule_id": sid, "from_seq": done, "to_seq": found.last_seq,
+                         "events": len(found.rows), "context": found.context, "known": found.known}
+            result = await processor.run(
+                owner=f"{sid}:backfill", instructions=schedule["requirement"], input_text=found.text,
+                input_ref=reference, quiet_word=extraction.QUIET_WORD, budget_usd=schedule["run_budget_usd"],
+                timeout_s=float(processor.PROCESSOR_TIMEOUT_SEC), runtime_root=runtime_root, claude_bin=claude_bin,
+                project_id=schedule["project_id"], schedule_id=sid, contract=extraction.LEADS_CONTRACT,
+                metadata={"backfill": reference})
+            spent += result.cost_usd or 0.0
+            if result.failure is not None:
+                stopped = f"the processor gave no reply ({result.failure.value}): {result.detail}"
+            parsed = None if stopped else extraction.parse(
+                "leads", result.reply or "", found.refs, now=now.astimezone(extraction._zone(zone_name)),
+                valid_days=await leads_model.valid_days(pool), enabled_types=(), app_seqs=found.app_seqs)
+            if parsed is not None and parsed.state == "invalid":
+                stopped = f"the processor's reply could not be read: {parsed.reason}"
+            async with connection.transaction() as conn:
+                if not stopped:
+                    counts = await extraction.store_leads(conn, parsed, source_id=sub["source_id"], run_id=None,
+                                                          record_id=result.record_id, backfill=True, more=found.more)
+                    for name in ("new", "merged", "superseded"):
+                        totals[name] += counts[name]
+                    totals["dropped"] += sum(counts["dropped"].values())
+                    done, windows, events = found.last_seq, windows + 1, events + len(found.rows)
+                await conn.execute(
+                    "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key,
+                    json.dumps({"done_seq": done, "spent_usd": round(spent, 6), "windows": windows}))
+            if stopped or not found.more and done >= start:
+                break
+        lines.append(f"ran {windows - progress['windows']} windows: {totals['new']} new leads, {totals['merged']} "
+                     f"merged, {totals['superseded']} superseded, {totals['dropped']} dropped; spent {_usd(spent)} of "
+                     f"{_usd(budget_usd)}; done up to seq {done} of {start}")
+        if stopped:
+            lines.append(f"  {stopped}; run it again to resume")
+        return (1 if stopped and "budget" not in stopped else 0), "\n".join(lines)
+    finally:
+        await connection.close_pool()
+
+
+def leads_backfill(args: Any, load_ops: Any) -> int:
+    if not 1 <= args.days <= BACKFILL_MAX_DAYS:
+        print(f"error: --days is a whole number from 1 to {BACKFILL_MAX_DAYS}", file=sys.stderr)
+        return 2
+    if args.run and not (args.budget_usd and args.budget_usd > 0):
+        print("error: --run needs --budget-usd: the most the backfill may spend", file=sys.stderr)
+        return 2
+    ops = load_ops(args)
+    if ops is None:
+        return 1
+    code, text = asyncio.run(_backfill(ops.database_url, days=args.days, schedule_id=args.schedule, run=args.run,
+                                       budget_usd=args.budget_usd, claude_bin=args.claude or "claude",
+                                       runtime_root=ops.runtime_root))
+    print(text, file=sys.stderr if code else sys.stdout)
+    return code
+
+
 def run(args: Any, load_ops: Any) -> int:
+    if getattr(args, "msgflow_command", "import") == "leads-backfill":
+        return leads_backfill(args, load_ops)
     if not 1 <= args.days <= IMPORT_MAX_DAYS:
         print(f"error: --days is a whole number from 1 to {IMPORT_MAX_DAYS}", file=sys.stderr)
         return 2
@@ -87,4 +254,4 @@ def run(args: Any, load_ops: Any) -> int:
                           per_file=args.per_file)
 
 
-__all__: Sequence[str] = ("run", "import_history")
+__all__: Sequence[str] = ("run", "import_history", "leads_backfill")
