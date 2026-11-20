@@ -1620,7 +1620,15 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     rules               JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array'),
     -- Counts every change to what a push depends on (the stream, the target, the rule, the zone, whether it runs, a
     -- confirmation): a run pins it, and a push needs it unchanged, so a change and its undoing both stop the run.
-    config_epoch        BIGINT NOT NULL DEFAULT 0
+    config_epoch        BIGINT NOT NULL DEFAULT 0,
+    "window"            TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
+    delivery_policy     TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'))
+);
+-- Reserve before the processor starts; release failures or interruptions only when nothing was sent or uncertain.
+CREATE TABLE IF NOT EXISTS subscription_daily_claims (
+    schedule_id TEXT NOT NULL REFERENCES subscriptions(schedule_id) ON DELETE CASCADE,
+    local_date  DATE NOT NULL,
+    PRIMARY KEY (schedule_id, local_date)
 );
 CREATE TABLE IF NOT EXISTS subscription_runs (
     run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,
@@ -1642,6 +1650,8 @@ CREATE TABLE IF NOT EXISTS subscription_runs (
     target_channel    TEXT,
     target_chat       TEXT,
     config_version    TEXT,
+    window_mode       TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
+    daily_date        DATE,  -- the claimed date at planning, unaffected by later timezone changes
     -- The subscription's configuration and epoch as the run started: its window is selected with these, not with what
     -- the subscription is by then.
     config            JSONB,

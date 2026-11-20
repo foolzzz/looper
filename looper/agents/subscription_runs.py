@@ -32,7 +32,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import processor, subscription_rules, subscriptions
+from . import cron, processor, subscription_rules, subscriptions
 from .channels.base import PostOutcome
 from .message import builtin_channel_id
 from .task_notice import NotifyTarget, TargetKind
@@ -84,20 +84,26 @@ class SubscriptionRuns:
     # --- Firing ---
 
     async def plan(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], *,
-                   now: datetime) -> dict[str, Any] | None:
+                   now: datetime, scheduled_for: datetime) -> dict[str, Any] | None:
         """The run's window: None when nothing in it is selected, then the cursor moves past it; else the window the
         run is recorded with (``subscription_runs`` is written here, in the firing's transaction), with the target the
         run may push to: the schedule's, when the operator has confirmed it for the configuration it has now."""
         sub = schedule["subscription"]
         to_seq = await db_subs.committed_seq(conn, sub["source_id"])
-        from_seq = sub["cursor_seq"]
+        mode = sub.get("window", "cursor")
+        from_seq = sub["cursor_seq"] if mode == "cursor" else 0
         if to_seq is None or to_seq <= from_seq:
             return None
         picked = await db_subs.window(conn, sub, from_seq=from_seq, to_seq=to_seq, now=now,
                                       own_apps=await self._own_apps(), matcher=await _matcher(conn, sub))
         if not picked["rows"]:
-            await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=to_seq, at=now)
+            if mode == "cursor":
+                await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=to_seq, at=now)
             return None
+        daily_date = (scheduled_for.astimezone(cron.zone(schedule["timezone"])).date()
+                      if sub.get("delivery_policy") == "daily" else None)
+        if daily_date is not None and not await db_subs.claim_day(conn, schedule["id"], daily_date):
+            return {"skip_reason": "the subscription already attempted this local day's digest or a later one"}
         version = await subscriptions.config_version(schedule)
         confirmed = (sub["target_confirmed_at"] is not None and sub.get("target_confirmed_version") == version
                      and schedule.get("notify_channel") and schedule["notify"] != "never")
@@ -107,7 +113,7 @@ class SubscriptionRuns:
                                                    await db_subs.source_user(conn, sub["source_id"]))
             except ValueError:
                 confirmed = False
-        return {"from_seq": from_seq, "to_seq": to_seq, **picked,
+        return {"from_seq": from_seq, "to_seq": to_seq, "window_mode": mode, "daily_date": daily_date, **picked,
                 "target": (schedule["notify_channel"], schedule["notify_chat"]) if confirmed else None,
                 "config_version": version if confirmed else None, "config": db_subs.snapshot(sub),
                 "config_epoch": sub["config_epoch"], "match_timeouts": int(picked["match_timed_out"])}
@@ -116,8 +122,9 @@ class SubscriptionRuns:
         await db_subs.insert_run(conn, run_id, from_seq=window["from_seq"], to_seq=window["to_seq"],
                                  in_window=window["in_window"], selected=len(window["rows"]),
                                  too_old=window["too_old"], over_cap=window["over_cap"], target=window["target"],
-                                 config_version=window["config_version"], config=window["config"],
-                                 config_epoch=window["config_epoch"], match_timeouts=window["match_timeouts"])
+                                 config_version=window["config_version"], window_mode=window["window_mode"],
+                                 daily_date=window["daily_date"], config=window["config"], config_epoch=window["config_epoch"],
+                                 match_timeouts=window["match_timeouts"])
 
     # --- Executing ---
 
@@ -147,7 +154,7 @@ class SubscriptionRuns:
             return
         # The run selects, renders and writes with the configuration it started with (``subscription_runs.config``): a
         # subscription changed meanwhile, and changed back, does not make it read what it was not meant to.
-        sub = {**schedule["subscription"], **(stream["config"] or {})}
+        sub = {**schedule["subscription"], **(stream["config"] or {}), "window": stream["window_mode"]}
         pool = db_connection.get_pool()
         picked = await db_subs.window(pool, sub, from_seq=stream["from_seq"], to_seq=stream["to_seq"],
                                       now=run["fired_at"], own_apps=await self._own_apps(),
@@ -189,6 +196,9 @@ class SubscriptionRuns:
         if sub["rules"]:
             header = subscription_rules.format_header(header, subscription_rules.counts(picked["rows"], sub["rules"]),
                                                      len(picked["rows"]))
+        if "{date}" in header:
+            local_date = stream["daily_date"] or run["scheduled_for"].astimezone(cron.zone(schedule["timezone"])).date()
+            header = header.replace("{date}", local_date.isoformat())
         message = subscriptions.push_text(reply, header)
         if not message:
             await self._end(run_id, status="failed", outcome="output_invalid", cost=result.cost_usd,
@@ -315,7 +325,7 @@ class SubscriptionRuns:
                    error: str | None = None, summary: str | None = None, advance: bool = False,
                    output: str | None = None, pushed: tuple[str, str] | None = None) -> None:
         """End the run in one transaction: its status, its outcome and output, the push's notification, and, when it
-        succeeded, the cursor."""
+        succeeded, the cursor. A failed or interrupted attempt with nothing sent or uncertain releases its daily claim."""
         now = self._clock()
         async with db_connection.transaction() as conn:
             run = await db_schedules.get_run(run_id, pool=conn)
@@ -335,7 +345,10 @@ class SubscriptionRuns:
             if not finished:
                 return
             await db_subs.update_run(conn, run_id, **fields)
-            if advance:
+            if not advance and stream["daily_date"] is not None:
+                await conn.execute("DELETE FROM subscription_daily_claims WHERE schedule_id = $1 AND local_date = $2",
+                                   run["schedule_id"], stream["daily_date"])
+            if advance and stream["window_mode"] == "cursor":
                 await db_subs.advance_cursor(conn, run["schedule_id"], from_seq=stream["from_seq"],
                                              to_seq=stream["to_seq"], at=now)
         logger.info("subscription run %s ended %s (%s)", run_id, status, outcome)

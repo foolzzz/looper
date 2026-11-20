@@ -178,9 +178,9 @@ def parse_rules(raw: Any) -> list[dict[str, Any]]:
 
 
 def check_header(header: str) -> str:
-    """A header's only braces are ``{count}`` and ``{count:RULE NAME}``."""
-    if re.search(r"[{}]", _PLACEHOLDER.sub("", header)):
-        raise ValueError("output_header may hold {count} and {count:RULE NAME} only: no other braces")
+    """A header accepts counts and the firing's local date."""
+    if re.search(r"[{}]", _PLACEHOLDER.sub("", header).replace("{date}", "")):
+        raise ValueError("output_header may hold {count}, {count:RULE NAME} and {date} only: no other braces")
     return header
 
 

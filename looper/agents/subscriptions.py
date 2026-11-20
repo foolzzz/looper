@@ -114,6 +114,8 @@ def _rules(raw: Any) -> list[dict[str, Any]]:
 
 _PARSERS = {
     "source_id": _source,
+    "window": _choice("window", "cursor", "lookback"),
+    "delivery_policy": _choice("delivery_policy", "per_run", "daily"),
     "chat_kinds": lambda raw: _enum_list("chat_kinds", raw, db_subs.CHAT_KINDS),
     "sender_kinds": lambda raw: _enum_list("sender_kinds", raw, db_subs.SENDER_KINDS),
     "include_chats": lambda raw: _chat_list("include_chats", raw),
@@ -171,13 +173,18 @@ def view(sub: Mapping[str, Any]) -> dict[str, Any]:
 # --- What a request does to the confirmation ---
 
 
-def needs_confirmation(row: Mapping[str, Any], changes: Mapping[str, Any]) -> bool:
+def needs_confirmation(row: Mapping[str, Any], changes: Mapping[str, Any], *,
+                       stream: Mapping[str, Any] | None = None) -> bool:
     """Whether applying ``changes`` (schedule columns, ``enabled`` and ``notify_*`` as stored) to the subscription
     schedule ``row`` clears its push target's confirmation: enabling it, or a different target, rule or zone while it
     has a target."""
     if row.get("kind") != "subscription" or not (changes.get("notify_channel", row.get("notify_channel"))):
         return False
     if changes.get("enabled") and not row["enabled"]:
+        return True
+    current = row.get("subscription") or {}
+    if stream and any(name in stream and stream[name] != current.get(name, default)
+                      for name, default in (("window", "cursor"), ("delivery_policy", "per_run"))):
         return True
     return any(name in changes and changes[name] != row.get(name)
                for name in ("notify_channel", "notify_chat", "cron", "timezone"))
@@ -375,6 +382,11 @@ async def config_version(schedule: Mapping[str, Any], *, profile: Mapping[str, A
              "processor": profile,
              # Only when true, so a version made before this existed is still the version of a subscription that is not.
              **({"private": True} if subscription_rules.is_private(schedule.get("subscription") or {}) else {})}
+    # Keep existing cursor confirmations byte-identical; opting in pins the new semantics too.
+    sub = schedule.get("subscription") or {}
+    for name, default in (("window", "cursor"), ("delivery_policy", "per_run")):
+        if sub.get(name, default) != default:
+            facts[name] = sub[name]
     return digest(json.dumps(facts, sort_keys=True, ensure_ascii=False))
 
 
@@ -400,7 +412,12 @@ async def confirmation_text(schedule: Mapping[str, Any], *, now: datetime, actio
              *([f"- {subscription_rules.PRIVATE_NOTE}"] if subscription_rules.is_private(sub) else []),
              f"- 机器人身份：{await bot_identity(channel)}",
              f"- 规则：{describe_zh(rule, zone_name)}；接下来 {len(fires)} 次：{'、'.join(fires)}",
-             f"- 每天最多推送：{fires_per_day(rule, zone_name, now)} 次（没有新消息或没有内容时不推送）"]
+             f"- 每天最多推送：{1 if sub.get('delivery_policy') == 'daily' else fires_per_day(rule, zone_name, now)} 次"
+             "（没有新消息或没有内容时不推送）"]
+    if sub.get("delivery_policy") == "daily":
+        lines.append("- 按触发时刻的本地日期占用名额（手动运行、补跑也计入；"
+                     "静默、仅留在面板或已发送/发送状态不确定时保留名额；"
+                     "失败或中断且无已发送/发送状态不确定的消息时释放名额）")
     profile = await processor.chosen_profile(schedule["project_id"], schedule["id"])
     named = f"{profile.get('name')}（{profile.get('runtime')} · {profile.get('model') or '默认模型'}）"
     lines.append(f"- 处理 Profile：{named}，来源：{profile.get('source')}（processor.chosen_profile）")

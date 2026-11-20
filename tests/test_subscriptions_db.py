@@ -54,6 +54,8 @@ def test_the_window_is_the_filtered_events_newest_first_under_the_collectors_lin
         await source(env.pool)
         await person(env.pool, "ou_alice", "Alice")
         sid = await started(env)
+        sub = await db_subs.get(sid)
+        assert (sub["window"], sub["delivery_policy"]) == ("cursor", "per_run")
         for text, chat_id, kind, extra in [
                 ("old group", "oc_ops", "group", {"sent_at": minutes_ago(env, 30)}),
                 ("a topic", "oc_topic", "topic", {"sent_at": minutes_ago(env, 20), "chat_name": "Topic room"}),

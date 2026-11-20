@@ -24,6 +24,7 @@ EDIT_EFFECT = {
 }
 
 _SUBSCRIPTION = _object({
+    "window": _enum("cursor", "lookback"), "delivery_policy": _enum("per_run", "daily"),
     "source_id": _STR, "chat_kinds": _array(_enum("p2p", "group", "topic", "unknown")),
     "sender_kinds": _array(_enum("user", "app")), "include_chats": _array(_STR), "exclude_chats": _array(_STR),
     "exclude_mentions_me": _BOOL, "include_history": _BOOL,
@@ -138,8 +139,12 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
         arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
         pushes = "pushes it to its confirmed target" if row["subscription"]["target_confirmed_at"] else \
             "keeps it on the dashboard (its push target is not confirmed)"
-        return (f"Run {subject} once now: it reads the events after its cursor, runs its processor within its caps and "
-                f"{pushes}. Its next fire stays.")
+        sub = row["subscription"]
+        window = (f"events from the last {sub['max_age_minutes']} minutes, ignoring its cursor"
+                  if sub["window"] == "lookback" else "the events after its cursor")
+        daily = " It skips if this local date already has an attempt." if sub["delivery_policy"] == "daily" else ""
+        return (f"Run {subject} once now: it reads {window}, runs its processor within its caps and "
+                f"{pushes}. Its next fire stays.{daily}")
     if action == "confirm_target":
         if not row["notify_channel"]:
             raise OpError(ErrorCode.INVALID, "the subscription has no notify_target to confirm")
@@ -156,6 +161,8 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
             arguments["_config_version"] = shown
         return await subscriptions.confirmation_text(row, now=now, action="确认推送目标：")
     if action == "reset_cursor":
+        if row["subscription"]["window"] == "lookback":
+            raise OpError(ErrorCode.INVALID, "a lookback subscription does not use a cursor")
         if await db_schedules.open_runs(db_connection.get_pool(), row["id"]):
             raise OpError(ErrorCode.CONFLICT, "a run of the subscription is in progress: reset its cursor when it ends")
         moment = _after(arguments.get("after"))
@@ -186,7 +193,7 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     asked = {**fields, **({"enabled": data["enabled"]} if "enabled" in data else {})}
     enabling = bool(data.get("enabled")) and not row["enabled"]
-    if not (enabling or subscriptions.needs_confirmation(row, asked)):
+    if not (enabling or subscriptions.needs_confirmation(row, asked, stream=stream)):
         return None
     if enabling:
         try:

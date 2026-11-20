@@ -59,6 +59,7 @@ _SCHEDULE_FIELDS = {
         ("runtime", "profile", "last_task_id", "last_task_title", "updated_at"), _NULL_STR)})}
 # What a subscription schedule reads (its ``subscription``), and what each of its runs read and made.
 SUBSCRIPTION = _object({
+    "window": _enum("cursor", "lookback"), "delivery_policy": _enum("per_run", "daily"),
     "source_id": _STR, "chat_kinds": _array(_STR), "include_chats": _array(_STR), "exclude_chats": _array(_STR),
     "sender_kinds": _array(_STR), "exclude_mentions_me": _BOOL, "include_history": _BOOL, "max_age_minutes": _INT,
     "max_events": _INT, "render": _STR, "text_max_chars": _INT, "quiet_word": _STR, "output_header": _STR,
