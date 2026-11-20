@@ -22,13 +22,13 @@ def test_the_stop_setting_is_stored_and_loaded(monkeypatch: pytest.MonkeyPatch, 
     async def test(pool: Any) -> None:
         async with _api(tmp_path, pool, None) as (call, _):
             assert await chat_settings.load() is False
-            assert (await call("chat_settings.get"))[1]["result"] == {"stop_enabled": False, "completion_turns": "off"}
+            assert (await call("chat_settings.get"))[1]["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False}
             assert (await call("chat_settings.update", {"stop_enabled": True}))[1]["result"] == {
-                "stop_enabled": True, "completion_turns": "off"}
+                "stop_enabled": True, "completion_turns": "off", "research_order": False}
             chat_settings.set_stop_enabled(False)  # a restart
             assert await chat_settings.load() is True
             assert (await call("chat_settings.update", {"stop_enabled": None}))[1]["result"] == {
-                "stop_enabled": False, "completion_turns": "off"}
+                "stop_enabled": False, "completion_turns": "off", "research_order": False}
             assert await chat_settings.load() is False
 
     run_db(test, monkeypatch, timeout=30)
@@ -41,8 +41,8 @@ def test_the_completion_turns_setting_is_stored_alone_and_loaded(monkeypatch: py
             await chat_settings.load()
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
             await call("chat_settings.update", {"stop_enabled": True})
-            status, answer = await call("chat_settings.update", {"completion_turns": "dm_only"})
-            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "dm_only"}
+            status, answer = await call("chat_settings.update", {"completion_turns": "dm_only", "research_order": False})
+            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "dm_only", "research_order": False}
             chat_settings.set_completion_turns(chat_settings.CompletionTurns.OFF)  # a restart
             await chat_settings.load()
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.DM_ONLY
@@ -59,5 +59,26 @@ def test_the_completion_turns_setting_is_stored_alone_and_loaded(monkeypatch: py
                                chat_settings.COMPLETION_TURNS_KEY)
             await chat_settings.load()  # an unreadable value is the default
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_the_research_order_setting_is_stored_alone_and_loaded(monkeypatch: pytest.MonkeyPatch,
+                                                               tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        async with _api(tmp_path, pool, None) as (call, _):
+            await chat_settings.load()
+            assert chat_settings.research_order() is False
+            status, answer = await call("chat_settings.update", {"research_order": True})
+            assert status == 200 and answer["result"]["research_order"] is True
+            chat_settings.set_research_order(False)  # a restart
+            await chat_settings.load()
+            assert chat_settings.research_order() is True and chat_settings.stop_enabled() is False
+            status, answer = await call("chat_settings.update", {"research_order": "yes"})
+            assert status == 400 and answer["error"]["code"] == "invalid"
+            status, answer = await call("chat_settings.update", {"research_order": None})
+            assert answer["result"]["research_order"] is False
+            assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = $1",
+                                       chat_settings.RESEARCH_ORDER_KEY) == 0
 
     run_db(test, monkeypatch, timeout=30)
