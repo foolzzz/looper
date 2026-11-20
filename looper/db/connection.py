@@ -822,8 +822,10 @@ async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
                            _MANAGER_EVENT_REASONS_MIGRATION):
         return False
+    # This schema's table only: another schema of the database has a constraint of the same name.
     definition = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                                     "WHERE conname = 'manager_events_reason_check'")
+                                     "WHERE conname = 'manager_events_reason_check' "
+                                     "AND conrelid = to_regclass('manager_events')")
     return definition is not None and any(f"'{reason}'" not in definition for reason in _MANAGER_EVENT_REASONS)
 
 
