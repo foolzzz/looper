@@ -7,12 +7,15 @@ without an API client, or a direct chat from the bot's operator. Never a write: 
 Claude runs on its own never get them.
 
 What they return is the user's own notes, so the group backstop of the leads search applies to it too: every text
-the tools return is remembered for a day (``ops.leads.remember``), and a group reply that quotes it is not sent.
+the tools return is remembered for a day (``ops.leads.remember``), each under its path and its own hash, so a search's
+snippet never replaces a note read before it; a group reply that quotes any of them is not sent.
 The tasks' vault tools (``ops.vault.TOOLS``) are unchanged: their declaration is what an upgrade reads.
 """
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from typing import Any
 
 from .. import vault
@@ -50,18 +53,24 @@ async def _config() -> vault.VaultConfig:
     return config
 
 
+def _remember(manager_id: str, texts: Iterable[tuple[str, str]]) -> None:
+    """Remember each (path, text) the tools returned for the backstop, keyed by the path and the text's hash: a
+    snippet and the whole note of one path are two entries, each kept for its own day."""
+    ops_leads.remember(manager_id, [(f"vault:{path}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}", text)
+                                    for path, text in texts])
+
+
 async def _search(call: Call) -> dict[str, Any]:
     config = await _config()
     found = await vault.search(config, call.arguments["query"], call.arguments.get("limit"))
-    ops_leads.remember(call.manager_id, [(f"vault:{result['path']}", result["snippet"])
-                                         for result in found["results"]])
+    _remember(call.manager_id, ((result["path"], result["snippet"]) for result in found["results"]))
     return {"notice": NOTICE, **found}
 
 
 async def _read(call: Call) -> dict[str, Any]:
     config = await _config()
     note = await vault.read(config, call.arguments["path"])
-    ops_leads.remember(call.manager_id, [(f"vault:{note['path']}", note["content"])])
+    _remember(call.manager_id, [(note["path"], note["content"])])
     return {"notice": NOTICE, "path": note["path"], "bytes": note["bytes"], "content": note["content"],
             "truncated": note["truncated"]}
 

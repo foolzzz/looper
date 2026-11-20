@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
@@ -216,6 +217,30 @@ def test_a_group_reply_that_quotes_a_note_read_in_the_users_chat_is_not_sent(
     run_with_channel_configs(test, monkeypatch)
 
 
+def test_a_search_after_a_read_keeps_the_whole_note_protected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A read and a later search of the same note return different texts (the whole note, a snippet): both stay
+    remembered, so a group reply quoting the note's text past the snippet is still not sent."""
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    async def test(pool: Any) -> None:
+        root = await _setting(tmp_path, manager_read=True)
+        tail = "交接后第二天要复盘：值班记录写进 ops 目录，附上所有未关闭告警的处理结论和下次值班的提醒。"
+        (root / "projects" / "atlas.md").write_text(f"# Atlas\n\n{NOTE}\n\n{'背景说明。' * 40}\n\n{tail}\n",
+                                                    encoding="utf-8")
+        ops = _ops()
+        assert (await _call(ops, _web(), READ, {"path": "projects/atlas.md"}))["status"] == "ok"
+        found = await _call(ops, _web("m-2"), SEARCH, {"query": "Atlas"})
+        assert found["status"] == "ok" and tail not in found["result"]["results"][0]["snippet"]
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        group = MessageEnvelope.create(
+            source=channel_address("lark", "channel-lark"), target=manager_address("manager"),
+            message_type=MessageType.USER_MESSAGE,
+            payload={"text": "q", "channel_context": {"chat_id": "oc_group", "chat_type": "group", "sender_id": OP}})
+        assert manager._group_safe(group, f"笔记里说：{tail}") == ops_leads.WITHHELD_REPLY
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def _prepared(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     from looper.agents.tiers.manager import ManagerAgent
 
@@ -271,5 +296,88 @@ def test_the_setting_stores_manager_read_only_when_on_and_checks_it(monkeypatch:
             vault.check_config({"path": str(root), "manager_read": "yes"})
         cleared = await vault.update_settings({"path": None})
         assert cleared["configured"] is False and cleared["manager_read"] is False
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+async def _switches(pool: Any, *, leads: bool, ledger: bool) -> None:
+    for key, on in (("leads.enabled", leads), ("ledger.enabled", ledger)):
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+                           "ON CONFLICT (key) DO UPDATE SET value = $2", key, "true" if on else "false")
+
+
+def _normalized(value: Any, root: Path) -> Any:
+    text = json.dumps(value, default=str)
+    for form in sorted({str(root.resolve()), str(root)}, key=len, reverse=True):
+        text = text.replace(form, "<root>")
+    return json.loads(text)
+
+
+@pytest.mark.parametrize("leads", [False, True])
+@pytest.mark.parametrize("ledger", [False, True])
+def test_a_vault_without_manager_read_changes_no_launch_under_any_switches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, leads: bool, ledger: bool,
+) -> None:
+    """The base comparison, for the default Manager: with the leads and ledger switches either way, a vault
+    configured without manager_read launches it exactly as no vault does: tool list, prompt and signature, the
+    temporary paths normalized."""
+    import manager_mcp_stand_in
+    from looper.agents.ops import service
+
+    # One endpoint port and token for both launches: Looper's own MCP entry (in the library's hash and the
+    # --mcp-config file's name) is then the same, and only the vault could make them differ.
+    port = manager_mcp_stand_in._free_port()
+    monkeypatch.setattr(manager_mcp_stand_in, "_free_port", lambda: port)
+    monkeypatch.setattr(service, "secrets", SimpleNamespace(token_urlsafe=lambda n=32: "comparison-token"))
+
+    async def test(pool: Any) -> None:
+        await _switches(pool, leads=leads, ledger=ledger)
+        prepared = _prepared(monkeypatch)
+        base = await _converse(tmp_path / "base", [[("looper_overview", {})]], ["hi"])
+        await _setting(tmp_path, manager_read=False)
+        configured = await _converse(tmp_path / "off", [[("looper_overview", {})]], ["hi"])
+        before, after = prepared
+        assert configured.tools == base.tools and not {SEARCH, READ, WRITE} & set(base.tools)
+        assert _normalized(after.system_prompt.text, tmp_path / "off") == \
+            _normalized(before.system_prompt.text, tmp_path / "base")
+        assert after.system_prompt.layers == before.system_prompt.layers
+        signatures = (_normalized(list(after.signature), tmp_path / "off"),
+                      _normalized(list(before.signature), tmp_path / "base"))
+        differing = [(a, b) for a, b in zip(signatures[0][0], signatures[1][0]) if a != b]
+        assert not differing, differing
+        assert signatures[0][1:] == signatures[1][1:]
+
+    run_db(test, monkeypatch, timeout=90)
+
+
+@pytest.mark.parametrize("leads", [False, True])
+@pytest.mark.parametrize("ledger", [False, True])
+def test_a_scenario_manager_never_reads_the_vault_under_any_switches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, leads: bool, ledger: bool,
+) -> None:
+    """A scenario Manager's tool list and prompt are the same with no vault and with one that says manager_read."""
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.profile_registry import builtin_resolved_profile
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import managers
+
+    async def test(pool: Any) -> None:
+        await _switches(pool, leads=leads, ledger=ledger)
+        async with pool.acquire() as conn:
+            row = await managers.insert_manager({"id": "manager-desk", "name": "Desk", "system_prompt": "p"}, conn=conn)
+        definition = ManagerDefinition.from_row(row)
+        desk = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok",
+                          scope=scope_for(definition))
+
+        async def launch() -> tuple[list[str], str]:
+            agent = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path, definition=definition)
+            await agent._load_db_config()
+            prompt = agent._composed_prompt(AgentSettings(profile=builtin_resolved_profile()))
+            return _names(await desk.current_listing(_web())), prompt.text
+
+        base = await launch()
+        await _setting(tmp_path, manager_read=True)
+        assert await launch() == base
+        assert not {SEARCH, READ, WRITE} & set(base[0])
 
     run_with_channel_configs(test, monkeypatch)
