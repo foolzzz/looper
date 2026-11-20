@@ -540,6 +540,8 @@ class TaskRouter:
         if ends_task(status) and (notice := self._notice(
                 task, status, summary, branch_line, delivery_summary=payload.get("delivery_summary"))) is not None:
             payload = {**payload, "notice": notice.payload()}
+        if branch_line:  # where a worktree task's work is, for the Manager's completion turn (``completion_events``)
+            payload = {**payload, "branch_line": branch_line}
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
             target=self._manager_for(task),

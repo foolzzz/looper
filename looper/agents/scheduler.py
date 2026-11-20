@@ -64,7 +64,7 @@ from typing import Any, Protocol
 
 import asyncpg
 
-from . import housekeeping
+from . import db_backup, housekeeping
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import schedules as db_schedules, tasks as db_tasks
@@ -422,7 +422,8 @@ class Scheduler:
     def __init__(self, *, bus: _Bus, clock: Callable[[], datetime] = _utcnow, tick_seconds: float = TICK_SECONDS,
                  sender: Sender | None = None, day_zone: str | None = None, dashboard_url: str = "",
                  runtime_root: Path | None = None, drain: DrainState | None = None, poster: Poster | None = None,
-                 claude_bin: str = "claude", own_apps: OwnApps | None = None) -> None:
+                 claude_bin: str = "claude", own_apps: OwnApps | None = None,
+                 message_backup: db_backup.MessageBackup | None = None) -> None:
         self._bus = bus
         self._clock = clock
         self._tick_seconds = tick_seconds
@@ -434,6 +435,10 @@ class Scheduler:
         self._commands = CommandRuns(runtime_root) if runtime_root is not None else None
         self._runtime_root = runtime_root
         self._housekeeping_at: datetime | None = None
+        # None, the default, takes no message backup and deletes nothing.
+        self._message_backup = message_backup
+        self._message_backup_not_before: datetime | None = None
+        self._message_backup_running = False
         self._adopted: set[str] = set()
         # Gates and messages under way; stopping cancels them.
         self._background: set[asyncio.Task[Any]] = set()
@@ -566,7 +571,7 @@ class Scheduler:
 
     async def tick(self) -> None:
         """One pass: finish ended runs, stop timed-out ones, start queued ones, fire due schedules, and start the
-        stale alerts that are due."""
+        stale alerts that are due. When a daily message backup is configured, start one that is due."""
         now = self._clock()
         await self._settle_running(now)
         kinds = ("command",) if self._drain is not None and self._drain.draining else None
@@ -578,6 +583,50 @@ class Scheduler:
         if self._runtime_root is not None and (self._housekeeping_at is None or now >= self._housekeeping_at):
             self._spawn(self._housekeep(now))
             self._housekeeping_at = now + housekeeping.INTERVAL
+        self._consider_message_backup(now)
+
+    def _consider_message_backup(self, now: datetime) -> None:
+        """Start a message backup when one is enabled and due. The next attempt is a day later, set before the
+        dump, so a failure does not retry every tick. A new process with no copy from the last day tries once."""
+        job = self._message_backup
+        if job is None or self._message_backup_running:
+            return
+        if self._message_backup_not_before is not None and now < self._message_backup_not_before:
+            return
+        if not db_backup.message_backup_due(job.backup_dir, job.dbname, now):
+            newest = db_backup.newest_message_backup(job.backup_dir, job.dbname)
+            self._message_backup_not_before = (newest + db_backup.MESSAGE_INTERVAL if newest is not None
+                                               else now + db_backup.MESSAGE_INTERVAL)
+            return
+        self._message_backup_not_before = now + db_backup.MESSAGE_INTERVAL
+        self._message_backup_running = True
+        self._spawn(self._run_message_backup(now))
+
+    async def _message_backup_server_major(self) -> int | None:
+        try:
+            async with db_connection.get_pool().acquire() as conn:
+                version = int(await conn.fetchval("SELECT current_setting('server_version_num')"))
+        except Exception:
+            logger.warning("daily message backup could not read the PostgreSQL version; "
+                           "pg_dump's version is not compared")
+            return None
+        return version // 10000
+
+    async def _run_message_backup(self, now: datetime) -> None:
+        job = self._message_backup
+        assert job is not None
+        try:
+            server_major = await self._message_backup_server_major()
+            # An asyncio subprocess, so cancellation terminates pg_dump and reaps it before stop returns.
+            path, checked = await db_backup.run_message_backup(job, server_major, now)
+        except Exception:
+            logger.exception("daily message backup failed; the next attempt is in one day, or at the next start "
+                             "when the newest copy is already a day old")
+        else:
+            logger.info("backed up %s to %s (%d bytes, %s)", ", ".join(db_backup.MESSAGE_BODY_TABLES),
+                        path, path.stat().st_size, checked)
+        finally:
+            self._message_backup_running = False
 
     async def _housekeep(self, now: datetime) -> None:
         try:
@@ -804,7 +853,8 @@ class Scheduler:
         timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
                                                                       schedule["run_timeout_seconds"], conn)}
         if subscription:
-            return await self._start_subscription(conn, schedule, now, common=common, run_id=run_id, timeout=timeout)
+            return await self._start_subscription(conn, schedule, now, scheduled_for=firing.scheduled_for,
+                                                  common=common, run_id=run_id, timeout=timeout)
         if schedule["gate_command"]:
             from .schedule_templates import effective_schedule, fingerprint
             try:
@@ -827,22 +877,24 @@ class Scheduler:
         return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
 
     async def _start_subscription(self, conn: asyncpg.Connection, schedule: dict[str, Any], now: datetime, *,
-                                  common: Mapping[str, Any] | None, run_id: str | None,
+                                  scheduled_for: datetime, common: Mapping[str, Any] | None, run_id: str | None,
                                   timeout: Mapping[str, Any]) -> _Launched:
         """A subscription's firing: its window is fixed now. With nothing selected in it no agent starts, and the
         firing is a ``skipped_gate`` (counted on the day's latest one) with the cursor moved past the window; else the
         run is ``running`` and ``SubscriptionRuns.execute`` takes it after the commit."""
-        window = await self._subscriptions.plan(conn, schedule, now=now)
-        if window is None:
+        window = await self._subscriptions.plan(conn, schedule, now=now, scheduled_for=scheduled_for)
+        if window is None or window.get("skip_reason"):
+            reason = window["skip_reason"] if window else "no new messages in the window"
             if run_id is None:
                 assert common is not None
                 skipped = await self._skip(conn, "skipped_gate", now, common, kind="subscription", fired_at=now,
-                                           error="no new messages in the window")
+                                           error=reason)
             else:
                 await db_schedules.update_run(conn, run_id, status="skipped_gate", fired_at=now, finished_at=now,
-                                              error="no new messages in the window")
+                                              error=reason)
                 skipped = run_id
-            await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
+            if window is None:  # only an empty window is a healthy skip; a daily claim says nothing about health
+                await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
             return _Launched(skipped)
         run_id = await self._put(conn, run_id, common, status=db_schedules.RUNNING, fired_at=now,
                                  runner_pid=os.getpid(), runner_started=self._subscriptions.instance, **timeout)

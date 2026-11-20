@@ -1605,7 +1605,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     include_history     BOOLEAN NOT NULL DEFAULT false,
     max_age_minutes     INTEGER NOT NULL CHECK (max_age_minutes BETWEEN 5 AND 10080),
     max_events          INTEGER NOT NULL CHECK (max_events BETWEEN 1 AND 2000),
-    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1')),
+    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1', 'lines_v2')),
     text_max_chars      INTEGER NOT NULL CHECK (text_max_chars BETWEEN 20 AND 4000),
     quiet_word          TEXT NOT NULL DEFAULT 'SKIP' CHECK (quiet_word ~ '^[^[:space:]]{1,40}$'),
     output_header       TEXT NOT NULL DEFAULT '' CHECK (length(output_header) <= 200),
@@ -1615,7 +1615,20 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     target_confirmed_at TIMESTAMPTZ,
     -- What the operator was shown when they confirmed (``agents/subscriptions.py`` ``config_version``): a push needs it
     -- to still be what the schedule is.
-    target_confirmed_version TEXT
+    target_confirmed_version TEXT,
+    -- Selection rules (agents/subscription_rules.py): empty, the subscription's own filter above applies.
+    rules               JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array'),
+    -- Counts every change to what a push depends on (the stream, the target, the rule, the zone, whether it runs, a
+    -- confirmation): a run pins it, and a push needs it unchanged, so a change and its undoing both stop the run.
+    config_epoch        BIGINT NOT NULL DEFAULT 0,
+    "window"            TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
+    delivery_policy     TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'))
+);
+-- Reserve before the processor starts; release failures or interruptions only when nothing was sent or uncertain.
+CREATE TABLE IF NOT EXISTS subscription_daily_claims (
+    schedule_id TEXT NOT NULL REFERENCES subscriptions(schedule_id) ON DELETE CASCADE,
+    local_date  DATE NOT NULL,
+    PRIMARY KEY (schedule_id, local_date)
 );
 CREATE TABLE IF NOT EXISTS subscription_runs (
     run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,
@@ -1636,7 +1649,15 @@ CREATE TABLE IF NOT EXISTS subscription_runs (
     -- otherwise (its output stays on the dashboard).
     target_channel    TEXT,
     target_chat       TEXT,
-    config_version    TEXT
+    config_version    TEXT,
+    window_mode       TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
+    daily_date        DATE,  -- the claimed date at planning, unaffected by later timezone changes
+    -- The subscription's configuration and epoch as the run started: its window is selected with these, not with what
+    -- the subscription is by then.
+    config            JSONB,
+    config_epoch      BIGINT,
+    -- Windows whose text_match pattern run was stopped at its deadline: no pattern took anything in them.
+    match_timeouts    INTEGER NOT NULL DEFAULT 0
 );
 -- One message of a run's push: pending, then sending (written before the channel is asked), then sent, failed (the
 -- channel said no: asked again) or uncertain (it was being sent when the process died, or the channel's answer was
@@ -1856,3 +1877,232 @@ CREATE TABLE IF NOT EXISTS advisor_advice (
 CREATE INDEX IF NOT EXISTS idx_advisor_advice_task ON advisor_advice (task_id);
 CREATE INDEX IF NOT EXISTS idx_advisor_advice_step ON advisor_advice (step_id, attempt) WHERE step_id IS NOT NULL;
 -- agent spawns end
+
+-- Message leads and intents (message-leads-intents RFC, section 6): sourced notes and typed intents the processor
+-- extracts from source_events, the per-chat extraction switch, intent types with their append-only history, chat →
+-- project bindings, the alert-bot allowlist and the messages Looper sent about intents. Default off: no rows, no
+-- behavior. connection.py applies this block to databases that predate it, so keep it between the markers and
+-- idempotent.
+-- message leads begin
+ALTER TABLE source_chats ADD COLUMN IF NOT EXISTS extraction TEXT NOT NULL DEFAULT 'included';
+ALTER TABLE source_chats ADD COLUMN IF NOT EXISTS extraction_excluded_at TIMESTAMPTZ;
+ALTER TABLE source_chats DROP CONSTRAINT IF EXISTS source_chats_extraction_check;
+ALTER TABLE source_chats ADD CONSTRAINT source_chats_extraction_check CHECK (extraction IN ('included', 'excluded')
+    AND ((extraction = 'excluded') = (extraction_excluded_at IS NOT NULL)));
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_output_kind_check;
+ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_output_kind_check
+    CHECK (output_kind IN ('push', 'leads', 'intents'));
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_outcome_check;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_outcome_check
+    CHECK (outcome IN ('pending', 'delivering', 'delivered', 'uncertain', 'quiet', 'dashboard_only', 'output_invalid',
+                       'failed', 'extracted'));
+ALTER TABLE subscription_runs ADD COLUMN IF NOT EXISTS extract_counts JSONB;
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_extract_counts_check;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_extract_counts_check
+    CHECK (extract_counts IS NULL OR jsonb_typeof(extract_counts) = 'object');
+
+CREATE TABLE IF NOT EXISTS message_leads (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,      -- shown as lead-123
+    source_id      TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+    kind           TEXT NOT NULL CHECK (kind IN ('decision', 'commitment', 'request', 'status', 'issue', 'fact')),
+    summary        TEXT NOT NULL CHECK (btrim(summary) <> '' AND char_length(summary) <= 200),
+    detail         TEXT NOT NULL DEFAULT '' CHECK (char_length(detail) <= 600),
+    confidence     TEXT NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
+    -- 'expired' is not stored: an active lead past valid_until shows as expired (agents/leads_model.shown_state).
+    state          TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'superseded', 'promoted', 'inaccurate')),
+    valid_until    TIMESTAMPTZ NOT NULL,
+    superseded_by  BIGINT REFERENCES message_leads(id) ON DELETE SET NULL,
+    promoted_kind  TEXT CHECK (promoted_kind IN ('vault_proposal')),     -- M6a writes it; nothing does before
+    promoted_ref   TEXT,
+    marked_via     TEXT CHECK (marked_via IN ('dashboard', 'cli')),      -- who marked it inaccurate
+    marked_note    TEXT CHECK (char_length(marked_note) <= 500),
+    first_sent_at  TIMESTAMPTZ NOT NULL,   -- the earliest and latest sent_at of its sources, kept by its writers
+    last_sent_at   TIMESTAMPTZ NOT NULL,
+    run_id         TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,   -- NULL for a backfill
+    record_id      BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    backfill       BOOLEAN NOT NULL DEFAULT false,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT message_leads_superseded CHECK (superseded_by IS NULL OR state = 'superseded'),
+    CONSTRAINT message_leads_promoted CHECK ((state = 'promoted') = (promoted_kind IS NOT NULL)),
+    CONSTRAINT message_leads_marked CHECK ((state = 'inaccurate') = (marked_via IS NOT NULL)),
+    CONSTRAINT message_leads_sent CHECK (first_sent_at <= last_sent_at)
+);
+CREATE TABLE IF NOT EXISTS message_lead_sources (
+    lead_id    BIGINT NOT NULL REFERENCES message_leads(id) ON DELETE CASCADE,
+    event_seq  BIGINT NOT NULL REFERENCES source_events(seq) ON DELETE CASCADE,
+    PRIMARY KEY (lead_id, event_seq)
+);
+-- Who a lead concerns: the senders and the @-mentioned of its sources (from the events), and the participants the
+-- processor named (about).
+CREATE TABLE IF NOT EXISTS message_lead_people (
+    lead_id  BIGINT NOT NULL REFERENCES message_leads(id) ON DELETE CASCADE,
+    open_id  TEXT NOT NULL CHECK (open_id <> ''),
+    role     TEXT NOT NULL CHECK (role IN ('sender', 'mentioned', 'about')),
+    PRIMARY KEY (lead_id, open_id, role)
+);
+CREATE INDEX IF NOT EXISTS idx_message_leads_list ON message_leads (source_id, state, last_sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_message_leads_valid ON message_leads (valid_until) WHERE state = 'active';
+CREATE INDEX IF NOT EXISTS idx_message_lead_sources_event ON message_lead_sources (event_seq);
+CREATE INDEX IF NOT EXISTS idx_message_lead_people_person ON message_lead_people (open_id);
+
+-- Intent types: the current version of each, and every version saved (only ever added; a rollback adds a copy).
+CREATE TABLE IF NOT EXISTS intent_types (
+    key          TEXT PRIMARY KEY CHECK (key ~ '^[a-z][a-z0-9_]{0,31}$'),
+    builtin      BOOLEAN NOT NULL DEFAULT false,
+    version      INTEGER NOT NULL CHECK (version >= 1),   -- the current row of intent_type_versions
+    enabled      BOOLEAN NOT NULL DEFAULT true,
+    archived_at  TIMESTAMPTZ,                             -- a custom type that was deleted
+    CONSTRAINT intent_types_builtin_kept CHECK (NOT (builtin AND archived_at IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS intent_type_versions (
+    type_key          TEXT NOT NULL REFERENCES intent_types(key) ON DELETE CASCADE,
+    version           INTEGER NOT NULL CHECK (version >= 1),
+    name              TEXT NOT NULL CHECK (btrim(name) <> '' AND char_length(name) <= 30),
+    guidance          TEXT NOT NULL CHECK (char_length(btrim(guidance)) BETWEEN 1 AND 2000),   -- model-visible
+    priority          TEXT NOT NULL CHECK (priority IN ('urgent', 'normal', 'quiet')),
+    workflow_key      TEXT,                                -- the type's default workflows.key; NULL: the project's
+    rolled_back_from  INTEGER,
+    edited_via        TEXT NOT NULL CHECK (edited_via IN ('builtin', 'dashboard', 'api')),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (type_key, version)
+);
+-- A type's template (workflow preset) in one project.
+CREATE TABLE IF NOT EXISTS intent_type_projects (
+    type_key     TEXT NOT NULL REFERENCES intent_types(key) ON DELETE CASCADE,
+    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    workflow_key TEXT,                     -- a workflows.key; code checks it still exists when it builds a task
+    PRIMARY KEY (type_key, project_id)
+);
+-- A chat's project, set by the operator on the Intents page; an intent copies it when it is made.
+CREATE TABLE IF NOT EXISTS message_chat_projects (
+    source_id  TEXT NOT NULL,
+    chat_id    TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    PRIMARY KEY (source_id, chat_id),
+    FOREIGN KEY (source_id, chat_id) REFERENCES source_chats(source_id, chat_id) ON DELETE CASCADE
+);
+-- The alert bots (by app id) whose messages the intents run reads, only for alert_triage.
+CREATE TABLE IF NOT EXISTS intent_alert_senders (
+    source_id  TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+    app_id     TEXT NOT NULL CHECK (btrim(app_id) <> ''),
+    added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_id, app_id)
+);
+CREATE TABLE IF NOT EXISTS intents (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,          -- shown as I-0042
+    source_id     TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+    schedule_id   TEXT REFERENCES schedules(id) ON DELETE SET NULL,      -- the intents subscription that made it
+    type_key      TEXT NOT NULL REFERENCES intent_types(key),
+    type_version  INTEGER NOT NULL,
+    title         TEXT NOT NULL CHECK (btrim(title) <> '' AND char_length(title) <= 60),
+    summary       TEXT NOT NULL DEFAULT '' CHECK (char_length(summary) <= 400),
+    confidence    TEXT NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
+    state         TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (state IN ('pending', 'tasked', 'rejected', 'expired', 'merged')),
+    chat_id       TEXT NOT NULL,                       -- the chat of its first source
+    project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    workflow_key  TEXT,                                -- a workflows.key, checked when it builds a task
+    merged_into   BIGINT,                              -- its key and its detaching are the intent merges block's
+    task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    flagged       BOOLEAN NOT NULL DEFAULT false,      -- one of its sources is in its run's instructions_seen
+    expires_at    TIMESTAMPTZ,                         -- 24 hours after its latest push; NULL while never pushed
+    handled_at    TIMESTAMPTZ,
+    handled_via   TEXT CHECK (handled_via IN ('dashboard', 'lark', 'telegram', 'system')),
+    reject_reason TEXT CHECK (char_length(reject_reason) <= 200),
+    run_id        TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
+    record_id     BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT intents_merged CHECK ((state = 'merged') = (merged_into IS NOT NULL)),
+    CONSTRAINT intents_handled CHECK ((state IN ('pending', 'merged')) = (handled_at IS NULL)
+                                      AND (handled_at IS NULL) = (handled_via IS NULL)),
+    CONSTRAINT intents_rejected CHECK (reject_reason IS NULL OR state = 'rejected')
+);
+CREATE TABLE IF NOT EXISTS intent_sources (
+    intent_id  BIGINT NOT NULL REFERENCES intents(id) ON DELETE CASCADE,
+    event_seq  BIGINT NOT NULL REFERENCES source_events(seq) ON DELETE CASCADE,
+    PRIMARY KEY (intent_id, event_seq)
+);
+-- One message Looper sent about an intent, claimed (sending, committed) before the channel is asked and never sent
+-- again unless the channel answered that it did not send it, as subscription_deliveries. A progress post belongs to
+-- the merged intent that brought the news and replies to its target's push; final is the fallback of an edit.
+CREATE TABLE IF NOT EXISTS intent_posts (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    intent_id    BIGINT NOT NULL REFERENCES intents(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ('push', 'progress', 'final')),
+    channel_id   TEXT NOT NULL,
+    chat         TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    candidates   TEXT[] NOT NULL DEFAULT '{}',         -- the project ids it listed, in order: 「建 I-0042 2」 is the 2nd
+    state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    external_id  TEXT,                                 -- the channel's message id, for quotes and the final edit
+    edited_at    TIMESTAMPTZ,                          -- a push changed to its intent's final state
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    error        TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_intents_list ON intents (source_id, state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_intents_recent ON intents (source_id, type_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_intents_expiry ON intents (expires_at) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_intent_sources_event ON intent_sources (event_seq);
+CREATE INDEX IF NOT EXISTS idx_intent_posts_intent ON intent_posts (intent_id, kind);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_intent_posts_external ON intent_posts (channel_id, external_id)
+    WHERE external_id IS NOT NULL;
+
+-- A deleted source message takes the leads and intents made from it: their text may restate it.
+CREATE OR REPLACE FUNCTION message_leads_drop_lead() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM message_leads WHERE id = OLD.lead_id;
+    RETURN NULL;
+END $$;
+CREATE OR REPLACE FUNCTION message_leads_drop_intent() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM intents WHERE id = OLD.intent_id;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS message_lead_sources_drop ON message_lead_sources;
+CREATE TRIGGER message_lead_sources_drop AFTER DELETE ON message_lead_sources
+    FOR EACH ROW EXECUTE FUNCTION message_leads_drop_lead();
+DROP TRIGGER IF EXISTS intent_sources_drop ON intent_sources;
+CREATE TRIGGER intent_sources_drop AFTER DELETE ON intent_sources
+    FOR EACH ROW EXECUTE FUNCTION message_leads_drop_intent();
+
+-- The built-in intent types, version 1 (the recommended text: a version equal to it is "recommended").
+INSERT INTO intent_types (key, builtin, version) VALUES
+    ('dev_task', true, 1), ('bug_triage', true, 1), ('alert_triage', true, 1)
+ON CONFLICT DO NOTHING;
+INSERT INTO intent_type_versions (type_key, version, name, guidance, priority, edited_via) VALUES
+    ('dev_task', 1, '开发任务',
+     '有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。',
+     'normal', 'builtin'),
+    ('bug_triage', 1, 'bug 排查',
+     '有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。',
+     'normal', 'builtin'),
+    ('alert_triage', 1, '监控异常排查',
+     '白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。',
+     'urgent', 'builtin')
+ON CONFLICT DO NOTHING;
+-- message leads end
+
+-- An intent merged into another is its own matter, made from its own messages: deleting the intent it was merged
+-- into (its messages deleted, its chat purged, any code path) makes it pending again instead of deleting it. The key
+-- takes no action of its own, so a path that skipped the trigger would fail rather than cascade. The trigger runs
+-- AFTER each deleted row (a BEFORE trigger could not update a row the same statement deletes, as in a chain of merges
+-- deleted at once) and its name sorts before the key's own RI_ConstraintTrigger_* triggers, which PostgreSQL fires in
+-- name order, so the merged rows are detached before the key is checked. connection.py applies this block to
+-- databases whose leads block predates it, so keep it between the markers and idempotent.
+-- intent merges begin
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_merged_into_fkey;
+ALTER TABLE intents ADD CONSTRAINT intents_merged_into_fkey FOREIGN KEY (merged_into) REFERENCES intents(id);
+CREATE OR REPLACE FUNCTION intents_detach_merged() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE intents SET state = 'pending', merged_into = NULL, updated_at = now() WHERE merged_into = OLD.id;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS intents_detach_merged ON intents;
+DROP TRIGGER IF EXISTS "A_intents_detach_merged" ON intents;
+CREATE TRIGGER "A_intents_detach_merged" AFTER DELETE ON intents
+    FOR EACH ROW EXECUTE FUNCTION intents_detach_merged();
+-- intent merges end
