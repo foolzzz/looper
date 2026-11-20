@@ -11,12 +11,14 @@ Every command is refused inside a Looper agent run. Exit codes match the ledger 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -88,10 +90,21 @@ ORDER BY s.lead_id, e.sent_at, e.seq
 """
 
 
-def committable(path: Path) -> str | None:
-    """Why ``path`` could be committed (it is inside a git work tree and git does not ignore it), or None when it
-    cannot: it is outside every work tree, or ``git check-ignore`` matches it. A git that cannot answer is a reason."""
+def resolved(path: Path) -> Path:
+    """Where ``path`` really is: its nearest existing directory with every symbolic link resolved, then the rest of
+    it (which does not exist yet, so it holds no link)."""
     target = path.expanduser().absolute()
+    where = next((parent for parent in target.parents if parent.is_dir()), Path("/"))
+    return Path(os.path.realpath(where)) / target.relative_to(where)
+
+
+def committable(path: Path) -> str | None:
+    """Why ``path`` could be committed, or None when it cannot: it is outside every work tree, or ``git
+    check-ignore`` matches it, both judged where it really is (``resolved``), so a link under an ignored name cannot
+    lead into a tracked place. The file itself being a symbolic link, or a git that cannot answer, is a reason."""
+    if path.expanduser().absolute().is_symlink():
+        return f"{path} is a symbolic link: write the eval set to a regular file"
+    target = resolved(path)
     where = next((parent for parent in target.parents if parent.is_dir()), Path("/"))
     try:
         inside = subprocess.run(["git", "-C", str(where), "rev-parse", "--is-inside-work-tree"], capture_output=True,
@@ -134,12 +147,25 @@ async def _export(pool: asyncpg.Pool, out: Path, sample: int) -> tuple[int, str]
                          "reply_to": refs.get(item["parent_id"] or ""), "sent_at": item["sent_at"].isoformat(),
                          "text": item["text"] or ""} for number, item in enumerate(found, 1)]},
             ensure_ascii=False))
-    out = out.expanduser().absolute()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write("".join(f"{line}\n" for line in lines))
-    return OK, (f"已导出 {len(lines)} 条到 {out}：不准确 {len(marked)} 条，看作正确 {len(good)} 条"
+    # Written where it really is (checked by ``committable``), through a file of mode 600 beside it that replaces
+    # it at once: a link is never followed, and a failure leaves nothing behind.
+    target = resolved(out)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink():
+            return REFUSED, f"{out} is a symbolic link: write the eval set to a regular file"
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write("".join(f"{line}\n" for line in lines))
+            os.replace(temporary, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
+    except OSError as error:
+        return USAGE, f"cannot write {out}: {error}"
+    return OK, (f"已导出 {len(lines)} 条到 {target}：不准确 {len(marked)} 条，看作正确 {len(good)} 条"
                 "（含出处消息原文，只留在本机）")
 
 

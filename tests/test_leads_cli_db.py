@@ -236,6 +236,45 @@ def test_eval_export_writes_the_inaccurate_leads_and_a_sample_of_active_ones_wit
     assert {line["id"] for line in lines[1:]} <= {f"lead-{n}" for n in active}
 
 
+def _ignoring_repo(tmp_path):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    (repo / "tracked").mkdir(parents=True)
+    (repo / "runs").mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitignore").write_text("runs/\n")
+    return repo
+
+
+def test_eval_export_follows_no_link_into_a_place_git_could_commit(tmp_path, database, capsys):
+    repo = _ignoring_repo(tmp_path)
+    (repo / "runs" / "into").symlink_to(repo / "tracked", target_is_directory=True)  # an ignored name, a tracked place
+    (repo / "runs" / "set.jsonl").symlink_to(repo / "tracked" / "linked.jsonl")
+    enable(database)
+    add(database, state="inaccurate")
+    capsys.readouterr()
+    assert run_cli(tmp_path, database, "eval-export", "--out", str(repo / "runs" / "into" / "set.jsonl")) == 4
+    assert run_cli(tmp_path, database, "eval-export", "--out", str(repo / "runs" / "set.jsonl")) == 4
+    assert "symbolic link" in capsys.readouterr().err
+    assert list((repo / "tracked").iterdir()) == [] and (repo / "runs" / "set.jsonl").is_symlink()
+
+
+def test_eval_export_leaves_no_file_behind_when_writing_fails(tmp_path, database, capsys, monkeypatch):
+    from looper.agents import leads_commands
+
+    repo = _ignoring_repo(tmp_path)
+    enable(database)
+    add(database, state="inaccurate")
+
+    def broken(source, target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(leads_commands.os, "replace", broken)
+    assert run_cli(tmp_path, database, "eval-export", "--out", str(repo / "runs" / "set.jsonl")) == 2
+    assert "disk full" in capsys.readouterr().err and list((repo / "runs").iterdir()) == []
+
+
 def test_eval_export_refuses_a_file_git_could_commit(tmp_path, database, capsys):
     import subprocess
 
