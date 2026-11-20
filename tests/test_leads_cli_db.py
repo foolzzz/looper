@@ -70,7 +70,7 @@ def add(url, *, chat_id="oc_synthetic", **columns):
 
 
 def test_disabled_empty_json_and_no_results(tmp_path, database, capsys):
-    for argv in (("search",), ("mark", "1", "--inaccurate"), ("delete", "1")):
+    for argv in (("search",), ("mark", "1", "--inaccurate")):
         assert run_cli(tmp_path, database, *argv) == 3
         assert capsys.readouterr().err.strip() == "消息线索没有启用：在控制台的消息流页打开"
     enable(database)
@@ -186,3 +186,21 @@ def test_unusable_or_missing_tables(tmp_path, database, capsys):
     db_call(database, lambda conn: conn.execute("DROP TABLE message_leads CASCADE"))
     assert run_cli(tmp_path, database, "search") == 6
     assert "looper serve" in capsys.readouterr().err
+
+
+def test_delete_while_disabled_and_promoted_mark_refused(tmp_path, database, capsys):
+    number = add(database)
+    assert run_cli(tmp_path, database, "delete", str(number)) == 0
+    enable(database)
+    number = add(database)
+    db_call(database, lambda conn: conn.execute(
+        "UPDATE message_leads SET state='promoted',promoted_kind='vault_proposal' WHERE id=$1", number))
+    assert run_cli(tmp_path, database, "mark", str(number), "--inaccurate") == 4
+    assert db_call(database, lambda conn: conn.fetchval("SELECT state FROM message_leads WHERE id=$1", number)) == "promoted"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_invalid_limit_precedes_enabled_check(tmp_path, database, enabled):
+    if enabled:
+        enable(database)
+    assert run_cli(tmp_path, database, "search", "--limit", "0") == 2

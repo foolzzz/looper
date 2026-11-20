@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 import asyncpg
@@ -11,6 +12,11 @@ from .message_stream import transaction
 from ..agents import leads_model as model
 
 Db = asyncpg.Pool | asyncpg.Connection
+logger = logging.getLogger(__name__)
+
+
+class LeadConflictError(Exception):
+    """The lead's current state forbids the requested transition."""
 
 
 def _db(db: Db | None) -> Db:
@@ -24,11 +30,15 @@ async def mark_inaccurate(lead_id: int, *, via: str, note: str | None, db: Db | 
     note = note.strip() or None if note is not None else None
     if note is not None and len(note) > 500:
         raise ValueError("note must be at most 500 characters")
-    # Clear the previous state's references along with the transition (the schema checks them together).
-    return await _db(db).fetchval(
-        "UPDATE message_leads SET state = 'inaccurate', marked_via = $2, marked_note = $3, "
-        "superseded_by = NULL, promoted_kind = NULL, promoted_ref = NULL, updated_at = now() "
-        "WHERE id = $1 RETURNING true", lead_id, via, note) is True
+    async with transaction(db) as conn:
+        state = await conn.fetchval("SELECT state FROM message_leads WHERE id = $1 FOR UPDATE", lead_id)
+        if state == "promoted":
+            raise LeadConflictError("a promoted lead cannot be marked inaccurate")
+        # Clear obsolete references atomically with the transition.
+        return await conn.fetchval(
+            "UPDATE message_leads SET state = 'inaccurate', marked_via = $2, marked_note = $3, "
+            "superseded_by = NULL, promoted_kind = NULL, promoted_ref = NULL, updated_at = now() "
+            "WHERE id = $1 RETURNING true", lead_id, via, note) is True
 
 
 async def delete_lead(lead_id: int, *, db: Db | None = None) -> bool:
@@ -103,9 +113,12 @@ async def set_extraction(source_id: str, chat_id: str, *, included: bool, delete
         raise ValueError("delete_extracted is only allowed when extraction is excluded")
     extraction = "included" if included else "excluded"
     deleted_leads = deleted_intents = 0
+    detached = []
     async with transaction(db) as conn:
         found = await conn.fetchval(
-            "UPDATE source_chats SET extraction = $3, extraction_excluded_at = $4 "
+            "UPDATE source_chats SET extraction = $3, "
+            "extraction_excluded_at = CASE WHEN $3 = 'included' THEN NULL "
+            "ELSE COALESCE(extraction_excluded_at, $4) END "
             "WHERE source_id = $1 AND chat_id = $2 RETURNING true",
             source_id, chat_id, extraction, None if included else now)
         if not found:
@@ -115,10 +128,21 @@ async def set_extraction(source_id: str, chat_id: str, *, included: bool, delete
                 "DELETE FROM message_leads l WHERE EXISTS (SELECT 1 FROM message_lead_sources ls "
                 "JOIN source_events e ON e.seq = ls.event_seq WHERE ls.lead_id = l.id "
                 "AND e.source_id = $1 AND e.chat_id = $2) RETURNING l.id", source_id, chat_id)
-            intent_rows = await conn.fetch(
-                "DELETE FROM intents i WHERE i.state <> 'tasked' AND EXISTS (SELECT 1 FROM intent_sources ins "
+            targets = await conn.fetch(
+                "SELECT i.id FROM intents i WHERE i.state <> 'tasked' AND EXISTS (SELECT 1 FROM intent_sources ins "
                 "JOIN source_events e ON e.seq = ins.event_seq WHERE ins.intent_id = i.id "
-                "AND e.source_id = $1 AND e.chat_id = $2) RETURNING i.id", source_id, chat_id)
+                "AND e.source_id = $1 AND e.chat_id = $2) ORDER BY i.id FOR UPDATE", source_id, chat_id)
+            target_ids = [row["id"] for row in targets]
+            # Detach before DELETE so the database trigger cannot hide these rows from the count.
+            # Items with any source in this chat are themselves deletion targets.
+            detached = await conn.fetch(
+                "WITH candidates AS (SELECT id, merged_into FROM intents "
+                "WHERE merged_into = ANY($1::bigint[]) AND NOT (id = ANY($1::bigint[])) FOR UPDATE) "
+                "UPDATE intents i SET merged_into = NULL, state = 'pending', handled_at = NULL, handled_via = NULL, "
+                "updated_at = now() FROM candidates c WHERE i.id = c.id RETURNING i.id, c.merged_into", target_ids)
+            intent_rows = await conn.fetch("DELETE FROM intents WHERE id = ANY($1::bigint[]) RETURNING id", target_ids)
             deleted_leads, deleted_intents = len(lead_rows), len(intent_rows)
+    for row in detached:
+        logger.info("intent_id=%s merged_into=%s state=pending reason=merge_target_deleted", row["id"], row["merged_into"])
     return {"chat_id": chat_id, "extraction": extraction,
-            "deleted_leads": deleted_leads, "deleted_intents": deleted_intents}
+            "deleted_leads": deleted_leads, "deleted_intents": deleted_intents, "detached_intents": len(detached)}

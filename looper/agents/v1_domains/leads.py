@@ -22,14 +22,15 @@ _CHAT = _object({
     "chat_id": _STR, "name": _STR, "kind": _STR, "extraction": _EXTRACTION,
     "extraction_excluded_at": _NULL_STR, "last_message_at": _NULL_STR, "leads": _INT, "open_intents": _INT}, closed=True)
 _SET_CHAT = _object({"chat_id": _STR, "extraction": _EXTRACTION,
-                     "deleted_leads": _INT, "deleted_intents": _INT}, closed=True)
+                     "deleted_leads": _INT, "deleted_intents": _INT, "detached_intents": _INT},
+                    ["chat_id", "extraction", "deleted_leads", "deleted_intents"], closed=True)
 _LEAD_ID = {"type": "string", "minLength": 1}
 
 RESULTS = {}
 OPERATIONS = (
     Operation("leads.search", "POST", "/api/v1/leads/search",
               "Search sourced, unconfirmed message leads.",
-              "Search message leads using every query word, with chat, person, time, kind and state filters. "
+              "Search sourced, unconfirmed message leads. Match every query word, with chat, person, time, kind and state filters. "
               "Read-only; the default state is active. Leads must be enabled.",
               _object({"source_id": _STR, "query": {"type": "string", "maxLength": 200},
                        "chat": _STR, "person": _STR, "since": _STR,
@@ -41,27 +42,27 @@ OPERATIONS = (
               risk="read", operator_only=True),
     Operation("leads.mark", "POST", "/api/v1/leads/mark",
               "Mark a message lead inaccurate.",
-              "Mark a lead inaccurate through the dashboard; marking it again replaces its note.",
+              "Mark a message lead inaccurate. Marking it again replaces its note; promoted leads conflict.",
               _object({"lead_id": _LEAD_ID, "note": {"type": "string", "maxLength": 500}}, ["lead_id"], closed=True),
-              _object({"lead": _LEAD}, closed=True), risk="write", operator_only=True),
+              _object({"lead": _LEAD}, closed=True), risk="write", operator_only=True, audit_operator=False),
     Operation("leads.delete", "POST", "/api/v1/leads/delete",
               "Delete a message lead and its references.",
-              "Delete a lead, with its source and person references; source messages remain.",
+              "Delete a message lead and its references. Source messages remain; allowed while leads are off.",
               _object({"lead_id": _LEAD_ID}, closed=True), _object({"deleted": _STR}, closed=True),
               risk="write", operator_only=True),
     Operation("leads.settings_get", "POST", "/api/v1/leads/settings_get",
               "Read message lead settings and subscriptions.",
-              "Read the enabled switch, validity in days and all leads subscriptions, even while leads are off.",
+              "Read message lead settings and subscriptions. Includes validity in days, even while leads are off.",
               _object({}, closed=True), _SETTINGS, risk="read", operator_only=True),
     Operation("leads.settings_put", "POST", "/api/v1/leads/settings_put",
               "Change message lead settings.",
-              "Change the enabled switch or validity in days. Turning leads off disables leads subscriptions; "
+              "Change message lead settings. Update the enabled switch or validity in days. Turning leads off disables leads subscriptions; "
               "turning them on leaves subscriptions disabled.",
               _object({"enabled": _BOOL, "valid_days": {"type": "integer", "minimum": 1, "maximum": 365}},
                       [], closed=True), _SETTINGS, risk="write", operator_only=True),
     Operation("leads.chats", "POST", "/api/v1/leads/chats",
               "List collected chats and their extraction switches.",
-              "List included chats by newest message, with extraction state and lead and pending intent counts. "
+              "List collected chats and their extraction switches. Included chats sort by newest message, with lead and pending intent counts. "
               "The query matches a literal name fragment or an exact chat id.",
               _object({"source_id": _STR, "query": _STR, "extraction": _EXTRACTION,
                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
@@ -70,8 +71,9 @@ OPERATIONS = (
               risk="read", operator_only=True),
     Operation("leads.set_chat", "POST", "/api/v1/leads/set_chat",
               "Include or exclude a chat from extraction.",
-              "Change a chat's extraction switch. Excluding may also delete its leads and non-tasked intents; "
-              "source messages and tasked intents remain.",
+              "Include or exclude a chat from extraction. Excluding may also delete its leads and non-tasked intents; "
+              "source messages and tasked intents remain. Exclusion with deletion is allowed while leads are off. "
+              "Other-chat intents merged into deleted targets return to pending and count as detached_intents.",
               _object({"source_id": _STR, "chat_id": _STR, "extraction": _EXTRACTION, "delete_extracted": _BOOL},
                       ["chat_id", "extraction"], closed=True), _SET_CHAT, risk="write", operator_only=True),
 )
@@ -120,7 +122,9 @@ async def _mark(arguments):
 
 async def run(server, operation, arguments, principal, headers):
     action = operation.operation_id.rsplit(".", 1)[1]
-    if action not in ("settings_get", "settings_put") and not await model.leads_enabled():
+    cleanup = action == "delete" or (action == "set_chat" and arguments["extraction"] == "excluded"
+                                    and arguments.get("delete_extracted", False))
+    if action not in ("settings_get", "settings_put") and not cleanup and not await model.leads_enabled():
         raise OpError(ErrorCode.CONFLICT, "message leads are not enabled")
     try:
         if action == "settings_get":
@@ -155,6 +159,8 @@ async def run(server, operation, arguments, principal, headers):
                 await _source_id(arguments), arguments["chat_id"], included=arguments["extraction"] == "included",
                 delete_extracted=arguments.get("delete_extracted", False), now=datetime.now(timezone.utc))
         return _plain(result)
+    except lead_admin.LeadConflictError as error:
+        raise OpError(ErrorCode.CONFLICT, str(error)) from None
     except ValueError as error:
         raise OpError(ErrorCode.INVALID, str(error)) from None
     except LookupError as error:

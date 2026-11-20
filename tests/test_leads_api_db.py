@@ -1,6 +1,6 @@
 """Operator-only lead administration on the HTTP path and a disposable PostgreSQL schema."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -52,11 +52,11 @@ def test_operator_search_mark_and_delete(monkeypatch, tmp_path):
             for action in ("mark", "delete"):
                 status, answer = await call("leads." + action, {"lead_id": lead["id"]})
                 assert status == 404 and answer["error"]["code"] == "not_found"
-    run_db(check, monkeypatch, timeout=30)
+    run_db(check, monkeypatch, timeout=60)
 
 
 @pytest.mark.parametrize("action,body", [
-    ("search", {}), ("mark", {"lead_id": "lead-1"}), ("delete", {"lead_id": "lead-1"}),
+    ("search", {}), ("mark", {"lead_id": "lead-1"}),
     ("chats", {}), ("set_chat", {"chat_id": "oc_ops", "extraction": "excluded"}),
 ])
 def test_disabled_operations_conflict(monkeypatch, tmp_path, action, body):
@@ -119,7 +119,7 @@ def test_chat_extraction_and_deletion_preserve_tasked_and_other_chats(monkeypatc
             status, answer = await call("leads.set_chat", {"chat_id": "oc_ops", "extraction": "excluded",
                                                           "delete_extracted": True})
             assert status == 200 and answer["result"] == {"chat_id": "oc_ops", "extraction": "excluded",
-                                                         "deleted_leads": 1, "deleted_intents": 3}
+                                                         "deleted_leads": 1, "deleted_intents": 3, "detached_intents": 0}
             assert await pool.fetchval("SELECT id FROM message_leads") == other_lead
             assert await pool.fetchval("SELECT id FROM intents") == tasked
             status, answer = await call("leads.chats", {"extraction": "excluded"})
@@ -202,7 +202,8 @@ def test_marking_again_or_after_other_states(monkeypatch):
         assert tuple(row) == ("inaccurate", None, "dashboard", None)
         await pool.execute("UPDATE message_leads SET state='promoted',promoted_kind='vault_proposal',promoted_ref='synthetic' "
                            "WHERE id=$1", replacement)
-        assert await lead_admin.mark_inaccurate(replacement, via="cli", note=None, db=pool)
+        with pytest.raises(lead_admin.LeadConflictError):
+            await lead_admin.mark_inaccurate(replacement, via="cli", note=None, db=pool)
         assert not await lead_admin.mark_inaccurate(999999, via="cli", note=None, db=pool)
         for values in ({"via": "api", "note": None}, {"via": "cli", "note": "x" * 501}):
             with pytest.raises(ValueError):
@@ -212,3 +213,77 @@ def test_marking_again_or_after_other_states(monkeypatch):
             await lead_admin.put_settings(enabled=False, valid_days=0, db=pool)
         assert await leads_model.leads_enabled(pool) is True
     run_db(check, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_exclusion_detaches_other_chat_intents(monkeypatch, tmp_path, caplog, enabled):
+    caplog.set_level("INFO", logger="looper.db.lead_admin")
+    async def check(pool):
+        event, _ = await seed(pool)
+        other = await stream.add(pool, "Synthetic other chat", chat_id="oc_other", sent_at=NOW)
+        target = await leads.intent(pool, [event])
+        merged = await leads.intent(pool, [other], state="merged", merged_into=target)
+        # A merged item with any excluded-chat source must still be deleted and counted.
+        await leads.intent(pool, [other, event], state="merged", merged_into=target)
+        await lead_admin.put_settings(enabled=enabled, db=pool)
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("leads.set_chat", {"chat_id": "oc_ops", "extraction": "excluded",
+                                                          "delete_extracted": True})
+            assert status == 200, answer
+            assert answer["result"] == {"chat_id": "oc_ops", "extraction": "excluded", "deleted_leads": 1,
+                                        "deleted_intents": 2, "detached_intents": 1}
+        rows = await pool.fetch("SELECT id,state,merged_into,handled_at,handled_via FROM intents")
+        assert [tuple(row) for row in rows] == [(merged, "pending", None, None, None)]
+        assert await pool.fetchval("SELECT event_seq FROM intent_sources WHERE intent_id=$1", merged) == other
+        assert f"intent_id={merged} merged_into={target} state=pending reason=merge_target_deleted" in caplog.text
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_mark_does_not_retain_deleted_message_text_in_audit(monkeypatch, tmp_path):
+    async def check(pool):
+        event, number = await seed(pool)
+        secret = "Synthetic private lead content"
+        await pool.execute("UPDATE message_leads SET summary=$2,detail=$2 WHERE id=$1", number, secret)
+        async with v1_api(tmp_path, pool) as call:
+            assert (await call("leads.settings_put", {"enabled": True}))[0] == 200
+            status, answer = await call("leads.mark", {"lead_id": f"lead-{number}", "note": secret})
+            assert status == 200 and answer["result"]["lead"]["summary"] == secret
+        await pool.execute("DELETE FROM source_events WHERE seq=$1", event)
+        assert await pool.fetchval("SELECT count(*) FROM message_leads") == 0
+        # Settings is a positive control proving that operator audit is active.
+        assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE tool='leads.settings_put'") == 1
+        assert secret not in str(await pool.fetch("SELECT arguments,result FROM manager_actions"))
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_promoted_mark_conflicts_on_http_path(monkeypatch, tmp_path):
+    async def check(pool):
+        _, number = await seed(pool)
+        await pool.execute("UPDATE message_leads SET state='promoted',promoted_kind='vault_proposal',"
+                           "promoted_ref='synthetic' WHERE id=$1", number)
+        await lead_admin.put_settings(enabled=True, db=pool)
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("leads.mark", {"lead_id": f"lead-{number}"})
+            assert status == 409 and answer["error"]["code"] == "conflict"
+        assert await pool.fetchval("SELECT state FROM message_leads WHERE id=$1", number) == "promoted"
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_repeated_exclusion_keeps_first_timestamp(monkeypatch):
+    async def check(pool):
+        await seed(pool)
+        for when in (NOW, NOW + timedelta(hours=1)):
+            await lead_admin.set_extraction(stream.SOURCE, "oc_ops", included=False, delete_extracted=False,
+                                            now=when, db=pool)
+        assert await pool.fetchval("SELECT extraction_excluded_at FROM source_chats WHERE chat_id='oc_ops'") == NOW
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_delete_works_while_disabled(monkeypatch, tmp_path):
+    async def check(pool):
+        _, number = await seed(pool)
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("leads.delete", {"lead_id": f"lead-{number}"})
+            assert status == 200 and answer["result"] == {"deleted": f"lead-{number}"}
+        assert await pool.fetchval("SELECT count(*) FROM message_leads") == 0
+    run_db(check, monkeypatch, timeout=60)

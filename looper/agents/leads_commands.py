@@ -27,12 +27,6 @@ _JSON_FIELDS = ("id", "kind", "summary", "detail", "confidence", "state", "valid
 _JSON_SOURCE_FIELDS = ("chat", "sender", "sent_at", "message_id", "link")
 
 
-class _Exit(Exception):
-    def __init__(self, code: int, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
 def _since(text: str | None, days: int | None) -> datetime | None:
     if text is not None and days is not None:
         raise ValueError("--since and --days cannot be used together")
@@ -74,10 +68,7 @@ def _lines(item: dict[str, Any]) -> list[str]:
 
 async def _command(pool: asyncpg.Pool, args: Any) -> tuple[int, str]:
     if args.leads_command == "search":
-        if not 1 <= args.limit <= 50:
-            raise _Exit(USAGE, "--limit must be 1 to 50")
-        since = _since(args.since, args.days)
-        query = {"words": args.words, "chat": args.chat, "person": args.person, "since": since,
+        query = {"words": args.words, "chat": args.chat, "person": args.person, "since": args.since_time,
                  "kind": args.kind, "state": args.state, "limit": args.limit}
         result = await leads.search(**query, db=pool)
         if args.json:
@@ -114,12 +105,12 @@ async def _run(database_url: str, args: Any) -> tuple[int, str]:
     try:
         if not await pool.fetchval("SELECT to_regclass('message_leads') IS NOT NULL"):
             return NO_DATABASE, "the database has no message leads tables yet: start `looper serve` once to upgrade it"
-        if not await leads_model.leads_enabled(db=pool):
+        if args.leads_command != "delete" and not await leads_model.leads_enabled(db=pool):
             return DISABLED, "消息线索没有启用：在控制台的消息流页打开"
         try:
             return await _command(pool, args)
-        except _Exit as stop:
-            return stop.code, str(stop)
+        except lead_admin.LeadConflictError as error:
+            return REFUSED, str(error)
         except ValueError as error:
             return USAGE, str(error)
     except (OSError, asyncpg.PostgresError, TimeoutError) as error:
@@ -133,6 +124,22 @@ def run(args: Any, load_ops: Any) -> int:
         logger.warning("leads cli refused reason=agent_run")
         print("消息线索只供操作者查询和修改，请在自己的终端运行", file=sys.stderr)
         return REFUSED
+    try:
+        if args.leads_command == "search":
+            if not 1 <= args.limit <= 50:
+                raise ValueError("--limit must be 1 to 50")
+            args.since_time = _since(args.since, args.days)
+            if args.kind is not None and args.kind not in {kind.value for kind in leads_model.LeadKind}:
+                raise ValueError("unknown lead kind")
+            if args.state not in leads_model.SEARCH_STATES:
+                raise ValueError("unknown lead state")
+        else:
+            leads_model.parse_lead_id(args.lead)
+            if args.leads_command == "mark" and args.note is not None and len(args.note.strip()) > 500:
+                raise ValueError("note must be at most 500 characters")
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return USAGE
     ops = load_ops(args)
     if ops is None:
         return NO_DATABASE

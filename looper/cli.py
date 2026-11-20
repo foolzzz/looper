@@ -151,8 +151,6 @@ def _add_ledger_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
-    from .agents.leads_model import LeadKind, SEARCH_STATES
-
     leads = commands.add_parser(
         "leads", allow_abbrev=False, help="Search and administer sourced message leads.",
         description="Read and write message leads directly in PostgreSQL, also with the service stopped. "
@@ -166,8 +164,8 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
     dates = search.add_mutually_exclusive_group()
     dates.add_argument("--since", help="YYYY-MM-DD, from midnight in this machine's zone.")
     dates.add_argument("--days", type=int, help="1 to 3650 days back.")
-    search.add_argument("--kind", choices=[kind.value for kind in LeadKind])
-    search.add_argument("--state", choices=SEARCH_STATES, default="active")
+    search.add_argument("--kind", help="Lead kind (decision, commitment, request, status, issue, fact).")
+    search.add_argument("--state", default="active", help="Lead state, or all (default active).")
     search.add_argument("--limit", type=int, default=10, help="1 to 50 (default 10).")
     search.add_argument("--json", action="store_true")
     mark = sub.add_parser("mark", allow_abbrev=False, help="Mark a lead inaccurate.")
