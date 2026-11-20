@@ -25,6 +25,7 @@ describe("Lark bot-token settings", () => {
         rejected: [{ open_id: "ou_refused123", name: "Refused person", count: 1, last_at: "2026-10-18T00:00:00Z", chat_id: null }],
       } });
       if (url === "/api/v1/channels/people") return Response.json({ status: "ok", result: { people: [], complete: false } });
+      if (url === "/api/v1/channel_configs/update") return Response.json({ status: "ok", result: {} });
       if (url === "/api/v1/gate_settings/get") return Response.json({ status: "ok", result: { targets: [], dashboard_target: null } });
       throw new Error(`Unexpected request: ${url}`);
     }));
@@ -61,6 +62,24 @@ describe("Lark bot-token settings", () => {
     });
     expect(container.textContent).toContain("Nobody found");
     expect(container.textContent).toContain("Only part of the directory was searched: use the person's email.");
+  });
+
+  it("picks My ID among the allowlisted senders and saves it with the config", async () => {
+    await act(async () => root.render(<ChannelsSection />));
+    const label = [...container.querySelectorAll("label")].find((node) => node.textContent === "My ID")!;
+    const select = document.getElementById(label.htmlFor) as HTMLSelectElement;
+    expect([...select.options].map((option) => option.value)).toEqual(["", "ou_example123"]);
+    expect(select.value).toBe("");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "ou_example123");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const save = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Save")!;
+    expect(save.disabled).toBe(false);
+    const calls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    await act(async () => save.click());
+    const update = calls.find(([url]) => String(url) === "/api/v1/channel_configs/update")!;
+    expect(JSON.parse(String(update[1].body)).fields.config.operator_sender_id).toBe("ou_example123");
   });
 
   it.each([
