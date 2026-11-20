@@ -3581,9 +3581,10 @@ channel allowlists, missing Claude session identities, the exact pre-rename
 system harness sentence, accounting basis, and gate channel ids. User files
 and other historical rows stay.
 
-`serve` takes a verified full custom-format `pg_dump` before that conversion.
-A schema-only dump or a config export cannot restore history. Backup failure
-stops the upgrade. `--skip-backup` is refused for this registry upgrade. The
+`serve` takes a verified custom-format `pg_dump` before that conversion. The
+dump keeps every table's schema and leaves out the rows of `source_events`
+(message bodies). A schema-only dump or a config export cannot restore history.
+Backup failure stops the upgrade. `--skip-backup` is refused for this registry upgrade. The
 dump is proved readable by, in order, `backup.verify_command` (dump on stdin),
 `docker exec -i <container> pg_restore --list` when `backup.command` is
 `docker exec [options] <container> pg_dump ...`, or the local `pg_restore`.
@@ -3608,7 +3609,8 @@ also defers the online steps with a warning until a start outside one. The lock
 is released on completion, failure or cancellation (and on connection loss).
 
 Rollback means stopping the new service, leaving the upgraded database
-unchanged, restoring the verified full backup into a separate database, and
+unchanged, restoring the verified schema-change backup into a separate database
+(it has the `source_events` schema and not its rows), and
 pointing the guarded older release at that database. Do not downgrade or
 mutate the original database. Writes made after the backup stay only in the
 upgraded database. Import preview is not evidence that a database upgrade is
@@ -4633,9 +4635,12 @@ does one query per tick. Existing sources run daily retention even when off.
 - **Deletion confirmation:** preview gives an event count and a ten-minute,
   single-use token bound to the operator session and target. Confirmation requires
   that token and an unchanged summary of this database's upgrade backups. The
-  preview lists the limits: pushed outputs, processor run outputs, full upgrade
+  preview lists the limits: pushed outputs, processor run outputs, older upgrade
   backups (count and earliest date), and the external lark-chat archive/collector
-  files remain. Backups are inventoried without returning their paths.
+  files remain. Schema-change backups now exclude `source_events` rows. When
+  enabled, daily message backups keep the newest 7 copies and older copies age
+  out through rotation; when disabled, no new message backup is created.
+  Upgrade backups are inventoried without returning their paths.
 - **Import report** (`looper msgflow import [--per-file]`): per file, messages
   read, distinct ids, new, already stored or repeated, skipped, skipped by deletion,
   lines that were not a message, an unterminated last line and files read again; every file
@@ -4655,6 +4660,13 @@ does one query per tick. Existing sources run daily retention even when off.
   `looper msgflow delete --message ID [--source ID] [--dry-run]` shows the same
   limits and asks to type `delete` before writing. Dashboard storage counts include
   raw bytes, daily event/byte growth, dropped bodies and the last retention pass.
+- **Backups:** a schema-change `pg_dump` keeps the `source_events` schema and
+  leaves out its rows. `[backup] messages = "daily"` (off unless the ops file
+  says so; no environment variable) writes `looper-<database>-<stamp>.messages.dump`
+  in the same `backups/` directory at most once a day and keeps the newest 7.
+  That suffix cannot match a schema-change dump (`looper-<database>-<stamp>.dump`),
+  so each rotation deletes only its own files. Stopping the service terminates
+  the daily `pg_dump`, kills it if it is still running, and reaps it.
 - **Not yet:** the collector. Lark and Telegram commands do not change; this
   management surface is operator-only and adds no model-visible tools or prompts.
 
@@ -5611,8 +5623,10 @@ Deployment settings are the ops file, `<runtime root>/ops/server.toml`
 another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
-in) and `verify_command` (an argv array that lists the dump read on stdin like
-`pg_restore --list`), `[operator_notes] root` (an absolute path),
+in), `verify_command` (an argv array that lists the dump read on stdin like
+`pg_restore --list`) and `messages` (`"off"` by default, omitted from the file;
+`"daily"` dumps `source_events` once a day into the same backups directory and
+keeps 7 copies; file only), `[operator_notes] root` (an absolute path),
 `[projects] root` (an absolute parent directory for new projects; file only,
 unset by default), and
 `[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only), and
