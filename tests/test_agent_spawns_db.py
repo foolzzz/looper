@@ -366,6 +366,22 @@ def test_a_spawn_runs_one_child_with_no_tools_in_an_empty_temporary_directory_an
     run_db(test, monkeypatch)
 
 
+@pytest.mark.parametrize(("model", "answered", "refusal"), [
+    ("claude-opus-5-5", {"claude-opus-5-5": {}}, None),
+    ("claude-opus-5-5", {"claude-sonnet-5-5": {}}, "another model answered (claude-sonnet-5-5)"),
+    # an alias is the model it runs, never a pass for any answer
+    ("opus", {"claude-opus-5-5-20261001": {}}, None),
+    ("opus", {"claude-sonnet-5-5": {}}, "another model answered (claude-sonnet-5-5)"),
+    ("haiku", {"claude-haiku-4-5": {}, "claude-opus-5-5": {}}, "another model answered (claude-opus-5-5)"),
+])
+def test_an_answer_is_the_models_only_when_that_model_alone_gave_it(
+    model: str, answered: dict[str, Any], refusal: str | None,
+) -> None:
+    from looper.agents.spawn import _refusal
+
+    assert _refusal({"stop_reason": "end_turn", "modelUsage": answered}, model) == refusal
+
+
 @pytest.mark.parametrize(("mode", "state", "failure"), [
     ("refuse", "failed", "refused"),
     ("other_model", "failed", "refused"),
