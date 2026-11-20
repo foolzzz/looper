@@ -87,12 +87,36 @@ function shellQuote(arg: string) {
   return /^[A-Za-z0-9_\-./=:@%+,]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Parse "<agentId>?task=<taskId>" from the #history/ route. */
-export function parseHistoryRoute(sub: string): { agentId: string; taskId: string | null } {
-  const [agentPart, query = ""] = sub.split("?");
+/** Roles `runs.list` can filter by. A task role the Planner defined is not one of these. */
+export const HISTORY_ROLES = ["manager", "planner", "worker", "reviewer", "processor"] as const;
+export type HistoryRole = (typeof HISTORY_ROLES)[number];
+
+export function isHistoryRole(role: string): role is HistoryRole {
+  return (HISTORY_ROLES as readonly string[]).includes(role);
+}
+
+const HISTORY_ROLE_LABEL: Record<HistoryRole, string> = {
+  manager: "Manager",
+  planner: "Planner",
+  worker: "Worker",
+  reviewer: "Reviewer",
+  processor: "Processor",
+};
+
+/** Parse "#history/<agentId>?task=<taskId>" or "#history?role=<role>". An unknown role is no filter. */
+export function parseHistoryRoute(sub: string, pageQuery = ""): {
+  agentId: string;
+  taskId: string | null;
+  role: HistoryRole | null;
+} {
+  const [agentPart, subQuery = ""] = sub.split("?");
+  const params = new URLSearchParams(pageQuery);
+  new URLSearchParams(subQuery).forEach((value, key) => params.set(key, value));
+  const requested = params.get("role") ?? "";
   return {
     agentId: decodeURIComponent(agentPart || ""),
-    taskId: new URLSearchParams(query).get("task"),
+    taskId: params.get("task"),
+    role: isHistoryRole(requested) ? requested : null,
   };
 }
 
@@ -102,8 +126,13 @@ export function activityBelongsTo(ev: ActivityEvent, agentId: string) {
   return worker === agentId || (agentId.startsWith("planner") && worker === "planner");
 }
 
-export function historyHref(agentId: string, taskId?: string | null) {
-  return `#history/${encodeURIComponent(agentId)}${taskId ? `?task=${encodeURIComponent(taskId)}` : ""}`;
+/** One agent's history, or, with no agent id, History filtered to a role (`#history?role=<role>`). */
+export function historyHref(agentId: string, taskId?: string | null, role?: HistoryRole | null) {
+  const params: string[] = [];
+  if (taskId) params.push(`task=${encodeURIComponent(taskId)}`);
+  if (role) params.push(`role=${encodeURIComponent(role)}`);
+  const query = params.join("&");
+  return `#history${agentId ? `/${encodeURIComponent(agentId)}` : ""}${query ? `?${query}` : ""}`;
 }
 
 /** How a run as a role its task's Planner defined is named wherever runs are listed: e.g. "fe_rd · work". */
@@ -1225,8 +1254,96 @@ function ActivityList({ events }: { events: ActivityEvent[] }) {
   );
 }
 
-export function AgentHistoryPage({ sub }: { sub: string }) {
-  const { agentId, taskId: routeTaskId } = useMemo(() => parseHistoryRoute(sub), [sub]);
+const ROLE_RUN_LIMIT = 100;
+
+/** Every recorded run of one role. Opening a run shows what that run loaded. */
+function RoleHistory({ role }: { role: HistoryRole | null }) {
+  const [runs, setRuns] = useState<LlmRecordSummary[] | null>(null);
+  const hasRunning = runs?.some((run) => run.status === "running") ?? false;
+
+  useEffect(() => {
+    if (!role) {
+      setRuns([]);
+      return;
+    }
+    let active = true;
+    setRuns(null);
+    fetchLlmRecords({ role, limit: ROLE_RUN_LIMIT })
+      .then((next) => { if (active) setRuns(next); })
+      .catch(() => { if (active) setRuns([]); });
+    return () => { active = false; };
+  }, [role]);
+
+  useEffect(() => {
+    if (!role || !hasRunning) return;
+    let active = true;
+    const timer = setInterval(() => {
+      fetchLlmRecords({ role, limit: ROLE_RUN_LIMIT })
+        .then((next) => { if (active) setRuns(next); })
+        .catch(() => {});
+    }, POLL_MS);
+    return () => { active = false; clearInterval(timer); };
+  }, [role, hasRunning]);
+
+  return (
+    <div className="mx-auto max-w-5xl space-y-5 p-6">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Bot className="h-5 w-5 text-primary" />
+        <h1 className="min-w-0 text-lg font-semibold">{role ? `${HISTORY_ROLE_LABEL[role]} runs` : "History"}</h1>
+      </div>
+      <nav aria-label="Roles" className="flex flex-wrap gap-2">
+        {HISTORY_ROLES.map((item) => (
+          <a
+            key={item}
+            href={historyHref("", null, item)}
+            aria-current={item === role ? "page" : undefined}
+            className={cn(
+              "inline-flex min-h-11 items-center rounded-md border px-3 text-xs font-medium",
+              item === role ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
+          >
+            {HISTORY_ROLE_LABEL[item]}
+          </a>
+        ))}
+      </nav>
+      <section className="space-y-2">
+        <h2 className="text-sm font-semibold">Runs</h2>
+        {!role ? (
+          <p className="text-xs text-muted-foreground">Pick a role to see its runs.</p>
+        ) : runs === null ? (
+          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        ) : runs.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No runs yet</p>
+        ) : (
+          runs.map((record, i) => (
+            <div key={record.id} className="space-y-1">
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
+                <a href={historyHref(record.agent_id, record.task_id)} className="font-mono text-primary underline-offset-2 hover:underline">
+                  {record.agent_id}
+                </a>
+                {record.task_role && <Badge variant="outline" className="font-mono">{runRoleLabel(record.task_role)}</Badge>}
+                {record.task_id && (
+                  <a href={`#tasks/${encodeURIComponent(record.task_id)}`} className="text-muted-foreground hover:text-foreground">
+                    task {record.task_id}
+                  </a>
+                )}
+              </div>
+              <RunCard initial={record} defaultOpen={i === 0} />
+            </div>
+          ))
+        )}
+      </section>
+    </div>
+  );
+}
+
+export function AgentHistoryPage({ sub, query = "" }: { sub: string; query?: string }) {
+  const route = useMemo(() => parseHistoryRoute(sub, query), [sub, query]);
+  if (!route.agentId) return <RoleHistory role={route.role} />;
+  return <OneAgentHistory agentId={route.agentId} routeTaskId={route.taskId} />;
+}
+
+function OneAgentHistory({ agentId, routeTaskId }: { agentId: string; routeTaskId: string | null }) {
   const role = agentRole(agentId);
   const [runs, setRuns] = useState<LlmRecordSummary[] | null>(null);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);

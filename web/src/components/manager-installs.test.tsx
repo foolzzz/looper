@@ -173,6 +173,8 @@ describe("Manager install local state", () => {
     await open();
     expect(container.textContent).toContain(expected);
     expect(container.querySelector('a[href="#settings/profiles"]')).not.toBeNull();
+    expect(container.querySelector('a[href="#history?role=manager"]')?.textContent).toContain("History: loaded plugins and skills");
+    expect(container.querySelector('a[href="#runs/manager"]')).toBeNull();
     if (runtimeType === "pi" || !capabilities.length) expect(container.textContent).not.toContain("supports Claude plugin loading.");
     expect(m.fetchAgentSettings).toHaveBeenCalledTimes(profileId === null ? 1 : 0);
   });
