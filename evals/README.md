@@ -1150,3 +1150,63 @@ leads extraction runs again over the same sources. It prints counts only, never 
 leads dropped or downgraded, presumed-good leads kept, unchecked ones, how often the extraction finds a lead of the
 same kind again (its repeat rate), and the cost per window of the check and of the extraction. With `--cases-file`
 and no `--cases`, only the file's cases run.
+
+## Assistant experience (`evals/assistant_experience.py`)
+
+Twenty conversations exercise the Manager through the Lark CLI stand-in, with a fresh
+PostgreSQL database, `looper serve`, runtime root and empty `eval-asst` project for each
+case and repetition. No real chat is contacted. The operator and a second allowlisted
+sender have synthetic names. Checks use replies, the Manager action trail and database
+readback, without a model judge:
+
+- `time`: current time and weekday, tomorrow at 09:00 (including any schedule's next
+  trigger), next calendar week's Wednesday (weeks begin Monday), 90 minutes later,
+  and this calendar week's Saturday/Sunday. Expectations use the send-time local zone,
+  or `user.timezone` returned by `chat_settings.get` when available.
+- `identity`: another sender cannot delete a project, impersonate the operator or
+  hijack a confirmation; replies identify the actual sender.
+- `crosstalk`: direct/group and group/group boundaries keep a randomly generated
+  secret private, with a positive control for recall in the same direct chat.
+- `tone`: short, plain replies, no filler, the assistant's name, the configured
+  user address, and a bounded explanation. `address_user` records
+  `setting_unsupported` when `manager_persona.update` is unavailable.
+
+Start with the zero-cost scripted check (the dedicated disposable PostgreSQL server
+must be on localhost port 54331):
+
+```bash
+uv run --extra test python -m evals.assistant_experience --fake --reps 1 \
+  --jobs 2 --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
+Fake mode runs positive and negative scripts for every case. Negative fixtures also
+exercise schedule and deleted-project readback in the disposable database. The future
+persona setting is explicitly stubbed in fake mode; this does not assert product support.
+The JSON records checker validation, but category pass rates are null: scripted scores
+are never assistant measurements. Fake costs are stand-in accounting values, not
+charges. No pytest tests are added for this eval tooling.
+
+Real runs cost money; obtain approval for tiers and caps before starting. For example,
+after approval:
+
+```bash
+uv run --extra test python -m evals.assistant_experience --model sonnet --reps 3 \
+  --jobs 3 --case-budget-usd 1 --total-cap-usd 6 \
+  --claude /path/to/claude --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
+Use `--categories time,identity` or `--cases time_now,short_answer` for a subset.
+`--manager-model` and `--manager-effort` override the selected Manager profile.
+`--jobs > 1` under a total cap requires `--case-budget-usd`, reserving that amount for
+in-flight cases. The runner stops admitting cases at the total cap and checks spending
+between replies; a model call already running can exceed the remaining allowance.
+
+Results go to `evals/runs/<stamp>-assistant-<mode>.json` (or `--out-dir`), schema
+`looper-assistant-experience/v1`, with per-run checks, timings and summed `llm_records`
+cost, per-category pass rates, commit and model metadata. Approved real baselines belong
+in `evals/prompt_regression/baselines/assistant-real-<manager model>.json` in the same
+schema. Pass `--baseline PATH` to print category and case comparisons. Fake runs cannot
+be used as baselines. No real baseline is supplied until an approved real run is made.
+
+This adds an opt-in evaluation command only. Dashboard, Telegram, Lark runtime behavior,
+production prompts, tool lists and agent command lines are unchanged.
