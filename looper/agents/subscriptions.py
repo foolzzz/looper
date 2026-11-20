@@ -414,7 +414,8 @@ def _usd(value: float) -> str:
 
 async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime, action: str) -> str:
     """``confirmation_text`` of an extraction: what it reads, the chats excluded from extraction, the rule, the
-    processor's Profile, the caps and what a day of the last 24 hours' messages would cost (inferred)."""
+    processor's Profile, the caps and what a day of the last 24 hours' messages would cost (by the unit costs
+    ``extraction`` measured)."""
     from ..db.connection import get_pool
     from . import processor
     from .schedules import notify_targets
@@ -455,8 +456,12 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
                      f"（{', '.join(profile['managed_hooks'].get('events') or []) or '无法读取'}）")
     cap, daily = schedule.get("run_budget_usd"), schedule.get("daily_budget_usd")
     lines.append(f"- 花费上限：单次 ${cap:g}；每日 " + (f"${daily:g}" if daily is not None else "未设置"))
-    low, high = (day * rate for rate in extraction.COST_PER_EVENT_USD)
-    lines.append(f"- 预计花费：约 ${_usd(low)}–{_usd(high)} 每天（按最近 24 小时 {day:,} 条估算，推测）")
+    # A firing with something to read starts a run; a day with more than its windows hold fires again at once.
+    runs = max(min(fires_per_day(rule, zone_name, now), day), -(-day // max(1, sub.get("max_events") or 1)))
+    low, high = extraction.estimate(day, runs)
+    lines.append(f"- 预计花费：约 ${_usd(low)}–{_usd(high)} 每天（按最近 24 小时 {day:,} 条、最多 {runs} 次运行估算；"
+                 f"单价 {extraction.COST_MEASURED_ON} 实测：每次约 ${extraction.COST_PER_RUN_USD[0]:g}–"
+                 f"{extraction.COST_PER_RUN_USD[1]:g}，每条约 ${extraction.COST_PER_EVENT_USD:g}）")
     if kind == "intents":
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
         label = next((t["label"] for t in await notify_targets()

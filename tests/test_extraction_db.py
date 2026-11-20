@@ -249,10 +249,18 @@ async def preset_fields(env: ScheduleEnv, kind: str) -> dict[str, Any]:
     return (await env.ok("POST", "/api/v1/schedule_admin/subscription_preset", {"output_kind": kind}))["fields"]
 
 
+async def switch(env: ScheduleEnv, kind: str, on: bool) -> None:
+    """Turn ``leads.enabled`` or ``intents.enabled`` on or off."""
+    await env.pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE "
+                           "SET value = EXCLUDED.value", f"{kind}.enabled", "true" if on else "false")
+
+
 async def extractor(env: ScheduleEnv, kind: str = "leads", *, confirm: bool = True, target: Any = None,
                     subscription: dict | None = None) -> str:
-    """An extraction subscription created from its preset, enabled and (unless ``confirm`` is false) confirmed."""
+    """An extraction subscription created from its preset, its kind turned on, enabled and (unless ``confirm`` is
+    false) confirmed."""
     await stream(env.pool)
+    await switch(env, kind, True)
     fields = await preset_fields(env, kind)
     fields["subscription"].update(subscription or {})
     fields.update(cron="*/5 * * * *", timezone=ZONE)  # the test's clock fires five-minute rules
@@ -409,7 +417,10 @@ def test_an_unconfirmed_extraction_is_skipped_without_moving_its_cursor_and_a_ne
         assert (run["status"], run["error"]) == ("skipped_gate", extraction.NOT_CONFIRMED)
         assert fake.calls == [] and await cursor(env, sid) == before
         confirmation = (await view(env, sid))["subscription"]["confirmation"]
-        assert "它会用不带工具的处理器整理你的消息" in confirmation and "按最近 24 小时 1 条估算，推测" in confirmation
+        assert "它会用不带工具的处理器整理你的消息" in confirmation
+        # One message, one run: the measured fixed part per run and the part per message.
+        assert ("- 预计花费：约 $0.005–0.008 每天（按最近 24 小时 1 条、最多 1 次运行估算；单价 2026-11-19 实测："
+                "每次约 $0.005–0.008，每条约 $0.0002）") in confirmation
         assert confirmation.splitlines()[-1] == "确认后按规则无人值守地整理；改规则、来源、会话范围或 Profile 都要再确认。"
         status, _ = await confirm_it(env, sid)
         assert status == 200
@@ -426,6 +437,26 @@ def test_an_unconfirmed_extraction_is_skipped_without_moving_its_cursor_and_a_ne
         assert status == 400 and "output_kind cannot change" in json.dumps(body)
 
     scenario(check, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["leads", "intents"])
+def test_a_run_whose_kind_is_turned_off_is_skipped_without_a_processor_and_keeps_its_cursor(monkeypatch, tmp_path,
+                                                                                              kind):
+    async def check(env, poster, fake):
+        sid = await extractor(env, kind)
+        await add(env.pool, "please look at this", chat_id="oc_dm", kind="p2p", sent_at=minutes_ago(env, 5))
+        before = await cursor(env, sid)
+        await switch(env, kind, False)
+        run = await fire(env, sid)
+        assert (run["status"], run["error"]) == ("skipped_gate", extraction.TURNED_OFF[kind])
+        assert fake.calls == [] and await cursor(env, sid) == before
+        await env.pool.execute("DELETE FROM system_settings WHERE key = $1", f"{kind}.enabled")  # absent is off too
+        assert (await fire(env, sid))["status"] == "skipped_gate" and fake.calls == []
+        await switch(env, kind, True)
+        assert (await fire(env, sid))["status"] == "completed" and len(fake.calls) == 1
+        assert await cursor(env, sid) == await committed(env.pool)
+
+    scenario(check, monkeypatch, tmp_path, reply="NONE")
 
 
 def test_an_intents_subscription_is_confirmed_only_with_a_direct_chat_target(monkeypatch, tmp_path):
@@ -548,6 +579,8 @@ def test_the_backfill_dry_run_counts_by_kind_and_day_and_writes_nothing(tmp_path
         out = capsys.readouterr().out
         assert out.startswith("dry run: leads backfill of 消息线索")
         assert "in-scope events: 3 (group 2, p2p 1)" in out and "windows: 1 of at most 500 events" in out
-        assert "推测" in out and "实测均价" not in out
+        # Three events in one window: the measured fixed part per window and the part per event.
+        assert "estimate: $0.006–$0.009 (measured on 2026-11-19: 0.005–0.008 USD per window and 0.0002 USD per event)" \
+            in out and "实测均价" not in out
         assert len(asyncio.run(_rows(url, "SELECT key FROM system_settings"))) == settings
         assert asyncio.run(_rows(url, "SELECT count(*) AS n FROM message_leads"))[0]["n"] == 0

@@ -53,11 +53,21 @@ REJECTED_WITHIN = timedelta(days=30)  # a rejected one: the same request again i
 ITEMS_MAX = 50
 SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
-# What one in-scope message costs the processor, from the real-mode eval (inferred until replaced by measured runs).
-COST_PER_EVENT_USD = (0.0004, 0.0006)
+# What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run
+# (its prompt and reply) and a part per window event. ``estimate`` uses them for the confirmation and the backfill.
+COST_MEASURED_ON = "2026-11-19"
+COST_PER_RUN_USD = (0.005, 0.008)
+COST_PER_EVENT_USD = 0.0002
+
+
+def estimate(events: int, runs: int) -> tuple[float, float]:
+    """What ``runs`` processor runs over ``events`` window events cost, low and high, by the measured unit costs."""
+    return tuple(runs * fixed + events * COST_PER_EVENT_USD for fixed in COST_PER_RUN_USD)  # type: ignore[return-value]
 # A full window fires the subscription again at once, at most this many times in a row (``Scheduler``).
 CATCH_UP_MAX = 6
 NOT_CONFIRMED = "not confirmed: confirm the subscription to start extracting"
+TURNED_OFF = {"leads": f"leads are turned off ({leads_model.LEADS_ENABLED_KEY}): nothing is extracted",
+              "intents": f"intents are turned off ({leads_model.INTENTS_ENABLED_KEY}): nothing is extracted"}
 
 LEADS_INSTRUCTIONS = """\
 From the user's chat messages, record the leads worth knowing later, when the user discusses a requirement, a
@@ -655,12 +665,16 @@ async def batch(conn: Any, kind: str, sub: Mapping[str, Any], picked: Mapping[st
 
 async def plan(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, now: datetime,
                own_apps: Collection[str]) -> dict[str, Any] | Skipped | None:
-    """The run's window (``SubscriptionRuns.plan``): ``Skipped`` while the operator's confirmation does not hold
-    for the configuration now (the cursor stays); None when nothing in the window is read (the cursor moves past
-    it); else the window the run is recorded with."""
+    """The run's window (``SubscriptionRuns.plan``): ``Skipped`` while its kind's switch (``leads.enabled``,
+    ``intents.enabled``) is off or the operator's confirmation does not hold for the configuration now (the cursor
+    stays, no processor starts); None when nothing in the window is read (the cursor moves past it); else the window
+    the run is recorded with."""
     from . import subscriptions
 
     sub = schedule["subscription"]
+    kind = subscriptions.output_kind(sub)
+    if not await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(conn):
+        return Skipped(TURNED_OFF[kind])
     version = await subscriptions.config_version(schedule)
     if sub["target_confirmed_at"] is None or sub.get("target_confirmed_version") != version:
         return Skipped(NOT_CONFIRMED)

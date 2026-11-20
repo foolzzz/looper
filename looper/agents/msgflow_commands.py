@@ -106,7 +106,7 @@ async def _leads_schedule(pool: Any, schedule_id: str | None) -> tuple[dict[str,
 
 
 def _usd(value: float) -> str:
-    return f"${value:.2f}" if value < 10 else f"${value:.1f}"
+    return f"${value:.3f}" if value < 0.1 else f"${value:.2f}" if value < 10 else f"${value:.1f}"
 
 
 async def _backfill(database_url: str, *, days: int, schedule_id: str | None, run: bool, budget_usd: float | None,
@@ -146,15 +146,16 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
         for row in tally:
             by_kind[row["chat_kind"]] = by_kind.get(row["chat_kind"], 0) + row["events"]
             by_day[row["day"]] = by_day.get(row["day"], 0) + row["events"]
-        low, high = (count * rate for rate in extraction.COST_PER_EVENT_USD)
+        low, high = extraction.estimate(count, math.ceil(count / BACKFILL_WINDOW))
         lines = [f"{'' if run else 'dry run: '}leads backfill of {schedule['name']} ({sid}), the last {days} days "
                  f"up to seq {start}" + (f", resuming after seq {progress['done_seq']} ({progress['windows']} windows, "
                                         f"{_usd(progress['spent_usd'])} spent)" if progress["done_seq"] else ""),
                  f"  in-scope events: {count:,} ("
                  + (", ".join(f"{kind} {n:,}" for kind, n in sorted(by_kind.items())) or "none") + ")",
                  f"  windows: {math.ceil(count / BACKFILL_WINDOW)} of at most {BACKFILL_WINDOW} events",
-                 f"  estimate: {_usd(low)}–{_usd(high)} (推测, {extraction.COST_PER_EVENT_USD[0]}–"
-                 f"{extraction.COST_PER_EVENT_USD[1]} USD per event)"]
+                 f"  estimate: {_usd(low)}–{_usd(high)} (measured on {extraction.COST_MEASURED_ON}: "
+                 f"{extraction.COST_PER_RUN_USD[0]:g}–{extraction.COST_PER_RUN_USD[1]:g} USD per window and "
+                 f"{extraction.COST_PER_EVENT_USD:g} USD per event)"]
         measured = await pool.fetchrow(
             "SELECT sum(r.cost_usd) AS cost, sum(sr.events_selected) AS events FROM schedule_runs r "
             "JOIN subscription_runs sr ON sr.run_id = r.id WHERE r.schedule_id = $1 AND r.status = 'completed' "
@@ -176,8 +177,9 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
             if not picked["rows"]:
                 done = start
                 break
-            # The next window's cost, by the running mean of this backfill's (or the inferred top rate before any).
-            estimate = len(picked["rows"]) * (spent / events if events else extraction.COST_PER_EVENT_USD[1])
+            # The next window's cost, by the running mean of this backfill's (the measured top rate before any).
+            estimate = (len(picked["rows"]) * spent / events if events
+                        else extraction.estimate(len(picked["rows"]), 1)[1])
             if spent + estimate > budget_usd:
                 stopped = f"stopped before a window of {len(picked['rows'])} events would pass the budget"
                 break
