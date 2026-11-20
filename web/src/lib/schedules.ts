@@ -34,6 +34,7 @@ export const RUN_STATUS: Record<ScheduleRunStatus, { label: string; variant: Var
   skipped_gate: { label: "Skipped: nothing new", variant: "outline" },
   gate_failed: { label: "Gate failed", variant: "destructive" },
   skipped_budget: { label: "Skipped: daily budget", variant: "warning" },
+  skipped_busy: { label: "Skipped: Manager busy", variant: "outline" },
 };
 
 /** What each `notify` choice sends. */
@@ -129,6 +130,8 @@ export function runNotice(run: ScheduleRunInfo): Notice {
       return { text: "Skipped: the previous run is still in progress", tone: "warn" };
     case "skipped_budget":
       return { text: "Skipped: today's spend reached the daily budget", tone: "warn" };
+    case "skipped_busy":
+      return { text: "Skipped: its Manager was answering a message (runs only when idle)", tone: "warn" };
     case "skipped_gate":
       return { text: "Skipped: the gate printed nothing, so there is nothing new", tone: "warn" };
     case "gate_failed":
