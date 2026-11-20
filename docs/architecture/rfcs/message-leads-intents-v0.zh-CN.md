@@ -127,7 +127,8 @@ tasked、rejected、merged 是终态。
 ## 8. 花费、上限与评测
 
 - **实测：** 吃瓜订阅一次整点运行，选中 500 条、每条 200 字，Sonnet $0.152、17.5 秒（2026-11-20）。
-- **推测**（实现时用真实运行替换）：每条在范围内的消息 $0.0004–0.0006；线索每天约 $3–6，意图每天约 $0.3–1。预设上限：线索单次 $0.6、每天 $10；意图单次 $0.3、每天 $3。
+- **实测**（切片 b 的真实路径，Claude Code + Sonnet，合成消息）：每次抽取运行固定约 $0.005–0.008，另加每条消息约 $0.0002；18 条一次 $0.0106，401 条一次 $0.0816。
+- **推测**（按上面的实测和每天八千到一万条在范围内的消息）：线索每天约 $2–3；意图每天约 $0.3–1（多数 10 分钟窗口为空、不花钱）。预设上限：线索单次 $0.6、每天 $10；意图单次 $0.3、每天 $3。
 - **上限：** 窗口 500 条、前文 100 条、输入 60,000 字；每次输出最多 50 条；启用的意图类型最多 10 种，判断说明每种 2,000 字。
 - **processor 评测**（`evals/processor`，sonnet `--reps 2`，合成批次）：`leads_basic`、`leads_quiet`、`leads_context`、`leads_supersede`、`leads_same`、`leads_injection`、`intents_basic`、`intents_same`、`intents_rejected`、`intents_injection`、`intents_custom_type`。
 - **Manager 对话评测**（sonnet `--reps 2` 加 opus xhigh `--reps 1`）：`leads_background`、`leads_dont_search`、`leads_conflict`、`leads_instruction`、`leads_task_requirement`。群聊拒绝、非操作者拒绝、关闭时逐字节不变用单元测试。
@@ -147,4 +148,8 @@ tasked、rejected、merged 是终态。
 
 **并行：** F 合入后（或者以 `codex/leads-foundation` 为基线），a、b、c、d 同时开工；e 先按冻结的 JSON 写组件和测试，接口合入后做真实路径截图。每张任务卡写清了文件、函数签名、JSON 形状、测试、真实路径（各用自己的端口和一次性数据库）和分支基线。b 合入后，协调者先跑回填的 dry-run 报给维护者。
 
-**需要核实：** 飞书和 Telegram 机器人编辑自己消息的时限（d）；飞书消息级链接的格式（v0 先给会话链接）；来源的 `user_open_id` 和机器人的操作者 ID 是否同一个 open_id（按应用区分，分开存）；Sonnet 在 500 条窗口上的 JSON 丢弃率和每条的实际花费（b）。
+**已核实：** 飞书编辑消息的时限由企业管理员配置（错误码 230075），每条最多改 20 次（230072）；Telegram 对机器人自己的文字消息没有一般的时限。两个渠道编辑失败时都改为引用原推送另发一条（d 查官方文档，真实平台的时限没有实测）。每条消息的实际花费见第 8 节（b）。
+
+**需要核实：** 飞书消息级链接的格式（v0 先给会话链接）；来源的 `user_open_id` 和机器人的操作者 ID 是否同一个 open_id（按应用区分，分开存）；Sonnet 在真实流量的 500 条窗口上的 JSON 丢弃率（评测和合成数据上没有丢弃）。
+
+**已知缺口：** 跑在 DSH 运行时上的 Manager 没有 `looper_leads_search`。
