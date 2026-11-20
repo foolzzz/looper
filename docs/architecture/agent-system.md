@@ -2812,9 +2812,12 @@ whether the project's agents get the knowledge vault's tools ([The knowledge
 vault](#the-knowledge-vault-the-operators-notes-read-and-written-through-looper));
 and `advisor` (`off`, also when null, or `on`), whether its Planners consult the
 advisor, with `advisor_consult_budget_usd` (0.01 to 5, null for 1),
-`advisor_budget_usd` (a task's consults in all, 0.01 to 50, null for 5),
-`advisor_consults_per_task` (0 to 100, null for 10) and
-`advisor_consults_per_step` (0 to 10, null for 2) ([Consults of the
+`advisor_budget_usd` (a task's consults in all, 0.01 to 50),
+`advisor_consults_per_task` (0 to 100) and `advisor_consults_per_step` (0 to
+10), none of the three a limit when null (the first phase sets none, only
+alerts), `advisor_fallback_profile` (an Agent Profile's name, unused for now)
+and `advisor_internal_domains` (at most 20 domains whose names, and the hosts
+under them, the code checks refuse in a request) ([Consults of the
 advisor](#consults-of-the-advisor)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
@@ -5116,17 +5119,35 @@ step, through an abstract request that code checks first. Only the Planner asks,
 `advisor` on; with it off, the reply contract, every DECISION message, the contract's refusals and the Worker's
 first turn stay as they were (`tests/test_advisor_off.py` hashes them).
 
-- **When.** Before the first Worker of a step its PLAN marks `"difficulty": "critical"` starts, a [DECISION] turn
-  may only advise (a checkpoint, kind `plan_review`); its answer's decision proceeds (the step starts, the advice
-  it took given to its Worker), replans or fails. A checkpoint that gets no answer (blocked, failed, over budget,
-  withdrawn) starts the step as planned. A [DECISION] where a retry is allowed after a failed Worker or review
-  offers advise (`planner_advice.OFFER`) while the step and the task have consults and budget left
-  (`advisor_*` settings); the decision after the answer allows what that decision allowed but advise.
-- **The turns.** A request that fails a check comes back in a [DECISION] turn with what to fix (at most twice);
-  the advisor's questions come in an [ADVICE] turn, answered (`supplement`, checked again) or withdrawn. The
-  decision after an answer must carry `advice_adoption` (refused without it), recorded on `advisor_advice`; the
-  points taken (not rejected) reach the step's next Worker in its first turn, and whether that attempt passed (its
-  review, or its acceptance without one) is `unlocked`.
+- **When.** Code forces one consult: before the first Worker of a step its PLAN marks `"difficulty": "critical"`
+  (an interface, a data structure, a migration, deleted data, production configuration) starts, a [DECISION] turn
+  may only advise (a checkpoint, kind `plan_review`); its answer's decision proceeds (the step starts, the
+  Planner's `feedback` added to its instruction), replans or fails. Otherwise the Planner chooses: every [DECISION]
+  (after a success, a failure, or with its retries used up: then `advise, replan, fail`) offers advise
+  (`planner_advice.OFFER`), and so does the first [PLAN] (`{"advise": {...}}` instead of the steps). [CHAT] and
+  [GATE] never do. Advise is not offered while the step (or the plan) has a consult going, after one that failed
+  until something new is known, or past a limit the project set (`advisor_*`; none by default: only $1 a consult).
+- **New evidence.** A consult records what was known of its scope when it was asked
+  (`planner_advice.Evidence`: a step's attempt, its latest Worker and Reviewer runs and how they ended, its
+  instruction; the plan's steps; the requirement and the user gates answered). A request of a kind already asked
+  about the same scope with the same evidence is refused; after a consult that failed, advise comes back once the
+  evidence changes.
+- **Waiting.** A consult runs in the background (`PlannerAgent._run_consult`): its step is `consulting` while the
+  other steps run and are decided; a [PLAN] consult holds the planning. Its outcome comes back as an `advice` event.
+  A round has 5 minutes and a consult 15 (`advisor.CONSULT_MAX_SEC`), or it fails (`timeout`).
+- **The turns.** A request that fails a check comes back in a [DECISION] (or [PLAN]) turn with what to fix (at most
+  twice); the advisor's questions come in an [ADVICE] turn, answered (`supplement`, checked again) or withdrawn.
+  The decision (or plan) after an answer must carry `advice_adoption` (refused without it), recorded on
+  `advisor_advice`. The Worker never gets the advisor's words: the Planner writes what it takes into its `feedback`,
+  and the Worker's record names the consult (`metadata.advisor_consult`). Whether that attempt passed (its review,
+  or its acceptance without one) is `unlocked`.
+- **Failure.** A run that ends in error runs once more; a rate-limited one (HTTP 429) does not. A consult that gives
+  no answer (timeout, a bad answer, a refusal, over budget, blocked, rate-limited) comes back to the Planner as
+  "The consult gave no answer: <kind>, <why>", with advise not offered; a checkpoint's step starts as planned, and
+  its activity says the checkpoint consult did not finish.
+- **Alerts** (`advisor_alerts`, to the chat the dashboard's user gates use): the day's advisor spend over
+  `advisor_daily_alert_usd` (a system setting, 30 USD when unset), a task consulting about more than half of its
+  steps, and 3 consults in a row failing across tasks. They never stop a consult.
 
 - **Two roles with no tools.** `advisor` answers; `advice_check` judges a request before it is sent. Their
   runtime needs `run` and `no_tools` (`ROLE_CAPABILITIES`). Only their role layer (Settings → Roles) chooses their
