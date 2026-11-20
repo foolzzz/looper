@@ -76,7 +76,7 @@ def test_concurrent_online_steps_finish_once_without_a_validate_index_deadlock()
                 await asyncio.wait_for(asyncio.gather(*runs), 10)
                 await assert_finished(observer)
                 for step in connection._ONLINE_STEPS:
-                    if step.migration not in ("run_tree", "step_difficulty"):  # a migration this database lacks
+                    if step.migration not in ("run_tree", "step_difficulty"):  # the steps this database has pending
                         continue
                     for table, constraint in step.validate:
                         assert queries.count(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}") == 1

@@ -4171,7 +4171,8 @@ export type LibraryKind = "plugin" | "skill" | "mcp";
 /** How an item was acquired: imported from this machine, uploaded, taken from git, written in Settings ("ui": a skill
  * or an MCP server) or in a project. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
-export type AgentRole = "manager" | "planner" | "worker" | "reviewer" | "processor" | "advisor" | "advice_check";
+export type AgentRole = "manager" | "planner" | "worker" | "reviewer" | "processor" | "advisor" | "advice_check"
+  | "leads_check";
 /** The roles whose runs have tools: every role but the processor, which runs with none. */
 export const TOOL_ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
 /** An install's roles: the built-in ones with tools, and "task_role", the roles a task's Planner defines: such an

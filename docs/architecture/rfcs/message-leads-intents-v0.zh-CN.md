@@ -186,6 +186,7 @@ tasked、rejected、merged 是终态。
 **做法：** 常驻内容做成一个带版本号的块「Looper state（rev N）」，只在需要时整块发：
 
 - 新会话、进程（重新）启动、`/new`、Looper 自己换会话（context full），以及运行时报告了压缩（流里的 `compact_boundary`）之后的第一个回合，发整块。
+- 「常驻会话会报告压缩」是运行时的类型化声明（`RuntimeAdapter.resident_compaction_events`，只有 Claude Code 声明）；没有它的运行时可能悄悄压缩，开关打开时每个回合都发整块，不发「unchanged」行，也不发变化说明。
 - 其余回合，把当前内容和最近一次整块逐行比较：没变，只发一行「Looper state: unchanged since rev N」；变了而且变化不大，发「Looper state: changes since rev N」，列出增加和去掉的行（总是相对最近一次整块，不会一条接一条地累积）；变化超过门槛就发新的整块（rev N+1）。
 - **门槛：** 变化的行数超过整块行数的 30%，或者变化说明的长度超过整块的 40%，就重发整块。PR3 用真实运行的数据检查这两个数，需要时调整并在 PR 里说明。
 - **模型可见：** 开关打开时，`TOOLS_CONTRACT` 后追加一句：最新的「Looper state rev N」整块加上它之后最新的一条变化说明是当前的状态，更早的都已过期。

@@ -19,6 +19,7 @@ from looper.agents.profile_registry import builtin_resolved_profile
     ["mark", "one", "--inaccurate"], ["delete", "not-a-lead"],
     ["mark", "1", "--inaccurate", "--note", "x" * 501],
     ["search", "--kind", "unknown"], ["search", "--state", "unknown"],
+    ["eval-export", "--out", "x.jsonl", "--sample", "-1"],
 ])
 def test_invalid_input_precedes_config_and_database(monkeypatch, argv):
     monkeypatch.delenv("LOOPER_AGENT_RUN", raising=False)
@@ -32,7 +33,8 @@ def test_invalid_input_precedes_config_and_database(monkeypatch, argv):
     assert code == 2
 
 
-@pytest.mark.parametrize("argv", [["search"], ["mark", "1", "--inaccurate"], ["delete", "1"]])
+@pytest.mark.parametrize("argv", [["search"], ["mark", "1", "--inaccurate"], ["delete", "1"],
+                                  ["eval-export", "--out", "set.jsonl"]])
 def test_real_launch_environment_refuses_leads_cli(tmp_path, argv):
     env = Launch(AgentSettings(profile=builtin_resolved_profile()), role=AgentType.WORKER).environment()
     if not env.get("LOOPER_AGENT_RUN"):

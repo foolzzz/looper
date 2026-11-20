@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from looper.agents import processor, subscription_runs
+from looper.agents.agent_settings import AgentType
 from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.agents.scheduler import Scheduler
 from looper.db import chat_bindings
@@ -56,7 +57,9 @@ class Poster:
 
 
 class FakeProcessor:
-    """``processor.run`` as the test scripts it: records what it was given, answers with ``reply`` or fails."""
+    """``processor.run`` as the test scripts it: records what it was given, answers with ``reply`` or fails. A run of
+    the leads check (``role``) answers with ``check_reply`` (or fails with ``check_failure``) instead, as record
+    ``check_record_id``."""
 
     def __init__(self, reply: str = "- 《Ops room》: someone spilled coffee") -> None:
         self.reply: str | None = reply
@@ -64,9 +67,18 @@ class FakeProcessor:
         self.cost = 0.01
         self.calls: list[dict[str, Any]] = []
         self.during: Any = None  # an async function called while the processor "runs"
+        self.check_reply: str | None = None
+        self.check_failure: processor.ProcessorFailure | None = None
+        self.check_cost = 0.0003
+        self.check_record_id: int | None = None
 
     async def __call__(self, **kwargs: Any) -> processor.ProcessorRun:
         self.calls.append(kwargs)
+        if kwargs.get("role", AgentType.PROCESSOR) is not AgentType.PROCESSOR:
+            if self.check_failure is not None:
+                return processor.ProcessorRun(None, self.check_record_id, self.check_cost, failure=self.check_failure,
+                                              detail="synthetic failure")
+            return processor.ProcessorRun(self.check_reply, self.check_record_id, self.check_cost)
         if self.during is not None:
             await self.during()
         if self.failure is not None:

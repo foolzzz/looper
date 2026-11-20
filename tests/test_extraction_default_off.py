@@ -1,6 +1,8 @@
 """With no extraction subscription, a push subscription's processor run is what it was before extraction existed:
 its system prompt, its command line and the confirmation version a live push subscription is confirmed under are
-pinned to a frozen sample taken from ``main`` before extraction. Pure: no database, no model."""
+pinned to a frozen sample taken from ``main`` before extraction. With the leads check off (``check_items``), an
+extraction's processor prompt and confirmation version are pinned to ``main`` before the check. Pure: no database,
+no model."""
 
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from looper.agents import processor, subscriptions
+from looper.agents import extraction, processor, subscriptions
 from looper.agents.agent_settings import AgentType, Launch, resolve
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents.runtimes import CLAUDE_CODE
@@ -69,6 +71,34 @@ def test_a_push_subscriptions_confirmation_version_is_unchanged():
              "runtime": {"id": "r", "type": "claude_code", "launcher": "direct", "executable": None}}
     version = asyncio.run(subscriptions.config_version(schedule, profile=facts))
     assert version == "110d72fb4c2c2ce72110d17fa95e0be8ae3ee92b059f74218712f966b837b965"  # frozen from main
+    unchecked = {**schedule, "subscription": {**schedule["subscription"], "check_items": False}}
+    assert asyncio.run(subscriptions.config_version(unchecked, profile=facts)) == version
     for kind in ("leads", "intents"):  # an extraction's version binds its kind and its chats too
         other = {**schedule, "subscription": {**schedule["subscription"], "output_kind": kind}}
         assert asyncio.run(subscriptions.config_version(other, profile=facts)) != version
+
+
+FACTS = {"profile_id": "builtin", "effort": None, "hooks": None,
+         "runtime": {"id": "r", "type": "claude_code", "launcher": "direct", "executable": None}}
+
+
+def test_with_the_check_off_an_extractions_prompt_and_version_are_unchanged():
+    role = processor._Role(processor.PROCESSOR_ROLE_PROMPT.strip(), True, 0, 0, True)
+    types = [{"key": "dev_task", "name": "开发任务", "guidance": "有人请用户做开发工作。"}]
+    frozen = {"leads": "f88c0689036ce3d958d2fa9d001ee5fc79348cd89b279c19d00613ff77c63f4d",  # from main before the check
+              "intents": "61c2a5642158ab27dfca8b9f7745d7a4dd87f820bf16a0e9b061629e2f56a49b"}
+    for kind, requirement in (("leads", extraction.LEADS_INSTRUCTIONS), ("intents", extraction.INTENTS_INSTRUCTIONS)):
+        prompt = processor._system_prompt(_settings(), role, extraction.instructions(kind, requirement, types), "NONE",
+                                          extraction.CONTRACTS[kind])
+        assert hashlib.sha256(prompt.text.encode()).hexdigest() == frozen[kind]
+    schedule = {"id": "sched-x", "project_id": "p", "notify_channel": "lark", "notify_chat": "ou_operatorsynthetic",
+                "cron": "*/10 * * * *", "timezone": "America/Los_Angeles",
+                "subscription": {"source_id": "stream", "output_kind": "intents", "include_chats": [],
+                                 "exclude_chats": ["oc_b"], "check_items": False}}
+    version = asyncio.run(subscriptions.config_version(schedule, profile=FACTS))
+    assert version == "8525737e5275fbceb34a52e69c33f83d45f55bf5d2d53771e73c26d2620219aa"  # frozen from main
+    # Turning it on binds the check and its Profile: another Profile is another version.
+    checked = {**schedule, "subscription": {**schedule["subscription"], "check_items": True}}
+    on = asyncio.run(subscriptions.config_version(checked, profile=FACTS, checker=FACTS))
+    other = asyncio.run(subscriptions.config_version(checked, profile=FACTS, checker={**FACTS, "effort": "high"}))
+    assert len({version, on, other}) == 3

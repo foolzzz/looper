@@ -178,6 +178,15 @@ def test_merged_into_rejected_is_not_pushed(monkeypatch):
     run_db(check, monkeypatch)
 
 
+def test_an_intent_the_check_dropped_is_never_pushed(monkeypatch):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        await env.create(state="dropped", handled_via="system", check_verdict="drop", check_reason="unsupported")
+        await env.service.run_once()
+        assert env.channels.posts == [] and await pool.fetchval("SELECT count(*) FROM intent_posts") == 0
+    run_db(check, monkeypatch)
+
+
 def test_frozen_push_and_progress_texts():
     view = {"id":"I-0042", "type":{"name":"bug 排查"}, "title":"支付回调偶发 500", "summary":"合成概括",
             "confidence":"high", "sources":[{"chat_kind":"p2p", "chat":"测试", "sender":"王五",

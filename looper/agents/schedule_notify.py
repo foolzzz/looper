@@ -5,8 +5,9 @@ and ``alerts`` sends alerts and recoveries only. ``never`` records them only
 on the dashboard. Skipped runs never get a run message.
 
 Each alert starts once per streak: consecutive failures, no success within
-the stale window, no success by the daily deadline, and consecutive overlap
-skips. ``alert_policy`` resolves their configurable thresholds with the
+the stale window, no success by the daily deadline, consecutive overlap
+skips, and an extraction subscription's second check failing in consecutive
+runs that otherwise succeeded (its items stored unchecked). ``alert_policy`` resolves their configurable thresholds with the
 existing agent defaults. An OK run recovers the success alerts; starting a
 new run recovers the overlap alert. Every message goes through the outbox,
 recorded as ``sent``, ``failed`` or ``dashboard``.
@@ -64,6 +65,9 @@ class Kind(str, Enum):
     DEADLINE_RECOVERED = "deadline_recovered"
     OVERLAP_ALERT = "overlap_alert"
     OVERLAP_RECOVERED = "overlap_recovered"
+    # An extraction subscription's second check (``check_items``) failing run after run, and done again.
+    CHECK_ALERT = "check_alert"
+    CHECK_RECOVERED = "check_recovered"
 
 
 @dataclass(frozen=True)
@@ -257,6 +261,18 @@ def failures_alert_text(schedule: Mapping[str, Any], project_name: str, run: Map
             f"{schedule['consecutive_failures']} 次。\n{last}{schedule_link(base, schedule)}")
 
 
+def check_alert_text(schedule: Mapping[str, Any], project_name: str, failures: int, *, base: str = "") -> str:
+    return (f"告警：订阅「{schedule['name']}」（项目 {project_name}）的第二道检查已连续 {failures} 次没有完成，"
+            f"这几次整理出的条目都未经复核入库。\n{schedule_link(base, schedule)}")
+
+
+def check_recovered_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], *,
+                         base: str = "") -> str:
+    when = _local(run.get("finished_at") or run["scheduled_for"], schedule["timezone"])
+    return (f"恢复：订阅「{schedule['name']}」（项目 {project_name}）的第二道检查又完成了复核（{when}）。\n"
+            f"{schedule_link(base, schedule)}")
+
+
 def stale_alert_text(schedule: Mapping[str, Any], project_name: str, deadline: datetime, *, base: str = "") -> str:
     since = (f"上次成功：{_local(schedule['last_ok_at'], schedule['timezone'])}" if schedule.get("last_ok_at")
              else "还没有成功过")
@@ -322,6 +338,29 @@ class Notifier:
             await self._deliver(schedule, Kind.DEADLINE_RECOVERED,
                                 recovered_text(schedule, project_name, run, Kind.DEADLINE_RECOVERED, base=self._base),
                                 run_id=run_id)
+        if schedule["kind"] == "subscription":
+            await self._check_streak(schedule, project_name, run, now)
+
+    async def _check_streak(self, schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any],
+                            now: datetime) -> None:
+        """An extraction run's second check: after as many failed checks in a row as the schedule's failure alert
+        waits for (3 by default; skipped checks neither end nor add to them), alert once; a check done again
+        recovers. The run itself succeeded either way: its items were stored, unchecked."""
+        from ..db import subscriptions as db_subs
+
+        pool = db_connection.get_pool()
+        stream = await db_subs.get_run(run["id"], db=pool)
+        check = (stream or {}).get("check_status")
+        if check == "failed":
+            threshold = alert_policy(schedule).failures_after
+            failures = await db_subs.check_failures(pool, schedule["id"], limit=threshold)
+            if failures >= threshold and await db_subs.set_check_alert(pool, schedule["id"], now):
+                await self._deliver(schedule, Kind.CHECK_ALERT,
+                                    check_alert_text(schedule, project_name, failures, base=self._base),
+                                    run_id=run["id"])
+        elif check == "checked" and await db_subs.set_check_alert(pool, schedule["id"], None):
+            await self._deliver(schedule, Kind.CHECK_RECOVERED,
+                                check_recovered_text(schedule, project_name, run, base=self._base), run_id=run["id"])
 
     @staticmethod
     async def _record_end(schedule: Mapping[str, Any], run: Mapping[str, Any], text: str):

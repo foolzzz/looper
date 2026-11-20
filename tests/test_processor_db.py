@@ -201,6 +201,39 @@ def test_a_processor_run_replaces_the_runtimes_prompt_with_its_role_instructions
     run_db(test, monkeypatch, setup=seed_role_configs)
 
 
+def test_a_leads_check_run_is_its_own_role_with_its_own_profile_prompt_and_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents import agent_settings, processor
+    from looper.agents.agent_settings import AgentType
+    from looper.agents.leads_check import LEADS_CHECK_ROLE_PROMPT
+    from looper.agents.serve import seed_role_configs
+
+    async def test(pool: Any) -> None:
+        # The processor's own layers choose another profile: the check runs its own role's, else its built-in one.
+        await agent_settings.update_role("processor", {"profile_id": await _profile("processor-role")})
+        view = await processor.chosen_profile(role=AgentType.LEADS_CHECK)
+        assert (view["name"], view["source"], view["problem"]) == ("claude-code/haiku-5-5", "builtin", None)
+        done = await _run(tmp_path, role=AgentType.LEADS_CHECK, contract="## Your reply\nOne JSON object.")
+        assert done.failure is None and done.profile["profile_id"] == "agent-claude-code-haiku-5-5"
+        seen = _seen(tmp_path)
+        argv = seen["argv"]
+        assert argv[argv.index("--model") + 1] == "claude-haiku-5-5" and argv[argv.index("--tools") + 1] == ""
+        assert "--replay-user-messages" not in argv and "--system-prompt-file" in argv
+        assert seen["system"] == (f"{LEADS_CHECK_ROLE_PROMPT.strip()}\n\n## Instructions\nReport incidents.\n\n"
+                                  "## Your reply\nOne JSON object.")
+        record = dict(await pool.fetchrow("SELECT agent_id, input_text, metadata FROM llm_records WHERE id = $1",
+                                          done.record_id))
+        assert record["agent_id"] == "leads_check:sched-1" and TOKEN not in record["input_text"]
+        layers = json.loads(record["metadata"])["prompt_layers"]
+        assert (layers["role"]["config_id"], layers["contract"]["name"]) == ("leads_check", "LEADS_CHECK_CONTRACT")
+        await pool.execute("UPDATE role_configs SET enabled = false WHERE role = 'leads_check'")
+        off = await _run(tmp_path, role=AgentType.LEADS_CHECK)
+        assert off.failure.value == "refused" and "the leads_check role is turned off" in off.detail
+
+    run_db(test, monkeypatch, setup=seed_role_configs)
+
+
 @pytest.mark.parametrize(("mode", "failure", "why"), [
     ("off", "refused", "turned off"),
     ("hang", "timeout", "no reply within 2 s"),
