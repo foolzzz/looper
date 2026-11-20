@@ -160,12 +160,18 @@ export function NeedsYouPage() {
 
   useEffect(() => startPolling((signal) => read(signal), REFRESH_MS), [read]);
 
-  // Failing logins are left to the banner every page shows (ClaudeCheckBanner reads the same checks); /todo lists them.
-  const sections = summary?.sections.filter((s) => s.kind !== "logins") ?? [];
+  // Failing logins that were read are left to the banner every page shows (ClaudeCheckBanner reads the same
+  // checks); /todo lists them. A logins section that could not be read stays.
+  const sections = summary?.sections.filter((s) => s.kind !== "logins" || s.state !== "ok") ?? [];
   const shown = sections.filter((s) => s.state === "error" || (s.state === "ok" && s.count > 0));
   const clear = sections.filter((s) => s.state === "ok" && s.count === 0);
   const unknown = sections.filter((s) => s.state === "unknown");
   const total = shown.reduce((sum, s) => sum + (s.state === "ok" ? s.count : 0), 0);
+  // "Nothing waits" only when every source was read; otherwise the ones not read are named below.
+  const unread = sections.filter((s) => s.state !== "ok").length;
+  const headline = total > 0 ? `${plural(total, "thing")} ${total === 1 ? "waits" : "wait"} for you`
+    : unread > 0 ? `Nothing found in what could be read; ${plural(unread, "source")} could not be read`
+    : "Nothing waits for you";
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
@@ -173,7 +179,7 @@ export function NeedsYouPage() {
         <h1 className="text-xl font-semibold">Needs you</h1>
         {summary && (
           <p className="text-sm text-muted-foreground">
-            {total > 0 ? `${plural(total, "thing")} ${total === 1 ? "waits" : "wait"} for you` : "Nothing waits for you"}
+            {headline}
             {" · read "}
             <time dateTime={summary.read_at}>{new Date(summary.read_at).toLocaleTimeString()}</time>
           </p>

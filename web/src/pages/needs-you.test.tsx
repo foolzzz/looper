@@ -67,6 +67,30 @@ describe("Needs you page", () => {
     expect(host.textContent).toContain("3 things wait for you");
   });
 
+  it("keeps a logins section that could not be read, and never says nothing waits while a source is unread",
+    async () => {
+      vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 0, sections: [
+        { kind: "gates", state: "ok", count: 0, error: null, items: [] },
+        { kind: "logins", state: "error", count: 0, error: "TimeoutError: checks", items: [] },
+        { kind: "confirmations", state: "unknown", count: 0, error: null, items: [] },
+      ] });
+      await render();
+      expect(host.querySelector('section[aria-label="Logins that fail"] [role="alert"]')?.textContent)
+        .toContain("TimeoutError: checks");
+      expect(host.textContent).not.toContain("Nothing waits for you");
+      expect(host.textContent).toContain("2 sources could not be read");
+      expect(host.textContent).toContain("Not known on this server: Operations to confirm.");
+    });
+
+  it("says nothing waits only when every source was read and is empty", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 0, sections: [
+      { kind: "gates", state: "ok", count: 0, error: null, items: [] },
+      { kind: "logins", state: "ok", count: 0, error: null, items: [] },
+    ] });
+    await render();
+    expect(host.textContent).toContain("Nothing waits for you");
+  });
+
   it("says when the summary is off", async () => {
     vi.mocked(fetchAttention).mockRejectedValue(new V1Error(409, "conflict", "not enabled"));
     await render();
