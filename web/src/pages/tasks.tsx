@@ -55,8 +55,8 @@ const STATUS_FILTERS = [
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 type StatusChip = Exclude<StatusFilter, "all">;
 
-/** Shown when the address has no `status`. Change this to change the page's default view. */
-export const DEFAULT_STATUS_FILTERS = ["init", "running", "waiting", "pending"] as const satisfies readonly StatusChip[];
+/** Shown when the address has neither `status` nor `group` nor `schedule`. Change this to change the page's default view. */
+export const DEFAULT_STATUS_FILTERS = ["init", "running", "waiting", "waiting_user", "pending"] as const satisfies readonly StatusChip[];
 
 const STATUS_CHIPS: readonly StatusChip[] = STATUS_FILTERS.filter((name): name is StatusChip => name !== "all");
 
@@ -204,19 +204,25 @@ function filterQuery(project: string, group: TaskGroup | null, schedule = "", st
   return query.toString();
 }
 
-/** No `status` is the default selection. `all` and a list that names nothing known are every task. */
-function parseStatuses(param: string | null): StatusChip[] {
-  if (param === null) return [...DEFAULT_STATUS_FILTERS];
+/** No `status` is the default selection, unless a group or a schedule is set: those links list every task.
+ * `all` and a list that names nothing known are every task. */
+function parseStatuses(param: string | null, scoped: boolean): StatusChip[] {
+  if (param === null) return scoped ? [] : [...DEFAULT_STATUS_FILTERS];
   if (param.trim() === "all") return [];
   const wanted = new Set(param.split(",").map((part) => part.trim()).filter(Boolean));
   return STATUS_CHIPS.filter((name) => wanted.has(name));
 }
 
-/** `all` clears the selection. The default selection is omitted so a link without `status` stays the default. */
-function encodeStatuses(selected: readonly StatusChip[]): string | null {
-  if (selected.length === 0) return "all";
-  if (selected.length === DEFAULT_STATUS_FILTERS.length
-    && selected.every((name, index) => name === DEFAULT_STATUS_FILTERS[index])) return null;
+function isDefaultSelection(selected: readonly StatusChip[]): boolean {
+  return selected.length === DEFAULT_STATUS_FILTERS.length
+    && selected.every((name, index) => name === DEFAULT_STATUS_FILTERS[index]);
+}
+
+/** `all` clears the selection, and is omitted on a group or schedule link so the address stays as it was.
+ * The default selection is omitted so a link without `status` stays the default. */
+function encodeStatuses(selected: readonly StatusChip[], scoped: boolean): string | null {
+  if (selected.length === 0) return scoped ? null : "all";
+  if (!scoped && isDefaultSelection(selected)) return null;
   return selected.join(",");
 }
 
@@ -244,8 +250,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const scheduleFilter = params.get("schedule") || "";
   const managerFilter = params.get("manager") || "";
   const searchFilter = params.get("query") || "";
-  const selected = parseStatuses(params.get("status"));
-  const encodedStatus = encodeStatuses(selected);
+  // A group or schedule link with no status lists every task. `scheduled=include` does not.
+  const statusScope = Boolean(groupFilter) || scheduleFilter !== "";
+  const selected = parseStatuses(params.get("status"), statusScope);
+  const encodedStatus = encodeStatuses(selected, statusScope);
   // Tasks agent schedules created are hidden unless "scheduled=include"; a schedule's own list shows them.
   const includeScheduled = params.get("scheduled") === "include";
   const hideScheduled = !includeScheduled && !scheduleFilter;
@@ -331,7 +339,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter, encodedStatus, managerFilter, searchFilter, includeScheduled));
   const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter, "", encodedStatus, managerFilter, searchFilter, includeScheduled));
   const setStatuses = (next: readonly StatusChip[]) =>
-    onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, encodeStatuses(next), managerFilter, searchFilter, includeScheduled));
+    onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, encodeStatuses(next, statusScope), managerFilter, searchFilter, includeScheduled));
   const toggleStatus = (name: StatusChip) => {
     const next = selected.length === 0
       ? [name]
@@ -708,7 +716,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
             const count = f === "all" ? total : counts[f] || 0;
             const pressed = f === "all" ? selected.length === 0 : selected.includes(f);
             // Only a project with user gates has tasks that wait for the user.
-            if (f === "waiting_user" && count === 0 && !pressed) return null;
+            // The default selection includes it, and that alone does not show the chip while its count is 0.
+            if (f === "waiting_user" && count === 0 && (!pressed || isDefaultSelection(selected))) return null;
             return (
               <button
                 key={f}

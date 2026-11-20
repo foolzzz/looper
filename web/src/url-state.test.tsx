@@ -184,21 +184,66 @@ describe("the dashboard keeps its place in the URL", () => {
       .filter(([url]) => url === "/api/v1/tasks/page")
       .map(([, options]) => JSON.parse(String(options?.body)) as Record<string, unknown>);
 
-    it("asks for Ready, Running, Waiting and Pending when the address has no status", async () => {
+    it("asks for every unfinished status when the address has no status, group or schedule", async () => {
       await open("#tasks");
+      expect(hash()).toBe("#tasks");
       const body = pageBodies().at(-1);
-      expect(body?.statuses).toEqual(["init", "running", "waiting", "pending"]);
+      expect(body?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
       expect(body).not.toHaveProperty("status");
       expect(body?.exclude_scheduled).toBe(true);
+    });
+
+    it("keeps a project's task list on the unfinished statuses", async () => {
+      await open("#tasks?project=p1");
+      expect(hash()).toBe("#tasks?project=p1");
+      const body = pageBodies().at(-1);
+      expect(body?.project_id).toBe("p1");
+      expect(body?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
+      expect(body).not.toHaveProperty("status");
+    });
+
+    it("lists every task in a group or a schedule when the address has no status", async () => {
+      await open("#tasks?group=needs_you");
+      expect(hash()).toBe("#tasks?group=needs_you");
+      let body = pageBodies().at(-1);
+      expect(body?.group).toBe("needs_you");
+      expect(body).not.toHaveProperty("status");
+      expect(body).not.toHaveProperty("statuses");
+
+      await open("#tasks?group=needs_you&scheduled=include");
+      expect(hash()).toBe("#tasks?group=needs_you&scheduled=include");
+      body = pageBodies().at(-1);
+      expect(body?.group).toBe("needs_you");
+      expect(body).not.toHaveProperty("exclude_scheduled");
+      expect(body).not.toHaveProperty("status");
+      expect(body).not.toHaveProperty("statuses");
+
+      await open("#tasks?schedule=sched-1");
+      expect(hash()).toBe("#tasks?schedule=sched-1");
+      body = pageBodies().at(-1);
+      expect(body?.schedule_id).toBe("sched-1");
+      expect(body).not.toHaveProperty("exclude_scheduled");
+      expect(body).not.toHaveProperty("status");
+      expect(body).not.toHaveProperty("statuses");
+
+      await open("#tasks?group=needs_you&status=failed");
+      body = pageBodies().at(-1);
+      expect(body).toMatchObject({ group: "needs_you", status: "failed" });
+      expect(body).not.toHaveProperty("statuses");
+      await click("All");
+      expect(hash()).toBe("#tasks?group=needs_you");
+      body = pageBodies().at(-1);
+      expect(body).not.toHaveProperty("status");
+      expect(body).not.toHaveProperty("statuses");
     });
 
     it("toggles a status onto the default selection and writes All explicitly", async () => {
       await open("#tasks?project=p1");
       await click("Failed");
       const params = new URLSearchParams(hash().split("?")[1]);
-      expect(params.get("status")).toBe("init,running,waiting,pending,failed");
+      expect(params.get("status")).toBe("init,running,waiting,waiting_user,pending,failed");
       expect(params.get("project")).toBe("p1");
-      expect(pageBodies().at(-1)?.statuses).toEqual(["init", "running", "waiting", "pending", "failed"]);
+      expect(pageBodies().at(-1)?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending", "failed"]);
       await click("All");
       expect(hash()).toBe("#tasks?project=p1&status=all");
       const all = pageBodies().at(-1);
@@ -231,6 +276,7 @@ describe("the dashboard keeps its place in the URL", () => {
         .map(([, options]) => JSON.parse(String(options?.body)));
       expect(bodies.some((body) => body.exclude_scheduled === true)).toBe(true);
       expect(bodies.at(-1)).not.toHaveProperty("exclude_scheduled");
+      expect(bodies.at(-1)?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
     });
 
     it("lists every task for an unknown status", async () => {
