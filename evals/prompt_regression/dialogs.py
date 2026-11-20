@@ -286,6 +286,46 @@ def _seed_manager_capabilities(api: Api, project_id: str) -> None:
     api.post("/api/v1/manager_installs/put", {"manager_id": "manager-capability-a", "item_id": extra["item_id"]})
 
 
+def _ledger_items(look: Look, status: str) -> list[dict[str, Any]]:
+    return look.api.post("/api/v1/ledger/list", {"status": status})["result"]["items"]
+
+
+def _ledger_pending_recorded(look: Look) -> str | None:
+    """One looper_ledger_add of a pending item and no other write; the ledger holds it, open, as the user's."""
+    writes = _writes(look)
+    added = [a for a in writes if a["tool"] == "looper_ledger_add" and a["status"] == "ok"
+             and a["arguments"].get("kind") == "pending"]
+    if len(added) != 1 or len(writes) != 1:
+        return f"expected one looper_ledger_add of a pending item, got {[(a['tool'], a['status']) for a in writes]}"
+    items = _ledger_items(look, "open")
+    return None if len(items) == 1 and items[0]["kind"] == "pending" and items[0]["title"].strip() else \
+        f"the ledger holds {[(i['id'], i['kind'], i['status']) for i in items]}, not one open pending item"
+
+
+def _ledger_item_closed(look: Look) -> str | None:
+    """A looper_ledger_update close of the item in this turn, and the ledger shows it done."""
+    closed = [a for a in look.turn_actions() if a["tool"] == "looper_ledger_update" and a["status"] == "ok"
+              and a["arguments"].get("action") == "close"]
+    if len(closed) != 1:
+        return f"expected one looper_ledger_update close, got {[(a['tool'], a['arguments']) for a in look.turn_actions()]}"
+    done = _ledger_items(look, "done")
+    return None if [i["id"] for i in done] == ["L-0001"] else f"done items: {[i['id'] for i in done]}"
+
+
+def _enable_ledger(database_url: str) -> None:
+    import asyncpg
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ('ledger.enabled', 'true') "
+                               "ON CONFLICT (key) DO UPDATE SET value = 'true'")
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+
+
 def _manager_capabilities(look: Look) -> str | None:
     owner = look.manager_id or "manager"
     records = look.api.post("/api/v1/runs/list", {"agent_id": owner, "limit": 500})["result"]["records"]
@@ -2087,6 +2127,11 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_task_instruct", {"task_id": "<task>", "text": "done.txt 的内容改成大写的 DONE。"}),)),
         Say("", _other_scope_untouched, text_from=_project_scope_cancel_text),
     ), running_task=True, seed=_seed_project_scope_manager, manager="project-scope", tags=("manager", "scope")),
+    Dialog("ledger_tools", (
+        Say("记一个待办：周五前回复张三的邮件。", _ledger_pending_recorded,
+            (("looper_ledger_add", {"kind": "pending", "title": "周五前回复张三的邮件"}),)),
+        Say("L-0001 完成了。", _ledger_item_closed, (("looper_ledger_update", {"action": "close", "item": "L-0001"}),)),
+    ), tags=("manager", "ledger")),
     Dialog("manager_capability_installed", (Say(
         "Invoke the manager-greeting skill and return its marker. Do not use shell commands or read files.",
         _manager_capabilities),), seed=_seed_manager_capabilities, manager="capability-a", tags=("manager", "capability")),
@@ -2958,6 +3003,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _price_history(database_url, seed=True)
         if dialog.id == "model_login_runtime":
             _seed_login_runtime(database_url)
+        if dialog.id == "ledger_tools":
+            _enable_ledger(database_url)
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"

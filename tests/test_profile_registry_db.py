@@ -295,7 +295,7 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         await ensure_schema(pool)
         await ensure_schema(pool)
         profiles = {row["name"]: row for row in await db.list_profiles()}
-        assert set(profiles) == {"claude-code/opus", "claude-code/fable-5-2", "claude-code/haiku-5-5"}
+        assert set(profiles) == {"claude-code/opus", "claude-code/fable-5-2", "claude-code/sonnet-5-5"}
         assert (profiles["claude-code/fable-5-2"]["effort"], profiles["claude-code/fable-5-2"]["model"]["name"]) == (
             "high", "claude-fable-5-2")
         profile = profiles["claude-code/opus"]

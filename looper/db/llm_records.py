@@ -451,7 +451,9 @@ async def task_run_rows(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
     """A task's Planner, Worker and Reviewer runs, oldest first, as compact rows (no metadata body, prompts or
     events): ``id``, ``role``, ``agent_id``, ``step_id``, ``status``, ``created_at``, ``runtime`` ({type, name}),
     ``model`` (the one the run reported, else the one it chose or its profile named), ``effort`` and ``profile``
-    ({name, source}) and ``task_role`` (the role its Planner defined that it ran as, else None); a run recorded before Agent Profiles has None for what it did not record."""
+    ({name, source}) and ``task_role`` (the role its Planner defined that it ran as, else None), ``kind``
+    (``RUN_KIND``: an advisor's or a judge's run among the Planner's) and ``parent_record_id`` (the run that started
+    it); a run recorded before Agent Profiles has None for what it did not record."""
     pool = pool or get_pool()
     profile = "COALESCE(metadata->'profile', metadata->'agent')"
     rows = await pool.fetch(
@@ -461,7 +463,7 @@ async def task_run_rows(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
                COALESCE(model, metadata->'model_choice'->>'model', {profile}->>'model') AS model,
                metadata->'model_choice'->>'effort' AS effort,
                {profile}->>'name' AS profile_name, {profile}->>'source' AS profile_source,
-               metadata->'prompt_layers'->'task_role' AS task_role
+               metadata->'prompt_layers'->'task_role' AS task_role, {RUN_KIND} AS kind, parent_record_id
         FROM llm_records WHERE task_id = $1 AND {TASK_RUN}
         ORDER BY created_at, id
         """,
@@ -473,7 +475,8 @@ async def task_run_rows(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
          "runtime": {"type": r["runtime_type"], "name": r["runtime_name"]},
          "model": r["model"], "effort": r["effort"],
          "profile": {"name": r["profile_name"], "source": r["profile_source"]},
-         "task_role": json.loads(r["task_role"]) if r["task_role"] else None}
+         "task_role": json.loads(r["task_role"]) if r["task_role"] else None,
+         "kind": r["kind"], "parent_record_id": r["parent_record_id"]}
         for r in rows
     ]
 

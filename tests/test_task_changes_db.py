@@ -24,9 +24,12 @@ def test_supplements_and_requirement_edits_are_pending_until_delivered(monkeypat
 
     async def test(pool: Any) -> None:
         await _task(pool)
+        assert await task_changes.versions("task-a", pool=pool) == (0, 0)
         first = await task_changes.add_supplement("task-a", "use CSV", via="chat", pool=pool)
+        assert await task_changes.versions("task-a", pool=pool) == (0, first)
         assert await task_changes.edit_requirement("task-a", "build calc, with a CLI", via="task_page",
                                                    delivered=False, pool=pool) == 2
+        assert await task_changes.versions("task-a", pool=pool) == (2, first)
         pending = await task_changes.pending("task-a", pool=pool)
         assert [(s.id, s.text, s.via) for s in pending.supplements] == [(first, "use CSV", "chat")]
         assert pending.requirement == RequirementEdit(2, "build calc, with a CLI", 1, "build calc")

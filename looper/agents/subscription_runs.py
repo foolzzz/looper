@@ -15,7 +15,8 @@ and ``execute`` (outside the transaction) does the rest:
    run ends, with its notification and its cursor, in one transaction.
 
 A run whose messages all failed ends ``failed`` and leaves the cursor; one that got a message out (sent or uncertain)
-moves it, so no later run starts a second push for the same window.
+moves it, so no later run starts a second push for the same window. An extraction (``output_kind`` ``leads`` or
+``intents``) is planned and executed by ``extraction`` instead, and pushes nothing.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import cron, processor, subscription_rules, subscriptions
+from . import cron, extraction, processor, subscription_rules, subscriptions
 from .channels.base import PostOutcome
 from .message import builtin_channel_id
 from .task_notice import NotifyTarget, TargetKind
@@ -87,8 +88,12 @@ class SubscriptionRuns:
                    now: datetime, scheduled_for: datetime) -> dict[str, Any] | None:
         """The run's window: None when nothing in it is selected, then the cursor moves past it; else the window the
         run is recorded with (``subscription_runs`` is written here, in the firing's transaction), with the target the
-        run may push to: the schedule's, when the operator has confirmed it for the configuration it has now."""
+        run may push to: the schedule's, when the operator has confirmed it for the configuration it has now. An
+        extraction's (``extraction.plan``) may also be a skip (``skip_reason``): turned off or not confirmed, the
+        cursor stays."""
         sub = schedule["subscription"]
+        if subscriptions.is_extraction(sub):
+            return await extraction.plan(conn, schedule, now=now, own_apps=await self._own_apps())
         to_seq = await db_subs.committed_seq(conn, sub["source_id"])
         mode = sub.get("window", "cursor")
         from_seq = sub["cursor_seq"] if mode == "cursor" else 0
@@ -125,15 +130,18 @@ class SubscriptionRuns:
                                  config_version=window["config_version"], window_mode=window["window_mode"],
                                  daily_date=window["daily_date"], config=window["config"], config_epoch=window["config_epoch"],
                                  match_timeouts=window["match_timeouts"])
+        if window.get("snapshot"):  # an extraction's pinned configuration and confirmation (``extraction.plan``)
+            await db_schedules.update_run(conn, run_id, execution_snapshot=window["snapshot"])
 
     # --- Executing ---
 
-    async def execute(self, run_id: str) -> None:
-        """Run the processor over the run's window and push or keep its output (the module's notes). Never raises: a
-        failure ends the run."""
+    async def execute(self, run_id: str) -> bool:
+        """Run the processor over the run's window and push or keep its output (the module's notes), or, for an
+        extraction, store what it found (``extraction.execute``). Never raises: a failure ends the run. True when an
+        extraction's window left events for another run at once (``more``)."""
         self.active.add(run_id)
         try:
-            await self._execute(run_id)
+            return await self._execute(run_id)
         except Exception as exc:
             logger.error("subscription run %s failed: %s", run_id, type(exc).__name__)
             stream = await db_subs.get_run(run_id)
@@ -143,15 +151,31 @@ class SubscriptionRuns:
                 await self._finish_push(run_id, None)
             else:
                 await self._end(run_id, status="failed", outcome="failed", error=f"{type(exc).__name__}: {exc}")
+            return False
         finally:
             self.active.discard(run_id)
 
-    async def _execute(self, run_id: str) -> None:
+    async def _execute(self, run_id: str) -> bool:
         run = await db_schedules.get_run(run_id)
         schedule = await db_schedules.get_schedule(run["schedule_id"]) if run else None
         stream = await db_subs.get_run(run_id)
         if run is None or schedule is None or stream is None or run["status"] != db_schedules.RUNNING:
-            return
+            return False
+        if subscriptions.is_extraction(schedule["subscription"]):
+            pool = db_connection.get_pool()
+            snapshot = run.get("execution_snapshot") or {}
+            planned = extraction.pinned(schedule, snapshot) if snapshot.get("subscription") else schedule
+            picked = await db_subs.extraction_window(
+                pool, planned["subscription"], output_kind=subscriptions.output_kind(planned["subscription"]),
+                from_seq=stream["from_seq"], to_seq=stream["to_seq"], now=run["fired_at"],
+                own_apps=await self._own_apps())
+            snapshot = {**snapshot, "config_epoch": stream["config_epoch"]} if snapshot else None
+            return await extraction.execute(self, run_id, planned, stream, {**picked, "snapshot": snapshot})
+        await self._push_run(run_id, run, schedule, stream)
+        return False
+
+    async def _push_run(self, run_id: str, run: Mapping[str, Any], schedule: Mapping[str, Any],
+                        stream: Mapping[str, Any]) -> None:
         # The run selects, renders and writes with the configuration it started with (``subscription_runs.config``): a
         # subscription changed meanwhile, and changed back, does not make it read what it was not meant to.
         sub = {**schedule["subscription"], **(stream["config"] or {}), "window": stream["window_mode"]}

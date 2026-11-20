@@ -104,6 +104,19 @@ def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
     imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
     imp.add_argument("--source", help="The source id (default: the only one).")
     _add_location_flags(imp)
+    backfill = sub.add_parser(
+        "leads-backfill", allow_abbrev=False, help="Count, or turn into leads, the history before a leads subscription.",
+        description="Count the in-scope messages of the last N days up to where the leads subscription started, their "
+                    "windows and what they would cost (a dry run, the default: nothing is written). --run --budget-usd "
+                    "X runs them oldest first through the subscription's processor and stores the leads, keeping its "
+                    "progress after each window and stopping before a window would pass the budget; run again, it "
+                    "resumes.")
+    backfill.add_argument("--days", type=int, required=True, help="How many days back (1 to 365).")
+    backfill.add_argument("--schedule", help="The leads subscription's schedule id (default: the only one).")
+    backfill.add_argument("--run", action="store_true", help="Run the windows (needs --budget-usd).")
+    backfill.add_argument("--budget-usd", type=float, help="With --run: the most the backfill may spend.")
+    backfill.add_argument("--claude", help="The Claude Code executable for a profile that names none (default: claude).")
+    _add_location_flags(backfill)
 
 
 def _add_ledger_parser(commands: argparse._SubParsersAction) -> None:
