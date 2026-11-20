@@ -36,6 +36,7 @@ def test_registry_and_bus_notice_record_their_typed_sources(monkeypatch, tmp_pat
 
         async def subscribe(channel):
             yield envelope
+            yield envelope  # Durable bus replay keeps the same envelope id.
 
         adapter._bus = SimpleNamespace(subscribe=subscribe)
         adapter._running = True
@@ -93,3 +94,55 @@ def test_off_gate_and_subscription_keep_the_original_calls_and_write_no_metrics(
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
 
     run_db(run, monkeypatch)
+
+
+@pytest.mark.parametrize("key", ["gate-17", "intent-3-9", "run-synthetic-1"])
+def test_three_delivery_retries_update_one_row(monkeypatch, key):
+    from unittest.mock import AsyncMock
+    from looper.agents.channels.base import PostOutcome, PostReceipt
+
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+
+    async def check(pool):
+        registry = ChannelRegistry(SimpleNamespace())
+        registry._channels["channel-lark"] = SimpleNamespace(post=AsyncMock(side_effect=[
+            PostReceipt(False, outcome=PostOutcome.REJECTED),
+            PostReceipt(False, outcome=PostOutcome.UNKNOWN),
+            PostReceipt(True, external_ids=("synthetic-receipt",)),
+        ]))
+        target = NotifyTarget(TargetKind.USER, OPEN_ID)
+        ref = turn_metrics.ProactiveRef(turn_metrics.ProactiveSource.GATE, "synthetic-gate")
+        for outcome in ("rejected", "unknown", "sent"):
+            await registry.post("channel-lark", target, "Question", idempotency_key=key, proactive=ref)
+            await asyncio.gather(*turn_metrics._pending)
+        rows = await pool.fetch("SELECT dedupe_key, outcome, external_id FROM proactive_deliveries")
+        assert [tuple(row) for row in rows] == [(key, "sent", "synthetic-receipt")]
+    run_db(check, monkeypatch)
+
+
+def test_gate_parent_fallback_updates_the_original_delivery(monkeypatch):
+    from unittest.mock import AsyncMock
+    from looper.agents import gate_courier
+    from looper.agents.channels.base import PostOutcome, PostReceipt
+
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+
+    async def check(pool):
+        registry = ChannelRegistry(SimpleNamespace())
+        post = AsyncMock(side_effect=[
+            PostReceipt(False, parent_gone=True, outcome=PostOutcome.REJECTED),
+            PostReceipt(True, external_ids=("synthetic-fallback",)),
+        ])
+        registry._channels["channel-lark"] = SimpleNamespace(post=post)
+        courier = gate_courier.GateCourier(registry.post)
+        monkeypatch.setattr(gate_courier.db_user_gates, "gate_state", AsyncMock(return_value="discussing"))
+        monkeypatch.setattr(gate_courier.db_user_gates, "record_post", AsyncMock())
+        monkeypatch.setattr(courier, "_reply_to", AsyncMock(return_value="synthetic-recalled"))
+        await courier._handle({"id": 17, "step_id": "synthetic-gate", "task_id": "synthetic-task", "kind": "reply",
+                               "state": "discussing", "text": "Question", "origin_channel_id": "channel-lark",
+                               "task_chat_id": OPEN_ID, "chat_kind": "user", "chat_group": False}, None)
+        await asyncio.gather(*turn_metrics._pending)
+        assert [call.kwargs["idempotency_key"] for call in post.call_args_list] == ["gate-17", "gate-17-own"]
+        rows = await pool.fetch("SELECT dedupe_key, outcome, external_id FROM proactive_deliveries")
+        assert [tuple(row) for row in rows] == [("gate-17", "sent", "synthetic-fallback")]
+    run_db(check, monkeypatch)

@@ -113,7 +113,8 @@ class ChannelRegistry:
         if adapter is None:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
-                                              external_id=None, outcome=PostOutcome.REJECTED.value)
+                                              external_id=None, outcome=PostOutcome.REJECTED.value,
+                                              dedupe_key=idempotency_key)
             return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
         if target.group:
             text = for_group(text)
@@ -122,12 +123,13 @@ class ChannelRegistry:
         except Exception:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
-                                              external_id=None, outcome=PostOutcome.UNKNOWN.value)
+                                              external_id=None, outcome=PostOutcome.UNKNOWN.value,
+                                              dedupe_key=idempotency_key)
             raise
         if proactive is not None:
             turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                           external_id=receipt.external_ids[0] if receipt.external_ids else None,
-                                          outcome=receipt.result.value)
+                                          outcome=receipt.result.value, dedupe_key=idempotency_key)
         return receipt
 
     async def edit(self, channel_id: str, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:

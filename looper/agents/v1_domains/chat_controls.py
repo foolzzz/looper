@@ -63,7 +63,7 @@ OPERATIONS = (
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
                  "research_order": {"type": ["boolean", "null"]},
                  "metrics_enabled": {"type": ["boolean", "null"]}},
-                [], closed=True), CHAT_SETTINGS, "high", operator_only=True),
+                [], closed=True), CHAT_SETTINGS, "high"),
 )
 
 
@@ -74,6 +74,8 @@ async def impact(server, operation, arguments, principal, headers):
         values = chat_settings.checked(arguments)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
+    if "metrics_enabled" in values and principal.kind != "operator":
+        raise OpError(ErrorCode.FORBIDDEN, "metrics_enabled requires operator identity")
     changes = []
     if "stop_enabled" in values:
         value = values["stop_enabled"]
@@ -130,6 +132,8 @@ async def run(server, operation, arguments, principal, headers):
     if name == "chat_settings.get":
         return chat_settings.settings_view()
     if name == "chat_settings.update":
+        if "metrics_enabled" in arguments and principal.kind != "operator":
+            raise OpError(ErrorCode.FORBIDDEN, "metrics_enabled requires operator identity")
         try:
             return await chat_settings.update(arguments)
         except ValueError as exc:

@@ -7,6 +7,7 @@ import pytest
 
 from looper.agents.bus import MessageBus
 from looper.agents.channels.base import DeliveryReceipt, PostReceipt
+from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.task_notice import NotifyTarget, TargetKind
 
@@ -24,7 +25,7 @@ def test_registry_records_post_before_returning_its_receipt(monkeypatch, tmp_pat
         target = NotifyTarget(TargetKind.CHAT, "oc_synthetic", group=True)
         assert await registry.post("channel-lark", target, "question", proactive=ref) is receipt
         assert calls == [(ref, {"channel_id": "channel-lark", "chat": "oc_synthetic", "group": True,
-                                "external_id": "message-a", "outcome": "sent"})]
+                                "external_id": "message-a", "outcome": "sent", "dedupe_key": None})]
         await registry.post("channel-lark", target, "ordinary")
         assert len(calls) == 1
 
@@ -97,5 +98,74 @@ def test_off_outbound_keeps_the_original_delivery(monkeypatch, tmp_path, channel
         delivery.assert_awaited_once_with(envelope)
         recorded.assert_awaited_once()
         assert metrics == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["direct", "group", "notice", "progress"])
+@pytest.mark.parametrize("proactive", [False, True])
+def test_lark_metrics_only_request_ids_for_proactive_envelopes(monkeypatch, tmp_path, kind, proactive):
+    from looper.agents import chat_settings
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.task_notice import Notice, NotifyChannel
+
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+
+    async def run():
+        adapter = LarkChannelAdapter(runtime_root=tmp_path, allowlist=SenderAllowlist("channel-lark", frozenset()))
+        async def send(*args, **kwargs):
+            return "om_sent" if kwargs.get("return_id") else None
+
+        adapter._transport = SimpleNamespace(send=AsyncMock(side_effect=send), reply=AsyncMock(side_effect=send))
+        adapter._status.finish = AsyncMock()
+        payload = {"text": "Synthetic answer"}
+        message_type = MessageType.AGENT_REPLY
+        if kind == "notice":
+            payload = Notice(NotifyChannel.LARK, NotifyTarget(TargetKind.CHAT, "oc_synthetic"),
+                             "Synthetic notice", "channel-lark").payload()
+            message_type = MessageType.CHAT_NOTICE
+        elif kind == "progress":
+            payload["kind"] = "progress"
+            message_type = MessageType.STATUS_UPDATE
+        envelope = MessageEnvelope.create(source=MANAGER_ADDRESS, target=channel_address("lark"),
+                                         message_type=message_type, payload=payload,
+                                         metadata={"proactive": {"source": "task_notice"}} if proactive else {})
+        adapter._correlation_chat[envelope.correlation_id] = "oc_synthetic"
+        if kind == "group":
+            adapter._group_message[envelope.correlation_id] = "om_parent"
+        receipt = await adapter.deliver(envelope)
+        assert receipt.success
+        calls = adapter._transport.send.await_args_list + adapter._transport.reply.await_args_list
+        assert len(calls) == 1
+        assert calls[0].kwargs.get("return_id", False) is proactive
+        assert receipt.external_id == ("om_sent" if proactive else None)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("output, expected", [(b"unreadable output", "sent"), (b"[]", "sent"),
+                                              (b'{"ok":false,"error":{"code":230001}}', "rejected")])
+def test_lark_proactive_send_retains_success_when_only_receipt_parsing_fails(monkeypatch, tmp_path, output, expected):
+    from looper.agents import chat_settings
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+    call = AsyncMock(return_value=output)
+    monkeypatch.setattr(lark_cli, "run", call)
+
+    async def run():
+        adapter = LarkChannelAdapter(runtime_root=tmp_path, allowlist=SenderAllowlist("channel-lark", frozenset()))
+        adapter._status.finish = AsyncMock()
+        envelope = MessageEnvelope.create(source=MANAGER_ADDRESS, target=channel_address("lark"),
+                                         message_type=MessageType.AGENT_REPLY, payload={"text": "Synthetic notice"},
+                                         metadata={"proactive": {"source": "task_notice"}})
+        adapter._correlation_chat[envelope.correlation_id] = "oc_synthetic"
+        receipt = await adapter.deliver(envelope)
+        assert receipt.result.value == expected
+        assert receipt.external_id is None
+        call.assert_awaited_once()
 
     asyncio.run(run())

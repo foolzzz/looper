@@ -13,8 +13,12 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 def test_metrics_switch_is_operator_only_and_reloadable(monkeypatch, tmp_path):
     async def check(pool):
         async with v1_api(tmp_path, pool) as call:
-            status, body = await call("chat_settings.update", {"metrics_enabled": True}, client=True)
-            assert status == 403
+            previous = chat_settings.settings_view()
+            for arguments in ({"metrics_enabled": True}, {"stop_enabled": True, "metrics_enabled": None}):
+                status, body = await call("chat_settings.update", arguments, client=True)
+                assert status == 403 and body["error"]["code"] == "forbidden"
+                assert chat_settings.settings_view() == previous
+                assert await pool.fetchval("SELECT count(*) FROM system_settings") == 0
             status, body = await call("chat_settings.update", {"metrics_enabled": True})
             assert status == 200 and body["result"]["metrics_enabled"] is True
             chat_settings.set_metrics_enabled(False)
@@ -42,11 +46,14 @@ def test_summary_percentiles_exclusions_and_proactive_reply_rates(monkeypatch, t
                     "ack_ms": ack, "first_reply_ms": ack * 2, "delivery": delivery}}))
         for source, age, reply in [("gate", 40, True), ("gate", 40, False), ("intent", 5, False)]:
             row = await deliveries.insert({"source": source, "source_ref": None, "manager_id": "manager",
-                "channel_id": "web", "chat": "synthetic", "group_chat": False, "external_id": None,
+                "channel_id": "web", "chat": "synthetic", "chat_kind": "direct", "external_id": None,
                 "outcome": "sent", "sent_at": now - timedelta(minutes=age)})
             if reply:
                 await pool.execute("UPDATE proactive_deliveries SET replied_at=$2, reply_match='next_message' WHERE id=$1",
                                    row["id"], now)
+        for outcome in ("rejected", "unknown"):
+            await deliveries.insert({"source": "gate", "channel_id": "web", "chat": "synthetic",
+                "chat_kind": "direct", "outcome": outcome, "sent_at": now - timedelta(minutes=40)})
         async with v1_api(tmp_path, pool) as call:
             for days in (0, 31):
                 assert (await call("manager_metrics.get", {"days": days}))[0] == 400
@@ -60,7 +67,7 @@ def test_summary_percentiles_exclusions_and_proactive_reply_rates(monkeypatch, t
             assert result["turns"]["by_delivery"] == {"reply": 1, "empty": 1}
             assert result["empty"] == {"count": 1, "ratio": 0.5}
             assert result["proactive"]["reply_rate"] == {"all": 0.5, "by_source": {"gate": 0.5}}
-            assert sum(sum(day["by_source"].values()) for day in result["proactive"]["per_day"]) == 3
+            assert sum(sum(day["by_source"].values()) for day in result["proactive"]["per_day"]) == 5
     run_db(check, monkeypatch)
 
 

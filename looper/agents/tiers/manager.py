@@ -1358,7 +1358,7 @@ class ManagerAgent:
         if token.times is None or prepared is None or prepared.run.recorder is None:
             return
         if token.envelope is None:
-            metadata = token.times.to_metadata(delivery, "completion", False)
+            metadata = token.times.to_metadata(delivery, TurnOrigin.COMPLETION, False)
             turn_metrics.background(prepared.run.recorder.annotate({"turn_metrics": metadata}))
             return
         origin = _message_origin(token.envelope)
@@ -1368,7 +1368,7 @@ class ManagerAgent:
             known = turn_metrics.ack_board.contains(channel_id, message_id)
             token.times.ack_at = turn_metrics.ack_board.take(channel_id, message_id)
             token.times.ack = AckKind.REACTION if token.times.ack_at is not None else (AckKind.NONE if known else AckKind.PENDING)
-        metadata = token.times.to_metadata(delivery, "user", token.times.received_at < self._metrics_started_at)
+        metadata = token.times.to_metadata(delivery, TurnOrigin.USER, token.times.received_at < self._metrics_started_at)
         turn_metrics.background(prepared.run.recorder.annotate({"turn_metrics": metadata}))
 
     async def _answer_user_message(self, envelope: MessageEnvelope, token: TurnToken) -> None:
@@ -2076,7 +2076,7 @@ class ManagerAgent:
         text = ""
         if not done:
             reason = "turn_timeout"
-            delivery = TurnDelivery.STOPPED
+            delivery = TurnDelivery.FAILED
             await self._fall_back_completion(batch, reason, state)
             await self._end_late_completion(run, batch, state)
         else:
@@ -2133,7 +2133,7 @@ class ManagerAgent:
             if reason and delivery is TurnDelivery.REPLY:
                 delivery = TurnDelivery.EMPTY if reason == "empty_reply" else TurnDelivery.FAILED
             turn_metrics.background(db_llm_records.add_metadata(state["record_id"], {"turn_metrics":
-                metrics_token.times.to_metadata(delivery, "completion", False)}))
+                metrics_token.times.to_metadata(delivery, TurnOrigin.COMPLETION, False)}))
         if state.get("record_id") is not None:
             try:
                 cost = await db_connection.get_pool().fetchval("SELECT cost_usd FROM llm_records WHERE id = $1",

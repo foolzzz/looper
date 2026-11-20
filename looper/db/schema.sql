@@ -2225,25 +2225,23 @@ ALTER TABLE intents ADD CONSTRAINT intents_dropped
 -- leads check end
 
 -- One row per proactive message. Metrics write the receipt directly; the delivery
--- layer will own the single decision/write point. Its nullable fields stay unset
--- until that layer is connected. Keep this block as the one named migration.
+-- layer will own the single decision point. Its policy fields stay unset until
+-- that layer is connected. Keep this block as the one named migration.
 -- proactive deliveries begin
 CREATE TABLE IF NOT EXISTS proactive_deliveries (
     id          BIGSERIAL PRIMARY KEY,
     source      TEXT NOT NULL CHECK (source IN ('task_notice', 'completion', 'progress', 'gate', 'gate_reminder',
-                                                'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous')),
+                                                'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous',
+                                                'user_reminder')),
     source_ref  TEXT,                 -- 任务、关卡、订阅运行、意图或定时任务运行的 id；管家自己说的话为空
     manager_id  TEXT,
     channel_id  TEXT NOT NULL,        -- 'web' 或机器人的渠道 id
     chat        TEXT NOT NULL,        -- 飞书、Telegram 的会话 id；控制台的会话 id
-    group_chat  BOOLEAN NOT NULL,
     external_id TEXT,                 -- 发送方知道时：平台消息 id
-    outcome     TEXT NOT NULL CHECK (outcome IN ('sent', 'rejected', 'unknown')),
+    outcome     TEXT CHECK (outcome IN ('sent', 'rejected', 'unknown')),
     dedupe_key  TEXT,
-    kind        TEXT CHECK (kind IN ('gate_reminder', 'task_notice', 'subscription', 'intent',
-                                    'completion_turn', 'user_reminder')),
     urgency     TEXT CHECK (urgency IN ('normal', 'blocking', 'user_set')),
-    chat_kind   TEXT CHECK (chat_kind IN ('direct', 'group')),
+    chat_kind   TEXT NOT NULL CHECK (chat_kind IN ('direct', 'group')),
     task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     step_id     TEXT,
     schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL,
@@ -2254,9 +2252,10 @@ CREATE TABLE IF NOT EXISTS proactive_deliveries (
     local_date  DATE,
     digest_date DATE,
     decided_at  TIMESTAMPTZ,
-    sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at     TIMESTAMPTZ,
     replied_at  TIMESTAMPTZ,
     reply_match TEXT CHECK (reply_match IN ('quoted', 'next_message')),
+    CONSTRAINT proactive_deliveries_receipt CHECK ((sent_at IS NULL) = (outcome IS NULL)),
     CONSTRAINT proactive_deliveries_reply CHECK ((replied_at IS NULL) = (reply_match IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_open

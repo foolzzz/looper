@@ -23,4 +23,5 @@ def record_delivery(channel_id: str, envelope: MessageEnvelope, receipt: Deliver
     if notice is not None:
         chat, group = notice.target.id, notice.target.group
     turn_metrics.record_proactive(ref, channel_id=channel_id, chat=chat, group=group,
-                                  external_id=receipt.external_id, outcome=receipt.result.value)
+                                  external_id=receipt.external_id, outcome=receipt.result.value,
+                                  dedupe_key=envelope.message_id)

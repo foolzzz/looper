@@ -223,7 +223,7 @@ class GateCourier:
         key = f"gate-{row['id']}"
         proactive = turn_metrics.proactive_kwargs(
             turn_metrics.ProactiveSource.GATE_REMINDER if MessageKind(row["kind"]) is MessageKind.REMINDER
-            else turn_metrics.ProactiveSource.GATE, row["step_id"], row.get("manager_id"))
+            else turn_metrics.ProactiveSource.GATE, row["step_id"], row.get("manager_id"), dedupe_key=key)
         receipt = await self._post(chat.channel_id, chat.target, text, reply_to=reply_to, idempotency_key=key,
                                    **proactive)
         if receipt.parent_gone:

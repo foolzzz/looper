@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from . import chat_settings
+from .ops import TurnOrigin
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,12 @@ class TurnTimes:
     tool_calls: int = 0
     chat: ChatKind = ChatKind.DASHBOARD
 
-    def to_metadata(self, delivery: TurnDelivery, origin: str, replayed: bool) -> dict[str, Any]:
-        if origin == 'completion':
-            return {'origin': origin, 'tool_calls': self.tool_calls, 'delivery': delivery.value}
+    def to_metadata(self, delivery: TurnDelivery, origin: TurnOrigin, replayed: bool) -> dict[str, Any]:
+        if origin is TurnOrigin.COMPLETION:
+            return {'origin': origin.value, 'tool_calls': self.tool_calls, 'delivery': delivery.value}
         def elapsed(at: datetime | None) -> int | None:
             return None if at is None else round((at - self.received_at).total_seconds() * 1000)
-        return {'v': 1, 'origin': origin, 'chat': self.chat.value,
+        return {'v': 1, 'origin': origin.value, 'chat': self.chat.value,
                 'received_at': self.received_at.isoformat().replace('+00:00', 'Z'),
                 'ack': self.ack.value, 'ack_ms': elapsed(self.ack_at),
                 'first_reply_ms': elapsed(self.first_reply_at), 'tool_calls': self.tool_calls,
@@ -97,6 +98,7 @@ class ProactiveSource(str, Enum):
     SCHEDULE = 'schedule'
     ADVISOR_ALERT = 'advisor_alert'
     AUTONOMOUS = 'autonomous'
+    USER_REMINDER = 'user_reminder'
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,7 @@ class ProactiveRef:
     source: ProactiveSource
     source_ref: str | None = None
     manager_id: str | None = None
+    dedupe_key: str | None = None
 
 
 PENDING_MAX = 2000
@@ -144,18 +147,19 @@ def background(work: Coroutine[Any, Any, Any]) -> None:
 
 
 def record_proactive(ref: ProactiveRef, *, channel_id: str, chat: str, group: bool,
-                     external_id: str | None, outcome: Any) -> None:
+                     external_id: str | None, outcome: Any, dedupe_key: str | None = None) -> None:
     if not chat_settings.metrics_enabled():
         return
     from ..db import proactive_deliveries
 
     background(proactive_deliveries.insert({
         'source': ref.source.value, 'source_ref': ref.source_ref, 'manager_id': ref.manager_id,
-        'channel_id': channel_id, 'chat': chat, 'group_chat': group, 'external_id': external_id,
+        'channel_id': channel_id, 'chat': chat, 'chat_kind': 'group' if group else 'direct', 'external_id': external_id,
+        'dedupe_key': ref.dedupe_key or dedupe_key,
         'outcome': getattr(outcome, 'value', outcome), 'sent_at': datetime.now(timezone.utc),
     }))
 
 
 def proactive_kwargs(source: ProactiveSource, source_ref: str | None = None,
-                     manager_id: str | None = None) -> dict[str, ProactiveRef]:
-    return {'proactive': ProactiveRef(source, source_ref, manager_id)} if chat_settings.metrics_enabled() else {}
+                     manager_id: str | None = None, *, dedupe_key: str | None = None) -> dict[str, ProactiveRef]:
+    return {'proactive': ProactiveRef(source, source_ref, manager_id, dedupe_key)} if chat_settings.metrics_enabled() else {}
