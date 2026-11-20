@@ -71,9 +71,10 @@ def _vault(tmp_path):
 
 
 @pytest.mark.parametrize("family,fields", [
-    ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds", "run_retention_days"}),
+    ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds", "run_retention_days",
+                            "session_context_max_tokens"}),
     ("wait_settings", {"max_wait_seconds", "min_check_seconds"}),
-    ("knowledge_vault", {"configured", "path", "writable", "rules_file", "git", "problem"}),
+    ("knowledge_vault", {"configured", "path", "writable", "rules_file", "manager_read", "git", "problem"}),
 ])
 @pytest.mark.parametrize("client", [False, True])
 def test_full_get_views_are_nonempty_and_typed(tmp_path, monkeypatch, family, fields, client):
@@ -94,6 +95,7 @@ NUMERIC_RULES = [
     ("scheduler_settings", "min_interval_seconds", 1, None),
     ("scheduler_settings", "run_timeout_seconds", 1, scheduler.RUN_TIMEOUT_MAX_SECONDS),
     ("scheduler_settings", "run_retention_days", 1, scheduler.RUN_RETENTION_MAX_DAYS),
+    ("scheduler_settings", "session_context_max_tokens", 40_000, 100_000_000),
     ("wait_settings", "max_wait_seconds", *waits.MAX_WAIT_RANGE),
     ("wait_settings", "min_check_seconds", *waits.MIN_CHECK_RANGE),
 ]
@@ -161,6 +163,7 @@ def test_client_confirmation_is_isolated_and_abandoned_changes_do_not_persist(tm
 @pytest.mark.parametrize("family,data", [
     ("scheduler_settings", {}), ("wait_settings", {}),
     ("scheduler_settings", {"unknown": 1}), ("wait_settings", {"unknown": 1}),
+    ("scheduler_settings", {"session_history_runs": 3}),
     ("wait_settings", {"max_wait_seconds": 60, "min_check_seconds": 61}),
     ("knowledge_vault", {}), ("knowledge_vault", {"path": None, "git": True}),
 ])
@@ -240,7 +243,8 @@ def test_vault_git_problem_clear_and_execution_revalidation_leave_notes_untouche
             assert problem["configured"] is False and problem["problem"] and problem["path"] == data["path"]
             status, body = await post("knowledge_vault/update", clear)
             assert status == 200 and body["result"] == {"configured": False, "path": None, "writable": [],
-                                                       "rules_file": None, "git": False, "problem": None}
+                                                       "rules_file": None, "manager_read": False, "git": False,
+                                                       "problem": None}
             assert (root / "rules.md").read_text() == "Example rules\n"
             assert subprocess.run(["git", "-C", data["path"], "log", "--oneline"], capture_output=True,
                                   timeout=10).returncode != 0

@@ -155,6 +155,7 @@ class OmpRuntime(RuntimeAdapter):
     type = "omp"
     label = "OMP"
     streams_usage = True
+    reports_request_context = True
     default_executable = "omp"
     # Verified against omp 18.4.3: Claude plugins' skills, commands and agents load (no hooks); compaction events;
     # tokens only, per request.
