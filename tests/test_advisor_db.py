@@ -126,7 +126,7 @@ def test_the_advisor_and_its_judge_run_their_own_built_in_profiles_unless_their_
         judge = await load_agent_settings(AgentType.ADVICE_CHECK)
         assert (advisor.profile.id, advisor.model, advisor.effort) == ("agent-claude-code-fable-5-2",
                                                                        "claude-fable-5-2", "high")
-        assert (judge.profile.id, judge.model) == ("agent-claude-code-haiku-5-5", "claude-haiku-5-5")
+        assert (judge.profile.id, judge.model) == ("agent-claude-code-sonnet-5-5", "claude-sonnet-5-5")
         assert advisor.profile_error is None and advisor.system_prompt_mode is SystemPromptMode.REPLACE
         # The shared defaults are for the roles with tools: they choose nothing for these two.
         await agent_settings.update_system({"profile_id": "agent-claude-code-opus", "run_budget_usd": 3})
@@ -146,7 +146,7 @@ def test_the_advisor_and_its_judge_run_their_own_built_in_profiles_unless_their_
         assert (roles["advisor"]["display_name"], roles["advisor"]["timeout_seconds"]) == ("Advisor", 300)
         assert roles["advice_check"]["timeout_seconds"] == 120
         # Without its built-in profile a role does not run in another's place.
-        await pool.execute("DELETE FROM agent_profiles WHERE id = 'agent-claude-code-haiku-5-5'")
+        await pool.execute("DELETE FROM agent_profiles WHERE id = 'agent-claude-code-sonnet-5-5'")
         assert "is missing" in (await load_agent_settings(AgentType.ADVICE_CHECK)).profile_error
 
     run_db(test, monkeypatch, setup=_setup)
@@ -165,7 +165,7 @@ def test_a_request_that_passes_its_checks_is_answered_and_both_runs_are_the_plan
         assert ended.response.fields["answers"][0]["conclusion"] == "Cache hot keys first."
         judge, advisor = _seen(tmp_path)
         assert (judge["as"], advisor["as"]) == ("judge", "advisor")
-        assert judge["argv"][judge["argv"].index("--model") + 1] == "claude-haiku-5-5"
+        assert judge["argv"][judge["argv"].index("--model") + 1] == "claude-sonnet-5-5"
         argv = advisor["argv"]
         assert argv[argv.index("--model") + 1] == "claude-fable-5-2" and argv[argv.index("--effort") + 1] == "high"
         assert argv[argv.index("--tools") + 1] == "" and argv[argv.index("--max-turns") + 1] == "2"

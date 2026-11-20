@@ -54,7 +54,7 @@
 | 概念 | 定义 |
 |---|---|
 | advisor | 一个角色，和执行者、评审者并列。绑定一个 Agent Profile，默认 `claude-code/fable-5-2`。每轮是一次独立的运行：不带工具，在空目录里启动 |
-| advice_check | 判别角色，默认 `claude-code/haiku-5-5`。一次独立的无工具运行，只看请教包 |
+| advice_check | 判别角色，默认 `claude-code/sonnet-5-5`（`claude-sonnet-5-5`）。一次独立的无工具运行，只看请教包 |
 | 请教的来源 `source` | `checkpoint`（检查点，代码强制）、`optional`（规划者自己选）、`ladder`（升级阶梯，第一期不用） |
 | 请教的类型 `kind` | `diagnose`、`design_choice`、`plan_review`、`unblock`。每种类型有自己的必填项（第 9.2 节） |
 | 难度 `difficulty` | PLAN 步骤的字段：`routine`、`hard`、`critical`，存在 `task_steps.difficulty`。第一期只有 `critical` 有作用：触发检查点 |
@@ -71,7 +71,7 @@
 | D2 | 什么时候请教由规划者判断：[PLAN] 回合，以及每个 [DECISION] 回合（步骤成功后、失败后、重试用完后）都可以选 `advise`；[CHAT] 和 [GATE] 回合不能请教。代码只强制两处：第一期的 critical 检查点，第二期的升级阶梯（等 M2） | 维护者要把这个能力开放给规划者；回答用户的回合里去请教，用户就得干等。阶梯要靠类型化的失败签名触发，现在还没有 |
 | D3 | 项目开关 `advisor`，默认 `off`。关闭时模型能看到的内容和命令行逐字节不变，用测试钉住 | 新行为默认关闭（仓库规则） |
 | D4 | `difficulty` 进入第一期，只用于检查点：PLAN 步骤字段加 `task_steps.difficulty` 列；只有开关打开时 PLAN 契约才提到它 | 检查点需要知道哪一步是 critical；难度路由留到以后 |
-| D5 | 不在代码里写运行时和模型：advisor 和 advice_check 是角色，默认 Profile 是种子数据（`claude-code/fable-5-2` 用完整 ID `claude-fable-5-2`，`claude-code/haiku-5-5` 用 `claude-haiku-5-5`），都能在 Settings → Roles 里通过现有的分层设置修改 | 运行时和模型只能来自配置 |
+| D5 | 不在代码里写运行时和模型：advisor 和 advice_check 是角色，默认 Profile 是种子数据（`claude-code/fable-5-2` 用完整 ID `claude-fable-5-2`，`claude-code/sonnet-5-5` 用 `claude-sonnet-5-5`），都能在 Settings → Roles 里通过现有的分层设置修改 | 运行时和模型只能来自配置 |
 | D6 | `advisor_advice` 不依赖 M1：存 `task_id`、`step_id` 和尝试编号（由现有的 `task_steps.retries` 算出），另留一个可空的 `attempt_id`，由 M1 填写并加约束 | M1 的 `step_attempts` 还没有 |
 | D7 | 第一期不设次数和总预算上限，先看效果。每步、每任务的次数上限，每任务、每天的预算上限，配置项都保留，默认为空。代码只强制两件事：每次请教 1 美元（每轮的 `--max-budget-usd` 取这次请教剩下的），以及「再请教要有新证据」（D20）。告警：全局每天的 advisor 花费超过阈值（默认 30 美元），请教率过高（第 15 节）。告警只提醒，不拦截 | 维护者决定先看实际效果再定上限 |
 | D8 | 第一期没有 explorer：代码给规划者最多 8,000 字的本地素材，只给规划者看、不外发。PR 里写明这个缺口 | explorer 需要 M4 的派生工具 |
@@ -256,7 +256,7 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
 ## 8. 两个角色、默认 Profile 和启动参数
 
 - **角色：** `AgentType` 加 `advisor` 和 `advice_check`。迁移放宽 `agent_setting_layers.role` 和 `schedule_profile_overrides.role` 的检查（做法和 processor 一样），`role_configs` 加两行（角色 prompt、超时、轮数，Settings → Roles 里能改）。两个角色都只能用有 `no_tools` 能力的运行时，`check_roles` 在选 Profile 时就拒绝不行的；
-- **默认 Profile（种子数据，不写在 Python 里）：**`seeds.sql` 给订阅登录的模型目录加 `claude-fable-5-2` 和 `claude-haiku-5-5` 两个模型（固定的 UUIDv5 ID），加两个内置 Profile `claude-code/fable-5-2`、`claude-code/haiku-5-5`，再给 `advisor`、`advice_check` 两个角色各种一行 `scope = 'role'` 的设置层，指向这两个 Profile。都是 `ON CONFLICT DO NOTHING`：运维者改过的不会被覆盖；把角色的 Profile 清空后，这一行的 `profile_id` 是 NULL，种子也不会再填回去；
+- **默认 Profile（种子数据，不写在 Python 里）：**`seeds.sql` 给订阅登录的模型目录加 `claude-fable-5-2` 和 `claude-sonnet-5-5` 两个模型（固定的 UUIDv5 ID），加两个内置 Profile `claude-code/fable-5-2`、`claude-code/sonnet-5-5`，再给 `advisor`、`advice_check` 两个角色各种一行 `scope = 'role'` 的设置层，指向这两个 Profile。都是 `ON CONFLICT DO NOTHING`：运维者改过的不会被覆盖；把角色的 Profile 清空后，这一行的 `profile_id` 是 NULL，种子也不会再填回去；
 - **价格表：** `BUILTIN_PRICES` 加 `claude-fable-5-2`：输入 8、输出 40、缓存读 0.20、5 分钟缓存写 10（1.25 倍输入）、1 小时缓存写 16（2 倍输入，第 18 节实测），单位都是美元每百万 token；`CLAUDE_CODE_ALIASES` 加 `fable → claude-fable-5-2`。Claude Code 写的多半是 1 小时缓存，所以价格表给 Anthropic 的模型都加了 1 小时缓存写的价格（`ModelPrice.cache_write_1h_usd_per_mtok`）。按服务商价格计费时，请求的用量里说了时长（`cache_creation`）就分开计；说不清时长的写入按 1 小时的价格计，这样只会多算、不会少算。按服务商价格计费的子运行，只要写入时长说不清就不给输出（花费不准，上限没法核对）。订阅登录用运行时自报的数，不受影响；
 - **启动参数**（Claude Code，复用 processor 的无工具路径，`max_turns = 2`）：
 
@@ -336,7 +336,7 @@ claude --print --verbose --output-format stream-json --include-partial-messages 
 - `standalone` 为假、`leaks` 不为空，或者 `answerable < 0.6`，都算不过；退回的消息列出泄漏的类别与字段，缺项用我们自己的话写（`advice.MISSING_REASONS`），不引用判别写的文字；
 - 判别本身失败（起不来、超时、回复不合格），这次请教记为 `failed`（`failure: judge`），不会不经判别就发出去；
 - **判别的运行记录不存请教包：** 输入只存请教包的 sha256 和长度，事件流只留类型化的字段，没有输出文字；
-- 每次判别都是一次 `run_kind = advice_check` 的运行，花费计入这次请教的预算（实测每次约 0.0004 美元）。
+- 每次判别都是一次 `run_kind = advice_check` 的运行，花费计入这次请教的预算。默认用 Sonnet 5.5（2026-11-20 维护者决定）：用两个真实请教包和注入了路径、人名、内部项目名的变体实测，Sonnet 5.5 没有误报、全部拦下，每次约 0.0017 美元、4 秒；Haiku 5.5 每次约 0.0002 美元，但在「路径从宽、名字从严」上不稳定，结果随措辞变化。仍可在 Settings → Roles 里换。
 
 ### 9.5 退回
 

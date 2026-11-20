@@ -5300,8 +5300,8 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   runtime needs `run` and `no_tools` (`ROLE_CAPABILITIES`). Only their role layer (Settings → Roles) chooses their
   Agent Profile and environment: the shared defaults and the project layers are for the roles with tools. With
   none chosen each runs its own built-in profile (`profile_registry.BUILTIN_ROLE_PROFILES`, seeded with the schema
-  in `seeds.sql`): `claude-code/fable-5-2` (`claude-fable-5-2`, effort `high`) and `claude-code/haiku-5-5`
-  (`claude-haiku-5-5`). Without its built-in profile a role does not run, and no other model takes its place.
+  in `seeds.sql`): `claude-code/fable-5-2` (`claude-fable-5-2`, effort `high`) and `claude-code/sonnet-5-5`
+  (`claude-sonnet-5-5`, about 0.0017 USD a check). Without its built-in profile a role does not run, and no other model takes its place.
   Their system prompt replaces the runtime's: the role prompt (`role_configs`) and the reply contract
   (`advice.ADVISOR_CONTRACT`, `advice.JUDGE_CONTRACT`), with no harness.
 - **A consult** is an `agent_spawns` row (`open_consult`, `drafting`). Each request (`submit`) passes three checks
