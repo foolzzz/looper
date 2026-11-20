@@ -151,9 +151,10 @@ async def source_user(conn: Db, source_id: str) -> str | None:
 
 
 async def claim_day(conn: Db, schedule_id: str, local_date: date) -> bool:
-    """Reserve the day's attempt atomically, in the firing's transaction; never released on failure."""
+    """Reserve the day's attempt in the firing's transaction, refusing dates at or before any retained claim."""
     return bool(await conn.fetchval(
-        "INSERT INTO subscription_daily_claims (schedule_id, local_date) VALUES ($1, $2) "
+        "INSERT INTO subscription_daily_claims (schedule_id, local_date) SELECT $1, $2 WHERE NOT EXISTS "
+        "(SELECT 1 FROM subscription_daily_claims WHERE schedule_id = $1 AND local_date >= $2) "
         "ON CONFLICT DO NOTHING RETURNING true", schedule_id, local_date))
 
 
@@ -261,16 +262,16 @@ def snapshot(sub: Mapping[str, Any]) -> dict[str, Any]:
 async def insert_run(conn: asyncpg.Connection, run_id: str, *, from_seq: int, to_seq: int, in_window: int,
                      selected: int, too_old: int, over_cap: int, target: tuple[str, str] | None = None,
                      config_version: str | None = None, window_mode: str = "cursor", config: Mapping[str, Any] | None = None,
-                     config_epoch: int | None = None) -> None:
+                     config_epoch: int | None = None, daily_date: date | None = None) -> None:
     """The run's window and, when it started with its push target confirmed, where it may push and under which
     configuration (``config_version``)."""
     await conn.execute(
         "INSERT INTO subscription_runs (run_id, from_seq, to_seq, events_in_window, events_selected, events_too_old, "
-        "events_over_cap, target_channel, target_chat, config_version, config, config_epoch, window_mode) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)",
+        "events_over_cap, target_channel, target_chat, config_version, config, config_epoch, window_mode, daily_date) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14)",
         run_id, from_seq, to_seq, in_window, selected, too_old, over_cap, target[0] if target else None,
         target[1] if target else None, config_version, json.dumps(config, ensure_ascii=False) if config is not None else None,
-        config_epoch, window_mode)
+        config_epoch, window_mode, daily_date)
 
 
 def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:

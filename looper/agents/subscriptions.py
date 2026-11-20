@@ -411,7 +411,9 @@ async def confirmation_text(schedule: Mapping[str, Any], *, now: datetime, actio
              f"- 每天最多推送：{1 if sub.get('delivery_policy') == 'daily' else fires_per_day(rule, zone_name, now)} 次"
              "（没有新消息或没有内容时不推送）"]
     if sub.get("delivery_policy") == "daily":
-        lines.append("- 每个本地日期最多尝试一次（手动运行、补跑也计入；静默、失败或仅留在面板也占用当天名额）")
+        lines.append("- 按触发时刻的本地日期占用名额（手动运行、补跑也计入；"
+                     "静默、仅留在面板或已发送/发送状态不确定时保留名额；"
+                     "失败或中断且无已发送/发送状态不确定的消息时释放名额）")
     profile = await processor.chosen_profile(schedule["project_id"], schedule["id"])
     named = f"{profile.get('name')}（{profile.get('runtime')} · {profile.get('model') or '默认模型'}）"
     lines.append(f"- 处理 Profile：{named}，来源：{profile.get('source')}（processor.chosen_profile）")

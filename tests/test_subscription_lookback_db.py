@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -134,7 +134,7 @@ def test_daily_guard_covers_manual_overlapping_fires_and_catchup_then_allows_nex
     scenario(check, monkeypatch, tmp_path)
 
 
-@pytest.mark.parametrize("outcome", ["quiet", "failed", "uncertain", "dashboard_only"])
+@pytest.mark.parametrize("outcome", ["quiet", "failed", "push_failed", "interrupted", "uncertain", "dashboard_only"])
 def test_daily_reservation_survives_restart_and_every_attempt_outcome(monkeypatch, tmp_path, outcome):
     from tests.subscription_support import scheduler_with
 
@@ -146,18 +146,37 @@ def test_daily_reservation_survives_restart_and_every_attempt_outcome(monkeypatc
             fake.reply = "SKIP"
         if outcome == "failed":
             fake.failure = processor.ProcessorFailure.TIMEOUT
+        if outcome == "push_failed":
+            poster.fail_with = "refused"
+        if outcome == "interrupted":
+            async def leave_running(run_id):
+                pass  # the old process exits before invoking the processor
+            monkeypatch.setattr(env.scheduler._subscriptions, "execute", leave_running)
         if outcome == "uncertain":
             poster.break_after = 1
         await add(env.pool, "report", sent_at=minutes_ago(env, 5))
         await fire(env, sid)
         first = await latest(env, sid)
-        assert first["stream"]["outcome"] == ("failed" if outcome == "failed" else outcome)
+        if outcome == "interrupted":
+            assert first["status"] == "running"
+            await env.pool.execute("UPDATE schedule_runs SET runner_pid = 999999, runner_started = 'dead server' "
+                                   "WHERE id = $1", first["id"])
+        else:
+            assert first["stream"]["outcome"] == ("failed" if outcome in ("failed", "push_failed") else outcome)
         scheduler_with(env, poster=poster)
+        await env.scheduler.tick()
+        await env.scheduler.idle()
+        if outcome == "interrupted":
+            assert (await latest(env, sid))["status"] == "interrupted"
+        released = outcome in ("failed", "push_failed", "interrupted")
+        assert await env.pool.fetchval("SELECT count(*) FROM subscription_daily_claims WHERE schedule_id = $1", sid) == (
+            0 if released else 1)
+        fake.failure, poster.fail_with = None, None
         await confirm(env, sid)
         await env.scheduler.run_now(sid)
         await env.scheduler.idle()
-        assert len(fake.calls) == 1
-        assert len(poster.sent) == (1 if outcome == "uncertain" else 0)
+        assert len(fake.calls) == (2 if outcome in ("failed", "push_failed") else 1)
+        assert len(poster.sent) == (1 if released or outcome == "uncertain" else 0)
 
     scenario(check, monkeypatch, tmp_path)
 
@@ -328,7 +347,7 @@ def test_upgrade_adds_default_cursor_and_daily_guard_without_changing_existing_c
         before = await db_subs.get(sid)
         async with env.pool.acquire() as conn:
             await conn.execute('ALTER TABLE subscriptions DROP COLUMN "window", DROP COLUMN delivery_policy')
-            await conn.execute("ALTER TABLE subscription_runs DROP COLUMN window_mode")
+            await conn.execute("ALTER TABLE subscription_runs DROP COLUMN window_mode, DROP COLUMN daily_date")
             await conn.execute("DROP TABLE subscription_daily_claims")
             await conn.execute("DELETE FROM schema_migrations WHERE name = 'subscription_lookback'")
             assert await connection.schema_change_pending(conn)
@@ -339,7 +358,124 @@ def test_upgrade_adds_default_cursor_and_daily_guard_without_changing_existing_c
         assert {key: value for key, value in after.items() if key not in ("window", "delivery_policy")} == {
             key: value for key, value in before.items() if key not in ("window", "delivery_policy")}
         assert await env.pool.fetchval("SELECT to_regclass('subscription_daily_claims') IS NOT NULL")
+        assert (await latest(env, sid))["stream"]["daily_date"] is None
         async with env.pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("policy", ["daily", "per_run"])
+def test_catchup_across_local_midnight_uses_scheduled_date_for_claim_and_header(monkeypatch, tmp_path, policy):
+    async def check(env, poster, fake):
+        env.clock.now = datetime(2026, 1, 16, 8, 5, tzinfo=timezone.utc)  # 00:05 in Los Angeles
+        scheduled = env.clock.now - timedelta(minutes=10)  # yesterday's 23:55 firing
+        sid = await started(env, subscription={**LOOKBACK, "delivery_policy": policy, "output_header": "Daily {date}"},
+                            cron="55 23 * * *", catch_up="once")
+        await confirm(env, sid)
+        await add(env.pool, "report", sent_at=minutes_ago(env, 20))
+        await env.pool.execute("UPDATE schedules SET next_fire_at = $2, last_fired_at = NULL WHERE id = $1", sid, scheduled)
+        await env.scheduler.tick()
+        await env.scheduler.idle()
+        run = await latest(env, sid)
+        assert run["trigger"] == "catch_up" and run["scheduled_for"] == scheduled
+        assert run["stream"]["output_text"].startswith("Daily 2026-01-15\n\n")
+        if policy == "daily":
+            assert run["stream"]["daily_date"].isoformat() == "2026-01-15"
+            assert await env.pool.fetchval("SELECT local_date FROM subscription_daily_claims WHERE schedule_id = $1",
+                                           sid) == run["stream"]["daily_date"]
+        env.clock.now += timedelta(seconds=1)
+        await env.scheduler.run_now(sid)  # today's manual firing is a distinct local date
+        await env.scheduler.idle()
+        assert len(poster.sent) == 2
+        assert (await latest(env, sid))["stream"]["output_text"].startswith("Daily 2026-01-16\n\n")
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_timezone_rollback_cannot_claim_a_date_before_a_retained_daily_claim(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env, subscription=DAILY, timezone="Pacific/Kiritimati")
+        await confirm(env, sid)
+        await add(env.pool, "report", sent_at=minutes_ago(env, 1))
+        await fire(env, sid)  # local Jan 16
+        assert len(poster.sent) == 1
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"timezone": "America/Los_Angeles"}})
+        await confirm(env, sid)
+        env.clock.now += timedelta(seconds=1)
+        await env.scheduler.run_now(sid)  # same real day, local Jan 15
+        await env.scheduler.idle()
+        assert len(poster.sent) == len(fake.calls) == 1
+        assert (await latest(env, sid))["status"] == "skipped_gate"
+        env.clock.now += timedelta(days=2)  # local Jan 17 is after the retained claim
+        await add(env.pool, "next report", sent_at=minutes_ago(env, 1))
+        await env.scheduler.run_now(sid)
+        await env.scheduler.idle()
+        assert len(poster.sent) == 2
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_failed_daily_run_releases_its_recorded_date_after_timezone_and_clock_change(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env, subscription=DAILY, timezone="Pacific/Kiritimati")
+        await add(env.pool, "report", sent_at=minutes_ago(env, 1))
+        previous_day = env.clock.now.date()
+        await env.pool.execute("INSERT INTO subscription_daily_claims (schedule_id, local_date) VALUES ($1, $2)",
+                               sid, previous_day)
+        async def during():
+            await env.pool.execute("UPDATE schedules SET timezone = 'America/Los_Angeles' WHERE id = $1", sid)
+            env.clock.now += timedelta(days=2)
+        fake.during, fake.failure = during, processor.ProcessorFailure.FAILED
+        run = await fire(env, sid)
+        assert run["status"] == "failed"
+        claims = await env.pool.fetch("SELECT local_date FROM subscription_daily_claims WHERE schedule_id = $1", sid)
+        assert [row["local_date"] for row in claims] == [previous_day]
+        assert run["stream"]["daily_date"] == previous_day + timedelta(days=1)
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_daily_skip_preserves_failure_streak_and_last_ok_but_empty_window_is_ok(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env, subscription=DAILY)
+        await confirm(env, sid)
+        await add(env.pool, "report", sent_at=minutes_ago(env, 1))
+        poster.fail_segments = {2: 1, 3: 1, 4: 1}
+        run = await fire(env, sid)
+        assert run["status"] == "failed"
+        assert [d["state"] for d in await db_subs.list_deliveries(run["id"])] == ["sent", "failed"]
+        before = await env.pool.fetchrow("SELECT consecutive_failures, last_ok_at FROM schedules WHERE id = $1", sid)
+        assert before["consecutive_failures"] == 1 and before["last_ok_at"] is None
+        env.clock.now += timedelta(seconds=1)
+        await env.scheduler.run_now(sid)
+        await env.scheduler.idle()
+        assert (await latest(env, sid))["status"] == "skipped_gate"
+        after = await env.pool.fetchrow("SELECT consecutive_failures, last_ok_at FROM schedules WHERE id = $1", sid)
+        assert after == before
+        assert len(fake.calls) == 1 and len(poster.sent) == 1
+        # Positive control: a genuinely empty window still clears the streak and updates last_ok_at.
+        await env.pool.execute("DELETE FROM source_events")
+        env.clock.now += timedelta(seconds=1)
+        await env.scheduler.run_now(sid)
+        await env.scheduler.idle()
+        empty = await latest(env, sid)
+        assert empty["status"] == "skipped_gate"
+        after = await env.pool.fetchrow("SELECT consecutive_failures, last_ok_at FROM schedules WHERE id = $1", sid)
+        assert after["consecutive_failures"] == 0 and after["last_ok_at"] == env.clock.now
+
+    scenario(check, monkeypatch, tmp_path, reply=("y" * 99 + "\n") * 60)
+
+
+
+def test_daily_confirmation_explains_retry_after_failure_without_delivery(monkeypatch, tmp_path):
+    from looper.agents import subscriptions
+    from looper.db import schedules
+
+    async def check(env, poster, fake):
+        sid = await started(env, subscription=DAILY, enable=False)
+        text = await subscriptions.confirmation_text(await schedules.get_schedule(sid), now=env.clock.now, action="启用")
+        assert "失败或中断且无已发送/发送状态不确定的消息时释放名额" in text
+        assert "静默、仅留在面板或已发送/发送状态不确定时保留名额" in text
 
     scenario(check, monkeypatch, tmp_path)

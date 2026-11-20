@@ -671,7 +671,8 @@ ALTER TABLE subscriptions
     ADD COLUMN "window" TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
     ADD COLUMN delivery_policy TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'));
 ALTER TABLE subscription_runs
-    ADD COLUMN window_mode TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback'));
+    ADD COLUMN window_mode TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
+    ADD COLUMN daily_date DATE;
 CREATE TABLE subscription_daily_claims (
     schedule_id TEXT NOT NULL REFERENCES subscriptions(schedule_id) ON DELETE CASCADE,
     local_date DATE NOT NULL,
