@@ -58,6 +58,10 @@ def test_deleting_any_source_message_deletes_the_lead_and_the_intent_made_from_i
     "UPDATE message_leads SET state = 'inaccurate' WHERE id = $1",                # inaccurate without who marked it
     "UPDATE message_leads SET state = 'promoted' WHERE id = $1",                  # promoted without where to
     "UPDATE message_leads SET last_sent_at = first_sent_at - interval '1 hour' WHERE id = $1",
+    "UPDATE message_leads SET state = 'dropped' WHERE id = $1",                   # dropped without the check's verdict
+    "UPDATE message_leads SET check_verdict = 'drop' WHERE id = $1",              # the check dropped it, yet active
+    "UPDATE message_leads SET check_verdict = 'maybe' WHERE id = $1",
+    "UPDATE message_leads SET check_verdict = 'keep', check_reason = repeat('x', 201) WHERE id = $1",
 ])
 def test_a_lead_state_needs_what_goes_with_it(monkeypatch, statement):
     async def check(pool):
@@ -73,6 +77,9 @@ def test_a_lead_state_needs_what_goes_with_it(monkeypatch, statement):
     {"state": "merged"},                                        # merged into nothing
     {"state": "tasked", "handled_at": None, "handled_via": None},  # handled without when
     {"reject_reason": "not mine"},                              # a reason for a pending intent
+    {"state": "dropped", "handled_via": "system"},              # dropped without the check's verdict
+    {"check_verdict": "drop"},                                  # the check dropped it, yet pending
+    {"state": "dropped", "check_verdict": "drop", "handled_at": None, "handled_via": None},  # dropped, not handled
 ])
 def test_an_intent_state_needs_what_goes_with_it(monkeypatch, columns):
     async def check(pool):
@@ -130,6 +137,65 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
         assert await pool.fetchval("SELECT count(*) FROM intent_type_versions") == 3
 
     run_db(check, monkeypatch, timeout=30)
+
+
+_LEADS_CHECK_UNDONE = (
+    "ALTER TABLE message_leads DROP CONSTRAINT message_leads_dropped, DROP COLUMN check_verdict, "
+    "DROP COLUMN check_reason, DROP COLUMN check_record_id, DROP CONSTRAINT message_leads_state_check, "
+    "ADD CONSTRAINT message_leads_state_check CHECK (state IN ('active', 'superseded', 'promoted', 'inaccurate')); "
+    "ALTER TABLE intents DROP CONSTRAINT intents_dropped, DROP COLUMN check_verdict, DROP COLUMN check_reason, "
+    "DROP COLUMN check_record_id, DROP CONSTRAINT intents_state_check, ADD CONSTRAINT intents_state_check "
+    "CHECK (state IN ('pending', 'tasked', 'rejected', 'expired', 'merged')); "
+    "ALTER TABLE subscriptions DROP COLUMN check_items; "
+    "ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check, ADD CONSTRAINT "
+    "agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', "
+    "'advisor', 'advice_check')); "
+    "DELETE FROM schema_migrations WHERE name = 'leads_check'")
+_CHECK_CATALOG = (
+    "SELECT conrelid::regclass::text AS t, conname, pg_get_constraintdef(oid) AS def FROM pg_constraint "
+    "WHERE conrelid IN ('message_leads'::regclass, 'intents'::regclass, 'agent_setting_layers'::regclass, "
+    "'subscriptions'::regclass) ORDER BY 1, 2")
+
+
+def test_a_database_without_the_leads_check_gets_it_on_upgrade_once(monkeypatch):
+    async def check(pool):
+        fresh = [tuple(row) for row in await pool.fetch(_CHECK_CATALOG)]
+        (seq,) = await _events(pool, "ship friday")
+        kept = await sup.lead(pool, [seq])
+        await pool.execute(_LEADS_CHECK_UNDONE)
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+        assert [tuple(row) for row in await pool.fetch(_CHECK_CATALOG)] == fresh
+        assert await pool.fetchval("SELECT check_items FROM subscriptions LIMIT 1") is None  # the column is there
+        assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'leads_check'") == 1
+        assert await pool.fetchval("SELECT state FROM message_leads WHERE id = $1", kept) == "active"
+        await pool.execute("UPDATE message_leads SET state = 'dropped', check_verdict = 'drop' WHERE id = $1", kept)
+        await connection.ensure_schema(pool)  # and a second upgrade changes nothing
+        assert [tuple(row) for row in await pool.fetch(_CHECK_CATALOG)] == fresh
+        assert await pool.fetchval("SELECT state FROM message_leads WHERE id = $1", kept) == "dropped"
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_a_dropped_lead_is_out_of_the_default_search_and_last_of_all(monkeypatch):
+    async def check(pool):
+        seqs = await _events(pool, "a", "b", "c")
+        active = await sup.lead(pool, [seqs[0]], summary="note one")
+        dropped = await sup.lead(pool, [seqs[1]], summary="note two")
+        wrong = await sup.lead(pool, [seqs[2]], summary="note three", state="inaccurate")
+        await pool.execute("UPDATE message_leads SET state = 'dropped', check_verdict = 'drop' WHERE id = $1", dropped)
+
+        async def found(**query):
+            return [lead["id"] for lead in (await leads.search(words=["note"], now=NOW, db=pool, **query))["leads"]]
+
+        assert await found() == [f"lead-{active}"]
+        assert await found(state="all") == [f"lead-{active}", f"lead-{wrong}", f"lead-{dropped}"]
+        assert await found(state="dropped") == [f"lead-{dropped}"]
+
+    run_db(check, monkeypatch, timeout=20)
 
 
 def test_search_matches_every_word_in_the_lead_its_chats_or_its_people(monkeypatch):

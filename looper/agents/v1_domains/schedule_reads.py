@@ -63,7 +63,8 @@ SUBSCRIPTION = _object({
     "source_id": _STR, "chat_kinds": _array(_STR), "include_chats": _array(_STR), "exclude_chats": _array(_STR),
     "sender_kinds": _array(_STR), "exclude_mentions_me": _BOOL, "include_history": _BOOL, "max_age_minutes": _INT,
     "max_events": _INT, "render": _STR, "text_max_chars": _INT, "quiet_word": _STR, "output_header": _STR,
-    "output_kind": _STR, "rules": _array(_OBJ), "cursor_seq": _INT, **dict.fromkeys(("cursor_at", "target_confirmed_at"), _NULL_STR)},
+    "output_kind": _STR, "rules": _array(_OBJ), "check_items": _BOOL, "cursor_seq": _INT,
+    **dict.fromkeys(("cursor_at", "target_confirmed_at"), _NULL_STR)},
     # ``confirmation``: what the operator is shown to confirm the push target, in a single schedule's answer.
     [name for name in ("source_id", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds",
                        "exclude_mentions_me", "include_history", "max_age_minutes", "max_events", "render",

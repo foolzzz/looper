@@ -156,7 +156,8 @@ def test_filters_pass_through_and_dates_use_local_zone(tmp_path, database, capsy
     assert seen[-1]["since"] == datetime(2020, 1, 2).astimezone()
 
 
-@pytest.mark.parametrize("argv", [("search",), ("mark", "1", "--inaccurate"), ("delete", "1")])
+@pytest.mark.parametrize("argv", [("search",), ("mark", "1", "--inaccurate"), ("delete", "1"),
+                                  ("eval-export", "--out", "set.jsonl")])
 def test_every_command_is_refused_in_agent_run(tmp_path, database, capsys, monkeypatch, argv):
     monkeypatch.setenv("LOOPER_AGENT_RUN", "worker")
     assert run_cli(tmp_path, database, *argv) == 4
@@ -168,6 +169,8 @@ def test_every_command_is_refused_in_agent_run(tmp_path, database, capsys, monke
     ("search", "--limit", "51"), ("search", "--days", "0"), ("search", "--days", "3651"),
     ("search", "--since", "tomorrow"), ("mark", "one", "--inaccurate"),
     ("mark", "1"), ("mark", "1", "--inaccurate", "--note", "n" * 501),
+    ("eval-export",), ("eval-export", "--out", "x.jsonl", "--sample", "-1"),
+    ("eval-export", "--out", "x.jsonl", "--sample", "501"),
 ])
 def test_usage(tmp_path, database, capsys, argv):
     enable(database)
@@ -188,7 +191,7 @@ def test_unusable_or_missing_tables(tmp_path, database, capsys):
     assert "looper serve" in capsys.readouterr().err
 
 
-def test_delete_while_disabled_and_promoted_mark_refused(tmp_path, database, capsys):
+def test_delete_while_disabled_and_promoted_or_dropped_mark_refused(tmp_path, database, capsys):
     number = add(database)
     assert run_cli(tmp_path, database, "delete", str(number)) == 0
     enable(database)
@@ -197,6 +200,56 @@ def test_delete_while_disabled_and_promoted_mark_refused(tmp_path, database, cap
         "UPDATE message_leads SET state='promoted',promoted_kind='vault_proposal' WHERE id=$1", number))
     assert run_cli(tmp_path, database, "mark", str(number), "--inaccurate") == 4
     assert db_call(database, lambda conn: conn.fetchval("SELECT state FROM message_leads WHERE id=$1", number)) == "promoted"
+    dropped = add(database, summary="示例被复核丢弃")
+    db_call(database, lambda conn: conn.execute(
+        "UPDATE message_leads SET state='dropped', check_verdict='drop' WHERE id=$1", dropped))
+    capsys.readouterr()
+    assert run_cli(tmp_path, database, "mark", str(dropped), "--inaccurate") == 4
+    assert "already dropped" in capsys.readouterr().err
+    assert run_cli(tmp_path, database, "search", "--state", "dropped") == 0
+    assert "示例被复核丢弃（已被复核丢弃）" in capsys.readouterr().out
+
+
+def test_eval_export_writes_the_inaccurate_leads_and_a_sample_of_active_ones_with_their_messages(
+        tmp_path, database, capsys):
+    out = tmp_path / "runs" / "set.jsonl"
+    enable(database)
+    assert run_cli(tmp_path, database, "eval-export", "--out", str(out)) == 1 and not out.exists()
+    wrong = add(database, summary="示例不准确", state="inaccurate", kind="fact")
+    active = [add(database, summary=f"示例有效{n}") for n in range(3)]
+    add(database, state="superseded")
+    capsys.readouterr()
+    assert run_cli(tmp_path, database, "eval-export", "--out", str(out), "--sample", "2") == 0
+    said = capsys.readouterr().out
+    assert said.strip() == f"已导出 3 条到 {out}：不准确 1 条，看作正确 2 条（含出处消息原文，只留在本机）"
+    assert "示例" not in said and "Synthetic" not in said  # counts only, never what a lead or a message says
+    assert out.stat().st_mode & 0o777 == 0o600
+    lines = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [line["label"] for line in lines] == ["inaccurate", "presumed_good", "presumed_good"]
+    assert lines[0] == {"id": f"lead-{wrong}", "label": "inaccurate", "kind": "fact", "summary": "示例不准确",
+                        "detail": "", "confidence": "high", "sources": lines[0]["sources"]}
+    first, second = lines[0]["sources"]
+    assert {key: first[key] for key in first if key != "sent_at"} == {
+        "ref": "s1", "chat": "示例讨论", "chat_kind": "group", "sender": "示例同事", "sender_kind": "user",
+        "from_user": False, "reply_to": None, "text": "Synthetic source"}
+    assert second["text"] == "Another synthetic source" and first["sent_at"] < second["sent_at"]
+    assert {line["id"] for line in lines[1:]} <= {f"lead-{n}" for n in active}
+
+
+def test_eval_export_refuses_a_file_git_could_commit(tmp_path, database, capsys):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitignore").write_text("runs/\n")
+    enable(database)
+    add(database, state="inaccurate")
+    capsys.readouterr()
+    assert run_cli(tmp_path, database, "eval-export", "--out", str(repo / "set.jsonl")) == 4
+    assert "git does not ignore it" in capsys.readouterr().err and not (repo / "set.jsonl").exists()
+    assert run_cli(tmp_path, database, "eval-export", "--out", str(repo / "runs" / "set.jsonl")) == 0
+    assert run_cli(tmp_path, database, "eval-export", "--out", str(tmp_path / "outside.jsonl")) == 0
 
 
 @pytest.mark.parametrize("enabled", [False, True])

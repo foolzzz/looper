@@ -23,7 +23,7 @@ Db = asyncpg.Pool | asyncpg.Connection
 # What a request sets on a subscription (``looper/agents/subscriptions.py`` validates it).
 FIELDS = ("source_id", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds", "exclude_mentions_me",
           "include_history", "max_age_minutes", "max_events", "render", "text_max_chars", "quiet_word",
-          "output_header", "output_kind", "rules", "window", "delivery_policy")
+          "output_header", "output_kind", "rules", "window", "delivery_policy", "check_items")
 STATE_COLUMNS = ("cursor_seq", "cursor_at", "target_confirmed_at", "target_confirmed_version")
 CHAT_KINDS = ("p2p", "group", "topic", "unknown")
 SENDER_KINDS = ("user", "app")

@@ -127,11 +127,15 @@ def is_extraction(sub: Mapping[str, Any] | None) -> bool:
 
 def check_extraction(sub: Mapping[str, Any]) -> None:
     """An extraction's scope is fixed by its kind and its window is its cursor's: rules, a lookback window and a
-    daily delivery belong to push subscriptions; ``ValueError`` saying so."""
+    daily delivery belong to push subscriptions; the second model's check (``check_items``) belongs to extractions;
+    ``ValueError`` saying so."""
     if is_extraction(sub) and (sub.get("rules") or sub.get("window", "cursor") != "cursor"
                                or sub.get("delivery_policy", "per_run") != "per_run"):
         raise ValueError("subscription.rules, window lookback and delivery_policy daily apply to push subscriptions "
                          "only: a leads or intents subscription reads its kind's scope after its cursor")
+    if not is_extraction(sub) and sub.get("check_items"):
+        raise ValueError("subscription.check_items applies to leads and intents subscriptions only: it checks what "
+                         "they find before it is stored")
 
 
 _PARSERS = {
@@ -152,6 +156,7 @@ _PARSERS = {
     "output_kind": _choice("output_kind", *OUTPUT_KINDS),
     "quiet_word": _quiet_word,
     "output_header": _header,
+    "check_items": lambda raw: _boolean("check_items", raw),
 }
 # Only a subscription's own state moves these: a request cannot set them.
 _STATE_FIELDS = ("cursor_seq", "cursor_at", "target_confirmed_at")
@@ -195,7 +200,7 @@ def view(sub: Mapping[str, Any]) -> dict[str, Any]:
 # --- What a request does to the confirmation ---
 
 
-_EXTRACTION_CONFIRMS = ("source_id", "include_chats", "exclude_chats")
+_EXTRACTION_CONFIRMS = ("source_id", "include_chats", "exclude_chats", "check_items")
 
 
 def _differs(new: Any, old: Any) -> bool:
@@ -207,7 +212,7 @@ def needs_confirmation(row: Mapping[str, Any], changes: Mapping[str, Any], *,
     """Whether applying ``changes`` (schedule columns, ``enabled`` and ``notify_*`` as stored) to the subscription
     schedule ``row`` clears its push target's confirmation: enabling it, or a different target, rule or zone while it
     has a target. An extraction (leads, intents) reads the operator's own messages, target or not: enabling it, or a
-    different rule, zone, source or chat list (``changes`` also carries its subscription fields) clears it."""
+    different rule, zone, source, chat list or check (``changes`` also carries its subscription fields) clears it."""
     if row.get("kind") == "subscription" and is_extraction(row.get("subscription")):
         sub, asked = row["subscription"], {**changes, **(stream or {})}
         if asked.get("enabled") and not row["enabled"]:
@@ -405,11 +410,15 @@ def idempotency_keys(run_id: str, count: int) -> list[str]:
 # --- What the operator confirms ---
 
 
-async def config_version(schedule: Mapping[str, Any], *, profile: Mapping[str, Any] | None = None) -> str:
+async def config_version(schedule: Mapping[str, Any], *, profile: Mapping[str, Any] | None = None,
+                         checker: Mapping[str, Any] | None = None) -> str:
     """What a push depends on, as one digest: where it goes, when it fires, the stream it reads and the processor
     (its runtime, provider, model and effort, with the managed hooks that see the messages). A target is confirmed for one
-    version; a push goes out only while the schedule still has it."""
+    version; a push goes out only while the schedule still has it. An extraction with ``check_items`` on depends on
+    the check's Profile too (``checker``: the one a run launched with; else the role's now), since it reads the
+    messages as well."""
     from . import processor
+    from .agent_settings import AgentType
 
     # ``profile``: the facts of the Profile a run actually launched with; else what the schedule would use now.
     profile = dict(profile) if profile is not None else await processor.run_facts(schedule["project_id"], schedule["id"])
@@ -425,6 +434,9 @@ async def config_version(schedule: Mapping[str, Any], *, profile: Mapping[str, A
     if is_extraction(sub):  # only an extraction's facts grow: a push subscription stays confirmed under its version
         facts.update(output_kind=output_kind(sub), include_chats=sorted(sub.get("include_chats") or []),
                      exclude_chats=sorted(sub.get("exclude_chats") or []))
+        if sub.get("check_items"):  # only when on, so an extraction without it keeps the version it was confirmed under
+            facts.update(check_items=True, checker=dict(checker) if checker is not None else
+                         await processor.run_facts(None, None, role=AgentType.LEADS_CHECK))
     return digest(json.dumps(facts, sort_keys=True, ensure_ascii=False))
 
 
@@ -493,6 +505,7 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
     ``extraction`` measured)."""
     from ..db.connection import get_pool
     from . import processor
+    from .agent_settings import AgentType
     from .schedules import notify_targets
     from .source_service import own_bot_app_ids
 
@@ -529,6 +542,17 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
     if profile.get("managed_hooks"):
         lines.append("- 本机有企业管理的 hooks，会看到处理的消息"
                      f"（{', '.join(profile['managed_hooks'].get('events') or []) or '无法读取'}）")
+    if sub.get("check_items"):
+        checker = await processor.chosen_profile(role=AgentType.LEADS_CHECK)
+        named = f"{checker.get('name')}（{checker.get('runtime')} · {checker.get('model') or '默认模型'}）"
+        lines.append("- 第二道检查：入库前，另一个不带工具的模型对照出处复核每一条（保留、丢弃或改置信度），"
+                     "它也会读这些消息；花费计入同一次运行的上限")
+        lines.append(f"- 复核 Profile：{named}，来源：{checker.get('source')}（Settings → Roles 的 leads_check）")
+        if checker.get("problem"):
+            lines.append(f"- 复核现在不能运行（条目会未经复核入库）：{checker['problem']}")
+        if checker.get("managed_hooks"):
+            lines.append("- 本机有企业管理的 hooks，会看到复核的消息"
+                         f"（{', '.join(checker['managed_hooks'].get('events') or []) or '无法读取'}）")
     cap, daily = schedule.get("run_budget_usd"), schedule.get("daily_budget_usd")
     lines.append(f"- 花费上限：单次 ${cap:g}；每日 " + (f"${daily:g}" if daily is not None else "未设置"))
     # A firing with something to read starts a run; a day with more than its windows hold fires again at once.
@@ -543,7 +567,8 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
                       if (t["channel"], t["chat"]) == (channel, chat)), f"{channel} · {chat}")
         lines.append(f"- 推送目标：{label}（私聊）" if channel else "- 推送目标：未设置（意图识别要一个私聊目标）")
         lines.append(f"- 机器人身份：{await bot_identity(channel)}")
-    lines.append("确认后按规则无人值守地整理；改规则、来源、会话范围或 Profile 都要再确认。")
+    lines.append("确认后按规则无人值守地整理；改规则、来源、会话范围" + ("、第二道检查" if sub.get("check_items") else "")
+                 + "或 Profile 都要再确认。")
     return "\n".join(lines)
 
 

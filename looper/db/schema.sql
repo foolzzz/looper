@@ -698,7 +698,7 @@ CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (pro
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
     role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor',
-                                         'advice_check')),
+                                         'advice_check', 'leads_check')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
     profile_id      TEXT REFERENCES agent_profiles(id),
@@ -1941,6 +1941,7 @@ CREATE TABLE IF NOT EXISTS message_leads (
     detail         TEXT NOT NULL DEFAULT '' CHECK (char_length(detail) <= 600),
     confidence     TEXT NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
     -- 'expired' is not stored: an active lead past valid_until shows as expired (agents/leads_model.shown_state).
+    -- 'dropped' and the check's columns are the leads check block's.
     state          TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'superseded', 'promoted', 'inaccurate')),
     valid_until    TIMESTAMPTZ NOT NULL,
     superseded_by  BIGINT REFERENCES message_leads(id) ON DELETE SET NULL,
@@ -2030,7 +2031,7 @@ CREATE TABLE IF NOT EXISTS intents (
     title         TEXT NOT NULL CHECK (btrim(title) <> '' AND char_length(title) <= 60),
     summary       TEXT NOT NULL DEFAULT '' CHECK (char_length(summary) <= 400),
     confidence    TEXT NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
-    state         TEXT NOT NULL DEFAULT 'pending'
+    state         TEXT NOT NULL DEFAULT 'pending'          -- 'dropped' and the check's columns: the leads check block's
                   CHECK (state IN ('pending', 'tasked', 'rejected', 'expired', 'merged')),
     chat_id       TEXT NOT NULL,                       -- the chat of its first source
     project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
@@ -2138,3 +2139,33 @@ DROP TRIGGER IF EXISTS "A_intents_detach_merged" ON intents;
 CREATE TRIGGER "A_intents_detach_merged" AFTER DELETE ON intents
     FOR EACH ROW EXECUTE FUNCTION intents_detach_merged();
 -- intent merges end
+
+-- A second model's check of what an extraction found (message-leads-intents RFC, section 10.1): its typed verdict on
+-- each lead and intent (keep, fix, drop), why, and the check's run; a dropped item stays, in state 'dropped', so a
+-- wrong drop can be measured (its sources still take it with them). A dropped intent is handled by the system and
+-- never pushed. The subscription's switch is off by default, and the checker has a role layer of its own.
+-- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
+-- leads check begin
+ALTER TABLE agent_setting_layers DROP CONSTRAINT IF EXISTS agent_setting_layers_role_check;
+ALTER TABLE agent_setting_layers ADD CONSTRAINT agent_setting_layers_role_check
+    CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check'));
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS check_items BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE message_leads DROP CONSTRAINT IF EXISTS message_leads_state_check;
+ALTER TABLE message_leads ADD CONSTRAINT message_leads_state_check
+    CHECK (state IN ('active', 'superseded', 'promoted', 'inaccurate', 'dropped'));
+ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_verdict TEXT CHECK (check_verdict IN ('keep', 'fix', 'drop'));
+ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_reason TEXT CHECK (char_length(check_reason) <= 200);
+ALTER TABLE message_leads ADD COLUMN IF NOT EXISTS check_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL;
+ALTER TABLE message_leads DROP CONSTRAINT IF EXISTS message_leads_dropped;
+ALTER TABLE message_leads ADD CONSTRAINT message_leads_dropped
+    CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop'));
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_state_check;
+ALTER TABLE intents ADD CONSTRAINT intents_state_check
+    CHECK (state IN ('pending', 'tasked', 'rejected', 'expired', 'merged', 'dropped'));
+ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_verdict TEXT CHECK (check_verdict IN ('keep', 'fix', 'drop'));
+ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_reason TEXT CHECK (char_length(check_reason) <= 200);
+ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL;
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_dropped;
+ALTER TABLE intents ADD CONSTRAINT intents_dropped
+    CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop'));
+-- leads check end
