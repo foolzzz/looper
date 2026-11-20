@@ -73,6 +73,8 @@ class EvalTask:
     step_workspaces: str | None = None
     # Seed a git repository without changing where the task's steps run.
     init_git: bool = False
+    # The task's project lets its Planner consult the advisor (``advisor`` on; the advisor RFC).
+    advisor: bool = False
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
@@ -1796,3 +1798,84 @@ def select(ids: list[str] | None) -> tuple[EvalTask, ...]:
     if unknown:
         raise ValueError(f"unknown task id(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
     return tuple(task for task in TASKS if task.id in ids)
+
+
+# --- The advisor (the advisor RFC, section 16): a critical step's checkpoint, and an optional consult ---
+
+def _users_migrated(work_dir: Path) -> str | None:
+    import json as _json
+
+    text = _read(work_dir, "users.jsonl")
+    if text is None:
+        return "users.jsonl is missing"
+    try:
+        rows = [_json.loads(line) for line in text.splitlines() if line.strip()]
+    except ValueError:
+        return "users.jsonl is not JSON lines"
+    if rows != [{"id": 1, "name": "ada"}, {"id": 2, "name": "lin"}]:
+        return f"users.jsonl holds {rows!r}"
+    if _read(work_dir, "users.csv.bak") is None:
+        return "users.csv.bak (the rollback copy) is missing"
+    return None
+
+
+# A plan_review request the fake Planner sends at the checkpoint: one that passes the checks.
+_PLAN_REVIEW = {
+    "v": "advice_request/1", "kind": "plan_review",
+    "problem": ("A small service keeps its user records in a two-column CSV file (id, name) that one loader function "
+                "reads. The plan moves the records to a JSON lines file and points the loader at it."),
+    "goal": "Move the records to JSON lines without losing any, with a way back.",
+    "constraints": ["the migration keeps a copy of the old file so it can be rolled back",
+                    "the loader reads only the new file afterwards"],
+    "artifacts": [{"kind": "pseudocode", "content": "step 1: copy the CSV to a backup\nstep 2: write one JSON object "
+                                                   "per row\nstep 3: switch the loader to the new file"}],
+    "questions": [{"id": "q1", "text": "Is this order safe, and what should the migration check before it switches "
+                                       "the loader?"}],
+}
+
+ADVISOR_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        id="advisor_checkpoint",
+        requirement="Migrate the user store from users.csv to users.jsonl. Write migrate.py, which converts "
+                    "users.csv (columns id,name) to users.jsonl with one JSON object per line (id as a number, "
+                    "name as a string), keeping a copy of the original as users.csv.bak so the migration can be "
+                    "rolled back; run it once. This changes the data format the service depends on, so treat the "
+                    "migration as a critical step.",
+        files={"users.csv": "id,name\n1,ada\n2,lin\n"},
+        check=_users_migrated,
+        advisor=True,
+        expect={"min_advisor_checkpoints": 1, "min_advisor_answered": 1, "min_advisor_adoptions": 1,
+                "max_advisor_returns": 0},
+        fake={
+            "plan": [{**_step("s1", "Write migrate.py and run it once: users.csv to users.jsonl, backup kept.",
+                              ["users.jsonl holds both users", "users.csv.bak exists"]), "difficulty": "critical"}],
+            "advice_request": _PLAN_REVIEW,
+            "attempts": {"s1": [{"status": "completed", "files": {
+                "users.jsonl": '{"id": 1, "name": "ada"}\n{"id": 2, "name": "lin"}\n',
+                "users.csv.bak": "id,name\n1,ada\n2,lin\n", "migrate.py": "# migrated\n"}}]},
+        },
+    ),
+    EvalTask(
+        id="advisor_optional_flaky",
+        requirement="The working directory has build.sh, which has side effects, so only the Worker of the step "
+                    "may run it. The step: run `sh build.sh` once and save its standard output in build.log. If "
+                    "it exits non-zero, do not run it again in the same attempt and do not change build.sh; "
+                    "report the step as failed with the error, so that it is retried in a new attempt. The task "
+                    "is done when build.log contains BUILD OK.",
+        files={"build.sh": _FLAKY_BUILD},
+        check=_build_log,
+        advisor=True,
+        # A transient failure needs a retry, not an outside expert: the advisor's offer is seen, and declined.
+        expect={"min_retries": 1, "min_advisor_offers": 1},
+        fake={
+            "plan": [_step("s1", "Run `sh build.sh` once and save its output in build.log.",
+                           ["build.log contains BUILD OK"])],
+            "attempts": {"s1": [
+                {"status": "failed", "files": {".build-attempted": ""},
+                 "summary": "sh build.sh exited 1: BUILD FAILED: transient error"},
+                {"status": "completed", "files": {"build.log": "BUILD OK\n"}},
+            ]},
+        },
+    ),
+)
+TASKS = TASKS + ADVISOR_TASKS

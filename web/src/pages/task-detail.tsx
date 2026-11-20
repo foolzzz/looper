@@ -26,6 +26,7 @@ import {
   MessageCircleQuestionMark,
   MessagesSquare,
   Pencil,
+  Lightbulb,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,9 @@ import { Markdown } from "@/components/markdown";
 import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref, runRoleLabel } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
+import { CheckpointUnfinished, StepConsults } from "@/components/task-advice";
+import { CHECKPOINT_UNFINISHED, type ConsultTone, consultCard, consultLabel, consultPlaces, consultResult, consultTone,
+         unfinishedCheckpoints } from "@/lib/consults";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { TaskRoleEditor } from "@/components/role-editor";
 import { RoleStatsLine } from "@/components/role-stats";
@@ -104,6 +108,7 @@ import {
   type UserGate,
   type TaskWait,
   type RunRole,
+  type AdvisorConsult,
 } from "@/lib/api";
 
 export type Tab = "overview" | "pipeline" | "room" | "agents" | "sessions" | "conversation";
@@ -127,6 +132,8 @@ function stepStatusIcon(status: string) {
       return <Clock className="h-4 w-4 text-warning" />;
     case "waiting_user":
       return <MessageCircleQuestionMark className="h-4 w-4 text-warning" />;
+    case "consulting":
+      return <Lightbulb className="h-4 w-4 text-primary" />;
     case "failed":
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     default:
@@ -149,6 +156,9 @@ function stepStatusBadge(status: string) {
       return <Badge variant="warning">Awaiting decision</Badge>;
     case "waiting_user":
       return <Badge variant="warning">Waiting for you</Badge>;
+    case "consulting":
+      // Waiting for the advisor's answer (the advisor RFC's words).
+      return <Badge variant="default">请教中</Badge>;
     case "failed":
       return <Badge variant="destructive">Failed</Badge>;
     case "skipped":
@@ -832,6 +842,7 @@ function OverviewTab({
   const cancelledGates = steps.filter(cancelledGate).length;
   const isActive = isActiveTask(task);
   const worktrees = workspacesByStep(task);
+  const unfinished = unfinishedCheckpoints(task.advisor?.consults ?? []);
 
   return (
     <div className="space-y-6 p-5">
@@ -914,6 +925,14 @@ function OverviewTab({
 
       <TaskRoles task={task} onEdited={onRoleEdited} />
 
+      {task.advisor && (
+        <section aria-labelledby="task-advisor-title">
+          <h3 id="task-advisor-title" className="mb-1 text-sm font-semibold">Advisor</h3>
+          <p className="text-xs text-muted-foreground">{task.advisor.summary}</p>
+          <StepConsults title="While planning" consults={task.advisor.consults.filter((c) => !c.step_id)} />
+        </section>
+      )}
+
       {steps.length > 0 && (
         <div>
           <h3 className="text-sm font-semibold mb-2">Steps</h3>
@@ -940,6 +959,7 @@ function OverviewTab({
                       {stepRoles(step) && <span className="font-mono text-xs text-muted-foreground">{stepRoles(step)}</span>}
                       <StepSpan step={step} active={isActive} />
                       <WorktreeMarker workspaces={worktrees.get(step.id)} />
+                      {unfinished.has(step.id) && <CheckpointUnfinished />}
                       {step.status === "completed" && step.review_stage && (
                         <span className="text-xs text-muted-foreground">
                           Waiting for{" "}
@@ -948,6 +968,7 @@ function OverviewTab({
                       )}
                     </div>
                     <p className="mt-1 text-sm">{step.instruction}</p>
+                    <StepConsults consults={(task.advisor?.consults ?? []).filter((c) => c.step_id === step.id)} />
                     {step.target_files && step.target_files.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">
                         {step.target_files.map((f) => (
@@ -1641,6 +1662,8 @@ const STEP_LOOKS: Record<string, NodeLook> = {
                 background: tint("--color-primary", 16), color: "var(--color-foreground)" },
   deciding: { label: "Awaiting decision", border: "var(--color-warning)", borderStyle: "solid",
               background: tint("--color-warning", 12), color: "var(--color-foreground)" },
+  consulting: { label: "请教中", border: "var(--color-primary)", borderStyle: "solid",
+                background: tint("--color-primary", 10), color: "var(--color-foreground)" },
   completed: { label: "In review", border: "var(--color-primary)", borderStyle: "dashed",
                background: tint("--color-primary", 8), color: "var(--color-foreground)" },
   verified: { label: "Done", border: "var(--color-success)", borderStyle: "solid",
@@ -1730,6 +1753,24 @@ const NODE_W = 180;
 const NODE_H = 60;
 const GAP_X = 36;
 const ROW_H = 110;
+/** A consult's node: small and dashed, `CONSULT_GAP` beside what it hangs on (its step, the Planner, or the consult
+ * before it), tied to it by a dashed line of its own: no dependency edge. It sits level with the top of its step,
+ * clear of the middle of the row, where an edge that skips a row runs across. */
+const CONSULT_W = 116;
+const CONSULT_H = 22;
+const CONSULT_TOP = 4;
+const CONSULT_GAP = 14;
+const CONSULT_SLOT = CONSULT_W + CONSULT_GAP;
+
+/** A consult's look by its state: going, answered, or ended without an answer (its label says which). */
+const CONSULT_LOOKS: Record<ConsultTone, NodeLook> = {
+  live: { label: "", border: "var(--color-primary)", borderStyle: "dashed", background: tint("--color-primary", 14),
+          color: "var(--color-foreground)" },
+  answered: { label: "", border: "var(--color-success)", borderStyle: "dashed", background: tint("--color-success", 12),
+              color: "var(--color-foreground)" },
+  failed: { label: "", border: "var(--color-destructive)", borderStyle: "dashed",
+            background: tint("--color-destructive", 12), color: "var(--color-foreground)" },
+};
 
 function nodeStyle(look: NodeLook) {
   return {
@@ -1844,7 +1885,33 @@ function ConditionJunction({ data }: NodeProps<Node<{ label: string; state: Cond
   );
 }
 
-const NODE_TYPES = { gate: GateNode, condition: ConditionJunction };
+interface ConsultNodeData extends Record<string, unknown> {
+  label: string;
+  tone: ConsultTone;
+  /** Which side of what it hangs on it sits: its tie runs back the other way. */
+  side: "left" | "right";
+}
+
+/** A consult of the advisor in the pipeline: its kind and how it ended, in a small dashed pill tied by a dashed line
+ * to what it hangs on. Its card (`consultCard`) has the rest. */
+function ConsultNode({ data }: NodeProps<Node<ConsultNodeData, "consult">>) {
+  const look = CONSULT_LOOKS[data.tone];
+  return (
+    <div
+      className="relative flex h-full w-full items-center justify-center rounded-full px-2 text-[10px] leading-none"
+      style={{ background: look.background, color: look.color, border: `1.5px dashed ${look.border}` }}
+    >
+      <span className="truncate">{data.label}</span>
+      <span
+        aria-hidden="true"
+        className="absolute top-1/2 border-t-[1.5px] border-dashed"
+        style={{ width: CONSULT_GAP, borderColor: look.border, [data.side === "left" ? "right" : "left"]: -CONSULT_GAP - 1.5 }}
+      />
+    </div>
+  );
+}
+
+const NODE_TYPES = { gate: GateNode, condition: ConditionJunction, consult: ConsultNode };
 
 function PipelineMeasurements({ nodes }: { nodes: Node[] }) {
   const updateNodeInternals = useUpdateNodeInternals();
@@ -1884,6 +1951,27 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
     });
     cards.planner = plannerCard(task, plannerLook, runs ?? undefined);
 
+    const consults = task.advisor?.consults ?? [];
+    const places = consultPlaces(consults);
+    const unfinished = unfinishedCheckpoints(consults);
+    // Each consult beside what it hangs on: the plan's after the Planner, a checkpoint before its step, the others
+    // after it; several side by side, in time order from left to right.
+    const addConsults = (list: AdvisorConsult[], centre: { x: number; y: number }, side: "left" | "right", owner: string) =>
+      list.forEach((consult, i) => {
+        const id = `consult:${consult.id}`;
+        const tone = consultTone(consult);
+        const left = side === "right" ? centre.x + NODE_W / 2 + CONSULT_GAP + i * CONSULT_SLOT
+          : centre.x - NODE_W / 2 - (list.length - i) * CONSULT_SLOT;
+        ns.push({
+          id, type: "consult", position: { x: left, y: centre.y + CONSULT_TOP },
+          ariaLabel: `${owner}: ${consultLabel(consult)}`, data: { label: consultLabel(consult), tone, side },
+          style: { width: CONSULT_W, height: CONSULT_H, padding: 0, background: "transparent", border: "none",
+                   pointerEvents: "all" },
+        });
+        cards[id] = consultCard(consult, { ...CONSULT_LOOKS[tone], label: consultResult(consult) });
+      });
+    addConsults(places.plan, { x: 0, y: 0 }, "right", "Planner");
+
     if (all.length === 0) {
       const look = { ...STEP_LOOKS.pending, borderStyle: "dashed" as const, label: "Waiting for the plan" };
       ns.push({
@@ -1916,7 +2004,9 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
     const levels = stepLevels(steps);
     const why = droppedBecause(task.journal || [], all);
     const worktrees = workspacesByStep(task);
-    const x = stepColumns(steps, levels, NODE_W + GAP_X);
+    // Room between the columns for the consults beside the steps: the most any step has before it and after it.
+    const most = (side: Map<string, AdvisorConsult[]>) => Math.max(0, ...steps.map((s) => side.get(s.id)?.length ?? 0));
+    const x = stepColumns(steps, levels, NODE_W + GAP_X + (most(places.before) + most(places.after)) * CONSULT_SLOT);
     const depth = steps.length ? Math.max(...levels.values()) : -1;
 
     for (const node of junctions) {
@@ -1955,6 +2045,9 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
     for (const step of steps) {
       const name = step.step_key || `step ${step.step_index + 1}`;
       const position = { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) };
+      const centre = { x: x.get(step.id) ?? 0, y: position.y };
+      addConsults(places.before.get(step.id) ?? [], centre, "left", name);
+      addConsults(places.after.get(step.id) ?? [], centre, "right", name);
       if (step.kind === "gate" || step.kind === "wait") {
         const look = lookOf(step);
         ns.push({
@@ -1975,7 +2068,8 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
       const look = advisory ? { ...reviewLook, borderStyle: "dashed" as const } : reviewLook;
       // Its seats' messages in the task's room (keyed as the room keys its seats).
       const room = task.room?.by_step[step.step_key || step.id];
-      const note = [advisory ? "建议" : "", step.retries ? `retry ${step.retries}` : "", roomNote(room)].filter(Boolean).join(" · ");
+      const note = [unfinished.has(step.id) ? CHECKPOINT_UNFINISHED : "", advisory ? "建议" : "",
+                    step.retries ? `retry ${step.retries}` : "", roomNote(room)].filter(Boolean).join(" · ");
       ns.push({
         id: step.id,
         position,
@@ -1983,9 +2077,12 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
                                   detail={step.instruction} note={note || undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      cards[step.id] = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
-                                        skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id), room,
-                                        runs: runs ?? undefined });
+      const card = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
+                                    skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id), room,
+                                    runs: runs ?? undefined });
+      cards[step.id] = unfinished.has(step.id) ? { ...card, sections: [{ kind: "text", title: CHECKPOINT_UNFINISHED,
+        tone: "destructive", text: "Its checkpoint consult of the advisor ended without an answer; the step went on without it." },
+        ...card.sections] } : card;
     }
 
     // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.

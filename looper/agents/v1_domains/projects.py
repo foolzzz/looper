@@ -5,7 +5,7 @@ from .. import projects as core
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _summary
 from ..ops import Call, ErrorCode, OpError, Turn
 from ..ops.config import _deleting_project, answered, directory_change_impact, project_named
-from ..project_execution import FIELDS, ROOM_LIMITS
+from ..project_execution import ADVISOR_BUDGETS, ADVISOR_COUNTS, ADVISOR_FIELDS, FIELDS, ROOM_LIMITS
 
 
 def _choice(*values):
@@ -16,14 +16,17 @@ def _choice(*values):
 EXECUTION = {
     "task_budget_usd": {"type": ["number", "null"]},
     "room_consult_budget_usd": {"type": ["number", "null"]},
+    **dict.fromkeys(ADVISOR_BUDGETS, {"type": ["number", "null"]}),
     **dict.fromkeys(("supervise_interval_seconds", "max_step_retries", "role_text_max_chars",
-                     "gate_reminder_hours", *ROOM_LIMITS), {"type": ["integer", "null"]}),
+                     "gate_reminder_hours", *ROOM_LIMITS, *ADVISOR_COUNTS), {"type": ["integer", "null"]}),
     "task_budget_action": _choice("wrap_up", "fail"), "review_policy": _choice("planner", "all"),
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     **dict.fromkeys(("planner_roles", "wait_commands", "user_gates", "agent_room", "operator_notes", "vault",
-                    "dependency_conditions"),
+                    "dependency_conditions", "advisor"),
                     _choice("off", "on")),
-    **dict.fromkeys(("workspace_links", "verification_paths"), {"type": ["array", "null"], "items": _STR}),
+    **dict.fromkeys(("workspace_links", "verification_paths", "advisor_internal_domains"),
+                    {"type": ["array", "null"], "items": _STR}),
+    "advisor_fallback_profile": {"type": ["string", "null"]},
     "distill_lessons": {"type": "string", "enum": ["off", "draft", "write"]},
 }
 assert set(EXECUTION) == set(FIELDS)
@@ -50,6 +53,11 @@ DELETED = _object({"deleted": _STR})
 MOVED = _object({"project": PROJECT, "old_dir": _STR, "new_dir": _STR, "link_old": _BOOL,
     "repairs": _array(_object({"repository": _STR, "ok": _BOOL, "output": _STR})),
     "notes": _object({"moved": _BOOL, "from": _STR, "to": _STR, "reason": _STR}, required=("moved",))})
+# The Manager's compact project leaves out the advisor's settings while the project's advisor is off (the advisor
+# RFC, section 13: what the model sees stays as it was).
+COMPACT_PROJECT = _object(PROJECT["properties"], [name for name in PROJECT["properties"] if name not in ADVISOR_FIELDS])
+COMPACT_PROJECT_RESULT = _object({"project": COMPACT_PROJECT})
+COMPACT_MOVED = {**MOVED, "properties": {**MOVED["properties"], "project": COMPACT_PROJECT}}
 MOVE_PREVIEW = _object({"old_dir": _STR, "new_dir": _STR, "impact": _STR, "move_version": _STR})
 MOVE_REQUEST = {"project": _STR, "to": _STR, "link_old": _BOOL}
 SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION), "ProjectPatch": PATCH}
@@ -59,9 +67,9 @@ RESULTS = {
         "tasks": _INT, "active_tasks": _INT, "schedules": _INT, "background": _NULL_STR,
         "dependency_conditions": _choice("off", "on")})),
         "projects_root": _STR}, ["projects"]),
-    **dict.fromkeys(("projects.get", "projects.create", "projects.update"), PROJECT_RESULT),
+    **dict.fromkeys(("projects.get", "projects.create", "projects.update"), COMPACT_PROJECT_RESULT),
     "projects.delete": DELETED,
-    "projects.move": MOVED,
+    "projects.move": COMPACT_MOVED,
 }
 
 

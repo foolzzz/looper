@@ -80,7 +80,7 @@ VALUES
     ('model-8914386b-758a-55e5-a3b1-9d0b9ae97c04', 'prov-cursor-login', 'gemini-3.7-flash-high', 'openai-responses', 4, true),
     -- The advisor's and its judge's models (the advisor RFC, section 8), named in full: an alias can map to another.
     ('model-5b413173-8c0d-5117-88cc-81d3af0763b9', 'prov-claude-subscription', 'claude-fable-5-2', 'anthropic-messages', 3, true),
-    ('model-20c51a64-3a6f-5426-a696-69533dc11e72', 'prov-claude-subscription', 'claude-haiku-5-5', 'anthropic-messages', 4, true)
+    ('model-0cb9a45d-4ee5-5eb7-97c9-a0e88a0c64dd', 'prov-claude-subscription', 'claude-sonnet-5-5', 'anthropic-messages', 4, true)
 ON CONFLICT (provider_id, name, protocol) DO NOTHING;
 INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams)
 SELECT 'agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', id, true, true
@@ -93,6 +93,6 @@ SELECT 'agent-claude-code-fable-5-2', 'claude-code/fable-5-2', 'rt-claude-code',
 FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'claude-fable-5-2' AND protocol = 'anthropic-messages'
 ON CONFLICT DO NOTHING;
 INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams)
-SELECT 'agent-claude-code-haiku-5-5', 'claude-code/haiku-5-5', 'rt-claude-code', id, true, false
-FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'claude-haiku-5-5' AND protocol = 'anthropic-messages'
+SELECT 'agent-claude-code-sonnet-5-5', 'claude-code/sonnet-5-5', 'rt-claude-code', id, true, false
+FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'claude-sonnet-5-5' AND protocol = 'anthropic-messages'
 ON CONFLICT DO NOTHING;

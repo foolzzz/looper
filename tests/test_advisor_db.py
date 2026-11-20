@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 # A Claude Code that answers as the judge (its system prompt is the judge's) or as the advisor, writing down each
 # start; JUDGE_REPLY is the judge's verdict, ADVISOR_REPLIES the advisor's answers in turn (one per line), and
-# ADVISOR_MODE makes the advisor refuse.
+# ADVISOR_MODE makes the advisor refuse, end its first run in error (error_once), or be rate-limited.
 _STAND_IN = r'''
 import json, os, sys
 turn = json.loads(sys.stdin.readline())["message"]["content"]
@@ -36,6 +36,9 @@ with open(os.environ["ADVISOR_SEEN"], "a") as seen:
 def emit(event):
     print(json.dumps(event), flush=True)
 emit({"type": "system", "subtype": "init", "session_id": "s", "model": model, "tools": [], "mcp_servers": []})
+if judge and os.environ.get("JUDGE_MODE") == "hang":
+    import time
+    time.sleep(120)
 if judge:
     text, cost, stop = os.environ.get("JUDGE_REPLY", ""), 0.001, "end_turn"
 else:
@@ -43,8 +46,22 @@ else:
     n = int(open(counter).read()) if os.path.exists(counter) else 0
     open(counter, "w").write(str(n + 1))
     replies = open(os.environ["ADVISOR_REPLIES"]).read().splitlines()
+    mode = os.environ.get("ADVISOR_MODE")
+    if mode == "error_then_hang" and n > 0:
+        import time
+        time.sleep(120)
+    if mode == "error_then_hang":
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": "s",
+                          "result": "", "total_cost_usd": 0.2, "modelUsage": {model: {"costUSD": 0.2}}}), flush=True)
+        sys.exit(0)
+    if mode == "error_once" and n == 0 or mode == "rate_limited":
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": "s",
+                          "result": "", "total_cost_usd": 0.01, "modelUsage": {model: {"costUSD": 0.01}},
+                          **({"api_error_status": 429} if mode == "rate_limited" else {})}), flush=True)
+        sys.exit(0)
+    n = n - 1 if mode == "error_once" else n
     text, cost = replies[min(n, len(replies) - 1)], 0.05
-    stop = "refusal" if os.environ.get("ADVISOR_MODE") == "refuse" else "end_turn"
+    stop = "refusal" if mode == "refuse" else "end_turn"
 usage = {"input_tokens": 30, "output_tokens": 9, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
 emit({"type": "assistant", "session_id": "s", "message": {"id": "m", "role": "assistant", "model": model,
       "content": [{"type": "text", "text": text}], "usage": usage}})
@@ -66,7 +83,7 @@ def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("JUDGE_REPLY", PASS)
     (tmp_path / "replies.txt").write_text(ANSWER + "\n")
     monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {"ADVISOR_SEEN", "ADVISOR_REPLIES", "JUDGE_REPLY",
-                                                                    "ADVISOR_MODE"})
+                                                                    "ADVISOR_MODE", "JUDGE_MODE"})
 
 
 def _replies(tmp_path: Path, *replies: str) -> None:
@@ -84,17 +101,18 @@ async def _setup(pool: Any) -> None:
     await seed_role_configs(pool)
 
 
-async def _consult(pool: Any, *, source: str = "optional", budget: float = 1.0) -> tuple[int, int]:
+async def _consult(pool: Any, *, source: str = "optional", budget: float = 1.0,
+                   task: str = "task-a") -> tuple[int, int]:
     from looper.agents import advisor
     from looper.db import llm_records, projects
 
-    project = (await projects.create_project(name="Import", pool=pool))["id"]
+    project = (await projects.create_project(name=f"Import {task}", pool=pool))["id"]
     await pool.execute("INSERT INTO tasks (id, project_id, requirement, status) "
-                       "VALUES ('task-a', $1, 'Speed up the import.', 'running')", project)
+                       "VALUES ($1, $2, 'Speed up the import.', 'running')", task, project)
     await pool.execute("INSERT INTO task_steps (id, task_id, step_index, step_key, instruction) "
-                       "VALUES ('task-a-s1', 'task-a', 0, 's1', 'Rewrite the loop.')")
-    planner = await llm_records.start_record(agent_id="planner-task-a", task_id="task-a")
-    spawn = await advisor.open_consult(advisor.Brief("task-a", "task-a-s1", 2, advisor.Source(source), planner),
+                       "VALUES ($1, $2, 0, 's1', 'Rewrite the loop.')", f"{task}-s1", task)
+    planner = await llm_records.start_record(agent_id=f"planner-{task}", task_id=task)
+    spawn = await advisor.open_consult(advisor.Brief(task, f"{task}-s1", 2, advisor.Source(source), planner),
                                        budget_usd=budget)
     return spawn, planner
 
@@ -118,7 +136,7 @@ def test_the_advisor_and_its_judge_run_their_own_built_in_profiles_unless_their_
         judge = await load_agent_settings(AgentType.ADVICE_CHECK)
         assert (advisor.profile.id, advisor.model, advisor.effort) == ("agent-claude-code-fable-5-2",
                                                                        "claude-fable-5-2", "high")
-        assert (judge.profile.id, judge.model) == ("agent-claude-code-haiku-5-5", "claude-haiku-5-5")
+        assert (judge.profile.id, judge.model) == ("agent-claude-code-sonnet-5-5", "claude-sonnet-5-5")
         assert advisor.profile_error is None and advisor.system_prompt_mode is SystemPromptMode.REPLACE
         # The shared defaults are for the roles with tools: they choose nothing for these two.
         await agent_settings.update_system({"profile_id": "agent-claude-code-opus", "run_budget_usd": 3})
@@ -138,7 +156,7 @@ def test_the_advisor_and_its_judge_run_their_own_built_in_profiles_unless_their_
         assert (roles["advisor"]["display_name"], roles["advisor"]["timeout_seconds"]) == ("Advisor", 300)
         assert roles["advice_check"]["timeout_seconds"] == 120
         # Without its built-in profile a role does not run in another's place.
-        await pool.execute("DELETE FROM agent_profiles WHERE id = 'agent-claude-code-haiku-5-5'")
+        await pool.execute("DELETE FROM agent_profiles WHERE id = 'agent-claude-code-sonnet-5-5'")
         assert "is missing" in (await load_agent_settings(AgentType.ADVICE_CHECK)).profile_error
 
     run_db(test, monkeypatch, setup=_setup)
@@ -157,7 +175,7 @@ def test_a_request_that_passes_its_checks_is_answered_and_both_runs_are_the_plan
         assert ended.response.fields["answers"][0]["conclusion"] == "Cache hot keys first."
         judge, advisor = _seen(tmp_path)
         assert (judge["as"], advisor["as"]) == ("judge", "advisor")
-        assert judge["argv"][judge["argv"].index("--model") + 1] == "claude-haiku-5-5"
+        assert judge["argv"][judge["argv"].index("--model") + 1] == "claude-sonnet-5-5"
         argv = advisor["argv"]
         assert argv[argv.index("--model") + 1] == "claude-fable-5-2" and argv[argv.index("--effort") + 1] == "high"
         assert argv[argv.index("--tools") + 1] == "" and argv[argv.index("--max-turns") + 1] == "2"
@@ -226,8 +244,18 @@ def test_a_request_the_judge_finds_unanswerable_goes_back_with_what_is_missing(
         assert [s["as"] for s in _seen(tmp_path)] == ["judge"]
         row = dict(await pool.fetchrow("SELECT * FROM agent_spawns WHERE id = $1", spawn))
         assert row["state"] == "drafting" and float(row["spent_usd"]) == pytest.approx(0.001)
-        assert json.loads(row["result"])["checks"] == [{"stage": "judge", "category": "unanswerable", "return": 1,
-                                                        "round": 1}]
+        result = json.loads(row["result"])
+        assert result["checks"] == [{"stage": "judge", "category": "unanswerable", "return": 1, "round": 1}]
+        # each judge run stays on the consult's record of its runs, however many times the request comes back
+        for _ in range(2):
+            await _submit(tmp_path, spawn, _request())
+        row = dict(await pool.fetchrow("SELECT * FROM agent_spawns WHERE id = $1", spawn))
+        result = json.loads(row["result"])
+        judges = [r["id"] for r in await pool.fetch("SELECT id FROM llm_records WHERE agent_id LIKE 'advice_check-%' "
+                                                    "ORDER BY id")]
+        assert row["state"] == "blocked" and len(judges) == 3
+        assert (result["runs"], result["booked"]) == (judges, judges)
+        assert float(row["spent_usd"]) == pytest.approx(0.003)
 
     run_db(test, monkeypatch, setup=_setup)
 
@@ -342,6 +370,75 @@ def test_a_consult_whose_advisor_does_not_answer_fails_with_why(
     run_db(test, monkeypatch, setup=_setup)
 
 
+def test_an_advisor_run_that_ends_in_error_runs_once_more_and_a_rate_limited_one_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        monkeypatch.setenv("ADVISOR_MODE", "error_once")
+        spawn, _ = await _consult(pool)
+        ended = await _submit(tmp_path, spawn, _request())
+        assert ended.state.value == "answered" and [s["as"] for s in _seen(tmp_path)] == ["judge", "advisor", "advisor"]
+        row = dict(await pool.fetchrow("SELECT * FROM agent_spawns WHERE id = $1", spawn))
+        assert float(row["spent_usd"]) == pytest.approx(0.001 + 0.01 + 0.05)  # both runs booked
+
+        monkeypatch.setenv("ADVISOR_MODE", "rate_limited")
+        (tmp_path / "seen.jsonl").unlink()
+        spawn, _ = await _consult(pool, task="task-b")
+        ended = await _submit(tmp_path, spawn, _request())
+        assert (ended.state.value, ended.failure) == ("failed", "rate_limited")
+        assert [s["as"] for s in _seen(tmp_path)] == ["judge", "advisor"]  # not run again
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
+def test_a_runs_spend_is_booked_when_it_ends_so_a_consult_stopped_in_its_retry_keeps_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents import advisor
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setenv("ADVISOR_MODE", "error_then_hang")
+        spawn, _ = await _consult(pool)
+        running = asyncio.create_task(_submit(tmp_path, spawn, _request()))
+        for _ in range(400):  # until the retry has started
+            if [s["as"] for s in _seen(tmp_path)] == ["judge", "advisor", "advisor"]:
+                break
+            await asyncio.sleep(0.05)
+        assert [s["as"] for s in _seen(tmp_path)] == ["judge", "advisor", "advisor"]
+        assert float(await pool.fetchval("SELECT spent_usd FROM agent_spawns WHERE id = $1", spawn)) == \
+            pytest.approx(0.001 + 0.2)  # the judge's and the failed run's, booked as each ended
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        ended = await advisor.expire(spawn, failure="interrupted", detail="the task stopped")
+        assert ended.state.value == "failed"
+        assert float(await pool.fetchval("SELECT spent_usd FROM agent_spawns WHERE id = $1", spawn)) == \
+            pytest.approx(0.001 + 0.2)
+        await advisor.reconcile(spawn)  # again: nothing is booked twice
+        assert float(await pool.fetchval("SELECT spent_usd FROM agent_spawns WHERE id = $1", spawn)) == \
+            pytest.approx(0.001 + 0.2)
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
+def test_a_consult_ends_at_its_deadline_whichever_run_is_going(monkeypatch: pytest.MonkeyPatch,
+                                                                 tmp_path: Path) -> None:
+    import time
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setenv("JUDGE_MODE", "hang")
+        spawn, _ = await _consult(pool)
+        started = time.monotonic()
+        ended = await asyncio.wait_for(_submit(tmp_path, spawn, _request(), deadline=started + 2), 30)
+        assert time.monotonic() - started < 10  # the judge got only what was left of the consult's time
+        assert (ended.state.value, ended.failure) == ("failed", "judge") and "no output within" in ended.detail
+        late, _ = await _consult(pool, task="task-b")
+        ended = await _submit(tmp_path, late, _request(), deadline=time.monotonic() - 1)
+        assert (ended.state.value, ended.failure) == ("failed", "timeout")  # nothing runs past the deadline
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
 def test_a_consult_with_too_little_left_after_the_judge_is_over_budget(monkeypatch: pytest.MonkeyPatch,
                                                                        tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
@@ -368,7 +465,7 @@ def test_a_checkpoint_takes_only_a_plan_review_and_the_planner_may_withdraw(monk
     run_db(test, monkeypatch, setup=_setup)
 
 
-def test_consults_a_stopped_server_left_checking_or_asking_fail_at_the_next_start(
+def test_every_consult_a_stopped_server_left_unfinished_fails_at_the_next_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.agents import advisor
@@ -378,10 +475,13 @@ def test_consults_a_stopped_server_left_checking_or_asking_fail_at_the_next_star
     async def test(pool: Any) -> None:
         spawn, _ = await _consult(pool)
         other = await advisor.open_consult(advisor.Brief("task-a", None, 1, advisor.Source.OPTIONAL), budget_usd=1)
+        done = await advisor.open_consult(advisor.Brief("task-a", None, 1, advisor.Source.OPTIONAL), budget_usd=1)
         await agent_spawns.move(spawn, SpawnState.LINTING, expect=SpawnState.DRAFTING)
-        assert await advisor.fail_interrupted() == 1
-        rows = {r["id"]: r["state"] for r in await pool.fetch("SELECT id, state FROM agent_spawns")}
-        assert rows == {spawn: "failed", other: "drafting"}
+        await advisor.withdraw(done, "the plan changed")
+        assert await advisor.fail_interrupted() == 2
+        rows = {r["id"]: (r["state"], r["detail"]) for r in await pool.fetch("SELECT id, state, detail FROM agent_spawns")}
+        assert rows == {spawn: ("failed", "interrupted by a restart"), other: ("failed", "interrupted by a restart"),
+                        done: ("failed", "the plan changed")}
 
     run_db(test, monkeypatch, setup=_setup)
 
@@ -406,3 +506,63 @@ def test_a_database_from_before_the_advisor_roles_admits_their_layers() -> None:
                                "VALUES ('role', 'advisor', 'agent-claude-code-fable-5-2')")
 
     asyncio.run(main())
+
+
+def test_the_advisors_alerts_tell_the_operator_once_each(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents import advisor, advisor_alerts, gate_service
+    from looper.agents.gate_service import GateChat
+    from looper.agents.task_notice import NotifyChannel, NotifyTarget, TargetKind
+    from looper.db import agent_spawns, system_settings
+    from looper.db.agent_spawns import SpawnState
+
+    sent: list[tuple[str, str, str]] = []
+
+    async def sender(channel_id: str, chat: str, text: str) -> tuple[bool, None]:
+        sent.append((channel_id, chat, text))
+        return True, None
+
+    async def target() -> Any:
+        return GateChat(NotifyChannel.TELEGRAM, NotifyTarget(TargetKind.CHAT, "42"))
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setattr(gate_service, "dashboard_target", target)
+        advisor_alerts.configure(sender)
+        try:
+            await system_settings.put_settings({advisor_alerts.DAILY_ALERT_KEY: "0.5"})
+            for task in ("task-a", "task-b", "task-c"):
+                spawn, _ = await _consult(pool, task=task)
+                await agent_spawns.move(spawn, SpawnState.FAILED, expect=SpawnState.DRAFTING, spent_usd=0.2,
+                                        result={"failure": "parse"})
+            await advisor_alerts.consult_ended("task-c")
+            await advisor_alerts.consult_ended("task-c")  # nothing new: nothing sent again
+            texts = [text for _, _, text in sent]
+            assert {chat for _, chat, _ in sent} == {"42"} and len(texts) == 2, texts
+            assert "今天 advisor 的花费 0.60 美元" in texts[0] and "连续 3 次失败" in texts[1]
+            # task-a consults about both of its steps: more than half
+            await pool.execute("INSERT INTO task_steps (id, task_id, step_index, step_key, instruction) "
+                               "VALUES ('task-a-s2', 'task-a', 1, 's2', 'Test it.')")
+            spawn = await advisor.open_consult(advisor.Brief("task-a", "task-a-s2", 1, advisor.Source.CHECKPOINT),
+                                               budget_usd=1)
+            await advisor.withdraw(spawn, "the plan changed")  # a withdrawal is no failure: the streak ends
+            await advisor_alerts.consult_ended("task-a")
+            assert len(sent) == 3 and "任务 task-a 的 2 个步骤里有 2 个请教过 advisor，超过一半" in sent[2][2]
+            # each kind at most once a day: task-b over the rate too, and three more failures in a row, say nothing
+            await pool.execute("INSERT INTO task_steps (id, task_id, step_index, step_key, instruction) "
+                               "VALUES ('task-b-s2', 'task-b', 1, 's2', 'Test it.')")
+            spawn = await advisor.open_consult(advisor.Brief("task-b", "task-b-s2", 1, advisor.Source.CHECKPOINT),
+                                               budget_usd=1)
+            await agent_spawns.move(spawn, SpawnState.FAILED, expect=SpawnState.DRAFTING, result={"failure": "parse"})
+            for task in ("task-d", "task-e"):
+                spawn, _ = await _consult(pool, task=task)
+                await agent_spawns.move(spawn, SpawnState.FAILED, expect=SpawnState.DRAFTING,
+                                        result={"failure": "parse"})
+            await advisor_alerts.consult_ended("task-b")
+            assert len(sent) == 3, sent[3:]
+            # and so after a restart (the marks are stored, not kept in memory)
+            monkeypatch.setattr(advisor_alerts, "_sent", set(), raising=False)
+            await advisor_alerts.consult_ended("task-e")
+            assert len(sent) == 3, sent[3:]
+        finally:
+            advisor_alerts.configure(None)
+
+    run_db(test, monkeypatch, setup=_setup)

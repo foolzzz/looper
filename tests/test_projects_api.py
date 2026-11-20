@@ -236,6 +236,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import waits as db_waits
 
     monkeypatch.setattr(db_waits, "list_for_task", AsyncMock(return_value=[]))
+    from looper.db import advisor_advice
+
+    monkeypatch.setattr(advisor_advice, "consults_view", AsyncMock(return_value=[]))
     from looper.db import step_workspaces, task_worktrees
 
     monkeypatch.setattr(step_workspaces, "list_for_task", AsyncMock(return_value=[]))
@@ -322,7 +325,9 @@ class TestProjectEndpoints:
                              "room_broadcasts_per_run", "room_message_max_chars", "room_messages_per_task",
                              "room_ping_pong_rounds", "room_wait_max_seconds", "room_consult_budget_usd",
                              "room_consult_timeout_seconds", "room_consults_per_task", "task_workspaces",
-                             "operator_notes", "vault", "dependency_conditions", "default_workflow"}
+                             "operator_notes", "vault", "dependency_conditions", "default_workflow", "advisor",
+                             "advisor_consult_budget_usd", "advisor_budget_usd", "advisor_consults_per_task",
+                             "advisor_consults_per_step", "advisor_fallback_profile", "advisor_internal_domains"}
         assert body["dependency_conditions"] is None
 
     def test_work_dir_is_optional(self, store: _Store) -> None:

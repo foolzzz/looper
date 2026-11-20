@@ -28,7 +28,7 @@ def stored_config(config: Mapping[str, Any]) -> dict[str, Any]:
     """The saved configuration, with its app id and platform domain checked and normalized."""
     from .lark_api import BASE_URLS
 
-    unknown = set(config) - {"app_id", "domain", "allowed_open_ids", "allowlist_app_id", "description"}
+    unknown = set(config) - {"app_id", "domain", "allowed_open_ids", "allowlist_app_id", "description", "operator_sender_id"}
     if unknown:
         raise ValueError(f"unknown config keys: {', '.join(sorted(unknown))}")
     stored = dict(config)

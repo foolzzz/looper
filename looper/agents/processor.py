@@ -16,7 +16,7 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
   them, and ``REFUSE_KEY`` refuses a run while they are present.
 - **Its system prompt replaces the runtime's**, always (``system_prompt_mode_choice``): the profile's custom prompt, the
   role prompt (``role_configs.processor``, ``PROCESSOR_ROLE_PROMPT`` recommended), the instructions, then the reply
-  contract with the quiet word. The harness and the boundaries speak of tools and permissions: neither is in it.
+  contract with the quiet word (or the caller's own, ``contract``: an extraction's JSON shape). The harness and the boundaries speak of tools and permissions: neither is in it.
   The batch is the run's one user turn, inside a ``<messages>`` block.
 - **Bounds.** ``single_run.run_once`` with the caller's deadline (lowered by the role's timeout) and per-run cap
   (lowered by the layers' ``run_budget_usd``); its recorded cost is checked against the cap afterwards, and a run
@@ -285,11 +285,12 @@ async def run_facts(project_id: str | None, schedule_id: str | None) -> dict[str
     return profile_facts(settings, hooks.view() if hooks is not None else None)
 
 
-def _system_prompt(settings: AgentSettings, role: _Role, instructions: str, quiet_word: str) -> Any:
+def _system_prompt(settings: AgentSettings, role: _Role, instructions: str, quiet_word: str,
+                   contract: str | None = None) -> Any:
     from .system_prompt import SystemPrompt, compose_system_prompt, prompt_layers
 
     task = f"## Instructions\n{instructions.strip()}"
-    contract = reply_contract(quiet_word)
+    contract = contract if contract is not None else reply_contract(quiet_word)
     custom = settings.profile.custom_prompt
     text = compose_system_prompt(role.prompt, custom_prompt=custom, task=task, contract=contract)
     layers = prompt_layers(role_id=AgentType.PROCESSOR.value, role=role.prompt, recommended=role.recommended,
@@ -312,11 +313,13 @@ def _check(owner: str, instructions: str, quiet_word: str, budget_usd: float, ti
 async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapping[str, Any], quiet_word: str,
               budget_usd: float, timeout_s: float, runtime_root: Path, claude_bin: str = "claude",
               project_id: str | None = None, schedule_id: str | None = None,
-              metadata: Mapping[str, Any] | None = None) -> ProcessorRun:
+              metadata: Mapping[str, Any] | None = None, contract: str | None = None) -> ProcessorRun:
     """One processor run (the module's notes) of ``instructions`` over ``input_text``, recorded as
     ``processor:<owner>`` with ``metadata`` and, as its input, ``input_ref`` (which must not hold the text) with the
-    text's sha256 and length. ``budget_usd`` and ``timeout_s`` bound it. Raises ``ValueError`` for arguments no run
-    should start with; any reason it gives no reply is in the result."""
+    text's sha256 and length. ``budget_usd`` and ``timeout_s`` bound it. ``contract`` replaces the reply section
+    (``reply_contract(quiet_word)``) for a caller whose code parses the reply (``extraction``); a push subscription
+    passes none. Raises ``ValueError`` for arguments no run should start with; any reason it gives no reply is in the
+    result."""
     from . import single_run
     from ..db import llm_records
     from .claude_cli import ClaudeRunRecorder
@@ -347,7 +350,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=(
             f"model {launch.model!r} has no full price with its provider, so the run's cap of {cap:g} USD cannot hold"))
     deadline = min(timeout_s, role.timeout_seconds or timeout_s)
-    system_prompt = _system_prompt(settings, role, instructions, quiet_word)
+    system_prompt = _system_prompt(settings, role, instructions, quiet_word, contract)
     reference = json.dumps({**input_ref, "sha256": sha256_text(input_text), "chars": len(input_text)},
                            ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     run_id = uuid.uuid4().hex[:12]

@@ -11,6 +11,7 @@ An own item keeps its status. A sourced item (a gate, a confirmation, a task) ha
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ import asyncpg
 
 from . import tasks as task_store
 from .connection import get_pool
+
+logger = logging.getLogger(__name__)
 
 Db = asyncpg.Pool | asyncpg.Connection
 
@@ -269,14 +272,25 @@ def _status_clause(status: str, args: list[Any]) -> str:
     return "(" + " OR ".join(parts or ["false"]) + ")"
 
 
-async def get_item(item_id: int, *, db: Db | None = None) -> dict[str, Any] | None:
-    row = await _db(db).fetchrow(_SELECT + " WHERE i.id = $1", item_id)
+def _added_in(args: list[Any], added_in: tuple[str | None, str | None]) -> str:
+    """SQL for "added in this chat" (a group sees only what was written down in it)."""
+    args.extend(added_in)
+    return (f"EXISTS (SELECT 1 FROM ledger_events v WHERE v.item_id = i.id AND v.action = 'add' "
+            f"AND v.channel_id IS NOT DISTINCT FROM ${len(args) - 1} AND v.chat IS NOT DISTINCT FROM ${len(args)})")
+
+
+async def get_item(item_id: int, *, added_in: tuple[str | None, str | None] | None = None,
+                   db: Db | None = None) -> dict[str, Any] | None:
+    """One item; with ``added_in`` (channel id, chat), only if it was added in that chat."""
+    args: list[Any] = [item_id]
+    extra = f" AND {_added_in(args, added_in)}" if added_in else ""
+    row = await _db(db).fetchrow(_SELECT + " WHERE i.id = $1" + extra, *args)
     return item_view(row) if row else None
 
 
 async def list_items(*, status: str | None = "open", kind: str | None = None, owner: str | None = None,
                      project_id: str | None = None, limit: int = LIST_DEFAULT,
-                     db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
+                     added_in: tuple[str | None, str | None] | None = None, db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
     """The items matching the filters, newest first, at most ``limit``; and how many more match."""
     if status is not None and status not in STATUSES:
         raise LedgerRefused("invalid", f"status is one of {', '.join(STATUSES)} or all")
@@ -303,6 +317,8 @@ async def list_items(*, status: str | None = "open", kind: str | None = None, ow
     if project_id is not None:
         args.append(project_id)
         where.append(f"COALESCE(i.project_id, t.project_id) = ${len(args)}")
+    if added_in:
+        where.append(_added_in(args, added_in))
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     pool = _db(db)
     rows = await pool.fetch("SELECT *, count(*) OVER () AS matching FROM (" + _SELECT + clause + ") AS found "
@@ -493,12 +509,25 @@ async def _add(conn: asyncpg.Connection, new: NewItem, actor: Actor, note: str |
     if item_id is None:  # a sourced item is registered once: the existing one stands
         existing = await conn.fetchrow(_SELECT + " WHERE i.gate_step_id = $1 OR i.action_id = $2 OR i.task_id = $3",
                                        new.gate_step_id, new.action_id, new.task_id)
-        return item_view(existing)
+        return {**item_view(existing), "created": False}
     event = await _event(conn, item_id, new.source_kind is not None, "add", actor, note=note, quote=quote,
                          changes=None)
     if new.kind == "decision" and actor.kind == "user":  # what the user decides is confirmed from the start
         await _update(conn, item_id, {"confirmed_event_id": event, "confirmed_actor": "user"})
-    return item_view(await conn.fetchrow(_SELECT + " WHERE i.id = $1", item_id))
+    return {**item_view(await conn.fetchrow(_SELECT + " WHERE i.id = $1", item_id)), "created": True}
+
+
+async def add_superseding(actor: Actor, new: NewItem, old_id: int, *, quote: str | None = None,
+                          db: Db | None = None) -> dict[str, Any]:
+    """Add the decision ``new`` and mark decision ``old_id`` superseded by it, in one transaction: the old decision
+    is locked and checked first, and whatever fails leaves nothing of either."""
+    async with _transaction(db) as conn:
+        row = await conn.fetchrow("SELECT id FROM ledger_items WHERE id = $1 FOR UPDATE", old_id)
+        if row is None:
+            raise LedgerRefused("not_found", f"{format_id(old_id)} does not exist")
+        item = await apply("add", actor, new=new, quote=quote, db=conn)
+        await apply("supersede", actor, item_id=old_id, superseded_by=item["number"], quote=quote, db=conn)
+        return item
 
 
 def _amend(item: Mapping[str, Any], fields: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, list[Any]]]:
@@ -537,3 +566,131 @@ def _amend(item: Mapping[str, Any], fields: Mapping[str, Any]) -> tuple[dict[str
     if not changes:
         raise LedgerRefused("conflict", "nothing to change")
     return sets, changes
+
+
+# --- arguments the CLI and the Manager's tools share ---------------------------------------------------------------
+
+def parse_due(text: str) -> datetime:
+    """``YYYY-MM-DD`` (the end of that day) or an ISO 8601 time; without a time zone, this machine's."""
+    from datetime import date, time
+
+    try:
+        parsed = (datetime.combine(date.fromisoformat(text), time(23, 59))
+                  if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else datetime.fromisoformat(text))
+    except ValueError:
+        raise LedgerRefused("invalid", f"a due date is YYYY-MM-DD or an ISO 8601 time, not {text!r}") from None
+    return parsed if parsed.tzinfo else parsed.astimezone()
+
+
+async def resolve_project(name: str, *, db: Db | None = None) -> str:
+    """The id of the one project whose id or name is ``name``."""
+    found = await _db(db).fetch("SELECT id FROM projects WHERE id = $1 OR name = $1", name)
+    if len(found) != 1:
+        raise LedgerRefused("invalid", f"project {name!r} matches {len(found)} projects: name one by its id")
+    return found[0]["id"]
+
+
+# --- registering what other tables own (RFC 4.5) --------------------------------------------------------------------
+
+SYSTEM = Actor("system", "system")
+RECONCILE_SECONDS = 300
+# A task is registered while it runs or waits to start; one that already ended is not caught up.
+_LIVE_TASK_GROUPS = (task_store.TaskGroup.IN_PROGRESS, task_store.TaskGroup.NEEDS_YOU, task_store.TaskGroup.READY)
+
+
+async def _register(new: NewItem, *, db: Db | None) -> bool:
+    """Register a sourced item; False when it was there already. Never raises: a source's own write has been done."""
+    try:
+        return bool((await apply("add", SYSTEM, new=new, db=db))["created"])
+    except Exception:
+        logger.warning("ledger could not register a %s", new.source_kind, exc_info=True)
+        return False
+
+
+def _gate_item(row: Mapping[str, Any]) -> NewItem:
+    return NewItem(kind="pending", title=row["topic"].strip()[:200] or "A question for you",
+                   source_kind="gate", gate_step_id=row["step_id"])
+
+
+def _task_item(row: Mapping[str, Any]) -> NewItem:
+    title = (row["title"] or row["requirement"] or row["id"]).strip()[:200] or row["id"]
+    return NewItem(kind="work_item", title=title, source_kind="task", task_id=row["id"], owner_kind="task",
+                   owner_ref=row["id"])
+
+
+def _confirmation_item(row: Mapping[str, Any]) -> NewItem:
+    return NewItem(kind="pending", title=f"Confirm {row['tool']}"[:200], source_kind="confirmation",
+                   action_id=row["id"])
+
+
+async def register_gates(task_id: str, *, db: Db | None = None) -> None:
+    """After a plan write: register the task's waiting gates that have no item. A no-op while the ledger is off."""
+    try:
+        if not await enabled(db=db):
+            return
+        rows = await _db(db).fetch(_MISSING_GATES + " AND g.task_id = $1", task_id)
+    except Exception:
+        logger.warning("ledger could not look for the gates of a task", exc_info=True)
+        return
+    for row in rows:
+        await _register(_gate_item(row), db=db)
+
+
+async def register_task(task_id: str, *, db: Db | None = None) -> None:
+    """After a task was created (not by a schedule): register it as a work item. A no-op while the ledger is off."""
+    try:
+        if not await enabled(db=db):
+            return
+        row = await _db(db).fetchrow("SELECT id, title, requirement FROM tasks WHERE id = $1 AND schedule_id IS NULL",
+                                     task_id)
+    except Exception:
+        logger.warning("ledger could not read a new task", exc_info=True)
+        return
+    if row is not None:
+        await _register(_task_item(row), db=db)
+
+
+async def register_confirmation(action_id: int | None, *, db: Db | None = None) -> None:
+    """After the Manager's question was recorded: register the ``needs_confirmation`` row as a pending item."""
+    if action_id is None:
+        return
+    try:
+        if not await enabled(db=db):
+            return
+        row = await _db(db).fetchrow("SELECT id, tool FROM manager_actions WHERE id = $1", action_id)
+    except Exception:
+        logger.warning("ledger could not read a confirmation", exc_info=True)
+        return
+    if row is not None:
+        await _register(_confirmation_item(row), db=db)
+
+
+_MISSING_GATES = """
+SELECT g.step_id, g.topic FROM task_user_gates g
+WHERE g.state IN ('open', 'discussing') AND NOT EXISTS (SELECT 1 FROM ledger_items i WHERE i.gate_step_id = g.step_id)"""
+_MISSING_TASKS = """
+SELECT t.id, t.title, t.requirement FROM tasks t
+WHERE t.schedule_id IS NULL AND t.status = ANY($1::text[])
+  AND NOT EXISTS (SELECT 1 FROM ledger_items i WHERE i.task_id = t.id)"""
+_MISSING_CONFIRMATIONS = f"""
+SELECT a.id, a.tool FROM manager_actions a
+WHERE a.status = 'needs_confirmation' AND a.confirmation_id IS NOT NULL
+  AND a.created_at > now() - make_interval(secs => {CONFIRMATION_SECONDS})
+  AND NOT EXISTS (SELECT 1 FROM manager_actions r WHERE r.confirmation_id = a.confirmation_id AND r.id > a.id
+                  AND r.status IN ('ok', 'error'))
+  AND NOT EXISTS (SELECT 1 FROM ledger_items i WHERE i.action_id = a.id)"""
+
+
+async def reconcile(*, db: Db | None = None) -> int:
+    """Register what the hooks missed: waiting gates, live tasks and recent confirmations without an item.
+
+    How many it registered; more than none means a hook missed one, which is logged as a warning."""
+    live = [status for status, group in task_store.STATUS_GROUPS.items() if group in _LIVE_TASK_GROUPS]
+    pool = _db(db)
+    registered = 0
+    for query, args, make in ((_MISSING_GATES, (), _gate_item), (_MISSING_TASKS, (live,), _task_item),
+                              (_MISSING_CONFIRMATIONS, (), _confirmation_item)):
+        for row in await pool.fetch(query, *args):
+            registered += await _register(make(row), db=db)
+    (logger.warning if registered else logger.info)("ledger reconcile registered=%d", registered)
+    return registered
