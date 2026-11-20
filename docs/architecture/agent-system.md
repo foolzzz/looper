@@ -3190,8 +3190,13 @@ evaluation is required before the original schedule requirement is complete.
   Cost also triggers maintenance when context is at least half that threshold
   and the previous run's Planner cost is strictly above half the effective task
   budget. Equality at either upper limit does not trigger it. A stored session
-  with unknown context rotates before its first resume after an upgrade; an
-  unknown cost also rotates when the context floor and budget rule applies.
+  with unknown context first recovers the old holder's last Planner record's
+  context, if available, and persists that measurement before transferring the
+  holder. If it remains unknown, a runtime that reports request-local context
+  (Claude Code, OMP, Pi or Model API) rotates; other runtimes keep resuming.
+  Turn or session token totals, such as Codex's usage events, are not context
+  measurements. An unknown cost also rotates when the context floor and budget
+  rule applies.
   A NULL cost in any Planner record keeps the run's total unknown. The effective
   task budget already includes the schedule's `run_budget_usd` override; with no
   budget only the context rule applies.
@@ -3201,10 +3206,13 @@ evaluation is required before the original schedule requirement is complete.
   records the compaction's cost from session-total deltas, and accepts its
   empty result. Context above three times the threshold rotates directly,
   as does an estimated uncached input cost (the launch's frozen model price
-  times context) above half the task budget; an unknown estimate with a budget
-  also rotates. This estimate covers input only, not the summary's output.
-  Unknown measurements, a runtime without this capability, or a failed
-  compaction also rotate. The existing run context supplies the last three
+  times context) above half the task budget; an unknown estimate with configured
+  launch pricing and a budget also rotates. Native Claude Code uses the runtime's
+  cost report and has no launch price: it may compact within the three-times
+  context limit even with a task budget. This estimate covers input only, not the
+  summary's output. Once maintenance is required, unknown measurements, a runtime
+  without headless compaction, or a failed compaction rotate. The existing run
+  context supplies the last three
   results once; rotation adds no separate history block or setting.
   The measured $0.000978465 compaction was on a 17,176-token synthetic session,
   not an estimate for a large cold-cache session. Compaction resends its context
