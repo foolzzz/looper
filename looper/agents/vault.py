@@ -51,6 +51,8 @@ class VaultConfig:
     path: Path
     writable: tuple[str, ...]
     rules_file: str | None
+    # The default Manager may search and read it in the user's own turns (``ops.manager_vault``); off by default.
+    manager_read: bool = False
 
     def folders(self) -> str:
         return ", ".join(f"{w}/" for w in self.writable)
@@ -101,8 +103,11 @@ def check_config(raw: Mapping) -> VaultConfig:
     if not isinstance(raw, Mapping):
         raise ValueError("the knowledge vault setting must be an object")
     for key in raw:
-        if key not in ("path", "writable", "rules_file"):
+        if key not in ("path", "writable", "rules_file", "manager_read"):
             raise ValueError(f"unknown knowledge vault key {key!r}")
+    manager_read = raw.get("manager_read", False)
+    if not isinstance(manager_read, bool):
+        raise ValueError("manager_read must be true or false")
     path = raw.get("path")
     if not isinstance(path, str):
         raise ValueError("path must be a string")
@@ -162,7 +167,7 @@ def check_config(raw: Mapping) -> VaultConfig:
             raise ValueError(f"rules file {rules} leaves the vault (a symbolic link?)")
         if not target.is_file():
             raise ValueError(f"rules file {rules} must exist and be a regular file")
-    return VaultConfig(root, tuple(folders), rules)
+    return VaultConfig(root, tuple(folders), rules, manager_read)
 
 
 async def load() -> tuple[VaultConfig | None, str | None]:
@@ -204,7 +209,8 @@ async def settings_view() -> dict:
     config, problem = await load()
     raw: Mapping = {}
     if config:
-        raw = {"path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file}
+        raw = {"path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file,
+               "manager_read": config.manager_read}
     elif problem:
         stored = await system_settings.get_settings([SETTING_KEY])
         try:
@@ -216,20 +222,23 @@ async def settings_view() -> dict:
     path = raw.get("path")
     is_git = await _git_root(Path(path)) is not None if isinstance(path, str) and os.path.isabs(path) else False
     return {"configured": config is not None, "path": path, "writable": raw.get("writable") or [],
-            "rules_file": raw.get("rules_file"), "git": is_git, "problem": problem}
+            "rules_file": raw.get("rules_file"), "manager_read": raw.get("manager_read") is True, "git": is_git,
+            "problem": problem}
 
 
 async def update_settings(body: Mapping) -> dict:
     from . import projects
 
     try:
-        if ("path" in body and body["path"] is None and set(body) <= {"path", "writable", "rules_file"}
-                and body.get("writable") in (None, []) and body.get("rules_file") in (None, "")):
+        if ("path" in body and body["path"] is None and set(body) <= {"path", "writable", "rules_file", "manager_read"}
+                and body.get("writable") in (None, []) and body.get("rules_file") in (None, "")
+                and not body.get("manager_read")):
             await system_settings.put_settings({SETTING_KEY: None})
         else:
             config = check_config(body)
             await system_settings.put_settings({SETTING_KEY: json.dumps({
-                "path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file})})
+                "path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file,
+                **({"manager_read": True} if config.manager_read else {})})})
     except ValueError as exc:
         raise projects.RequestError(projects.HTTP_400, str(exc)) from None
     except PermissionError as exc:
