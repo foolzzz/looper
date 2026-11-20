@@ -201,3 +201,26 @@ def test_only_the_default_manager_gets_a_research_order_and_only_while_it_is_on(
     monkeypatch.setattr(chat_settings, "_research_order", on)
     found = ManagerAgent._research_sources(SimpleNamespace(agent_id=agent_id), OPERATOR, _launch("pi", AgentLibrary()))
     assert (found is not None) is offered
+
+
+def test_the_stable_context_contract_stays_last_after_the_research_order() -> None:
+    from looper.agents.tiers import state_view
+
+    composed = _composed(FULL)
+    with_stable = _composed_with(FULL, _stable_context=True)
+    assert with_stable.text.endswith(state_view.STABLE_CONTEXT_CONTRACT.rstrip("\n") + "\n") or \
+        with_stable.text.rstrip().endswith(state_view.STABLE_CONTEXT_CONTRACT.rstrip())
+    assert with_stable.text.index(GOLDEN_FULL) < with_stable.text.index(state_view.STABLE_CONTEXT_CONTRACT.strip())
+    assert with_stable.layers["contract"]["name"] == "TOOLS_CONTRACT+RESEARCH_ORDER+STABLE_CONTEXT_CONTRACT"
+    assert GOLDEN_FULL in composed.text
+
+
+def _composed_with(research: ResearchSources, **fields: Any) -> Any:
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.profile_registry import builtin_resolved_profile
+    from looper.agents.tiers.manager import ManagerAgent
+
+    settings = AgentSettings(profile=replace(builtin_resolved_profile(), custom_prompt=""))
+    manager = SimpleNamespace(agent_id="manager", _system_prompt="ROLE", _prompt_recommended=False, _leads_on=False,
+                              _research=research, **fields)
+    return ManagerAgent._composed_prompt(manager, settings)
