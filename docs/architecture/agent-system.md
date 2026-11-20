@@ -5952,14 +5952,18 @@ yet; its callers come with the `outbound_review.enabled` switch.
   `run` and `no_tools`). Its role layer chooses its Agent Profile; with none it runs its built-in
   `claude-code/sonnet-5-5`. Its system prompt is the role prompt (`role_configs`) and `outbound.OUTBOUND_CONTRACT`.
   Its one turn holds the action, the operator's turn and the outside content in data blocks the content cannot
-  close or open, with keys and tokens masked (paths stay). One turn, the role's timeout (30 s, at most), a
-  0.10 USD cap (`spawn.MIN_RUN_USD`), never run again.
+  close or open, with keys and tokens masked (paths stay). The text an action would send is shown whole: one
+  longer than 12,000 characters is blocked (`too_long`) without a run. One turn, the role's timeout (30 s, at
+  most), a 0.10 USD cap (`spawn.MIN_RUN_USD`), never run again.
 - **The verdict** must be the contract's one JSON object (`outbound.parse_verdict`): `decision` `allow` or `block`,
-  a `reason` of at most 300 characters and known `signals`. Anything else, a timeout, a run that ends in error, a
-  rate limit, a refusal (or another model answering), a turned-off role or a missing profile blocks the action, with
-  `failure` saying why.
+  a `reason` of at most 300 characters and known `signals`. Anything else, a timeout, a run that ends in error or
+  cannot be prepared or started, a rate limit, a refusal (or another model answering), a turned-off role or a
+  missing profile blocks the action, with `failure` saying why. A review returns within
+  `outbound.CALLER_TIMEOUT_SEC` (the run, then at most 5 s for its audit row): a caller that bounds it waits
+  longer.
 - **Records.** Each review is an `outbound_reviews` row, written before the action may go ahead: an action whose
-  row cannot be written is blocked. The run's record has `run_kind` `outbound_check` and the asking run as its
+  row cannot be written in time is blocked. Its free text (the target, the summary, the model's reason) is stored
+  masked. The run's record has `run_kind` `outbound_check` and the asking run as its
   `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
 
 ### Turns Claude runs on its own
@@ -6157,7 +6161,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at` and `sent_at`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
-| `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `refused`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
+| `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
