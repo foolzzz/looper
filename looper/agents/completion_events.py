@@ -1,10 +1,19 @@
-"""Recording a task's end as a completion event (manager completion ledger RFC, C1).
+"""A task's end as a completion event, and the Manager's completion turn that may tell it (manager completion
+ledger RFC, C1 and C2).
 
 An end that has a chat to tell is written to ``manager_events`` with the code notice it would send (``fallback``).
-The completion turn that may one day replace that notice is not built yet: every event is ``skipped`` (``off``),
-so the notice goes out as it always did, and the row only counts it. A replayed message finds its row: it is not
-sent again, unless the first attempt never handed the notice to the channel. When the database cannot be
-written, the notice is sent anyway.
+With ``manager.completion_turns`` off (the default) every event is ``skipped`` (``off``): the notice goes out as it
+always did, and the row only counts it. With it ``dm_only``, the end of a task asked for in a direct chat or the
+dashboard chat, whose own Manager handles the report, is ``pending``: the Manager is woken (``COMPLETION_DUE``),
+claims the chat's pending events and runs a read-only ``[COMPLETION]`` turn; its reply, with each task's link added
+by code, replaces the notice. Whatever goes wrong (the turn fails, runs past ``TURN_SECONDS``, is stopped, replies
+nothing, or the reply cannot be handed to the channel; the Manager or the switch was turned off), the events fall
+back and their notices go out exactly as recorded. A group chat's end is ``skipped`` (``group_chat``), and so is
+one whose report reached another Manager (``manager_off``). A schedule's run message is recorded ``skipped``
+(``off``) whatever the switch says: its turn is not built yet.
+
+A replayed message finds its row: it is not sent again, unless the first attempt never handed the notice to the
+channel. When the database cannot be written, the notice is sent anyway.
 """
 
 from __future__ import annotations
