@@ -5998,8 +5998,9 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
 ### Reviews of outbound actions
 
 Before an agent does something that may leave the operator's machine, `outbound.review` (`looper/agents/outbound.py`,
-the outbound-review RFC) asks a tool-less run whether the operator asked for it, to that target. No tool calls it
-yet; its callers come with the `outbound_review.enabled` switch.
+the outbound-review RFC) asks a tool-less run whether the operator asked for it, to that target. The Managers'
+tool calls are its first caller, through a hook, while the system setting `outbound_review.enabled` is on (default
+off; `outbound_review.get` and `outbound_review.update`).
 
 - **The action** is typed: its tool and action, its `ActionLevel` (`inside`, `operator`, `origin`, `machine`,
   `external`, `unknown`; only `external` and `unknown` are reviewed), its target and a summary code wrote, and the
@@ -6022,6 +6023,31 @@ yet; its callers come with the `outbound_review.enabled` switch.
   row cannot be written in time is blocked. Its free text (the target, the summary, the model's reason) is stored
   masked. The run's record has `run_kind` `outbound_check` and the asking run as its
   `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
+- **The Managers' hook** (`looper/agents/outbound_hook.py`). While the review is on, each Manager's Claude Code
+  carries a PreToolUse hook in its `--settings` (matcher `*`) and reads no settings file (`--setting-sources ""`),
+  so nothing it writes in its working directory turns the hook off. Turning the review on or off changes the
+  command, so a running Manager restarts on its next turn. The hook is `outbound_hook_client.py`, run by path with
+  `python -I`, behind a shell that prints a `deny` whenever the client cannot run or prints nothing. The client asks
+  `POST /api/agent/v1/outbound/check` with the Manager's token and its turn binding, waits at most
+  `CHECK_TIMEOUT_SEC` (60 s), and denies when it gets no answer; Claude Code waits for the hook `HOOK_TIMEOUT_SEC`
+  (90 s), since it runs a call whose hook failed or timed out. Its config (the URL, the token, the turn file) is
+  `<runtime root>/.local/outbound-hook/<manager>.json`, readable by the operator only.
+  - **What runs at once** is decided by the tool's type (`outbound_hook.level_of`): Claude Code's built-in tools have
+    a level each (`BUILTIN_LEVELS`: `Bash` and `Monitor` are `unknown`; `WebSearch`, `WebFetch`, `RemoteTrigger` and
+    `SendMessage` `external`); a tool not listed is `unknown`. Looper's own tools are `inside` here (`ManagerOps.call`
+    runs them). Another MCP server's tools are `inside` until their level can be declared.
+  - **What is reviewed:** an `unknown` or `external` call, in the turn its binding names: the operator's own turn
+    (`operator_identity`), or else blocked by code. The review sees the leads this turn's searches found and the
+    files the session wrote last (a later `sh s.sh` runs one).
+  - **What code refuses:** a `Write`, `Edit`, `MultiEdit` or `NotebookEdit` of Looper's own files: anything under
+    `<runtime root>/.local` or `ops`, the operator token, or the hook's client (`outbound.refuse`, `protected`).
+  - **A block** is a `deny` whose reason the model reads ("Looper's outbound review blocked this action: <reason>.
+    It did not run. …"). The operator is told once per turn in the chat the dashboard's user gates use, never in
+    the turn's own chat.
+  - **Without a hook:** the review is not turned on while an enabled Manager's Agent Profile runs on a runtime
+    without one (`RuntimeAdapter.tool_hook`: Claude Code only). While it is on, such a Manager starts no turn.
+  - **Spend:** a review of a Manager's call that no task owns is the Manager's spend (`manager_spend`), and goes
+    with the Manager when it is purged (`manager_cleanup`).
 
 ### Turns Claude runs on its own
 
@@ -6752,6 +6778,7 @@ The retained private capability protocol is separate from this public inventory:
 |---|---|---|
 | GET | `/api/agent/v1/tools` | Manager, task Planner or run token; only that principal's tools |
 | POST | `/api/agent/v1/ops/:tool` | The same capability token; task/run/turn scope checked before dispatch |
+| POST | `/api/agent/v1/outbound/check` | A Manager's token; its Claude Code's PreToolUse hook asks whether one tool call runs ([Reviews of outbound actions](#reviews-of-outbound-actions)) |
 
 Clients cannot authenticate on the private protocol, obtain its tokens or invoke its private tools through
 `CLIENT_TOOLS`. `/login` (GET/POST), `/logout` (POST), pages and static assets deliver browser authentication
