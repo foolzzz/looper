@@ -4748,7 +4748,7 @@ Manager's `looper_schedules` cannot create or change one.
 The ledger lists what waits for the user (`pending`), what was decided
 (`decision`) and who does what (`work_item`) ([Completion and ledger
 RFC](rfcs/manager-completion-ledger-v0.zh-CN.md), section 4). It is off until
-the system setting `ledger.enabled` is `true`; the dashboard has no switch yet.
+the system setting `ledger.enabled` is `true` (Settings → Chat has the switch).
 Off, no prompt, tool list or command line mentions it.
 
 - **Tables** (`ledger_items`, `ledger_events`; migration `ledger`): an own item
@@ -4799,11 +4799,21 @@ Off, no prompt, tool list or command line mentions it.
   bump, not isolation: an agent runs as the same user. Exit codes: 0 done, 1
   nothing listed, 2 usage, 3 ledger not enabled, 4 refused, 5 no such item, 6
   database unusable.
-- **Reads:** `ledger.list` and `ledger.get` (`/api/v1`, read-only, open to an
-  API client and the operator) answer `conflict` while the ledger is off.
-- **Not yet:** the To-do page and the dashboard switch, the ledger contract in
-  the Manager's system prompt (the tool descriptions are all it has), HTTP
-  writes.
+- **Reads:** `ledger.list` (also `needs_you`: open to-dos and decisions only
+  someone else said) and `ledger.get` (`/api/v1`, read-only, open to an API
+  client and the operator) answer `conflict` while the ledger is off.
+- **Dashboard** (operator only): `ledger.status` (switch, the number waiting for
+  the user, whether an enabled bot has no `operator_sender_id`; works while the
+  ledger is off), `ledger.configure` (the switch, also Settings → Chat),
+  `ledger.add` and `ledger.act` (confirm, close, cancel, reopen, note, amend),
+  written as the user, `via dashboard`. The To-do page (`#ledger`, sidebar item
+  with the number) lists "Needs you" (overdue first, relayed decisions marked),
+  "In progress" and the last 30 days of decisions, keeps its status and kind
+  filters in the URL, and opens an item beside the list (`#ledger?item=L-0012`)
+  with its history (who, how, the words said) and the actions its kind allows;
+  a sourced item links to its gate or task and is not changed here.
+- **Not yet:** the ledger contract in the Manager's system prompt (the tool
+  descriptions are all it has).
 
 ### User gates
 
