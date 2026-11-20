@@ -4650,7 +4650,9 @@ processor's instructions. Its stream is a row of `subscriptions` (request field
 `include_chats` and `exclude_chats`, `sender_kinds` (`user`, `app`),
 `exclude_mentions_me`, `include_history` (history and imports), `max_age_minutes`
 (5–10080), `max_events` (1–2000), `text_max_chars` (20–4000), `render`
-(`lines_v1`), `quiet_word` (default `SKIP`), `output_header`, and the state
+(`lines_v1`), `quiet_word` (default `SKIP`), `output_header`, `output_kind`
+(`push`; `leads` and `intents` are [extraction
+subscriptions](#extraction-subscriptions)), and the state
 `cursor_seq`, `cursor_at` and `target_confirmed_at`. A new schedule is disabled
 and its cursor starts at its source's `committed_seq`. The API refuses a field it
 cannot use, naming it; a `parallel` overlap (two runs would read one window), no
@@ -4742,6 +4744,95 @@ Manager's `looper_schedules` cannot create or change one.
   subscription's cursor and confirmation stay on the machine: a configuration
   file leaves it out), the digest and daily subscriptions, and Looper's own
   collection.
+
+### Extraction subscriptions
+
+A subscription whose `output_kind` is `leads` or `intents`
+([RFC](rfcs/message-leads-intents-v0.zh-CN.md), sections 4 and 7) turns its
+window into rows of `message_leads` or `intents` instead of a message, through
+the same tool-less processor run with a reply that code parses and never runs
+(`looper/agents/extraction.py`; `SubscriptionRuns` routes the two kinds there,
+and a push subscription's run, prompt and confirmation are unchanged). Nothing
+here pushes: the intent push service polls `intents`.
+
+- **Created from a preset.** `schedule_admin.subscription_preset` (operator
+  only, read; `{"output_kind": "leads" | "intents"}`) answers the complete
+  `fields` of `schedule_admin.create` for the only message source and the
+  server's zone, but `project_id` and, for intents, `notify_target`
+  (`subscriptions.PRESETS`): leads `消息线索`, `7 * * * *`, $0.6 a run and $10 a
+  day; intents `意图识别`, `*/10 * * * *`, $0.3 and $3; both a window of 500
+  events, seven days back, 500 characters a message, quiet word `NONE`. The
+  Manager's `looper_schedules` refuses either kind (`invalid`), and a
+  subscription's `output_kind` cannot change.
+- **Its scope is fixed by its kind** (decision 5, R-1), not by the stream
+  filter: `chat_kinds`, `sender_kinds`, `exclude_mentions_me`, `render`,
+  `quiet_word` and `output_header` are not consulted. Both read chats included in
+  the stream and in extraction (`source_chats.extraction`), the subscription's
+  own `include_chats` and `exclude_chats`, live and history events (no
+  imports), within `max_age_minutes`, never Looper's own apps. Leads read
+  every person's message in every chat kind, the user's own too; intents read a
+  person's message in a direct chat, one that @-mentions the user or one the
+  user sent (`event_sources.user_open_id`), and the alert bots listed in
+  `intent_alert_senders`.
+- **The window is oldest first and drops nothing**
+  (`db.subscriptions.extraction_window`): at most `max_events`, and the cursor
+  moves only to the last event read. A full window ends the run with `more`, and
+  the scheduler fires it again at once, at most six times in a row (the daily
+  budget still admits each run); an input over 60,000 characters leaves its
+  newest events for the next run the same way.
+- **The input** (`extraction.render`): the participants `P1…` (the user marked
+  `（用户本人）`, an alert bot `（告警机器人）`), for leads the known active leads
+  `L1…` of the window's chats from the last 14 days (40 lines, 8,000
+  characters), for intents the recent intents `I1…` (pending or tasked within 6
+  hours, rejected within 30 days), then each chat in the order of its first
+  window message with its context `c…` (up to five people's messages within 24
+  hours before it, and any parent outside the window; 100 in all) and its window
+  messages `m…`, each `[ref] [time] P2 ↩c1: text`. It is the run's `<messages>`
+  block. For intents the instructions gain `## Intent types`, one line per
+  enabled type with its current guidance.
+- **The reply contract** replaces the push contract (`processor.run`
+  `contract=`): `NONE`, or one JSON object (`{"leads": [...]}` or
+  `{"intents": [...]}`, with `instructions_seen`). `extraction.parse` reads it:
+  anything else is `output_invalid` (the run fails, the cursor stays); each item
+  is checked for its kind or enabled type, confidence, summary and lengths, refs
+  that exist in the input with the right letter, at least one `m` source, not
+  both `supersedes` and `same_as`, a valid date, and, for an intent whose
+  sources are all alert-bot messages, the `alert_triage` type; a bad one is
+  dropped and counted by reason, unknown fields are ignored, at most 50 items
+  are read, and a lead's `valid_until` is the end of its day, clamped to
+  [tomorrow, now + `leads.valid_days`].
+- **Storing** is one transaction with the run's end and the cursor, its sources
+  locked first (a deleted one is left out; with no `m` source left the item is
+  `source_deleted`). A lead is new, or merged into the active lead it is
+  `same_as` (sources and people added, the later `valid_until`), and the active
+  leads it `supersedes` become `superseded`; its people are the senders and the
+  @-mentioned of its sources and the participants it is `about`. An intent is
+  `pending`, or `merged` into the intent it is `same_as` when that one is
+  pending or tasked within 6 hours or rejected within 30 days (its sources are
+  added to that one's too); it is `flagged` when a source is in
+  `instructions_seen`, and takes its project from `message_chat_projects`. The
+  run is `extracted` (or `quiet` when nothing was stored), with
+  `extract_counts` (`new`, `merged`, `superseded`, `dropped` by reason,
+  `instructions_seen`, `more`) and a count line written by code as its output.
+- **The operator's word.** An extraction runs only while
+  `target_confirmed_at` holds for its `config_version`, which for these kinds
+  also binds the kind and the chat lists; otherwise a firing is a
+  `skipped_gate` (`not confirmed: …`) and the cursor stays. Enabling it, or
+  changing its rule, zone, source or chat lists (or the processor's Profile,
+  through the version) clears it. A leads subscription is confirmed without a
+  target; an intents one only with a direct chat (a Lark `ou_…` or a positive
+  Telegram id). The confirmation names what it reads, the chats excluded from
+  extraction, the rule, the processor's Profile and managed hooks, the caps and
+  an inferred cost from the last 24 hours' in-scope events.
+- **Backfill** (`looper msgflow leads-backfill --days N`): by default it counts
+  the in-scope events (imports included) of the last N days up to where the
+  leads subscription started, by chat kind and day, its windows and the
+  estimate (inferred, and measured from the subscription's own runs when it has
+  some), and writes nothing. `--run --budget-usd X` runs the windows oldest
+  first through the same rendering, processor, parsing and storing (leads
+  marked `backfill`, no run), saves its progress after each window
+  (`leads.backfill.<schedule id>`) and stops before a window would pass the
+  budget; it resumes.
 
 ### The ledger
 
