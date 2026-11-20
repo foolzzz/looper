@@ -5,6 +5,7 @@ once there is one."""
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Mapping
 from typing import Any
@@ -130,19 +131,31 @@ async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
     return consults
 
 
+# The heading of the line a task's summary gives its consults (the Planner adds it while the advisor is on).
+SUMMARY_HEADING = "## Advisor"
+_SUMMARY = re.compile(r"(?:\n\n)?^## Advisor\n[^\n]*", re.M)
+
+
+def without_summary(text: str) -> str:
+    """``text`` (a task's summary) without the advisor's line in it."""
+    return _SUMMARY.sub("", text)
+
+
 async def summary_line(task_id: str, *, pool: asyncpg.Pool | None = None) -> str | None:
     """The line a task's summary gives its consults of the advisor (the advisor RFC, section 14): how many, what
-    they spent, the points the Planner took and the consults whose attempt then passed, and the steps whose
-    checkpoint consult did not finish; None for a task without one."""
+    they spent, the points the Planner took, those of them whose attempt then passed, and the steps whose
+    checkpoint consult did not end with an answer (one the advisor refused included); None for a task without
+    one."""
     pool = pool or get_pool()
     row = await pool.fetchrow(
         """SELECT count(*) AS consults, COALESCE(sum(s.spent_usd), 0) AS spent,
                   COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(a.adoption_detail->'items') i
                                  WHERE i->>'use' IN ('adopted', 'partial'))), 0) AS taken,
-                  count(*) FILTER (WHERE a.unlocked) AS helped,
+                  COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(a.adoption_detail->'items') i
+                                 WHERE i->>'use' IN ('adopted', 'partial'))) FILTER (WHERE a.unlocked), 0) AS helped,
                   array_remove(array_agg(DISTINCT st.step_key) FILTER (
-                      WHERE s.brief->>'source' = 'checkpoint' AND s.state <> 'answered'
-                      AND s.finished_at IS NOT NULL), NULL) AS incomplete
+                      WHERE s.brief->>'source' = 'checkpoint' AND s.finished_at IS NOT NULL
+                      AND NOT (s.state = 'answered' AND a.advice->>'status' = 'answered')), NULL) AS incomplete
              FROM agent_spawns s LEFT JOIN advisor_advice a ON a.spawn_id = s.id
              LEFT JOIN task_steps st ON st.id = s.step_id
             WHERE s.task_id = $1 AND s.kind = 'advisor'""", task_id)

@@ -75,12 +75,15 @@ const ENDED_LABEL: Partial<Record<AdvisorConsult["state"], string>> = {
 export const consultLabel = (consult: AdvisorConsult) =>
   `${KIND_LABEL[consult.kind ?? ""] ?? "请教"} · ${consultResult(consult)}`;
 
+/** Whether the consult ended with an answer: answered, and not refused (`out_of_scope`). */
+export const consultAnswered = (consult: AdvisorConsult) => consult.state === "answered" && consult.status === "answered";
+
 /** A consult's state as a colour says it (the words always say it too): going, answered, or ended without one. */
 export type ConsultTone = "live" | "answered" | "failed";
 
 export function consultTone(consult: AdvisorConsult): ConsultTone {
   if (consultLive(consult)) return "live";
-  return consult.state === "answered" && consult.status !== "out_of_scope" ? "answered" : "failed";
+  return consultAnswered(consult) ? "answered" : "failed";
 }
 
 const byTime = (a: AdvisorConsult, b: AdvisorConsult) => a.created_at.localeCompare(b.created_at) || a.id - b.id;
@@ -109,10 +112,10 @@ export function consultPlaces(consults: AdvisorConsult[]): ConsultPlaces {
 /** The marker of a step whose checkpoint consult ended without an answer (the step went on without it). */
 export const CHECKPOINT_UNFINISHED = "检查点请教未完成";
 
-/** The steps whose checkpoint consult ended without an answer. */
+/** The steps whose checkpoint consult ended without an answer (one the advisor refused included). */
 export function unfinishedCheckpoints(consults: AdvisorConsult[]): Set<string> {
   return new Set(consults
-    .filter((c) => c.step_id && c.source === "checkpoint" && !consultLive(c) && c.state !== "answered")
+    .filter((c) => c.step_id && c.source === "checkpoint" && !consultLive(c) && !consultAnswered(c))
     .map((c) => c.step_id!));
 }
 

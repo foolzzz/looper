@@ -1043,6 +1043,13 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
     journal = task.get("journal") or []
     supplements = [entry for entry in journal if entry.get("kind") == db_changes.SUPPLEMENT]
     progress = [entry for entry in journal if entry.get("kind") == "progress"]
+    result = task.get("result_summary") or ""
+    if result and (await db_projects.get_task_project(task_id) or {}).get("advisor") != "on":
+        # What the model sees leaves out the advisor while its project has it off (the advisor RFC, section 13);
+        # the task's page keeps its history.
+        from ..db.advisor_advice import without_summary
+
+        result = without_summary(result)
     return {
         **task_listed(task),
         "workflow": task.get("workflow"),
@@ -1067,7 +1074,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
         "supplements": [{"text": clip(entry["summary"], 300), "delivered": entry.get("delivered_at") is not None}
                         for entry in supplements],
         "latest_progress": progress[-1]["summary"] if progress else None,
-        "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
+        "result": clip(result or task.get("error") or "", 1_000) or None,
         **({"process_record": process_record_text(task["process_record"])} if task.get("process_record") else {}),
         "cost_usd": (cost or {}).get("cost_usd"),
         # How many of its Workers and Reviewers run at once, with the source; its own limits (task).

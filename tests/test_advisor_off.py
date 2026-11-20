@@ -123,6 +123,36 @@ def test_decision_messages_stay_as_they_were_without_the_advisor(tmp_path: Path)
     assert _digest(_normalized(_decisions(_planner(tmp_path)), tmp_path)) == DECISIONS_SHA256
 
 
+def test_a_project_that_had_consults_and_turned_the_advisor_off_gives_the_planner_the_same_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The history a project's consults left (steps marked critical, a retry that took advice, earlier consults on
+    record) changes nothing the Planner is given once its project turns the advisor off: no offer, no repeat
+    check, the same DECISION messages."""
+    import asyncio
+
+    from looper.db import advisor_advice
+
+    async def earlier(step_id: str) -> list[dict[str, Any]]:
+        return [{"source": "checkpoint", "attempt": 1, "adoption": "adopted",
+                 "advice": {"answers": [{"conclusion": "Read each key once."}]}}]
+
+    monkeypatch.setattr(advisor_advice, "for_step", earlier)
+    agent = _planner(tmp_path)
+    for step in agent._plan.steps:
+        step.difficulty, step.consult = "critical", 3
+    assert not agent._execution.advisor_on
+    assert _digest(_normalized(_decisions(agent), tmp_path)) == DECISIONS_SHA256
+
+    async def main() -> None:
+        assert await agent._advice_offer(agent._plan, agent._plan.steps[0]) is None
+        assert await agent._advice_offer(agent._plan, None) is None
+        parse = object()
+        assert await agent._asking(agent._plan, agent._plan.steps[0], parse) is parse
+
+    asyncio.run(main())
+
+
 def test_a_workers_first_turn_and_task_stay_as_they_were_without_advice() -> None:
     assert _digest(_worker()) == WORKER_SHA256
 

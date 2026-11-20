@@ -73,7 +73,9 @@ describe("consultPlaces", () => {
     const going = { ...ANSWERED, id: 3, step_id: "step-c", source: "checkpoint" as const, state: "asking" as const };
     const answered = { ...ANSWERED, id: 4, step_id: "step-d", source: "checkpoint" as const };
     const optional = { ...failed, id: 6, step_id: "step-e", source: "optional" as const };
-    expect([...unfinishedCheckpoints([failed, going, answered, optional])]).toEqual(["step-b"]);
+    // a checkpoint the advisor refused ended answered, but without an answer
+    const refused = { ...answered, id: 7, step_id: "step-f", status: "out_of_scope" as const };
+    expect([...unfinishedCheckpoints([failed, going, answered, optional, refused])]).toEqual(["step-b", "step-f"]);
     expect(CHECKPOINT_UNFINISHED).toBe("检查点请教未完成");
   });
 });

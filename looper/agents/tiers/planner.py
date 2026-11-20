@@ -5593,7 +5593,7 @@ class PlannerAgent:
         except Exception:
             logger.warning("task %s: cannot read its consults for its summary", self._task_id, exc_info=True)
             return ""
-        return f"\n\n## Advisor\n{line}" if line else ""
+        return f"\n\n{advisor_advice.SUMMARY_HEADING}\n{line}" if line else ""
 
     async def _cap_reached(self) -> float | None:
         """The task's cap once spent, or None when under it or its cost cannot be read."""
