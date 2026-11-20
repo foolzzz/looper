@@ -836,6 +836,18 @@ async def _leads_check_pending(conn: asyncpg.Connection) -> bool:
          "message_leads_check_record_id_fkey", "intents_check_record_id_fkey"], "'leads_check'", "'check_alert'")
 
 
+def _leads_check_step() -> _OnlineStep:
+    return next(step for step in _ONLINE_STEPS if step.migration == _LEADS_CHECK)
+
+
+async def _leads_check_unvalidated(conn: asyncpg.Connection) -> bool:
+    """Whether a constraint the leads check block adds NOT VALID is still not validated."""
+    return bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ANY($1::text[]) AND NOT convalidated "
+        "AND connamespace = current_schema()::regnamespace)",
+        [constraint for _, constraint in _leads_check_step().validate]))
+
+
 async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_LEADS):
         return False
@@ -1349,8 +1361,13 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         elif state == "empty":
             # schema.sql ran the block, so its constraints are NOT VALID here too: on tables just created, validating
             # them now scans nothing, and a fresh database keeps recording only its baseline.
-            for table, constraint in next(s for s in _ONLINE_STEPS if s.migration == _LEADS_CHECK).validate:
+            for table, constraint in _leads_check_step().validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+        elif await _leads_check_unvalidated(conn):
+            # The block ran outside a migration (schema.sql applied by hand): validated after commit, as an upgrade.
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                               _LEADS_CHECK)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
