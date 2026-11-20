@@ -1161,7 +1161,7 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE projects ADD COLUMN verification_paths TEXT[] "
                                "CHECK (cardinality(verification_paths) <= 20)")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _VERIFICATION_PATHS)
-        # After workflows and every table its keys point at.
+        # After every table its keys point at.
         if await _message_leads_pending(conn):
             await conn.execute(_message_leads_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_LEADS)
