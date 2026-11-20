@@ -58,6 +58,7 @@ from .drain import DrainPhase, DrainScope, DrainState
 from .wait_service import WaitService
 from .ledger_reconciler import LedgerReconciler
 from .source_service import SourceService, own_bot_app_ids
+from .intent_push import IntentPushService
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
@@ -881,6 +882,7 @@ async def _run_agent_system_watched(
             from . import completion_events
             completion_events.set_scheduler(scheduler)
             source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
+            intent_push_service = IntentPushService(registry, drain=drain)
             ledger_reconciler = LedgerReconciler()
             supervisor.register(task_router)
 
@@ -1017,6 +1019,7 @@ async def _run_agent_system_watched(
         await completion_service.start()
         # Sources that are off (the default) cost one query per tick.
         await source_service.start()
+        await intent_push_service.start()
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
@@ -1079,6 +1082,7 @@ async def _run_agent_system_watched(
             await wait_service.stop()
             await completion_service.stop()
             await source_service.stop()
+            await intent_push_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()
             await scheduler.stop()

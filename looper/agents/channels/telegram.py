@@ -335,6 +335,19 @@ class TelegramChannelAdapter(ChannelAdapter):
             return PostReceipt(False, external_ids=tuple(sent), error=error, outcome=_post_outcome(exc))
         return PostReceipt(True, external_ids=tuple(sent))
 
+    async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
+        if self._app is None:
+            return PostReceipt(False, error="the Telegram bot is not started", outcome=PostOutcome.REJECTED)
+        try:
+            chat, message_id = int(target.id), int(external_id)
+        except ValueError:
+            return PostReceipt(False, error="invalid Telegram chat or message id", outcome=PostOutcome.REJECTED)
+        try:
+            await self._app.bot.edit_message_text(chat_id=chat, message_id=message_id, text=self._redact(text))
+        except Exception as exc:
+            return PostReceipt(False, error=redact(str(exc)), outcome=_post_outcome(exc))
+        return PostReceipt(True, external_ids=(external_id,))
+
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
         its own, or send the answer to the Telegram user who wrote and close its status line."""

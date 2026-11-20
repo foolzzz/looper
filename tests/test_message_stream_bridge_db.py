@@ -380,7 +380,8 @@ def test_health_follows_the_runs(monkeypatch, tmp_path):
     run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
 
 
-def test_a_lost_lock_session_stops_the_writes(monkeypatch, tmp_path):
+@pytest.mark.parametrize("wait_for_disconnect", [False, True])
+def test_a_lost_lock_session_stops_the_writes(monkeypatch, tmp_path, wait_for_disconnect):
     async def check(pool):
         monkeypatch.setattr(service, "CHUNK_BYTES", 2000)
         sup.append(tmp_path, "oc_a", *(sup.message(f"m{n:03d}", text="z" * 100) for n in range(40)))
@@ -389,12 +390,18 @@ def test_a_lost_lock_session_stops_the_writes(monkeypatch, tmp_path):
         async def losing(conn, source_id, run_id, batch):
             calls.append(1)
             if len(calls) == 2:
+                disconnected = asyncio.Event()
+                conn.add_termination_listener(lambda _: disconnected.set())
                 # The session that holds the writer lock goes away; the writes must go with it.
                 # This schema's lock only: other tests of other workers take the same lock class in their own schemas.
                 holder = await pool.fetchval("SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted "
                                              "AND classid = $1 AND objid = hashtext(current_schema() || ':' || 'src')::oid",
                                              store._LOCK_CLASS)
-                await pool.execute("SELECT pg_terminate_backend($1)", holder)
+                assert holder == conn.get_server_pid()
+                assert await pool.fetchval("SELECT pg_terminate_backend($1)", holder)
+                if wait_for_disconnect:
+                    # Force asyncpg's cleanup to detach the pooled proxy before the next write.
+                    await asyncio.wait_for(disconnected.wait(), timeout=5)
             return await real(conn, source_id, run_id, batch)
 
         monkeypatch.setattr(store, "insert_events", losing)
@@ -402,11 +409,15 @@ def test_a_lost_lock_session_stops_the_writes(monkeypatch, tmp_path):
         assert broken.status == "failed"
         stored = await pool.fetchval("SELECT count(*) FROM source_events")
         assert 0 < stored < 40
+        assert len(calls) == 2
+        committed = await pool.fetchval("SELECT committed_seq FROM event_sources WHERE id='src'")
+        assert committed == await pool.fetchval("SELECT max(seq) FROM source_events")
         await asyncio.sleep(0.3)
         assert await pool.fetchval("SELECT count(*) FROM source_events") == stored
         monkeypatch.setattr(store, "insert_events", real)
         assert (await passes(pool, tmp_path)).status == "ok"
         assert await pool.fetchval("SELECT count(*) FROM source_events") == 40
+        assert await pool.fetchval("SELECT status FROM source_runs WHERE id=$1", broken.run_id) == "interrupted"
 
     run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30, max_size=5)
 
