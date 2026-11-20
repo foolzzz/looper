@@ -98,6 +98,36 @@ def test_exclusion_removes_existing_events_from_subscription_selection(monkeypat
     run_db(check, monkeypatch, setup=lambda p: setup(p, tmp_path), timeout=30)
 
 
+@pytest.mark.parametrize("kind", ["leads", "intents"])
+def test_stream_inclusion_and_extraction_exclusion_both_filter_existing_events(monkeypatch, tmp_path, kind):
+    async def check(pool):
+        sup.append(tmp_path, "chat_synthetic", sup.message("m1"))
+        await ingest(pool)
+        await pool.execute("UPDATE source_events SET origin = 'live'")
+        await pool.execute("UPDATE source_chats SET kind = 'p2p'")
+        sub = dict(source_id="src", include_chats=[], exclude_chats=[], max_age_minutes=10080, max_events=100)
+
+        async def picked():
+            result = await subscriptions.extraction_window(
+                pool, sub, output_kind=kind, from_seq=0, to_seq=100000, now=sup.NOW, own_apps=[])
+            return [row["text"] for row in result["rows"]]
+
+        assert await picked() == ["hello"]
+        await store.set_chat_inclusion("src", "chat_synthetic", False, db=pool)
+        assert await picked() == []
+        await store.set_chat_inclusion("src", "chat_synthetic", True, db=pool)
+        assert await picked() == ["hello"]
+        await pool.execute("UPDATE source_chats SET extraction = 'excluded', extraction_excluded_at = now()")
+        assert await picked() == []
+        await store.set_chat_inclusion("src", "chat_synthetic", False, db=pool)
+        await store.set_chat_inclusion("src", "chat_synthetic", True, db=pool)
+        assert await picked() == []
+        await pool.execute("UPDATE source_chats SET extraction = 'included', extraction_excluded_at = NULL")
+        assert await picked() == ["hello"]
+
+    run_db(check, monkeypatch, setup=lambda p: setup(p, tmp_path), timeout=30)
+
+
 def test_daily_retention_drops_only_expired_raw_bodies_and_preserves_text(monkeypatch, tmp_path):
     async def check(pool):
         old = sup.NOW - timedelta(days=31)
