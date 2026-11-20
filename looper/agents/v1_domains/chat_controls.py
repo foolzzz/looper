@@ -56,8 +56,7 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read the chat settings: stopping a reply, the Manager's completion turns, its "
-        "research order, and the delivery layer for proactive messages.",
+    _op("chat_settings.get", "Read the chat settings: stopping a reply, completion turns, research order and the delivery layer.",
         _object({}, closed=True), CHAT_SETTINGS),
     _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
