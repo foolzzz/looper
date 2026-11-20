@@ -3,6 +3,8 @@ the operator is shown. The runs on PostgreSQL are in ``test_subscriptions_db.py`
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -25,11 +27,31 @@ def test_a_new_subscription_names_what_it_reads():
     ("chat_kinds", []), ("chat_kinds", ["channel"]), ("sender_kinds", ["bot"]), ("max_age_minutes", 4),
     ("max_age_minutes", 10081), ("max_events", 0), ("max_events", 2001), ("text_max_chars", 19),
     ("text_max_chars", True), ("quiet_word", "two words"), ("quiet_word", ""), ("exclude_mentions_me", "yes"),
-    ("render", "lines_v2"), ("output_kind", "memory"), ("include_chats", "oc_x"), ("output_header", "x" * 201),
+    ("output_kind", "memory"), ("include_chats", "oc_x"), ("output_header", "x" * 201),
     ("source_id", " "), ("cursor_seq", 5), ("target_confirmed_at", "2026-01-01"), ("unknown", 1)])
 def test_an_invalid_field_is_refused_and_named(field, value):
     with pytest.raises(ValueError, match=field):
         subscriptions.parse({**CREATE, field: value}, update=False)
+
+
+@pytest.mark.parametrize("field,value", [("window", "rolling"), ("window", None),
+                                       ("delivery_policy", "weekly"), ("delivery_policy", True)])
+def test_window_and_delivery_policy_are_explicit_choices(field, value):
+    with pytest.raises(ValueError, match=field):
+        subscriptions.parse({**CREATE, field: value}, update=False)
+
+
+def test_default_cursor_configuration_keeps_existing_target_confirmation_version():
+    row = {"project_id": "project", "id": "schedule", "notify_channel": "lark", "notify_chat": "ou_synthetic",
+           "cron": "5 * * * *", "timezone": "UTC", "subscription": {"source_id": "source"}}
+    facts = {"channel": "lark", "chat": "ou_synthetic", "cron": row["cron"], "timezone": "UTC",
+             "source": "source", "processor": {}}
+    expected = subscriptions.digest(json.dumps(facts, sort_keys=True, ensure_ascii=False))
+    assert asyncio.run(subscriptions.config_version(row, profile={})) == expected
+    row["subscription"].update(window="cursor", delivery_policy="per_run")
+    assert asyncio.run(subscriptions.config_version(row, profile={})) == expected
+    row["subscription"]["window"] = "lookback"
+    assert asyncio.run(subscriptions.config_version(row, profile={})) != expected
 
 
 def test_an_update_may_name_any_part_but_not_nothing():

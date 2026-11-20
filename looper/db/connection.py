@@ -137,6 +137,8 @@ _PROCESSOR_ROLE = "processor_role"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _SUBSCRIPTIONS = "subscriptions"
+_SUBSCRIPTION_RULES = "subscription_rules"
+_SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
 _SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
 _RUN_TREE = "run_tree"
@@ -687,6 +689,56 @@ async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('subscriptions') IS NOT NULL")
 
 
+async def _subscription_rules_pending(conn: asyncpg.Connection) -> bool:
+    """A database whose ``subscriptions`` predates the selection rules; a fresh one already has the column."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SUBSCRIPTION_RULES):
+        return False
+    return bool(await conn.fetchval(
+        "SELECT to_regclass('subscriptions') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('subscriptions') AND attname = 'rules' AND attnum > 0 AND NOT attisdropped)"))
+
+
+_SUBSCRIPTION_RULES_DDL = """
+ALTER TABLE subscriptions ADD COLUMN rules JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array');
+ALTER TABLE subscriptions ADD COLUMN config_epoch BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE subscription_runs ADD COLUMN config JSONB, ADD COLUMN config_epoch BIGINT,
+    ADD COLUMN match_timeouts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_render_check,
+    ADD CONSTRAINT subscriptions_render_check CHECK (render IN ('lines_v1', 'lines_v2'));
+"""
+
+
+async def _subscription_lookback_pending(conn: asyncpg.Connection) -> bool:
+    """Unmarked databases may already have some daily objects; recorded upgrades never repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SUBSCRIPTION_LOOKBACK):
+        return False
+    return bool(await conn.fetchval("""
+        SELECT to_regclass('subscriptions') IS NOT NULL AND (
+            to_regclass('subscription_daily_claims') IS NULL OR EXISTS (
+                SELECT 1 FROM (VALUES ('subscriptions', 'window'), ('subscriptions', 'delivery_policy'),
+                                     ('subscription_runs', 'window_mode'), ('subscription_runs', 'daily_date'))
+                    AS required(table_name, column_name)
+                WHERE NOT EXISTS (SELECT 1 FROM pg_attribute
+                    WHERE attrelid = to_regclass(required.table_name) AND attname = required.column_name
+                    AND attnum > 0 AND NOT attisdropped)))
+    """))
+
+
+_SUBSCRIPTION_LOOKBACK_DDL = """
+ALTER TABLE subscriptions
+    ADD COLUMN IF NOT EXISTS "window" TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
+    ADD COLUMN IF NOT EXISTS delivery_policy TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'));
+ALTER TABLE subscription_runs
+    ADD COLUMN IF NOT EXISTS window_mode TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
+    ADD COLUMN IF NOT EXISTS daily_date DATE;
+CREATE TABLE IF NOT EXISTS subscription_daily_claims (
+    schedule_id TEXT NOT NULL REFERENCES subscriptions(schedule_id) ON DELETE CASCADE,
+    local_date DATE NOT NULL,
+    PRIMARY KEY (schedule_id, local_date)
+);
+"""
+
+
 async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
@@ -1109,6 +1161,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _subscriptions_pending(conn):
             await conn.execute(_subscriptions_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTIONS)
+        if await _subscription_rules_pending(conn):
+            await conn.execute(_SUBSCRIPTION_RULES_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_RULES)
+        if await _subscription_lookback_pending(conn):
+            await conn.execute(_SUBSCRIPTION_LOOKBACK_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_LOOKBACK)
         if await _ledger_pending(conn):
             await conn.execute(_ledger_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
@@ -1255,7 +1313,8 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
-            or await _subscriptions_pending(conn)
+            or await _subscriptions_pending(conn) or await _subscription_rules_pending(conn)
+            or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _message_leads_pending(conn)
