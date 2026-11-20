@@ -95,6 +95,7 @@ def test_planner_runtime_receives_resume_and_only_an_actual_matching_resume_sets
         "claimed": True, "session_id": "sess-p" if copied else None,
         "session_totals": {}, "runtime_type": "claude-code", "profile_id": None,
         "provider_id": "other-provider" if mode == "profile" else "prov-claude-subscription", "previous": None,
+        "context_tokens": 1000, "run_cost_usd": 0.1,
     })
     if mode == "parallel":
         claim.return_value = {"claimed": False, "reason": "parallel"}
@@ -821,7 +822,8 @@ def test_restart_after_reset_resumes_with_the_persisted_storage_label(
         persisted["label"] = label  # what claim_planner_session writes on the task
         assert task_id == "t1"
         return {"claimed": True, "session_id": "sess-p", "session_totals": {}, "runtime_type": "claude-code",
-                "provider_id": "prov-claude-subscription", "profile_id": None, "previous": None}
+                "provider_id": "prov-claude-subscription", "profile_id": None, "previous": None,
+                "context_tokens": 1000, "run_cost_usd": 0.1}
 
     from looper.db import schedules
 
@@ -1022,7 +1024,8 @@ def test_dsh_schedule_claim_resumes_the_saved_owner_across_planners(tmp_path, mo
                 agent._plan = TaskPlan(plan_id=task_id, goal_id="g", requirement=f"run {index}", work_dir=str(tmp_path))
                 claim.return_value = {"claimed": True, "session_id": session, "session_totals": totals,
                                       "runtime_type": "dsh", "provider_id": state.launch.profile.provider.id,
-                                      "profile_id": state.launch.profile.id, "previous": None}
+                                      "profile_id": state.launch.profile.id, "previous": None,
+                                      "context_tokens": 1000, "run_cost_usd": 0.1}
                 await agent._claim_schedule_session(agent._plan)
                 assert await agent._turn(agent._plan_message(agent._plan)) == "planner reply"
                 assert agent._claude.label == "planner-schedule-schedule-dsh"
