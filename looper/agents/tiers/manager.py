@@ -846,6 +846,8 @@ class ManagerAgent:
         self._running_token: TurnToken | None = None  # the token of the user turn being answered
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
+        # Completion turns past their deadline that did not end, and the stops of their runtimes (``_tell_completion``).
+        self._late_turns: set[asyncio.Task[Any]] = set()
         self._stopped_notes: list[str] = []  # told to the next user turn: the user stopped or withdrew the ones before
         self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
         self._process: _Process | None = None  # what the running Claude was started with
@@ -935,6 +937,11 @@ class ManagerAgent:
         await self._load_db_config()
         if not self._session_loaded:
             await self._load_session_state()
+        try:
+            # Before any replayed wake-up: a turn a restart cut off sends its notices (``completion_events``).
+            await completion_events.recover(bus, self.agent_address)
+        except Exception:
+            logger.exception("%s: could not recover the completion events of its earlier turns", self._log)
 
         bus.subscribe_topic(MessageType.USER_MESSAGE.value, self._receive, consumes=True)
         # Channels (and journal replay) can queue messages before this consumer exists. Give those messages
@@ -1885,7 +1892,12 @@ class ManagerAgent:
             batch = uuid.uuid4()
             rows = await db_manager_events.claim(*target.key, batch)
         except Exception:
-            logger.exception("%s: could not take the completion events of %s", self._log, target.key)
+            # The bus acknowledges this wake-up once it is handled: a new one is queued (and journaled) first, so
+            # the events are tried again, after a pause, and after a restart.
+            logger.exception("%s: could not take the completion events of %s; trying again in %.0f s", self._log,
+                             target.key, completion_events.RETRY_SECONDS)
+            await asyncio.sleep(completion_events.RETRY_SECONDS)
+            await self._bus.publish(completion_events.wake(self.agent_address, target))
             return
         if rows:
             await self._tell_completion(rows, batch)
@@ -1910,16 +1922,7 @@ class ManagerAgent:
         if not done:
             reason = "turn_timeout"
             await self._fall_back_completion(batch, reason, state)
-            token, turn = state.get("token"), state.get("turn")
-            if token is not None and self.can_interrupt and token.request_stop("completion_timeout"):
-                if turn is not None and self.ops is not None:
-                    self.ops.stop_turn(turn)
-            try:
-                await run
-            except asyncio.CancelledError:
-                raise
-            except BaseException:
-                logger.info("%s: the completion turn %s ended after its deadline", self._log, batch)
+            await self._end_late_completion(run, batch, state)
         else:
             try:
                 text = run.result().strip()
@@ -1965,6 +1968,54 @@ class ManagerAgent:
         logger.info("completion turn ended batch=%s outcome=%s reason=%s seconds=%.1f cost_usd=%s", batch,
                     "fallback" if reason else "delivered", reason, time.monotonic() - started, cost)
 
+    async def _end_late_completion(self, run: asyncio.Task[str], batch: uuid.UUID, state: dict[str, Any]) -> None:
+        """End a completion turn past its deadline (its notices are out) within ``END_SECONDS`` twice, so the
+        Manager's next message is not held behind it: first stopped as a stop ends a turn (a runtime run per turn
+        ends its process tree), then cancelled. A cancelled turn may have left its runtime mid-turn, so that runtime
+        is stopped and the next message starts a fresh one. A turn that ends even then is left to end on its own:
+        the Manager lets go of it (its lock, its binding) and answers on a fresh runtime; it only writes its record."""
+        token, turn = state.get("token"), state.get("turn")
+        if token is not None and token.request_stop("completion_timeout") and turn is not None \
+                and self.ops is not None:
+            self.ops.stop_turn(turn)
+        cancelled = False
+        for _ in range(2):
+            try:
+                done, _ = await asyncio.wait({run}, timeout=completion_events.END_SECONDS)
+            except asyncio.CancelledError:
+                run.cancel()
+                raise
+            if done:
+                break
+            cancelled = True
+            run.cancel()
+        if run.done():
+            if not run.cancelled() and run.exception() is not None:
+                logger.info("%s: the completion turn %s ended after its deadline (%s)", self._log, batch,
+                            type(run.exception()).__name__)
+            if cancelled:
+                try:
+                    await asyncio.wait_for(self._claude.stop(kill=True), completion_events.END_SECONDS)
+                except Exception:
+                    logger.warning("%s: the runtime of the cancelled completion turn %s did not stop", self._log,
+                                   batch, exc_info=True)
+            return
+        logger.error("%s: the completion turn %s did not end once cancelled; it is left to end on its own",
+                     self._log, batch)
+        self._late_turns.add(run)
+        run.add_done_callback(self._late_turns.discard)
+        if self._lock_owner is token:
+            self._lock_owner = None
+            self._turn_lock.release()
+        if self._running_token is token:
+            self._running_token = None
+        self._publish_binding(None)
+        late, self._claude = self._claude, self._claude_runtime.resident_session(self.agent_id)
+        self._process = None
+        stopping = asyncio.create_task(late.stop(kill=True))
+        self._late_turns.add(stopping)
+        stopping.add_done_callback(self._late_turns.discard)
+
     async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any]) -> None:
         assert self._bus is not None
         try:
@@ -2007,7 +2058,8 @@ class ManagerAgent:
                 raise _CompletionNotTaken()
             return await self._run_prepared(token, prepared)
         finally:
-            self._running_token = None
+            if self._running_token is token:  # (a turn let go of past its deadline: another may run by now)
+                self._running_token = None
             if self._lock_owner is token:
                 self._lock_owner = None
                 self._turn_lock.release()

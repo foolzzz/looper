@@ -8,7 +8,8 @@ dashboard chat, whose own Manager handles the report, is ``pending``: the Manage
 claims the chat's pending events and runs a read-only ``[COMPLETION]`` turn; its reply, with each task's link added
 by code, replaces the notice. Whatever goes wrong (the turn fails, runs past ``TURN_SECONDS``, is stopped, replies
 nothing, or the reply cannot be handed to the channel; the Manager or the switch was turned off), the events fall
-back and their notices go out exactly as recorded. A group chat's end is ``skipped`` (``group_chat``), and so is
+back and their notices go out exactly as recorded; a Manager that starts does the same for the events a restart
+left ``running`` (``recover``). A group chat's end is ``skipped`` (``group_chat``), and so is
 one whose report reached another Manager (``manager_off``). A schedule's run message is recorded ``skipped``
 (``off``) whatever the switch says: its turn is not built yet.
 
@@ -41,6 +42,10 @@ LEAD_CHARS = 600
 DB_TIMEOUT_SECONDS = 3.0
 # A completion turn's reply goes out only within this long from the claim; else the notices do.
 TURN_SECONDS = 120.0
+# A turn past its deadline gets this long to end once stopped, and again once cancelled.
+END_SECONDS = 10.0
+# A wake-up whose events could not be read is queued again after this long.
+RETRY_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -184,9 +189,25 @@ def waits_for_turn(recorded: store.Recorded | None) -> bool:
 
 def due(source: AgentAddress, recorded: store.Recorded) -> MessageEnvelope:
     """The wake-up of the Manager whose completion turn the event waits for (``source`` is that Manager)."""
-    target = Target.of(recorded.row)
+    return wake(source, Target.of(recorded.row))
+
+
+def wake(source: AgentAddress, target: Target) -> MessageEnvelope:
+    """A ``COMPLETION_DUE`` for the chat ``target``, from and to its Manager ``source``."""
     return MessageEnvelope.create(source=source, target=source, message_type=MessageType.COMPLETION_DUE,
-                                  payload=target.payload(), correlation_id=f"completion-{recorded.row['id']}")
+                                  payload=target.payload(), correlation_id=f"completion-{uuid.uuid4().hex[:12]}")
+
+
+async def recover(bus: Any, source: AgentAddress) -> None:
+    """A Manager starts (``source``): the events its earlier turns left ``running`` fall back (``restart``), every
+    fallen-back event whose notice was never sent sends it, and each chat whose events still wait gets a wake-up.
+    Done before its message loop, so a replayed wake-up finds them settled."""
+    unsent, waiting = await asyncio.wait_for(store.recover(source.agent_id), DB_TIMEOUT_SECONDS)
+    for row in unsent:
+        logger.info("completion fallback id=%s reason=%s", row["id"], row["reason"])
+    await send_fallbacks(bus, source, unsent)
+    for key in waiting:
+        await bus.publish(wake(source, Target(*key)))
 
 
 def _json(value: Any) -> Any:

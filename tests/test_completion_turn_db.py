@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,8 +19,11 @@ from typing import Any
 import pytest
 
 from looper.agents import chat_settings, completion_events
-from looper.agents.message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+from looper.agents.claude_cli import ResidentTurn
+from looper.agents.message import (MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType,
+                                   channel_address)
 from looper.agents.ops import Turn, TurnOrigin
+from looper.agents.run_usage import Usage
 from looper.agents.task_notice import Notice, NotifyChannel, NotifyTarget, TargetKind, web_end_text
 from looper.db import projects, tasks
 from tests.api_manager_support import USAGE, _manager
@@ -368,3 +372,152 @@ def test_the_switch_changes_no_prompt_tool_or_command_of_a_users_turn(monkeypatc
         assert seen[0] == seen[1]
 
     run_db(run, monkeypatch, timeout=90)
+
+
+def test_a_turn_a_restart_cut_off_sends_its_notice_before_a_replayed_wake_up(monkeypatch, tmp_path, turns_on):
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import manager_events as store
+    from tests.db_support import until
+
+    async def run(pool):
+        async with _manager(pool, tmp_path, monkeypatch, []) as chat:
+            await _task(pool, tmp_path, origin_thread=THREAD)
+            await chat.manager._handle(_goal_status())
+            (due,) = _drain(chat.bus, "manager")
+            # The turn took the event, then the service stopped before it ended.
+            (taken,) = await store.claim("manager", "channel-web", THREAD, uuid.uuid4())
+            restarted = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+            chat.bus.get_queue("manager").put_nowait(due)  # the journal replays the wake-up
+            await restarted.start(chat.bus)
+            try:
+                await until(lambda: chat.bus.get_queue("channel-web").qsize() > 0, "the notice")
+                await until(lambda: chat.bus.get_queue("manager").qsize() == 0 and restarted._handling is None,
+                            "the replayed wake-up")
+            finally:
+                await restarted.stop()
+            (notice,) = _drain(chat.bus, "channel-web")
+            assert notice.payload["text"] == web_end_text("completed", "calc", "## Done\nadd and sub pass")
+            (row,) = await _events(pool)
+            assert (row["id"], row["state"], row["reason"], row["sent_at"] is not None) == (
+                taken["id"], "fallback", "restart", True)
+
+    run_db(run, monkeypatch, timeout=60)
+
+
+def test_a_wake_up_whose_events_cannot_be_read_is_queued_again(monkeypatch, tmp_path, turns_on):
+    from looper.db import manager_events as store
+
+    real_claim, failures = store.claim, []
+
+    async def claim(*args: Any, **kwargs: Any) -> Any:
+        if not failures:
+            failures.append(1)
+            raise ConnectionError("the database went away")
+        return await real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(store, "claim", claim)
+    monkeypatch.setattr(completion_events, "RETRY_SECONDS", 0.01, raising=False)
+
+    async def run(pool):
+        async with _manager(pool, tmp_path, monkeypatch, [_text(REPLY)]) as chat:
+            await _task(pool, tmp_path, origin_thread=THREAD)
+            await chat.manager._handle(_goal_status())
+            (due,) = _drain(chat.bus, "manager")
+            await chat.manager._handle(due)
+            (again,) = _drain(chat.bus, "manager")  # queued before the first is acknowledged
+            assert again.message_type is MessageType.COMPLETION_DUE and again.payload == due.payload
+            assert _drain(chat.bus, "channel-web") == [] and (await _events(pool))[0]["state"] == "pending"
+            await chat.manager._handle(again)
+            (reply,) = _drain(chat.bus, "channel-web")
+            assert reply.payload["text"].startswith(REPLY)
+            assert (await _events(pool))[0]["state"] == "delivered"
+
+    run_db(run, monkeypatch, timeout=60)
+
+
+class _Hung:
+    """A resident session stand-in run per turn: it cannot be interrupted, and its completion turn ignores its stop
+    and waits for ``release`` (a cancellation ends it, unless ``swallow`` makes it ignore that too)."""
+
+    label = "manager"
+    pid = None
+    shares_bridge = False
+    can_interrupt = False
+
+    def __init__(self, *, swallow: bool = False) -> None:
+        self.started, self.starts, self.stops, self.swallow = False, 0, 0, swallow
+        self.command: list[str] = []
+        self.totals = Usage()
+        self.texts: list[str] = []
+        self.release = asyncio.Event()
+
+    def stale(self, signature: Any) -> bool:
+        return False
+
+    async def start(self, command: list[str], **kwargs: Any) -> None:
+        self.started, self.command = True, command
+        self.starts += 1
+
+    async def run_turn(self, text: str, on_event: Any, *, tag: Any = None, stop: Any = None,
+                       cancel: Any = None) -> Any:
+        self.texts.append(text)
+        await on_event({"type": "system", "subtype": "init", "session_id": "sess-1"})
+        if text.startswith("[COMPLETION]"):
+            while not self.release.is_set():
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    if not self.swallow:
+                        raise
+        return ResidentTurn({"type": "result", "subtype": "success", "is_error": False, "result": "好的",
+                             "session_id": "sess-1"})
+
+    async def stop(self, *, kill: bool = False) -> None:
+        self.started = False
+        self.stops += 1
+
+
+@pytest.mark.parametrize("swallow", [False, True], ids=["cancelled", "ignores_cancel"])
+def test_a_turn_past_its_deadline_on_a_runtime_without_interrupt_does_not_hold_the_next_message(
+        monkeypatch, tmp_path, turns_on, swallow):
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    monkeypatch.setattr(completion_events, "TURN_SECONDS", 0.5)
+    monkeypatch.setattr(completion_events, "END_SECONDS", 0.3, raising=False)
+    hung, fresh = _Hung(swallow=swallow), _Hung()
+    monkeypatch.setattr(ClaudeCodeRuntime, "resident_session", lambda self, label: fresh)
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\nexit 0\n")
+    claude.chmod(0o755)
+
+    async def run(pool):
+        from looper.agents.bus import MessageBus
+
+        await _task(pool, tmp_path, origin_thread=THREAD)
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(claude_bin=str(claude), work_dir=tmp_path),
+                               runtime_root=tmp_path)
+        manager._bus, manager._claude = bus, hung
+        await manager._handle(_goal_status())
+        (due,) = _drain(bus, "manager")
+        await asyncio.wait_for(manager._handle(due), 10)  # the message loop goes on
+        (notice,) = _drain(bus, "channel-web")
+        assert notice.payload["text"] == web_end_text("completed", "calc", "## Done\nadd and sub pass")
+        (row,) = await _events(pool)
+        assert (row["state"], row["reason"]) == ("fallback", "turn_timeout")
+        assert not manager.busy and hung.stops >= 1  # the late turn's runtime is stopped
+        await asyncio.wait_for(manager._handle(MessageEnvelope.create(
+            source=channel_address("web"), target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+            payload={"text": "还在吗？", "channel_context": {"session_id": THREAD}}, correlation_id="c2",
+            metadata={"origin_channel_id": "channel-web"})), 10)
+        (reply,) = [e for e in _drain(bus, "channel-web") if e.message_type is MessageType.AGENT_REPLY]
+        assert reply.payload["text"] == "好的"
+        runtime = fresh if swallow else hung  # a fresh runtime: a new session, or the old one started again
+        assert runtime.texts[-1].endswith("还在吗？") and runtime.starts == (1 if swallow else 2)
+        hung.release.set()
+        await asyncio.sleep(0.05)
+        assert not manager._late_turns or not swallow
+        await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=60)

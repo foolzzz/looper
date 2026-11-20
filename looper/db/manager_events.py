@@ -23,6 +23,8 @@ Db = asyncpg.Pool | asyncpg.Connection
 RETENTION_DAYS = 30
 # The most events one completion turn tells.
 CLAIM_LIMIT = 10
+# A Manager that starts sends the notices of fallen-back events this recent that were never sent.
+UNSENT_HOURS = 24
 PRUNE_BATCH = 5000
 SUMMARY_HOURS = 24
 
@@ -117,6 +119,22 @@ async def fall_back(*, reason: str, batch: UUID | None = None, target: Sequence[
         f"record_id = COALESCE($2, record_id) WHERE {where} AND state = ANY(${len(args) + 3}::text[]) RETURNING *",
         reason, record_id, *args, list(states))
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
+
+
+async def recover(manager_id: str, *, pool: Db | None = None) -> tuple[list[dict[str, Any]], list[tuple[str, str, str]]]:
+    """What a Manager that starts finds of the turns it took before: its ``running`` events (their turn was cut off)
+    fall back with ``restart``. Answers the fallen-back events of the last ``UNSENT_HOURS`` whose notice was never
+    handed to the channel (those just moved among them), oldest first, and the chats whose events still wait for a
+    turn (``pending``)."""
+    db = pool or get_pool()
+    await db.execute("UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now() "
+                     "WHERE manager_id = $1 AND state = 'running'", manager_id)
+    unsent = await db.fetch(
+        "SELECT * FROM manager_events WHERE manager_id = $1 AND state = 'fallback' AND sent_at IS NULL "
+        "AND created_at >= now() - make_interval(hours => $2) ORDER BY id", manager_id, UNSENT_HOURS)
+    waiting = await db.fetch("SELECT DISTINCT manager_id, channel_id, chat FROM manager_events "
+                             "WHERE manager_id = $1 AND state = 'pending'", manager_id)
+    return [dict(row) for row in unsent], [(row["manager_id"], row["channel_id"], row["chat"]) for row in waiting]
 
 
 async def prune(conn: Db, before: datetime) -> int:
