@@ -174,14 +174,17 @@ def score_schedule(posts: list[dict[str, str]], work_dir: str, cron: str | None)
     return {"settings_shown": shown, "changed": changed, "cron": cron, "passed": not shown and changed}
 
 
-def _event(stand_in: Any, conversation: str, message_id: str, text: str) -> dict[str, Any]:
-    group = conversation in GROUPS
-    return {"type": "im.message.receive_v1", "chat_id": CHATS[conversation], "chat_type": "group" if group else "p2p",
-            "message_id": message_id, "message_type": "text", "sender_type": "user", "sender_id": stand_in.OPEN_ID,
+def _event(stand_in: Any, conversation: str, message_id: str, text: str, *,
+           sender: str | None = None, chat_id: str | None = None, group: bool | None = None) -> dict[str, Any]:
+    group = conversation in GROUPS if group is None else group
+    return {"type": "im.message.receive_v1", "chat_id": chat_id if chat_id is not None else CHATS[conversation],
+            "chat_type": "group" if group else "p2p", "message_id": message_id, "message_type": "text",
+            "sender_type": "user", "sender_id": sender if sender is not None else stand_in.OPEN_ID,
             "content": f"@HelperBot {text}" if group else text, "mentions": [stand_in.BOT_MENTION] if group else []}
 
 
-def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: str) -> dict[str, Any]:
+def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: str, *,
+             session: Any = None) -> dict[str, Any]:
     import asyncpg
     from evals.prompt_regression import runner
     from looper.agents.serve import seed_channel_configs
@@ -192,12 +195,17 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
         path.mkdir(parents=True)
     log, world_file = root / "lark-cli.jsonl", root / "world.json"
     world = {**stand_in.WORLD, "events": []}
+    if session is not None:
+        world = session.world(stand_in, world)
     world_file.write_text(json.dumps(world), encoding="utf-8")
     script = bin_dir / "lark-cli.py"
     script.write_text(stand_in._STAND_IN.format(log=str(log), world=str(world_file), bot=stand_in.BOT_OPEN_ID))
     (bin_dir / "lark-cli").write_text(f"#!/bin/sh\nexec {shlex.join([sys.executable, str(script)])} \"$@\"\n")
     (bin_dir / "lark-cli").chmod(0o755)
-    runner.install_claude(bin_dir, mode="real", real_claude=args.claude, max_budget_usd=args.max_budget_usd)
+    if session is None:
+        runner.install_claude(bin_dir, mode="real", real_claude=args.claude, max_budget_usd=args.max_budget_usd)
+    else:
+        session.install(bin_dir, root)
     with runner.fresh_database(args.pg_url) as (database_url, _):
         async def seed() -> None:
             pool = await asyncpg.create_pool(database_url, min_size=1, max_size=2)
@@ -207,7 +215,7 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
                 await pool.execute("UPDATE channel_configs SET enabled=TRUE, config=$1::jsonb "
                                    "WHERE channel_id='channel-lark'", json.dumps({
                                        "profile": "cli_main", "allowed_open_ids": [stand_in.OPEN_ID],
-                                       "allowlist_app_id": "cli_main"}))
+                                       "allowlist_app_id": "cli_main", **(session.channel_config(stand_in) if session else {})}))
             finally:
                 await pool.close()
 
@@ -278,7 +286,10 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
             return notice or not now["has_events"] or time.monotonic() - ended > NO_EVENT_SECONDS
 
         with runner.running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir,
-                                   log_path=root / "serve.log") as api:
+                                   log_path=root / "serve.log",
+                                   **({"home": root / "home"} if session is not None and args.fake else {})) as api:
+            if session is not None:
+                return session.run(api, database_url, world_file, log, world, work)
             runner.select_agent(api, agent=None, model=args.model)
             if args.manager_model:
                 from evals.prompt_regression.dialogs import _manager_profile
