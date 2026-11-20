@@ -150,7 +150,7 @@ function RunList({ runs }: { runs: MessageStreamRun[] }) {
             <span className="text-muted-foreground">{run.mode}{run.trigger === "manual" ? " · manual" : ""}{duration(run) && ` · ${duration(run)}`}</span>
             <span className="flex-1" />
             <span className="tabular-nums">
-              {run.events_new} new · {run.events_seen} already stored · {run.events_skipped} skipped
+              {run.events_new} new · {run.events_seen} already stored · {run.events_skipped} skipped · {run.skipped_by_deletion} skipped by deletion
               {run.files_rescanned ? ` · ${run.files_rescanned} file${run.files_rescanned === 1 ? "" : "s"} read again` : ""}
             </span>
           </div>
@@ -250,8 +250,10 @@ function Deletion({ sourceId, onDeleted }: { sourceId: string; onDeleted: () => 
     else if (hadReview.current) reviewButton.current?.focus();
     hadReview.current = !!review;
   }, [review]);
+  const now = new Date();
+  const maxDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   const valid = scope === "message" ? !!messageId.trim() : scope === "chat" ? !!chatId.trim() :
-    !!start && !!end && Date.parse(start) < Date.parse(end);
+    !!start && !!end && Date.parse(start) < Date.parse(end) && Date.parse(end) <= now.getTime();
   const preview = async () => {
     setBusy(true); setError(""); setResult("");
     try {
@@ -295,9 +297,9 @@ function Deletion({ sourceId, onDeleted }: { sourceId: string; onDeleted: () => 
             )}
             {scope === "range" && <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5"><label className={LABEL} htmlFor={`${id}-start`}>From (inclusive, local time)</label>
-                <Input id={`${id}-start`} type="datetime-local" required value={start} disabled={busy} onChange={(event) => setStart(event.target.value)} /></div>
+                <Input id={`${id}-start`} type="datetime-local" max={maxDate} required value={start} disabled={busy} onChange={(event) => setStart(event.target.value)} /></div>
               <div className="space-y-1.5"><label className={LABEL} htmlFor={`${id}-end`}>Until (exclusive, local time)</label>
-                <Input id={`${id}-end`} type="datetime-local" required value={end} disabled={busy} onChange={(event) => setEnd(event.target.value)} /></div>
+                <Input id={`${id}-end`} type="datetime-local" max={maxDate} required value={end} disabled={busy} onChange={(event) => setEnd(event.target.value)} /></div>
             </div>}
             <p className="text-xs text-muted-foreground">Whole-chat deletion also erases its name and excludes it. Deletions cannot be undone and block matching messages from future imports.</p>
             <Button ref={reviewButton} type="submit" variant="outline" disabled={busy || !valid}>Review deletion</Button>

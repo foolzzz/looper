@@ -79,14 +79,23 @@ def test_deleting_a_run_does_not_scan_the_events(monkeypatch):
 def test_existing_stream_gets_deletion_and_retention_schema(monkeypatch):
     async def check(pool):
         await pool.execute("DROP TABLE source_deletions; ALTER TABLE event_sources DROP COLUMN retention_last_at; "
+                           "ALTER TABLE source_runs DROP COLUMN IF EXISTS skipped_by_deletion; "
                            "DELETE FROM schema_migrations WHERE name = 'message_stream_deletions'")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn, conn.transaction():
+            await connection.ensure_schema(conn)
             assert not await connection.schema_change_pending(conn)
+            locks = await conn.fetch(
+                "SELECT mode FROM pg_locks WHERE pid = pg_backend_pid() "
+                "AND relation = 'source_events'::regclass AND granted")
+            assert not {row["mode"] for row in locks} & {
+                "ShareLock", "ShareRowExclusiveLock", "ExclusiveLock", "AccessExclusiveLock"}
         await source(pool)
         assert await pool.fetchval("SELECT retention_last_at FROM event_sources") is None
+        await pool.execute("INSERT INTO source_runs (source_id, mode, trigger, status) "
+                           "VALUES ('s1', 'import', 'manual', 'ok')")
+        assert await pool.fetchval("SELECT skipped_by_deletion FROM source_runs") == 0
         assert await pool.fetchval("SELECT count(*) FROM source_deletions") == 0
 
     run_db(check, monkeypatch, timeout=20)

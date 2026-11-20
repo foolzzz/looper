@@ -1,5 +1,7 @@
 """The message stream's operations through the v1 API: status and runs, the switch, and who may call them."""
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from looper.agents import source_service
@@ -164,3 +166,44 @@ def test_expired_confirmation_and_unknown_chat_cannot_delete(monkeypatch, tmp_pa
             assert status == 400
 
     run_db(check, monkeypatch, timeout=20)
+
+
+def test_range_refuses_future_end_but_now_preserves_later_messages(monkeypatch, tmp_path):
+    from looper.agents.v1_domains import message_stream
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return sup.NOW.astimezone(tz)
+
+    monkeypatch.setattr(message_stream, "datetime", Clock)
+
+    async def check(pool):
+        sup.append(tmp_path, "chat_synthetic", sup.message("old_message"))
+        source = await store.save_source("src", {"bridge_dir": str(tmp_path), "bridge_start_from": "beginning"}, db=pool)
+        await source_service.run_bridge_pass(source, db=pool, now=sup.NOW)
+        target = {"source_id": "src", "scope": "range", "start": (sup.NOW - timedelta(hours=1)).isoformat(),
+                  "end": (sup.NOW + timedelta(hours=1)).isoformat()}
+        async with v1_api(tmp_path / "api", pool) as call:
+            status, answer = await call("message_stream.delete_preview", target)
+            assert status == 400, answer
+            assert "future" in str(answer).lower()
+            assert await pool.fetchval("SELECT count(*) FROM source_deletions") == 0
+            target["end"] = sup.NOW.isoformat()
+            status, answer = await call("message_stream.delete_preview", target)
+            assert status == 200, answer
+            status, answer = await call("message_stream.delete", {
+                **target, "confirmation_token": answer["result"]["confirmation_token"]})
+            assert status == 200 and answer["result"]["deleted"] == 1, answer
+            sup.append(tmp_path, "chat_synthetic", sup.message("at_end", sent_at=sup.NOW),
+                       sup.message("later_message", sent_at=sup.NOW + timedelta(seconds=1)))
+            report = await source_service.run_bridge_pass(source, db=pool, now=sup.NOW + timedelta(seconds=2), days=7)
+            assert report.events_new == 2
+            for action in ("status", "runs"):
+                status, answer = await call("message_stream." + action, {"source_id": "src"} if action == "runs" else {})
+                assert status == 200, answer
+                run = answer["result"]["runs"][0] if action == "runs" else answer["result"]["sources"][0]["last_run"]
+                assert (run["events_seen"], run["events_skipped"], run["skipped_by_deletion"]) == (0, 0, 1)
+            assert {r[0] for r in await pool.fetch("SELECT external_id FROM source_events")} == {"at_end", "later_message"}
+
+    run_db(check, monkeypatch, timeout=30)

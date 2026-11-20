@@ -60,6 +60,7 @@ class PassReport:
     events_new: int = 0
     events_seen: int = 0
     events_skipped: int = 0
+    skipped_by_deletion: int = 0
     bad_lines: int = 0
     error: str | None = None
     failed_chats: list[str] = field(default_factory=list)
@@ -117,7 +118,7 @@ def _state_of(chat: Mapping[str, Any]) -> FileState | None:
 @dataclass
 class FileReport:
     """What one file gave, for the import's reconciliation: ``lines`` (messages read) is ``new`` + ``duplicates`` +
-    ``skipped``; ``distinct`` counts the message ids among them."""
+    ``skipped`` + ``skipped_by_deletion``; ``distinct`` counts the message ids among them."""
 
     chat_id: str
     lines: int = 0
@@ -125,6 +126,7 @@ class FileReport:
     new: int = 0
     duplicates: int = 0
     skipped: int = 0
+    skipped_by_deletion: int = 0
     bad_lines: int = 0
     incomplete_tail: bool = False
     rescans: int = 0
@@ -132,7 +134,7 @@ class FileReport:
 
     @property
     def reconciled(self) -> bool:
-        return self.lines == self.new + self.duplicates + self.skipped
+        return self.lines == self.new + self.duplicates + self.skipped + self.skipped_by_deletion
 
 
 def _body_dropped(message: BridgeMessage, source: Mapping[str, Any], now: datetime) -> bool:
@@ -155,7 +157,8 @@ async def _chunk(conn: Any, source: Mapping[str, Any], path: Path, run_id: int |
         await store.exclude_chat(conn, source_id, chat_id, "looper_channel", now=now)
     rows: list[dict[str, Any]] = []
     kept: list[BridgeMessage] = []
-    skipped = repeats = 0
+    skipped = 0
+    repeats: dict[str, int] = {}
     in_chunk: set[str] = set()
     user_open_id = source["user_open_id"]
     for message in scan.messages:
@@ -166,7 +169,7 @@ async def _chunk(conn: Any, source: Mapping[str, Any], path: Path, run_id: int |
             skipped += 1
             continue
         if message.external_id in in_chunk:
-            repeats += 1
+            repeats[message.external_id] = repeats.get(message.external_id, 0) + 1
             continue
         in_chunk.add(message.external_id)
         origin = "import" if first else "history" if message.sent_at < now - HISTORY_AFTER else "live"
@@ -179,6 +182,10 @@ async def _chunk(conn: Any, source: Mapping[str, Any], path: Path, run_id: int |
             "mention_ids": message.mention_ids, "text": message.text,
             "body": None if _body_dropped(message, source, now) else message.body,
             "body_bytes": message.body_bytes, "origin": origin})
+    deleted = await store.deleted_ids(conn, source_id, rows)
+    skipped_by_deletion = sum(1 + repeats.pop(message_id, 0) for message_id in deleted)
+    rows = [row for row in rows if row["external_id"] not in deleted]
+    kept = [message for message in kept if message.external_id not in deleted]
     if dry_ids is not None:
         stored = await store.existing_ids(conn, source_id, [r["external_id"] for r in rows])
         fresh = [r for r in rows if r["external_id"] not in stored and r["external_id"] not in dry_ids]
@@ -194,10 +201,12 @@ async def _chunk(conn: Any, source: Mapping[str, Any], path: Path, run_id: int |
             last_id=scan.state.last_id, mtime=scan.state.mtime, now=now,
             newest=max((m.sent_at for m in kept), default=None), importing=first and scan.more)
         new = len(inserted)
-    seen = len(rows) - new + repeats
+    seen = len(rows) - new + sum(repeats.values())
     file.new, file.duplicates, file.skipped = file.new + new, file.duplicates + seen, file.skipped + skipped
+    file.skipped_by_deletion += skipped_by_deletion
     if run_id is not None:
-        await store.add_run_counts(conn, run_id, new=new, seen=seen, skipped=skipped)
+        await store.add_run_counts(conn, run_id, new=new, seen=seen, skipped=skipped,
+                                   skipped_by_deletion=skipped_by_deletion)
     return looper_chat
 
 
@@ -278,6 +287,7 @@ async def _ingest_file(source: Mapping[str, Any], path: Path, run_id: int | None
     report.events_new += file.new
     report.events_seen += file.duplicates
     report.events_skipped += file.skipped
+    report.skipped_by_deletion += file.skipped_by_deletion
     return file
 
 

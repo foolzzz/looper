@@ -21,7 +21,7 @@ RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT = 20, 100
 _MODES = {"type": "string", "enum": ["off", "bridge"]}
 _RUN = _object({
     "run_id": _INT, "mode": _STR, "trigger": _STR, "status": _STR, "started_at": _STR, "finished_at": _NULL_STR,
-    "events_new": _INT, "events_seen": _INT, "events_skipped": _INT, "files_rescanned": {"type": ["integer", "null"]},
+    "events_new": _INT, "events_seen": _INT, "events_skipped": _INT, "skipped_by_deletion": _INT, "files_rescanned": {"type": ["integer", "null"]},
     "error": _NULL_STR}, closed=True)
 _SOURCE = _object({
     "source_id": _STR, "name": _STR, "kind": _STR, "ingest_mode": {"type": "string", "enum": ["off", "bridge", "collect"]},
@@ -102,7 +102,7 @@ OPERATIONS += (
 
 def _run_view(row):
     return {"run_id": row["id"], **{key: row[key] for key in (
-        "mode", "trigger", "status", "started_at", "finished_at", "events_new", "events_seen", "events_skipped",
+        "mode", "trigger", "status", "started_at", "finished_at", "events_new", "events_seen", "events_skipped", "skipped_by_deletion",
         "files_rescanned", "error")}}
 
 
@@ -183,6 +183,8 @@ def deletion_target(arguments):
                 raise ValueError()
         except ValueError:
             raise OpError(ErrorCode.INVALID, "range needs timezone-aware start and end, with start before end") from None
+        if result["end"] > datetime.now(timezone.utc):
+            raise OpError(ErrorCode.INVALID, "range end must not be in the future")
     return {"scope": scope, **result}
 
 

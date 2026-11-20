@@ -232,6 +232,7 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 )
 
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
+_SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source deletions end", re.S)
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
@@ -242,6 +243,14 @@ def _message_stream_ddl() -> str:
     found = _MESSAGE_STREAM_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its message stream block")
+    return found.group(1)
+
+
+def _source_deletions_ddl() -> str:
+    """Only the additive tombstone tables: replaying source_events indexes holds a writer-blocking lock."""
+    found = _SOURCE_DELETIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its source deletions block")
     return found.group(1)
 
 
@@ -610,7 +619,8 @@ async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
 
 
 async def _message_stream_deletions_pending(conn: asyncpg.Connection) -> bool:
-    return await _column_pending(conn, _MESSAGE_STREAM_DELETIONS, "event_sources", "retention_last_at")
+    return (await _column_pending(conn, _MESSAGE_STREAM_DELETIONS, "event_sources", "retention_last_at")
+            or await _column_pending(conn, _MESSAGE_STREAM_DELETIONS, "source_runs", "skipped_by_deletion"))
 
 
 async def _column_pending(conn: asyncpg.Connection, marker: str, table: str, column: str) -> bool:
@@ -1032,7 +1042,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM)
         if await _message_stream_deletions_pending(conn):
             await conn.execute("ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS retention_last_at TIMESTAMPTZ")
-            await conn.execute(_message_stream_ddl())
+            await conn.execute("ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS skipped_by_deletion "
+                               "BIGINT NOT NULL DEFAULT 0")
+            await conn.execute(_source_deletions_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM_DELETIONS)
         if await _subscriptions_pending(conn):
             await conn.execute(_subscriptions_ddl())

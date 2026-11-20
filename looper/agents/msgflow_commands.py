@@ -19,7 +19,7 @@ def format_report(report: Any, *, days: int, dry_run: bool, per_file: bool = Fal
     verb = "would store" if dry_run else "stored"
     files = [f for f in report.file_reports if not f.baselined]
     total = {name: sum(getattr(f, name) for f in files) for name in
-             ("lines", "distinct", "new", "duplicates", "skipped", "bad_lines", "rescans")}
+             ("lines", "distinct", "new", "duplicates", "skipped", "skipped_by_deletion", "bad_lines", "rescans")}
     unreconciled = [f for f in files if not f.reconciled]
     lines = [
         f"{'dry run: ' if dry_run else ''}import of the last {days} day{'s' if days != 1 else ''}: {report.status}",
@@ -27,14 +27,15 @@ def format_report(report: Any, *, days: int, dry_run: bool, per_file: bool = Fal
         f"{sum(f.incomplete_tail for f in files)} with an unterminated last line",
         f"  messages read: {total['lines']} ({total['distinct']} distinct ids)",
         f"  {verb} {total['new']}, already stored or repeated {total['duplicates']}, skipped {total['skipped']} "
-        "(a Looper bot's own, an excluded chat, older than the days asked)",
-        f"  reconciliation: {'every file adds up (read = new + already stored + skipped)' if not unreconciled else str(len(unreconciled)) + ' files do not add up: ' + ', '.join(f.chat_id for f in unreconciled[:10])}",
+        "(a Looper bot's own, an excluded chat, older than the days asked), "
+        f"skipped by deletion {total['skipped_by_deletion']}",
+        f"  reconciliation: {'every file adds up (read = new + already stored + skipped + skipped by deletion)' if not unreconciled else str(len(unreconciled)) + ' files do not add up: ' + ', '.join(f.chat_id for f in unreconciled[:10])}",
     ]
     if total["bad_lines"]:
         lines.append(f"  lines that were not a message: {total['bad_lines']}")
     if per_file:
         lines += [f"  {f.chat_id}: read {f.lines}, distinct {f.distinct}, new {f.new}, already stored {f.duplicates}, "
-                  f"skipped {f.skipped}, bad {f.bad_lines}, rescans {f.rescans}"
+                  f"skipped {f.skipped}, skipped by deletion {f.skipped_by_deletion}, bad {f.bad_lines}, rescans {f.rescans}"
                   f"{', unterminated tail' if f.incomplete_tail else ''}" for f in files]
     if report.error:
         lines.append(f"  error: {report.error}")
@@ -51,6 +52,13 @@ async def _import(database_url: str, *, source_id: str | None, days: int, dry_ru
     try:
         if not await pool.fetchval("SELECT to_regclass('event_sources') IS NOT NULL"):
             return 1, "the database has no message stream tables yet: start `looper serve` once to upgrade it"
+        if not await pool.fetchval(
+            "SELECT to_regclass('source_deletions') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_attribute "
+            "WHERE attrelid = to_regclass('event_sources') AND attname = 'retention_last_at' AND NOT attisdropped) "
+            "AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('source_runs') "
+            "AND attname = 'skipped_by_deletion' AND NOT attisdropped)"
+        ):
+            return 1, "the database has no deletion support yet: start `looper serve` once to upgrade it"
         sources = await store.list_sources()
         found = [s for s in sources if source_id in (None, s["id"])]
         if source_id is None and len(sources) > 1:

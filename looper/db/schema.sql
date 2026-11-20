@@ -1554,6 +1554,7 @@ CREATE TABLE IF NOT EXISTS source_runs (
     events_new        INTEGER NOT NULL DEFAULT 0,
     events_seen       INTEGER NOT NULL DEFAULT 0,
     events_skipped    INTEGER NOT NULL DEFAULT 0,
+    skipped_by_deletion BIGINT NOT NULL DEFAULT 0,
     files_rescanned   INTEGER,
     error             TEXT,
     error_code        INTEGER
@@ -1588,6 +1589,7 @@ CREATE INDEX IF NOT EXISTS idx_source_events_chat ON source_events (source_id, c
 CREATE INDEX IF NOT EXISTS idx_source_events_sent ON source_events (source_id, sent_at);
 CREATE INDEX IF NOT EXISTS idx_source_events_run ON source_events (run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_source_events_body ON source_events (sent_at) WHERE body IS NOT NULL;
+-- source deletions begin
 -- Durable predicates contain identifiers and bounds, never message content or chat names.
 CREATE TABLE IF NOT EXISTS source_deletions (
     id          BIGSERIAL PRIMARY KEY,
@@ -1605,6 +1607,7 @@ CREATE TABLE IF NOT EXISTS source_deletions (
 CREATE INDEX IF NOT EXISTS idx_source_deletions_source ON source_deletions (source_id, scope);
 CREATE INDEX IF NOT EXISTS idx_source_deletions_message ON source_deletions (source_id, message_id) WHERE scope = 'message';
 CREATE INDEX IF NOT EXISTS idx_source_deletions_chat ON source_deletions (source_id, chat_id) WHERE scope = 'chat';
+-- source deletions end
 -- message stream end
 
 -- Subscriptions (message-stream RFC, section 7): the schedule kind that turns the events a source ingested after a

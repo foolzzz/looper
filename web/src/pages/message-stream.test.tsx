@@ -28,7 +28,7 @@ const source = (extra: Partial<MessageStreamSource> = {}): MessageStreamSource =
 });
 const run = (id: number, extra: Partial<MessageStreamRun> = {}): MessageStreamRun => ({
   run_id: id, mode: "bridge", trigger: "scheduled", status: "ok", started_at: "2026-11-18T11:58:00Z",
-  finished_at: "2026-11-18T11:58:03Z", events_new: 7, events_seen: 2, events_skipped: 1, files_rescanned: null,
+  finished_at: "2026-11-18T11:58:03Z", events_new: 7, events_seen: 2, events_skipped: 1, skipped_by_deletion: 0, files_rescanned: null,
   error: null, ...extra,
 });
 
@@ -134,6 +134,37 @@ describe("MessageStreamPage", () => {
     await change('input[aria-label="Search chats"]', "Demo");
     await act(async () => { container.querySelector<HTMLFormElement>('form[aria-label="Search chats"]')!.requestSubmit(); });
     expect(fetchMessageStreamChats).toHaveBeenLastCalledWith("lark-user", "Demo", expect.any(AbortSignal));
+  });
+
+  it("limits a range to the current local time and refuses a future end", async () => {
+    vi.mocked(fetchMessageStream).mockResolvedValue({ sources: [source()] });
+    await show();
+    await act(async () => {
+      const select = container.querySelector<HTMLSelectElement>("select")!;
+      select.value = "range";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const [start, end] = container.querySelectorAll<HTMLInputElement>('input[type="datetime-local"]');
+    const local = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+    const now = new Date();
+    expect(end.max).toBe(local(now));
+    await change(`#${CSS.escape(start.id)}`, local(new Date(now.getTime() - 3600000)));
+    await change(`#${CSS.escape(end.id)}`, local(new Date(now.getTime() + 3600000)));
+    const review = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Review deletion")!;
+    expect(review.disabled).toBe(true);
+    await click("Review deletion");
+    expect(previewMessageStreamDeletion).not.toHaveBeenCalled();
+    await change(`#${CSS.escape(end.id)}`, local(now));
+    expect(review.disabled).toBe(false);
+  });
+
+  it("shows deletion skips separately from stored duplicates and other skips", async () => {
+    vi.mocked(fetchMessageStream).mockResolvedValue({ sources: [source()] });
+    vi.mocked(fetchMessageStreamRuns).mockResolvedValue({ source_id: "lark-user", runs: [
+      run(1, { skipped_by_deletion: 3 }),
+    ] });
+    await show();
+    expect(container.textContent).toContain("7 new · 2 already stored · 1 skipped · 3 skipped by deletion");
   });
 
   it("requires a review with deletion limits before the second confirmation", async () => {

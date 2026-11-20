@@ -3090,6 +3090,7 @@ export interface MessageStreamRun {
   events_new: number;
   events_seen: number;
   events_skipped: number;
+  skipped_by_deletion: number;
   files_rescanned: number | null;
   error: string | null;
 }
