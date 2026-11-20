@@ -6132,7 +6132,11 @@ It is off until the system setting `decision_snapshots.enabled` is `true`
 no switch yet). Off, nothing is written; on or off, no prompt, tool list or
 command line changes: snapshots read what the Planner already holds and feed
 nothing back, and a failure to read the switch or to write is logged and never
-fails the decision.
+fails the decision. Each snapshot's database work (the switch, the turn's
+record, the write, connection waits included) has 1 second in all
+(`decisions.TIMEOUT_SECONDS`); past it the snapshot is dropped with a warning,
+so a locked table holds a dispatch pass, which keeps the project's dispatch
+lock, for at most that long.
 
 - **Dispatch** (`kind` `dispatch`): one row per `_dispatch_ready_impl` pass,
   written before its work steps start. The inputs are every step as readiness
@@ -6148,11 +6152,13 @@ fails the decision.
   applies the Planner's `accept`, `review`, `retry`, `replan` or `fail` (not
   `advise` or a checkpoint's `proceed`), with the step and the turn's run record
   (`record_id`). The inputs are the step's attempt, every `DecisionContext`
-  field and a digest of the run record (profile id and runtime type, model and
+  field, whether the turn was offered an adjudicated accept
+  (`adjudicated_accept`: downgrading a panel's blocking findings would let it
+  accept) and a digest of the run record (profile id and runtime type, model and
   effort, `system_prompt_sha256`, each prompt layer's sha256 fields, the
   `--tools`, `--allowedTools` and `--disallowedTools` values, `read_only`, the
   library hash, the message's length and the token counts); the decision is the
-  decisions code allowed, the chosen one, its reason (the retry's feedback for
+  decisions the turn was offered (`DecisionContext.offered`), the chosen one, its reason (the retry's feedback for
   a retry; 500 characters, as the activity line keeps it), the gate and wait
   changes and a replan's step ids. No prompt, requirement or message text is
   kept.
@@ -6160,12 +6166,14 @@ fails the decision.
   database directly, also with the service stopped): a dispatch runs
   `TaskPlan.ready_steps` on steps rebuilt from its inputs, and `plan_round` on
   the recorded round, and is the same when the ready steps, the round and the
-  started steps all are; a step decision recomputes `DecisionContext.allowed()`
-  and is the same when the allowed decisions are and the chosen one is among
+  started steps all are; a step decision recomputes `DecisionContext.offered()`
+  with the recorded `adjudicated_accept` and is the same when the offered decisions are and the chosen one is among
   them (the model's choice is not run again). Exit codes: 0 all the same, 1
   none recorded, 3 some differ, 6 database unusable.
-- **Retention:** rows go with their task, and the hourly housekeeping deletes
-  those older than 30 days (`decision_snapshots_deleted` in its log line).
+- **Retention:** rows go with their task, and while the switch is on the
+  hourly housekeeping deletes those older than 30 days
+  (`decision_snapshots_deleted` in its log line); off, it leaves the table
+  alone.
 
 ## Message Bus
 
@@ -6318,7 +6326,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and the typed delivery of its message: `delivery` (`pending`, `sending`, `sent`, `failed`, `uncertain`), `delivery_attempts`, `delivery_at` (sending since, or tried again from) and `delivery_error`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
-| `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days |
+| `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |

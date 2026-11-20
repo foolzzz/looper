@@ -9,7 +9,7 @@
 一个任务往下走，每一步都是一次决策，分两类：
 
 - **代码做的决策：** 每次派发时「现在哪些步骤能动」。`TaskPlan.ready_steps` 按 `depends_on` 和 `ready_when` 算出就绪的步骤，`_dispatch_ready_impl` 按种类分开（开关卡、开等待、派评审席位、派 Worker），开了步骤工作区的项目再由 `step_workspaces.plan_round` 决定这一轮有几个工作步骤能开始。这几个函数本身已经是纯函数。
-- **模型做的决策：** Worker 或 Reviewer 结果回来后，Planner 的 `[DECISION]` 回合选 `accept`、`review`、`retry`、`replan` 或 `fail`。可选范围由代码先算好（`DecisionContext.allowed()`），模型在其中选一个，并给出理由。
+- **模型做的决策：** Worker 或 Reviewer 结果回来后，Planner 的 `[DECISION]` 回合选 `accept`、`review`、`retry`、`replan` 或 `fail`。可选范围由代码先算好（`DecisionContext.offered()`：通常就是 `allowed()`；评审席位不通过、但把阻塞问题降级就能接受时，还会多给一个「裁决后接受」），模型在其中选一个，并给出理由。
 
 现在留下来的只有结果：活动流里一行「Planner decision on step …: retry: …」，`llm_records` 里有这一回合的输入输出和元数据。没有记下决策当时看到的输入，所以：
 
@@ -45,9 +45,11 @@ INSERT INTO system_settings (key, value) VALUES ('decision_snapshots.enabled', '
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 ```
 
-- 每次派发前和每次应用步骤决定前读一次（主键查询），改了立刻生效，不用重启；读失败按关处理并记一条警告。
+- 每次派发前和每次应用步骤决定前读一次（主键查询），改了立刻生效，不用重启；读失败或超时按关处理并记一条警告。
+- 快照的数据库操作都有总时限（`TIMEOUT_SECONDS`，1 秒，含等连接池的时间）：读开关、读回合记录、写入，超时就放弃这条快照、记警告，决策照常往下走。派发写快照时持有项目派发锁，所以最多多等 1 秒，不会因为表被锁住而卡住同项目的任务。
 - 关闭时一行都不写。派发前多出的一次读在拿项目派发锁之前，派发过程中不多任何等待。
 - 开启时模型可见的内容也不变：快照只读 Planner 已有的状态和运行记录，从不回流到 prompt、工具或命令行；写失败只记警告，决策照常进行。
+- 关闭时 housekeeping 也不碰这张表（不删除），之前开着时写下的快照随任务删除，或在再次打开后按保留期清理。
 
 ## 4. 快照记什么
 
@@ -75,11 +77,12 @@ Planner 的决定被应用时（`_apply_decision` 开头）一行，带 `step_id
 
 - `step`、`key`、`attempt`（这一步的第几次尝试）；
 - `context`：代码为这一回合算出的 `DecisionContext` 全部字段（结果种类、是否成功、是否必须评审、重试次数和上限、是否最后一个未完成步骤、是否升级、是否允许请教顾问等）；
+- `adjudicated_accept`：这一回合是否被提供了「裁决后接受」（由评审席位当时的结果和工作流设置算出，是派生自计划状态的输入，原样记下）；
 - `turn`：这一回合运行记录的摘要，从 `llm_records` 读：Agent Profile 的 id 和运行时类型、模型和 effort、`system_prompt_sha256`、`prompt_layers` 每层只留其中的 sha256 字段、命令行里的工具参数（`--tools`、`--allowedTools`、`--disallowedTools` 的值，不用这些参数的运行时为空）、只读方式、已装能力的 `library` 哈希，以及大小：回合消息的字符数、`input_tokens`、`context_tokens`、`cache_read_tokens`。
 
-**决定：** `allowed`（代码允许的决定，按顺序）、`decision`、`reason`（`retry` 时是给 Worker 的反馈；截到 500 字符，与活动行保留的相同）、对关卡和等待的改动（id 和动作）、`replan` 的新步骤 id。
+**决定：** `allowed`（这一回合被提供的决定，按顺序，即 `context.offered(adjudicated_accept)`）、`decision`、`reason`（`retry` 时是给 Worker 的反馈；截到 500 字符，与活动行保留的相同）、对关卡和等待的改动（id 和动作）、`replan` 的新步骤 id。
 
-**重放：** 用 `context` 重建 `DecisionContext`，复算 `allowed()`，与记录相同、且记录的决定在其中，才算一致。模型的选择不重跑；要比较不同 prompt 或模型下的选择，评测可以按 `record_id` 取回当时的输入，这不在 v0。
+**重放：** 用 `context` 重建 `DecisionContext`，按记下的 `adjudicated_accept` 调用同一个 `offered()`，与记录相同、且记录的决定在其中，才算一致。模型的选择不重跑；要比较不同 prompt 或模型下的选择，评测可以按 `record_id` 取回当时的输入，这不在 v0。
 
 ### 4.3 Manager
 
@@ -109,7 +112,7 @@ CREATE TABLE decision_snapshots (
 ## 6. 保留
 
 - 随任务删除（外键级联）；任务重新规划（start over）后旧快照保留，作为那一次的历史。
-- 每小时的 housekeeping 按批删除 30 天前的快照，删除数进它的日志行（`decision_snapshots_deleted`）。
+- 开关开着时，每小时的 housekeeping 按批删除 30 天前的快照，删除数进它的日志行（`decision_snapshots_deleted`）；关着时不清理（关闭即不写这张表）。
 - 量级估计：一个 10 步的任务每次派发约 2–3 KB，整个任务几十 KB；去重之后更少。
 
 ## 7. 隐私
@@ -123,7 +126,7 @@ CREATE TABLE decision_snapshots (
 - `looper/agents/tiers/decisions.py`：采集（派发、步骤决定）、回合摘要和重放，全部是纯函数，外加两个写入入口（先读开关；任何异常只记警告）；
 - `looper/db/decision_snapshots.py`：开关、写入（含派发去重）、按任务读取、读回合记录、按批清理；
 - `planner.py` 只加接线：`_dispatch_ready` 读开关，`_dispatch_ready_impl` 采集并在工作步骤开始前写入，`_plan_round` 交出它给 `plan_round` 的输入和结果，`_apply_decision` 开头写步骤决定；
-- 迁移 `decision_snapshots`；housekeeping 清理 30 天前的快照；
+- 迁移 `decision_snapshots`；开关开着时 housekeeping 清理 30 天前的快照；
 - 命令 `looper decisions replay <task_id> [--json]`：直接读数据库（服务停着也能用），逐条重放并比对。退出码：0 全部一致，1 没有快照，3 有不一致，6 数据库不可用。
 
 入口：控制台、Telegram 和飞书不变（只记录，没有要展示或操作的东西）；CLI 新增上面这条只读命令。
@@ -139,7 +142,7 @@ CREATE TABLE decision_snapshots (
 | 风险 | 应对 |
 |---|---|
 | 漏记一项输入，重放对不上 | 重放就是检测手段：`looper decisions replay` 退出码 3 并列出差异；测试覆盖关卡、等待、评审席位、条件依赖和工作区分轮 |
-| 写入拖慢派发 | 每次派发一条插入（含去重判断），在项目派发锁内约 1 ms 量级；关闭时没有写入 |
+| 写入拖慢派发 | 每次派发一条插入（含去重判断），在项目派发锁内约 1 ms 量级；表被锁或数据库慢时最多等 1 秒就放弃；关闭时没有写入 |
 | 表增长 | 去重 + 30 天清理 + 随任务删除 |
-| 读开关或写快照失败 | 只记警告（`could not record a decision snapshot`），决策照常；不会因为快照让任务失败 |
+| 读开关或写快照失败、超时 | 只记警告（`could not record a decision snapshot`、`timed out`），决策照常；不会因为快照让任务失败或久等 |
 | 快照泄露内容 | 见第 7 节；测试断言回合摘要里没有 prompt 文本和自定义 prompt |
