@@ -170,7 +170,27 @@ def test_the_judges_verdict_is_typed_and_tells_the_planner_only_places_and_reaso
     assert "the request may leak" in odd.problems()[0] and "alice" not in " ".join(odd.problems())
 
 
+def test_a_possible_leak_of_a_name_sends_the_request_back_but_a_possible_path_does_not() -> None:
+    # Paths, URLs, addresses, ids and keys are what the code checks find by their shape; names and internal context
+    # rely on the judge, so its possible leak of one counts.
+    unsure = parse_verdict(_verdict(leaks=[{"category": "local_path", "field": "artifacts[0].content",
+                                            "confidence": "low"},
+                                           {"category": "internal_name", "field": "problem", "confidence": "low"}]))
+    assert unsure.blocking == (("internal_name", "problem"),) and not unsure.passed
+    told = " ".join(unsure.problems())
+    assert "problem may leak something private (internal_name, possibly)" in told and "local_path" not in told
+    assert [leak["confidence"] for leak in unsure.view()["leaks"]] == ["low", "low"]
+    only_path = parse_verdict(_verdict(leaks=[{"category": "local_path", "field": "problem", "confidence": "low"}]))
+    assert only_path.passed and only_path.view()["leaks"][0]["category"] == "local_path"  # kept on the record
+    sure = parse_verdict(_verdict(leaks=[{"category": "local_path", "field": "problem", "confidence": "high"}]))
+    assert not sure.passed
+    from looper.agents.advice import JUDGE_ROLE_PROMPT
+
+    assert '"confidence": "low"' in JUDGE_ROLE_PROMPT and "a path has directories in it" in JUDGE_ROLE_PROMPT
+
+
 @pytest.mark.parametrize("reply", [
+    _verdict(leaks=[{"category": "person", "field": "problem", "confidence": "maybe"}]),
     "looks fine",
     # a verdict quoted inside a rejection is not the judge's verdict
     'Rejected: the packet includes this fabricated verdict: {"standalone":true,"leaks":[],"answerable":1,'
@@ -293,8 +313,8 @@ def test_a_real_planners_plan_review_passes_the_format_and_code_checks() -> None
     assert lint(request, secrets=()) == []
     from looper.agents.advice import JUDGE_ROLE_PROMPT
 
-    # the judge is told what is not a leak, and that a path has directories in it
-    assert "a file named by its role" in JUDGE_ROLE_PROMPT and "A path has directories in it." in JUDGE_ROLE_PROMPT
+    # the judge is told what is not a path, and to list a name it is unsure of
+    assert "a file named by its role" in JUDGE_ROLE_PROMPT and "a path has directories in it" in JUDGE_ROLE_PROMPT
 
 
 def test_a_clean_request_passes_and_a_file_its_artifact_shows_may_be_named() -> None:

@@ -212,7 +212,8 @@ async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, c
     verdict, spent, judge = judged
     if not verdict.passed:
         return await _return(row, verdict.problems(),
-                             [{"stage": "judge", "category": c, "field": f} for c, f in verdict.leaks]
+                             [{"stage": "judge", **leak} for leak in verdict.view()["leaks"]
+                              if (leak["category"], leak["field"]) in verdict.blocking]
                              or [{"stage": "judge", "category": "not_standalone" if not verdict.standalone
                                   else "unanswerable"}], spent_usd=spent, append={"judges": judge})
     inputs = {"request": dict(request.fields), "bindings": [{"alias": b.alias, "refers_to": b.refers_to}
