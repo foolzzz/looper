@@ -26,7 +26,7 @@ def format_report(report: Any, *, days: int, dry_run: bool, per_file: bool = Fal
     verb = "would store" if dry_run else "stored"
     files = [f for f in report.file_reports if not f.baselined]
     total = {name: sum(getattr(f, name) for f in files) for name in
-             ("lines", "distinct", "new", "duplicates", "skipped", "bad_lines", "rescans")}
+             ("lines", "distinct", "new", "duplicates", "skipped", "skipped_by_deletion", "bad_lines", "rescans")}
     unreconciled = [f for f in files if not f.reconciled]
     lines = [
         f"{'dry run: ' if dry_run else ''}import of the last {days} day{'s' if days != 1 else ''}: {report.status}",
@@ -34,14 +34,15 @@ def format_report(report: Any, *, days: int, dry_run: bool, per_file: bool = Fal
         f"{sum(f.incomplete_tail for f in files)} with an unterminated last line",
         f"  messages read: {total['lines']} ({total['distinct']} distinct ids)",
         f"  {verb} {total['new']}, already stored or repeated {total['duplicates']}, skipped {total['skipped']} "
-        "(a Looper bot's own, an excluded chat, older than the days asked)",
-        f"  reconciliation: {'every file adds up (read = new + already stored + skipped)' if not unreconciled else str(len(unreconciled)) + ' files do not add up: ' + ', '.join(f.chat_id for f in unreconciled[:10])}",
+        "(a Looper bot's own, an excluded chat, older than the days asked), "
+        f"skipped by deletion {total['skipped_by_deletion']}",
+        f"  reconciliation: {'every file adds up (read = new + already stored + skipped + skipped by deletion)' if not unreconciled else str(len(unreconciled)) + ' files do not add up: ' + ', '.join(f.chat_id for f in unreconciled[:10])}",
     ]
     if total["bad_lines"]:
         lines.append(f"  lines that were not a message: {total['bad_lines']}")
     if per_file:
         lines += [f"  {f.chat_id}: read {f.lines}, distinct {f.distinct}, new {f.new}, already stored {f.duplicates}, "
-                  f"skipped {f.skipped}, bad {f.bad_lines}, rescans {f.rescans}"
+                  f"skipped {f.skipped}, skipped by deletion {f.skipped_by_deletion}, bad {f.bad_lines}, rescans {f.rescans}"
                   f"{', unterminated tail' if f.incomplete_tail else ''}" for f in files]
     if report.error:
         lines.append(f"  error: {report.error}")
@@ -58,6 +59,13 @@ async def _import(database_url: str, *, source_id: str | None, days: int, dry_ru
     try:
         if not await pool.fetchval("SELECT to_regclass('event_sources') IS NOT NULL"):
             return 1, "the database has no message stream tables yet: start `looper serve` once to upgrade it"
+        if not await pool.fetchval(
+            "SELECT to_regclass('source_deletions') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_attribute "
+            "WHERE attrelid = to_regclass('event_sources') AND attname = 'retention_last_at' AND NOT attisdropped) "
+            "AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('source_runs') "
+            "AND attname = 'skipped_by_deletion' AND NOT attisdropped)"
+        ):
+            return 1, "the database has no deletion support yet: start `looper serve` once to upgrade it"
         sources = await store.list_sources()
         found = [s for s in sources if source_id in (None, s["id"])]
         if source_id is None and len(sources) > 1:
@@ -81,6 +89,50 @@ def import_history(database_url: str, *, source_id: str | None, days: int, dry_r
                                      per_file=per_file))
     print(text, file=sys.stderr if code else sys.stdout)
     return code
+
+
+async def _delete_message(database_url, *, source_id, message_id, runtime_root, dry_run=False):
+    from ..db import message_stream as store
+    from ..db.connection import close_pool, init_pool
+    from .ops import OpError
+    from .v1_domains.message_stream import preview_deletion, confirm_deletion, deletion_target
+
+    pool = await init_pool(database_url, min_size=1, max_size=3)
+    try:
+        if not await pool.fetchval("SELECT to_regclass('source_deletions') IS NOT NULL"):
+            print("the database has no deletion support yet: start `looper serve` once to upgrade it", file=sys.stderr)
+            return 1
+        sources = await store.list_sources()
+        found = [source for source in sources if source_id in (None, source["id"])]
+        if len(found) != 1:
+            print("name an existing, unambiguous message source with --source", file=sys.stderr)
+            return 1
+        target = deletion_target({"scope": "message", "message_id": message_id})
+        confirmations = {}
+        kwargs = {"runtime_root": runtime_root, "confirmations": confirmations, "owner": "cli", "db": pool}
+        preview = await preview_deletion(found[0]["id"], target, **kwargs)
+        backups = preview["backups"]
+        print(f"Delete message {message_id}: {preview['events']} stored event(s).")
+        for limit in preview["limits"]:
+            print(f"  {limit}")
+        print(f"  Upgrade backups: {backups['count']}; earliest: {backups['earliest_at'] or 'none'}")
+        if dry_run:
+            return 0
+        try:
+            answer = await asyncio.to_thread(input, "Type delete to permanently delete this message: ")
+        except (EOFError, OSError):
+            answer = ""
+        if answer.strip() != "delete":
+            print("Cancelled; no message was deleted.")
+            return 1
+        result = await confirm_deletion(found[0]["id"], target, preview["confirmation_token"], **kwargs)
+        print(f"Deleted {result['deleted']} stored event(s); the tombstone prevents reimport.")
+        return 0
+    except OpError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    finally:
+        await close_pool()
 
 
 BACKFILL_MAX_DAYS = 365
@@ -265,6 +317,12 @@ def leads_backfill(args: Any, load_ops: Any) -> int:
 
 
 def run(args: Any, load_ops: Any) -> int:
+    if args.msgflow_command == "delete":
+        ops = load_ops(args)
+        if ops is None:
+            return 1
+        return asyncio.run(_delete_message(ops.database_url, source_id=args.source, message_id=args.message,
+                                          runtime_root=ops.runtime_root, dry_run=args.dry_run))
     if getattr(args, "msgflow_command", "import") == "leads-backfill":
         return leads_backfill(args, load_ops)
     if not 1 <= args.days <= IMPORT_MAX_DAYS:

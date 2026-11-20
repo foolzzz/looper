@@ -136,6 +136,7 @@ _TASK_CHAT_GROUP = "task_chat_group"
 _PROCESSOR_ROLE = "processor_role"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
+_MESSAGE_STREAM_DELETIONS = "message_stream_deletions"
 _SUBSCRIPTIONS = "subscriptions"
 _SUBSCRIPTION_RULES = "subscription_rules"
 _SUBSCRIPTION_LOOKBACK = "subscription_lookback"
@@ -246,6 +247,7 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 )
 
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
+_SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source deletions end", re.S)
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
@@ -256,6 +258,14 @@ def _message_stream_ddl() -> str:
     found = _MESSAGE_STREAM_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its message stream block")
+    return found.group(1)
+
+
+def _source_deletions_ddl() -> str:
+    """Only the additive tombstone tables: replaying source_events indexes holds a writer-blocking lock."""
+    found = _SOURCE_DELETIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its source deletions block")
     return found.group(1)
 
 
@@ -681,6 +691,11 @@ async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_STREAM):
         return False
     return not await conn.fetchval("SELECT to_regclass('event_sources') IS NOT NULL")
+
+
+async def _message_stream_deletions_pending(conn: asyncpg.Connection) -> bool:
+    return (await _column_pending(conn, _MESSAGE_STREAM_DELETIONS, "event_sources", "retention_last_at")
+            or await _column_pending(conn, _MESSAGE_STREAM_DELETIONS, "source_runs", "skipped_by_deletion"))
 
 
 async def _column_pending(conn: asyncpg.Connection, marker: str, table: str, column: str) -> bool:
@@ -1195,6 +1210,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _message_stream_pending(conn):
             await conn.execute(_message_stream_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM)
+        if await _message_stream_deletions_pending(conn):
+            await conn.execute("ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS retention_last_at TIMESTAMPTZ")
+            await conn.execute("ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS skipped_by_deletion "
+                               "BIGINT NOT NULL DEFAULT 0")
+            await conn.execute(_source_deletions_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM_DELETIONS)
         if await _subscriptions_pending(conn):
             await conn.execute(_subscriptions_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTIONS)
@@ -1355,8 +1376,8 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
-            or await _subscriptions_pending(conn) or await _subscription_rules_pending(conn)
-            or await _subscription_lookback_pending(conn)
+            or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
+            or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_no_chat_pending(conn)
