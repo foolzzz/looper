@@ -28,7 +28,8 @@ from ..db import (connection as db_connection, managers as db_managers, projects
                   schedules as db_schedules, tasks as db_tasks)
 from . import completion_events, cron
 from .links import run_link, schedule_link, task_link
-from .message import builtin_channel_id
+from .channels.base import PostOutcome
+from .message import builtin_channel_id, parse_channel_id
 from .project_execution import format_usd
 
 logger = logging.getLogger(__name__)
@@ -51,14 +52,6 @@ STATUS_WORDS = {
     "completed": "完成", "failed": "失败", "stopped": "已停止", "cancelled": "已取消", "timed_out": "超时被停止",
     "gate_failed": "前置检查失败", "succeeded": "成功", "interrupted": "中断",
 }
-
-
-class _NotRecorded(Exception):
-    """A completion event's message was sent (or not, ``status``) but its outbox row could not be written."""
-
-    def __init__(self, status: str, raised: bool) -> None:
-        super().__init__(f"the outbox row of a {status} message was not written")
-        self.status, self.raised = status, raised
 
 
 class Kind(str, Enum):
@@ -283,10 +276,13 @@ class Notifier:
     """Sends a schedule's messages through ``sender`` (the server's channels; None: record them only), their links
     starting with ``dashboard_url`` (``links``; empty: relative)."""
 
-    def __init__(self, *, sender: Sender | None, clock: Callable[[], datetime], dashboard_url: str = "") -> None:
+    def __init__(self, *, sender: Sender | None, clock: Callable[[], datetime], dashboard_url: str = "",
+                 poster: Any = None) -> None:
         self._sender = sender
         self._clock = clock
         self._base = dashboard_url
+        # The channels' ``post`` (typed outcome): what a completion event's run message goes through.
+        self._poster = poster
 
     async def run_ended(self, run_id: str) -> None:
         """A run reached its final status: its message, then the failures alert or the recoveries it causes."""
@@ -347,47 +343,78 @@ class Notifier:
             db_managers.DEFAULT_MANAGER_ID, task_id=run["task_id"], run_id=run["id"], target=target,
             channel_id=builtin_channel_id(channel), chat=chat, text=text, name=schedule["name"], status=run["status"])
 
-    async def deliver_run_message(self, run_id: str, text: str, manager_event_id: int, *, send: bool = True) -> str:
-        """A run's message told by its completion event ``manager_event_id``: the Manager's reply, or the code notice
-        it falls back to; sent and recorded in the outbox as ``_deliver`` does, the row naming the event. Not
-        ``send``: the chat got it in a reply the Manager sent for other tasks too, so it is only recorded, as sent.
+    async def post_run_message(self, run_id: str, channel_id: str, chat: str, text: str, manager_event_id: int, *,
+                               send: bool = True, reply: bool = False) -> tuple[PostOutcome, str | None]:
+        """A run's message told by its completion event ``manager_event_id`` (the Manager's reply, or the code notice
+        it falls back to), sent to the chat the event recorded (``channel_id``, ``chat``: never one the schedule
+        names later) through the channels' ``post``, and recorded in the outbox, the row naming the event. The caller
+        wrote the event ``sending`` first. Not ``send``: the chat got it in a reply the Manager sent for other tasks
+        too, so it is only recorded, as sent, once. ``reply``: the Manager's reply (its own idempotency key, so a
+        refused reply never holds back the notice that follows it).
 
-        Answers ``sent``, ``dashboard``, ``failed`` (known not handed to a channel: the run or its schedule cannot be
-        read, its target is gone, the channel refused) or ``unknown`` (the channel failed in a way that does not say
-        whether the message went). A message that went out but whose outbox row could not be written is ``sent``: its
-        row is written again, once per event, never the message."""
+        Answers what happened: ``SENT``; ``REJECTED`` (it never reached a channel: the run cannot be read, the chat is
+        no longer an allowed target, no channel can post; or the channel refused it before any part went) or
+        ``UNKNOWN`` (the channel raised or did not answer, or a part went and a later one failed: never sent again).
+        A message that went but whose outbox row could not be written is ``SENT``: the row is written once more."""
+        from .schedules import notify_targets
+        from .subscription_runs import push_target
+
+        parsed = parse_channel_id(channel_id)
         try:
             run = await db_schedules.get_run(run_id)
             schedule = await db_schedules.get_schedule(run["schedule_id"]) if run is not None else None
-        except Exception:
-            logger.warning("schedule run %s: could not read it to send its message", run_id, exc_info=True)
-            return "failed"
-        if schedule is None:
-            return "failed"
+        except Exception as exc:
+            return PostOutcome.REJECTED, f"the run could not be read ({type(exc).__name__})"
+        if schedule is None or parsed is None:
+            return PostOutcome.REJECTED, "the run, its schedule or its channel is gone"
+        channel = parsed.channel_type
         if not send:
-            await self._record_once(schedule, run_id, text, manager_event_id)
-            return "sent"
+            await self._record_once(schedule, run_id, channel, chat, text, "sent", None, manager_event_id)
+            return PostOutcome.SENT, None
         try:
-            status, raised = await self._send_and_record(schedule, Kind.RUN, text, run_id=run_id,
-                                                         manager_event_id=manager_event_id)
-        except _NotRecorded as missing:
-            status, raised = missing.status, missing.raised
-            if status == "sent":
-                try:
-                    await self._record_once(schedule, run_id, text, manager_event_id)
-                except Exception:
-                    logger.exception("schedule %s: run %s's message went out, but its outbox row was not written",
-                                     schedule["id"], run_id)
-        if status == "failed" and raised:
-            return "unknown"
-        return status
+            allowed = any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets())
+        except Exception as exc:
+            return PostOutcome.REJECTED, f"the allowed chats could not be read ({type(exc).__name__})"
+        if not allowed:
+            outcome, error = PostOutcome.REJECTED, "the chat is no longer an allowed notification target"
+        elif self._poster is None:
+            outcome, error = PostOutcome.REJECTED, "this server cannot send messages"
+        else:
+            try:
+                receipt = await self._poster(channel_id, push_target(channel, chat), text,
+                                             idempotency_key=f"looper-{'reply' if reply else 'notice'}-"
+                                                             f"{manager_event_id}")
+            except Exception as exc:  # in the channel's hands: it may have gone
+                outcome, error = PostOutcome.UNKNOWN, f"{type(exc).__name__}: the channel did not say"
+            else:
+                outcome, error = receipt.result, receipt.error
+                if outcome is PostOutcome.REJECTED and receipt.external_ids:  # a part went: never sent again
+                    outcome, error = PostOutcome.UNKNOWN, f"part of it was sent: {receipt.error}"
+        if outcome is not PostOutcome.SENT:
+            logger.warning("schedule %s: run %s's message to %s is %s", schedule["id"], run_id, channel,
+                           outcome.value)
+        await self._record_once(schedule, run_id, channel, chat, text,
+                                "sent" if outcome is PostOutcome.SENT else "failed",
+                                None if outcome is PostOutcome.SENT else error, manager_event_id)
+        return outcome, error
 
     @staticmethod
-    async def _record_once(schedule: Mapping[str, Any], run_id: str, text: str, manager_event_id: int) -> None:
-        await db_schedules.insert_notification(
-            db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=Kind.RUN.value,
-            channel=schedule.get("notify_channel"), chat=schedule.get("notify_chat"), text=text, status="sent",
-            error=None, manager_event_id=manager_event_id, once=True)
+    async def _record_once(schedule: Mapping[str, Any], run_id: str, channel: str, chat: str, text: str, status: str,
+                           error: str | None, manager_event_id: int) -> None:
+        """The outbox row of an event's message, once per event and status; a write that fails is tried once more and
+        then logged (the message is what it is: never sent again for its row)."""
+        for attempt in range(2):
+            try:
+                await db_schedules.insert_notification(
+                    db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=Kind.RUN.value,
+                    channel=channel, chat=chat, text=text, status=status, error=error,
+                    manager_event_id=manager_event_id, once=True)
+                return
+            except asyncpg.ForeignKeyViolationError:
+                return  # deleted since: its outbox went with it
+            except Exception:
+                if attempt:
+                    logger.exception("schedule %s: run %s's outbox row was not written", schedule["id"], run_id)
 
     async def run_target_ok(self, run_id: str, channel_id: str, chat: str) -> bool:
         """Whether the run's schedule still sends its messages to ``chat`` through ``channel_id`` (the target its
@@ -507,13 +534,6 @@ class Notifier:
 
     async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> str:
         """Send and record the message; its status: ``sent``, ``failed`` (not handed to a channel) or ``dashboard``."""
-        return (await self._send_and_record(schedule, kind, text, run_id=run_id))[0]
-
-    async def _send_and_record(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None,
-                               manager_event_id: int | None = None) -> tuple[str, bool]:
-        """``_deliver``, and whether the channel raised (the message may have gone). With ``manager_event_id``, an
-        outbox row that cannot be written raises ``_NotRecorded`` with the send's status, so the caller tells a
-        message that went from one that did not."""
         from .schedules import notify_targets
 
         if schedule.get("kind") == "subscription":
@@ -521,7 +541,7 @@ class Notifier:
             # read the schedule (this run's end, an alert's check), and a notice goes only where it may now.
             schedule = await db_schedules.get_schedule(schedule["id"]) or schedule
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
-        status, error, raised = "dashboard", None, False
+        status, error = "dashboard", None
         dashboard_alert = kind is not Kind.RUN and schedule.get("notify_format") == "deliverable"
         # A subscription's notices (failures and alerts too) go only where its pushes may: through the same check.
         unconfirmed = await _held_back(schedule, run_id)
@@ -535,20 +555,16 @@ class Notifier:
                 try:
                     sent, error = await self._sender(builtin_channel_id(channel), chat, text)
                 except Exception as exc:  # a channel's failure is the message's, never the scheduler's
-                    sent, error, raised = False, f"{type(exc).__name__}: {exc}", True
+                    sent, error = False, f"{type(exc).__name__}: {exc}"
                 status = "sent" if sent else "failed"
             if status == "failed":
                 logger.warning("schedule %s: the %s message to %s could not be sent", schedule["id"], kind.value, channel)
         try:
             await db_schedules.insert_notification(
                 db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=kind.value, channel=channel,
-                chat=chat, text=text, status=status, error=error, manager_event_id=manager_event_id,
+                chat=chat, text=text, status=status, error=error,
             )
         except asyncpg.ForeignKeyViolationError:
             # Deleted since the message was written: its outbox went with it.
             logger.info("schedule %s was deleted: its %s message is not recorded", schedule["id"], kind.value)
-        except Exception as exc:
-            if manager_event_id is None:
-                raise
-            raise _NotRecorded(status, raised) from exc
-        return status, raised
+        return status

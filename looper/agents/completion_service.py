@@ -6,14 +6,16 @@ Every ``TICK_SECONDS`` (and at once when an event is recorded, ``completion_even
 
 - a pending event that waited ``QUEUE_SECONDS`` for its turn (its Manager is held by a long one) falls back
   (``queue_deadline``) and its notice goes;
-- a fallback notice known not to have been handed to its channel is tried again when its backoff is up
-  (``store.claim_retries``; one that may have reached the chat is never tried again);
+- every code notice due is sent through the one claim (``store.claim_deliveries``): a fallback's, and one its channel
+  refused whose backoff is up; one that may have reached the chat (``uncertain``) is never sent again, and one left
+  ``sending`` for ``SENDING_STALE_SECONDS`` becomes ``uncertain``;
 - a chat whose oldest pending event is due (``WINDOW_SECONDS`` after it was recorded) and that no turn is telling
   gets a ``COMPLETION_DUE`` on its Manager's queue, at most once per ``RESEND_SECONDS`` (a duplicate claims
   nothing); a Manager that does not run gets the chat's notices instead (``manager_off``).
 
-When it starts, the ``running`` events of Managers that do not run fall back (``restart``): a running Manager
-recovered its own when it started. One service runs per ``looper serve``.
+When it starts, the ``running`` events of Managers that do not run are settled (``restart``; a reply that was being
+sent is ``uncertain``), and a notice left ``sending`` by the server before is ``uncertain``: a running Manager
+recovered its own events when it started. One service runs per ``looper serve``.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..db import manager_events as store
@@ -64,6 +66,9 @@ class CompletionService:
         self._task: asyncio.Task[Any] | None = None
         self._health: dict[str, Any] | None = None
         self._health_at = float("-inf")
+        # Built before any Manager of this server starts: a notice ``sending`` since earlier was this process's
+        # predecessor's (``store.settle_stale``).
+        self._born = datetime.now(timezone.utc)
 
     def poke(self) -> None:
         self._woken.set()
@@ -72,12 +77,13 @@ class CompletionService:
         if self._task is not None:
             return
         try:
-            rows = await store.recover_stopped(self._running_managers())
-            for row in rows:
-                logger.info("completion fallback id=%s reason=%s", row["id"], row["reason"])
-                await completion_events.send_fallbacks(self._bus, manager_address(row["manager_id"]), [row])
+            if moved := await store.recover_stopped(self._running_managers()):
+                logger.info("completion service: %d event(s) of Managers that do not run fell back (restart)", moved)
+            for row in await store.settle_stale(before=self._born):
+                logger.warning("manager_event %s: its notice was being sent when the server stopped: uncertain, not "
+                               "sent again", row["id"])
         except Exception:
-            logger.exception("completion service: could not recover the events of Managers that do not run")
+            logger.exception("completion service: could not recover the events of the server before it")
         global _running
         completion_events.set_poke(self.poke)
         _running = self
@@ -111,15 +117,15 @@ class CompletionService:
         if self._drain is not None and self._drain.draining:
             return 0
         now = now or datetime.now(timezone.utc)
-        # Notices known not to have been sent, due again (taken for a lease: no other pass sends them meanwhile);
-        # first, so one that fails below waits for its backoff.
-        for row in await store.claim_retries(now):
-            logger.info("completion fallback id=%s: trying its notice again (try %d)", row["id"],
-                        row["send_attempts"] + 1)
-            await completion_events.send_fallbacks(self._bus, manager_address(row["manager_id"]), [row])
+        # A notice whose send never answered may have gone: never sent again (from the wall clock: a test's ``now``
+        # must not age a send under way).
+        stale = datetime.now(timezone.utc) - timedelta(seconds=store.SENDING_STALE_SECONDS)
+        for row in await store.settle_stale(before=stale):
+            logger.warning("manager_event %s: its notice never finished sending: uncertain, not sent again", row["id"])
         for row in await store.expire(now):
             logger.info("completion fallback id=%s reason=queue_deadline", row["id"])
-            await completion_events.send_fallbacks(self._bus, manager_address(row["manager_id"]), [row])
+        # Every notice due (pending, or refused and its backoff up), through the one claim.
+        await completion_events.deliver_notices(self._bus, now=now)
         moved = 0
         monotonic = self._clock()
         for key in await store.due_targets(now):

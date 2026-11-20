@@ -452,9 +452,9 @@ def test_a_database_whose_events_predate_the_new_reasons_and_retries_gets_them_o
             "ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
             "manager_events_reason_check CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', "
             "'turn_timeout', 'turn_stopped', 'empty_reply', 'send_failed', 'queue_deadline', 'restart')); "
-            "ALTER TABLE manager_events DROP COLUMN send_attempts, DROP COLUMN send_retry_at, "
-            "DROP COLUMN send_uncertain; "
-            "DELETE FROM schema_migrations WHERE name IN ('manager_event_reasons', 'manager_event_send_retry')")
+            "ALTER TABLE manager_events DROP COLUMN delivery, DROP COLUMN delivery_attempts, "
+            "DROP COLUMN delivery_at, DROP COLUMN delivery_error; "
+            "DELETE FROM schema_migrations WHERE name IN ('manager_event_reasons', 'manager_event_delivery')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
@@ -462,6 +462,7 @@ def test_a_database_whose_events_predate_the_new_reasons_and_retries_gets_them_o
             assert not await connection.schema_change_pending(conn)
         await with_task(pool, tmp_path)
         await insert(pool, dedupe_key="k", state="skipped", reason="no_chat")
-        await insert(pool, dedupe_key="k2", state="fallback", reason="target_changed", send_attempts=2)
+        await insert(pool, dedupe_key="k2", state="fallback", reason="target_changed", delivery="failed",
+                     delivery_attempts=2)
 
     run_db(check, monkeypatch, timeout=30)

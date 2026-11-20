@@ -387,7 +387,8 @@ def test_the_switch_changes_no_prompt_tool_or_command_of_a_users_turn(monkeypatc
     run_db(run, monkeypatch, timeout=90)
 
 
-def test_a_turn_a_restart_cut_off_sends_its_notice_before_a_replayed_wake_up(monkeypatch, tmp_path, turns_on):
+@pytest.mark.parametrize("cut", ["turn", "reply"])
+def test_a_turn_a_restart_cut_off_settles_before_a_replayed_wake_up(monkeypatch, tmp_path, turns_on, cut):
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
     from looper.db import manager_events as store
     from tests.db_support import until
@@ -397,22 +398,32 @@ def test_a_turn_a_restart_cut_off_sends_its_notice_before_a_replayed_wake_up(mon
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
             (due,) = await _due(chat.bus)
-            # The turn took the event, then the service stopped before it ended.
-            (taken,) = await store.claim("manager", "channel-web", THREAD, uuid.uuid4())
+            # The turn took the event (and, for "reply", was handing its reply over), then the server stopped.
+            batch = uuid.uuid4()
+            (taken,) = await store.claim("manager", "channel-web", THREAD, batch)
+            if cut == "reply":
+                await store.claim_reply(batch)
             restarted = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
             chat.bus.get_queue("manager").put_nowait(due)  # the journal replays the wake-up
             await restarted.start(chat.bus)
             try:
-                await until(lambda: chat.bus.get_queue("channel-web").qsize() > 0, "the notice")
                 await until(lambda: chat.bus.get_queue("manager").qsize() == 0 and restarted._handling is None,
                             "the replayed wake-up")
             finally:
                 await restarted.stop()
+            (row,) = await _events(pool)
+            if cut == "reply":  # the reply may have gone: nothing more is sent, ever
+                assert (row["state"], row["delivery"], row["sent_at"]) == ("delivered", "uncertain", None)
+                await _service(chat.bus).run_once()
+                assert _drain(chat.bus, "channel-web") == []
+                return
+            assert (row["id"], row["state"], row["reason"], row["delivery"]) == (
+                taken["id"], "fallback", "restart", "pending")
+            await _service(chat.bus).run_once()  # the completion service delivers it
             (notice,) = _drain(chat.bus, "channel-web")
             assert notice.payload["text"] == web_end_text("completed", "calc", "## Done\nadd and sub pass")
             (row,) = await _events(pool)
-            assert (row["id"], row["state"], row["reason"], row["sent_at"] is not None) == (
-                taken["id"], "fallback", "restart", True)
+            assert (row["delivery"], row["sent_at"] is not None) == ("sent", True)
 
     run_db(run, monkeypatch, timeout=60)
 
@@ -484,7 +495,8 @@ class _Hung:
                 except asyncio.CancelledError:
                     if not self.swallow:
                         raise
-            # A late exit: a new session's id and spend, which only the turn's own record may take.
+            # A late exit: its transport's callback, a new session's id and spend: none of them is the Manager's now.
+            await on_event({"type": "system", "subtype": "transport"})
             await on_event({"type": "system", "subtype": "init", "session_id": "sess-late"})
             self.totals = Usage(cost_usd=9.0)
         elif self.hold is not None:

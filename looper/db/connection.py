@@ -143,7 +143,7 @@ _SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
 _SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
 _MANAGER_EVENT_REASONS_MIGRATION = "manager_event_reasons"
-_MANAGER_EVENT_SEND_RETRY = "manager_event_send_retry"
+_MANAGER_EVENT_DELIVERY = "manager_event_delivery"
 _SCHEDULE_NOTIFICATION_EVENTS_ONLINE = "schedule_notification_events_online"
 # The reasons a completion event may record (schema.sql's manager events block lists the same).
 _MANAGER_EVENT_REASONS = ("off", "group_chat", "manager_off", "turn_failed", "turn_timeout", "turn_stopped",
@@ -829,14 +829,14 @@ async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
     return definition is not None and any(f"'{reason}'" not in definition for reason in _MANAGER_EVENT_REASONS)
 
 
-async def _manager_event_send_retry_pending(conn: asyncpg.Connection) -> bool:
-    """A database whose completion events predate the retry of their unsent notices."""
+async def _manager_event_delivery_pending(conn: asyncpg.Connection) -> bool:
+    """A database whose completion events predate the typed delivery of their messages."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
-                           _MANAGER_EVENT_SEND_RETRY):
+                           _MANAGER_EVENT_DELIVERY):
         return False
     return await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL") and not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('manager_events') "
-        "AND attname = 'send_attempts' AND attnum > 0 AND NOT attisdropped)")
+        "AND attname = 'delivery' AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _schedule_notification_events_pending(conn: asyncpg.Connection) -> bool:
@@ -1260,11 +1260,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
                                f"manager_events_reason_check CHECK (reason IN ({reasons}))")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_REASONS_MIGRATION)
-        if await _manager_event_send_retry_pending(conn):
-            await conn.execute("ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS send_attempts INTEGER NOT NULL "
-                               "DEFAULT 0, ADD COLUMN IF NOT EXISTS send_retry_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS "
-                               "send_uncertain BOOLEAN NOT NULL DEFAULT false")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_SEND_RETRY)
+        if await _manager_event_delivery_pending(conn):
+            await conn.execute(
+                "ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery TEXT CHECK (delivery IN ('pending', "
+                "'sending', 'sent', 'failed', 'uncertain')), ADD COLUMN IF NOT EXISTS delivery_attempts INTEGER NOT NULL "
+                "DEFAULT 0, ADD COLUMN IF NOT EXISTS delivery_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS delivery_error TEXT")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_DELIVERY)
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():
                 await conn.execute(ddl)
@@ -1405,7 +1406,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
-            or await _manager_event_reasons_pending(conn) or await _manager_event_send_retry_pending(conn)
+            or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)

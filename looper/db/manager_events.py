@@ -23,8 +23,6 @@ Db = asyncpg.Pool | asyncpg.Connection
 RETENTION_DAYS = 30
 # The most events one completion turn tells.
 CLAIM_LIMIT = 10
-# A Manager that starts sends the notices of fallen-back events this recent that were never sent.
-UNSENT_HOURS = 24
 # A chat's first pending event waits this long for the others ending soon after it: one turn tells them all.
 WINDOW_SECONDS = 60
 # A pending event that waited this long for its turn (the Manager is held by a long one) gets its notice instead.
@@ -32,12 +30,12 @@ QUEUE_SECONDS = 15 * 60
 # The fallbacks of this many batches in a row, for these reasons, make the completion turns a failing feature (P3).
 FAILING_BATCHES = 5
 FAILING_REASONS = ("turn_failed", "turn_timeout", "empty_reply")
-# A fallback notice known not to have been handed to its channel is tried again after RETRY_SECONDS * 3^(n-1)
-# (at most RETRY_MAX_SECONDS) for its first SEND_ATTEMPTS tries; a pass that took one holds it RETRY_LEASE_SECONDS.
+# A code notice the channel said it did not send (``failed``) is tried again RETRY_SECONDS * 3^(n-1) later (at most
+# RETRY_MAX_SECONDS) for its first DELIVERY_ATTEMPTS tries. One ``sending`` for SENDING_STALE_SECONDS may have gone.
 RETRY_SECONDS = 5
 RETRY_MAX_SECONDS = 15 * 60
-SEND_ATTEMPTS = 8
-RETRY_LEASE_SECONDS = 60
+DELIVERY_ATTEMPTS = 8
+SENDING_STALE_SECONDS = 10 * 60
 PRUNE_BATCH = 5000
 SUMMARY_HOURS = 24
 
@@ -108,77 +106,107 @@ async def claim(manager_id: str, channel_id: str, chat: str, batch: UUID, *, lim
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
-async def deliver(batch: UUID, *, record_id: int | None, uncertain: bool = False,
+async def claim_reply(batch: UUID, *, pool: Db | None = None) -> int:
+    """The completion turn's reply is about to be handed to its channel: its events are ``sending`` (committed
+    before the channel is asked). How many."""
+    result = await (pool or get_pool()).execute(
+        "UPDATE manager_events SET delivery = 'sending', delivery_attempts = delivery_attempts + 1, "
+        "delivery_at = now() WHERE batch = $1 AND state = 'running' AND delivery IS NULL", batch)
+    return int(result.split()[-1])
+
+
+async def deliver(batch: UUID, *, record_id: int | None, uncertain: bool = False, error: str | None = None,
                   pool: Db | None = None) -> list[dict[str, Any]]:
-    """The completion turn's reply was handed to the channel (``uncertain``: it may have been; it is never sent
-    again): its running events are delivered."""
+    """The completion turn's reply went to the channel (``uncertain``: it may have; it is never sent again, and
+    neither are its notices): its running events are delivered."""
     rows = await (pool or get_pool()).fetch(
-        "UPDATE manager_events SET state = 'delivered', record_id = $2, sent_at = now(), finished_at = now(), "
-        "send_uncertain = $3 WHERE batch = $1 AND state = 'running' RETURNING *", batch, record_id, uncertain)
+        "UPDATE manager_events SET state = 'delivered', record_id = $2, finished_at = now(), "
+        "delivery = CASE WHEN $3 THEN 'uncertain' ELSE 'sent' END, delivery_error = $4, "
+        "sent_at = CASE WHEN $3 THEN NULL ELSE now() END WHERE batch = $1 AND state = 'running' RETURNING *",
+        batch, record_id, uncertain, error)
     return [dict(row) for row in rows]
 
 
-async def retry_later(event_id: int, *, pool: Db | None = None) -> datetime | None:
-    """The fallback notice was not handed to its channel, and it is known not to have been: it is tried again with
-    backoff, up to ``SEND_ATTEMPTS`` tries. Answers when, or None once given up."""
-    return await (pool or get_pool()).fetchval(
-        "UPDATE manager_events SET send_attempts = send_attempts + 1, send_retry_at = CASE "
-        "WHEN send_attempts + 1 >= $2 THEN NULL "
-        "ELSE now() + make_interval(secs => least($3 * power(3, send_attempts), $4)) END "
-        "WHERE id = $1 AND sent_at IS NULL RETURNING send_retry_at",
-        event_id, SEND_ATTEMPTS, float(RETRY_SECONDS), float(RETRY_MAX_SECONDS))
-
-
-async def mark_uncertain(event_id: int, *, pool: Db | None = None) -> None:
-    """A try at the fallback notice may have reached the chat: it is never tried again."""
-    await (pool or get_pool()).execute(
-        "UPDATE manager_events SET send_uncertain = true, send_retry_at = NULL, send_attempts = send_attempts + 1 "
-        "WHERE id = $1 AND sent_at IS NULL", event_id)
-
-
-async def claim_retries(now: datetime, *, limit: int = CLAIM_LIMIT, pool: Db | None = None) -> list[dict[str, Any]]:
-    """The fallback notices due to be tried again, taken for ``RETRY_LEASE_SECONDS`` (a pass that runs meanwhile
-    takes none of them), oldest first."""
-    rows = await (pool or get_pool()).fetch(
-        "UPDATE manager_events SET send_retry_at = $1::timestamptz + make_interval(secs => $2) WHERE id IN ("
-        "SELECT id FROM manager_events WHERE state = 'fallback' AND sent_at IS NULL AND NOT send_uncertain "
-        "AND send_retry_at <= $1 ORDER BY id LIMIT $3 FOR UPDATE SKIP LOCKED) RETURNING *",
-        now, float(RETRY_LEASE_SECONDS), limit)
-    return sorted((dict(row) for row in rows), key=lambda row: row["id"])
-
-
 async def fall_back(*, reason: str, batch: UUID | None = None, target: Sequence[str] | None = None,
-                    states: Sequence[str] = ("running",), record_id: int | None = None,
+                    states: Sequence[str] = ("running",), record_id: int | None = None, rejected: bool = False,
                     pool: Db | None = None) -> list[dict[str, Any]]:
-    """Move events to ``fallback`` with ``reason`` and answer them, oldest first, for the caller to send their code
-    notices: the running events of ``batch``, or the events of the chat ``target`` (manager, channel, chat) still in
-    ``states``. Moved once: a second caller gets nothing."""
+    """Move events to ``fallback`` with ``reason``, their code notices waiting for delivery (``pending``), and answer
+    them, oldest first: the running events of ``batch``, or the events of the chat ``target`` (manager, channel,
+    chat) still in ``states``. An event whose reply was being sent (``sending``) may have been told: it becomes
+    ``delivered`` and ``uncertain`` instead, unless the channel said it did not send it (``rejected``). Moved once: a
+    second caller gets nothing."""
     if (batch is None) == (target is None):
         raise ValueError("give a batch or a target")
     if batch is not None:
         where, args = "batch = $3", [batch]
     else:
         where, args = "manager_id = $3 AND channel_id = $4 AND chat = $5", list(target or ())
-    rows = await (pool or get_pool()).fetch(
-        "UPDATE manager_events SET state = 'fallback', reason = $1, finished_at = now(), "
-        f"record_id = COALESCE($2, record_id) WHERE {where} AND state = ANY(${len(args) + 3}::text[]) RETURNING *",
-        reason, record_id, *args, list(states))
+    states_at = len(args) + 3
+    db = pool or get_pool()
+    if not rejected:
+        await db.execute(
+            "UPDATE manager_events SET state = 'delivered', delivery = 'uncertain', finished_at = now(), "
+            "delivery_error = $1, record_id = COALESCE($2, record_id) "
+            f"WHERE {where} AND state = ANY(${states_at}::text[]) AND delivery = 'sending'",
+            "the reply may have been sent", record_id, *args, list(states))
+    rows = await db.fetch(
+        "UPDATE manager_events SET state = 'fallback', reason = $1, finished_at = now(), delivery = 'pending', "
+        "delivery_attempts = 0, delivery_at = NULL, delivery_error = NULL, record_id = COALESCE($2, record_id) "
+        f"WHERE {where} AND state = ANY(${states_at}::text[]) RETURNING *", reason, record_id, *args, list(states))
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
-async def recover(manager_id: str, *, pool: Db | None = None) -> list[dict[str, Any]]:
-    """What a Manager that starts finds of the turns it took before: its ``running`` events (their turn was cut off)
-    fall back with ``restart``. Answers the fallen-back events of the last ``UNSENT_HOURS`` whose notice was never
-    handed to the channel (those just moved among them), oldest first. Its ``pending`` events wait for the
-    completion service, as before the restart."""
+async def claim_deliveries(*, now: datetime | None = None, ids: Sequence[int] | None = None,
+                           limit: int = CLAIM_LIMIT, pool: Db | None = None) -> list[dict[str, Any]]:
+    """The one way a code notice is taken for sending (a fallback's, a retry's, after a restart): ``pending``, or
+    ``failed`` and due again (``delivery_at`` <= ``now``, under ``DELIVERY_ATTEMPTS``), written ``sending``
+    (committed) before the channel is asked. ``ids``: only these. Oldest first; a second caller gets none of them."""
+    rows = await (pool or get_pool()).fetch(
+        "UPDATE manager_events SET delivery = 'sending', delivery_attempts = delivery_attempts + 1, "
+        "delivery_at = now() WHERE id IN (SELECT id FROM manager_events WHERE state = 'fallback' AND ("
+        "delivery = 'pending' OR (delivery = 'failed' AND delivery_at <= COALESCE($1::timestamptz, now()) "
+        "AND delivery_attempts < $4)) AND ($3::bigint[] IS NULL OR id = ANY($3::bigint[])) "
+        "ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED) AND delivery IN ('pending', 'failed') RETURNING *",
+        now, limit, list(ids) if ids is not None else None, DELIVERY_ATTEMPTS)
+    return sorted((dict(row) for row in rows), key=lambda row: row["id"])
+
+
+async def settle_delivery(event_id: int, delivery: str, *, error: str | None = None, pool: Db | None = None) -> bool:
+    """What the channel answered for a notice being sent: ``sent``; ``failed`` (it did not send it: tried again
+    with backoff, until ``DELIVERY_ATTEMPTS``); ``uncertain`` (it may have: never again). Only from ``sending``."""
+    if delivery not in ("sent", "failed", "uncertain"):
+        raise ValueError(f"not a delivery outcome: {delivery!r}")
+    result = await (pool or get_pool()).execute(
+        "UPDATE manager_events SET delivery = $2, delivery_error = $3, "
+        "sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END, delivery_at = CASE WHEN $2 = 'failed' "
+        "AND delivery_attempts < $4 THEN now() + make_interval(secs => least($5 * power(3, delivery_attempts - 1), "
+        "$6)) WHEN $2 = 'failed' THEN NULL ELSE delivery_at END WHERE id = $1 AND delivery = 'sending'",
+        event_id, delivery, error, DELIVERY_ATTEMPTS, float(RETRY_SECONDS), float(RETRY_MAX_SECONDS))
+    return result.endswith(" 1")
+
+
+async def settle_stale(*, before: datetime, pool: Db | None = None) -> list[dict[str, Any]]:
+    """Code notices left ``sending`` since before ``before`` (by a process that is gone, or a send that never
+    answered): the channel may have sent them, so they are ``uncertain`` and are never sent again."""
+    rows = await (pool or get_pool()).fetch(
+        "UPDATE manager_events SET delivery = 'uncertain', delivery_error = 'it was being sent when its sender "
+        "stopped' WHERE state = 'fallback' AND delivery = 'sending' AND delivery_at < $1 RETURNING *", before)
+    return [dict(row) for row in rows]
+
+
+async def recover(manager_id: str, *, pool: Db | None = None) -> int:
+    """What a Manager that starts finds of the turns it took before (none of its own runs yet): an event whose reply
+    was being sent may have been told (``delivered``, ``uncertain``); any other ``running`` one falls back with
+    ``restart``, its notice waiting for the completion service. How many fell back."""
     db = pool or get_pool()
-    await db.execute("UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now() "
-                     "WHERE manager_id = $1 AND state = 'running'", manager_id)
-    unsent = await db.fetch(
-        "SELECT * FROM manager_events WHERE manager_id = $1 AND state = 'fallback' AND sent_at IS NULL "
-        "AND NOT send_uncertain AND created_at >= now() - make_interval(hours => $2) ORDER BY id",
-        manager_id, UNSENT_HOURS)
-    return [dict(row) for row in unsent]
+    await db.execute(
+        "UPDATE manager_events SET state = 'delivered', delivery = 'uncertain', finished_at = now(), "
+        "delivery_error = 'the server stopped while the reply was being sent' "
+        "WHERE manager_id = $1 AND state = 'running' AND delivery = 'sending'", manager_id)
+    result = await db.execute(
+        "UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now(), delivery = 'pending', "
+        "delivery_attempts = 0, delivery_at = NULL WHERE manager_id = $1 AND state = 'running'", manager_id)
+    return int(result.split()[-1])
 
 
 async def due_targets(now: datetime, *, pool: Db | None = None) -> list[tuple[str, str, str]]:
@@ -195,24 +223,27 @@ async def expire(now: datetime, *, pool: Db | None = None) -> list[dict[str, Any
     """Pending events that waited ``QUEUE_SECONDS`` for their turn fall back (``queue_deadline``); answers them,
     oldest first, for the caller to send their notices."""
     rows = await (pool or get_pool()).fetch(
-        "UPDATE manager_events SET state = 'fallback', reason = 'queue_deadline', finished_at = now() "
-        "WHERE state = 'pending' AND created_at <= $1::timestamptz - make_interval(secs => $2) RETURNING *",
+        "UPDATE manager_events SET state = 'fallback', reason = 'queue_deadline', finished_at = now(), "
+        "delivery = 'pending' WHERE state = 'pending' AND created_at <= $1::timestamptz - make_interval(secs => $2) "
+        "RETURNING *",
         now, float(QUEUE_SECONDS))
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
-async def recover_stopped(running: Sequence[str], *, pool: Db | None = None) -> list[dict[str, Any]]:
-    """At the service's start: the ``running`` events of Managers that do not run (none will start their turn
-    again) fall back with ``restart``; answers every recent fallen-back event of theirs whose notice was never
-    sent. A running Manager recovered its own when it started (``recover``)."""
+async def recover_stopped(running: Sequence[str], *, pool: Db | None = None) -> int:
+    """At the service's start: the ``running`` events of Managers that do not run (none will take their turn again)
+    are settled as ``recover`` settles a Manager's own. A running Manager recovered its own when it started. How
+    many fell back."""
     db = pool or get_pool()
-    await db.execute("UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now() "
-                     "WHERE state = 'running' AND NOT (manager_id = ANY($1::text[]))", list(running))
-    rows = await db.fetch(
-        "SELECT * FROM manager_events WHERE state = 'fallback' AND sent_at IS NULL AND NOT send_uncertain "
-        "AND NOT (manager_id = ANY($1::text[])) AND created_at >= now() - make_interval(hours => $2) ORDER BY id",
-        list(running), UNSENT_HOURS)
-    return [dict(row) for row in rows]
+    await db.execute(
+        "UPDATE manager_events SET state = 'delivered', delivery = 'uncertain', finished_at = now(), "
+        "delivery_error = 'the server stopped while the reply was being sent' "
+        "WHERE NOT (manager_id = ANY($1::text[])) AND state = 'running' AND delivery = 'sending'", list(running))
+    result = await db.execute(
+        "UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now(), delivery = 'pending', "
+        "delivery_attempts = 0, delivery_at = NULL WHERE NOT (manager_id = ANY($1::text[])) AND state = 'running'",
+        list(running))
+    return int(result.split()[-1])
 
 
 async def prune(conn: Db, before: datetime) -> int:

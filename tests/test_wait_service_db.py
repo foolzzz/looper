@@ -702,7 +702,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
             return SimpleNamespace(start=start, stop=stop, start_all=start, stop_all=stop,
                                    register=MagicMock(), resume_all=AsyncMock(), notify=AsyncMock(),
                                    post=AsyncMock(), read_quote=AsyncMock(), task_ended=AsyncMock(),
-                                   deliver_run_message=AsyncMock(), list_channels=lambda: [])
+                                   list_channels=lambda: [])
 
         bus = SimpleNamespace(shutdown=AsyncMock(), queue_ids=lambda: [])
         router = SimpleNamespace(has_planner=lambda task_id: task_id == "task-active")

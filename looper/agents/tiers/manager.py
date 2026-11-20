@@ -91,6 +91,7 @@ from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from ..ops import Turn, TurnOrigin, leads as ops_leads
+from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
 from ..message import (
@@ -1938,6 +1939,7 @@ class ManagerAgent:
             await cancel_and_wait(run)
             raise
         reason: str | None = None
+        rejected = False  # the channel refused the reply: its notices may go
         text = ""
         if not done:
             reason = "turn_timeout"
@@ -1964,28 +1966,31 @@ class ManagerAgent:
             if reason is None:
                 body = "\n\n".join(part for part in (
                     text, completion_events.link_block(rows, base=self._config.dashboard_url)) if part)
-                uncertain = False
                 try:
-                    await completion_events.send_reply(self._bus, self.agent_address, rows, body,
-                                                       metadata=state.get("chat_record"))
+                    outcome, error = await completion_events.send_reply(self._bus, self.agent_address, rows, body,
+                                                                        metadata=state.get("chat_record"))
                 except completion_events.TargetChanged as exc:
                     logger.warning("%s: the completion turn %s's reply is not sent: %s", self._log, batch, exc)
                     reason = "target_changed"
-                except completion_events.MaybeSent:
-                    # It may have reached the chat: never sent again, nor its notices (an unknown post is final).
-                    logger.warning("%s: the completion turn %s's reply may not have been sent", self._log, batch)
-                    uncertain = True
-                except Exception:
+                except Exception:  # before its events were ``sending``: nothing went
                     logger.exception("%s: the completion turn %s's reply could not be sent", self._log, batch)
                     reason = "send_failed"
-                if reason is None:
-                    try:
-                        await db_manager_events.deliver(batch, record_id=state.get("record_id"), uncertain=uncertain)
-                    except Exception:
-                        logger.exception("%s: could not record that the completion turn %s was delivered",
-                                         self._log, batch)
+                else:
+                    if outcome is PostOutcome.REJECTED:  # the channel did not send it: its notices may go
+                        logger.warning("%s: the completion turn %s's reply was refused: %s", self._log, batch, error)
+                        reason, rejected = "send_failed", True
+                    else:  # sent, or it may have been (an unknown post is final: nothing more is sent)
+                        if outcome is not PostOutcome.SENT:
+                            logger.warning("%s: the completion turn %s's reply may not have been sent: %s",
+                                           self._log, batch, error)
+                        try:
+                            await db_manager_events.deliver(batch, record_id=state.get("record_id"),
+                                                            uncertain=outcome is not PostOutcome.SENT, error=error)
+                        except Exception:  # left ``sending``: a restart settles it as uncertain, never resends
+                            logger.exception("%s: could not record that the completion turn %s was delivered",
+                                             self._log, batch)
             if reason is not None:
-                await self._fall_back_completion(batch, reason, state)
+                await self._fall_back_completion(batch, reason, state, rejected=rejected)
         cost = None
         if state.get("record_id") is not None:
             try:
@@ -2053,11 +2058,12 @@ class ManagerAgent:
         self._late_turns.add(stopping)
         stopping.add_done_callback(self._late_turns.discard)
 
-    async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any]) -> None:
+    async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any], *,
+                                    rejected: bool = False) -> None:
         assert self._bus is not None
         try:
             await completion_events.fall_back(self._bus, self.agent_address, reason=reason, batch=batch,
-                                              record_id=state.get("record_id"))
+                                              record_id=state.get("record_id"), rejected=rejected)
         except Exception:
             logger.exception("%s: the completion turn %s's events could not fall back", self._log, batch)
 
@@ -2253,7 +2259,7 @@ class ManagerAgent:
                     self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
 
         async def on_event(payload: dict[str, Any]) -> None:
-            if payload.get("type") == "system" and payload.get("subtype") == "transport":
+            if payload.get("type") == "system" and payload.get("subtype") == "transport" and not token.abandoned:
                 self._publish_binding(token)
             observe(payload)
             events.put_nowait(payload)
