@@ -276,24 +276,36 @@ def _agent_spawns_ddl() -> str:
 _OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
 
 
-def _outbound_reviews_ddl() -> tuple[str, ...]:
-    """The review table as schema.sql defines it, and the classifier in the checks that list roles and run kinds.
-    llm_records is large: its check comes back NOT VALID (no scan while the schema transaction holds its lock) and is
-    validated in ``_ONLINE_STEPS``."""
+# The checks that list the classifier: (table, constraint).
+_OUTBOUND_CHECKS = (("llm_records", "llm_records_run_kind_check"),
+                    ("agent_setting_layers", "agent_setting_layers_role_check"))
+
+
+async def _lacks_outbound_check(conn: asyncpg.Connection, table: str, constraint: str) -> bool:
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass($1) AND conname = $2 "
+        "AND strpos(pg_get_constraintdef(oid), $3) = 0)", table, constraint, "'outbound_check'")
+
+
+async def _outbound_reviews_ddl(conn: asyncpg.Connection) -> list[str]:
+    """The review table as schema.sql defines it (idempotent), and the classifier in each check that lists roles or
+    run kinds without it. llm_records is large: its check comes back NOT VALID (no scan while the schema transaction
+    holds its lock) and is validated in ``_ONLINE_STEPS``."""
     from .llm_records import RUN_KINDS
 
     found = _OUTBOUND_REVIEWS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its outbound reviews block")
     kinds = ", ".join(f"'{kind}'" for kind in RUN_KINDS)
-    return (
-        found.group(1),
-        "ALTER TABLE llm_records DROP CONSTRAINT llm_records_run_kind_check, "
+    widen = {
+        "llm_records_run_kind_check": "ALTER TABLE llm_records DROP CONSTRAINT llm_records_run_kind_check, "
         f"ADD CONSTRAINT llm_records_run_kind_check CHECK (run_kind IN ({kinds})) NOT VALID",
-        "ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check, "
-        "ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', "
-        "'processor', 'advisor', 'advice_check', 'outbound_check'))",
-    )
+        "agent_setting_layers_role_check": "ALTER TABLE agent_setting_layers DROP CONSTRAINT "
+        "agent_setting_layers_role_check, ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', "
+        "'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'outbound_check'))",
+    }
+    return [found.group(1)] + [widen[constraint] for table, constraint in _OUTBOUND_CHECKS
+                               if await _lacks_outbound_check(conn, table, constraint)]
 
 
 def _run_tree_ddl() -> tuple[str, ...]:
@@ -746,8 +758,13 @@ async def _agent_spawns_pending(conn: asyncpg.Connection) -> bool:
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _OUTBOUND_REVIEWS):
         return False
-    # Fresh baselines create the table and the widened checks together.
-    return not await conn.fetchval("SELECT to_regclass('outbound_reviews') IS NOT NULL")
+    # Fresh baselines have the table and the widened checks; an older migration may have rewritten a check since.
+    if not await conn.fetchval("SELECT to_regclass('outbound_reviews') IS NOT NULL"):
+        return True
+    for table, constraint in _OUTBOUND_CHECKS:
+        if await _lacks_outbound_check(conn, table, constraint):
+            return True
+    return False
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -1332,7 +1349,7 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _INTENT_MERGES)
         if await _outbound_reviews_pending(conn):
-            for ddl in _outbound_reviews_ddl():
+            for ddl in await _outbound_reviews_ddl(conn):
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
         # Current databases never replay initialization DDL. Missing builtins
