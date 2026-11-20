@@ -44,6 +44,32 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   with `looper_task_gate_reply`, which sends the user's own message (asking
   first which gate when it could be more than one), and nothing else does; refer to what Looper writes itself instead
   of repeating it; and never say an operation ran unless its answer was `ok`
+- With the system setting `manager.stable_context` `true` (default off), those
+  sections and the active goals are one block, `Looper state (rev R)`, R a
+  hash of its lines (`tiers/state_view.py`), so the resident session's growing
+  history keeps hitting the prompt cache. A turn starts with the whole block
+  when its session may not hold the last one: a new session (`/new`, a
+  session switch such as a full context), a new process (a server restart, an
+  idle close), after a compaction the session reported (`compact_boundary`)
+  or a turn it ran on its own, after a turn that did not go through, and on
+  every turn of a runtime whose resident session does not report its
+  compactions (`RuntimeAdapter.resident_compaction_events`, only Claude
+  Code's). A compaction or a turn of its own moves a context generation on: a
+  turn rendered before it is rendered again whole just before its message is
+  written, and a turn keeps its block only for the generation it was rendered
+  for. Any other turn starts with `Looper state: unchanged since rev R`, or
+  with the lines added and removed since that whole block (never since the
+  previous note), each under its section's heading; a note that changes more
+  than 30 % of the block's non-blank lines (a replaced line counts twice) or is
+  longer than 40 % of its characters is a new whole block instead, and exactly
+  30 % or 40 % is still a note. An open gate's line says when it opened (UTC,
+  to the minute) instead of how long it has been open, so the block does not
+  change every minute. What the session holds is in the Manager's memory
+  only. The contract then ends with `STABLE_CONTEXT_CONTRACT` (the latest
+  whole block with the newest note after it is the current state), and each
+  turn's record has `metadata.looper_state` (`view`, `rev`, `reason`). Off,
+  the turns, the prompt, the tool list and the process signature are as they
+  were without the setting
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
@@ -4983,7 +5009,17 @@ tables, the chat extraction columns and the intent tables. `agents.leads.search`
 is the shared search: every word matches a summary, detail, chat or person;
 filters select chat, person, time, kind and state. Expired is derived from
 `valid_until`, never stored. Results contain provenance, confidence and validity,
-never source message bodies; message-derived text loses mention markup.
+never source message bodies; message-derived text loses mention markup. The
+`leads check` block (migration `leads_check`, applied when the catalog lacks it)
+adds the `dropped` state to leads and intents, their `check_verdict`,
+`check_reason` and `check_record_id` (a row is `dropped` exactly when its verdict
+is `drop`), `subscriptions.check_items` and `check_alert_at`,
+`subscription_runs.check_status`, the notification kinds `check_alert` and
+`check_recovered`, and the `leads_check` role layer. Its columns come without
+constraints and its constraints `NOT VALID`, so nothing is scanned under the
+migration's locks; the online step `leads_check_online` validates them after the
+schema transaction commits (resumed by the next start if one stops first). A
+fresh database validates them on its empty tables in its own transaction.
 
 `looper leads search [WORDS ...]` reads the database directly, even while serve
 is stopped, with `--chat`, `--person`, `--since YYYY-MM-DD` or `--days N`,
@@ -4995,8 +5031,20 @@ is stopped, with `--chat`, `--person`, `--since YYYY-MM-DD` or `--days N`,
 lead, 6 unusable database or missing tables (start serve once to migrate).
 Dates without times use the machine's zone, at midnight.
 Invalid arguments return exit 2 before reading configuration, connecting or
-checking whether leads are enabled. Marking a promoted lead is refused (exit 4).
-Deletion remains available while leads are disabled.
+checking whether leads are enabled. Marking a promoted lead, or one the leads
+check dropped, is refused (exit 4). A dropped lead (state `dropped`) is out of
+the default search; `--state all` lists it after every other, `--state dropped`
+alone. Deletion remains available while leads are disabled.
+`eval-export --out FILE [--sample N]` writes the leads check's local eval set as
+JSONL: every lead marked inaccurate (label `inaccurate`) and N random active ones
+(default 20, at most 500; label `presumed_good`), each with its kind, summary,
+detail, confidence and source messages (ref, chat, sender, `sent_at`, text). It
+is written only outside any git work tree or where `git check-ignore` matches it
+(`evals/runs/`), both judged on the path with its symbolic links resolved; a
+target that is itself a symbolic link, or anything else, is refused (exit 4)
+before the database is read. It is written through a mode-600 temporary file in
+the resolved directory that replaces the target at once, so a failure (exit 2)
+leaves nothing behind. It prints counts only.
 
 Operator-only POST operations under `/api/v1/leads/` are `search`, `mark`,
 `delete`, `settings_get`, `settings_put`, `chats` and `set_chat`; API clients
@@ -5107,19 +5155,60 @@ here pushes: the intent push service polls `intents`.
   run is `extracted` (or `quiet` when nothing was stored), with
   `extract_counts` (`new`, `merged`, `superseded`, `dropped` by reason,
   `instructions_seen`, `more`) and a count line written by code as its output.
+- **The second model's check** (`subscriptions.check_items`, default false,
+  set on create or update of a leads or intents subscription and refused for a
+  push one; the presets leave it off; `looper/agents/leads_check.py`, RFC
+  section 10.1). Off, nothing below happens and the run, its prompt, its
+  results and its `config_version` are as before. On, after `extraction.parse`
+  and before the storing transaction, one run of the `leads_check` role checks
+  what was found: each item is `X1…` with its kind or type, summary or title
+  and confidence, then the `m` and `c` messages it cites, rendered as the
+  extraction's input, under the participants and, for intents, each type's
+  description once, in a `<messages>` block. The role is a tool-less spawned
+  role (`SPAWN_ROLES`): only its role layer chooses its Agent Profile, else its
+  built-in `claude-code/haiku-5-5` (`claude-haiku-5-5`), its role prompt is
+  `role_configs.leads_check`, it runs through `processor.run(role=...)` as
+  `leads_check:<schedule id>` (its record keeps only a reference to its input;
+  it has no `run_kind`), its cap is what the extraction left of the run's
+  `run_budget_usd` and of the day's `daily_budget_usd`, its deadline what is
+  left of the run's (at most 300 s). Its reply is one JSON object
+  `{"verdicts": [{"item", "verdict": "keep|drop|fix", "confidence", "reason"}],
+  "instructions_seen": [...]}`: a missing item, an unknown ref, a bad field, two
+  verdicts for one item or `fix` without a confidence leaves that item
+  unchecked; a reply that is not such an object, or reads no verdict, fails the
+  check. `drop` stores the item as `dropped` (a lead merges into none and
+  supersedes none; an intent is handled by the system at once, merged into none,
+  never pushed and never a merge target), `fix` replaces its confidence, `keep`
+  keeps it; each checked item records `check_verdict`, `check_reason` (at most
+  200 characters) and `check_record_id`. A failed check (refused, timed out,
+  over budget, unreadable, or nothing left to spend) stores every item
+  unchecked; the run still succeeds. Each extraction run that stores records
+  `subscription_runs.check_status`: `skipped` (the check is off, or nothing was
+  found), `checked` or `failed`. When as many runs in a row as the schedule's
+  failure alert waits for (3 by default) have `failed`, skipped ones neither
+  ending nor adding to the streak, the subscription's notices get one
+  `check_alert` per streak (`subscriptions.check_alert_at`), and the next
+  `checked` run a `check_recovered`; they go where its failure alerts go.
+  `extract_counts` adds `checked`,
+  `check_kept`, `check_dropped`, `check_fixed`, `check_failed` and
+  `check_cost_usd`, the count line says them, and the run's cost is both runs'.
+  The leads backfill does not run it. The intents stats count `dropped` apart:
+  neither `recognized` nor in a rate.
 - **The operator's word.** An extraction runs only while its kind's switch
   (`leads.enabled`, `intents.enabled`) is on and `target_confirmed_at` holds
   for its `config_version`, which for these kinds also binds the kind and the
-  chat lists; otherwise a firing is a `skipped_gate` (`leads are turned off:
+  chat lists, and, with `check_items` on, the check and the `leads_check`
+  role's Profile facts; otherwise a firing is a `skipped_gate` (`leads are turned off:
   …`, `not confirmed: …`), no processor starts and the cursor stays. Enabling it, or
-  changing its rule, zone, source or chat lists (or the processor's Profile,
-  through the version) clears it. A leads subscription is confirmed without a
+  changing its rule, zone, source, chat lists or `check_items` (or the processor's
+  or the check's Profile, through the version) clears it. A leads subscription is confirmed without a
   target; an intents one only with the operator's own direct chat (what it
   reads is private, so the subscriptions' private-target guard applies: the
   Lark user its source is bound to). Rules, a lookback window and a daily
   delivery are refused for either kind. The confirmation names what it reads,
   the chats excluded from
-  extraction, the rule, the processor's Profile and managed hooks, the caps and
+  extraction, the rule, the processor's Profile and managed hooks (with the
+  check on, the check's Profile, where it comes from and its managed hooks), the caps and
   what a day of the last 24 hours' in-scope events would cost, by the unit costs
   measured on the real path (`extraction.COST_PER_RUN_USD`, about $0.005–0.008
   a run, and `COST_PER_EVENT_USD`, about $0.0002 an event, with the date).

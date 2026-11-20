@@ -97,8 +97,8 @@ def test_normalized_nested_reads_counts_order_and_missing(monkeypatch):
         assert await db.get_provider('missing') is None
         assert await db.get_profile('missing') is None
         assert await db.get_model('missing') is None
-        # The built-in profile and the advisor's and its judge's.
-        assert await db.login_profile_count('claude-code') == 3
+        # The built-in profile and the advisor's, its judge's and the leads check's.
+        assert await db.login_profile_count('claude-code') == 4
         assert await db.login_profile_count('codex') == 0
         assert SECRET not in repr((providers, models, profiles))
         assert await db.get_api_key('prov-test') == SECRET  # positive control for the isolated secret path
@@ -124,7 +124,7 @@ def test_every_layer_and_usage_reads_the_same_model_reference(monkeypatch):
         view = service.profile_view(profile, usage)
         assert view['profile_id'] == 'agent-test' and view['used_by'] == usage
         assert view['roles'] == ['manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check',
-                                 'outbound_check']
+                                 'leads_check', 'outbound_check']
         assert view['cost']['source'] == 'provider_price'
         assert view['cost']['unpriced'] == ['unknown-model'] and view['warnings']
         assert SECRET not in repr((rows, view))
@@ -215,7 +215,7 @@ def test_profile_view_preserves_usage_cost_and_warnings_from_normalized_settings
     assert view['model']['name'] == 'unknown-model[1m]'
     assert view['provider']['provider_id'] == 'prov-test' and view['provider_name'] == 'Saved account'
     assert view['roles'] == ['manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check',
-                             'outbound_check'] and view['used_by'] == used
+                             'leads_check', 'outbound_check'] and view['used_by'] == used
     assert view['cost'] == {'source': 'provider_price', 'equivalent': False, 'unpriced': ['unknown-model[1m]']}
     assert view['warnings'] and view['custom_prompt'] == 'Saved prompt'
     assert 'wrong-model' not in repr(view)

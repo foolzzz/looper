@@ -49,7 +49,7 @@ _SENDER = _object({**_APP, "added_at": _STR}, closed=True)
 _SETTINGS = _object({"enabled": _BOOL, "subscriptions": _array(_object({"schedule_id": _STR, "name": _STR,
     "enabled": _BOOL, "project_id": _STR, "target_ok": _BOOL}, closed=True))}, closed=True)
 _STAT = _object({"key": _STR, "name": _STR,
-    **dict.fromkeys(("recognized", "tasked", "rejected", "expired", "merged"), _INT),
+    **dict.fromkeys(("recognized", "tasked", "rejected", "expired", "merged", "dropped"), _INT),
     **dict.fromkeys(("adoption_rate", "rejection_rate"), {"type": ["number", "null"]})}, closed=True)
 
 _ID = {"intent_id": {"type": "string", "pattern": r"^(?:[Ii]-)?\d{1,18}$"}}

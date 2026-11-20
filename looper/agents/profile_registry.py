@@ -201,6 +201,10 @@ BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
                                   BUILTIN_PROVIDER, "claude-fable-5-2", effort="high"),
     "advice_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
                                        BUILTIN_PROVIDER, "claude-sonnet-5-5"),
+    # The second model that checks what an extraction found (message-leads-intents RFC, section 10.1): another model
+    # than the extraction's, the cheapest that met the targets on the checker eval.
+    "leads_check": LegacyAgentProfile("agent-claude-code-haiku-5-5", "claude-code/haiku-5-5", BUILTIN_RUNTIME,
+                                      BUILTIN_PROVIDER, "claude-haiku-5-5"),
     "outbound_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
                                          BUILTIN_PROVIDER, "claude-sonnet-5-5"),
 })

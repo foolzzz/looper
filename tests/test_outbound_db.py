@@ -321,7 +321,7 @@ async def _before_outbound_reviews(conn: Any) -> None:
     await conn.execute(
         "ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check, "
         "ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', "
-        "'processor', 'advisor', 'advice_check'))")
+        "'processor', 'advisor', 'advice_check', 'leads_check'))")
     await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1)",
                        ["outbound_reviews", "outbound_reviews_online"])
 

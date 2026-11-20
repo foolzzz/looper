@@ -175,8 +175,8 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
     leads = commands.add_parser(
         "leads", allow_abbrev=False, help="Search and administer sourced message leads.",
         description="Read and write message leads directly in PostgreSQL, also with the service stopped. "
-                    "Exit codes: 0 done, 1 no results, 2 usage, 3 disabled, 4 refused inside an agent run, "
-                    "5 no such lead, 6 database unusable.")
+                    "Exit codes: 0 done, 1 no results, 2 usage, 3 disabled, 4 refused (inside an agent run, or an "
+                    "export that could be committed), 5 no such lead, 6 database unusable.")
     sub = leads.add_subparsers(dest="leads_command", required=True)
     search = sub.add_parser("search", allow_abbrev=False, help="Search unconfirmed message leads.")
     search.add_argument("words", nargs="*")
@@ -195,7 +195,14 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
     mark.add_argument("--note", help="Up to 500 characters.")
     delete = sub.add_parser("delete", allow_abbrev=False, help="Delete a lead and its sources.")
     delete.add_argument("lead", help="lead-123 or 123.")
-    for command in (search, mark, delete):
+    export = sub.add_parser(
+        "eval-export", allow_abbrev=False, help="Write the leads check's eval set to a local JSONL file.",
+        description="Every lead marked inaccurate, and a random sample of active ones, with the text of their source "
+                    "messages, one JSON object per line; for `python -m evals.processor --cases-file`. The file must "
+                    "be outside any git work tree or ignored by git (evals/runs/ is).")
+    export.add_argument("--out", required=True, help="The JSONL file to write (mode 600).")
+    export.add_argument("--sample", type=int, default=20, help="Active leads to add, 0 to 500 (default 20).")
+    for command in (search, mark, delete, export):
         _add_location_flags(command)
 
 
