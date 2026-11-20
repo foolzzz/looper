@@ -1800,6 +1800,112 @@ def _started_without_waiting(look: Look) -> str | None:
     return None
 
 
+# --- The Manager's completion turn (``manager.completion_turns``) ---
+
+COMPLETION_MAX_LINES = 8
+CAP_WORDS = ("上限", "预算", "花费", "budget", "cap", "$")
+RETRY_WORDS = ("重试", "重新", "再跑", "restart", "retry")
+_LINK_LINE = re.compile(r"^\[[^\]\n]*#tasks/[^\]\n]*\]\(", re.MULTILINE)
+
+
+def _seed_completion_failed(api: Api, project_id: str) -> None:
+    """The completion turn on, and a per-task spend cap no task survives its first Planner run under."""
+    api.post("/api/v1/chat_settings/update", {"completion_turns": "dm_only"})
+    api.post("/api/v1/project_admin/update", {"project_id": project_id, "fields": {
+        "task_budget_usd": 0.01, "task_budget_action": "fail"}})
+
+
+def completion_message_problem(text: str, task_id: str, *, fake: bool) -> str | None:
+    """What is wrong with the completion message stored in the chat (the Manager's words and the link line)."""
+    if text.startswith("任务「"):
+        return "the chat got the code notice, not the Manager's message"
+    if f"#tasks/{task_id}" not in text:
+        return f"the message has no link to {task_id}"
+    if fake:
+        return None
+    found = _LINK_LINE.search(text)
+    words = (text[:found.start()] if found else text).strip()
+    lines = [line for line in words.splitlines() if line.strip()]
+    if len(lines) > COMPLETION_MAX_LINES:
+        return f"the Manager's words have {len(lines)} lines, more than {COMPLETION_MAX_LINES}"
+    if not any(word in words for word in CAP_WORDS):
+        return "the message does not say the task failed at its spend cap"
+    if any(word in words for word in RETRY_WORDS) and "？" not in words and "?" not in words:
+        return "the message mentions retrying but not as a question"
+    return None
+
+
+def _completion_facts(database_url: str, task_id: str) -> dict[str, Any]:
+    """The task's status, its newest event row, the chat's newest assistant message since the task ended, the turn's
+    calls (no message id, between the row's start and end) and the restarts made since the task ended."""
+    import asyncpg
+
+    async def read() -> dict[str, Any]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            status = await conn.fetchval("SELECT status FROM tasks WHERE id = $1", task_id)
+            event = await conn.fetchrow(
+                "SELECT state, reason, session_key, created_at, started_at, finished_at, sent_at "
+                "FROM manager_events WHERE task_id = $1 ORDER BY id DESC LIMIT 1", task_id)
+            facts: dict[str, Any] = {"status": status, "event": dict(event) if event else None, "message": None,
+                                     "calls": [], "restarts": []}
+            if event is None:
+                return facts
+            facts["message"] = await conn.fetchval(
+                "SELECT content FROM chat_messages WHERE session_id = $1 AND role = 'assistant' "
+                "AND created_at >= $2 ORDER BY id DESC LIMIT 1", event["session_key"], event["created_at"])
+            start, end = event["started_at"], event["finished_at"] or event["sent_at"]
+            if start is not None and end is not None:
+                facts["calls"] = [dict(r) for r in await conn.fetch(
+                    "SELECT tool, risk, status, error_code FROM manager_actions WHERE message_id = '' "
+                    "AND created_at BETWEEN $1 AND $2 ORDER BY id", start, end)]
+            facts["restarts"] = [dict(r) for r in await conn.fetch(
+                "SELECT tool, status FROM manager_actions WHERE created_at >= $1 AND tool = 'looper_task_control' "
+                "AND arguments->>'action' = 'restart' AND status = 'ok'", event["created_at"])]
+            return facts
+        finally:
+            await conn.close()
+
+    return asyncio.run(read())
+
+
+def _completion_delivered(look: Look) -> str | None:
+    task_id = look.new_tasks()[0]["task_id"] if look.new_tasks() else None
+    if task_id is None:
+        return "no task was created"
+    ready = ("completed", "failed") if look.fake else ("failed",)
+
+    def waiting() -> str | None:
+        facts = _completion_facts(look.database_url, task_id)
+        event = facts["event"]
+        if facts["status"] in ACTIVE or facts["status"] == "init":
+            return f"the task is {facts['status']}, not {' or '.join(ready)}"
+        if event is None or not (event["finished_at"] or event["sent_at"]):
+            return "the task's manager_events row is not finished"
+        return None if facts["message"] is not None else "the chat has no message since the task ended"
+
+    problem = look.until(waiting, 300.0)
+    if problem:
+        return problem
+    facts = _completion_facts(look.database_url, task_id)
+    event = facts["event"]
+    if facts["status"] not in ready:
+        return f"the task is {facts['status']}, not {' or '.join(ready)}"
+    if event["state"] != "delivered":
+        return f"the event row is {event['state']} ({event['reason']}), not delivered"
+    problem = completion_message_problem(facts["message"], task_id, fake=look.fake)
+    if problem:
+        return problem
+    if look.fake:
+        return None
+    writes = [c["tool"] for c in facts["calls"] if c["risk"] != "read"]
+    if writes:
+        return f"the completion turn made write calls: {writes}"
+    if facts["restarts"] or facts["status"] != "failed":
+        return f"the task was restarted: {len(facts['restarts'])} restart(s), status {facts['status']}"
+    return None
+
+
 # --- The Manager's session profile (/profile) ---
 
 SWITCH = "eval/switch"
@@ -2146,6 +2252,13 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("start_no_wait", (
         Say("开始", _started_without_waiting, (("looper_task_control", {"task_id": "<task>", "action": "start"}),)),
     ), ready_task=True),
+    Dialog("completion_failed", (
+        Say(f"在 {PROJECT} 项目里建一个任务并马上开始：在工作目录里创建 hello.py，运行时打印 hello。目录用项目默认的。"
+            "不用再问我，我确认创建，也确认现在就开始。", _completion_delivered,
+            (("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。", "title": "hello 脚本",
+                                     "project": PROJECT}),
+             ("looper_task_control", {"task_id": "<task id>", "action": "start"}))),
+    ), seed=_seed_completion_failed),
     Dialog("gate_relay", (
         Say("关于那个任务在等我回答的问题：存储就用 PostgreSQL。", _relayed_to_the_gate,
             (("looper_task_gate_reply", {"task_id": "<task>", "gate": GATE_LABEL}),)),

@@ -808,6 +808,7 @@ database, a disposable `looper serve`, and fake or real mode.
 | `task_cost` | a running task's cost by model: read for that task (`looper_costs` with its task_id), nothing changes, and the reply names each model of the task's cost and gives its cost as rounded (fake mode checks the read only) |
 | `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
 | `start_no_wait` | a ready task and "开始": the Manager starts it once and ends the reply, with no shell/sleep and at most one status read after the start; the reply says it started and its questions will come to the user |
+| `completion_failed` | with the Manager's completion turn on and the project's per-task spend cap at $0.01 (action `fail`), one message asks for a tiny task to be created and started; the task fails at its cap, and the completion turn's message in the chat (not the old `任务「…」` notice) links the task, says why it failed (the cap), offers a retry only as a question, restarts nothing and makes no write call, in at most 8 lines. In fake mode only the path is checked: the event row is delivered and the message links the task |
 | `gate_relay` | the running task waits at a user gate (written into its plan first, so no Planner has to decide to ask): the user answers its question in the Manager's chat, and the Manager passes their words to the gate (`looper_task_gate_reply`), not as a supplement |
 | `gate_unrelated` | the same open gate, and a question about something else: nothing goes to the gate and nothing changes |
 | `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
@@ -902,6 +903,24 @@ task's Planner and Worker.
 `--conversations group-schedule` runs a third conversation in a group: it asks for a schedule, then changes its
 time. It passes when no answer shows a setting's value (`settings_shown`: a before → after, the directory, a budget
 or the requirement) and the change was made (`changed`).
+
+`--conversations completion` runs two more, with the Manager's completion turn on (`manager.completion_turns` =
+`dm_only`, set through `POST /api/v1/chat_settings/update` once the server is up): `completion-direct` and
+`completion-group`. After the task ends the run waits for its `manager_events` row to finish (the turn may take up to
+2 minutes). `completion-direct` passes when the task completed, the row is `delivered` and:
+
+| check | what it requires |
+|---|---|
+| `manager_last` | the last post is an answer, and no post is a code notice |
+| `link` | the last post contains `#tasks/<task id>` |
+| `first_line` | the Manager's words (the text before the link lines) start with a sentence: not a heading, list item or table row |
+| `lines_ok` | the Manager's words have at most 8 non-empty lines |
+| `no_writes` | the turn's `manager_actions` (no `message_id`, between the row's `started_at` and `finished_at`) have no write or high call; the tools are in `turn_calls` |
+| `delivered` | the row's `state` is `delivered`; `event_state`, `event_reason`, `turn_cost_usd` and `seconds_to_sent` (from the row's creation to `sent_at`) are in the JSON |
+
+`completion-group` passes with the group checks above, `notice_last` (the code notice is still the last post) and
+`event_skipped` (the row is `skipped` with reason `group_chat`). A checkout without the feature (`--checkout`) has
+no table and refuses the setting: the run records the error as `completion_setting` and fails the event checks.
 
 ```bash
 uv run --extra test python -m evals.lark_group --model sonnet --reps 2 \
