@@ -531,3 +531,20 @@ def test_task_workspace_defaults_preserve_null_in_place(stored, expected):
     assert ProjectExecution.from_row({"task_workspaces": stored}).task_mode.value == expected
     assert ProjectExecution.from_row({}).task_mode.value == "in_place"
     assert ProjectExecution.from_row({}).view()["task_workspaces"] is None
+
+
+def test_the_advisor_has_no_count_or_budget_limit_unless_set_and_takes_its_internal_domains() -> None:
+    from looper.agents.project_execution import AdvisorLimits, execution_fields
+
+    assert ProjectExecution().advisor_limits == AdvisorLimits(1.0, None, None, None)
+    limited = ProjectExecution.from_row(execution_fields({"advisor_consults_per_step": 2, "advisor_budget_usd": 5}))
+    assert (limited.advisor_limits.consults_per_step, limited.advisor_limits.budget_usd) == (2, 5.0)
+    stored = execution_fields({"advisor_internal_domains": [" Corp.Example. ", "corp.example", "build.internal"],
+                               "advisor_fallback_profile": " claude-code/opus "})
+    assert stored == {"advisor_internal_domains": ["corp.example", "build.internal"],
+                      "advisor_fallback_profile": "claude-code/opus"}
+    for bad in (["not a domain"], ["localhost"], ["a.example"] * 21, "corp.example"):
+        with pytest.raises(ValueError, match="advisor_internal_domains"):
+            execution_fields({"advisor_internal_domains": bad})
+    with pytest.raises(ValueError, match="null for no limit"):
+        execution_fields({"advisor_consults_per_step": 11})

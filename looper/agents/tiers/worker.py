@@ -627,6 +627,9 @@ class RunContext:
     verification: dict[str, Any] | None = None
     verification_source: str | None = None
     verification_writes: VerificationWrites | None = None
+    # The consult of the advisor its Planner took advice from for this attempt (``agent_spawns.id``): its record
+    # names it, never the advice, which reaches it only in the Planner's feedback.
+    advisor_consult: int | None = None
 
 
 def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
@@ -2301,7 +2304,9 @@ class WorkerPool:
         return RunContext(worker_id, parent_task_id, payload.get("task_id") or None, work_dir, prompt,
                           is_verify, launch, runtime, seat, run_timeout, started_at, hosted, command,
                           handle, system_prompt, severity=payload.get("severity") is True, head=payload.get("head"),
-                          verification=verification, verification_source=verification_source)
+                          verification=verification, verification_source=verification_source,
+                          advisor_consult=consult if isinstance(consult := payload.get("advisor_consult"), int)
+                          and not isinstance(consult, bool) else None)
 
     async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
                        started_at: datetime | None = None) -> dict[str, Any]:
@@ -2402,6 +2407,8 @@ class WorkerPool:
             pid_of=lambda: handle.pid,
         )
         async with self._record_run(worker_id, recorder):
+            if ctx.advisor_consult is not None:
+                await recorder.annotate({"advisor_consult": ctx.advisor_consult})
             if fallbacks:
                 await recorder.annotate({"fallback_from": fallbacks[-1]["from"], "fallback": list(fallbacks)})
                 if ctx.seat is not None and self.room_ops is not None:

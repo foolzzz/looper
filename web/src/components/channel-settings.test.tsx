@@ -10,32 +10,22 @@ describe("Lark bot-token settings", () => {
   let container: HTMLDivElement;
   let root: Root;
   let bot: { name: string; app_id: string; open_id: string; profile: string } | null;
-  let operatorId = "";
-  const updates: { channel_id?: string; fields?: { config?: Record<string, unknown> } }[] = [];
 
   beforeEach(() => {
     bot = { name: "Example bot", app_id: "cli_example", open_id: "ou_botexample", profile: "" };
-    operatorId = "";
-    updates.length = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === "/api/v1/channel_configs/update") {
-        updates.push(JSON.parse(String(init?.body)));
-        return Response.json({ status: "ok", result: { channel_id: "channel-lark_bot" } });
-      }
       if (url === "/api/v1/channel_configs/list") return Response.json({ status: "ok", result: { configs: [{
         channel_id: "channel-lark_bot", channel_type: "lark_bot", display_name: "Lark (bot token)",
         enabled: true, has_bot_token: true, created_at: "2026-10-18T00:00:00Z", updated_at: "2026-10-18T00:00:00Z",
-        config: {
-          app_id: "cli_example", domain: "feishu", allowed_open_ids: ["ou_example123"], allowlist_app_id: "cli_example", description: "",
-          ...(operatorId ? { operator_sender_id: operatorId } : {}),
-        },
+        config: { app_id: "cli_example", domain: "feishu", allowed_open_ids: ["ou_example123"], allowlist_app_id: "cli_example", description: "" },
       }] } });
       if (url === "/api/v1/channels/status") return Response.json({ status: "ok", result: {
         bot, problem: bot ? null : "the platform rejected the app credentials: invalid secret", names: { ou_example123: "Allowed person" },
         rejected: [{ open_id: "ou_refused123", name: "Refused person", count: 1, last_at: "2026-10-18T00:00:00Z", chat_id: null }],
       } });
       if (url === "/api/v1/channels/people") return Response.json({ status: "ok", result: { people: [], complete: false } });
+      if (url === "/api/v1/channel_configs/update") return Response.json({ status: "ok", result: {} });
       if (url === "/api/v1/gate_settings/get") return Response.json({ status: "ok", result: { targets: [], dashboard_target: null } });
       throw new Error(`Unexpected request: ${url}`);
     }));
@@ -72,28 +62,24 @@ describe("Lark bot-token settings", () => {
     });
     expect(container.textContent).toContain("Nobody found");
     expect(container.textContent).toContain("Only part of the directory was searched: use the person's email.");
-    expect(container.textContent).toContain("我的 ID");
-    expect(container.textContent).toContain("必须是允许的发送者之一。");
-    expect(container.textContent).not.toContain("It must be one of the allowed senders.");
   });
 
-  it("sends my id when it is filled in, and leaves the key out when it is cleared", async () => {
-    operatorId = "ou_old";
+  it("picks My ID among the allowlisted senders and saves it with the config", async () => {
     await act(async () => root.render(<ChannelsSection />));
-    const label = [...container.querySelectorAll("label")].find((node) => node.textContent === "我的 ID")!;
-    const input = document.getElementById(label.htmlFor) as HTMLInputElement;
-    expect(input.value).toBe("ou_old");
-    const type = (value: string) => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    };
-    const save = () => [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Save")!.click();
-    await act(async () => type(" ou_example123 "));
-    await act(async () => save());
-    expect(updates.at(-1)?.fields?.config?.operator_sender_id).toBe("ou_example123");
-    await act(async () => type("  "));
-    await act(async () => save());
-    expect(updates.at(-1)?.fields?.config).not.toHaveProperty("operator_sender_id");
+    const label = [...container.querySelectorAll("label")].find((node) => node.textContent === "My ID")!;
+    const select = document.getElementById(label.htmlFor) as HTMLSelectElement;
+    expect([...select.options].map((option) => option.value)).toEqual(["", "ou_example123"]);
+    expect(select.value).toBe("");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "ou_example123");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const save = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Save")!;
+    expect(save.disabled).toBe(false);
+    const calls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    await act(async () => save.click());
+    const update = calls.find(([url]) => String(url) === "/api/v1/channel_configs/update")!;
+    expect(JSON.parse(String(update[1].body)).fields.config.operator_sender_id).toBe("ou_example123");
   });
 
   it.each([

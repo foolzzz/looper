@@ -152,6 +152,13 @@ describe("useTaskRuns", () => {
         runtime: { type: "claude-code", name: "Claude Code" }, model: "opus", effort: "high", profile: { name: "Fast", source: "project" } },
       { id: 2, role: "worker", agent_id: "worker-1", step_id: "step-1", status: "running", created_at: "2026-10-17T08:01:00Z",
         runtime: { type: "codex", name: "Codex" }, model: "gpt", effort: null, profile: { name: "W", source: "task_role" } },
+      // A consult's runs are the Planner's role's, but not the Planner's turns: the Agent line is still the Planner's.
+      { id: 3, role: "planner", agent_id: "advice_check-0a1b", step_id: null, status: "completed",
+        created_at: "2026-10-17T08:02:00Z", runtime: { type: "claude-code", name: "Claude Code" }, model: "sonnet",
+        effort: null, profile: { name: "Judge", source: "role" }, kind: "advice_check", parent_record_id: 1 },
+      { id: 4, role: "planner", agent_id: "advisor-0a1b", step_id: null, status: "running",
+        created_at: "2026-10-17T08:03:00Z", runtime: { type: "claude-code", name: "Claude Code" }, model: "fable",
+        effort: null, profile: { name: "Advisor", source: "role" }, kind: "advisor", parent_record_id: 1 },
     ]);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -167,6 +174,7 @@ describe("useTaskRuns", () => {
     expect(seen?.runs?.planner.map((r) => r.id)).toEqual([1]);
     expect(seen?.runs?.worker.map((r) => r.id)).toEqual([2]);
     expect(seen?.runs?.reviewer).toEqual([]);
+    expect(seen?.runs?.consults?.map((r) => [r.record.id, r.kind, r.parentId])).toEqual([[3, "advice_check", 1], [4, "advisor", 1]]);
     expect(agentFact(seen!.runs!.planner)).toMatchObject({ label: "Agent", value: "Claude Code · opus · high" });
     expect(agentFact(seen!.runs!.worker, "step-1")).toMatchObject({ label: "Agent", value: "Codex · gpt" });
   });

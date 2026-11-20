@@ -44,9 +44,11 @@ _SAVE_STEP = f"""
 INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, target_files, validation_commands,
                         acceptance_criteria, depends_on, review, status, result, worker_id, reviewer_id,
                         retries, feedback, missed_messages, role_key, role_version, review_stage, review_roles,
-                        review_position, kind, created_at, updated_at, completed_at, started_at, ready_when, accept_when, reviews)
+                        review_position, kind, created_at, updated_at, completed_at, started_at, ready_when, accept_when, reviews,
+                        difficulty)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb,
-        $22, $23, now(), now(), CASE WHEN $11::text IN {_DONE_STEP_STATUSES!r} THEN now() END, $24, $25::jsonb, $26::jsonb, $27)
+        $22, $23, now(), now(), CASE WHEN $11::text IN {_DONE_STEP_STATUSES!r} THEN now() END, $24, $25::jsonb, $26::jsonb, $27,
+        $28)
 ON CONFLICT (id) DO UPDATE
 SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction = EXCLUDED.instruction,
     target_files = EXCLUDED.target_files, validation_commands = EXCLUDED.validation_commands,
@@ -56,7 +58,7 @@ SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction 
     worker_id = EXCLUDED.worker_id, reviewer_id = EXCLUDED.reviewer_id, retries = EXCLUDED.retries,
     feedback = EXCLUDED.feedback, missed_messages = EXCLUDED.missed_messages, role_key = EXCLUDED.role_key,
     role_version = EXCLUDED.role_version, review_stage = EXCLUDED.review_stage, review_roles = EXCLUDED.review_roles,
-    review_position = EXCLUDED.review_position, kind = EXCLUDED.kind, updated_at = now(),
+    review_position = EXCLUDED.review_position, kind = EXCLUDED.kind, difficulty = EXCLUDED.difficulty, updated_at = now(),
     completed_at = COALESCE(EXCLUDED.completed_at, task_steps.completed_at),
     started_at = CASE WHEN EXCLUDED.status = 'pending' THEN NULL
                       ELSE COALESCE(task_steps.started_at, EXCLUDED.started_at) END
@@ -91,7 +93,7 @@ def _step_args(task_id: str, step: Mapping[str, Any]) -> tuple[Any, ...]:
         step.get("started_at"),
         None if step.get("ready_when") is None else json.dumps(step["ready_when"], ensure_ascii=False),
         None if step.get("accept_when") is None else json.dumps(step["accept_when"], ensure_ascii=False),
-        step.get("reviews"),
+        step.get("reviews"), step.get("difficulty"),
     )
 
 
@@ -123,6 +125,10 @@ async def save(
     async with pool.acquire() as conn, conn.transaction():
         await write(conn, task_id, plan=plan, steps=steps, journal=journal, gates=gates,
                     gate_messages=gate_messages, waits=waits)
+    if gates:  # after the commit: the ledger lists the gates that now wait for the user (a no-op while it is off)
+        from . import ledger
+
+        await ledger.register_gates(task_id, db=pool)
 
 
 async def write(

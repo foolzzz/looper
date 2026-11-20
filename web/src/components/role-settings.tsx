@@ -25,13 +25,15 @@ import {
   type Registry,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
-import { historyHref } from "@/pages/agent-history";
+import { historyHref, isHistoryRole } from "@/pages/agent-history";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
 import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
-const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer", "processor"];
+const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check"];
+/** The roles another run starts (the advisor's): only their own row chooses their profile, else their built-in one. */
+const SPAWNED: readonly string[] = ["advisor", "advice_check"];
 const isRole = (role: string): role is AgentRole => (ROLES as readonly string[]).includes(role);
 
 /** The role configs in the order a task meets them. */
@@ -43,8 +45,8 @@ function rank(role: string) {
 // --- The role prompt ---
 
 /** The role prompt: one text, the role layer of the agent's system prompt. */
-function RolePromptEditor({ id, value, onChange, processor }: {
-  id: string; value: string; onChange: (v: string) => void; processor: boolean;
+function RolePromptEditor({ id, value, onChange, processor, spawned = false }: {
+  id: string; value: string; onChange: (v: string) => void; processor: boolean; spawned?: boolean;
 }) {
   const lineCount = value.split("\n").length;
 
@@ -62,6 +64,12 @@ function RolePromptEditor({ id, value, onChange, processor }: {
             This text is the role layer. At launch Looper follows it with the instructions of what it processes and
             the reply format, in place of the runtime&apos;s own prompt; a run&apos;s history page shows that whole
             prompt.
+          </>
+        ) : spawned ? (
+          <>
+            This text is the role layer. At launch Looper follows it with the reply format, in place of the
+            runtime&apos;s own prompt, and gives the run only the Planner&apos;s checked request; a run&apos;s history
+            page (from Runs) shows that whole prompt.
           </>
         ) : (
           <>
@@ -208,6 +216,15 @@ function RoleConfigForm({
           <ManagedHooks />
           <LeadsSettings />
         </div>
+      ) : SPAWNED.includes(config.role) ? (
+        <div className="space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">Permissions</span>
+          <p className="text-sm">No tools: no built-in tool, MCP server, plugin, skill or command</p>
+          <p className="text-[11px] text-muted-foreground">
+            It sees only the Planner&apos;s request, in an empty directory, and can only reply. Its Agent Profile needs
+            a runtime that can run without tools; a project turns consults on in its settings (Advisor).
+          </p>
+        </div>
       ) : (
         <div className="space-y-1">
           <span className="text-xs font-medium text-muted-foreground">Permissions</span>
@@ -243,6 +260,7 @@ function RoleConfigForm({
         value={form.system_prompt}
         onChange={(v) => setForm({ ...form, system_prompt: v })}
         processor={config.role === "processor"}
+        spawned={SPAWNED.includes(config.role)}
       />
 
       {config.default_prompt && config.system_prompt !== config.default_prompt && (
@@ -274,6 +292,8 @@ const ROLE_JOBS: Record<AgentRole, string> = {
   worker: "carries out one step",
   reviewer: "checks a step's result",
   processor: "turns messages others wrote into what its instructions ask, with no tools",
+  advisor: "answers the Planner's checked request about a hard step, with no tools",
+  advice_check: "checks the Planner's request before it goes to the advisor, with no tools",
 };
 
 /** The Shared defaults row (the system layer): its id, and its link #settings/roles/shared. */
@@ -308,7 +328,8 @@ function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined, 
   const parts = [ROLE_JOBS[role]];
   if (effective) {
     const own = effective.profile.source === "role";
-    parts.push(`${effectiveProfileText(effective, registry)} (${own ? "own" : "shared"})`);
+    const from = own ? "own" : SPAWNED.includes(role) ? "built-in" : "shared";
+    parts.push(`${effectiveProfileText(effective, registry)} (${from})`);
     const cannot = cannotRun(role, effective, registry);
     if (cannot) parts.push(cannot);
     const limit = effective.max_concurrency?.value;
@@ -435,9 +456,11 @@ export function RolesSection({ sub }: { sub: string }) {
         {configs.map((config) => {
           const role = isRole(config.role) ? config.role : null;
           const name = nameOf(config);
-          const runs = (
+          // History filters by the roles `runs.list` knows; the advisor's runs are under their task's Planner run.
+          const historyRole = isHistoryRole(config.role) ? config.role : null;
+          const runs = historyRole && (
             <a
-              href={historyHref("", null, isRole(config.role) ? config.role : null)}
+              href={historyHref("", null, historyRole)}
               className="flex shrink-0 items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
             >
               <History className="h-3.5 w-3.5" aria-hidden="true" />
@@ -461,7 +484,11 @@ export function RolesSection({ sub }: { sub: string }) {
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div>
                           <h3 id={`role-layer-${role}`} className="text-xs font-semibold">Overrides for this role</h3>
-                          <p className="mt-1 text-xs text-muted-foreground">Empty fields use the shared defaults.</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {SPAWNED.includes(role)
+                              ? "Empty fields use this role's built-in defaults: the shared defaults do not apply to it."
+                              : "Empty fields use the shared defaults."}
+                          </p>
                         </div>
                         {runs}
                       </div>

@@ -81,18 +81,6 @@ const TOKEN_CHANNELS: Record<string, { label: string; hint: string }> = {
 /** Config keys the server owns: shown elsewhere or not at all, never as an editable field. */
 const SERVER_KEYS = ["allowlist_app_id", "operator_sender_id"];
 
-const OPERATOR_CHANNELS = new Set(["telegram", "lark", "lark_bot"]);
-
-function OperatorIdField({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <div>
-      <label htmlFor={id} className="block text-xs font-medium text-muted-foreground mb-1.5">我的 ID</label>
-      <Input id={id} value={value} spellCheck={false} autoComplete="off" onChange={(e) => onChange(e.target.value)} />
-      <p className="mt-1 text-[10px] text-muted-foreground">必须是允许的发送者之一。</p>
-    </div>
-  );
-}
-
 /** Placeholders and hints for config fields that are not environment variable names. */
 const FIELD_HELP: Record<string, { placeholder: string; hint: string }> = {
   profile: {
@@ -211,12 +199,11 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
   const [enabled, setEnabled] = useState(channel.enabled);
   const [fields, setFields] = useState<Record<string, string>>(stringFields(saved, skip));
   const [ids, setIds] = useState<string[]>(allowlist ? storedIds(saved[allowlist.field]) : []);
+  const savedOperator = typeof saved.operator_sender_id === "string" ? saved.operator_sender_id : "";
+  const [operator, setOperator] = useState(savedOperator);
   const tokenChannel = TOKEN_CHANNELS[channel.channel_type];
   // Prefilled with the mask when a token is stored: sending it back unchanged keeps it.
   const [botToken, setBotToken] = useState(channel.has_bot_token ? SECRET_MASK : "");
-  const showOperator = OPERATOR_CHANNELS.has(channel.channel_type);
-  const savedOperator = typeof saved.operator_sender_id === "string" ? saved.operator_sender_id : "";
-  const [operatorId, setOperatorId] = useState(savedOperator);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [justSaved, setJustSaved] = useState(freshlySaved);
@@ -251,7 +238,7 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
     enabled !== channel.enabled ||
     JSON.stringify(fields) !== JSON.stringify(stringFields(saved, skip)) ||
     JSON.stringify(ids) !== JSON.stringify(savedIds) ||
-    (showOperator && operatorId !== savedOperator) ||
+    (!!allowlist && operator !== savedOperator) ||
     (!!tokenChannel && botToken !== savedToken);
   const idProblems = allowlistProblems(ids, allowlist);
   const invalid = idProblems.some(Boolean);
@@ -269,11 +256,12 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
     setError("");
     try {
       const config: Record<string, unknown> = { ...saved, ...fields };
-      if (allowlist) config[allowlist.field] = ids.map((value) => value.trim());
-      if (showOperator) {
-        const value = operatorId.trim();
-        if (value) config.operator_sender_id = value;
-        else delete config.operator_sender_id;
+      if (allowlist) {
+        config[allowlist.field] = ids.map((value) => value.trim());
+        // Only a sender still on the list can be the operator; an unchanged, unset one is left out of the config.
+        if (operator !== savedOperator || savedOperator) {
+          config.operator_sender_id = ids.map((value) => value.trim()).includes(operator) ? operator : null;
+        }
       }
       const payload: Partial<ChannelConfig> & { bot_token?: string } = { enabled, config };
       // Only send the token when it changed from the mask; the mask would keep it anyway, but this avoids a needless write.
@@ -362,8 +350,6 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
           </div>
         )}
 
-        {showOperator && <OperatorIdField id={`${id}-operator`} value={operatorId} onChange={setOperatorId} />}
-
         {Object.keys(fields).map((key) => (
           <div key={key}>
             <label htmlFor={`${id}-${key}`} className="block text-xs font-medium text-muted-foreground mb-1.5">
@@ -386,6 +372,32 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
             ) : null}
           </div>
         ))}
+
+        {allowlist && (
+          <div>
+            <label htmlFor={`${id}-operator`} className="block text-xs font-medium text-muted-foreground mb-1.5">
+              My ID
+            </label>
+            <select
+              id={`${id}-operator`}
+              value={ids.includes(operator) ? operator : ""}
+              onChange={(e) => setOperator(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value="">Not set</option>
+              {ids.filter(Boolean).map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              Which allowlisted sender is you. In a direct chat with this bot only your messages count as your own
+              decisions in the ledger; anyone else&apos;s, and everything said in a group, is recorded as relayed.
+              Not set: every direct message counts as relayed.
+            </p>
+          </div>
+        )}
 
         {allowlist && (
           <AllowlistEditor
@@ -750,7 +762,6 @@ function AddBotForm({
     type === "lark" ? { profile: "" } : type === "lark_bot" ? { app_id: "", domain: "feishu" } : {},
   );
   const [ids, setIds] = useState<string[]>([]);
-  const [operatorId, setOperatorId] = useState("");
   const [enabled, setEnabled] = useState(false);
   const { busy, error, run } = useAction();
 
@@ -783,7 +794,6 @@ function AddBotForm({
     const config: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(fields)) config[key] = value.trim();
     if (allowlist) config[allowlist.field] = ids.map((value) => value.trim());
-    if (operatorId.trim()) config.operator_sender_id = operatorId.trim();
     const body: Parameters<typeof createChannelBot>[0] = { channel_type: type, manager_id: managerId, enabled, config };
     if (displayName.trim()) body.display_name = displayName.trim();
     if (tokenChannel) body.bot_token = secret;
@@ -851,8 +861,6 @@ function AddBotForm({
             <p className="mt-1 text-[10px] text-muted-foreground">{tokenChannel.hint}</p>
           </div>
         )}
-
-        {OPERATOR_CHANNELS.has(type) && <OperatorIdField id={`${id}-operator`} value={operatorId} onChange={setOperatorId} />}
 
         {Object.keys(fields).map((key) => (
           <div key={key}>

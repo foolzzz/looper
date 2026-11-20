@@ -12,7 +12,7 @@ _ID = {"type": "string", "minLength": 1}
 _TYPE = {"type": "string", "enum": ["telegram", "lark", "lark_bot"]}
 _TELEGRAM_SENDERS = {"anyOf": [{"type": "null"}, _STR, _array({"type": ["string", "integer"]})]}
 _LARK_SENDERS = {"anyOf": [{"type": "null"}, _STR, _array(_STR)]}
-_COMMON = {"description": _STR}
+_COMMON = {"description": _STR, "operator_sender_id": _NULL_STR}
 _LARK = {**_COMMON, "allowed_open_ids": _LARK_SENDERS, "allowlist_app_id": _NULL_STR}
 CONFIGS = {
     "telegram": _object({**_COMMON, "bot_token_env": _NULL_STR,

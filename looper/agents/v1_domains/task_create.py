@@ -5,7 +5,7 @@ from .. import projects, workflows
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
-from ..project_execution import FIELDS, ROOM_LIMITS, ProjectExecution, format_usd
+from ..project_execution import ADVISOR_BUDGETS, ADVISOR_COUNTS, FIELDS, ROOM_LIMITS, ProjectExecution, format_usd
 
 WORKSPACE_MODE = {"type": "string", "enum": ["in_place", "worktree"]}
 WORKSPACE_WARNING = _object({
@@ -43,12 +43,16 @@ NEW_PROJECT_FIELDS = _object({
                         "enum": ["off", "draft", "write", "", True, False, None],
                         "description": "Lessons mode; true maps to write, false, null and empty string map to off."},
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
-    **dict.fromkeys(("workspace_links", "verification_paths"), _inherit("array", items=_STR)),
+    **dict.fromkeys(("workspace_links", "verification_paths", "advisor_internal_domains"),
+                    _inherit("array", items=_STR)),
+    "advisor_fallback_profile": _inherit("string"),
     **{field: _choice("on", "off") for field in (
-        "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room")},
+        "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room",
+        "advisor")},
     **{field: _inherit("integer") for field in (
-        "supervise_interval_seconds", "max_step_retries", "role_text_max_chars", "gate_reminder_hours", *ROOM_LIMITS)},
-    "room_consult_budget_usd": _inherit("number")}, ["name"], closed=True)
+        "supervise_interval_seconds", "max_step_retries", "role_text_max_chars", "gate_reminder_hours", *ROOM_LIMITS,
+        *ADVISOR_COUNTS)},
+    **{field: _inherit("number") for field in ("room_consult_budget_usd", *ADVISOR_BUDGETS)}}, ["name"], closed=True)
 REQUEST = {**_object({
     "requirement": {"type": "string", "minLength": 1, "maxLength": 32_000, "pattern": r"\S"},
     "project_id": {"type": "string", "minLength": 1}, "project": NEW_PROJECT_FIELDS,
@@ -153,6 +157,21 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
     for field, label in room_labels.items():
         value = getattr(limits, field.removeprefix("room_"))
         values[field] = (label, format_usd(value) if field == "room_consult_budget_usd" else value)
+    advisor = execution.advisor_limits
+    unlimited = "不限（只告警）"
+    values.update({
+        "advisor": ("Planner 请教 advisor", execution.advisor_on),
+        "advisor_consult_budget_usd": ("每次请教花费上限，USD", format_usd(advisor.consult_budget_usd)),
+        "advisor_budget_usd": ("每任务请教总花费上限，USD",
+                               unlimited if advisor.budget_usd is None else format_usd(advisor.budget_usd)),
+        "advisor_consults_per_task": ("每任务请教次数", unlimited if advisor.consults_per_task is None
+                                      else advisor.consults_per_task),
+        "advisor_consults_per_step": ("每步请教次数", unlimited if advisor.consults_per_step is None
+                                      else advisor.consults_per_step),
+        "advisor_fallback_profile": ("advisor 的备用 Profile（第一期不用）", execution.advisor_fallback_profile or "无"),
+        "advisor_internal_domains": ("请教包里算作 URL 的内部域名",
+                                     ", ".join(execution.advisor_internal_domains or ()) or "无"),
+    })
     lines = []
     for field in FIELDS:
         label, value = values[field]
