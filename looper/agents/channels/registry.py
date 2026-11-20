@@ -14,7 +14,7 @@ from typing import Any
 from ..bus import MessageBus
 from ..message import parse_channel_id
 from ..task_notice import NotifyTarget
-from .base import ChannelAdapter, PostReceipt
+from .base import ChannelAdapter, PostOutcome, PostReceipt
 from .chat_routing import RouteDecision, RoutingSnapshot, load_snapshot
 from .lark_quote import QuoteRead, QuoteReader, QuoteRef, QuoteUnavailable
 
@@ -92,7 +92,7 @@ class ChannelRegistry:
         """Post ``text`` to ``target`` through the running channel ``channel_id`` (``ChannelAdapter.post``)."""
         adapter = self._channels.get(channel_id)
         if adapter is None:
-            return PostReceipt(False, error=self._not_running(channel_id))
+            return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
         return await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
 
     async def read_quote(self, ref: QuoteRef, *, after: int) -> QuoteRead:

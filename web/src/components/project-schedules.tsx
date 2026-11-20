@@ -8,6 +8,7 @@ import { AgentProfileSelect } from "@/components/agent-profiles";
 import { CollapsibleRow } from "@/components/collapsible-row";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import {
+  confirmSubscriptionTarget,
   createSchedule,
   deleteSchedule,
   fetchSchedule,
@@ -18,6 +19,7 @@ import {
   fetchSchedules,
   previewSchedule,
   resetSchedulePlannerSession,
+  resetSubscriptionCursor,
   runSchedule,
   updateSchedule,
   type Project,
@@ -39,6 +41,11 @@ import {
   type ScheduleRunStatus,
   type RunStats,
   type ScheduleUpdate,
+  type SubscriptionChatKind,
+  type SubscriptionFields,
+  type SubscriptionInfo,
+  type SubscriptionRunInfo,
+  type SubscriptionSenderKind,
   type TaskLimitRole,
   type TaskRole,
 } from "@/lib/api";
@@ -840,7 +847,7 @@ function GateBudgetNotify({
  * Every field of a schedule, with the live check of its rule. Null `schedule`: a new one, created disabled. The
  * server's refusal (400, 409) is shown as it gives it.
  */
-function ScheduleForm({
+function TaskScheduleForm({
   idPrefix,
   project,
   schedule,
@@ -850,6 +857,7 @@ function ScheduleForm({
   onSaved,
   onDeleted,
   onCancel,
+  onSubscription,
 }: {
   idPrefix: string;
   project: Project;
@@ -862,6 +870,8 @@ function ScheduleForm({
   onDeleted?: () => void;
   /** A new schedule's Cancel. */
   onCancel?: () => void;
+  /** A new schedule's choice of the subscription type, whose form is another. */
+  onSubscription?: () => void;
 }) {
   const [draft, setDraft] = useState(() => draftOf(schedule, limits));
   const [busy, setBusy] = useState(false);
@@ -979,11 +989,13 @@ function ScheduleForm({
       {schedule ? <p className="text-sm text-muted-foreground">Type: {isCommand ? "Command" : "Agent task"}</p> : (
         <Choices name={id("kind")} legend="Type" value={draft.kind}
           onChange={(kind) => {
+            if (kind === "subscription") return onSubscription?.();
             setDraft((d) => ({ ...d, kind, notifyFormat: kind === "command" ? "report" : d.notifyFormat, timeoutMode: kind === "command" ? "none" : "default" }));
             setSaved(false);
           }} options={[
             { value: "agent", label: "Agent task", hint: "Each firing starts a task: a Planner and Workers, with model spend." },
             { value: "command", label: "Command", hint: "Each firing runs a shell command directly: no agent, no model spend." },
+            ...(onSubscription ? [SUBSCRIPTION_CHOICE] : []),
           ]} />
       )}
       {schedule ? !isCommand && (
@@ -1439,6 +1451,417 @@ function ScheduleForm({
   );
 }
 
+// --- Subscriptions: the stream a schedule of that type reads, and the operator's word on where it pushes ---
+
+const SUBSCRIPTION_CHOICE = {
+  value: "subscription" as const,
+  label: "Subscription",
+  hint: "Each firing reads the new messages of a chat source and has a processor with no tools write from them; "
+    + "the output is pushed once you confirm where, and stays here until then.",
+};
+const CHAT_KIND_OPTIONS: { value: SubscriptionChatKind; label: string }[] = [
+  { value: "group", label: "Group chats" }, { value: "topic", label: "Topic groups" },
+  { value: "p2p", label: "Direct chats" }, { value: "unknown", label: "Chats of unknown kind" },
+];
+const SENDER_KIND_OPTIONS: { value: SubscriptionSenderKind; label: string }[] = [
+  { value: "user", label: "People" }, { value: "app", label: "Bots" },
+];
+
+/** A subscription schedule as its form holds it: text as typed. */
+interface SubDraft {
+  name: string; cron: string; timezone: string; requirement: string;
+  source: string; chatKinds: SubscriptionChatKind[]; senderKinds: SubscriptionSenderKind[];
+  excludeMe: boolean; history: boolean; maxAge: string; maxEvents: string; textChars: string;
+  quiet: string; header: string; budget: string; dailyBudget: string;
+  overlap: ScheduleOverlap; catchUp: ScheduleCatchUp; notify: ScheduleNotify; notifyTarget: string;
+}
+
+function subDraftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): SubDraft {
+  const sub = schedule?.subscription;
+  return {
+    name: schedule?.name ?? "", cron: schedule?.cron ?? "", timezone: schedule?.timezone ?? limits.default_timezone,
+    requirement: schedule?.requirement ?? "", source: sub?.source_id ?? "",
+    chatKinds: sub?.chat_kinds ?? ["group", "topic"], senderKinds: sub?.sender_kinds ?? ["user", "app"],
+    excludeMe: sub?.exclude_mentions_me ?? true, history: sub?.include_history ?? false,
+    maxAge: String(sub?.max_age_minutes ?? 180), maxEvents: String(sub?.max_events ?? 500),
+    textChars: String(sub?.text_max_chars ?? 200), quiet: sub?.quiet_word ?? "SKIP", header: sub?.output_header ?? "",
+    budget: schedule?.run_budget_usd == null ? "" : String(schedule.run_budget_usd),
+    dailyBudget: schedule?.daily_budget_usd == null ? "" : String(schedule.daily_budget_usd),
+    overlap: schedule?.overlap === "queue" ? "queue" : "skip", catchUp: schedule?.catch_up ?? "once",
+    notify: schedule?.notify ?? "failures", notifyTarget: targetKey(schedule?.notify_target ?? null),
+  };
+}
+
+/** The schedule's own fields and the subscription's, as a request writes them. */
+function subFieldsOf(d: SubDraft, limits: ScheduleLimits) {
+  const whole = (text: string) => (/^\d+$/.test(text.trim()) ? Number(text.trim()) : NaN);
+  const schedule = {
+    name: d.name.trim(), cron: d.cron.trim(), timezone: d.timezone.trim() || limits.default_timezone,
+    requirement: d.requirement.trim(), overlap: d.overlap, catch_up: d.catchUp, notify: d.notify,
+    notify_target: targetOf(d.notifyTarget), run_budget_usd: numberOf(d.budget), daily_budget_usd: numberOf(d.dailyBudget),
+  };
+  const subscription: SubscriptionFields = {
+    source_id: d.source.trim(), chat_kinds: d.chatKinds, sender_kinds: d.senderKinds,
+    exclude_mentions_me: d.excludeMe, include_history: d.history, max_age_minutes: whole(d.maxAge),
+    max_events: whole(d.maxEvents), text_max_chars: whole(d.textChars), quiet_word: d.quiet.trim(),
+    output_header: d.header.trim(),
+  };
+  return { schedule, subscription };
+}
+
+const sameValue = (a: unknown, b: unknown) =>
+  Array.isArray(a) && Array.isArray(b) ? [...a].sort().join("\n") === [...b].sort().join("\n")
+    : JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+/** What the form changes in a saved subscription schedule, as an update takes it. */
+function subChangesOf(fields: ReturnType<typeof subFieldsOf>, saved: ScheduleInfo): ScheduleUpdate {
+  const changes: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields.schedule))
+    if (!sameValue(value, saved[key as keyof ScheduleInfo])) changes[key] = value;
+  const stored = saved.subscription;
+  const changed = Object.entries(fields.subscription).filter(([key, value]) =>
+    !sameValue(value, stored?.[key as keyof SubscriptionInfo]));
+  if (changed.length) changes.subscription = Object.fromEntries(changed);
+  return changes as ScheduleUpdate;
+}
+
+/** The form of a subscription schedule: the stream it reads, the processor's instructions, the caps and where it pushes. */
+function SubscriptionForm({
+  idPrefix, project, schedule, limits, zonesId, onDirtyChange, onSaved, onDeleted, onCancel, onTask,
+}: {
+  idPrefix: string;
+  project: Project;
+  schedule: ScheduleInfo | null;
+  limits: ScheduleLimits;
+  zonesId: string;
+  onDirtyChange?: (dirty: boolean) => void;
+  onSaved: (schedule: ScheduleInfo) => void;
+  onDeleted?: () => void;
+  onCancel?: () => void;
+  /** A new schedule's choice of another type. */
+  onTask?: () => void;
+}) {
+  const [draft, setDraft] = useState(() => subDraftOf(schedule, limits));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const set = <K extends keyof SubDraft>(key: K, value: SubDraft[K]) => { setDraft((d) => ({ ...d, [key]: value })); setSaved(false); };
+  const toggle = <T extends string>(list: T[], value: T): T[] => list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
+  const fields = subFieldsOf(draft, limits);
+  const changes = schedule ? subChangesOf(fields, schedule) : {};
+  const dirty = Object.keys(changes).length > 0;
+  useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
+  const check = useRulePreview(fields.schedule.cron, fields.schedule.timezone, true);
+  const sub = fields.subscription;
+  const inRange = (value: number | undefined, low: number, high: number) => Number.isInteger(value) && value! >= low && value! <= high;
+  const tooLong = fields.schedule.requirement.length > limits.requirement_max_chars;
+  const problems = [
+    !fields.schedule.name && "a name", !fields.schedule.cron && "a rule", !fields.schedule.requirement && "instructions",
+    !sub.source_id && "a source", !sub.chat_kinds?.length && "a kind of chat", !sub.sender_kinds?.length && "a kind of sender",
+    !(fields.schedule.run_budget_usd! > 0) && "a spend cap per run",
+    !inRange(sub.max_age_minutes, 5, 10080) && "a look-back of 5 to 10080 minutes",
+    !inRange(sub.max_events, 1, 2000) && "a message cap of 1 to 2000", !inRange(sub.text_max_chars, 20, 4000) && "a text length of 20 to 4000",
+    !sub.quiet_word || /\s/.test(sub.quiet_word) ? "a quiet word of one word" : false,
+    Number.isNaN(fields.schedule.daily_budget_usd) && "a daily budget as a number",
+  ].filter(Boolean);
+  const invalid = problems.length > 0 || tooLong || check?.preview?.valid === false;
+  const id = (field: string) => `${idPrefix}-${field}`;
+  const targets = limits.notify_targets;
+  const gone = draft.notifyTarget && !targets.some((t) => targetKey(t) === draft.notifyTarget) ? targetOf(draft.notifyTarget) : null;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (invalid || (schedule && !dirty)) return;
+    setBusy(true);
+    setError("");
+    try {
+      const { notify_target, run_budget_usd, daily_budget_usd, ...rest } = fields.schedule;
+      const next = schedule
+        ? await updateSchedule(schedule.schedule_id, changes)
+        : await createSchedule(project.project_id, {
+          ...rest, kind: "subscription", run_budget_usd, subscription: fields.subscription,
+          ...(daily_budget_usd != null ? { daily_budget_usd } : {}), ...(notify_target ? { notify_target } : {}),
+        });
+      if (schedule) { setDraft(subDraftOf(next, limits)); setSaved(true); }
+      onSaved(next);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="min-w-0 space-y-4">
+      {schedule ? <p className="text-sm text-muted-foreground">Type: Subscription</p> : (
+        <Choices name={id("kind")} legend="Type" value="subscription" onChange={(kind) => { if (kind !== "subscription") onTask?.(); }}
+          options={[
+            { value: "agent" as ScheduleKind, label: "Agent task", hint: "Each firing starts a task: a Planner and Workers, with model spend." },
+            { value: "command" as ScheduleKind, label: "Command", hint: "Each firing runs a shell command directly: no agent, no model spend." },
+            SUBSCRIPTION_CHOICE,
+          ]} />
+      )}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1">
+          <label htmlFor={id("name")} className={LABEL}>Name *</label>
+          <Input id={id("name")} value={draft.name} maxLength={limits.name_max_chars} onChange={(e) => set("name", e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <label htmlFor={id("source")} className={LABEL}>Message source *</label>
+          <Input id={id("source")} value={draft.source} onChange={(e) => set("source", e.target.value)} spellCheck={false} autoComplete="off" />
+          <p className="text-xs text-muted-foreground">The id of an event source: the stream whose new messages each run reads.</p>
+        </div>
+        <div className="space-y-1">
+          <label htmlFor={id("cron")} className={LABEL}>Rule *</label>
+          <Input id={id("cron")} value={draft.cron} onChange={(e) => set("cron", e.target.value)} placeholder="5 * * * *" className="font-mono" spellCheck={false} />
+        </div>
+        <div className="space-y-1">
+          <label htmlFor={id("zone")} className={LABEL}>Time zone</label>
+          <Input id={id("zone")} value={draft.timezone} onChange={(e) => set("timezone", e.target.value)} list={zonesId} spellCheck={false} autoComplete="off" />
+          <p className="text-xs text-muted-foreground">The rule is read in it, and so are the times the processor reads.</p>
+        </div>
+        <div className="sm:col-span-2"><RulePreview id={id("preview")} cron={fields.schedule.cron} check={check} /></div>
+      </div>
+
+      <div className="space-y-1">
+        <div className="flex items-baseline justify-between gap-2">
+          <label htmlFor={id("requirement")} className={LABEL}>Processor instructions *</label>
+          <span className={cn("text-[11px] tabular-nums", tooLong ? "text-destructive" : "text-muted-foreground")}>
+            {fields.schedule.requirement.length} / {limits.requirement_max_chars}
+          </span>
+        </div>
+        <textarea id={id("requirement")} value={draft.requirement} onChange={(e) => set("requirement", e.target.value)} rows={5}
+          aria-invalid={tooLong} className={TEXTAREA} />
+        <p className="text-xs text-muted-foreground">
+          What the processor writes from the messages. It has no tools and reads the messages as data; its Agent Profile is the
+          processor&apos;s in Settings → Roles.
+        </p>
+      </div>
+
+      <fieldset className="space-y-2 border-t border-border pt-4">
+        <legend className={cn(LABEL, "mb-1")}>What a run reads</legend>
+        <div className="flex flex-wrap gap-x-5 gap-y-1">
+          {CHAT_KIND_OPTIONS.map((option) => (
+            <label key={option.value} className="flex min-h-11 items-center gap-2 text-xs sm:min-h-0">
+              <input type="checkbox" className="h-4 w-4 accent-primary" checked={draft.chatKinds.includes(option.value)}
+                onChange={() => set("chatKinds", toggle(draft.chatKinds, option.value))} />{option.label}
+            </label>))}
+        </div>
+        <div className="flex flex-wrap gap-x-5 gap-y-1">
+          {SENDER_KIND_OPTIONS.map((option) => (
+            <label key={option.value} className="flex min-h-11 items-center gap-2 text-xs sm:min-h-0">
+              <input type="checkbox" className="h-4 w-4 accent-primary" checked={draft.senderKinds.includes(option.value)}
+                onChange={() => set("senderKinds", toggle(draft.senderKinds, option.value))} />{option.label}
+            </label>))}
+          <label className="flex min-h-11 items-center gap-2 text-xs sm:min-h-0">
+            <input type="checkbox" className="h-4 w-4 accent-primary" checked={draft.excludeMe}
+              onChange={(e) => set("excludeMe", e.target.checked)} />Leave out messages that @-mention me</label>
+          <label className="flex min-h-11 items-center gap-2 text-xs sm:min-h-0">
+            <input type="checkbox" className="h-4 w-4 accent-primary" checked={draft.history}
+              onChange={(e) => set("history", e.target.checked)} />Include history and imports</label>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          {([["maxAge", "Look back (minutes)", "Older messages are dropped and counted."], ["maxEvents", "Newest messages (at most)", "More are cut, oldest first."],
+            ["textChars", "Characters per message", "Each message is cut to this many."]] as const).map(([key, label, hint]) => (
+            <div key={key} className="space-y-1">
+              <label htmlFor={id(key)} className={LABEL}>{label}</label>
+              <Input id={id(key)} inputMode="numeric" value={draft[key]} onChange={(e) => set(key, e.target.value)} />
+              <p className="text-xs text-muted-foreground">{hint}</p>
+            </div>))}
+        </div>
+      </fieldset>
+
+      <fieldset className="space-y-2 border-t border-border pt-4">
+        <legend className={cn(LABEL, "mb-1")}>What it pushes</legend>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1">
+            <label htmlFor={id("quiet")} className={LABEL}>Quiet word</label>
+            <Input id={id("quiet")} value={draft.quiet} onChange={(e) => set("quiet", e.target.value)} spellCheck={false} />
+            <p className="text-xs text-muted-foreground">A reply that is only this word, or nothing, is not pushed.</p>
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("header")} className={LABEL}>Title</label>
+            <Input id={id("header")} value={draft.header} onChange={(e) => set("header", e.target.value)} />
+            <p className="text-xs text-muted-foreground">Written above the reply; @ marks in the reply are removed.</p>
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("budget")} className={LABEL}>Spend cap per run (USD) *</label>
+            <Input id={id("budget")} inputMode="decimal" value={draft.budget} onChange={(e) => set("budget", e.target.value)} />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("daily")} className={LABEL}>Daily budget (USD)</label>
+            <Input id={id("daily")} inputMode="decimal" value={draft.dailyBudget} onChange={(e) => set("dailyBudget", e.target.value)} placeholder="No daily cap" />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("target")} className={LABEL}>Push to</label>
+            <select id={id("target")} value={draft.notifyTarget} onChange={(e) => set("notifyTarget", e.target.value)} className={SELECT}>
+              <option value="">Dashboard only</option>
+              {targets.map((target) => (
+                <option key={targetKey(target)} value={targetKey(target)}>{`${target.label}${target.channel_enabled ? "" : " (channel off)"}`}</option>))}
+              {gone && <option value={draft.notifyTarget}>{`${gone.channel} · ${gone.chat} (unavailable)`}</option>}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              A direct chat or a bound group. Changing it, the rule or the zone, or turning the subscription on, asks you to
+              confirm before anything is pushed; until then the output stays on this page.
+            </p>
+          </div>
+          <Choices name={id("notify")} legend="Failures" value={draft.notify} onChange={(value) => set("notify", value)}
+            options={scheduleNotifyOptions("agent", 3).filter((option) => option.value !== "always")} />
+        </div>
+        <Choices name={id("overlap")} legend="While the previous run is in progress" value={draft.overlap}
+          onChange={(value) => set("overlap", value)} options={[
+            { value: "skip", label: "Skip", hint: "Skip this firing; its messages are read by the next run." },
+            { value: "queue", label: "Queue", hint: "Start it when the previous run ends; at most one waits." },
+          ]} />
+      </fieldset>
+
+      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {schedule && <DeleteSchedule schedule={schedule} onDeleted={() => onDeleted?.()} className="mr-auto" />}
+        {saved && !dirty && <span role="status" className="flex items-center gap-1 text-xs text-success"><CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />Saved</span>}
+        {problems.length > 0 && (dirty || !schedule) && <span className="text-xs text-muted-foreground">Needs {problems.join(", ")}</span>}
+        {schedule ? (
+          <Button type="button" variant="outline" size="sm" disabled={!dirty || busy}
+            onClick={() => { setDraft(subDraftOf(schedule, limits)); setError(""); }}>Discard changes</Button>
+        ) : <Button type="button" variant="ghost" size="sm" onClick={onCancel} disabled={busy}>Cancel</Button>}
+        <Button type="submit" size="sm" disabled={(schedule ? !dirty : false) || busy || invalid}>
+          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{schedule ? "Save" : "Create"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/** A schedule's form: the subscription's own, or the task and command one. */
+function ScheduleForm(props: Omit<React.ComponentProps<typeof TaskScheduleForm>, "onSubscription">) {
+  const [subscription, setSubscription] = useState(props.schedule?.kind === "subscription");
+  return subscription
+    ? <SubscriptionForm {...props} onTask={props.schedule ? undefined : () => setSubscription(false)} />
+    : <TaskScheduleForm {...props} onSubscription={props.schedule ? undefined : () => setSubscription(true)} />;
+}
+
+/**
+ * Where a subscription pushes and whether the operator has said it may: until they confirm the target, what its runs
+ * make stays on this page. "Confirm push target" shows what confirming means (the server's own text: the target and
+ * the bot, the rule and its next fires, how often at most, the processor's Profile and where it comes from, the
+ * machine's managed hooks, the caps) and confirms it; "Reset cursor" moves where the next run starts reading.
+ */
+export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleInfo; onChange: (schedule: ScheduleInfo) => void }) {
+  const sub = schedule.subscription;
+  const id = useId();
+  const [panel, setPanel] = useState<"" | "confirm" | "reset">("");
+  const [text, setText] = useState<string | null>(null);
+  /** The version of the schedule the panel shows: the confirmation names it. */
+  const [version, setVersion] = useState("");
+  const [after, setAfter] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [moved, setMoved] = useState("");
+  if (!sub) return null;
+  const target = schedule.notify_target;
+  const close = () => { setPanel(""); setError(""); };
+  const openConfirm = async () => {
+    setPanel("confirm"); setText(null); setError("");
+    try {
+      const shown = (await fetchSchedule(schedule.schedule_id)).subscription;
+      setVersion(shown?.config_version ?? "");
+      setText(shown?.confirmation ?? "");
+    } catch (err) { setError(errorText(err)); }
+  };
+  const confirm = async () => {
+    setBusy(true); setError("");
+    try { onChange(await confirmSubscriptionTarget(schedule.schedule_id, version)); close(); }
+    catch (err) {
+      // It changed after it was shown (another tab, another request): what it is now replaces the panel.
+      setError(errorText(err));
+      void fetchSchedule(schedule.schedule_id).then((now) => { onChange(now); setText(null); setPanel(""); }, () => {});
+    }
+    finally { setBusy(false); }
+  };
+  const reset = async () => {
+    const moment = new Date(after);
+    if (!after || Number.isNaN(moment.getTime())) { setError("Choose the time after which events are read."); return; }
+    setBusy(true); setError("");
+    try {
+      const done = await resetSubscriptionCursor(schedule.schedule_id, moment.toISOString());
+      onChange(done.schedule);
+      setMoved(`Cursor at ${done.cursor.cursor_seq}: the next run reads the ${done.cursor.events_after} events stored since.`);
+      close();
+    } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="basis-full space-y-2 text-xs">
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
+        {target ? (sub.target_confirmed_at
+          ? <><CheckCircle2 className="h-3.5 w-3.5 text-success" aria-hidden="true" />Pushes to {target.channel} · {target.chat}, confirmed {formatInZone(sub.target_confirmed_at, schedule.timezone)}</>
+          : <><AlertCircle className="h-3.5 w-3.5 text-warning" aria-hidden="true" /><span className="text-warning">Push target not confirmed: output stays on this page.</span></>)
+          : "Dashboard only: nothing is pushed."}
+        <span className="tabular-nums">Cursor {sub.cursor_seq}</span>
+        {!!sub.uncertain_deliveries && <span className="text-warning" role="status">
+          {sub.uncertain_deliveries} message{sub.uncertain_deliveries === 1 ? "" : "s"} of the last 7 days may not have been sent
+          (cut off while sending; never sent again)</span>}
+        {target && !sub.target_confirmed_at && panel !== "confirm" && (
+          <Button type="button" variant="outline" size="sm" onClick={openConfirm} className="h-11 sm:h-7">Confirm push target…</Button>)}
+        {panel !== "reset" && <Button type="button" variant="ghost" size="sm" onClick={() => { setPanel("reset"); setMoved(""); }} className="h-11 sm:h-7">Reset cursor…</Button>}
+      </p>
+      {moved && <p role="status" className="text-muted-foreground">{moved}</p>}
+      {panel === "confirm" && (
+        <section role="group" aria-labelledby={`${id}-confirm`} className="space-y-2 rounded-md border border-warning/50 bg-muted/20 p-3">
+          <h4 id={`${id}-confirm`} className="font-semibold">Confirm the push target</h4>
+          {text == null && !error ? <Loader2 className="h-4 w-4 animate-spin" aria-label="Loading" />
+            : <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">{text}</pre>}
+          {error && <p role="alert" className="text-destructive">{error}</p>}
+          <div className="flex gap-2">
+            <Button type="button" size="sm" onClick={confirm} disabled={busy || !text} className="h-11 sm:h-8">
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}Confirm</Button>
+            <Button type="button" variant="ghost" size="sm" onClick={close} disabled={busy} className="h-11 sm:h-8">Cancel</Button>
+          </div>
+        </section>)}
+      {panel === "reset" && (
+        <section role="group" aria-labelledby={`${id}-reset`} className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
+          <h4 id={`${id}-reset`} className="font-semibold">Reset the cursor</h4>
+          <label htmlFor={`${id}-after`} className={LABEL}>Read the events stored after</label>
+          <Input id={`${id}-after`} type="datetime-local" value={after} onChange={(e) => setAfter(e.target.value)} className="max-w-64" />
+          <p className="text-muted-foreground">Your local time. The next run reads exactly the events this stream stored after it, then the subscription&apos;s own limits apply. Refused while a run is in progress.</p>
+          {error && <p role="alert" className="text-destructive">{error}</p>}
+          <div className="flex gap-2">
+            <Button type="button" size="sm" onClick={reset} disabled={busy} className="h-11 sm:h-8">
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}Reset</Button>
+            <Button type="button" variant="ghost" size="sm" onClick={close} disabled={busy} className="h-11 sm:h-8">Cancel</Button>
+          </div>
+        </section>)}
+    </div>
+  );
+}
+
+const OUTCOME_LABELS: Record<SubscriptionRunInfo["outcome"], string> = {
+  pending: "Reading", delivering: "Pushing", delivered: "Pushed", uncertain: "Pushed, some messages uncertain", quiet: "Nothing to say", dashboard_only: "Kept here (target not confirmed)",
+  output_invalid: "Reply unusable", failed: "Not pushed",
+};
+
+/** What a subscription run read and made, under its line of the history. */
+function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
+  const sub = run.subscription;
+  if (!sub) return null;
+  const dropped = [sub.events_too_old && `${sub.events_too_old} too old`, sub.events_over_cap && `${sub.events_over_cap} over the cap`].filter(Boolean);
+  return (
+    <div className="min-w-0 text-xs sm:basis-full">
+      <p className="text-muted-foreground">
+        <span className="font-medium text-foreground">{OUTCOME_LABELS[sub.outcome]}</span>
+        {" · "}{sub.events_selected} of {sub.events_in_window} messages read{dropped.length > 0 && ` (${dropped.join(", ")})`}
+        {" · "}events {sub.from_seq + 1}–{sub.to_seq}
+        {sub.deliveries && sub.deliveries.length > 0 && ` · messages: ${sub.deliveries.map((d) => `${d.segment} ${d.state}`).join(", ")}`}
+      </p>
+      {sub.output_text && (
+        <details className="mt-1">
+          <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">Output</summary>
+          <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/20 px-3 py-2 font-sans text-[11px] text-foreground/90">{sub.output_text}</pre>
+        </details>)}
+    </div>
+  );
+}
+
 /**
  * "Delete schedule", then the inline confirmation ("Delete <name>? Its tasks stay."): it deletes the schedule and its
  * run history, the tasks it created staying; `onDeleted` runs once it is gone. A run in progress keeps its task
@@ -1852,6 +2275,7 @@ export function RunHistory({ schedule, open, version, runId = "" }: {
                 {run.carried_from && (
                   <p className="text-xs text-muted-foreground sm:basis-full">Carries the input of the previous run</p>
                 )}
+                <SubscriptionRun run={run} />
                 {run.gate_output && (
                   <details className="min-w-0 text-xs sm:basis-full">
                     <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
@@ -2049,8 +2473,8 @@ export function ProjectSchedulesSection({
     <div className="space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="min-w-0 flex-1 basis-64 text-sm text-muted-foreground">
-          A schedule runs an agent task or shell command of this project on a time rule. A new one starts disabled; turn it on when it is
-          ready.
+          A schedule runs an agent task or shell command of this project, or reads a message stream, on a time rule. A new one
+          starts disabled; turn it on when it is ready.
         </p>
         <Button type="button" size="sm" onClick={() => setAdding(true)} disabled={!data || adding}>
           <Plus className="h-3.5 w-3.5" />
@@ -2128,7 +2552,8 @@ export function ProjectSchedulesSection({
                 id={`schedule-${sid}`}
                 {...state}
                 name={schedule.name}
-                marks={schedule.kind === "command" && <Badge variant="outline">Command</Badge>}
+                marks={schedule.kind === "command" ? <Badge variant="outline">Command</Badge>
+                  : schedule.kind === "subscription" && <Badge variant="outline">Subscription</Badge>}
                 detail={schedule.description}
                 summary={next}
                 wrapActions={Boolean(schedule.alerts.deadline_since || schedule.alerts.overlap_since)}
@@ -2166,9 +2591,10 @@ export function ProjectSchedulesSection({
                         )}
                         Run now
                       </Button>
-                      {schedule.kind !== "command" && <ResetPlannerSession schedule={schedule} onReset={put} />}
+                      {schedule.kind === "agent" && <ResetPlannerSession schedule={schedule} onReset={put} />}
                     </div>
-                    {schedule.kind !== "command" && <PlannerSessionStatus schedule={schedule} />}
+                    {schedule.kind === "agent" && <PlannerSessionStatus schedule={schedule} />}
+                    {schedule.kind === "subscription" && <SubscriptionStatus schedule={schedule} onChange={put} />}
                     {notices[sid] && <NoticeText notice={notices[sid]} />}
                   </>
                 }

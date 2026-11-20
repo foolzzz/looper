@@ -43,10 +43,18 @@ SINGLE_LOOKUPS_MAX = 20
 class LarkCliError(RuntimeError):
     """A lark-cli call that failed, with lark-cli's reason, and the Lark API's error code when it gave one."""
 
-    def __init__(self, message: str, *, code: int | None = None, error_type: str | None = None) -> None:
+    def __init__(self, message: str, *, code: int | None = None, error_type: str | None = None,
+                 not_sent: bool = False) -> None:
         super().__init__(message)
         self.code = code
         self.error_type = error_type
+        self.not_sent = not_sent  # the call never started: nothing reached Lark
+
+    @property
+    def refused(self) -> bool:
+        """Whether the failure says the platform did not take the request (an API error code, lark-cli's own
+        validation, or no start at all): a time-out, a lost or unreadable answer does not."""
+        return self.code is not None or self.error_type == "validation" or self.not_sent
 
 
 # ``LarkCliError.error_type`` of a call that did not answer in time.
@@ -277,7 +285,7 @@ async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS, cwd: Pa
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
-        raise LarkCliError(f"lark-cli could not start: {exc}") from None
+        raise LarkCliError(f"lark-cli could not start: {exc}", not_sent=True) from None
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except asyncio.TimeoutError:

@@ -846,7 +846,8 @@ async def _run_agent_system_watched(
             # task ends, to record a scheduled run's outcome.
             drain = DrainState()  # A new control plane always starts serving; drain is never stored.
             scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
-                                  runtime_root=runtime_root, drain=drain)
+                                  runtime_root=runtime_root, drain=drain, poster=registry.post,
+                                  claude_bin=claude_bin, own_apps=own_bot_app_ids)
             # It notes the user gates that have waited for the user for their project's reminder interval; the courier
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()

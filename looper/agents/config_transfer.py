@@ -561,7 +561,8 @@ async def export_chunks(
             templates[row["project_id"]].append(row)
         schedules = defaultdict(list)
         for row in await list_schedules(pool=conn):
-            schedules[row["project_id"]].append(row)
+            if row["kind"] != "subscription":  # a stream's cursor and confirmed target stay on this machine
+                schedules[row["project_id"]].append(row)
         profile_names = {row["id"]: row["name"] for row in await db.read_profiles(conn)}
         projects = await db.read_projects(conn)
         summary.counts["projects"] = len(projects)
