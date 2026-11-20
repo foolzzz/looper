@@ -7315,13 +7315,19 @@ implementation supplies it and is retested.
   so a path split across chunks cannot escape redaction. With `channels.outbound.enabled` off (the default),
   both Lark transports retain their original calls and write no outbox rows. Settings → Chat exposes
   `outbound_enabled`; only the operator can change it. On, `GatedLarkTransport` routes every write through
-  one gateway per channel: a 15/s token bucket, classified errors, up to five retries with jitter and
+  one gateway per channel: separate send/reply and total-write token buckets (defaults 5/s and 15/s),
+  at most four platform calls in flight, classified errors, up to five retries with jitter and
   `retry_after`, a 60-second circuit breaker after five consecutive failures in 30 seconds, and coalesced
-  edits at least one second apart. Answers, progress, notices, notifications and posts first enter
+  edits at least one second apart. The operator-only `outbound_settings.get/update` operations expose
+  `send_qps`, `write_qps`, `edit_interval_seconds` and `max_in_flight` (integer 1–32). Rate and edit
+  defaults remain **to verify** against the real platform. Answers, progress, notices, notifications and posts first enter
   `channel_outbox`, ordered per chat and concurrent across chats. Caller keys win; otherwise envelope ids
   and part numbers derive stable keys. Keyed timeout retries and restart recovery within one hour use the
   same key; older interrupted sends become `uncertain`. Callers wait at most 30 seconds for a receipt,
-  while queued work continues. An insert failure logs a warning and falls back to the gateway. Status
+  while queued work continues, including after the switch is turned off. Startup also recovers unfinished
+  rows with the switch off; an empty disabled outbox performs no recovery writes. Waiters share in-process
+  completion futures; the scanner sleeps until the earliest unblocked retry or new work. Notifications can
+  carry a caller-supplied event key to deduplicate retries. An insert failure logs a warning and falls back to the gateway. Status
   lines and reactions use the gateway alone. Housekeeping retains sent rows for seven days and other rows
   for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Telegram wiring
   and dashboard metrics follow separately; the standalone probe remains independent.
