@@ -219,7 +219,7 @@ Read with your tools (looper_tasks get, looper_costs) only when the facts above 
 
 **能做什么：** 只读。这一轮的 ops `Turn` 没有 `message_id`，`Turn.autonomous` 为真：`write`、`high` 档的调用返回 `needs_user_turn` 并照常留痕，`looper_confirm` 一律拒绝，不消耗任何待确认的操作。工具列表不变（常驻进程的工具列表在启动时就定了，按回合换列表会让进程重启）；「只读」由 ops 按回合执行，不靠提示词。`Turn` 新增类型化的 `origin`（`user`、`own`、`completion`），`autonomous` 改为 `origin != user`，现有两种回合的判定不变。
 
-**运行记录：** `llm_records` 一行，`agent_id` 是 Manager，`metadata.completion = {batch, event_ids, task_ids}`，花费算 Manager 的，不挂到任务上。每次运行的花费上限沿用 Manager 角色现有的设置，收尾回合不另设上限（Q9）。Runs 页能按「收尾回合」筛出。
+**运行记录：** `llm_records` 一行，`agent_id` 是 Manager，`metadata.completion = {batch, event_ids, task_ids}`，花费算 Manager 的，不挂到任务上。每次运行的花费上限沿用 Manager 角色现有的设置，收尾回合不另设上限（Q9）。
 
 ### 3.6 回复与兜底
 
@@ -614,7 +614,7 @@ Looper 没有单独的指标系统，照命令型定时任务 RFC 第 15.2 节�
   - `briefing snapshot run=… items=n shown=m more=k`；`briefing output run=… source=processor|code reason=…`
   - 日志里不写回复正文、原话和条目标题。
 - **`system.health`：** 待投递完成事件的数量和最老的年龄、最近 24 小时 `delivered` / `fallback`（按原因）/ `skipped`；账本未结的待确认数、待核实的转述决定数、最近一次对账补登记数；晨报沿用定时任务和订阅的健康数据。
-- **控制台：** Settings → Chat 的收尾计数；Runs 页的收尾回合（花费、时长）；待办页；订阅运行历史里晨报的快照条数、输出来源和花费。
+- **控制台：** Settings → Chat 的收尾计数和花费；待办页；订阅运行历史里晨报的快照条数、输出来源和花费。
 - **告警：**
 
 | 级别 | 条件 | 去向 |

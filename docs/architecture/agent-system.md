@@ -4273,11 +4273,24 @@ dashboard chat session, as the `CHAT_NOTICE` of the recorded target with its
 text replaced (stored in that chat's history), or for a schedule's run through
 the scheduler, as the run's message (its outbox row, `kind = run`, names the
 event in `manager_event_id`; another schedule run in the same batch records the
-same reply as sent); code appends each task's link
+same reply as sent). A batch with a schedule run whose schedule no longer sends
+to the chat its event recorded (its target changed, or the chat is no longer
+allowed) is not sent: it falls back with `target_changed`, and each run's
+message goes where its schedule sends now. A run's message that went out but
+whose outbox row could not be written is not sent again: the row is written
+once more, by the event. A reply whose channel failed without saying whether it
+went (the channel raised) counts as delivered, marked `send_uncertain`, and is
+never sent again; code appends each task's link
 line (and a worktree task's branch line) after it, and the events become
 `delivered` with the run's `record_id`. Otherwise the batch falls back and
 every event's recorded notice is sent unchanged (a schedule run's through the
-scheduler, its outbox row naming the event): `turn_failed` (the turn
+scheduler, its outbox row naming the event). A notice known not to have been
+handed to its channel (its queue refused it, the schedule's target or channel is
+gone) is tried again by the completion service after 5 s, then 15 s, 45 s and so
+on (at most 15 minutes apart, 8 tries; `send_attempts`, `send_retry_at`, a pass
+taking it for a minute); one that may have reached the chat (the channel raised)
+is marked `send_uncertain` and never tried again, a restart included. Reasons:
+`turn_failed` (the turn
 failed, or the tools' token was refused), `turn_timeout` (no reply within 120
 seconds of the claim: the notices go at once, then the turn is stopped as a stop
 ends a turn, a runtime run per turn ending its process tree; if it has not ended
@@ -5960,7 +5973,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
 | `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
-| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at` and `sent_at`; kept 30 days |
+| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and for a notice not handed to its channel `send_attempts`, `send_retry_at` and `send_uncertain`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
@@ -5985,7 +5998,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
-| `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`, `manager_event_id` (the completion event that told a run's message: the Manager's reply or its fallback; NULL otherwise); going with its schedule |
+| `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`, `manager_event_id` (the completion event that told a run's message: the Manager's reply or its fallback; NULL otherwise; a partial index, built online on an existing database); going with its schedule |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report and the scheduler's `scheduler.min_interval_seconds` and `scheduler.run_timeout_seconds` |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
