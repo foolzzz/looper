@@ -130,13 +130,7 @@ class LarkApi:
                     answer = {}
                 else:
                     error = self._error(answer, response.status_code, token=token)
-                raw_delay = response.headers.get("Retry-After") or answer.get("retry_after")
-                try:
-                    delay = float(raw_delay)
-                    if math.isfinite(delay) and delay >= 0:
-                        error.retry_after = delay
-                except (ValueError, TypeError):
-                    pass
+                self._retry_delay(error, response, answer)
                 raise error
             if response.status_code == 401:
                 if self._token == token:
@@ -153,9 +147,27 @@ class LarkApi:
                     continue
                 raise error
             if answer.get("code") != 0 or response.is_error:
-                raise self._error(answer, response.status_code, token=token)
+                error = self._error(answer, response.status_code, token=token)
+                self._retry_delay(error, response, answer)
+                raise error
             return answer
         raise AssertionError("unreachable token retry")
+
+    @staticmethod
+    def _retry_delay(error: LarkApiError, response: httpx.Response, answer: dict[str, Any]) -> None:
+        # The gateway may return application throttling (99991400) with HTTP 200. Keep its reset delay
+        # independently of HTTP status; malformed headers must not hide a usable Retry-After.
+        delays = []
+        for raw in (response.headers.get("x-ogw-ratelimit-reset"), response.headers.get("Retry-After"),
+                    answer.get("retry_after")):
+            try:
+                delay = float(raw)
+            except (ValueError, TypeError):
+                continue
+            if math.isfinite(delay) and delay >= 0:
+                delays.append(delay)
+        if delays:
+            error.retry_after = max(delays)
 
     @staticmethod
     def _message(text: str | None, markdown: str | None, key: str | None = None) -> dict[str, Any]:
