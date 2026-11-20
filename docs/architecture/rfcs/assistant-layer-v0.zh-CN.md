@@ -583,6 +583,8 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 2 | `manager.completion_turns = dm_only` | 私聊和控制台里任务结束时，由管家在一个只读回合里用几句话收尾，代替代码通知；群仍是代码通知 | `manager_events` 里 `delivered` 和 `fallback` 的比例、收尾回合的花费和耗时、同一任务只说一次 | 设回 `off`，之后的任务结束发代码通知 |
 | 3 | `ledger.enabled = true` | 等你确认的事、决定、谁在做什么开始登记，账本工具出现在管家里 | 对账补登记的次数（应为 0）、账本里能看到待确认的事；先确认各机器人都填了「我的 ID」 | 设回 `false`，不再登记，已有条目保留 |
 
+**账本开关的入口（1.7a）：** 现在 `ledger.enabled` 只有系统设置这一行，没有 Settings 开关，也没有 v1 操作；账本 RFC 第 4.3 节要求打开时列出没填「我的 ID」的机器人，也还没做。打开账本之前先补一个小 PR：`chat_settings` 加 `ledger_enabled`（Settings → Chat 的开关、`chat_settings.update`），打开时返回并显示这些机器人。列出它们的函数（`channels.operator_ids.missing()`）1.1 和 1.3b 打开开关时也用。
+
 **验收：** 任务结束后管家在原会话说 3–5 句结论，同一任务只说一次；账本里能看到待确认的事。
 
 ## 6. 数据模型与迁移（汇总）
@@ -695,6 +697,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 
 | PR | 内容 | 依赖 | 默认关闭时 | 模型可见 | 验收 |
 |---|---|---|---|---|---|
+| 1.7a | 账本开关的入口：`chat_settings.ledger_enabled`、Settings → Chat 的开关、打开时列出没填「我的 ID」的机器人（`channels.operator_ids.missing()`） | — | 不变（开关本来就是关） | 否 | 打开、关闭、列出的测试；截图 |
 | 0.1a | `turn_metrics`、`AckBoard`、`proactive_deliveries` 表与写入、回复标记、`manager.metrics.enabled`、`manager_metrics.get` | — | 回合记录不变，表为空 | 否 | 第 4.1 节；第 10 节 |
 | 0.1b | 首页「管家」一组（含开关关时的说明） | 0.1a | — | 否 | 无头浏览器截图（1280、390） |
 | 0.3 | `evals/assistant_experience.py`、20 条用例、假模式通过、基线文件格式；真实基线在预算获批后跑 | — | — | 否（只加评测） | 假模式 20 条都能跑通；真实基线四类都有通过率 |
@@ -712,13 +715,13 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 
 **并行：**
 
-- 0.1a 先合入（之后的每一项都要有可比的数字）；0.3 和 0.1a 可以同时做。
+- 0.1a 先合入（之后的每一项都要有可比的数字）；0.3、1.7a 和 0.1a 可以同时做。
 - 1.1、1.2、1.5、1.6a 互相独立，也不依赖第 0 期的代码，可以同时开发；但**打开**要等 0.1 有一周数据、0.3 有基线。
 - 1.3a 在 0.1a 之后尽早合入：它动的字段 1.1、1.2、1.5 都会碰到，晚了冲突更多。1.3b → 1.3c → 1.3d 依次；1.4 在 1.3b 和 #1473 之后。
 - 1.6b、1.6c 在 1.6a 之后可以并行。
 - 同时进行的开发会话不超过 4 个（开发计划第 1 节）。
 
-推荐的合入顺序：0.1a、0.3 → 1.3a → 0.1b、1.1、1.2、1.5、1.6a（并行）→ 1.3b、1.6b → 1.3c、1.3d、1.6c → 1.4。
+推荐的合入顺序：0.1a、0.3、1.7a → 1.3a → 0.1b、1.1、1.2、1.5、1.6a（并行）→ 1.3b、1.6b → 1.3c、1.3d、1.6c → 1.4。
 
 ## 14. 出口标准
 
