@@ -7,11 +7,14 @@
 in a read-only turn of its own (``dm_only``) instead of the code notice (``off``, the default; manager completion
 ledger RFC section 3.7).
 
-``delivery.enabled``: whether proactive messages pass the delivery layer (``proactive_delivery``) before they go
-out; off by default (proactive delivery RFC section 2).
+``manager.research_order``: whether the default Manager's contract says where to look things up, and in what order,
+before it asks the user (``research_order``; off by default).
 
-Stop and the completion events check them from synchronous code, so they are kept in memory: ``load`` reads them
-at startup and ``update`` refreshes them. Until loaded, all are off.
+``delivery.enabled``: whether proactive messages pass the delivery layer (``proactive_delivery``) before they go
+out (``delivery_enabled``; off by default, proactive delivery RFC section 2).
+
+Stop, the completion events, the Manager's prompt and the send points check them from synchronous code, so they are
+kept in memory: ``load`` reads them at startup and ``update`` refreshes them. Until loaded, all are off.
 """
 
 from __future__ import annotations
@@ -26,9 +29,13 @@ from .proactive_delivery import ENABLED_KEY as DELIVERY_ENABLED_KEY
 STOP_ENABLED_KEY = "chat.stop_enabled"
 DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
+RESEARCH_ORDER_KEY = "manager.research_order"
+DEFAULT_RESEARCH_ORDER = False
 DEFAULT_DELIVERY_ENABLED = False
-FIELDS = ("stop_enabled", "completion_turns", "delivery_enabled")
-_FLAGS = {"stop_enabled": STOP_ENABLED_KEY, "delivery_enabled": DELIVERY_ENABLED_KEY}
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "delivery_enabled")
+# The settings that are true or false, and their keys.
+_FLAGS = {"stop_enabled": STOP_ENABLED_KEY, "research_order": RESEARCH_ORDER_KEY,
+          "delivery_enabled": DELIVERY_ENABLED_KEY}
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -44,6 +51,7 @@ DEFAULT_COMPLETION_TURNS = CompletionTurns.OFF
 
 _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
+_research_order = DEFAULT_RESEARCH_ORDER
 _delivery_enabled = DEFAULT_DELIVERY_ENABLED
 
 
@@ -57,16 +65,6 @@ def set_stop_enabled(value: bool) -> None:
     _stop_enabled = value
 
 
-def delivery_enabled() -> bool:
-    return _delivery_enabled
-
-
-def set_delivery_enabled(value: bool) -> None:
-    """Apply a value in memory only (``load`` and ``update`` store it; tests use this directly)."""
-    global _delivery_enabled
-    _delivery_enabled = value
-
-
 def completion_turns() -> CompletionTurns:
     return _completion_turns
 
@@ -77,11 +75,32 @@ def set_completion_turns(value: CompletionTurns) -> None:
     _completion_turns = CompletionTurns(value)
 
 
+def research_order() -> bool:
+    return _research_order
+
+
+def set_research_order(value: bool) -> None:
+    """Apply a value in memory only (``load`` and ``update`` store it; tests use this directly)."""
+    global _research_order
+    _research_order = value
+
+
+def delivery_enabled() -> bool:
+    return _delivery_enabled
+
+
+def set_delivery_enabled(value: bool) -> None:
+    """Apply a value in memory only (``load`` and ``update`` store it; tests use this directly)."""
+    global _delivery_enabled
+    _delivery_enabled = value
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, DELIVERY_ENABLED_KEY])
+    stored = await db_settings.get_settings([*_FLAGS.values(), COMPLETION_TURNS_KEY])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
+    set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_delivery_enabled(stored.get(DELIVERY_ENABLED_KEY) == "true")
     try:
         turns = CompletionTurns(stored.get(COMPLETION_TURNS_KEY, DEFAULT_COMPLETION_TURNS.value))
@@ -92,7 +111,7 @@ async def load() -> bool:
 
 
 def settings_view() -> dict[str, Any]:
-    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value,
+    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value, "research_order": _research_order,
             "delivery_enabled": _delivery_enabled}
 
 
