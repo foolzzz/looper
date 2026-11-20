@@ -423,3 +423,98 @@ def test_a_sent_reply_whose_outbox_row_failed_is_recorded_once_and_not_sent_agai
 
     run_scheduled(test, monkeypatch, tmp_path)
 
+
+
+# --- A send whose record failed, or that answered late (review round 3) ---
+
+
+@pytest.mark.parametrize("failures", [1, 3])
+def test_a_managers_reply_that_went_but_whose_record_failed_is_recorded_again_and_never_sent_again(
+        monkeypatch, tmp_path, failures):
+    """The Manager's completion turn, on a loopback model API, replies through the real Telegram adapter; writing
+    its delivery then fails ``failures`` times. The record (never the send) is tried again; one never written does
+    not hold the chat: the service settles it ``uncertain`` and the chat's next end gets its turn."""
+    from looper.agents.message import MessageType
+    from tests.api_manager_support import USAGE, _manager
+    from tests.fake_model_api import ResponseScript, text_events
+
+    real, calls = store.deliver, []
+
+    async def deliver(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) <= failures:
+            raise ConnectionError("the database went away after the send")
+        return await real(*args, **kwargs)
+
+    async def tell(chat: Any) -> None:
+        await CompletionService(bus=chat.bus, manager_running=lambda manager_id: True,
+                                running_managers=lambda: ["manager"]).run_once(now=_later(store.WINDOW_SECONDS + 1))
+        queue = chat.bus.get_queue("manager")
+        (due,) = [e for e in (queue.get_nowait() for _ in range(queue.qsize()))
+                  if e.message_type is MessageType.COMPLETION_DUE]
+        await chat.manager._handle(due)
+
+    async def test(env: ScheduleEnv):
+        http = await _telegram(env)
+        await _failed_run(env)
+        root = tmp_path / "manager"
+        root.mkdir()
+        scripts = [ResponseScript(events=text_events(answer, usage=USAGE)) for answer in ("日报没写出来。", "又没写出来。")]
+        async with _manager(env.pool, root, monkeypatch, scripts) as chat:
+            monkeypatch.setattr(store, "deliver", deliver)
+            await tell(chat)
+            assert [text.split("\n")[0] for _, text in http.sent] == ["日报没写出来。"]
+            (row,) = await _events(env)
+            if failures < 3:  # the second try wrote it
+                assert (row["state"], row["delivery"], len(calls)) == ("delivered", "sent", failures + 1)
+                return
+            assert (row["state"], row["delivery"], len(calls)) == ("running", "sending", 3)
+            monkeypatch.setattr(store, "SENDING_STALE_SECONDS", 0)
+            await _service(env).run_once()
+            (row,) = await _events(env)
+            assert (row["state"], row["delivery"], row["sent_at"]) == ("delivered", "uncertain", None)
+            assert len(http.sent) == 1  # never sent again, nor its notice
+            await _failed_run(env)  # the chat's next end: its turn is not held by the first
+            await tell(chat)
+            assert [text.split("\n")[0] for _, text in http.sent] == ["日报没写出来。", "又没写出来。"]
+            assert [(r["state"], r["delivery"]) for r in await _events(env)] == [
+                ("delivered", "uncertain"), ("delivered", "sent")]
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("message", ["notice", "reply"])
+def test_a_send_that_answers_sent_after_it_went_stale_is_recorded_sent_and_never_sent_again(
+        monkeypatch, tmp_path, message):
+    """A live send that takes longer than ``SENDING_STALE_SECONDS`` is settled ``uncertain`` meanwhile; when Telegram
+    then answers that it was sent, the same send (its claim) records ``sent``. Another claim's answer changes
+    nothing, and nothing is sent again."""
+    async def test(env: ScheduleEnv):
+        http = await _telegram(env)
+        await _failed_run(env)
+        http.gate = asyncio.Event()
+        if message == "notice":
+            sending = asyncio.create_task(_expire(env))
+        else:
+            rows = await store.claim("manager", "channel-telegram", TELEGRAM_CHAT, uuid.uuid4())
+
+            async def reply() -> None:
+                outcome, error = await completion_events.send_reply(None, None, rows, "日报没写出来。")
+                assert outcome is PostOutcome.SENT
+                assert await completion_events.record_reply(rows, outcome, error, record_id=None)
+
+            sending = asyncio.create_task(reply())
+        await asyncio.wait_for(http.waiting.wait(), 10)
+        monkeypatch.setattr(store, "SENDING_STALE_SECONDS", 0)
+        await _service(env).run_once()  # the send under way is past the stale age
+        (row,) = await _events(env)
+        assert (row["state"], row["delivery"]) == ("fallback" if message == "notice" else "delivered", "uncertain")
+        http.gate.set()
+        await asyncio.wait_for(sending, 10)
+        (row,) = await _events(env)
+        assert (row["delivery"], row["sent_at"] is not None, row["delivery_error"]) == ("sent", True, None)
+        assert not await store.settle_delivery(row["id"], "failed", claim=uuid.uuid4())
+        await _service(env).run_once(now=_later(24 * 3600))
+        assert http.sends == 1 and (await _events(env))[0]["delivery"] == "sent"
+
+    run_scheduled(test, monkeypatch, tmp_path)

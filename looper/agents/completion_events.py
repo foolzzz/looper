@@ -21,10 +21,11 @@ channel. When the database cannot be written, the notice is sent anyway.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -475,11 +476,34 @@ async def _send_notice(bus: Any, row: Mapping[str, Any]) -> tuple[PostOutcome, s
 _DELIVERY = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "failed", PostOutcome.UNKNOWN: "uncertain"}
 
 
+async def _write_outcome(event_id: int, what: str, write: Callable[[], Awaitable[Any]]) -> bool:
+    """Record what the channel answered for a send, trying the record (never the send) three times. One that cannot
+    be written leaves its events ``sending``, which the service settles ``uncertain`` after ``SENDING_STALE_SECONDS``:
+    a message that went is never sent twice, and its chat is not held."""
+    for attempt in range(3):
+        try:
+            await asyncio.wait_for(write(), DB_TIMEOUT_SECONDS)
+            return True
+        except Exception:
+            logger.warning("manager_event %s: could not record %s", event_id, what, exc_info=attempt == 2)
+            if attempt < 2:
+                await asyncio.sleep(0.2 * (attempt + 1))
+    return False
+
+
+async def record_reply(rows: Sequence[Mapping[str, Any]], outcome: PostOutcome, error: str | None, *,
+                       record_id: int | None) -> bool:
+    """The completion turn's reply was sent (``SENT``) or may have been (``UNKNOWN``): its events are delivered."""
+    return await _write_outcome(rows[0]["id"], "its completion reply as delivered", functools.partial(
+        store.deliver, rows[0]["batch"], record_id=record_id, uncertain=outcome is not PostOutcome.SENT, error=error))
+
+
 async def deliver_notices(bus: Any, *, ids: Sequence[int] | None = None, now: datetime | None = None) -> int:
     """Send the code notices due (``ids``: only these): each is claimed ``sending`` (committed) before its channel is
     asked, then settled as the channel answered. A channel that raised may have sent it: ``uncertain``, never sent
     again. A settlement that cannot be written leaves it ``sending``, which the service later settles as
-    ``uncertain``: a notice that went is never sent twice. How many were sent."""
+    ``uncertain``: a notice that went is never sent twice; its send's ``sent`` answered after that still makes it
+    ``sent``. How many were sent."""
     sent = 0
     for row in await asyncio.wait_for(store.claim_deliveries(now=now, ids=ids), DB_TIMEOUT_SECONDS):
         try:
@@ -490,14 +514,8 @@ async def deliver_notices(bus: Any, *, ids: Sequence[int] | None = None, now: da
         log = logger.info if outcome is PostOutcome.SENT else logger.warning
         log("manager_event %s: its notice is %s%s", row["id"], delivery, f" ({error})" if error else "")
         sent += outcome is PostOutcome.SENT
-        for attempt in range(3):
-            try:
-                await asyncio.wait_for(store.settle_delivery(row["id"], delivery, error=error), DB_TIMEOUT_SECONDS)
-                break
-            except Exception:
-                logger.warning("manager_event %s: could not record its notice as %s", row["id"], delivery,
-                               exc_info=attempt == 2)
-                await asyncio.sleep(0.2 * (attempt + 1))
+        await _write_outcome(row["id"], f"its notice as {delivery}", functools.partial(
+            store.settle_delivery, row["id"], delivery, claim=row["delivery_claim"], error=error))
     return sent
 
 

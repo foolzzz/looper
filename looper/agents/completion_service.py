@@ -7,8 +7,10 @@ Every ``TICK_SECONDS`` (and at once when an event is recorded, ``completion_even
 - a pending event that waited ``QUEUE_SECONDS`` for its turn (its Manager is held by a long one) falls back
   (``queue_deadline``) and its notice goes;
 - every code notice due is sent through the one claim (``store.claim_deliveries``): a fallback's, and one its channel
-  refused whose backoff is up; one that may have reached the chat (``uncertain``) is never sent again, and one left
-  ``sending`` for ``SENDING_STALE_SECONDS`` becomes ``uncertain``;
+  refused whose backoff is up; one that may have reached the chat (``uncertain``) is never sent again;
+- a notice or a completion reply left ``sending`` for ``SENDING_STALE_SECONDS`` (its send never answered, or its
+  record could not be written) becomes ``uncertain``, and a reply's events ``delivered``: never sent again, and the
+  chat's next turn may start;
 - a chat whose oldest pending event is due (``WINDOW_SECONDS`` after it was recorded) and that no turn is telling
   gets a ``COMPLETION_DUE`` on its Manager's queue, at most once per ``RESEND_SECONDS`` (a duplicate claims
   nothing); a Manager that does not run gets the chat's notices instead (``manager_off``).
@@ -80,8 +82,8 @@ class CompletionService:
             if moved := await store.recover_stopped(self._running_managers()):
                 logger.info("completion service: %d event(s) of Managers that do not run fell back (restart)", moved)
             for row in await store.settle_stale(before=self._born):
-                logger.warning("manager_event %s: its notice was being sent when the server stopped: uncertain, not "
-                               "sent again", row["id"])
+                logger.warning("manager_event %s: its %s was being sent when the server stopped: uncertain, not "
+                               "sent again", row["id"], "reply" if row["state"] == "delivered" else "notice")
         except Exception:
             logger.exception("completion service: could not recover the events of the server before it")
         global _running
@@ -117,11 +119,12 @@ class CompletionService:
         if self._drain is not None and self._drain.draining:
             return 0
         now = now or datetime.now(timezone.utc)
-        # A notice whose send never answered may have gone: never sent again (from the wall clock: a test's ``now``
-        # must not age a send under way).
+        # A notice or a reply whose send never answered (or whose record was not written) may have gone: never sent
+        # again (from the wall clock: a test's ``now`` must not age a send under way).
         stale = datetime.now(timezone.utc) - timedelta(seconds=store.SENDING_STALE_SECONDS)
         for row in await store.settle_stale(before=stale):
-            logger.warning("manager_event %s: its notice never finished sending: uncertain, not sent again", row["id"])
+            logger.warning("manager_event %s: its %s never finished sending: uncertain, not sent again", row["id"],
+                           "reply" if row["state"] == "delivered" else "notice")
         for row in await store.expire(now):
             logger.info("completion fallback id=%s reason=queue_deadline", row["id"])
         # Every notice due (pending, or refused and its backoff up), through the one claim.

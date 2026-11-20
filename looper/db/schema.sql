@@ -1856,6 +1856,9 @@ ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery TEXT
 ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_at TIMESTAMPTZ;
 ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_error TEXT;
+-- The claim (one send) the delivery was taken by: only that send's answer settles it, and a success it reports late
+-- turns an `uncertain` it was settled as meanwhile into `sent` (it is never sent again either way).
+ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_claim UUID;
 -- The completion event that told a schedule run's message (the Manager's reply, or its fallback); NULL otherwise.
 ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT
     REFERENCES manager_events(id) ON DELETE SET NULL;

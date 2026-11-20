@@ -446,23 +446,58 @@ def test_the_foreign_keys_that_are_cleared_or_cascaded_have_indexes(monkeypatch)
     run_db(check, monkeypatch, timeout=30)
 
 
-def test_a_database_whose_events_predate_the_new_reasons_and_retries_gets_them_on_upgrade(monkeypatch, tmp_path):
+async def _events_shape(pool) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The events' and the outbox's columns and constraints (validated or not), as the catalog has them."""
+    columns = await pool.fetch(
+        "SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name IN ('manager_events', 'schedule_notifications') "
+        "ORDER BY 1, 2")
+    constraints = await pool.fetch(
+        "SELECT conrelid::regclass::text AS tbl, conname, pg_get_constraintdef(oid) AS def, convalidated "
+        "FROM pg_constraint WHERE conrelid IN ('manager_events'::regclass, 'schedule_notifications'::regclass) "
+        "ORDER BY 1, 2")
+    return [dict(r) for r in columns], [dict(r) for r in constraints]
+
+
+def test_a_database_whose_events_predate_the_new_reasons_and_delivery_gets_them_validated_after_the_commit(
+        monkeypatch, tmp_path):
+    async def stopped(conn: Any) -> None:
+        return None
+
     async def check(pool):
+        fresh = await _events_shape(pool)
         await pool.execute(
             "ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
             "manager_events_reason_check CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', "
             "'turn_timeout', 'turn_stopped', 'empty_reply', 'send_failed', 'queue_deadline', 'restart')); "
             "ALTER TABLE manager_events DROP COLUMN delivery, DROP COLUMN delivery_attempts, "
-            "DROP COLUMN delivery_at, DROP COLUMN delivery_error; "
-            "DELETE FROM schema_migrations WHERE name IN ('manager_event_reasons', 'manager_event_delivery')")
+            "DROP COLUMN delivery_at, DROP COLUMN delivery_error, DROP COLUMN delivery_claim; "
+            "ALTER TABLE schedule_notifications DROP COLUMN manager_event_id; "
+            "DELETE FROM schema_migrations WHERE name IN ('manager_event_reasons', 'manager_event_delivery', "
+            "'schedule_notification_events', 'schedule_notification_events_online', 'manager_event_reasons_online', "
+            "'manager_event_delivery_online')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
+        with monkeypatch.context() as patch:  # the start stops once the schema transaction committed
+            patch.setattr(connection, "_finish_online", stopped)
+            await connection.ensure_schema(pool)
+        # Added NOT VALID under the schema transaction's lock: nothing was scanned there.
+        _, constraints = await _events_shape(pool)
+        assert {c["conname"] for c in constraints if not c["convalidated"]} == {
+            "manager_events_reason_check", "manager_events_delivery_check",
+            "schedule_notifications_manager_event_id_fkey"}
+        await connection.ensure_schema(pool)  # the next start validates them after its commit
+        assert await _events_shape(pool) == fresh
+        assert {"manager_event_reasons_online", "manager_event_delivery_online",
+                "schedule_notification_events_online"} <= {
+            r["name"] for r in await pool.fetch("SELECT name FROM schema_migrations")}
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         await with_task(pool, tmp_path)
         await insert(pool, dedupe_key="k", state="skipped", reason="no_chat")
         await insert(pool, dedupe_key="k2", state="fallback", reason="target_changed", delivery="failed",
                      delivery_attempts=2)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await insert(pool, dedupe_key="k3", state="fallback", reason="restart", delivery="lost")
 
     run_db(check, monkeypatch, timeout=30)

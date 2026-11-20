@@ -1983,12 +1983,9 @@ class ManagerAgent:
                         if outcome is not PostOutcome.SENT:
                             logger.warning("%s: the completion turn %s's reply may not have been sent: %s",
                                            self._log, batch, error)
-                        try:
-                            await db_manager_events.deliver(batch, record_id=state.get("record_id"),
-                                                            uncertain=outcome is not PostOutcome.SENT, error=error)
-                        except Exception:  # left ``sending``: a restart settles it as uncertain, never resends
-                            logger.exception("%s: could not record that the completion turn %s was delivered",
-                                             self._log, batch)
+                        # The record only is tried again; one never written stays ``sending`` until the service
+                        # settles it ``uncertain``: the reply is not sent again.
+                        await completion_events.record_reply(rows, outcome, error, record_id=state.get("record_id"))
             if reason is not None:
                 await self._fall_back_completion(batch, reason, state, rejected=rejected)
         cost = None

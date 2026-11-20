@@ -317,10 +317,16 @@ _ONLINE_STEPS = (
                           "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL"),)),
     _OnlineStep(_STEP_DIFFICULTY, "step_difficulty_online",
                 validate=(("task_steps", "task_steps_difficulty_check"),)),
-    # The outbox can be large: its new foreign key's index (for ON DELETE SET NULL) is built without blocking writes.
+    # The outbox can be large: its new foreign key is validated, and its index (for ON DELETE SET NULL) built,
+    # without blocking writes.
     _OnlineStep(_SCHEDULE_NOTIFICATION_EVENTS, _SCHEDULE_NOTIFICATION_EVENTS_ONLINE,
+                validate=(("schedule_notifications", "schedule_notifications_manager_event_id_fkey"),),
                 indexes=(("idx_schedule_notifications_manager_event",
                           "ON schedule_notifications (manager_event_id) WHERE manager_event_id IS NOT NULL"),)),
+    _OnlineStep(_MANAGER_EVENT_REASONS_MIGRATION, "manager_event_reasons_online",
+                validate=(("manager_events", "manager_events_reason_check"),)),
+    _OnlineStep(_MANAGER_EVENT_DELIVERY, "manager_event_delivery_online",
+                validate=(("manager_events", "manager_events_delivery_check"),)),
 )
 
 
@@ -1252,19 +1258,23 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             # The block added the outbox's column too: its index is built online, as for a later database.
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFICATION_EVENTS)
         if await _schedule_notification_events_pending(conn):
-            await conn.execute("ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT "
-                               "REFERENCES manager_events(id) ON DELETE SET NULL")
+            await conn.execute("ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT, "
+                               "ADD CONSTRAINT schedule_notifications_manager_event_id_fkey FOREIGN KEY "
+                               "(manager_event_id) REFERENCES manager_events(id) ON DELETE SET NULL NOT VALID")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFICATION_EVENTS)
         if await _manager_event_reasons_pending(conn):
             reasons = ", ".join(f"'{reason}'" for reason in _MANAGER_EVENT_REASONS)
+            # NOT VALID: no scan under this transaction's lock; the online step validates it after the commit.
             await conn.execute("ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
-                               f"manager_events_reason_check CHECK (reason IN ({reasons}))")
+                               f"manager_events_reason_check CHECK (reason IN ({reasons})) NOT VALID")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_REASONS_MIGRATION)
         if await _manager_event_delivery_pending(conn):
             await conn.execute(
-                "ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery TEXT CHECK (delivery IN ('pending', "
-                "'sending', 'sent', 'failed', 'uncertain')), ADD COLUMN IF NOT EXISTS delivery_attempts INTEGER NOT NULL "
-                "DEFAULT 0, ADD COLUMN IF NOT EXISTS delivery_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS delivery_error TEXT")
+                "ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery TEXT, ADD COLUMN IF NOT EXISTS "
+                "delivery_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS delivery_at TIMESTAMPTZ, "
+                "ADD COLUMN IF NOT EXISTS delivery_error TEXT, ADD COLUMN IF NOT EXISTS delivery_claim UUID, "
+                "ADD CONSTRAINT manager_events_delivery_check CHECK (delivery IN ('pending', 'sending', 'sent', "
+                "'failed', 'uncertain')) NOT VALID")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_DELIVERY)
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 
@@ -31,7 +31,8 @@ QUEUE_SECONDS = 15 * 60
 FAILING_BATCHES = 5
 FAILING_REASONS = ("turn_failed", "turn_timeout", "empty_reply")
 # A code notice the channel said it did not send (``failed``) is tried again RETRY_SECONDS * 3^(n-1) later (at most
-# RETRY_MAX_SECONDS) for its first DELIVERY_ATTEMPTS tries. One ``sending`` for SENDING_STALE_SECONDS may have gone.
+# RETRY_MAX_SECONDS) for its first DELIVERY_ATTEMPTS tries. A notice or a reply ``sending`` for SENDING_STALE_SECONDS
+# may have gone: ``uncertain``, never sent again (its send, if it answers ``sent`` later, makes it ``sent``).
 RETRY_SECONDS = 5
 RETRY_MAX_SECONDS = 15 * 60
 DELIVERY_ATTEMPTS = 8
@@ -108,21 +109,23 @@ async def claim(manager_id: str, channel_id: str, chat: str, batch: UUID, *, lim
 
 async def claim_reply(batch: UUID, *, pool: Db | None = None) -> int:
     """The completion turn's reply is about to be handed to its channel: its events are ``sending`` (committed
-    before the channel is asked). How many."""
+    before the channel is asked), the batch their claim (a reply is sent once). How many."""
     result = await (pool or get_pool()).execute(
         "UPDATE manager_events SET delivery = 'sending', delivery_attempts = delivery_attempts + 1, "
-        "delivery_at = now() WHERE batch = $1 AND state = 'running' AND delivery IS NULL", batch)
+        "delivery_at = now(), delivery_claim = $1 WHERE batch = $1 AND state = 'running' AND delivery IS NULL", batch)
     return int(result.split()[-1])
 
 
 async def deliver(batch: UUID, *, record_id: int | None, uncertain: bool = False, error: str | None = None,
                   pool: Db | None = None) -> list[dict[str, Any]]:
     """The completion turn's reply went to the channel (``uncertain``: it may have; it is never sent again, and
-    neither are its notices): its running events are delivered."""
+    neither are its notices): its running events are delivered. A ``sent`` also corrects the events the stale sweep
+    settled ``uncertain`` while this send (its batch, their claim) had not answered."""
     rows = await (pool or get_pool()).fetch(
-        "UPDATE manager_events SET state = 'delivered', record_id = $2, finished_at = now(), "
-        "delivery = CASE WHEN $3 THEN 'uncertain' ELSE 'sent' END, delivery_error = $4, "
-        "sent_at = CASE WHEN $3 THEN NULL ELSE now() END WHERE batch = $1 AND state = 'running' RETURNING *",
+        "UPDATE manager_events SET state = 'delivered', record_id = COALESCE($2, record_id), "
+        "finished_at = COALESCE(finished_at, now()), delivery = CASE WHEN $3 THEN 'uncertain' ELSE 'sent' END, "
+        "delivery_error = $4, sent_at = CASE WHEN $3 THEN NULL ELSE now() END WHERE batch = $1 AND (state = 'running' "
+        "OR (NOT $3 AND state = 'delivered' AND delivery = 'uncertain' AND delivery_claim = $1)) RETURNING *",
         batch, record_id, uncertain, error)
     return [dict(row) for row in rows]
 
@@ -160,37 +163,46 @@ async def claim_deliveries(*, now: datetime | None = None, ids: Sequence[int] | 
                            limit: int = CLAIM_LIMIT, pool: Db | None = None) -> list[dict[str, Any]]:
     """The one way a code notice is taken for sending (a fallback's, a retry's, after a restart): ``pending``, or
     ``failed`` and due again (``delivery_at`` <= ``now``, under ``DELIVERY_ATTEMPTS``), written ``sending``
-    (committed) before the channel is asked. ``ids``: only these. Oldest first; a second caller gets none of them."""
+    (committed) with a new ``delivery_claim`` before the channel is asked; only that claim settles it
+    (``settle_delivery``). ``ids``: only these. Oldest first; a second caller gets none of them."""
     rows = await (pool or get_pool()).fetch(
         "UPDATE manager_events SET delivery = 'sending', delivery_attempts = delivery_attempts + 1, "
-        "delivery_at = now() WHERE id IN (SELECT id FROM manager_events WHERE state = 'fallback' AND ("
-        "delivery = 'pending' OR (delivery = 'failed' AND delivery_at <= COALESCE($1::timestamptz, now()) "
+        "delivery_at = now(), delivery_claim = $5 WHERE id IN (SELECT id FROM manager_events WHERE state = 'fallback' "
+        "AND (delivery = 'pending' OR (delivery = 'failed' AND delivery_at <= COALESCE($1::timestamptz, now()) "
         "AND delivery_attempts < $4)) AND ($3::bigint[] IS NULL OR id = ANY($3::bigint[])) "
         "ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED) AND delivery IN ('pending', 'failed') RETURNING *",
-        now, limit, list(ids) if ids is not None else None, DELIVERY_ATTEMPTS)
+        now, limit, list(ids) if ids is not None else None, DELIVERY_ATTEMPTS, uuid4())
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
-async def settle_delivery(event_id: int, delivery: str, *, error: str | None = None, pool: Db | None = None) -> bool:
-    """What the channel answered for a notice being sent: ``sent``; ``failed`` (it did not send it: tried again
-    with backoff, until ``DELIVERY_ATTEMPTS``); ``uncertain`` (it may have: never again). Only from ``sending``."""
+async def settle_delivery(event_id: int, delivery: str, *, claim: UUID, error: str | None = None,
+                          pool: Db | None = None) -> bool:
+    """What the channel answered the send of ``claim`` for a notice: ``sent``; ``failed`` (it did not send it:
+    tried again with backoff, until ``DELIVERY_ATTEMPTS``); ``uncertain`` (it may have: never again). From
+    ``sending``, or a late ``sent`` from the ``uncertain`` the stale sweep settled that send as; another claim's
+    answer changes nothing."""
     if delivery not in ("sent", "failed", "uncertain"):
         raise ValueError(f"not a delivery outcome: {delivery!r}")
     result = await (pool or get_pool()).execute(
         "UPDATE manager_events SET delivery = $2, delivery_error = $3, "
         "sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END, delivery_at = CASE WHEN $2 = 'failed' "
         "AND delivery_attempts < $4 THEN now() + make_interval(secs => least($5 * power(3, delivery_attempts - 1), "
-        "$6)) WHEN $2 = 'failed' THEN NULL ELSE delivery_at END WHERE id = $1 AND delivery = 'sending'",
-        event_id, delivery, error, DELIVERY_ATTEMPTS, float(RETRY_SECONDS), float(RETRY_MAX_SECONDS))
+        "$6)) WHEN $2 = 'failed' THEN NULL ELSE delivery_at END WHERE id = $1 AND delivery_claim = $7 "
+        "AND (delivery = 'sending' OR (delivery = 'uncertain' AND $2 = 'sent'))",
+        event_id, delivery, error, DELIVERY_ATTEMPTS, float(RETRY_SECONDS), float(RETRY_MAX_SECONDS), claim)
     return result.endswith(" 1")
 
 
 async def settle_stale(*, before: datetime, pool: Db | None = None) -> list[dict[str, Any]]:
-    """Code notices left ``sending`` since before ``before`` (by a process that is gone, or a send that never
-    answered): the channel may have sent them, so they are ``uncertain`` and are never sent again."""
+    """Code notices and completion replies left ``sending`` since before ``before`` (by a process that is gone, a
+    send that never answered, or a reply whose record could not be written): the channel may have sent them, so they
+    are ``uncertain`` and never sent again, and a reply's events are ``delivered`` (their chat's next turn may
+    start)."""
     rows = await (pool or get_pool()).fetch(
-        "UPDATE manager_events SET delivery = 'uncertain', delivery_error = 'it was being sent when its sender "
-        "stopped' WHERE state = 'fallback' AND delivery = 'sending' AND delivery_at < $1 RETURNING *", before)
+        "UPDATE manager_events SET delivery = 'uncertain', delivery_error = 'its send did not answer in time: "
+        "it may have gone', state = CASE WHEN state = 'running' THEN 'delivered' ELSE state END, "
+        "finished_at = CASE WHEN state = 'running' THEN now() ELSE finished_at END "
+        "WHERE state IN ('fallback', 'running') AND delivery = 'sending' AND delivery_at < $1 RETURNING *", before)
     return [dict(row) for row in rows]
 
 
