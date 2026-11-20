@@ -71,6 +71,7 @@ class ApiRuntime(RuntimeAdapter):
     type = "api"
     label = "Model API (SDK)"
     streams_usage = True
+    reports_request_context = True
     default_executable = ""
     capabilities = frozenset({Capability.RESIDENT_SESSION, Capability.RESUME})
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES})

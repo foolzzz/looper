@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 SESSION_COLUMNS = ("planner_session_id", "planner_session_totals", "planner_session_runtime",
                    "planner_session_provider", "planner_session_profile", "planner_session_task_id",
-                   "planner_session_since")
+                   "planner_session_since", "planner_session_context_tokens", "planner_session_run_cost_usd")
 SINCE = datetime(2026, 10, 19, 1, tzinfo=timezone.utc)
 
 
@@ -27,7 +27,8 @@ async def _stored(pool: Any, schedule_id: str, task_id: str) -> None:
     await pool.execute(
         "UPDATE schedules SET planner_session_id = 'private-session', planner_session_totals = '{\"cost_usd\": 1}', "
         "planner_session_runtime = 'claude-code', planner_session_provider = 'prov-test', "
-        "planner_session_profile = 'prof-test', planner_session_task_id = $2, planner_session_since = $3 WHERE id = $1",
+        "planner_session_profile = 'prof-test', planner_session_task_id = $2, planner_session_since = $3, "
+        "planner_session_context_tokens = 120000, planner_session_run_cost_usd = 0.4 WHERE id = $1",
         schedule_id, task_id, SINCE)
 
 
@@ -42,7 +43,7 @@ def test_schedule_api_shows_session_metadata_without_its_id_and_reset_clears_it(
         await _stored(pool, sid, "task-session")
         expected = {"active": True, "runtime": "claude-code", "profile": "prof-test",
                     "last_task_id": "task-session", "last_task_title": "Nightly run",
-                    "updated_at": SINCE.isoformat()}
+                    "updated_at": SINCE.isoformat(), "context_tokens": 120000, "run_cost_usd": 0.4}
         for action, arguments in (("get", {"schedule_id": sid}), ("list", {}),
                                   ("project_list", {"project_id": project["id"]})):
             status, body = await _call("POST", f"/api/v1/schedule_admin/{action}", arguments)

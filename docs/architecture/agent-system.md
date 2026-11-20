@@ -1381,7 +1381,7 @@ Manager tools.
   over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
   Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
-  `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
+  `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`, `headless_compaction`,
   `autonomous_turns`, `cost_report`, `steer`, `no_tools` (Claude Code has all but
   `structured_output`, `read_tools` and `steer`; Codex has `run`, `resident_session`, `resume`,
   `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
@@ -3199,8 +3199,58 @@ evaluation is required before the original schedule requirement is complete.
   existing session-switch path and writes the replacement session through;
   a parallel run or a failed claim starts fresh without changing the stored
   session. Each fallback records its reason as phase activity. Runtime
-  compaction and existing handoff remain in effect; failures and edits to
-  the requirement, rule, gate or overlap never reset the session.
+  compaction and existing handoff remain in effect; edits to the requirement,
+  rule, gate or overlap do not reset the session.
+  Persistent sessions are bounded by default. After each Planner turn the
+  schedule stores its last main-loop request's context (uncached input plus
+  cache reads and writes) and this task's total Planner cost, including
+  compaction. Before the next run resumes, context strictly above
+  `scheduler.session_context_max_tokens` (default 100,000) triggers maintenance.
+  Cost also triggers maintenance when context is at least half that threshold
+  and the previous run's Planner cost is strictly above half the effective task
+  budget. Equality at either upper limit does not trigger it. A stored session
+  with unknown context first recovers the old holder's last Planner record's
+  context, if available, and persists that measurement before transferring the
+  holder. If it remains unknown, a runtime that reports request-local context
+  (Claude Code, OMP, Pi or Model API) rotates; other runtimes keep resuming.
+  Turn or session token totals, such as Codex's usage events, are not context
+  measurements. An unknown cost also rotates when the context floor and budget
+  rule applies.
+  A NULL cost in any Planner record keeps the run's total unknown. The effective
+  task budget already includes the schedule's `run_budget_usd` override; with no
+  budget only the context rule applies.
+  Claude Code declares `headless_compaction`, verified with version 2.1.329:
+  `/compact` on a resumed headless session emits a manual `compact_boundary`,
+  whose summary is available on the next turn. Looper requires that event,
+  records the compaction's cost from session-total deltas, and accepts its
+  empty result. Context above three times the threshold rotates directly,
+  as does an estimated uncached input cost (the launch's frozen model price
+  times context) above half the task budget; an unknown estimate with configured
+  launch pricing and a budget also rotates. Native Claude Code uses the runtime's
+  cost report and has no launch price: it may compact within the three-times
+  context limit even with a task budget. This estimate covers input only, not the
+  summary's output. Once maintenance is required, unknown measurements, a runtime
+  without headless compaction, or a failed compaction rotate. The existing run
+  context supplies the last three
+  results once; rotation adds no separate history block or setting.
+  The measured $0.000978465 compaction was on a 17,176-token synthetic session,
+  not an estimate for a large cold-cache session. Compaction resends its context
+  and is charged to the current run's budget.
+  The context setting accepts integers from 40,000 to 100,000,000, or null to
+  restore its default, through `scheduler_settings.update` and configuration
+  import/export; Manager settings view and set expose the same field.
+  The `headless_compaction` capability is admitted on fresh databases and by an
+  upgrade constraint replacement, validated after its schema transaction commits.
+  Schedule runs expose `planner_context_tokens`, `planner_cost_usd`,
+  `planner_session_action` (`compacted` or `rotated`), `planner_session_reason`
+  (`context` or `cost`) and `planner_session_before_tokens` /
+  `planner_session_after_tokens`. A rotation's after-size is the first measured
+  request in the new session; a compaction's is its boundary's post-size.
+  Maintenance also appears in the task's activity and server log. Budget
+  failure alerts name the task budget and point at an oversized session.
+  Parallel runs, ordinary tasks, and schedules without a stored session keep
+  their existing launch and prompt paths. The task budget remains a soft cap
+  checked at existing boundaries; this does not add a mid-request hard stop.
   Reset is explicit: `POST /api/v1/schedule_admin/reset_planner_session` with `schedule_id`, the
   project's schedule-row **Reset Planner session** button (with a
   confirmation), or the Manager's `reset_planner_session` action (high,
@@ -3210,7 +3260,8 @@ evaluation is required before the original schedule requirement is complete.
   according to whether a stored session existed, or 404 for an unknown
   schedule, with the same caller checks as editing a schedule. Schedule
   responses expose only `planner_session` status: `active`, `runtime`,
-  `profile`, `last_task_id`, `last_task_title` and `updated_at`; never the
+  `profile`, `last_task_id`, `last_task_title`, `updated_at`, `context_tokens`
+  and `run_cost_usd`; never the
   session id. `updated_at` is when the current id was first stored, not the
   schedule's last edit; with no session the other fields are null. Stored
   sessions are excluded from configuration export; an import entry carrying

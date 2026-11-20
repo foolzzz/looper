@@ -144,10 +144,12 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     type = "claude-code"
     label = "Claude Code"
     streams_usage = True
+    reports_request_context = True
     default_executable = "claude"
     image_input = ImageInput.READ_TOOL
     # Verified against Claude Code 2.1.285 (claude_cli), no_tools against 2.1.328 (claude_cli.NO_TOOLS_ARGS); its
-    # replies follow Looper's contracts by prompt, so no structured_output.
+    # replies follow Looper's contracts by prompt, so no structured_output. Headless /compact on resume
+    # was verified with 2.1.329: a manual compact_boundary and a later turn recalling the summary.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
     # Verified against Claude Code 2.1.329: /compact and an automatic compaction in the resident stream-json session
     # each write a compact_boundary event before the turn's result.
