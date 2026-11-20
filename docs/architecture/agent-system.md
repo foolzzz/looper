@@ -4826,21 +4826,24 @@ here pushes: the intent push service polls `intents`.
   run is `extracted` (or `quiet` when nothing was stored), with
   `extract_counts` (`new`, `merged`, `superseded`, `dropped` by reason,
   `instructions_seen`, `more`) and a count line written by code as its output.
-- **The operator's word.** An extraction runs only while
-  `target_confirmed_at` holds for its `config_version`, which for these kinds
-  also binds the kind and the chat lists; otherwise a firing is a
-  `skipped_gate` (`not confirmed: …`) and the cursor stays. Enabling it, or
+- **The operator's word.** An extraction runs only while its kind's switch
+  (`leads.enabled`, `intents.enabled`) is on and `target_confirmed_at` holds
+  for its `config_version`, which for these kinds also binds the kind and the
+  chat lists; otherwise a firing is a `skipped_gate` (`leads are turned off:
+  …`, `not confirmed: …`), no processor starts and the cursor stays. Enabling it, or
   changing its rule, zone, source or chat lists (or the processor's Profile,
   through the version) clears it. A leads subscription is confirmed without a
   target; an intents one only with a direct chat (a Lark `ou_…` or a positive
   Telegram id). The confirmation names what it reads, the chats excluded from
   extraction, the rule, the processor's Profile and managed hooks, the caps and
-  an inferred cost from the last 24 hours' in-scope events.
+  what a day of the last 24 hours' in-scope events would cost, by the unit costs
+  measured on the real path (`extraction.COST_PER_RUN_USD`, about $0.005–0.008
+  a run, and `COST_PER_EVENT_USD`, about $0.0002 an event, with the date).
 - **Backfill** (`looper msgflow leads-backfill --days N`): by default it counts
   the in-scope events (imports included) of the last N days up to where the
   leads subscription started, by chat kind and day, its windows and the
-  estimate (inferred, and measured from the subscription's own runs when it has
-  some), and writes nothing. `--run --budget-usd X` runs the windows oldest
+  estimate (by the same measured unit costs, and by the subscription's own
+  runs when it has some), and writes nothing. `--run --budget-usd X` runs the windows oldest
   first through the same rendering, processor, parsing and storing (leads
   marked `backfill`, no run), saves its progress after each window
   (`leads.backfill.<schedule id>`) and stops before a window would pass the
