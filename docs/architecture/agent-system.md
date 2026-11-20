@@ -4212,7 +4212,7 @@ goes back to it (the bot and the user's sender id there); one set on the dashboa
 the first enabled bot of the default Manager that names an `operator_sender_id`, and is refused (`conflict`) when there
 is none. The table `reminders` (migration `reminders`) keeps each one with its target and status: `pending`,
 `sending`, `delivered`, `failed`, `uncertain`, `missed` or `cancelled`. `ReminderService` (started by `looper serve`,
-idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock. It settles a
+idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock; a stop lets a send under way finish (up to 15 seconds) and starts no other. It settles a
 `sending` row left by a stopped sender as `uncertain`, then sends the due ones in code-written words
 (「⏰ 你在 <when asked> 让我提醒你：<text>」) through `ChannelRegistry.post` with the idempotency key
 `looper-reminder-<id>`, after checking that the bot still names that user as its operator. A reminder up to 10 minutes

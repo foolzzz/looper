@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 
 ## 5. 投递
 
-`ReminderService` 每 10 秒一次，在一个会话级 advisory lock 下处理（两个 Looper 同时运行时只有一个在发）。服务正在排空（热升级）时不发，由接替的进程发。
+`ReminderService` 每 10 秒一次，在一个会话级 advisory lock 下处理（两个 Looper 同时运行时只有一个在发）。服务正在排空（热升级）时不发，由接替的进程发。停服务时，正在发的那一条最多等 15 秒发完，不再开始下一条，所以正常重启不会把提醒变成 `uncertain`。
 
 每一次：
 
@@ -122,5 +122,5 @@ CREATE TABLE IF NOT EXISTS reminders (
 ## 7. 验证
 
 - `tests/test_reminders.py`：时间解析（今天、明天、具体日期、已过去、超过一年、格式错、夏令时跳过、未知时区）、显示格式、提醒文字、`plan` 的表驱动用例；
-- `tests/test_reminders_db.py`：开关关闭时逐字节不变、打开后只多三个工具；只有默认 Manager、只在用户本人的回合；私聊和 Dashboard 的投递目标；列出和取消；到点只发一次、重启不丢；停机后只补最近一条；发送途中停下不再发；拒收重试三次、结果不明不重试；操作者换人不发；关闭或排空时不发；两个服务同时跑只发一次；「三点提醒我看 PR」从 Manager 到渠道的完整路径；旧库升级；表约束；
+- `tests/test_reminders_db.py`：开关关闭时逐字节不变、打开后只多三个工具；只有默认 Manager、只在用户本人的回合；私聊和 Dashboard 的投递目标；列出和取消；到点只发一次、重启不丢；停服务时正在发的那条发完、不开始下一条；停机后只补最近一条；发送途中停下不再发；拒收重试三次、结果不明不重试；操作者换人不发；关闭或排空时不发；两个服务同时跑只发一次；「三点提醒我看 PR」从 Manager 到渠道的完整路径；旧库升级；表约束；
 - 真实模型评测：`evals/prompt_regression` 的 `reminder_tools` 对话（设一条明天下午三点的提醒，再取消）。
