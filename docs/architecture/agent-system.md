@@ -4617,8 +4617,8 @@ does one query per tick. Existing sources run daily retention even when off.
   event counts (at most 200 matches). Exclusion stops ingestion and removes the chat
   from every future subscription selection, including windows of previously stored
   events. Three deletion scopes remove events: one external message id, a sent-time
-  range `[start, end)` (optionally limited to a chat), or a whole chat. A whole-chat
-  deletion clears its name and thread state and permanently excludes it. Durable
+  range `[start, end)` (optionally limited to a chat, with end no later than now),
+  or a whole chat. A whole-chat deletion clears its name and thread state and permanently excludes it. Durable
   `source_deletions` predicates reject matching events on overlap scans and imports;
   purged chats cannot be included again. Each ingest chunk, deletion, inclusion
   change and retention pass shares a transaction advisory lock per source.
@@ -4629,9 +4629,10 @@ does one query per tick. Existing sources run daily retention even when off.
   backups (count and earliest date), and the external lark-chat archive/collector
   files remain. Backups are inventoried without returning their paths.
 - **Import report** (`looper msgflow import [--per-file]`): per file, messages
-  read, distinct ids, new, already stored or repeated, skipped, lines that were
-  not a message, an unterminated last line and files read again; every file
-  must add up (read = new + already stored + skipped).
+  read, distinct ids, new, already stored or repeated, skipped, skipped by deletion,
+  lines that were not a message, an unterminated last line and files read again; every file
+  must add up (read = new + already stored + skipped + skipped by deletion).
+  Dry runs apply the same deletion tombstones as real imports.
 - **Looper does not read itself back:** messages sent by an app that one of
   Looper's own enabled Lark channels acts as are not stored (app ids come from
   the channel configuration), and a direct chat holding one is excluded
