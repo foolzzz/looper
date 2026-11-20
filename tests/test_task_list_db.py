@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -139,5 +140,103 @@ def test_excluding_scheduled_tasks_filters_rows_and_counts_and_reports_what_it_h
         assert "schedule_id" in str(body)
         scheduled = await page(schedule_id="sched-a")
         assert len(scheduled["tasks"]) == 3
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_statuses_returns_the_union_of_filters_and_leaves_counts_per_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        for status in ("executing", "planning", "running", "waiting", "failed"):
+            await _task(pool, f"task-{status}", status, project)
+
+        status, page = await _get(_server(), "/api/v1/tasks/page", {"statuses": ["running", "failed"]})
+        assert status == 200, page
+        assert {row["task_id"] for row in page["tasks"]} == {
+            "task-executing", "task-planning", "task-running", "task-failed",
+        }
+        assert page["counts"] == {"running": 3, "waiting": 1, "failed": 1}
+
+        status, only_failed = await _get(_server(), "/api/v1/tasks/page", {"statuses": ["failed"]})
+        assert status == 200, only_failed
+        assert [row["task_id"] for row in only_failed["tasks"]] == ["task-failed"]
+        assert only_failed["counts"] == page["counts"]
+
+        # A name status accepts that is not a chip still matches that status alone.
+        status, planning = await _get(_server(), "/api/v1/tasks/page", {"statuses": ["planning"]})
+        assert status == 200, planning
+        assert [row["task_id"] for row in planning["tasks"]] == ["task-planning"]
+        assert planning["counts"]["waiting"] == 1
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_status_still_filters_one_name_and_counts_stay_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        for status in ("executing", "waiting", "failed"):
+            await _task(pool, f"task-{status}", status, project)
+
+        status, running = await _get(_server(), "/api/v1/tasks/page", {"status": "running"})
+        assert status == 200, running
+        assert [row["task_id"] for row in running["tasks"]] == ["task-executing"]
+        assert running["counts"] == {"running": 1, "waiting": 1, "failed": 1}
+
+        status, failed = await _get(_server(), "/api/v1/tasks/page", {"status": "failed"})
+        assert status == 200, failed
+        assert [row["task_id"] for row in failed["tasks"]] == ["task-failed"]
+        assert failed["counts"] == running["counts"]
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_statuses_pages_with_before_across_the_union(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        moments = {
+            "task-init": datetime(2026, 1, 1, 0, 0, 4, tzinfo=timezone.utc),
+            "task-failed": datetime(2026, 1, 1, 0, 0, 3, tzinfo=timezone.utc),
+            "task-waiting": datetime(2026, 1, 1, 0, 0, 2, tzinfo=timezone.utc),
+            "task-executing": datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        }
+        await _task(pool, "task-init", "init", project)
+        await _task(pool, "task-failed", "failed", project)
+        await _task(pool, "task-waiting", "waiting", project)
+        await _task(pool, "task-executing", "executing", project)
+        for task_id, moment in moments.items():
+            await pool.execute("UPDATE tasks SET created_at = $2 WHERE id = $1", task_id, moment)
+
+        selection = {"statuses": ["init", "running", "failed"], "limit": 2}
+        status, page = await _get(_server(), "/api/v1/tasks/page", selection)
+        assert status == 200, page
+        assert [row["task_id"] for row in page["tasks"]] == ["task-init", "task-failed"]
+        assert page["next_before"] == "task-failed"
+        assert page["counts"]["waiting"] == 1
+
+        status, older = await _get(_server(), "/api/v1/tasks/page", {**selection, "before": page["next_before"]})
+        assert status == 200, older
+        assert [row["task_id"] for row in older["tasks"]] == ["task-executing"]
+        assert older["next_before"] is None
+        assert "task-waiting" not in {row["task_id"] for row in [*page["tasks"], *older["tasks"]]}
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_statuses_rejects_both_an_unknown_name_and_a_bad_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = (
+        ({"status": "failed", "statuses": ["running"]}, "not both"),
+        ({"statuses": ["nope"]}, "nope"),
+        ({"statuses": ["archived"]}, "archived"),
+        ({"statuses": []}, "does not match the declared schema"),
+        ({"statuses": ["init"] * 11}, "does not match the declared schema"),
+    )
+
+    async def test(pool: Any) -> None:
+        for body, needle in cases:
+            status, page = await _get(_server(), "/api/v1/tasks/page", body)
+            assert status == 400, (body, page)
+            assert needle in str(page), (body, page)
 
     run_db(test, monkeypatch, timeout=30)

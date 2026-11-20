@@ -7,6 +7,8 @@ from tests.test_chat_navigation_browser import dashboard_url  # noqa: F401
 
 pytestmark = pytest.mark.installed
 ROOT = Path(__file__).resolve().parents[1]
+# The Tasks page's default selection when the address has neither status, group nor schedule.
+DEFAULT_STATUSES = ["init", "running", "waiting", "waiting_user", "pending"]
 
 
 def task(task_id, owner="manager", *, created="2026-10-24T00:00:00Z"):
@@ -187,7 +189,7 @@ def test_default_only_install_hides_selector_until_explicit_filter(dashboard):
     page.goto(f"{base}/#tasks?manager=manager")
     expect(page.get_by_role("combobox", name="Manager", exact=True)).to_have_value("manager")
     expect(page.get_by_text("1 total tasks", exact=True)).to_be_visible()
-    assert ("tasks/page", {"manager_id": "manager", "exclude_scheduled": True}) in state["calls"]
+    assert ("tasks/page", {"manager_id": "manager", "exclude_scheduled": True, "statuses": DEFAULT_STATUSES}) in state["calls"]
 
 
 def test_unavailable_owner_keeps_empty_filter_until_removed(dashboard):
@@ -200,7 +202,7 @@ def test_unavailable_owner_keeps_empty_filter_until_removed(dashboard):
     expect(selector.locator("option:checked")).to_have_text("removed-owner (unavailable)")
     expect(page.get_by_role("status")).to_contain_text("The Manager filter is still applied")
     expect(page.get_by_text("No tasks yet", exact=True)).to_be_visible()
-    assert ("tasks/page", {"manager_id": "removed-owner", "exclude_scheduled": True}) in state["calls"]
+    assert ("tasks/page", {"manager_id": "removed-owner", "exclude_scheduled": True, "statuses": DEFAULT_STATUSES}) in state["calls"]
     page.get_by_role("button", name="Remove Manager filter", exact=True).click()
     expect(selector).to_have_value("")
     expect(page.get_by_text("Synthetic default-new", exact=True)).to_be_visible()
@@ -229,4 +231,4 @@ def test_disabled_manager_keyboard_narrow_and_error_states(dashboard):
     page.goto(f"{base}/#tasks?manager=scenario-a")
     expect(page.get_by_text("Synthetic list unavailable", exact=True)).to_be_visible()
     expect(page.get_by_role("combobox", name="Manager", exact=True)).to_have_value("scenario-a")
-    assert ("tasks/page", {"manager_id": "scenario-a", "exclude_scheduled": True}) in state["calls"]
+    assert ("tasks/page", {"manager_id": "scenario-a", "exclude_scheduled": True, "statuses": DEFAULT_STATUSES}) in state["calls"]
