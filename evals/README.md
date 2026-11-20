@@ -538,17 +538,17 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 69 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- haiku on all 73 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
-- sonnet on all 69 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+- sonnet on all 73 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all 69 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 73 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
   --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
 
 Omitting `--dialogs` selects every dialog in `dialogs.select(None)`: currently
-69, or 207 case/reps per three-rep tier. A complete 69-dialog cost measurement is blocked
+73, or 219 case/reps per three-rep tier. A complete 73-dialog cost measurement is blocked
 pending evaluation credentials, a fresh disposable database/runtime root and
 an authorized budget. Set the three `*_DIALOG_CAP_USD` variables to explicitly
 authorized candidate measurement ceilings before running these commands;
@@ -557,8 +557,8 @@ until each tier completes. Do not extrapolate from the committed 24-dialog
 reports: at clean commit `c9ac42d5c562306259203790cb23766d9abed34f`,
 `dialogs-real-haiku.json` covers 72 rows / $4.226970 and
 `dialogs-real-opus.json` covers 72 rows / $8.426588 (other roles on haiku).
-Neither measures the current 69-dialog selection; no Sonnet dialog report exists.
-After each full real candidate run, verify all 69 IDs at reps 1–3, no cap stop,
+Neither measures the current 73-dialog selection; no Sonnet dialog report exists.
+After each full real candidate run, verify all 73 IDs at reps 1–3, no cap stop,
 skipped or error rows, and reconcile row costs with the report total. Record
 the candidate commit, models/Manager effort, selected IDs/count, repetitions,
 row count and measured total here before deriving numeric caps with headroom.
@@ -608,6 +608,21 @@ RFC, section 5). Run them with Sonnet at two reps and the opus xhigh Manager at 
 above say, with `--dialogs leads_background,leads_dont_search,leads_conflict,leads_instruction,leads_task_requirement`;
 `status` and `confirm_create_start` with leads off show that the default path is unchanged. Group chats, other
 senders and turning leads off are unit tests (`tests/test_leads_manager_tool_db.py`).
+
+#### Session search
+
+The four `session_*` dialogs turn `manager.session_search.enabled` on in their disposable database and store a
+synthetic history before the first message (`_seed_sessions`): a dashboard conversation six days earlier that
+decided how an invented project ships and who rolls back, unrelated chatter, and a Lark direct chat recorded as the
+bot's operator's that set an alert threshold. Three unrelated chats follow the day before, so the history is not
+among the three chats a new session's resume brief shows and is found only by searching. The dashboard chat is the user's own turn, so the search runs.
+`session_decision` and `session_direct_chat` ask in Chinese about the decision and the threshold; `session_english`
+asks about the decision in English, so the Manager must search with the words the conversation used; each must
+search, change nothing, give the decided values and say where or when they were said. `session_not_needed` asks
+about the tasks now and must not search the history. Run them with Sonnet at two reps and the opus xhigh Manager at
+one, as the Manager PR commands above say, with
+`--dialogs session_decision,session_direct_chat,session_english,session_not_needed`. Group chats, other senders and
+turning the search off are unit tests (`tests/test_session_search_db.py`).
 
 #### The Manager's state block
 
@@ -879,7 +894,7 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode now selects all 69 dialogs by
+MCP; it takes about two minutes. Real mode now selects all 73 dialogs by
 default. The committed cost references cover only 24 dialogs (see the release
 tiers above), so neither they nor the default `--total-cap-usd` (0.50)
 establish a sufficient cap. Use an explicitly authorized measurement ceiling
@@ -896,7 +911,7 @@ Options: `--dialogs status,ask_project`, `--model`, `--agent`, `--stable-context
 every dialog's database),
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
-does not establish a cap for the current 69 dialogs; give it
+does not establish a cap for the current 73 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
