@@ -123,8 +123,9 @@ def _database_url(url: str, database: str) -> str:
 
 
 @contextmanager
-def fresh_database(admin_url: str) -> Iterator[tuple[str, float]]:
-    """A new database on ``admin_url``'s server, dropped afterwards: (its URL, database clock − local clock)."""
+def fresh_database(admin_url: str, *, keep: bool = False) -> Iterator[tuple[str, float]]:
+    """A new database on ``admin_url``'s server, dropped afterwards unless ``keep``: (its URL, database clock − local
+    clock)."""
     import asyncpg
 
     admin_db = urllib.parse.urlsplit(admin_url).path.lstrip("/")
@@ -157,7 +158,10 @@ def fresh_database(admin_url: str) -> Iterator[tuple[str, float]]:
     try:
         yield _database_url(admin_url, name), offset
     finally:
-        asyncio.run(drop())
+        if keep:
+            print(f"kept the database {name}", file=sys.stderr)
+        else:
+            asyncio.run(drop())
 
 
 # --- Server --------------------------------------------------------------------------------------------
@@ -326,12 +330,14 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
                    gh_diffs: dict[str, str] | None = None,
                    startup_timeout: float = 90.0, env: dict[str, str] | None = None,
                    pi_runtime: str = "cli", dsh_runtime: str = "cli",
-                   keeper_mode: str = "off") -> Iterator[Api]:
-    """``looper serve`` on a free port, with an ops file of its own in ``runtime_root`` naming ``database_url``;
-    stopped with SIGINT, as the operator would. ``notes_root`` stands in for the operator's ``~/.claude/projects``
+                   keeper_mode: str = "off", port: int | None = None) -> Iterator[Api]:
+    """``looper serve`` on ``port`` (default: a free one), with an ops file of its own in ``runtime_root`` naming
+    ``database_url``; stopped with SIGINT, as the operator would. ``notes_root`` stands in for the operator's ``~/.claude/projects``
     (the operator's notes). ``env``: variables the server gets on top of this process's (a key read for it alone)."""
+    if port == RESERVED_PORT:
+        raise EvalError(f"port {RESERVED_PORT} is the operator's own server")
     install_gh(bin_dir, diffs=gh_diffs)
-    port = free_port()
+    port = port or free_port()
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,

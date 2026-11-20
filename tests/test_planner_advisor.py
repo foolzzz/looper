@@ -95,6 +95,9 @@ class FakeConsults:
         async def nothing(*args: Any, **kwargs: Any) -> list[Any]:
             return []
 
+        async def summary_line(task_id: str) -> str:
+            return f"请教 advisor {len(self.opened)} 次，花费 0.30 美元，采纳 1 条，其中 1 条帮步骤通过"
+
         async def for_task(task_id: str) -> list[dict[str, Any]]:
             return [{"id": n, "step_id": brief.step_id, "state": "failed"} for n, (brief, _) in enumerate(self.opened, 1)]
 
@@ -111,6 +114,7 @@ class FakeConsults:
         monkeypatch.setattr(advisor_advice, "adopt", adopt)
         monkeypatch.setattr(advisor_advice, "unlock", unlock)
         monkeypatch.setattr(advisor_advice, "for_step", nothing)
+        monkeypatch.setattr(advisor_advice, "summary_line", summary_line)
 
 
 def _answered(fields: dict[str, Any] = ADVICE) -> Any:
@@ -170,6 +174,8 @@ def test_a_critical_step_starts_after_the_advisor_reviewed_its_plan_with_the_pla
     assert brief.evidence and consults.adopted[0]["adoption"] == "adopted"
     assert consults.unlocked == [(payload["task_id"], 1, True)]
     assert h.final().payload["status"] == "completed"
+    # the task's summary has a line for its consults
+    assert "## Advisor\n请教 advisor 1 次，花费 0.30 美元" in h.final().payload["summary"]
 
 
 def test_a_checkpoint_without_an_answer_starts_the_step_as_planned(
@@ -483,8 +489,9 @@ def test_with_the_advisor_off_nothing_offers_advise_and_a_critical_step_is_refus
     claude = planner_claude(plan(_critical("s1")), plan(step("s1")), decide("retry", feedback="again"),
                             decide("accept"))
     outcomes = iter([WORK_FAILED, WORK_OK])
-    drive(claude, lambda envelope: next(outcomes))
+    h = drive(claude, lambda envelope: next(outcomes))
     texts = _texts(claude)
     assert "You may ask the advisor" not in texts[0] and "unknown keys: difficulty" in texts[1]
     assert "Allowed decisions now: retry (2 left), replan, fail." in texts[2] and "advise" not in texts[2]
     assert consults.opened == [] and consults.unlocked == []
+    assert "## Advisor" not in h.final().payload.get("summary", "")

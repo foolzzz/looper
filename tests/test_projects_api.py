@@ -236,6 +236,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import waits as db_waits
 
     monkeypatch.setattr(db_waits, "list_for_task", AsyncMock(return_value=[]))
+    from looper.db import advisor_advice
+
+    monkeypatch.setattr(advisor_advice, "consults_view", AsyncMock(return_value=[]))
     from looper.db import step_workspaces, task_worktrees
 
     monkeypatch.setattr(step_workspaces, "list_for_task", AsyncMock(return_value=[]))

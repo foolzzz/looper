@@ -5,6 +5,7 @@ import { gateWaitsOn } from "@/lib/gates";
 import { waitCheckText } from "@/lib/waits";
 import { MERGE_ERRORS, shortCommit, workspaceState } from "@/lib/workspaces";
 import { isPlainAllOf } from "@/lib/pipeline-layout";
+import type { ConsultRun } from "@/lib/consults";
 import {
   reviewingRole,
   runProfile,
@@ -20,8 +21,9 @@ import {
   type TaskWait,
 } from "@/lib/api";
 
-/** The task's runs by role, as `runs.list` answers for each. */
-export type TaskRuns = Record<TaskRole, LlmRecord[]>;
+/** The task's runs by role, as `runs.list` answers for each (the Planner's without its consults' runs), and its
+ * consults' runs (the advisor's and its judge's), each with the Planner run that started it. */
+export type TaskRuns = Record<TaskRole, LlmRecord[]> & { consults?: ConsultRun[] };
 
 /** The runtime, model and effort of the latest of `records` (of one step, when `stepId` is given), or undefined
  * when none ran. */
@@ -363,6 +365,7 @@ export function plannerCard(task: TaskDetail, look: CardLook, runs?: TaskRuns): 
           label: "Plan",
           value: `${planned} step${planned === 1 ? "" : "s"}${dropped ? `, ${dropped} dropped` : ""}`,
         },
+        task.advisor?.summary && { label: "Advisor", value: task.advisor.summary },
       ]),
       ...(note
         ? text(`Latest note · ${formatWhen(note.at)}`, [note.now && `Now: ${note.now}`, note.next && `Next: ${note.next}`]

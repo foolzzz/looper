@@ -320,7 +320,7 @@ claude --print --verbose --output-format stream-json --include-partial-messages 
 | `url` | 任何 scheme 的 URI（`https://`、`data:`、`mailto:` 等，第一期没有白名单），以及 `advisor_internal_domains` 里的域名和它们的子域名 |
 | `identity` | 邮箱、IPv4 和 IPv6 地址、长 ID（≥ 16 位的十六进制，或者 UUID）、任务 ID、步骤 ID、执行者 ID |
 | `raw_log` | 带时间戳的行、Python、Java、JavaScript 和 Go 的堆栈，或者一段 `log_excerpt` 超过 20 行 |
-| `dangling` | 「上面」「见日志」「above」「see the log」这类指代；提到请教包里没定义的文件名（`*.py`、`*.ts` 这类带扩展名的名字） |
+| `dangling` | 「上面」「见日志」「above」「see the log」这类指代；提到请教包里没定义的文件名（`*.py`、`*.ts` 这类带扩展名的名字），请教包引用的命令里出现的文件名除外（如 `` `sh build.sh > build.log` ``：命令运行和写出的文件只是名字，不是指代） |
 | `verbatim` | 请教包里超过 30% 的 12 字窗口和本地素材逐字重合（请教包的每个窗口位置都算，只有素材一侧去重） |
 
 ### 9.4 第三道：判别（`advice_check` 角色）
@@ -485,7 +485,8 @@ Allowed decisions now: advise (kind plan_review).
 - **请教卡片**（点开小节点）：请教包、回问、回答、规划者的表态和理由、花费和耗时；被拦的请教只显示检查的类别和次数；
 - **任务页：** 步骤在等回答时显示「请教中」；检查点请教失败的步骤标「检查点请教未完成」；
 - **运行树：** advisor 和 advice_check 各是一条运行，挂在发起请教的规划者运行下面；
-- **任务总结：** 加一行，例如「请教 advisor 3 次，花费 1.20 美元，采纳 2 条，其中 1 条帮步骤通过」；检查点请教失败时也写一句；
+- **任务总结：** 加一行，例如「请教 advisor 3 次，花费 1.20 美元，采纳 2 条，其中 1 条帮步骤通过」（「帮步骤通过」只数采纳了、并且随后那次尝试通过的条目）；检查点请教失败或被拒答时也写一句；
+- **开关关闭以后：** 页面照旧显示已有的请教（这是历史，花费也要看得到）；给模型看的内容不带 advisor 的字段，管家看到的任务结果去掉 `## Advisor` 这一行；
 - **Settings → Roles：** 列出 Advisor 和 advice_check，可以改 Profile、角色 prompt、超时；
 - **项目设置：** `advisor` 开关和第 5.4 节的设置；
 - 按 `docs/design.md` 的界面规则做，用一次性的 serve 拍无头浏览器截图。

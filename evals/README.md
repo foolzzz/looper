@@ -893,6 +893,43 @@ outcome, its tool calls per turn (a refused one with its error code) and its
 cost; the JSON keeps what each refused call was told and the arguments it came
 with.
 
+## The advisor's go-live acceptance (`evals/advisor_acceptance.py`)
+
+The real-path acceptance the advisor RFC asks for before the switch is turned on anywhere (D22, section 16). It
+starts a disposable `looper serve` of its own: a new database on the PostgreSQL server you name, a temporary runtime
+root, port 8885 by default (never 8767). Every role but the advisor's two runs Claude Code on `--model` (sonnet by
+default). The advisor and its judge keep their seeded profiles, `claude-code/fable-5-2` and
+`claude-code/sonnet-5-5`, and the advisor is on only in the projects of the cases that need it. The cases run one
+after another:
+
+| case | what it shows |
+|---|---|
+| `diagnose` | a build that fails on its first attempt and passes only when it is run the way an expert would say (its error hints at it without naming it). The Planner consults the advisor, records what it takes (`advice_adoption`) and retries; the retry's Worker names the consult on its record, the attempt passes (`unlocked`), the advisor's and the judge's runs hang under the Planner run that asked, and the summary has its advisor line. Real advisor and judge |
+| `timeout` | a critical step's checkpoint, with an advisor that never answers (a stand-in) and its role's timeout lowered to 20 s: the consult fails as `timeout`, the advisor ran once, the step still starts and passes, and the task shows 检查点请教未完成 |
+| `blocked` | the same, with a judge that finds a leak in every request: two returns, then `blocked`; the judge ran 3 times and the advisor never |
+| `rate_limited` | the same, with an advisor its model's rate limit stops (HTTP 429): failed as `rate_limited`, not run again |
+| (after `rate_limited`) | its project turns the advisor off: the task's page keeps its consults and their cost, and the Manager's view of the task (`ops/tasks/get`) names the advisor nowhere |
+| `switch_off` | a task with the advisor off: the advisor-off contracts are the ones `tests/test_advisor_off.py` pins, the Planner's system prompt holds one of them byte for byte, and nothing the Planner or its Workers are given names the advisor (the words are first found in an advisor-on contract, so the check can fail) |
+
+The stand-ins are in the `claude` the server runs (`evals/advisor_acceptance_claude.py`): it tells the advisor's
+and the judge's runs by their reply contracts, stands in for them as each case's modes say, and runs real Claude
+Code for everything else, capped at `--max-run-usd` unless the call sets a cap of its own. With `--shots`, it takes
+headless screenshots (`evals/advisor_acceptance_shots.cjs`, node and playwright-core) of the `diagnose`, `blocked`
+and `timeout` tasks' Pipelines at 1280 and 390 px, with the card of each task's first consult node.
+
+It writes `advisor-acceptance-<time>.json` to `--out-dir`, with each case's checks, each consult's cost (what it
+booked, and its runs by kind) and the run's total, and exits non-zero when a check fails. It stops starting cases
+once the run has spent `--total-cap-usd`.
+
+```bash
+uv run --extra test python -m evals.advisor_acceptance \
+  --pg-url postgresql://postgres:<password>@127.0.0.1:<port>/postgres \
+  --claude ~/.local/bin/claude --total-cap-usd 10 --shots evals/runs/advisor-shots
+```
+
+`--cases` runs some of the cases; `PLAYWRIGHT_CORE` and `CHROMIUM` point the screenshots at a playwright-core
+module and a browser.
+
 ## Lark group chats (`evals/lark_group.py`)
 
 What a Lark group chat and a direct chat see of a task they ask for, on the real path: the same stand-in

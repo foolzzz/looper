@@ -5616,7 +5616,8 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
     at most 12,000 characters; a checkpoint takes only `plan_review`);
   - code (`advice_lint.lint`: secrets, a binding's real value however short, absolute paths of any root, URIs of
     any scheme and the project's internal domains, e-mail and IPv4 or IPv6 addresses and ids, raw logs and
-    Python, Java, JavaScript or Go stacks, dangling references, and more than 30% of the request's 12-character
+    Python, Java, JavaScript or Go stacks, dangling references (a file named in a command the request quotes is
+    named, not referred to), and more than 30% of the request's 12-character
     windows copied from the local material). Each text is also read NFKC-normalized without zero-width
     characters, with its escapes decoded and its Base64 runs decoded once; a hit there points at the characters
     as written;
@@ -5647,6 +5648,28 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   was interrupted, without offering advise again.
 - **Time.** A consult has one deadline, 15 minutes after it opened: the judge's and the advisor's runs get only what
   is left of it, and a request sent back or a question asked that waits for the Planner past it ends the consult.
+- **Where they show.** A task's detail has `advisor` (only in a task with some): `consults`
+  (`advisor_advice.consults_view`: each consult's source, kind, attempt, state and why it failed, rounds, returns,
+  spend and duration, the checks its request failed (stage, category and count), the request that was sent
+  (`question`), the advisor's questions back (`needs_info`), its answer (`advice`), the adoption with each point's
+  use and reason (`adoption_items`) and `unlocked`; never a request's bindings, a request that failed its checks,
+  nor where a check matched) and `summary` (`advisor_advice.summary_line`: how many consults, their spend, the
+  points taken, those of them whose attempt then passed, and the steps whose checkpoint consult ended without an
+  answer, a refusal included). The Planner adds that line to the task's final summary or closing note
+  (`## Advisor`). A project that turns the advisor off keeps its tasks' consults on their pages (their history
+  and cost), while what the models see leaves the advisor out: the Manager's view of a task (`ops/tasks/get`)
+  drops the `## Advisor` line from its result. `runs.for_task`
+  gives each run its `kind` and `parent_record_id`. The task page shows them:
+  - the Pipeline draws each consult as a small dashed node beside its step, tied to it by a dashed line of its
+    own, not a dependency edge: a checkpoint before the step, the others after it, the plan's beside the Planner,
+    several in time order; its label is its kind and how it ended, its colour its state, and its card the rest;
+  - a `consulting` step reads 请教中, and a step whose checkpoint consult ended without an answer is marked
+    检查点请教未完成, on the Overview and in the Pipeline;
+  - the Overview has the summary line and each step's consults; the Agents tab lists the advisor's and the advice
+    check's runs under the Planner run that asked.
+
+  Settings → Roles lists the Advisor and Advice check roles, and a project's settings its `advisor` switch, limits,
+  fallback profile and internal domains.
 
 ### Turns Claude runs on its own
 
