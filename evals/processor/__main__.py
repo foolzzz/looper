@@ -433,6 +433,14 @@ CHECK_CASES: dict[str, dict[str, Any]] = {
                         summary="王五请你看支付回调偶发的 500，两天十几次，日志显示超时", confidence="high")
                   | {"expect": "keep", "good": True}],
     },
+    "check_intent_alert": {
+        "what": "an alert from a listed alert bot, which names nobody, as an alert_triage intent: keep",
+        "kind": "intents",
+        "rows": [_row(1, "oc_ops", "cli_alertbot", "【告警】订单服务错误率 5.2%，超过阈值 2%，已持续 10 分钟", 1)],
+        "items": [_item([1], type="alert_triage", title="订单服务错误率 5.2% 超阈值",
+                        summary="告警机器人报告订单服务错误率 5.2%，超过阈值 2%，已持续 10 分钟", confidence="high")
+                  | {"expect": "keep", "good": True}],
+    },
     "check_intent_unsupported": {
         "what": "someone telling the group about their own work, recorded as the user's dev task: drop",
         "kind": "intents",
@@ -735,12 +743,12 @@ async def _check(args: argparse.Namespace, key: str, rep: int, root: Path) -> di
 
     case = CHECK_CASES[key]
     items = [{k: v for k, v in item.items() if k not in ("expect", "good")} for item in case["items"]]
-    names = {row["key"]: row["name"] for row in await extraction.intent_types(get_pool())}
+    types = {row["key"]: row for row in await extraction.intent_types(get_pool())}
     started = time.monotonic()
     outcome = await leads_check.check(
         case["kind"], items, messages={row["seq"]: row for row in case["rows"]},
         participants=extraction.Participants(_NAMES, _USER), zone_name="Asia/Shanghai", text_max_chars=500,
-        type_names=names, owner=f"eval-{key}", reference={"case": key, "rep": rep}, budget_usd=args.budget_usd,
+        types=types, owner=f"eval-{key}", reference={"case": key, "rep": rep}, budget_usd=args.budget_usd,
         timeout_s=args.timeout, runtime_root=root, claude_bin=args.claude or "claude")
     checked = outcome.checked
     verdicts = [checked.verdicts.get(index) if checked is not None else None for index in range(len(items))]
@@ -802,7 +810,7 @@ async def _check_file_case(args: argparse.Namespace, case: dict[str, Any], numbe
     item = dict(case["item"])
     outcome = await leads_check.check(
         "leads", [item], messages={row["seq"]: row for row in case["rows"]}, participants=case["participants"],
-        zone_name=zone, text_max_chars=500, type_names={}, owner=f"eval-file-{number}",
+        zone_name=zone, text_max_chars=500, types={}, owner=f"eval-file-{number}",
         reference={"case": "file", "number": number, "rep": rep}, budget_usd=args.budget_usd, timeout_s=args.timeout,
         runtime_root=root, claude_bin=args.claude or "claude")
     verdict = outcome.checked.verdicts.get(0) if outcome.checked is not None else None
