@@ -5,7 +5,7 @@
 - **需求：** 默认管家用起来要像一个助理：知道现在几点、是谁在跟它说话；有固定的名字和语气；群里的消息不等私聊里的长回合，群里也拿不到私聊里的内容；会话不会无限变长；回执了就一定给结果；飞书限流时不丢消息、不重复。做这些之前，先有能对比的数字。
 - **范围：** 第 0 期（度量、前提验证、体验评测集）和第 1 期（1.1–1.7）。第 2 期以后（画像块、提醒、卡片按钮、送达层、车道等）不在本文；其中几项已经在并行开发（默认关），和本文的分工见第 13 节。
 - **相关：** [Manager 收尾、账本与晨报 RFC](manager-completion-ledger-v0.zh-CN.md)（收尾回合、账本、`operator_sender_id`）；[消息线索 RFC](message-leads-intents-v0.zh-CN.md) 第 10.2 节（常驻内容的稳定块）；[对外动作审查与围栏 RFC](outbound-review-v0.zh-CN.md)（第 8 节的不可信内容围栏）；[定时任务共用一条规划者会话 RFC](schedule-planner-session-v0.zh-CN.md) 和 #1473（会话上限）；[Manager 会话 Profile RFC](manager-session-profile-v0.zh-CN.md)；[Agent 系统架构](../agent-system.md)；[开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 1 节（测试和评测要求）。
-- **核对基线：** `main` `26d1b3a82`（含 #1463 收尾窗口、#1469 审查 RFC、#1471 稳定块）；另读了未合入的 #1473（定时任务规划者会话上限）和 #1477（管家只读 vault）。第 3 节的现状是读代码得出的，每项标了出处；本文没有启动服务、没有调用模型。
+- **核对基线：** `main` `26d1b3a82`（含 #1463 收尾窗口、#1469 审查 RFC、#1471 稳定块）；另读了当时未合入的 #1473（定时任务规划者会话上限，评审期间已合入）和 #1477（管家只读 vault）。第 3 节的现状是读代码得出的，每项标了出处；本文没有启动服务、没有调用模型。
 - **术语：**
   - **管家：** 默认 Manager（`DEFAULT_MANAGER_ID`）。场景管家另说。
   - **回合记录：** 一轮管家回合在 `llm_records` 里的那一行（`run_kind = 'manager'`），它的 `metadata` 是 JSONB。
@@ -450,7 +450,7 @@ v1 只读操作 `manager_sessions.list`（`operator_only`）：每个会话的�
 | 正在跑的是用户回合：不是收尾回合、不是 Claude 自己的回合、不是隐藏的追加回合 | 后台回合只能读，不该替用户做事 |
 | 新消息是纯文字：不是命令（`/stop` 照旧立刻处理，`/new`、`/help`、Profile、关卡命令）、不是关卡回复、不是意图回复、没有附件和引用 | 这些都由代码先处理，或要先读材料 |
 | 这个聊天里没有等确认的操作 | 确认必须是它自己那一轮（`looper_confirm` 的规则），不能并进别的回合 |
-| 这一轮并入的消息不到 3 条 | 有界 |
+| 这一轮已经并入的消息少于 3 条（每轮最多并入 3 条） | 有界 |
 
 - **写入的文字（模型可见）：** `[Looper] Another message from the user arrived while you were working (<聊天，同 [Turn context] 的 Chat 行；1.1 关时同 Channel 行>). Answer it in this same reply.`，接着是消息正文。
 - **回复：** 这一轮的最终回复照常发到这一轮自己的聊天；并入的消息如果来自**另一个聊天**（`main` 里控制台和私聊之间），同一段回复也作为对它的回复发过去；来自同一个聊天的，飞书和 Telegram 不另发，控制台给它的回复流一条代码写的结束语「（已并入上一条的回复）」。
@@ -464,7 +464,7 @@ v1 只读操作 `manager_sessions.list`（`operator_only`）：每个会话的�
 
 ### 5.4 1.4 会话预算
 
-**复用 #1473，不另写一套阈值：** 判断函数用 #1473 的 `schedule_session.session_bound(context_tokens, run_cost_usd, budget_usd, max_tokens)`，上下文上限用同一个设置 `scheduler.session_context_max_tokens`（默认 100000，范围 40000–100000000），设置页上的说明改成「常驻会话的上下文上限：定时任务的 Planner 和管家」。产品设计里的 `manager.session.max_context_tokens` 不加（第 15 节）。1.4 在 #1473 合入后开工。
+**复用 #1473，不另写一套阈值：** 判断函数用 #1473 的 `schedule_session.session_bound(context_tokens, run_cost_usd, budget_usd, max_tokens)`，上下文上限用同一个设置 `scheduler.session_context_max_tokens`（默认 100000，范围 40000–100000000），设置页上的说明改成「常驻会话的上下文上限：定时任务的 Planner 和管家」。产品设计里的 `manager.session.max_context_tokens` 不加（第 15 节）。#1473 已合入，1.4 在 1.3b 之后开工。
 
 **开关和设置：** `manager.turn_budget_usd`（正数，单位美元；未设置就是关）。
 
