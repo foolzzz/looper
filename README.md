@@ -233,8 +233,17 @@ enable-linger $USER` keeps it running without a login session.
 columns or tables. When the schema is about to change, serve first writes a
 `pg_dump` backup to `~/.looper/backups/` (the runtime root's `backups/`, newest
 5 per database kept) and logs how to restore it; a new, empty database needs
-none. It uses the `pg_dump` on PATH, or the one `[backup] pg_dump` in the ops
-file names, which must be at least the server's major version (`looper doctor`
+none. The dump keeps every table's schema and leaves out the rows of
+`source_events`, the only message-stream table that stores message bodies
+(`text` and `body`). `event_sources`, `source_chats`, `source_threads`,
+`source_people` and `source_runs` are metadata and cursors; their rows stay,
+so a restore still has the chats those events reference. Delivered subscription
+output stays too. Looper appends `--exclude-table-data=source_events` to its
+own `pg_dump` and to a `backup.command` whose program is `pg_dump`, including
+`docker exec ... pg_dump`. A command that is not `pg_dump` is run as given and
+has to exclude that data itself. It uses the `pg_dump` on PATH, or the one
+`[backup] pg_dump` in the ops file names, which must be at least the server's
+major version (`looper doctor`
 checks it; on macOS, `brew install libpq` and put `$(brew --prefix libpq)/bin`
 on PATH). With PostgreSQL in Docker, set `[backup] command` to an argv array
 and dump inside the container (`{dbname}` and `{user}` are filled in):
@@ -258,13 +267,29 @@ verify_command = ["docker", "exec", "-i", "looper-postgres", "pg_restore", "--li
 
 `looper doctor` and the startup log say which verifier is used.
 
+A daily backup of `source_events` (schema and rows, the original text included)
+is off until the ops file asks for it. There is no environment variable:
+
+```toml
+[backup]
+messages = "daily"
+```
+
+`looper serve` then writes `looper-<database>-messages-<UTC stamp>.dump` in the
+same `backups/` directory, at most once a day, and keeps the newest 7. Rotation
+deletes only those files. Schema-change dumps, other databases and any other
+name stay. Omit `messages`, or set `"off"`, and serve does not take this backup
+and does not delete one. A failed attempt is not retried until a day later,
+or at the next start when the newest copy is already a day old. Restore a message backup
+into a database that already has the source's chats.
+
 Without a usable `pg_dump`, or when the backup fails, serve exits before it
 changes anything. A bridge upgrade refuses `looper serve --skip-backup`. A
 schema change that is not that upgrade may still warn and proceed with
 `--skip-backup`; do not use it here. The upgraded schema must not be opened by
 an older binary. To roll back, stop the new service, leave the upgraded
-database unchanged, and restore the verified full backup into a separate
-database:
+database unchanged, and restore the verified schema-change backup into a separate
+database (it has the `source_events` schema and not its rows):
 
 ```bash
 pg_restore --no-owner --dbname '<isolated-database-url>' <file>
@@ -319,8 +344,8 @@ only `looper-manager-dialogs/v2`.
 An empty database runs the current schema once and records
 `post_bridge_baseline`. A current database does not replay that DDL.
 `seeds.sql` is applied on every start and does not change saved choices.
-Rollback is the verified full backup restored into a separate database, then
-the guarded older release pointed at that database.
+Rollback restores that schema-change backup into a separate database (no
+`source_events` rows), then points the guarded older release at that database.
 
 The dashboard, Telegram, Lark and the CLI stay supported, including compact
 v1 operations and the `loopercli` aliases. Feature-off, shared and in-place
