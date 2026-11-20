@@ -32,11 +32,13 @@ def _like(text: str) -> str:
     return f"%{escaped}%"
 
 
-# state: '' all; 'expired' an active lead past valid_until; 'active' one before it; else the stored state.
+# state: '' all; 'expired' an active lead past valid_until; 'active' one before it; else the stored state. A lead the
+# check dropped comes after every other.
 _SEARCH = """
 WITH found AS (
     SELECT l.*,
-           CASE WHEN l.state = 'active' AND l.valid_until > $2 THEN 0 WHEN l.state = 'active' THEN 1 ELSE 2 END
+           CASE WHEN l.state = 'active' AND l.valid_until > $2 THEN 0 WHEN l.state = 'active' THEN 1
+                WHEN l.state = 'dropped' THEN 3 ELSE 2 END
                AS state_rank
     FROM message_leads l
     WHERE ($1::text IS NULL OR l.source_id = $1)
@@ -79,8 +81,8 @@ async def search_rows(*, now: datetime, words: Sequence[str] = (), chat: str | N
     """The leads that match, best first, at most ``limit``, and how many match in all. Every word must appear in the
     lead's summary or detail, or in the name of a chat or a person it concerns (ignoring case); ``chat`` is a chat id
     or part of its name, ``person`` an open_id or part of a name; ``since`` compares with the lead's newest source;
-    ``state`` is one of ``leads_model.SEARCH_STATES``. Order: active, then expired, then the rest; high confidence
-    first; newest first."""
+    ``state`` is one of ``leads_model.SEARCH_STATES``. Order: active, then expired, then the rest, then the dropped;
+    high confidence first; newest first."""
     from ..agents.leads_model import SEARCH_STATES
 
     if state not in SEARCH_STATES:
