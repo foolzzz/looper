@@ -12,7 +12,7 @@
 所以长连接的做法是：
 
 - 消息事件照旧：先回 `{"code":200}`，再处理。
-- 卡片回调（`event` 帧，`event_type` 是 `card.action.trigger`）先交给渠道处理，拿到答复后再回确认，答复放进 `data`；平台等 3 秒，Looper 自己限 2.8 秒，超时就回普通确认。同一个 `event_id` 只处理一次（平台重投时回普通确认）。
+- 卡片回调（`event` 帧，`event_type` 是 `card.action.trigger`）先交给渠道处理，拿到答复后再回确认，答复放进 `data`；平台等 3 秒，Looper 自己限 2.8 秒，超时就回普通确认。同一个 `event_id` 只处理一次（平台重投时回普通确认）。按钮的值里没有 `looper` 键的（这个应用的别的发送方做的卡片），照旧回普通确认后忽略。
 - 旧式的 `card` 帧照旧回 `{"code":200}` 后忽略，每条连接只记一行 INFO 日志。
 
 本 PR 没有真实测试会话，按钮在本地假的长连接服务器上验证（`tests/lark_platform_fake.py` 的 `push_card_action`）。
