@@ -13,7 +13,7 @@ from tests.db_support import DSN, fresh_connection
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
-_SCHEDULE_COLUMNS = """    kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command')),
+_SCHEDULE_COLUMNS = """    kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command', 'subscription')),
     command TEXT,
     env JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(env) = 'object'),
     env_file TEXT,
@@ -65,6 +65,8 @@ async def existing_baseline(conn):
     ]:
         assert sql.count(line) == 1, line
         sql = sql.replace(line, original)
+    # A baseline from before subscriptions has neither their tables nor the kind they add.
+    suffix = suffix.split("-- subscriptions begin")[0]
     await conn.execute(prefix + schedules_start + sql + next_table + suffix)
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ('post_bridge_baseline'), ('schedule_user_gates')")
     await conn.execute("INSERT INTO registry_schema_version (id, version) VALUES (TRUE, 4)")
