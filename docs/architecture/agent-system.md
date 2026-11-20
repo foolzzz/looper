@@ -5128,7 +5128,8 @@ here pushes: the intent push service polls `intents`.
   and before the storing transaction, one run of the `leads_check` role checks
   what was found: each item is `X1…` with its kind or type, summary or title
   and confidence, then the `m` and `c` messages it cites, rendered as the
-  extraction's input, in a `<messages>` block. The role is a tool-less spawned
+  extraction's input, under the participants and, for intents, each type's
+  description once, in a `<messages>` block. The role is a tool-less spawned
   role (`SPAWN_ROLES`): only its role layer chooses its Agent Profile, else its
   built-in `claude-code/haiku-5-5` (`claude-haiku-5-5`), its role prompt is
   `role_configs.leads_check`, it runs through `processor.run(role=...)` as
