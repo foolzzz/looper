@@ -482,9 +482,12 @@ async def alert_sender_delete(app_id: str, *, source_id: str | None = None, db: 
 async def stats(days: int = 30, *, now: datetime | None = None, db: Any = None) -> dict:
     if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
         raise ValueError("days must be between 1 and 365")
-    rows = await _db(db).fetch("SELECT t.key,v.name, count(i.id) FILTER(WHERE i.state<>'merged') AS recognized, "
+    # A dropped intent (the check's) was never shown to the operator: not recognized, not in a rate's denominator.
+    rows = await _db(db).fetch("SELECT t.key,v.name, count(i.id) FILTER(WHERE i.state NOT IN ('merged','dropped')) "
+        "AS recognized, "
         "count(i.id) FILTER(WHERE i.state='tasked') AS tasked,count(i.id) FILTER(WHERE i.state='rejected') AS rejected, "
-        "count(i.id) FILTER(WHERE i.state='expired') AS expired,count(i.id) FILTER(WHERE i.state='merged') AS merged "
+        "count(i.id) FILTER(WHERE i.state='expired') AS expired,count(i.id) FILTER(WHERE i.state='merged') AS merged, "
+        "count(i.id) FILTER(WHERE i.state='dropped') AS dropped "
         "FROM intent_types t JOIN intent_type_versions v ON v.type_key=t.key AND v.version=t.version "
         "LEFT JOIN intents i ON i.type_key=t.key AND i.created_at >= $1 GROUP BY t.key,v.name ORDER BY t.key",
         (now or _now()) - timedelta(days=days))

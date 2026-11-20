@@ -34,6 +34,7 @@ _SUBSCRIPTION = _object({
     "quiet_word": {"type": "string", "minLength": 1, "maxLength": 40},
     "output_header": {"type": "string", "maxLength": subscriptions.HEADER_MAX_CHARS},
     "output_kind": _enum(*subscriptions.OUTPUT_KINDS), "render": _enum("lines_v1", "lines_v2"),
+    "check_items": _BOOL,
     "rules": _array(_object({
         "name": _STR, "label": _STR, "chat_kinds": _array(_enum("p2p", "group", "topic", "unknown")),
         "include_chats": _array(_STR), "exclude_chats": _array(_STR), "sender_kinds": _array(_enum("user", "app")),

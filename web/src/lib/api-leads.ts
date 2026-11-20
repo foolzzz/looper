@@ -153,6 +153,8 @@ export interface IntentStatsType {
   rejected: number;
   expired: number;
   merged: number;
+  /** Dropped by the second model's check: never shown, so counted in neither rate (absent from an older server). */
+  dropped?: number;
   adoption_rate: number | null;
   rejection_rate: number | null;
 }

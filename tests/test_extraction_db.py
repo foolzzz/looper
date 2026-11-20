@@ -17,7 +17,8 @@ from typing import Any
 import asyncpg
 import pytest
 
-from looper.agents import extraction, subscription_runs, subscriptions
+from looper.agents import agent_settings, extraction, leads_check, subscription_runs, subscriptions
+from looper.agents.agent_settings import AgentType
 from looper.agents.extraction import parse
 from looper.agents.ops import ErrorCode, OpError
 from looper.db import subscriptions as db_subs
@@ -25,6 +26,7 @@ from tests import leads_support
 from tests.db_support import DSN, fresh_database_without_recording, run_db
 from tests.lark_cli_stand_in import lark_cli_stand_in  # noqa: F401  (a fixture)
 from tests.schedule_support import ScheduleEnv, run_scheduled
+from tests.subscription_support import SUBSCRIPTION as SUBSCRIPTION_FIELDS
 from tests.subscription_support import DM, GROUP, SOURCE, Poster, add, chat, lark_targets, minutes_ago, person, \
     processor_says, scheduler_with, source
 
@@ -591,6 +593,279 @@ def test_rules_lookback_and_daily_delivery_are_refused_for_an_extraction(monkeyp
         status, body = await env.call("POST", "/api/v1/schedule_admin/update",
                                       {"schedule_id": sid, "fields": {"subscription": extra}})
         assert status == 400 and "apply to push subscriptions only" in json.dumps(body)
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+# --- The second model's check (check_items) ---
+
+FOUR_LEADS = json.dumps({"leads": [
+    {"kind": "decision", "summary": "Release moves to Friday", "confidence": "high", "sources": ["m1"]},
+    {"kind": "fact", "summary": "Nobody said this", "confidence": "high", "sources": ["m2"]},
+    {"kind": "status", "summary": "Maybe Friday", "confidence": "high", "sources": ["m2"]},
+    {"kind": "fact", "summary": "Left unchecked", "confidence": "medium", "sources": ["m1"]}]})
+VERDICTS = json.dumps({"verdicts": [
+    {"item": "X1", "verdict": "keep", "reason": "stated"},
+    {"item": "X2", "verdict": "drop", "reason": "the messages do not say it"},
+    {"item": "X3", "verdict": "fix", "confidence": "low", "reason": "a guess"}]})  # X4: no verdict
+
+
+async def _checked_window(env: ScheduleEnv, fake: Any) -> str:
+    from looper.db import llm_records
+
+    sid = await extractor(env, subscription={"check_items": True})
+    await add(env.pool, "release moves to Friday", sent_at=minutes_ago(env, 9))
+    await add(env.pool, "maybe Friday, not sure", sent_at=minutes_ago(env, 8))
+    fake.check_record_id = await llm_records.start_record(agent_id=f"leads_check:{sid}", pool=env.pool)
+    return sid
+
+
+def test_with_the_check_on_each_verdict_decides_how_its_lead_is_stored(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await _checked_window(env, fake)
+        fake.check_reply = VERDICTS
+        run = await fire(env, sid)
+        assert (run["status"], run["stream"]["outcome"]) == ("completed", "extracted")
+        _, checking = fake.calls
+        assert (checking["role"], checking["contract"], checking["instructions"]) == (
+            AgentType.LEADS_CHECK, leads_check.CONTRACT, leads_check.INSTRUCTIONS)
+        assert checking["budget_usd"] == pytest.approx(0.6 - fake.cost)  # what the extraction left of the run's cap
+        assert checking["input_ref"] == {"kind": "leads_check", "schedule_id": sid, "run_id": run["id"],
+                                         "record_id": None, "items": 4, "shown": 4}
+        assert "X4 线索 [fact] 置信度 medium：Left unchecked" in checking["input_text"]
+        rows = await env.pool.fetch("SELECT summary, state, confidence, check_verdict, check_reason, check_record_id "
+                                    "FROM message_leads ORDER BY id")
+        record = fake.check_record_id
+        assert [tuple(row) for row in rows] == [
+            ("Release moves to Friday", "active", "high", "keep", "stated", record),
+            ("Nobody said this", "dropped", "high", "drop", "the messages do not say it", record),
+            ("Maybe Friday", "active", "low", "fix", "a guess", record),
+            ("Left unchecked", "active", "medium", None, None, None)]
+        assert json.loads(run["stream"]["extract_counts"]) == {
+            "new": 3, "merged": 0, "superseded": 0, "dropped": {}, "instructions_seen": 0, "more": False,
+            "checked": 3, "check_kept": 1, "check_dropped": 1, "check_fixed": 1, "check_failed": False,
+            "check_cost_usd": 0.0003}
+        assert run["stream"]["output_text"] == "新线索 3，合并 0，推翻 0，丢弃 0；复核 3 条：保留 1，复核丢弃 1，改置信度 1"
+        assert float(run["cost_usd"]) == pytest.approx(fake.cost + fake.check_cost)
+
+    scenario(check, monkeypatch, tmp_path, reply=FOUR_LEADS)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "budget", "refused", "not_json", "spent"])
+def test_a_check_that_fails_stores_every_item_unchecked_and_the_run_still_succeeds(monkeypatch, tmp_path, failure):
+    from looper.agents import processor
+
+    async def check(env, poster, fake):
+        sid = await _checked_window(env, fake)
+        fake.check_reply = "Every item looks right to me."
+        if failure in ("timeout", "budget", "refused"):
+            fake.check_failure = processor.ProcessorFailure(failure)
+        if failure == "spent":  # the extraction took the whole cap: nothing is left to check with
+            fake.cost = 0.6
+        run = await fire(env, sid)
+        assert (run["status"], run["stream"]["outcome"]) == ("completed", "extracted")
+        assert len(fake.calls) == (1 if failure == "spent" else 2)
+        assert await env.pool.fetch("SELECT state FROM message_leads WHERE check_verdict IS NOT NULL "
+                                    "OR check_record_id IS NOT NULL OR state <> 'active'") == []
+        counts = json.loads(run["stream"]["extract_counts"])
+        assert (counts["new"], counts["checked"], counts["check_failed"]) == (4, 0, True)
+        assert run["stream"]["output_text"].endswith("；复核没有完成，其余条目未经复核入库")
+
+    scenario(check, monkeypatch, tmp_path, reply=FOUR_LEADS)
+
+
+@pytest.mark.parametrize("case, status", [("off", "skipped"), ("nothing", "skipped"), ("checked", "checked"),
+                                          ("failed", "failed")])
+def test_each_extraction_run_records_what_its_check_did(monkeypatch, tmp_path, case, status):
+    from looper.agents import processor
+
+    async def check(env, poster, fake):
+        if case == "off":
+            sid = await extractor(env)
+            await add(env.pool, "release moves to Friday", sent_at=minutes_ago(env, 9))
+            await add(env.pool, "maybe Friday, not sure", sent_at=minutes_ago(env, 8))
+        else:
+            sid = await _checked_window(env, fake)
+        fake.check_reply = VERDICTS
+        if case == "nothing":
+            fake.reply = "NONE"
+        if case == "failed":
+            fake.check_failure = processor.ProcessorFailure.TIMEOUT
+        run = await fire(env, sid)
+        assert (run["status"], run["stream"]["check_status"]) == ("completed", status)
+
+    scenario(check, monkeypatch, tmp_path, reply=FOUR_LEADS)
+
+
+ONE_INTENT = json.dumps({"intents": [{"type": "bug_triage", "title": "Look at the payment error", "summary": "Bob asks",
+                                      "confidence": "high", "sources": ["m1"]}]})
+
+
+def test_three_failed_checks_in_a_row_alert_once_and_a_checked_run_recovers(monkeypatch, tmp_path):
+    from looper.agents import processor
+
+    async def check(env, poster, fake):
+        sid = await extractor(env, "intents", subscription={"check_items": True})
+
+        async def firing(n, *, failing=True, quiet=False):
+            await add(env.pool, f"can you look at payment error {n}?", chat_id="oc_bob", kind="p2p",
+                      sent_at=minutes_ago(env, 1))
+            fake.reply = "NONE" if quiet else ONE_INTENT
+            fake.check_failure = processor.ProcessorFailure.TIMEOUT if failing else None
+            fake.check_reply = json.dumps({"verdicts": [{"item": "X1", "verdict": "keep"}]})
+            run = await fire(env, sid)
+            assert run["status"] == "completed"
+            return run["stream"]["check_status"]
+
+        async def notices():
+            return [dict(row) for row in await env.pool.fetch(
+                "SELECT kind, text FROM schedule_notifications WHERE schedule_id = $1 AND kind LIKE 'check_%' "
+                "ORDER BY created_at, id", sid)]
+
+        assert [await firing(1), await firing(2)] == ["failed", "failed"]
+        assert await firing(3, quiet=True) == "skipped"  # nothing to check: it neither ends nor adds to the streak
+        assert await notices() == []
+        assert await firing(4) == "failed"
+        [alert] = await notices()
+        assert alert["kind"] == "check_alert" and "第二道检查已连续 3 次没有完成" in alert["text"]
+        assert await firing(5) == "failed"
+        assert [n["kind"] for n in await notices()] == ["check_alert"]  # once per streak
+        assert await firing(6, failing=False) == "checked"
+        assert [n["kind"] for n in await notices()] == ["check_alert", "check_recovered"]
+        # Fail-open: every run whose check failed still stored what it found, unchecked.
+        assert await env.pool.fetchval("SELECT count(*) FROM intents WHERE schedule_id = $1 AND state = 'pending' "
+                                       "AND check_verdict IS NULL", sid) == 4
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_the_check_is_bounded_by_what_is_left_of_the_days_budget(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await _checked_window(env, fake)
+        fake.check_reply = VERDICTS
+        await env.pool.execute("UPDATE schedules SET daily_budget_usd = 0.3 WHERE id = $1", sid)
+        await env.pool.execute(
+            "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status, fired_at, finished_at, "
+            "cost_usd) VALUES ('earlier-run', $1, $2, 'manual', 'completed', $2, $2, 0.2)", sid,
+            minutes_ago(env, 1))
+        await fire(env, sid)
+        assert fake.calls[1]["budget_usd"] == pytest.approx(0.3 - 0.2 - fake.cost)
+
+    scenario(check, monkeypatch, tmp_path, reply=FOUR_LEADS)
+
+
+def test_with_the_check_off_the_extraction_runs_alone_and_stores_what_it_did(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+        await add(env.pool, "release moves to Friday", sent_at=minutes_ago(env, 9))
+        await add(env.pool, "maybe Friday, not sure", sent_at=minutes_ago(env, 8))
+        fake.check_reply = VERDICTS
+        run = await fire(env, sid)
+        [call] = fake.calls
+        assert "role" not in call and call["contract"] == extraction.LEADS_CONTRACT
+        assert json.loads(run["stream"]["extract_counts"]) == {
+            "new": 4, "merged": 0, "superseded": 0, "dropped": {}, "instructions_seen": 0, "more": False}
+        assert await env.pool.fetchval("SELECT count(*) FROM message_leads WHERE state = 'active' AND "
+                                       "check_verdict IS NULL AND check_reason IS NULL AND check_record_id IS NULL") == 4
+
+    scenario(check, monkeypatch, tmp_path, reply=FOUR_LEADS)
+
+
+def test_a_dropped_lead_merges_into_no_lead_and_supersedes_none(monkeypatch):
+    async def test(pool):
+        await stream(pool)
+        e1, e2 = await _events(pool, "first", "second")
+        old = await leads_support.lead(pool, [e1], summary="the old lead")
+        parsed = parse("leads", json.dumps({"leads": [
+            {"kind": "decision", "summary": "Supersedes it", "confidence": "high", "sources": ["m1"], "supersedes": ["L1"]},
+            {"kind": "decision", "summary": "Same as it", "confidence": "high", "sources": ["m1"], "same_as": "L1"}]}),
+            {"m1": e2, "L1": old}, now=datetime.now(UTC), valid_days=90, enabled_types=(), app_seqs=())
+        for item in parsed.items:
+            item["check"] = {"verdict": "drop", "reason": "unsupported", "record_id": None}
+        async with pool.acquire() as conn, conn.transaction():
+            counts = await extraction.store_leads(conn, parsed, source_id=SOURCE, run_id=None, record_id=None,
+                                                  backfill=False, more=False)
+        assert (counts["new"], counts["merged"], counts["superseded"]) == (0, 0, 0)
+        assert await pool.fetchval("SELECT state FROM message_leads WHERE id = $1", old) == "active"
+        assert await pool.fetchval("SELECT count(*) FROM message_lead_sources WHERE lead_id = $1", old) == 1
+        assert [tuple(r) for r in await pool.fetch("SELECT summary, state FROM message_leads WHERE id <> $1 "
+                                                   "ORDER BY id", old)] == [("Supersedes it", "dropped"),
+                                                                            ("Same as it", "dropped")]
+
+    run_db(test, monkeypatch)
+
+
+def test_a_dropped_intent_is_handled_by_the_system_and_never_a_merge_target(monkeypatch):
+    async def test(pool):
+        await stream(pool)
+        now = datetime.now(UTC)
+        e1, e2, e3 = await _events(pool, "please fix it", "same thing", "again")
+        target = await leads_support.intent(pool, [e1])
+        reply = {"intents": [{"type": "dev_task", "title": "Same matter", "confidence": "high", "sources": ["m1"],
+                              "same_as": "I1"}]}
+        parsed = parse("intents", json.dumps(reply), {"m1": e2, "I1": target}, now=now, valid_days=90,
+                       enabled_types={"dev_task"}, app_seqs=())
+        parsed.items[0]["check"] = {"verdict": "drop", "reason": "nobody asked", "record_id": None}
+        async with pool.acquire() as conn, conn.transaction():
+            counts = await extraction.store_intents(conn, parsed, source_id=SOURCE, schedule_id=None, run_id=None,
+                                                    record_id=None, now=now, more=False)
+        assert (counts["new"], counts["merged"]) == (0, 0)
+        dropped = await pool.fetchrow("SELECT * FROM intents WHERE id <> $1", target)
+        assert (dropped["state"], dropped["merged_into"], dropped["handled_via"], dropped["handled_at"],
+                dropped["check_verdict"]) == ("dropped", None, "system", now, "drop")
+        # A later intent on the same matter as the dropped one is its own: nothing is merged into a dropped intent.
+        again = parse("intents", json.dumps(reply), {"m1": e3, "I1": dropped["id"]}, now=now, valid_days=90,
+                      enabled_types={"dev_task"}, app_seqs=())
+        async with pool.acquire() as conn, conn.transaction():
+            counts = await extraction.store_intents(conn, again, source_id=SOURCE, schedule_id=None, run_id=None,
+                                                    record_id=None, now=now, more=False)
+        assert (counts["new"], counts["merged"]) == (1, 0)
+        assert await pool.fetchval("SELECT count(*) FROM intents WHERE merged_into = $1", dropped["id"]) == 0
+        assert dropped["id"] not in {row["id"] for row in await extraction.recent_intents(pool, SOURCE, now=now)}
+
+    run_db(test, monkeypatch)
+
+
+def test_turning_the_check_on_needs_the_operators_word_and_names_the_checker(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+        before = (await view(env, sid))["subscription"]
+        assert "复核" not in before["confirmation"]
+        await env.ok("POST", "/api/v1/schedule_admin/update",
+                     {"schedule_id": sid, "fields": {"subscription": {"check_items": True}}})
+        after = (await view(env, sid))["subscription"]
+        assert after["check_items"] is True and after["target_confirmed_at"] is None
+        assert after["config_version"] != before["config_version"]
+        lines = after["confirmation"].splitlines()
+        assert "- 复核 Profile：claude-code/haiku-5-5（claude-code · claude-haiku-5-5），来源：builtin（Settings → Roles 的 " \
+               "leads_check）" in lines
+        assert lines[-1] == "确认后按规则无人值守地整理；改规则、来源、会话范围、第二道检查或 Profile 都要再确认。"
+        await add(env.pool, "something", sent_at=minutes_ago(env, 5))
+        assert (await fire(env, sid))["error"] == extraction.NOT_CONFIRMED and fake.calls == []
+        # The checker's Profile is confirmed too: choosing another one for its role needs the operator again.
+        status, _ = await confirm_it(env, sid)
+        assert status == 200
+        confirmed = (await view(env, sid))["subscription"]["config_version"]
+        await agent_settings.update_role("leads_check", {"profile_id": "agent-claude-code-opus"})  # Settings → Roles
+        assert (await view(env, sid))["subscription"]["config_version"] != confirmed
+        assert (await fire(env, sid))["error"] == extraction.NOT_CONFIRMED
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_the_check_is_for_extractions_only_and_presets_leave_it_off(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        await stream(env.pool)
+        for kind in ("leads", "intents"):
+            assert "check_items" not in (await preset_fields(env, kind))["subscription"]
+        sid = await extractor(env)
+        assert (await view(env, sid))["subscription"]["check_items"] is False
+        push = {"kind": "subscription", "name": "digest", "cron": "5 * * * *", "timezone": ZONE,
+                "requirement": "Report incidents.", "run_budget_usd": 0.1,
+                "subscription": {**SUBSCRIPTION_FIELDS, "check_items": True}}
+        status, body = await env.call("POST", "/api/v1/schedule_admin/create",
+                                      {"project_id": env.project_id, "fields": push})
+        assert status == 400 and "check_items applies to leads and intents subscriptions only" in json.dumps(body)
 
     scenario(check, monkeypatch, tmp_path)
 

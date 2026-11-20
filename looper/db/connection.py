@@ -150,6 +150,8 @@ _PROJECT_ACTIVITY = "project_activity"
 _LEDGER = "ledger"
 _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
+_LEADS_CHECK = "leads_check"
+_LEADS_CHECK_ONLINE = "leads_check_online"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
@@ -310,6 +312,14 @@ _ONLINE_STEPS = (
                           "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL"),)),
     _OnlineStep(_STEP_DIFFICULTY, "step_difficulty_online",
                 validate=(("task_steps", "task_steps_difficulty_check"),)),
+    # The leads check block adds these NOT VALID (a fresh database validates them as it is created).
+    _OnlineStep(_LEADS_CHECK, _LEADS_CHECK_ONLINE,
+                validate=(("agent_setting_layers", "agent_setting_layers_role_check"),
+                          ("subscription_runs", "subscription_runs_check_status_check"),
+                          ("schedule_notifications", "schedule_notifications_kind_check"),
+                          *((table, f"{table}_{name}") for table in ("message_leads", "intents")
+                            for name in ("state_check", "check_verdict_check", "check_reason_check",
+                                         "check_record_id_fkey", "dropped")))),
 )
 
 
@@ -372,6 +382,17 @@ def _intent_merges_ddl() -> str:
     found = _INTENT_MERGES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its intent merges block")
+    return found.group(1)
+
+
+_LEADS_CHECK_BLOCK = re.compile(r"-- leads check begin\n(.*?)-- leads check end", re.S)
+
+
+def _leads_check_ddl() -> str:
+    """The second model's check of leads and intents, as schema.sql defines it."""
+    found = _LEADS_CHECK_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its leads check block")
     return found.group(1)
 
 
@@ -792,6 +813,39 @@ async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
         "AND tgname = 'intents_detach_merged') "
         "AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'intents_merged_into_fkey' "
         "AND conrelid = 'intents'::regclass AND confdeltype = 'c')")
+
+
+async def _leads_check_pending(conn: asyncpg.Connection) -> bool:
+    """Whether the leads and intents lack the check's ``dropped`` state and columns, the subscriptions its switch and
+    alert, the runs their check status, the notifications its kinds, or the role layers its role. Judged by the
+    catalog, as the intent merges block is: a database whose leads block predates it is upgraded, and one that
+    already has it is left alone."""
+    if not await conn.fetchval("SELECT to_regclass('message_leads') IS NOT NULL AND to_regclass('intents') IS NOT NULL"):
+        return False
+    return not await conn.fetchval(
+        "SELECT (SELECT count(*) FROM pg_constraint WHERE conname = ANY($1::text[]) "
+        "AND connamespace = current_schema()::regnamespace) = cardinality($1::text[]) "
+        "AND (SELECT count(*) FROM pg_attribute WHERE attnum > 0 AND NOT attisdropped AND "
+        "((attrelid = 'subscriptions'::regclass AND attname IN ('check_items', 'check_alert_at')) "
+        "OR (attrelid = 'subscription_runs'::regclass AND attname = 'check_status'))) = 3 "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'agent_setting_layers'::regclass "
+        "AND conname = 'agent_setting_layers_role_check' AND strpos(pg_get_constraintdef(oid), $2) > 0) "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'schedule_notifications'::regclass "
+        "AND conname = 'schedule_notifications_kind_check' AND strpos(pg_get_constraintdef(oid), $3) > 0)",
+        ["message_leads_dropped", "intents_dropped", "subscription_runs_check_status_check",
+         "message_leads_check_record_id_fkey", "intents_check_record_id_fkey"], "'leads_check'", "'check_alert'")
+
+
+def _leads_check_step() -> _OnlineStep:
+    return next(step for step in _ONLINE_STEPS if step.migration == _LEADS_CHECK)
+
+
+async def _leads_check_unvalidated(conn: asyncpg.Connection) -> bool:
+    """Whether a constraint the leads check block adds NOT VALID is still not validated."""
+    return bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ANY($1::text[]) AND NOT convalidated "
+        "AND connamespace = current_schema()::regnamespace)",
+        [constraint for _, constraint in _leads_check_step().validate]))
 
 
 async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
@@ -1298,6 +1352,22 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute(_intent_merges_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _INTENT_MERGES)
+        if await _leads_check_pending(conn):
+            await conn.execute(_leads_check_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                               _LEADS_CHECK)
+            # Its constraints are NOT VALID again: the online step validates them after this commits.
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
+        elif state == "empty":
+            # schema.sql ran the block, so its constraints are NOT VALID here too: on tables just created, validating
+            # them now scans nothing, and a fresh database keeps recording only its baseline.
+            for table, constraint in _leads_check_step().validate:
+                await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+        elif await _leads_check_unvalidated(conn):
+            # The block ran outside a migration (schema.sql applied by hand): validated after commit, as an upgrade.
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                               _LEADS_CHECK)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1345,7 +1415,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _message_leads_pending(conn)
-            or await _intent_merges_pending(conn)
+            or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _project_advisor_pending(conn)
