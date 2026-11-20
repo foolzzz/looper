@@ -314,11 +314,14 @@ def test_deleted_template_not_listed_as_binding(monkeypatch, tmp_path):
     run_db(check, monkeypatch)
 
 
-def test_build_does_not_borrow_another_connection(monkeypatch, tmp_path):
+@pytest.mark.parametrize("ledger_enabled", [False, True])
+def test_build_does_not_borrow_another_connection(monkeypatch, tmp_path, ledger_enabled):
     async def check(pool):
         p = await project(pool, str(tmp_path))
         ids = [await seed(pool, project_id=p["id"]) for _ in range(3)]
         await intents.settings_put(True)
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('ledger.enabled', $1)",
+                           "true" if ledger_enabled else "false")
         from looper.agents import projects
         import asyncio
         original = projects.create_task_core
@@ -336,6 +339,7 @@ def test_build_does_not_borrow_another_connection(monkeypatch, tmp_path):
         results = await asyncio.wait_for(asyncio.gather(*(intents.build(iid, via="dashboard", platform=platform)
                                                         for iid in ids)), 10)
         assert len(results) == 3 and await pool.fetchval("SELECT count(*) FROM tasks") == 3
+        assert await pool.fetchval("SELECT count(*) FROM ledger_items") == (3 if ledger_enabled else 0)
     run_db(check, monkeypatch, max_size=3)
 
 

@@ -642,14 +642,14 @@ async def create_task_core(
             created, task, workspace = await persist()
         else:
             with project_directories() as created_directories:
-                async with db_connection.transaction() as conn:
-                    created, task, workspace = await persist(conn)
+                async with db_connection.transaction() as transaction_conn:
+                    created, task, workspace = await persist(transaction_conn)
     except asyncpg.UniqueViolationError:
         # The Manager adapter keeps its existing concurrent-create instruction.
         raise _name_taken(new_fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") from None
-    await db_ledger.register_task(task["task_id"])
+    await db_ledger.register_task(task["task_id"], db=conn)
     work_dir = task["work_dir"]
     shown = task["title"] or task["goal_id"] or task["task_id"]
     block = (await configuration_block(task["task_id"], shown, project, work_dir, new_project is not None,
