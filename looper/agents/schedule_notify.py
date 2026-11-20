@@ -84,6 +84,24 @@ def alert_policy(schedule: Mapping[str, Any]) -> AlertPolicy:
     )
 
 
+async def _held_back(schedule: Mapping[str, Any], run_id: str | None) -> bool:
+    """Whether a subscription's notice stays on the dashboard: its target is not confirmed for the configuration it
+    has now, or the run it is about did not start with that target confirmed for it (``subscription_runs``' pin)."""
+    if schedule.get("kind") != "subscription":
+        return False
+    from ..db import subscriptions as db_subs
+    from . import subscriptions
+
+    sub = schedule.get("subscription") or {}
+    version = sub.get("target_confirmed_version")
+    if not sub.get("target_confirmed_at") or not version or version != await subscriptions.config_version(schedule):
+        return True
+    stream = await db_subs.get_run(run_id) if run_id else None
+    return stream is not None and (
+        stream["config_version"] != version
+        or (stream["target_channel"], stream["target_chat"]) != (schedule.get("notify_channel"), schedule.get("notify_chat")))
+
+
 def wants_run_message(notify: str, status: str) -> bool:
     if notify == "always":
         return status in RAN
@@ -171,6 +189,11 @@ def _local(moment: datetime, zone_name: str) -> str:
 
 
 def run_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], *, base: str = "") -> str:
+    if schedule.get("kind") == "subscription":
+        # What it made or why it failed can carry what the messages said: the notice says only that it failed.
+        when = _local(run.get("fired_at") or run["scheduled_for"], schedule["timezone"])
+        return (f"订阅「{schedule['name']}」（项目 {project_name}）{when} 的运行："
+                f"{STATUS_WORDS.get(run['status'], run['status'])}，详情见 Dashboard。\n{run_link(base, schedule, run['id'])}")
     if schedule.get("kind") == "command":
         return command_run_text(schedule, project_name, run, base=base)
     if schedule.get("notify_format") == "deliverable":
@@ -226,7 +249,7 @@ def failures_alert_text(schedule: Mapping[str, Any], project_name: str, run: Map
     last = ""
     if run is not None:
         last = f"最近一次：{STATUS_WORDS.get(run['status'], run['status'])}"
-        if text := snippet(run.get("summary") or run.get("error")):
+        if (text := snippet(run.get("summary") or run.get("error"))) and schedule.get("kind") != "subscription":
             last += f" · {text}"
         last += "\n"
     return (f"告警：定时任务「{schedule['name']}」（项目 {project_name}）已连续失败 "
@@ -376,7 +399,7 @@ class Notifier:
                 elif recent:
                     run = recent[0]
                     last = f"最近一次：{STATUS_WORDS.get(run['status'], run['status'])}"
-                    if error := snippet(run.get("error")):
+                    if (error := snippet(run.get("error"))) and schedule.get("kind") != "subscription":
                         last += f" · {error}"
                     lines.append(last)
                 lines.append(schedule_link(self._base, schedule))
@@ -423,9 +446,8 @@ class Notifier:
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
         status, error = "dashboard", None
         dashboard_alert = kind is not Kind.RUN and schedule.get("notify_format") == "deliverable"
-        # Until the operator confirms a subscription's push target, nothing it says goes there, alerts included.
-        unconfirmed = schedule.get("kind") == "subscription" and not (schedule.get("subscription") or {}).get(
-            "target_confirmed_at")
+        # A subscription's notices (failures and alerts too) go only where its pushes may: through the same check.
+        unconfirmed = await _held_back(schedule, run_id)
         if channel and chat and schedule["notify"] != "never" and not dashboard_alert and not unconfirmed:
             if not any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
                 status, error = "failed", ("the notification target is unavailable: "

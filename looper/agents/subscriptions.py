@@ -309,17 +309,17 @@ def idempotency_keys(run_id: str, count: int) -> list[str]:
 # --- What the operator confirms ---
 
 
-async def config_version(schedule: Mapping[str, Any]) -> str:
+async def config_version(schedule: Mapping[str, Any], *, profile: Mapping[str, Any] | None = None) -> str:
     """What a push depends on, as one digest: where it goes, when it fires, the stream it reads and the processor
-    Profile (with the managed hooks that see the messages) that runs it as of now. A target is confirmed for one
+    (its runtime, provider, model and effort, with the managed hooks that see the messages). A target is confirmed for one
     version; a push goes out only while the schedule still has it."""
     from . import processor
 
-    profile = await processor.chosen_profile(schedule["project_id"], schedule["id"])
-    hooks = profile.get("managed_hooks") or {}
+    # ``profile``: the facts of the Profile a run actually launched with; else what the schedule would use now.
+    profile = dict(profile) if profile is not None else await processor.run_facts(schedule["project_id"], schedule["id"])
     facts = {"channel": schedule.get("notify_channel"), "chat": schedule.get("notify_chat"), "cron": schedule["cron"],
              "timezone": schedule["timezone"], "source": (schedule.get("subscription") or {}).get("source_id"),
-             "profile": profile.get("profile_id"), "hooks": sorted(hooks.get("events") or []) if hooks else None}
+             "processor": profile}
     return digest(json.dumps(facts, sort_keys=True, ensure_ascii=False))
 
 

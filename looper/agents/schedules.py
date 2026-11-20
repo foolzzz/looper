@@ -858,7 +858,7 @@ async def reset_cursor(schedule_id: str, after: datetime, *, runtime_root: Path 
             raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
         if row["kind"] != Kind.SUBSCRIPTION.value:
             raise RequestError(HTTP_400, "only a subscription has a cursor")
-        if after > datetime.now(timezone.utc) + timedelta(seconds=5):
+        if after > _utcnow():
             raise RequestError(HTTP_400, "after is in the future: events not stored yet cannot be skipped")
         if await db_schedules.open_runs(conn, schedule_id):
             raise RequestError(HTTP_409, "a run of the subscription is in progress: reset its cursor when it ends")

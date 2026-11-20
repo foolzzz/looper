@@ -33,6 +33,7 @@ import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
 from . import processor, subscriptions
+from .channels.base import PostOutcome
 from .message import builtin_channel_id
 from .task_notice import NotifyTarget, TargetKind
 
@@ -168,6 +169,13 @@ class SubscriptionRuns:
             await self._end(run_id, status="failed", outcome="output_invalid", cost=result.cost_usd,
                             error="the reply was empty once its @ marks were removed")
             return
+        if stream["config_version"] and result.profile is not None and (
+                await subscriptions.config_version(schedule, profile=result.profile) != stream["config_version"]):
+            # The processor launched with a Profile other than the one the operator confirmed (edited meanwhile).
+            await self._end(run_id, status="completed", outcome="dashboard_only", cost=result.cost_usd, advance=True,
+                            summary=f"{message}\n\n(kept here: the processor's Profile changed since the target was "
+                                    "confirmed)", output=message)
+            return
         if not stream["target_channel"] or not stream["config_version"]:  # not confirmed when it started
             await self._end(run_id, status="completed", outcome="dashboard_only", cost=result.cost_usd, advance=True,
                             summary=message, output=message)
@@ -236,10 +244,13 @@ class SubscriptionRuns:
                     logger.warning("subscription run %s message %d: uncertain after %s", run_id, segment, exc)
                     await db_subs.mark_segment(run_id, segment, "uncertain", error=f"{type(exc).__name__}: {exc}")
                 else:
-                    if receipt.success:
+                    if receipt.result is PostOutcome.SENT:
                         await db_subs.mark_segment(run_id, segment, "sent", external_ids=receipt.external_ids)
-                    else:
+                    elif receipt.result is PostOutcome.REJECTED:  # the platform said no: asking again is safe
                         await db_subs.mark_segment(run_id, segment, "failed", error=receipt.error or "not sent")
+                    else:  # it may have been accepted (a lost answer): it is never sent again
+                        logger.warning("subscription run %s message %d: uncertain, %s", run_id, segment, receipt.error)
+                        await db_subs.mark_segment(run_id, segment, "uncertain", error=receipt.error or "no answer")
             if refused is not None:
                 break
         await self._finish_push(run_id, refused)

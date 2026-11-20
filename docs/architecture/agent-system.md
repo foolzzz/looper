@@ -4667,7 +4667,7 @@ Manager's `looper_schedules` cannot create or change one.
   run id and its number. Delivery is at most once: a message is claimed
   (`sending`, committed) before the channel is asked; a message left `sending`
   by a process that died, or whose ask raised, is `uncertain` and is never sent
-  again (neither Lark's hour-long key nor Telegram's lack of one is relied on),
+  again (neither Lark's hour-long key nor Telegram's lack of one is relied on). A post answers with a typed outcome (`PostReceipt.result`: `sent`, `rejected`, `unknown`): `rejected` is the platform saying no or a call that never left (Lark: an API error code, lark-cli's own validation, no start; Telegram: bad request, forbidden, migrated, flood control, bad token) and the message is asked again; `unknown` is anything that may have been accepted (a time-out, a lost or unreadable answer, a receipt that says nothing) and the message is `uncertain`,
   and is counted in the schedule's view (`uncertain_deliveries`, the last 7
   days), in the run's `deliveries` and in the log; a message the channel
   refused is asked again, three asks in all. Before every message the run is
@@ -4686,7 +4686,7 @@ Manager's `looper_schedules` cannot create or change one.
   alerts count them) and `subscription_runs` (window, counts, the processor's
   record, `outcome`: `delivered`, `uncertain`, `quiet`, `dashboard_only`,
   `output_invalid`, `failed`, and the output); a successful run sends no message
-  of its own, the output is the message. The Manager's `looper_schedules` shows a
+  of its own, the output is the message. A failure notice or alert about a subscription goes through the same check (the run's pin, and the target confirmed for the configuration it has now) and says only that the run failed, see the dashboard: no output, no error text. The Manager's `looper_schedules` shows a
   subscription's state and counts only: no run summary or error, no output.
 - **The operator's word on a push target.** A subscription pushes only after
   `target_confirmed_at` is set; before that its output stays in the run
@@ -4701,7 +4701,7 @@ Manager's `looper_schedules` cannot create or change one.
   and the caps; confirming applies the change and confirms the target.
   `schedule_admin.confirm_target` confirms it for the `config_version` the
   schedule's view showed (a digest of the target, rule, zone, source and the
-  processor Profile with its managed hooks; a mismatch is refused, so the
+  processor's runtime, provider, model and effort with its managed hooks, so an in-place edit of the Profile counts; a run also reports the Profile it launched with and its output stays on the dashboard when that is not the confirmed one; a mismatch is refused, so the
   operator confirms only what they saw, and a change of any of them, the
   processor's Profile included, leaves the target unconfirmed). A request that
   enables or retargets and also changes the processor's Profile is refused. The dashboard's own
@@ -4714,7 +4714,7 @@ Manager's `looper_schedules` cannot create or change one.
   the next run reads exactly those. It is refused while a run is in progress.
   It waits for the source's writer lock (a pass reading its files, up to 20 s,
   else 409) so that no write that began before the time commits after it is
-  counted, and a time in the future is refused. Changing `source_id` puts the
+  counted, and a time in the future (any, to the microsecond) is refused. Changing `source_id` puts the
   cursor at the new source's end, and is refused while a run is open.
 - **Not here:** the Manager's tools and prompts, export and import (a
   subscription's cursor and confirmation stay on the machine: a configuration

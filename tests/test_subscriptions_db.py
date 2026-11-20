@@ -7,15 +7,18 @@ anywhere: the channels' ``post`` is ``Poster``. Runs only with a disposable LOOP
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from looper.agents import processor, subscription_runs
+from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.agents.task_notice import TargetKind
 from looper.db import schedules as db_schedules, subscriptions as db_subs
 from tests.db_support import DSN, run_db, v1_api
+from tests.lark_cli_stand_in import lark_cli_stand_in  # noqa: F401  (a fixture)
 from tests.schedule_support import ScheduleEnv, run_scheduled, with_sender
 from tests.subscription_support import (DM, GROUP, SOURCE, INSTRUCTIONS, SUBSCRIPTION, UNBOUND_GROUP, Poster, add, lark_targets, minutes_ago, person, processor_says, scheduler_with, source)
 
@@ -528,15 +531,17 @@ def test_a_cursor_reset_waits_for_the_sources_writer_and_refuses_a_time_in_the_f
         async with env.pool.acquire() as writer:  # a pass reading the source's files: it holds the writer lock
             assert await message_stream.try_lock(writer, SOURCE)
             status, answer = await env.call("POST", "/api/v1/schedule_admin/reset_cursor",
-                                            {"schedule_id": sid, "after": datetime.now(UTC).isoformat()})
+                                            {"schedule_id": sid, "after": env.clock.now.isoformat()})
             assert status == 409 and "being read" in answer["error"]["message"]
             await message_stream.unlock(writer, SOURCE)
-        status, answer = await env.call("POST", "/api/v1/schedule_admin/reset_cursor", {
-            "schedule_id": sid, "after": (datetime.now(UTC) + timedelta(hours=1)).isoformat()})
-        assert status == 400 and "future" in answer["error"]["message"]
-        status, _ = await env.call("POST", "/api/v1/schedule_admin/reset_cursor",
-                                   {"schedule_id": sid, "after": datetime.now(UTC).isoformat()})
-        assert status == 200
+        # Any future time is refused, to the microsecond; now itself and the second before it are not.
+        for ahead, ok in ((timedelta(microseconds=1), False), (timedelta(seconds=1), False), (timedelta(hours=1), False),
+                          (timedelta(0), True), (-timedelta(seconds=1), True)):
+            status, answer = await env.call("POST", "/api/v1/schedule_admin/reset_cursor",
+                                            {"schedule_id": sid, "after": (env.clock.now + ahead).isoformat()})
+            assert (status == 200) is ok, (ahead, status, answer)
+            if not ok:
+                assert status == 400 and "future" in answer["error"]["message"]
 
     scenario(check, monkeypatch, tmp_path)
 
@@ -743,7 +748,7 @@ def test_resetting_the_cursor_to_a_time_reads_exactly_the_events_ingested_after_
     async def check(env, poster, fake):
         sid = await started(env)
         await confirm(env, sid)
-        moment = datetime.now(UTC)
+        moment = env.clock.now
         for name, delta in (("a", -120), ("b", -60), ("c", 60), ("d", 120)):
             await add(env.pool, name, sent_at=minutes_ago(env, 5), ingested_at=moment + timedelta(minutes=delta))
         status, answer = await env.call("POST", "/api/v1/schedule_admin/reset_cursor",
@@ -759,15 +764,15 @@ def test_resetting_the_cursor_to_a_time_reads_exactly_the_events_ingested_after_
 def test_resetting_after_the_last_event_skips_everything_and_a_running_run_blocks_it(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await started(env)
-        await add(env.pool, "old", sent_at=minutes_ago(env, 5), ingested_at=datetime.now(UTC) - timedelta(hours=1))
+        await add(env.pool, "old", sent_at=minutes_ago(env, 5), ingested_at=env.clock.now - timedelta(hours=1))
         status, answer = await env.call("POST", "/api/v1/schedule_admin/reset_cursor",
-                                        {"schedule_id": sid, "after": datetime.now(UTC).isoformat()})
+                                        {"schedule_id": sid, "after": env.clock.now.isoformat()})
         assert status == 200 and answer["cursor"]["events_after"] == 0
         assert await cursor(env, sid) == answer["cursor"]["committed_seq"]
         await env.pool.execute("INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status) "
                                "VALUES ('srun-running', $1, now(), 'manual', 'running')", sid)
         status, answer = await env.call("POST", "/api/v1/schedule_admin/reset_cursor",
-                                        {"schedule_id": sid, "after": datetime.now(UTC).isoformat()})
+                                        {"schedule_id": sid, "after": env.clock.now.isoformat()})
         assert status == 409 and "in progress" in answer["error"]["message"]
 
     scenario(check, monkeypatch, tmp_path)
@@ -994,9 +999,9 @@ def test_a_client_can_confirm_the_target_as_it_is_and_reset_the_cursor_after_con
             assert await pool.fetchval("SELECT target_confirmed_at FROM subscriptions WHERE schedule_id = $1", sid) is None
             status, done = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
             assert status == 200 and done["result"]["schedule"]["subscription"]["target_confirmed_at"]
-            when = "2026-11-19T08:00:00-08:00"
+            when = "2026-01-01T00:00:00-08:00"
             status, pending = await call("schedule_admin.reset_cursor", {"schedule_id": sid, "after": when}, client=True)
-            assert status == 202 and "Reset the cursor" in pending["impact"] and "2026-11-19T16:00:00+00:00" in pending["impact"]
+            assert status == 202 and "Reset the cursor" in pending["impact"] and "2026-01-01T08:00:00+00:00" in pending["impact"]
             status, done = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
             assert status == 200 and done["result"]["cursor"]["events_after"] == 0
             status, refused = await call("schedule_admin.confirm_target", {"schedule_id": sid + "x"}, client=True)
@@ -1026,3 +1031,169 @@ def test_a_confirmation_does_not_apply_to_a_schedule_that_changed_after_it_was_s
             assert await pool.fetchval("SELECT target_confirmed_at FROM subscriptions WHERE schedule_id = $1", sid) is None
 
     run_db(run, monkeypatch, timeout=60, max_size=4)
+
+
+# --- A lost answer is not a refusal ---
+
+
+@pytest.mark.parametrize("receipt", [PostReceipt(False, error="timed out"),
+                                     PostReceipt(False, error="no answer", outcome=PostOutcome.UNKNOWN)])
+def test_a_post_that_may_have_been_accepted_is_uncertain_and_not_asked_again(monkeypatch, tmp_path, receipt):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        top = await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        calls = 0
+
+        async def lost(*args: Any, **kwargs: Any) -> PostReceipt:
+            nonlocal calls
+            calls += 1
+            return receipt
+        scheduler_with(env, poster=lost)
+        run = await fire(env, sid)
+        assert calls == 1 and run["status"] == "completed" and run["stream"]["outcome"] == "uncertain"
+        assert await cursor(env, sid) == top
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def _lark_poster(adapter):
+    async def post(channel_id, target, text, *, idempotency_key=None):
+        return await adapter.post(target, text, idempotency_key=idempotency_key)
+    return post
+
+
+@pytest.mark.parametrize("answer, outcome, asks", [
+    ("lost", "uncertain", 1),  # lark-cli took the message and its answer could not be read
+    ("refused", "failed", 3),  # the platform said no: asked again, three asks in all
+])
+def test_the_lark_adapter_tells_a_refusal_from_a_lost_answer(  # noqa: F811
+        monkeypatch, tmp_path, lark_cli_stand_in, answer, outcome, asks):
+    import shutil
+
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+
+    executable = Path(f"{shutil.which('lark-cli')}.py")
+    if answer == "lost":
+        executable.write_text(executable.read_text().replace("print(json.dumps(value))", "print('', end='')"))
+    else:
+        executable.write_text(executable.read_text().replace(
+            "if args[:4] == [\"im\", \"+messages-send\", \"--as\", \"bot\"]:",
+            "if args[:4] == [\"im\", \"+messages-send\", \"--as\", \"bot\"]:\n    refuse(\"Bot can NOT be out of the chat\", api_code=230002)"))
+
+    async def check(env, poster, fake):
+        adapter = LarkChannelAdapter(runtime_root=tmp_path, allowlist=SenderAllowlist("channel-lark", frozenset({DM})))
+        scheduler_with(env, poster=_lark_poster(adapter))
+        sid = await started(env)
+        await confirm(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        sends = [line for line in lark_cli_stand_in.read_text().splitlines() if "+messages-send" in line]
+        assert len(sends) == asks, sends
+        assert run["stream"]["outcome"] == outcome
+        await adapter.stop()
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("failure, outcome, asks", [("timeout", "uncertain", 1), ("bad request", "failed", 3)])
+def test_the_telegram_adapter_tells_a_refusal_from_a_lost_answer(monkeypatch, tmp_path, failure, outcome, asks):
+    from types import SimpleNamespace
+
+    from telegram.error import BadRequest, TimedOut
+
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+    from tests.schedule_support import TELEGRAM_CHAT, allow_telegram
+
+    sent = []
+
+    async def send_message(**kwargs):
+        sent.append(kwargs)  # the request went out
+        raise TimedOut("read timed out") if failure == "timeout" else BadRequest("chat not found")
+
+    async def check(env, poster, fake):
+        await allow_telegram(env)
+        adapter = TelegramChannelAdapter(bot_token="0:synthetic",
+                                         allowlist=SenderAllowlist("channel-telegram", frozenset({TELEGRAM_CHAT})))
+        adapter._app = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+
+        async def post(channel_id, target, text, *, idempotency_key=None):
+            return await adapter.post(target, text, idempotency_key=idempotency_key)
+        scheduler_with(env, poster=post)
+        sid = await started(env, target={"channel": "telegram", "chat": TELEGRAM_CHAT})
+        await confirm(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        assert len(sent) == asks and run["stream"]["outcome"] == outcome
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+# --- What a notice about a subscription says and where it goes ---
+
+
+def test_a_failure_notice_goes_through_the_same_check_and_says_nothing_of_the_output(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sender = with_sender(env)
+        secret = "SECRET-PROCESSOR-DETAIL"
+        sid = await started(env, alert_failures_after=1)
+        await confirm(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        fake.failure = processor.ProcessorFailure.FAILED
+
+        async def move() -> None:  # the target moves to B, and B is confirmed, while the run (started for A) is going
+            await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify_target": {"channel": "lark", "chat": GROUP}}})
+            await confirm(env, sid)
+        fake.during = move
+        await fire(env, sid)
+        assert sender.sent == []  # neither the failure notice nor the alert: the run did not start for B
+        notes = await env.pool.fetch("SELECT kind, status, text FROM schedule_notifications WHERE schedule_id = $1", sid)
+        assert {n["status"] for n in notes} == {"dashboard"}
+        fake.during = None
+        fake.failure = processor.ProcessorFailure.FAILED
+        await add(env.pool, "y", sent_at=minutes_ago(env, 5) + timedelta(minutes=10))
+        await env.pool.execute("UPDATE schedule_runs SET error = $2 WHERE schedule_id = $1 AND status = 'failed'", sid, secret)
+        await fire(env, sid)
+        sent = [text for _, _, text in sender.sent]
+        assert sent and all(secret not in text and "synthetic failure" not in text for text in sent)
+        assert any("详情见 Dashboard" in text for text in sent)
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_run_whose_processor_launched_with_another_profile_than_the_confirmed_one_is_not_pushed(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        profile = (await processor.chosen_profile(env.project_id, sid))["profile_id"]
+        original = fake.__call__
+
+        async def launched_after_an_edit(**kwargs):
+            # The Profile is edited in place and the run launches with it: the facts it reports are the new ones.
+            await env.pool.execute("UPDATE agent_profiles SET effort = 'high' WHERE id = $1", profile)
+            run = await original(**kwargs)
+            return processor.ProcessorRun(run.reply, run.record_id, run.cost_usd,
+                                          profile=await processor.run_facts(env.project_id, sid))
+        monkeypatch.setattr(processor, "run", launched_after_an_edit)
+        run = await fire(env, sid)
+        assert poster.sent == [] and run["stream"]["outcome"] == "dashboard_only"
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_an_in_place_edit_of_the_processors_profile_unconfirms_the_target(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        before = await version_of(env, sid)
+        profile = (await processor.chosen_profile(env.project_id, sid))["profile_id"]
+        await env.pool.execute("UPDATE agent_profiles SET effort = 'high' WHERE id = $1", profile)
+        assert await version_of(env, sid) != before  # the runtime, model, provider and effort are bound, not the id
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        assert poster.sent == [] and run["stream"]["outcome"] == "dashboard_only"
+
+    scenario(check, monkeypatch, tmp_path)

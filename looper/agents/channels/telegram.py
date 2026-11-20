@@ -33,7 +33,6 @@ from ... import env
 from ..bus import MessageBus
 from ..log_redaction import add_secret, redact
 from ..message import (
-    AgentAddress,
     MessageEnvelope,
     MessageType,
     channel_address,
@@ -43,8 +42,8 @@ from ..message import (
 )
 from ..task_notice import Notice, NotifyTarget, split_message
 from .allowlist import SenderAllowlist
-from .. import chat_attachments, chat_commands, chat_settings
-from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
+from .. import chat_attachments, chat_commands
+from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -71,6 +70,18 @@ def _check_telegram_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _post_outcome(exc: Exception) -> PostOutcome:
+    """Whether Telegram refused a send (its answer said no: nothing was sent) or the answer was lost (a time-out or a
+    broken connection after the request went out: the message may be there)."""
+    from telegram.error import BadRequest, ChatMigrated, Forbidden, InvalidToken, RetryAfter, TimedOut
+
+    if isinstance(exc, TimedOut):
+        return PostOutcome.UNKNOWN
+    if isinstance(exc, (BadRequest, Forbidden, ChatMigrated, InvalidToken, RetryAfter)):
+        return PostOutcome.REJECTED
+    return PostOutcome.UNKNOWN
 
 
 class TelegramChannelAdapter(ChannelAdapter):
@@ -299,15 +310,15 @@ class TelegramChannelAdapter(ChannelAdapter):
         ids of the messages sent are kept when a later one fails, so replies to them still route. Telegram has no
         idempotency key: a post retried after a lost answer may be sent twice."""
         if self._app is None:
-            return PostReceipt(False, error="the Telegram bot is not started")
+            return PostReceipt(False, error="the Telegram bot is not started", outcome=PostOutcome.REJECTED)
         try:
             chat = int(target.id)
         except ValueError:
-            return PostReceipt(False, error=f"not a Telegram chat id: {target.id!r}")
+            return PostReceipt(False, error=f"not a Telegram chat id: {target.id!r}", outcome=PostOutcome.REJECTED)
         try:
             reply = int(reply_to) if reply_to else None
         except ValueError:
-            return PostReceipt(False, error=f"not a Telegram message id: {reply_to!r}")
+            return PostReceipt(False, error=f"not a Telegram message id: {reply_to!r}", outcome=PostOutcome.REJECTED)
         sent: list[str] = []
         text = self._redact(text)
         try:
@@ -319,7 +330,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         except Exception as exc:
             error = redact(str(exc))
             logger.warning("telegram: a post to %s failed (%d of its messages sent): %s", target.id, len(sent), error)
-            return PostReceipt(False, external_ids=tuple(sent), error=error)
+            return PostReceipt(False, external_ids=tuple(sent), error=error, outcome=_post_outcome(exc))
         return PostReceipt(True, external_ids=tuple(sent))
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
@@ -447,7 +458,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                 success=True,
                 external_id=str(msg.message_id),
             )
-        except Exception as exc:
+        except Exception:
             # Fallback: try without markdown if parse fails
             try:
                 for chunk in self._split_message(text, max_len=4000):

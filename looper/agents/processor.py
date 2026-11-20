@@ -135,6 +135,14 @@ async def _refuses_managed_hooks() -> bool:
     return (await system_settings.get_settings([REFUSE_KEY])).get(REFUSE_KEY) == "true"
 
 
+def profile_facts(profile: Mapping[str, Any], hooks: Mapping[str, Any] | None) -> dict[str, Any]:
+    """What a confirmation of the processor binds: the Profile's runtime, provider, model and effort, and the events
+    of the managed hooks that see what it is given (an in-place edit of the Profile changes them, its id does not)."""
+    return {"profile_id": profile.get("profile_id"), "runtime": profile.get("runtime"),
+            "provider": profile.get("provider"), "model": profile.get("model"), "effort": profile.get("effort"),
+            "hooks": sorted((hooks or {}).get("events") or []) if hooks else None}
+
+
 def _managed_hooks(settings: AgentSettings) -> Any:
     from .runtimes import ADAPTERS
 
@@ -188,6 +196,8 @@ class ProcessorRun:
     cost_usd: float | None = None
     failure: ProcessorFailure | None = None
     detail: str = ""
+    # The Agent Profile the run launched with (``profile_facts``), from the settings it was started on.
+    profile: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +253,12 @@ async def chosen_profile(project_id: str | None = None, schedule_id: str | None 
             "problem": problem}
 
 
+async def run_facts(project_id: str | None, schedule_id: str | None) -> dict[str, Any]:
+    """``profile_facts`` of the Profile a run would use now."""
+    found = await chosen_profile(project_id, schedule_id)
+    return profile_facts(found, found.get("managed_hooks"))
+
+
 def _system_prompt(settings: AgentSettings, role: _Role, instructions: str, quiet_word: str) -> Any:
     from .system_prompt import SystemPrompt, compose_system_prompt, prompt_layers
 
@@ -289,6 +305,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
     hooks = _managed_hooks(settings)
     if hooks is not None and await _refuses_managed_hooks():
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=_managed_refusal(hooks))
+    facts = profile_facts(settings.view()["profile"]["value"], hooks.view() if hooks is not None else None)
     role = await _role()
     if not role.enabled:
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED,
@@ -358,5 +375,5 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
         failed = ProcessorFailure.BUDGET, f"it cost {cost:.4f} USD, over its cap of {cap:g} USD"
     if failed is not None:
         await recorder.annotate({"processor_failure": failed[0].value})
-        return ProcessorRun(None, record_id, cost, failure=failed[0], detail=failed[1])
-    return ProcessorRun(str(result.get("result") or ""), record_id, cost)
+        return ProcessorRun(None, record_id, cost, failure=failed[0], detail=failed[1], profile=facts)
+    return ProcessorRun(str(result.get("result") or ""), record_id, cost, profile=facts)

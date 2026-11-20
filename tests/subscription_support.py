@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from looper.agents import processor
-from looper.agents.channels.base import PostReceipt
+from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.agents.scheduler import Scheduler
 from looper.db import chat_bindings
 
@@ -42,9 +42,9 @@ class Poster:
                        idempotency_key: str | None = None) -> PostReceipt:
         self.calls += 1
         if self.fail_with:
-            return PostReceipt(False, error=self.fail_with)
+            return PostReceipt(False, error=self.fail_with, outcome=PostOutcome.REJECTED)
         if self.fail_segments.get(self.calls):
-            return PostReceipt(False, error="refused")
+            return PostReceipt(False, error="refused", outcome=PostOutcome.REJECTED)
         if self.dedupe and idempotency_key is not None and any(m["key"] == idempotency_key for m in self.sent):
             return PostReceipt(True, external_ids=("om_again",))
         self.sent.append({"channel_id": channel_id, "target": target, "text": text, "key": idempotency_key})

@@ -35,7 +35,7 @@ from ..message import (
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from .allowlist import SenderAllowlist
-from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
+from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
@@ -468,8 +468,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 message_id = await self._send_target(target, text, idempotency_key=idempotency_key, return_id=True)
         except LarkCliError as exc:
             logger.warning("%s: a post to %s failed: %s", self.channel_id, target.id, exc)
-            return PostReceipt(False, error=str(exc),
-                               parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES)
+            return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
+                               outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
         if message_id is None:
             problem = ("lark-cli" if isinstance(self._transport, CliTransport) else self.channel_type) + " did not say which message it sent"
             logger.warning("%s: a post to %s: %s", self.channel_id, target.id, problem)
