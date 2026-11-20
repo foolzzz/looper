@@ -590,6 +590,15 @@ There is no committed baseline for either new case. During this change's isolate
 the isolated CLI was not logged in. These attempts leave the model comparison unverified; they do not establish
 a baseline or a performance pass. The fake schedule case checks harness wiring only.
 
+#### Ledger tools
+
+`ledger_tools` turns the ledger on (`ledger.enabled`) on its disposable server and sends two messages to the default
+Manager: a to-do ("write down a to-do: reply by Friday") must become exactly one `looper_ledger_add` of a pending
+item, as the user's, and no other write; then "L-0001 is done" must become one `looper_ledger_update` close, after
+which the ledger shows L-0001 done. The two tools are the only thing the Manager is told about the ledger (their
+descriptions); its system prompt has no ledger contract yet. Run it with Sonnet at two reps and the opus xhigh Manager at
+one, as the Manager PR commands above say, with `--dialogs ledger_tools`.
+
 #### Manager capability installs
 
 `manager_capability_installed`, `manager_capability_isolated` and
