@@ -261,6 +261,21 @@ def test_each_code_check_finds_its_category_by_position_only(text: str, category
     assert "problem (characters" in told and text[hit.start:hit.end] not in told
 
 
+def test_a_command_the_request_quotes_may_name_the_files_it_runs_and_writes() -> None:
+    """A Planner's diagnose request from the go-live acceptance: it says what the script is and quotes how it was
+    run, so the names in the command are not references to anything the request does not contain. A file named on
+    its own as where the problem is still is."""
+    request = parse_request(_request(
+        problem="A POSIX shell build script that builds an archive index exited 1 on its single run. The script "
+                "itself must not be edited. It is run as `sh build.sh` and its stdout is saved to a log file.",
+        attempts=[{"approach": "Ran `sh build.sh > build.log` once under the default environment",
+                   "signal": "Exit code 1 and the E-COLL error about byte order; the log is empty"}]))
+    assert [h for h in lint(request, secrets=()) if h.category == "dangling"] == []
+    for problem in ("the bug is in `importer.py`", "the bug is in importer.py, see `importer.py`"):
+        hits = lint(parse_request(_request(problem=problem)), secrets=())
+        assert [h.category for h in hits] and {h.category for h in hits} == {"dangling"}, problem
+
+
 def test_the_code_checks_find_bindings_registered_secrets_local_dirs_and_ids_written_out() -> None:
     request = parse_request(_request(
         problem="The Billing Sync Worker in /srv/app calls the store; task-42 shows it, with s3cr3t-value-123.",

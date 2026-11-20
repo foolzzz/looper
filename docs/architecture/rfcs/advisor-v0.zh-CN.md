@@ -320,7 +320,7 @@ claude --print --verbose --output-format stream-json --include-partial-messages 
 | `url` | 任何 scheme 的 URI（`https://`、`data:`、`mailto:` 等，第一期没有白名单），以及 `advisor_internal_domains` 里的域名和它们的子域名 |
 | `identity` | 邮箱、IPv4 和 IPv6 地址、长 ID（≥ 16 位的十六进制，或者 UUID）、任务 ID、步骤 ID、执行者 ID |
 | `raw_log` | 带时间戳的行、Python、Java、JavaScript 和 Go 的堆栈，或者一段 `log_excerpt` 超过 20 行 |
-| `dangling` | 「上面」「见日志」「above」「see the log」这类指代；提到请教包里没定义的文件名（`*.py`、`*.ts` 这类带扩展名的名字） |
+| `dangling` | 「上面」「见日志」「above」「see the log」这类指代；提到请教包里没定义的文件名（`*.py`、`*.ts` 这类带扩展名的名字），请教包引用的命令里出现的文件名除外（如 `` `sh build.sh > build.log` ``：命令运行和写出的文件只是名字，不是指代） |
 | `verbatim` | 请教包里超过 30% 的 12 字窗口和本地素材逐字重合（请教包的每个窗口位置都算，只有素材一侧去重） |
 
 ### 9.4 第三道：判别（`advice_check` 角色）

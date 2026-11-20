@@ -5474,7 +5474,8 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
     at most 12,000 characters; a checkpoint takes only `plan_review`);
   - code (`advice_lint.lint`: secrets, a binding's real value however short, absolute paths of any root, URIs of
     any scheme and the project's internal domains, e-mail and IPv4 or IPv6 addresses and ids, raw logs and
-    Python, Java, JavaScript or Go stacks, dangling references, and more than 30% of the request's 12-character
+    Python, Java, JavaScript or Go stacks, dangling references (a file named in a command the request quotes is
+    named, not referred to), and more than 30% of the request's 12-character
     windows copied from the local material). Each text is also read NFKC-normalized without zero-width
     characters, with its escapes decoded and its Base64 runs decoded once; a hit there points at the characters
     as written;
