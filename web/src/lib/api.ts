@@ -1,3 +1,4 @@
+import { randomId } from "@/lib/ids";
 import { isSessionEnded, SessionEndedError } from "@/lib/session";
 import { callV1, confirmV1, streamV1, V1Error, type V1PendingConfirmation } from "@/lib/v1";
 
@@ -3162,6 +3163,7 @@ export interface MessageStreamRun {
   events_new: number;
   events_seen: number;
   events_skipped: number;
+  skipped_by_deletion: number;
   files_rescanned: number | null;
   error: string | null;
 }
@@ -3188,6 +3190,12 @@ export interface MessageStreamSource {
   chats_excluded: number;
   chats_failing: number;
   last_run: MessageStreamRun | null;
+  body_retention_days: number | null;
+  app_body_retention_days: number | null;
+  retention_last_at: string | null;
+  events_last_day: number;
+  body_bytes_last_day: number;
+  bodies_dropped: number;
 }
 
 export interface MessageStreamConfiguration {
@@ -3198,8 +3206,8 @@ export interface MessageStreamConfiguration {
   user_open_id?: string | null;
 }
 
-async function messageStreamOperation<T extends object>(operation: string, fields: object = {}, signal?: AbortSignal): Promise<T> {
-  const result = await callV1<T>(`/api/v1/message_stream/${operation}`, fields, { signal });
+async function messageStreamOperation<T extends object>(operation: string, fields: object = {}, signal?: AbortSignal, session?: string): Promise<T> {
+  const result = await callV1<T>(`/api/v1/message_stream/${operation}`, fields, { signal, session });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
@@ -3210,6 +3218,48 @@ export const fetchMessageStreamRuns = (source_id: string, signal?: AbortSignal) 
   messageStreamOperation<{ source_id: string; runs: MessageStreamRun[] }>("runs", { source_id, limit: 20 }, signal);
 export const configureMessageStream = (fields: MessageStreamConfiguration) =>
   messageStreamOperation<MessageStreamSource>("configure", fields);
+
+export interface MessageStreamChat {
+  chat_id: string;
+  kind: string;
+  name: string;
+  inclusion: "included" | "excluded";
+  state: string;
+  events_7d: number;
+  purged_at: string | null;
+}
+
+export interface MessageStreamDeletion {
+  source_id: string;
+  scope: "message" | "range" | "chat";
+  message_id?: string;
+  chat_id?: string;
+  start?: string;
+  end?: string;
+}
+
+export interface MessageStreamDeletionPreview {
+  /** Client-only action session: confirmation must use the same session as this preview. */
+  session: string;
+  source_id: string;
+  scope: MessageStreamDeletion["scope"];
+  events: number;
+  confirmation_token: string;
+  backups: { count: number; earliest_at: string | null };
+  limits: string[];
+}
+
+export const fetchMessageStreamChats = (source_id: string, search = "", signal?: AbortSignal) =>
+  messageStreamOperation<{ source_id: string; chats: MessageStreamChat[] }>("chats", { source_id, search }, signal);
+export const setMessageStreamChat = (source_id: string, chat_id: string, included: boolean) =>
+  messageStreamOperation<MessageStreamChat>("chat_update", { source_id, chat_id, included });
+export const previewMessageStreamDeletion = async (fields: MessageStreamDeletion): Promise<MessageStreamDeletionPreview> => {
+  const session = randomId();
+  const preview = await messageStreamOperation<Omit<MessageStreamDeletionPreview, "session">>("delete_preview", fields, undefined, session);
+  return { ...preview, session };
+};
+export const deleteMessageStream = (fields: MessageStreamDeletion & { confirmation_token: string }, session: string) =>
+  messageStreamOperation<{ source_id: string; deleted: number; deletion_id: number }>("delete", fields, undefined, session);
 
 export interface LlmrecSettingsUpdate {
   enabled?: boolean;

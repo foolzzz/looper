@@ -41,6 +41,7 @@ from ..message import (
     parse_channel_id,
 )
 from ..task_notice import Notice, NotifyTarget, split_message
+from ..ops.leads import for_group
 from .allowlist import SenderAllowlist
 from .. import chat_attachments, chat_commands
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
@@ -365,7 +366,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                 return await self._send_answer(chat, str(envelope.payload.get("text") or ""))
             # A group's notice carries the whole summary: several messages in order. A part that fails ends the
             # notice; the parts before it are not sent again.
-            parts = split_message(notice.text)
+            parts = split_message(for_group(notice.text))
             for number, part in enumerate(parts):
                 receipt = await self._send_answer(chat, part)
                 if not receipt.success:

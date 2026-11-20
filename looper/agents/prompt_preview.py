@@ -86,6 +86,10 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
         from .tiers.manager import TOOLS_CONTRACT, root_adjusted
 
         contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
+        from .ops.leads import LEADS_CONTRACT, leads_on
+
+        if await leads_on():  # the default Manager's, as ManagerAgent._composed_prompt adds it
+            contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + LEADS_CONTRACT
         if recommended:
             role_text = root_adjusted(role_text)
     elif agent is AgentType.PLANNER:

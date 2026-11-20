@@ -57,7 +57,7 @@ def test_an_operation_does_not_share_its_schema_with_the_tool() -> None:
 
 def test_summary_and_escalation_note() -> None:
     for op in api_v1.operations():
-        assert 0 < len(op.summary) <= 120 and op.description.startswith(op.summary.rstrip("…"))
+        assert 0 < len(op.summary) <= 120 and op.description.startswith(op.summary.rstrip("…")), op.operation_id
     create = next(op for op in api_v1.operations() if op.operation_id == "task_create")
     assert create.description.endswith("POST /api/v1/confirm runs them.")
     overview = next(op for op in api_v1.operations() if op.operation_id == "overview")

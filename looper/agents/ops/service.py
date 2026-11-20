@@ -57,10 +57,13 @@ from ... import child_env
 from .. import chat_settings
 from ...db import ledger as db_ledger, manager_actions as db_actions, managers as db_managers, tasks as db_tasks, workflows as db_workflows
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
-from . import Call, ErrorCode, OpError, Risk, Tool, Turn, TurnState, check_arguments
+from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
+from ..operator_identity import is_operator, operator_sender_id
+from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
+from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
 from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool, task_workflow_tool
@@ -137,7 +140,9 @@ MANAGER_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, *CONFIG_TOOL
 TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if t.name == "looper_projects"),
                                     *SCHEDULE_TOOLS, CONFIRM)
 READ_ONLY_TASKS = frozenset({"looper_projects"})
-_MANAGER_TOOL_NAMES = {tool.name: tool for tool in MANAGER_TOOLS}
+# Every tool a Manager may have had: a call of one it no longer has is told so. The leads search is the default
+# Manager's while leads are on (``ManagerOps._with_leads``).
+_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
 
 
@@ -283,6 +288,7 @@ class ManagerOps:
                 for tool in scope.tools.values()]))
             self._scope = scope
         scope = await self._with_ledger_tools(scope)
+        scope = await self._with_leads(scope)
         if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
             return scope
         try:
@@ -323,12 +329,34 @@ class ManagerOps:
             self._scope = adjusted
         return adjusted
 
-    def listing(self) -> list[dict[str, Any]]:
-        return [task_directory_tool(project_tool(tool)).listing() for tool in self._scope.tools.values()]
+    async def _with_leads(self, scope: OpsScope) -> OpsScope:
+        """``scope`` with ``looper_leads_search`` exactly while ``leads.enabled`` is on, for the default Manager; any
+        other Manager's as it is. Off, the default Manager's is what it was before leads existed."""
+        if scope.manager_id != DEFAULT_MANAGER_ID:
+            return scope
+        wanted = await leads_on()
+        if wanted == (LEADS_TOOL in scope.tools):
+            return scope
+        kept = [tool for tool in scope.tools.values() if tool.name != LEADS_TOOL]
+        adjusted = replace(scope, tools=_tool_map([*kept, LEADS_SEARCH] if wanted else kept))
+        if self._scope is scope:
+            self._scope = adjusted
+        return adjusted
 
-    async def current_listing(self) -> list[dict[str, Any]]:
-        """The tools the Manager has now (``current_scope``), as ``tools/list`` names them."""
-        return [task_directory_tool(project_tool(tool)).listing() for tool in (await self.current_scope()).tools.values()]
+    def listing(self) -> list[dict[str, Any]]:
+        return [task_directory_tool(project_tool(tool)).listing() for tool in self._scope.tools.values()
+                if _audience(tool) is Audience.ANY]
+
+    async def current_listing(self, turn: Turn | None = None) -> list[dict[str, Any]]:
+        """The tools the Manager has now (``current_scope``), as ``tools/list`` names them, for ``turn`` (by default
+        the one running, as MCP's ``tools/list`` and the API runtime ask): a tool only the user's own turns run is
+        listed only in such a turn, never with no turn running."""
+        turn = turn or self._turn
+        tools = list((await self.current_scope()).tools.values())
+        if any(_audience(tool) is Audience.OPERATOR for tool in tools) and not (
+                turn is not None and await _operator_turn(turn)):
+            tools = [tool for tool in tools if _audience(tool) is Audience.ANY]
+        return [task_directory_tool(project_tool(tool)).listing() for tool in tools]
 
     async def _authorize(self, scope: OpsScope, name: str, arguments: Mapping[str, Any]) -> Tool:
         """The one check of what ``scope`` allows: the tool is among its tools, a read-only tool is only read, and
@@ -417,6 +445,10 @@ class ManagerOps:
         bound = self._bindings.get(binding) if binding else None
         self._observe_turn(name, binding, bound, enforced=enforced)
         turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
+        if _audience(tool) is Audience.OPERATOR:
+            # Only the turn the call is bound to, whatever the stop switch: no binding, or one Looper did not give, is
+            # Claude's own turn; a turn that ended refuses it (below).
+            turn = bound or Turn(channel=None, chat=None)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
@@ -426,6 +458,9 @@ class ManagerOps:
             risk = tool.risk_of(arguments)
             if tool.name != CONFIRM_TOOL:
                 tool = await self._authorize(scope, name, arguments)
+            if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
+                raise OpError(ErrorCode.FORBIDDEN, "message leads are searched only in the user's own direct chat "
+                                                   "or on the dashboard")
             _check_answering(turn)
             matched_turn = turn if enforced else bound
             if (matched_turn is not None and matched_turn.require_match and binding
@@ -454,7 +489,10 @@ class ManagerOps:
                         "expires_in_seconds": CONFIRMATION_SECONDS,
                         "shown_to_user": "Looper adds what this does and the request to confirm it after your reply. "
                                          "It has not run: do not say it did."}
-            result = _plain(await self._run_tool(tool, call))
+            answer = await self._run_tool(tool, call)
+            result = _plain(answer)
+            audited = isinstance(tool, RestrictedTool) and tool.audit_result is not None
+            audit = tool.audit_result(answer) if audited else None  # type: ignore[union-attr]
         except _Recorded as exc:
             return _error(exc.code, str(exc))
         except OpError as exc:
@@ -467,7 +505,8 @@ class ManagerOps:
                                result={"message": f"{type(exc).__name__}: {exc}"})
             return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); tell "
                                                  "the user, and try again later")
-        await self._record(turn, tool, arguments, risk, "ok", result=None if risk is Risk.READ else result)
+        await self._record(turn, tool, arguments, risk, "ok",
+                           result=audit if audited else None if risk is Risk.READ else result)
         return {"status": "ok", "result": result}
 
     async def _confirm(self, confirmation_id: str, turn: Turn) -> dict[str, Any]:
@@ -759,6 +798,22 @@ class _Recorded(OpError):
 
     def __init__(self, error: OpError) -> None:
         super().__init__(error.code, str(error))
+
+
+def _audience(tool: Tool) -> Audience:
+    return tool.audience if isinstance(tool, RestrictedTool) else Audience.ANY
+
+
+async def _operator_turn(turn: Turn) -> bool:
+    """Whether ``turn`` is the user's own (``operator_identity.is_operator``); a turn Claude runs on its own (a
+    completion turn too) never is."""
+    if turn.autonomous:
+        return False
+    operator_id = None
+    if turn.channel in BOT_CHANNEL_TYPES:
+        operator_id = await operator_sender_id(turn.channel_id or builtin_channel_id(turn.channel))
+    return is_operator(channel=turn.channel, group=turn.group, sender=turn.sender, client_id=turn.client_id,
+                       operator_id=operator_id)
 
 
 def _check_answering(turn: Turn) -> None:

@@ -76,6 +76,39 @@ def test_import_refuses_while_the_server_holds_the_source(tmp_path, capsys):
             loop.close()
 
 
+@pytest.mark.parametrize("missing", ["table", "retention_column", "deletion_count_column"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_import_refuses_an_upgrade_pending_restart(tmp_path, capsys, missing, dry_run):
+    sup.append(tmp_path / "collector", "oc_a", sup.message("m1", sent_at=datetime.now(timezone.utc)))
+    with fresh_database_without_recording(DSN) as (url, _):
+        asyncio.run(add_source(url, tmp_path / "collector"))
+        ddl = {"table": "DROP TABLE source_deletions",
+               "retention_column": "ALTER TABLE event_sources DROP COLUMN retention_last_at",
+               "deletion_count_column": "ALTER TABLE source_runs DROP COLUMN skipped_by_deletion"}[missing]
+        asyncio.run(query(url, ddl))
+        assert run_cli(tmp_path, url, "--days", "3", *(["--dry-run"] if dry_run else [])) == 1
+        error = capsys.readouterr().err
+        assert "start `looper serve` once to upgrade" in error
+        assert asyncio.run(query(url, "SELECT count(*) AS n FROM source_events"))[0]["n"] == 0
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_import_reports_deleted_messages_separately(tmp_path, capsys, dry_run):
+    now = datetime.now(timezone.utc)
+    sup.append(tmp_path / "collector", "oc_a", sup.message("deleted", sent_at=now),
+               sup.message("new", sent_at=now), sup.message("new", sent_at=now))
+    with fresh_database_without_recording(DSN) as (url, _):
+        asyncio.run(add_source(url, tmp_path / "collector"))
+        asyncio.run(query(url, "INSERT INTO source_deletions (source_id, scope, message_id) "
+                              "VALUES ('src', 'message', 'deleted')"))
+        assert run_cli(tmp_path, url, "--days", "3", "--per-file", *(["--dry-run"] if dry_run else [])) == 0
+        output = capsys.readouterr().out
+        assert "already stored or repeated 1" in output
+        assert output.count("skipped by deletion 1") == 2
+        assert "every file adds up" in output
+        assert asyncio.run(query(url, "SELECT count(*) AS n FROM source_events"))[0]["n"] == (0 if dry_run else 1)
+
+
 @pytest.mark.parametrize("days", ["0", "99999"])
 def test_import_refuses_days_out_of_range(tmp_path, capsys, days):
     assert run_cli(tmp_path, "postgresql://unused", "--days", days) == 2
