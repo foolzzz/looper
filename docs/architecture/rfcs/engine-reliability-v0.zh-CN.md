@@ -1,6 +1,6 @@
 # RFC：任务引擎可靠性 v0（失败分型、全局准入、用量与限流信号、降级规则）
 
-- **状态：** 草案，等维护者评审。第 3 节 D1–D8 来自维护者的产品设计（第 4 期「引擎更稳」和「模型接入层」两节）；第 15 节是待决问题和推荐。评审通过后按第 13 节的 PR 顺序实现。本 PR 只有文档。
+- **状态：** 已定，等实现。第 3 节的 D1–D8 来自维护者的产品设计（第 4 期「引擎更稳」和「模型接入层」两节）。第 15 节的 Q1–Q11 维护者已在 2026-11-20 全部按推荐答复，记为 D9–D19。实现按第 13 节的 PR 顺序，还没有开工。
 - **需求：** 四件事。(1) **失败分型**：步骤失败先由代码分成四类：额度不足（等重置）、瞬时故障（有限次重试）、环境问题（带类型进你的关卡）、需要判断（进 Planner 的 `[DECISION]`）；同一步骤连续失败 3 次熔断。(2) **全局准入和公平队列**：按账号设并发槽位；你发起的优先，重试和恢复其次，等得最久的定期提前；遇到 429 冻结这个账号的槽位，直到额度重置。(3) **用量和限流信号**：按账号汇总 token、429 次数和额度重置时间，调度器读这份数据做准入。(4) **降级规则类型化**：备用 Profile 的触发条件分成额度不足和供应商故障两类；后台角色可以自动切换，管家和 Planner 切换前先告诉你。
 - **相关：** [Agent 系统架构](../agent-system.md)（「Concurrency limits」「Runtimes, LLM providers and Agent Profiles」「What a run spent」「Model request recording」「How a task runs」）；[Advisor RFC](advisor-v0.zh-CN.md)（`ChildFailure.RATE_LIMITED`，本文把它推广到所有运行）；[用户关卡 RFC](user-gate-v0.zh-CN.md)；[热升级 RFC](hot-upgrade-v0.zh-CN.md)（保留运行和排空）。
 - **核对基线：** `main` `26d1b3a82`。第 2 节的「现状」读代码得出，每项标了出处；第 2.5 节的数字来自一个长期运行的实例，只用只读接口（`runs.list`、`runs.events`、`tasks.page`、`tasks.detail`、`llmrec_settings.get`）汇总，不含任何内容。
@@ -139,6 +139,17 @@
 | D6 | 备用 Profile 的触发条件分成额度不足和供应商故障两类；后台角色可以自动切换；管家和 Planner 切换前先告诉你，不悄悄换模型 |
 | D7 | 不做多账号轮换绕过限流；不做语义缓存和通用网关 |
 | D8 | 暂时不用 API key，所有模型调用都走订阅登录的 Claude Code、Codex、Grok（本文的信号以这三者为主，API 运行时顺带） |
+| D9 | 冻结和槽位按整个账号算，不按窗口或模型拆，也不按 `vendor_type` 合计（Q1） |
+| D10 | 准入打开时，账号的任何一个窗口 `utilization ≥ 0.95`，就暂停这个账号的 `BACKGROUND` 车道，其他车道照常（Q2） |
+| D11 | 冻结时你给 Manager 发消息，代码立刻回一句（重置时间，有备用 Profile 时附上可选的备用），消息留在队列里，重置后照常回答（Q3） |
+| D12 | 冻结期间，定时任务建出的任务最多等 6 小时或这个定时任务的一个周期，取小的；超过就以 `fail_kind = quota_exhausted` 结束（Q4） |
+| D13 | 环境问题挂起不受 `user_gates` 开关限制，所有项目和定时任务都进「需要你」（Q5） |
+| D14 | Worker、Reviewer 是否自动切备用 Profile，跟 Profile 的 `fallback_on` 走，默认只有 `launch_failure`（Q6） |
+| D15 | Planner 切备用 Profile 前通知你并等确认，没有确认就等重置（Q7） |
+| D16 | Codex 冻结到期后，用 app-server 的 `account/rateLimits/read` 探测（不花模型调用）；开工前验证，用不了就放行等得最久的一个运行（Q8） |
+| D17 | 准入打开但 `max_concurrency` 为空时不限；文档建议 Claude 订阅账号设 10（Q9） |
+| D18 | 重新派发时给 Worker 加一行代码写的说明（类、原因、工作目录里可能有改动），跑真实评测（Q10） |
+| D19 | keeper 启动超时（10 秒没打开控制 socket）算瞬时故障（Q11） |
 
 验收口径（产品设计给的）：交给 Planner 的非判断类失败占比下降；429 引发的连锁失败次数下降。基线见第 2.5 节：50% 和 80 次。
 
@@ -200,16 +211,16 @@ class Failure:
 | 环境问题 | 步骤挂起（`kind = environment`），任务报告 `waiting_user`（「需要你」分组），通知任务的来源会话；你选「已修好，重试」「交给 Planner」「停止任务」之一 | 不算 | 你选「交给 Planner」时进 |
 | 需要判断 | 和今天一样 | 和今天一样 | 进 |
 
-- **重新派发的说明：** 新的 Worker 收到同样的指令，末尾加一行代码写的说明：「上一次运行没有完成：<类>（<原因>）。工作目录里可能有它留下的改动。」这一行是模型可见的，PR4 要跑真实评测（第 14 节）。
+- **重新派发的说明：** 新的 Worker 收到同样的指令，末尾加一行代码写的说明：「上一次运行没有完成：<类>（<原因>）。工作目录里可能有它留下的改动。」这一行是模型可见的，PR4 要跑真实评测（D18、第 14 节）。
 - **挂起的步骤不算开始。** 步骤保持 `pending`，派发时跳过有挂起的步骤；`replan` 可以照常替换它（挂起随之删除）。
-- **环境问题不走 Planner 定义的用户关卡。** 它是系统挂起，不需要项目或定时任务打开 `user_gates`；它复用任务的 `waiting_user` 状态和通知渠道，不复用 `task_user_gates`（那张表的主键是关卡步骤）。
+- **环境问题不走 Planner 定义的用户关卡。** 它是系统挂起，不需要项目或定时任务打开 `user_gates`（D13）；它复用任务的 `waiting_user` 状态和通知渠道，不复用 `task_user_gates`（那张表的主键是关卡步骤）。
 
 ### 4.4 各角色自己回合的失败
 
 | 回合 | 额度不足 | 瞬时故障 | 环境问题 |
 |---|---|---|---|
-| Planner 规划、决定、`[CHAT]` 等回合 | 回合挂起，重置后在同一会话里重发同一条消息；定时任务建出的任务最多等 6 小时，超过就以 `fail_kind = quota_exhausted` 结束 | 按 4.3 的退避重发同一回合；连续 3 次失败走今天的失败路径（规划失败让任务失败，决定失败退回步骤结论） | 规划回合：任务失败，`fail_kind = environment`；其他回合：今天的路径 |
-| Manager 回合 | 代码回一句：「<账号> 的额度已用完（<窗口>），<本地时间> 重置。」有备用 Profile 时问要不要换（第 7 节）；消息留在队列里，重置后照常回答 | 不自动重试（用户在等，Claude Code 已经重试过 3 分钟），回一句带类型的说明 | 回一句带类型的说明 |
+| Planner 规划、决定、`[CHAT]` 等回合 | 回合挂起，重置后在同一会话里重发同一条消息；定时任务建出的任务最多等 6 小时或这个定时任务的一个周期，取小的，超过就以 `fail_kind = quota_exhausted` 结束（D12） | 按 4.3 的退避重发同一回合；连续 3 次失败走今天的失败路径（规划失败让任务失败，决定失败退回步骤结论） | 规划回合：任务失败，`fail_kind = environment`；其他回合：今天的路径 |
+| Manager 回合 | 代码回一句：「<账号> 的额度已用完（<窗口>），<本地时间> 重置。」有备用 Profile 时问要不要换（第 7 节）；消息留在队列里，重置后照常回答（D11） | 不自动重试（用户在等，Claude Code 已经重试过 3 分钟），回一句带类型的说明 | 回一句带类型的说明 |
 | processor（订阅、抽取、判别） | 这次运行挂起，最多等 6 小时，超过记失败（带类） | 退避后重试，最多 2 次 | 记失败（带类） |
 
 Planner 和 Manager 的回合挂起只在内存里；服务重启时，任务按现有的恢复路径继续，准入会重新挂起它。
@@ -232,7 +243,7 @@ Planner 和 Manager 的回合挂起只在内存里；服务重启时，任务按
 
 ### 5.1 槽位
 
-- **按账号。** 上限是 `llm_providers.max_concurrency`（已有的列，NULL 不限）。准入打开时才执行。账号的「模型供应商」层（同一 `vendor_type` 的几个账号合计）第一期不做（Q1）。
+- **按账号。** 上限是 `llm_providers.max_concurrency`（已有的列，NULL 不限）。准入打开时才执行。冻结和槽位都按整个账号算；账号下的窗口或模型不拆，同一 `vendor_type` 的几个账号也不合计（D9）。NULL 时不限（D17），文档建议 Claude 订阅账号设 10（线上 P95 8、P99 13）。
 - **什么占槽位：** Worker、Reviewer 的一次运行（启动到进程结束）；Planner、Manager 常驻会话的一个回合（发出消息到结果）；processor 的一次运行；consult、advisor、judge 的一次运行。常驻会话空闲时不占。Claude Code 自己的子 agent、teammate 算在它的运行里。
 - **嵌套不等待：** 在一个回合进行中由它的工具调用发起的运行（例如 Manager 回合里的 consult）借用父回合的槽位：计数，但不排队，避免父等子、子等父的死锁。
 - **热升级：** 排空时不放行；被保留的运行在新进程接管时重新登记它们的槽位（`kept_run` 的接管路径）。
@@ -251,6 +262,7 @@ class Lane(IntEnum):
 - 车道由代码按回合类型和任务来源（`tasks.schedule_id`、`TurnKind`）决定，不由模型决定。
 - 同一车道先来先放。
 - **提前：** 每等满 5 分钟，等待者的有效车道提前一档，最多提到 `USER_TASK`（等得再久也不插到你正在等的回合前面）。
+- **后台收紧（D10）：** 账号的任何一个窗口 `utilization ≥ 0.95`（第 6 节的最新信号）时，这个账号的 `BACKGROUND` 车道暂停放行，其他车道照常；信号回落到 0.95 以下、窗口重置或账号冻结后又解冻时恢复。正在跑的不打断。
 - **你在等的回合的保护：** `INTERACTIVE` 的等待者等了 2 分钟还没放行（槽位被长运行占满、账号没冻结），就超额放行，记一条告警。账号冻结时不适用（第 4.4 节的回复先发出）。
 
 ### 5.3 冻结
@@ -271,7 +283,7 @@ class Lane(IntEnum):
 
 - `resets_at` 要在 `(now, now + 8 天]` 里，否则当作没有。
 - 状态写进 `provider_admission`，转换只在单个进程的锁里做，每次转换在 `provider_admission_events` 记一行；重启后读回，所以重启不会让恢复的任务一起再撞一次 429。
-- Codex 可能有不花模型调用的探测：app-server 的 `account/rateLimits/read`（需要验证，Q8）。
+- Codex 账号到期后用 app-server 的 `account/rateLimits/read` 探测，不花模型调用（D16）；开工前验证这个请求可用（第 14 节验证 2），用不了就照上表放行等得最久的一个运行。
 
 ### 5.4 接入点
 
@@ -321,8 +333,8 @@ class Lane(IntEnum):
 | 角色 | `quota` / `provider_fault` 触发时 |
 |---|---|
 | processor、订阅、以后的后台角色 | 按 Profile 的 `fallback_on` 自动切，记活动 |
-| Worker、Reviewer | 同上（和今天的启动失败切换一样记日志、不占重试，Q6） |
-| Planner | 不自动切：步骤或回合挂起，通知你「<账号> 额度已用完，要换到 <备用 Profile> 继续吗」，两个动作：换（这个任务后面的 Planner 回合都用备用）、等重置（默认） |
+| Worker、Reviewer | 同上（和今天的启动失败切换一样记日志、不占重试，D14） |
+| Planner | 不自动切（D15）：步骤或回合挂起，通知你「<账号> 额度已用完，要换到 <备用 Profile> 继续吗」，两个动作：换（这个任务后面的 Planner 回合都用备用）、等重置（默认） |
 | Manager | 不自动切：第 4.4 节的回复里带「换到 <备用 Profile>」的选项，你确认后这个会话换 Profile（现有的 `manager_session.select_profile`） |
 
 - 常驻会话绑定运行时和账号（`agent_sessions.runtime_type`、`provider_id`），换到别的账号会新开会话，带现有的续接摘要。
@@ -431,7 +443,7 @@ ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS fallback_on TEXT[] NOT NULL 
 | `agent_profiles.fallback_on` | `{launch_failure}` | 见第 7 节 | 备用 Profile 的触发条件 | PR5 |
 
 - 前三个是系统设置（`system_settings`），在 Settings 和 Manager 的 `looper_settings`（`view` 能读；改动要你确认）里，和其他系统设置一样；后两个是账号和 Profile 上的字段，在 Settings → LLM Providers 和 Agent Profiles 里改，随配置导出导入。
-- 阈值第一期是常量，不做设置：熔断 3、退避 2/10 分钟、冻结余量 60 秒、无重置时间时的退避 5→60 分钟、提前间隔 5 分钟、`INTERACTIVE` 保护 2 分钟、后台最长等待 6 小时、供应商故障 5 次/3 个运行/10 分钟。
+- 阈值第一期是常量，不做设置：熔断 3、退避 2/10 分钟、冻结余量 60 秒、无重置时间时的退避 5→60 分钟、提前间隔 5 分钟、`INTERACTIVE` 保护 2 分钟、后台最长等待 6 小时（定时任务建出的任务取它和一个周期中小的）、后台收紧 `utilization ≥ 0.95`、供应商故障 5 次/3 个运行/10 分钟。
 - **关闭时：** 提示词、工具列表、命令行、运行记录的内容和任务行为逐字节不变；新列为 NULL，新表为空。每个 PR 有测试证明。
 - **运行中关掉：** 准入关掉时立即放行所有等待者；失败处理从 `act` 改回别的值时，已有的挂起立即解除并按今天的路径交给 Planner（不会有步骤永远挂着）。
 
@@ -484,7 +496,7 @@ ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS fallback_on TEXT[] NOT NULL 
 |---|---|---|---|---|
 | PR1 失败分型（只记录） | `failures.py`；运行时钩子（Claude Code、Codex 两条路、API）；`codex_steer.py` 保留 `codexErrorInfo`；`llm_records.failure_class/cause`；运行卡片显示类；统计接口 | `engine.failure_typing = record` | — | 否 |
 | PR2 用量和限流信号 | 解析 `rate_limit_event`、`account/rateLimits/updated`；`provider_limit_windows`；`providers.limits`；LLM Providers 的额度块；自检一行 | `engine.limit_signals.enabled` | — | 否 |
-| PR3 全局准入和冻结 | `admission.py`；`provider_admission(_events)`；执行 `max_concurrency`；车道、提前、冻结、探测；接入点；`providers.limits_clear`；冻结通知和 Manager 的冻结回复 | `engine.admission.enabled` | PR1、PR2 | Manager 的冻结回复是代码写的固定文字，不进模型上下文 |
+| PR3 全局准入和冻结 | `admission.py`；`provider_admission(_events)`；执行 `max_concurrency`；车道、提前、后台收紧、冻结、探测；接入点；`providers.limits_clear`；冻结通知和 Manager 的冻结回复 | `engine.admission.enabled` | PR1、PR2 | Manager 的冻结回复是代码写的固定文字，不进模型上下文 |
 | PR4 失败处理和熔断 | `step_failures`、`step_holds`；Worker/Reviewer 的路由、重派说明；Planner、processor 回合的挂起和重试；环境问题挂起、`tasks.hold_release`、`looper_task_hold`；`tasks.fail_kind` 新值；`[DECISION]` 消息里的失败历史 | `engine.failure_typing = act` | PR1（准入可有可无：没有准入时额度挂起按 `resets_at` 等） | 是：重派说明、`[DECISION]` 的失败历史、新工具；跑真实评测 |
 | PR5 降级规则类型化 | `agent_profiles.fallback_on`；`metadata.fallback[].trigger`；`degraded` 状态；后台和 Worker/Reviewer 的自动切换；Planner、Manager 的询问 | `fallback_on` 默认值 | PR1、PR3、PR4 | 否（询问是代码写的） |
 
@@ -504,21 +516,23 @@ ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS fallback_on TEXT[] NOT NULL 
   3. Codex exec 和 Grok 额度用完时的报错文字；
   4. Claude Code 的 `rateLimitType` 还有哪些值（是否有按模型的窗口）。
 
-## 15. 待决问题
+## 15. 维护者的答复（2026-11-20）
 
-| 编号 | 问题 | 选项 | 推荐 |
+本节保留问题、选项和当时的推荐。Q1–Q11 全部按推荐答复，记为第 3 节的 D9–D19。
+
+| 编号 | 问题 | 选项 | 当时的推荐 → 答复 |
 |---|---|---|---|
-| Q1 | 冻结和槽位的粒度 | (a) 整个账号；(b) 账号下按窗口或模型；(c) 再加一层同 `vendor_type` 的合计 | **(a)**。线上只见过 `seven_day` 一个窗口；按模型的窗口观测到再拆（第 14 节验证 4）。(c) 没有调用方 |
-| Q2 | 用量接近上限时要不要提前收紧 | (a) 不收紧，只告警；(b) 某个窗口 `utilization ≥ 0.95` 时暂停 `BACKGROUND` 车道，其他车道照常 | **(b)**，随 PR3，准入打开时生效。11-11 那次 6 个同时在跑的 Worker 一起被截断，冻结挡不住，只有提前收紧后台才能少丢工作 |
-| Q3 | 冻结时你给 Manager 发消息 | (a) 代码立刻回一句（重置时间、可选的备用 Profile），消息排队，重置后照常回答；(b) 回一句，消息丢弃，你重发 | **(a)**。不丢消息；你可以用停止取消 |
-| Q4 | 冻结期间定时任务建出的任务 | (a) 一直等；(b) 最多等 6 小时（或定时任务的一个周期，取小的），超过以 `quota_exhausted` 结束；(c) 冻结时定时任务直接跳过触发 | **(b)**。每半小时的汇报等 3 天没有意义；(c) 要改定时任务的触发逻辑，影响面大 |
-| Q5 | 环境问题挂起是否受 `user_gates` 开关限制 | (a) 不受，所有项目和定时任务都进「需要你」；(b) 只在打开了用户关卡的地方，其他地方直接交给 Planner | **(a)**。它是系统挂起，不是 Planner 的讨论关卡；交给 Planner 只会让模型猜 |
-| Q6 | Worker、Reviewer 算不算可以自动切换的「后台角色」 | (a) 跟 Profile 的 `fallback_on` 走，默认只有 `launch_failure`；(b) 一律不自动切；(c) 一律自动切 | **(a)**。默认和今天一样，操作者在 Profile 上勾了才切 |
-| Q7 | Planner 切换前怎么「告诉你」 | (a) 通知后等你确认（默认等重置）；(b) 通知后自动切 | **(a)**。D6 说不悄悄换；夜里没人确认时就是等重置，和不切一样 |
-| Q8 | Codex 冻结到期后怎么探测 | (a) `account/rateLimits/read`，不花模型调用；(b) 放行等得最久的一个运行 | 能用 **(a)** 就用（第 14 节验证 2），否则 **(b)** |
-| Q9 | 准入打开但 `max_concurrency` 为空 | (a) 不限，只有冻结和后台收紧生效；(b) 给订阅账号一个内置默认值 | **(a)**，不悄悄改并发；文档建议 Claude 订阅设 10（线上 P95 8、P99 13） |
-| Q10 | 瞬时故障重派时给 Worker 的说明 | (a) 一行代码写的说明（类、原因、工作目录可能有改动）；(b) 不加说明，指令完全相同 | **(a)**。重派的 Worker 看到上一次留下的改动时知道为什么；走真实评测 |
-| Q11 | 启动超时（keeper 10 秒没打开控制 socket）算瞬时还是环境 | (a) 瞬时；(b) 环境 | **(a)**。线上 54 次集中在几个小时里，是本机繁忙时的启动竞争，重试能过；一直失败时熔断会交给 Planner |
+| Q1 | 冻结和槽位的粒度 | (a) 整个账号；(b) 账号下按窗口或模型；(c) 再加一层同 `vendor_type` 的合计 | **(a)**。线上只见过 `seven_day` 一个窗口；按模型的窗口观测到再拆（第 14 节验证 4）。(c) 没有调用方 → **答复：** 按推荐（D9） |
+| Q2 | 用量接近上限时要不要提前收紧 | (a) 不收紧，只告警；(b) 某个窗口 `utilization ≥ 0.95` 时暂停 `BACKGROUND` 车道，其他车道照常 | **(b)**，随 PR3，准入打开时生效。11-11 那次 6 个同时在跑的 Worker 一起被截断，冻结挡不住，只有提前收紧后台才能少丢工作 → **答复：** 按推荐（D10） |
+| Q3 | 冻结时你给 Manager 发消息 | (a) 代码立刻回一句（重置时间、可选的备用 Profile），消息排队，重置后照常回答；(b) 回一句，消息丢弃，你重发 | **(a)**。不丢消息；你可以用停止取消 → **答复：** 按推荐（D11） |
+| Q4 | 冻结期间定时任务建出的任务 | (a) 一直等；(b) 最多等 6 小时（或定时任务的一个周期，取小的），超过以 `quota_exhausted` 结束；(c) 冻结时定时任务直接跳过触发 | **(b)**。每半小时的汇报等 3 天没有意义；(c) 要改定时任务的触发逻辑，影响面大 → **答复：** 按推荐（D12） |
+| Q5 | 环境问题挂起是否受 `user_gates` 开关限制 | (a) 不受，所有项目和定时任务都进「需要你」；(b) 只在打开了用户关卡的地方，其他地方直接交给 Planner | **(a)**。它是系统挂起，不是 Planner 的讨论关卡；交给 Planner 只会让模型猜 → **答复：** 按推荐（D13） |
+| Q6 | Worker、Reviewer 算不算可以自动切换的「后台角色」 | (a) 跟 Profile 的 `fallback_on` 走，默认只有 `launch_failure`；(b) 一律不自动切；(c) 一律自动切 | **(a)**。默认和今天一样，操作者在 Profile 上勾了才切 → **答复：** 按推荐（D14） |
+| Q7 | Planner 切换前怎么「告诉你」 | (a) 通知后等你确认（默认等重置）；(b) 通知后自动切 | **(a)**。D6 说不悄悄换；夜里没人确认时就是等重置，和不切一样 → **答复：** 按推荐（D15） |
+| Q8 | Codex 冻结到期后怎么探测 | (a) `account/rateLimits/read`，不花模型调用；(b) 放行等得最久的一个运行 | 能用 **(a)** 就用（第 14 节验证 2），否则 **(b)** → **答复：** 按推荐（D16） |
+| Q9 | 准入打开但 `max_concurrency` 为空 | (a) 不限，只有冻结和后台收紧生效；(b) 给订阅账号一个内置默认值 | **(a)**，不悄悄改并发；文档建议 Claude 订阅设 10（线上 P95 8、P99 13） → **答复：** 按推荐（D17） |
+| Q10 | 瞬时故障重派时给 Worker 的说明 | (a) 一行代码写的说明（类、原因、工作目录可能有改动）；(b) 不加说明，指令完全相同 | **(a)**。重派的 Worker 看到上一次留下的改动时知道为什么；走真实评测 → **答复：** 按推荐（D18） |
+| Q11 | 启动超时（keeper 10 秒没打开控制 socket）算瞬时还是环境 | (a) 瞬时；(b) 环境 | **(a)**。线上 54 次集中在几个小时里，是本机繁忙时的启动竞争，重试能过；一直失败时熔断会交给 Planner → **答复：** 按推荐（D19） |
 
 ## 16. 风险
 
