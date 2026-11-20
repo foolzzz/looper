@@ -3581,9 +3581,10 @@ channel allowlists, missing Claude session identities, the exact pre-rename
 system harness sentence, accounting basis, and gate channel ids. User files
 and other historical rows stay.
 
-`serve` takes a verified full custom-format `pg_dump` before that conversion.
-A schema-only dump or a config export cannot restore history. Backup failure
-stops the upgrade. `--skip-backup` is refused for this registry upgrade. The
+`serve` takes a verified custom-format `pg_dump` before that conversion. The
+dump keeps every table's schema and leaves out the rows of `source_events`
+(message bodies). A schema-only dump or a config export cannot restore history.
+Backup failure stops the upgrade. `--skip-backup` is refused for this registry upgrade. The
 dump is proved readable by, in order, `backup.verify_command` (dump on stdin),
 `docker exec -i <container> pg_restore --list` when `backup.command` is
 `docker exec [options] <container> pg_dump ...`, or the local `pg_restore`.
@@ -3608,7 +3609,8 @@ also defers the online steps with a warning until a start outside one. The lock
 is released on completion, failure or cancellation (and on connection loss).
 
 Rollback means stopping the new service, leaving the upgraded database
-unchanged, restoring the verified full backup into a separate database, and
+unchanged, restoring the verified schema-change backup into a separate database
+(it has the `source_events` schema and not its rows), and
 pointing the guarded older release at that database. Do not downgrade or
 mutate the original database. Writes made after the backup stay only in the
 upgraded database. Import preview is not evidence that a database upgrade is
@@ -4204,13 +4206,64 @@ it to a chat (`origin = schedule`, `dm` for an allowlisted direct chat, `group`
 for a bound chat; only a run that ended its task, and only when `notify` sends
 that run's message). The row keeps the notice it stands for (`fallback`) and a
 `dedupe_key` (the `GOAL_STATUS` message's id, or `schedule_run:<run id>`).
-Until the completion turn exists every row is `skipped` with reason `off`: the
-notice is sent exactly as before and `sent_at` records that it was handed to
-the channel. A replayed message finds its row and sends nothing, unless
-`sent_at` is empty; a database that cannot be written logs the failure and
-sends the notice anyway. Rows older than 30 days are deleted by housekeeping,
-and a deleted task takes its rows with it. The operator-only operation
-`manager_events.summary` counts the last 24 hours by state and reason.
+With the system setting `manager.completion_turns` at `off` (the default)
+every row is `skipped` with reason `off`: the notice is sent exactly as before
+and `sent_at` records that it was handed to the channel. A replayed message
+finds its row and sends nothing, unless `sent_at` is empty; a database that
+cannot be written logs the failure and sends the notice anyway. Rows older
+than 30 days are deleted by housekeeping, and a deleted task takes its rows
+with it. The operator-only operation `manager_events.summary` counts the last
+24 hours by state and reason.
+
+**Completion turns.** With `manager.completion_turns` at `dm_only` (set with
+`chat_settings.update`; it applies to the next task end), the end of a task
+asked for in a dashboard chat session or a Telegram or Lark direct chat is told
+by the Manager instead of the notice. Its row is `pending` (due at once) when
+the report reached the task's own Manager (`tasks.manager_id`; a report handed
+to the default Manager is `skipped` with `manager_off`, as is one reaching a
+Manager that is turned off); a group chat's is `skipped` with `group_chat` and
+gets the notice; a schedule's run message is still recorded `skipped` with
+`off`. The Manager queues itself a `COMPLETION_DUE` (the chat: Manager, bot or
+`channel-web`, chat), and when its message loop reaches it, claims every
+pending event of that chat (`running`, at most 10, one `batch`) and runs one
+turn on the message `[COMPLETION]`: each ended task's id, name, project,
+outcome, duration, cost, the start of its result, its delivery summary and
+branch, then the contract for the reply (one sentence per task, only the
+outputs and decisions the facts name, at most two next steps as questions, no
+links, at most 8 lines). The message goes into the Manager's session without
+the sections a user's message carries, and is not stored as a chat message;
+the system prompt, the tools and the runtime's command are the same as in a
+user's turn, whichever the setting. The turn's ops `Turn` has
+`origin = completion`: like a turn Claude runs on its own it answers no
+message, so a change answers `needs_user_turn` (still recorded in
+`manager_actions`, with an empty `message_id`) and `looper_confirm` is refused
+without touching an operation waiting in the chat. Its run record is the
+Manager's (no task), with `metadata.completion` (`batch`, `event_ids`,
+`task_ids`). It is the chat's live turn while it runs, so `/stop` there stops
+it; nothing streams to the chat. A reply goes where the notice would: into the
+dashboard chat session, or as the `CHAT_NOTICE` of the recorded target with its
+text replaced (stored in that chat's history); code appends each task's link
+line (and a worktree task's branch line) after it, and the events become
+`delivered` with the run's `record_id`. Otherwise the batch falls back and
+every event's recorded notice is sent unchanged: `turn_failed` (the turn
+failed, or the tools' token was refused), `turn_timeout` (no reply within 120
+seconds of the claim: the notices go at once, then the turn is stopped as a stop
+ends a turn, a runtime run per turn ending its process tree; if it has not ended
+within 10 seconds it is cancelled and its runtime stopped, so the next message
+starts a fresh one; a turn that does not end even then is let go of, its lock
+and binding released and a fresh runtime used, and it only writes its record),
+`turn_stopped`, `empty_reply`, `send_failed` (the reply could not be handed to
+the channel), and, at the claim, `off` (the setting was turned off) or
+`manager_off` (the Manager was turned off). A wake-up whose events cannot be
+read (the database fails) queues a new `COMPLETION_DUE` after 5 seconds, before
+it is acknowledged. When a Manager starts, before its message loop, the events
+its earlier turns left `running` fall back with `restart`, every fallen-back
+event of the last 24 hours whose notice was never sent sends it, and each chat
+with `pending` events gets a wake-up: a turn a restart cut off may cost an
+extra notice, never the notice. A Manager retired with a `COMPLETION_DUE`
+queued or in hand sends the notices of that chat's open events
+(`manager_off`). The 60-second gathering window, the 15-minute queue limit, the
+schedules' run messages and the Settings → Chat controls are not built yet.
 
 ### Task templates
 
@@ -4676,8 +4729,18 @@ source that is `off`, the server does one query per tick.
   bridging on or off (the dashboard's switch). `looper msgflow import --days N
   [--dry-run] [--source ID]` reads every file from its start and stores the last
   N days; `--dry-run` rolls back what it counted.
+- **Backups:** a schema-change `pg_dump` keeps the `source_events` schema and
+  leaves out its rows. `[backup] messages = "daily"` (off unless the ops file
+  says so; no environment variable) writes `looper-<database>-<stamp>.messages.dump`
+  in the same `backups/` directory at most once a day and keeps the newest 7.
+  That suffix cannot match a schema-change dump (`looper-<database>-<stamp>.dump`),
+  so each rotation deletes only its own files. Stopping the service terminates
+  the daily `pg_dump`, kills it if it is still running, and reaps it.
 - **Not yet:** a retention job for bodies already stored, deleting a chat, the
-  collector.
+  collector. There is no deletion confirmation yet. When exclude-and-delete
+  exists, its confirmation says delivered output remains, and that a daily
+  message backup keeps 7 copies and then ages them out (with the backup off,
+  nothing keeps the original text).
 
 ### Subscriptions: a message stream on a time rule
 
@@ -5540,7 +5603,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
 | `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
-| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, and `sent_at`; kept 30 days |
+| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at` and `sent_at`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Advisor RFC](rfcs/advisor-v0.zh-CN.md), section 5.2; nothing starts one yet): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at`; nothing writes it yet |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
@@ -5632,8 +5695,10 @@ Deployment settings are the ops file, `<runtime root>/ops/server.toml`
 another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
-in) and `verify_command` (an argv array that lists the dump read on stdin like
-`pg_restore --list`), `[operator_notes] root` (an absolute path),
+in), `verify_command` (an argv array that lists the dump read on stdin like
+`pg_restore --list`) and `messages` (`"off"` by default, omitted from the file;
+`"daily"` dumps `source_events` once a day into the same backups directory and
+keeps 7 copies; file only), `[operator_notes] root` (an absolute path),
 `[projects] root` (an absolute parent directory for new projects; file only,
 unset by default), and
 `[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only), and

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..db import managers as db_managers
-from . import chat_settings
+from . import chat_settings, completion_events
 from .channels.chat_routing import boundary_log
 from .channels.lark_quote import ReadQuote
 from .bus import MessageBus
@@ -444,6 +444,9 @@ class ManagerFleet:
                 continue
             if envelope.message_type in _TASK_REPORTS:
                 await self._hand_over(envelope)
+            elif envelope.message_type == MessageType.COMPLETION_DUE:
+                # Its completion turn was cut short: the chat gets the notices of every event it had left.
+                await self._completion_off(envelope, ("pending", "running"))
             else:
                 # The stopped turn's final reply first: the chat waits for it, and settling alone ends no stream.
                 await bus.publish(reply_envelope(envelope, stopped_reply(partial, []), manager_address(manager_id),
@@ -461,8 +464,22 @@ class ManagerFleet:
                 self._bus.settle(envelope.message_id)
             elif envelope.message_type in _TASK_REPORTS:
                 await self._hand_over(envelope, manager_id)
+            elif envelope.message_type == MessageType.COMPLETION_DUE:
+                await self._completion_off(envelope, ("pending",))
             else:
                 self._bus.settle(envelope.message_id)
+
+    async def _completion_off(self, envelope: MessageEnvelope, states: Sequence[str]) -> None:
+        """A Manager that no longer runs cannot tell its chats that their tasks ended: their notices go instead
+        (``completion_events``, reason ``manager_off``), and only then is the wake-up settled."""
+        target = completion_events.Target.from_payload(envelope.payload)
+        if target is not None:
+            try:
+                await completion_events.fall_back(self._bus, manager_address(target.manager_id), target=target,
+                                                  reason="manager_off", states=states)
+            except Exception:
+                logger.exception("could not send the notices of %s's completion events", target.manager_id)
+        self._bus.settle(envelope.message_id)
 
     async def _hand_over(self, envelope: MessageEnvelope, manager_id: str | None = None) -> None:
         """Pass a task's report to the default Manager (a new message), and only then settle the original: a crash
