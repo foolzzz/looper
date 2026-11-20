@@ -11,7 +11,41 @@ from lark_cli_stand_in import OPEN_ID
 pytestmark = pytest.mark.skipif(not DSN, reason='disposable PostgreSQL required')
 
 
-@pytest.mark.parametrize(('suffix', 'count'), [('rl230020x3', 10), ('rl99991400x2', 3), ('tox2', 5)])
+def test_cli_deadline_after_delivery_retries_the_same_key_once(monkeypatch, lark_cli_stand_in):
+    from looper.agents import chat_settings
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.outbound import ErrorClass
+
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, '_outbound_enabled', True)
+        adapter = LarkChannelAdapter(allowlist=SenderAllowlist('lark', frozenset([OPEN_ID])))
+        started = asyncio.get_running_loop().time()
+        try:
+            # The stand-in delivers, then hangs: exercise the real subprocess deadline (20 s).
+            receipt = await adapter._send_message('oc_synthetic_hangx1', 'answer')
+            assert receipt.success
+            assert asyncio.get_running_loop().time() - started >= lark_cli.CALL_TIMEOUT_SECONDS
+            row, = await pool.fetch('SELECT * FROM channel_outbox')
+            assert row['state'] == 'sent' and row['attempts'] == 2
+            assert adapter._gateway.counters.failures == {ErrorClass.UNKNOWN: 1}
+            assert adapter._gateway.counters.backoffs == 1
+            calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+            sends = [c for c in calls if '+messages-send' in c]
+            assert len(sends) == 2
+            assert [c[c.index('--idempotency-key') + 1] for c in sends] == [row['idempotency_key']] * 2
+            journal = Path(str(lark_cli_stand_in) + '.delivered.jsonl')
+            delivered = [json.loads(line) for line in journal.read_text().splitlines()]
+            assert len(delivered) == 1
+            assert delivered[0]['key'] == row['idempotency_key']
+            assert row['external_id'] == delivered[0]['message_id']
+        finally:
+            await adapter._channel_outbox.stop()
+    run_db(check, monkeypatch, timeout=45)
+
+
+@pytest.mark.parametrize(('suffix', 'count'), [('tox2', 5), ('rl230020x3', 10), ('rl99991400x2', 3)])
 def test_lark_keyed_delivery_and_replay(monkeypatch, lark_cli_stand_in: Path, suffix, count):
     from looper.agents import chat_settings
     from looper.agents.channels.allowlist import SenderAllowlist

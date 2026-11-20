@@ -84,7 +84,7 @@ def deliver(target, message_id, chat):
         found = next((item for item in previous if key and item["key"] == key and item["profile"] == name), None)
         if found:
             message_id = found["message_id"]
-        match = re.search(r"(rl230020|rl99991400|to)x([0-9]+)$", target)
+        match = re.search(r"(rl230020|rl99991400|to|hang)x([0-9]+)$", target)
         fail = False
         if match:
             with open({log!r}) as attempts:
@@ -92,13 +92,16 @@ def deliver(target, message_id, chat):
                 target_attempts = sum(target in call and any(method in call for method in
                     ("+messages-send", "+messages-reply")) for call in calls)
             fail = target_attempts <= int(match[2])
-            if fail and match[1] != "to":
+            if fail and match[1] in ("rl230020", "rl99991400"):
                 refuse("rate limited", 1, 230020 if match[1] == "rl230020" else 99991400)
         if not found:
             journal.write(json.dumps({{"key": key, "profile": name, "target": target,
                                       "message_id": message_id, "chat_id": chat}}) + "\\n")
             journal.flush()
         if fail:
+            if match[1] == "hang":
+                # Delivery happened, but no response reaches the caller before its 20 s deadline.
+                time.sleep(60)
             print(json.dumps({{"ok": False, "identity": "bot", "error": {{"type": "network", "subtype": "timeout",
                 "message": "API call failed: server time out error"}}}}), file=sys.stderr)
             sys.exit(4)
