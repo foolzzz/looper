@@ -1616,7 +1616,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     include_history     BOOLEAN NOT NULL DEFAULT false,
     max_age_minutes     INTEGER NOT NULL CHECK (max_age_minutes BETWEEN 5 AND 10080),
     max_events          INTEGER NOT NULL CHECK (max_events BETWEEN 1 AND 2000),
-    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1')),
+    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1', 'lines_v2')),
     text_max_chars      INTEGER NOT NULL CHECK (text_max_chars BETWEEN 20 AND 4000),
     quiet_word          TEXT NOT NULL DEFAULT 'SKIP' CHECK (quiet_word ~ '^[^[:space:]]{1,40}$'),
     output_header       TEXT NOT NULL DEFAULT '' CHECK (length(output_header) <= 200),
@@ -1626,7 +1626,20 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     target_confirmed_at TIMESTAMPTZ,
     -- What the operator was shown when they confirmed (``agents/subscriptions.py`` ``config_version``): a push needs it
     -- to still be what the schedule is.
-    target_confirmed_version TEXT
+    target_confirmed_version TEXT,
+    -- Selection rules (agents/subscription_rules.py): empty, the subscription's own filter above applies.
+    rules               JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array'),
+    -- Counts every change to what a push depends on (the stream, the target, the rule, the zone, whether it runs, a
+    -- confirmation): a run pins it, and a push needs it unchanged, so a change and its undoing both stop the run.
+    config_epoch        BIGINT NOT NULL DEFAULT 0,
+    "window"            TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
+    delivery_policy     TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'))
+);
+-- Reserve before the processor starts; release failures or interruptions only when nothing was sent or uncertain.
+CREATE TABLE IF NOT EXISTS subscription_daily_claims (
+    schedule_id TEXT NOT NULL REFERENCES subscriptions(schedule_id) ON DELETE CASCADE,
+    local_date  DATE NOT NULL,
+    PRIMARY KEY (schedule_id, local_date)
 );
 CREATE TABLE IF NOT EXISTS subscription_runs (
     run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,
@@ -1647,7 +1660,15 @@ CREATE TABLE IF NOT EXISTS subscription_runs (
     -- otherwise (its output stays on the dashboard).
     target_channel    TEXT,
     target_chat       TEXT,
-    config_version    TEXT
+    config_version    TEXT,
+    window_mode       TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
+    daily_date        DATE,  -- the claimed date at planning, unaffected by later timezone changes
+    -- The subscription's configuration and epoch as the run started: its window is selected with these, not with what
+    -- the subscription is by then.
+    config            JSONB,
+    config_epoch      BIGINT,
+    -- Windows whose text_match pattern run was stopped at its deadline: no pattern took anything in them.
+    match_timeouts    INTEGER NOT NULL DEFAULT 0
 );
 -- One message of a run's push: pending, then sending (written before the channel is asked), then sent, failed (the
 -- channel said no: asked again) or uncertain (it was being sent when the process died, or the channel's answer was
@@ -1993,7 +2014,7 @@ CREATE TABLE IF NOT EXISTS intents (
     chat_id       TEXT NOT NULL,                       -- the chat of its first source
     project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
     workflow_key  TEXT,                                -- a workflows.key, checked when it builds a task
-    merged_into   BIGINT REFERENCES intents(id) ON DELETE CASCADE,
+    merged_into   BIGINT,                              -- its key and its detaching are the intent merges block's
     task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     flagged       BOOLEAN NOT NULL DEFAULT false,      -- one of its sources is in its run's instructions_seen
     expires_at    TIMESTAMPTZ,                         -- 24 hours after its latest push; NULL while never pushed
@@ -2075,3 +2096,24 @@ INSERT INTO intent_type_versions (type_key, version, name, guidance, priority, e
      'urgent', 'builtin')
 ON CONFLICT DO NOTHING;
 -- message leads end
+
+-- An intent merged into another is its own matter, made from its own messages: deleting the intent it was merged
+-- into (its messages deleted, its chat purged, any code path) makes it pending again instead of deleting it. The key
+-- takes no action of its own, so a path that skipped the trigger would fail rather than cascade. The trigger runs
+-- AFTER each deleted row (a BEFORE trigger could not update a row the same statement deletes, as in a chain of merges
+-- deleted at once) and its name sorts before the key's own RI_ConstraintTrigger_* triggers, which PostgreSQL fires in
+-- name order, so the merged rows are detached before the key is checked. connection.py applies this block to
+-- databases whose leads block predates it, so keep it between the markers and idempotent.
+-- intent merges begin
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_merged_into_fkey;
+ALTER TABLE intents ADD CONSTRAINT intents_merged_into_fkey FOREIGN KEY (merged_into) REFERENCES intents(id);
+CREATE OR REPLACE FUNCTION intents_detach_merged() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE intents SET state = 'pending', merged_into = NULL, updated_at = now() WHERE merged_into = OLD.id;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS intents_detach_merged ON intents;
+DROP TRIGGER IF EXISTS "A_intents_detach_merged" ON intents;
+CREATE TRIGGER "A_intents_detach_merged" AFTER DELETE ON intents
+    FOR EACH ROW EXECUTE FUNCTION intents_detach_merged();
+-- intent merges end
