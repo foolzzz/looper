@@ -30,7 +30,11 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
                      "started_at": _STR, "state": _STR, "method": _NULL_STR,
                      "stopping": _BOOL, "can_interrupt": _BOOL})
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
-CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL})
+_MISSING_BOT = _object({"channel_id": _STR, "channel_type": _STR, "name": _STR}, closed=True)
+CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL,
+                         "ledger_enabled": _BOOL})
+CHAT_SETTINGS_UPDATED = _object({**CHAT_SETTINGS["properties"], "missing_operator_ids": _array(_MISSING_BOT)},
+                                required=CHAT_SETTINGS["required"])
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -56,13 +60,15 @@ OPERATIONS = (
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
     _op("chat_settings.get", "Read the chat settings: stopping a reply, the Manager's completion turns, and its "
-        "research order.",
+        "research order. It also says whether the ledger is on.",
         _object({}, closed=True), CHAT_SETTINGS),
-    _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
+    _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default. "
+        "Turning the ledger on also lists enabled bots with no operator id.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
-                 "research_order": {"type": ["boolean", "null"]}},
-                [], closed=True), CHAT_SETTINGS, "high"),
+                 "research_order": {"type": ["boolean", "null"]},
+                 "ledger_enabled": {"type": ["boolean", "null"]}},
+                [], closed=True), CHAT_SETTINGS_UPDATED, "high"),
 )
 
 
@@ -98,6 +104,21 @@ async def impact(server, operation, arguments, principal, headers):
                           "order, before it asks the user; its process starts again to read them." if enabled else
                           "From its next turn, the default Manager's instructions no longer say where to look things "
                           "up; its process starts again."))
+    if "ledger_enabled" in values:
+        value = values["ledger_enabled"]
+        enabled = False if value is None else value
+        if enabled:
+            from ..channels.operator_ids import missing
+
+            names = [bot.name for bot in await missing()]
+            listed = ("" if not names else
+                      " These bots have no My ID, so a decision in their direct chats is recorded as relayed until "
+                      "Settings → Channels has one: " + ", ".join(names) + ".")
+            changes.append("Set ledger.enabled to true? Waiting items, decisions and who does what start being "
+                           "recorded, and the default Manager gains the ledger tools." + listed)
+        else:
+            changes.append(f"Set ledger.enabled to false{' (built-in default)' if value is None else ''}? "
+                           "New items stop being recorded. Items already recorded stay.")
     return " ".join(changes)
 
 
@@ -123,7 +144,7 @@ def _stop_state(agent, message_id):
 async def run(server, operation, arguments, principal, headers):
     name = operation.operation_id
     if name == "chat_settings.get":
-        return chat_settings.settings_view()
+        return await chat_settings.settings_view()
     if name == "chat_settings.update":
         try:
             return await chat_settings.update(arguments)
