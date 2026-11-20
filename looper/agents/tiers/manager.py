@@ -90,6 +90,8 @@ from ..session_switch import SessionSwitch, SwitchReason
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
+from . import state_view
+from .state_view import Rendered, StateShown
 from ..ops import Turn, TurnOrigin, leads as ops_leads
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
@@ -403,6 +405,7 @@ class RunState:
     command: list[str] = field(default_factory=list)
     brief: str = ""
     resuming: str | None = None
+    state: Rendered | None = None  # what the turn starts with, with manager.stable_context on (``state_view``)
 
 
 @dataclass(frozen=True)
@@ -425,6 +428,8 @@ class Prepared:
     turn_text: str = ""
     run: RunState = field(default_factory=RunState)
     quoted: lark_quote.QuoteRead | None = None
+    # With manager.stable_context on: the sections as they read now, which ``turn_text`` leaves out.
+    state: tuple[str, ...] | None = None
 
 
 def api_handoff_prompt(reason: str, max_chars: int) -> str:
@@ -806,6 +811,11 @@ class ManagerAgent:
         self._turned_off_told = False
         self._has_templates = False  # from the last read of the Manager's task templates
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
+        self._stable_context = False  # manager.stable_context, from the last read
+        # The last whole "Looper state" block the session got (``state_view``); in memory only, so the first turn
+        # after a restart sends it whole. A compaction the session reported since the last turn ended forgets it.
+        self._state_shown: StateShown | None = None
+        self._state_compacted = False
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
         # Reads what a channel's message quotes, by the channel's id; the fleet sets it (``ChannelRegistry``).
@@ -966,6 +976,10 @@ class ManagerAgent:
 
     async def _load_db_config(self) -> None:
         """Load the role prompt from DB; keep the last one read on failure."""
+        try:
+            self._stable_context = await state_view.enabled()
+        except Exception:
+            logger.debug("could not read manager.stable_context; keeping the last value", exc_info=True)
         if self.agent_id != DEFAULT_MANAGER_ID:
             try:
                 row = await db_managers.get_manager(self.agent_id)
@@ -1542,18 +1556,22 @@ class ManagerAgent:
             switch = session_switch.context_full(
                 self._claude.context_tokens, self._claude.context_limit, runtime=self._session_runtime,
                 profile=self._session_profile, provider=self._session_provider)
+        state: list[str] | None = None
         if ask.turn is not None and ask.turn.origin is TurnOrigin.COMPLETION:
             turn_text = ask.message  # Looper's own message, without the sections before a user's
         else:
             attachments = chat_attachments.from_payload(envelope.payload.get("attachments"), self._runtime_root)
+            if self._stable_context:  # the sections go in the turn's state block (``_start_turn``)
+                state = await token.step("build_user_message", self._sections(envelope))
             turn_text = await token.step("build_user_message", self._build_user_message(
                 ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
                 attachments=[*attachments, *(ask.quoted.attachments if ask.quoted else ())],
-                quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input))
+                quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input,
+                sections=state is None))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
-            quoted=ask.quoted)
+            quoted=ask.quoted, state=tuple(state) if state is not None else None)
 
     @contextmanager
     def _runtime_start_budget(self, launch: Launch) -> Iterator[float]:
@@ -1605,6 +1623,8 @@ class ManagerAgent:
         brief = "" if (self._claude.started or self._session_id or self._clean_start) and not self._pending_handoff \
             else await token.step("resume_brief", self._resume_brief(envelope, prepared.message))
         run.brief = brief
+        if prepared.state is not None:
+            run.state = self._render_state(prepared.state, launch, prepared.switch)
         asked = f"{prepared.note}\n\n{prepared.message}" if prepared.note else prepared.message
         run.recorder = recorder = ClaudeRunRecorder(
             agent_id=self.agent_id,
@@ -1619,6 +1639,8 @@ class ManagerAgent:
         )
         try:
             await token.keep("recorder_start", recorder.start(), 10)
+            if run.state is not None:
+                await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
             if prepared.switch is not None and prepared.switch.reason is SwitchReason.CONTEXT_FULL:
                 recorder.account({"type": "system", "subtype": "compact_boundary",
                                   "compact_metadata": {"trigger": "auto", "pre_tokens": pre_context}})
@@ -1698,6 +1720,7 @@ class ManagerAgent:
             return await self._converse(token, prepared)
         except BaseException as exc:
             failure = exc
+            self._state_turn_ended(prepared.run.state, seen=False)
             raise
         finally:
             try:
@@ -2156,6 +2179,9 @@ class ManagerAgent:
             contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
         elif getattr(self, "_leads_on", False):  # a Manager without the switch read is leads-off
             contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
+        if getattr(self, "_stable_context", False):  # last, so every part before it reads as it does without it
+            contract_name += "+STABLE_CONTEXT_CONTRACT"
+            contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
@@ -2214,6 +2240,8 @@ class ManagerAgent:
         def observe(payload: dict[str, Any]) -> None:
             nonlocal session_unsaved
             recorder.account(payload)
+            if payload.get("type") == "system" and payload.get("subtype") == "compact_boundary":
+                self._state_compacted = True
             # The session is taken at once, not as the event is handled: a stop that cuts the handling short (a
             # slow persistence) still saves it, and the next process resumes it.
             session_id = payload.get("session_id")
@@ -2331,7 +2359,8 @@ class ManagerAgent:
                             await show("thinking", phase=True, activity="thinking")
 
         try:
-            turn_text = f"{brief}\n\n{prepared.turn_text}" if brief else prepared.turn_text
+            text = prepared.turn_text if run.state is None else "\n".join([*run.state.lines, prepared.turn_text])
+            turn_text = f"{brief}\n\n{text}" if brief else text
             if token.cancel.requested:
                 await self._finish_stopped_early(token, recorder, ops_turn)
                 raise TurnStopped()
@@ -2468,6 +2497,7 @@ class ManagerAgent:
             failed = (f"{label} turn did not succeed: {detail}"[:500] if detail else
                       f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
         replied = succeeded and failed is None and not over_cap and bool(final_text)
+        self._state_turn_ended(run.state, seen=replied)
         # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
         # keeps what it spent.
         await recorder.finish(
@@ -2919,6 +2949,8 @@ class ManagerAgent:
             await recorder.start()
 
             async def on_end(text: str, resident: ResidentTurn) -> None:
+                # Its stream is not read for a compaction: the next user turn sends the state whole.
+                self._state_shown = None
                 try:
                     await self._link_turn_task(recorder, turn)
                     if self.ops is not None:
@@ -2976,7 +3008,22 @@ class ManagerAgent:
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
                                   envelope: MessageEnvelope | None = None, attachments: Sequence[Attachment] = (),
                                   quoted: Sequence[lark_quote.Quote] = (),
-                                  image_input: ImageInput = ImageInput.NONE) -> str:
+                                  image_input: ImageInput = ImageInput.NONE, sections: bool = True) -> str:
+        parts = await self._sections(envelope) if sections else []
+        if note:
+            parts += [note, ""]
+        if channel:
+            parts += [channel, ""]
+        parts.append(user_message)
+        if quoted:
+            parts += ["", *lark_quote.section(quoted)]
+        if attachments:
+            parts += ["", *chat_attachments.section(attachments, image_input)]
+        return "\n".join(parts)
+
+    async def _sections(self, envelope: MessageEnvelope | None) -> list[str]:
+        """What every user turn starts with: the projects, task templates, workflows, ready tasks, open gates and
+        active goals, each section ending with a blank line."""
         parts = await self._projects_section()
         parts += await self._templates_section()
         parts += await self._workflows_section()
@@ -2988,17 +3035,31 @@ class ManagerAgent:
             for gid, snap in self._goal_snapshots.items():
                 parts.append(f"  - [{snap.status}] {snap.title or gid}: {snap.progress}")
             parts.append("")
+        return parts
 
-        if note:
-            parts += [note, ""]
-        if channel:
-            parts += [channel, ""]
-        parts.append(user_message)
-        if quoted:
-            parts += ["", *lark_quote.section(quoted)]
-        if attachments:
-            parts += ["", *chat_attachments.section(attachments, image_input)]
-        return "\n".join(parts)
+    def _render_state(self, sections: Sequence[str], launch: Launch, switch: SessionSwitch | None) -> Rendered:
+        """What the turn starts with (``state_view.render``): the whole block when its session may not hold the
+        last one: a new session (``/new``, a switch such as a full context, none saved), a new process (a server
+        restart, an idle close), or a runtime whose resident session does not report its compactions."""
+        shown = self._state_shown
+        reason = None
+        if not launch.runtime.resident_compaction_events:
+            reason = "no compaction events"
+        elif switch is not None or not self._session_id or (shown is not None and shown.session != self._session_id):
+            reason = "new session"
+        elif not self._claude.started:
+            reason = "new process"
+        return state_view.render(sections, shown, session=self._session_id, whole_reason=reason)
+
+    def _state_turn_ended(self, rendered: Rendered | None, *, seen: bool) -> None:
+        """After a turn: the session holds ``rendered``'s whole block once the turn went through (``seen``). A
+        compaction meanwhile, or a turn that started with the state and did not go through, leaves no block a later
+        turn may refer to."""
+        if self._state_compacted or (rendered is not None and not seen):
+            self._state_shown = None
+        elif rendered is not None:
+            self._state_shown = replace(rendered.shown, session=self._session_id)
+        self._state_compacted = False
 
     async def _projects_section(self, listed: db_tasks.TaskFilter | None = None) -> list[str]:
         """The existing projects, so Claude can name a task's project."""
