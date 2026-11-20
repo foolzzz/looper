@@ -167,6 +167,54 @@ def test_a_compaction_sends_the_whole_block_on_the_next_turn(stable: Any, tmp_pa
     assert [_whole(turn) for turn in turns] == [True, False, True, False]
 
 
+def _claude_with_a_turn_of_its_own(before: int) -> str:
+    """A resident Claude Code that marks each user turn with its replay (``--replay-user-messages``) and, once it has
+    read user turn ``before``, first runs a turn of its own (no replay: background work ended) in which it compacts
+    its context, then answers that message."""
+    return (
+        "def say(event):\n"
+        "    print(json.dumps(event), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    open('turns.jsonl', 'a').write(json.dumps(message['message']['content']) + '\\n')\n"
+        "    number = sum(1 for _ in open('turns.jsonl'))\n"
+        f"    if number == {before}:\n"
+        "        say({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'})\n"
+        "        say({'type': 'system', 'subtype': 'compact_boundary', 'compact_metadata': {'trigger': 'auto'}})\n"
+        "        say({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'background done'}]}})\n"
+        "        say({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'background done',\n"
+        "             'session_id': 'sess-1'})\n"
+        "    say({'type': 'user', 'isReplay': True, 'uuid': message.get('uuid'), 'message': message['message']})\n"
+        "    say({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'})\n"
+        "    say({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'ok'}]}})\n"
+        "    say({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'ok', 'session_id': 'sess-1'})\n"
+    )
+
+
+def test_a_turn_of_its_own_while_a_message_waits_sends_the_whole_block_next(stable: Any, tmp_path: Path) -> None:
+    # The second message was sent as "unchanged"; before Claude starts it, Claude runs a turn of its own that compacts.
+    turns = _chat(tmp_path, ["hello", "again", "after", "later"], body=_claude_with_a_turn_of_its_own(2))
+    assert [_whole(turn) for turn in turns] == [True, False, True, False]
+    assert _views(stable) == ["whole", "unchanged", "whole", "unchanged"]
+
+
+def test_a_turn_of_its_own_after_the_state_was_rendered_sends_it_whole(
+    stable: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = ManagerAgent._start_turn
+
+    async def own_turn_begins_after(self: ManagerAgent, token: Any, prepared: Any) -> None:
+        await start(self, token, prepared)  # the turn's state is rendered: "unchanged"
+        if prepared.message == "again":  # Claude begins a turn of its own before the message is sent
+            await self._autonomous_turns(self._process.command, prepared.system_prompt, prepared.launch)(None)
+
+    monkeypatch.setattr(ManagerAgent, "_start_turn", own_turn_begins_after)
+    turns = _chat(tmp_path, ["hello", "again"])
+    assert [_whole(turn) for turn in turns] == [True, True]
+    assert [call.args[1]["looper_state"] for call in stable.add_metadata.await_args_list
+            if "looper_state" in call.args[1]][-1]["reason"] == "a turn of its own"
+
+
 def test_a_runtime_without_resident_compaction_events_gets_the_whole_block_every_turn(
     stable: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -175,6 +223,24 @@ def test_a_runtime_without_resident_compaction_events_gets_the_whole_block_every
     assert [_whole(turn) for turn in turns] == [True, True, True]
     assert {call.args[1]["looper_state"]["reason"] for call in stable.add_metadata.await_args_list
             if "looper_state" in call.args[1]} == {"no compaction events"}
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_on_an_open_gate_says_when_it_opened_instead_of_how_long_ago(agent_db: Any, tmp_path: Path, on: bool) -> None:
+    from datetime import datetime, timezone
+
+    agent_db.open_gates.return_value = [{
+        "task_id": "task-1", "project_name": "calc", "step_key": "g1", "topic": "storage",
+        "opened_at": datetime(2026, 11, 20, 9, 42, 30, tzinfo=timezone.utc),
+        "agenda": [{"id": "q1", "question": "PostgreSQL or SQLite?", "status": "open"}]}]
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    manager._stable_context = on
+    heading, line, blank = asyncio.run(manager._open_gates_section(None))
+    # Off, as before: how long it has been open, which changes every minute; on, a time that does not.
+    head, _, tail = line.partition(": open for " if not on else ": opened 2026-11-20 09:42 UTC, ")
+    assert head == '  - task task-1 (project calc), gate g1 "storage"' and tail
+    assert tail.endswith("waiting for the user; chat: the task page only; open questions: q1 PostgreSQL or SQLite?")
+    assert ("open for" in line) is not on
 
 
 @pytest.mark.parametrize("on", [False, True])

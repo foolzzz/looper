@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from looper.agents.tiers.state_view import StateView, render, rev_of
+from looper.agents.tiers.state_view import StateView, _changes, render, rev_of
 
 PROJECTS = ["Projects:", *(f"  - project-{i} (default directory ~/p{i}): " + f"what project {i} is about " * 3
                            for i in range(10)), ""]
@@ -88,4 +88,49 @@ def test_a_long_change_note_sends_a_new_whole_block():
     # Two changed lines of eleven, but the one added is longer than the rest of the block together.
     changed = [*short[:-2], "  - p9 (no default directory): " + "a long description " * 20, ""]
     rendered = render(changed, shown, session="sess-1", whole_reason=None)
+    assert rendered.view is StateView.WHOLE and rendered.reason == "long change note"
+
+
+# The boundaries are inclusive: a note that changes exactly 30 % of the block's lines, or is exactly 40 % of its
+# length, is still a note. Lines: the last whole block's non-blank ones, a replaced line counting as one removed and
+# one added. Lengths: characters of the joined lines, the note with its heading line, the block without its rev line.
+LONG = ["Projects:", *(f"  - project-{i} (default directory ~/p{i}): " + "x" * 200 for i in range(9)), ""]
+
+
+def _added(count: int) -> list[str]:
+    return [*LONG[:-1], *(f"  - new-{i}" for i in range(count)), ""]
+
+
+def test_exactly_30_percent_of_the_lines_changed_is_still_a_note():
+    shown = _whole(LONG).shown  # ten non-blank lines
+    assert render(_added(3), shown, session="sess-1", whole_reason=None).view is StateView.CHANGES
+
+
+def test_just_over_30_percent_of_the_lines_changed_is_a_new_whole_block():
+    shown = _whole(LONG).shown
+    rendered = render(_added(4), shown, session="sess-1", whole_reason=None)
+    assert rendered.view is StateView.WHOLE and rendered.reason == "many lines changed"
+
+
+def _note_case(filler: int, pad: int) -> tuple[list[str], list[str]]:
+    """A block (its first item ``filler`` characters longer) and the block with one item added, ``pad`` longer."""
+    block = ["Projects:", "  - p0 (no default directory): " + "z" * filler,
+             *(f"  - p{i} (no default directory)" for i in range(1, 9)), ""]
+    return block, [*block[:-1], "  - q" + "y" * pad, ""]
+
+
+def _percent(block: list[str], changed: list[str]) -> float:
+    """The note's length as a share of the new whole block's, as render counts them."""
+    note, _ = _changes(_whole(block).shown, changed)
+    return 100 * len("\n".join(note)) / len("\n".join(changed))
+
+
+def test_a_note_of_exactly_40_percent_of_the_block_is_still_a_note():
+    # The added item's length is in both the note and the block: some filler makes 40 % exact.
+    filler, pad = next((f, p) for f in range(300) for p in range(80, 83) if _percent(*_note_case(f, p)) == 40)
+    block, changed = _note_case(filler, pad)
+    assert render(changed, _whole(block).shown, session="sess-1", whole_reason=None).view is StateView.CHANGES
+    block, longer = _note_case(filler, pad + 1)
+    assert _percent(block, longer) > 40
+    rendered = render(longer, _whole(block).shown, session="sess-1", whole_reason=None)
     assert rendered.view is StateView.WHOLE and rendered.reason == "long change note"

@@ -354,6 +354,12 @@ def _waited(moment: Any) -> str:
         return f"{int(seconds // 60)} min"
     return f"{int(seconds // 3600)} h" if seconds < 172_800 else f"{int(seconds // 86_400)} d"
 
+
+def _opened(moment: Any) -> str:
+    """When ``moment`` was (a gate opened), to the minute in UTC: what the stable state block says instead of
+    ``_waited``, which changes every minute."""
+    return f"{moment.astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC" if isinstance(moment, datetime) else "a while ago"
+
 # A new session's resume brief: the recent conversation of the most recently active chats, from the stored
 # chat messages, each message clipped, all of it in at most CONVERSATION_MAX_CHARS.
 CONVERSATION_CHATS = 3
@@ -406,6 +412,7 @@ class RunState:
     brief: str = ""
     resuming: str | None = None
     state: Rendered | None = None  # what the turn starts with, with manager.stable_context on (``state_view``)
+    state_generation: int = 0  # the Manager's ``_state_generation`` when ``state`` was rendered
 
 
 @dataclass(frozen=True)
@@ -813,9 +820,13 @@ class ManagerAgent:
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
         self._stable_context = False  # manager.stable_context, from the last read
         # The last whole "Looper state" block the session got (``state_view``); in memory only, so the first turn
-        # after a restart sends it whole. A compaction the session reported since the last turn ended forgets it.
+        # after a restart sends it whole. None: none a turn may refer to, for ``_state_lost``'s reason.
         self._state_shown: StateShown | None = None
-        self._state_compacted = False
+        self._state_lost = "no whole block yet"
+        # Moves on when the session's context may have lost what earlier turns showed: a compaction it reported, a
+        # turn it runs on its own (whose stream is not read for one). A turn rendered before it moved starts whole
+        # and leaves no block behind.
+        self._state_generation = 0
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
         # Reads what a channel's message quotes, by the channel's id; the fleet sets it (``ChannelRegistry``).
@@ -1624,7 +1635,8 @@ class ManagerAgent:
             else await token.step("resume_brief", self._resume_brief(envelope, prepared.message))
         run.brief = brief
         if prepared.state is not None:
-            run.state = self._render_state(prepared.state, launch, prepared.switch)
+            run.state, run.state_generation = (self._render_state(prepared.state, launch, prepared.switch),
+                                               self._state_generation)
         asked = f"{prepared.note}\n\n{prepared.message}" if prepared.note else prepared.message
         run.recorder = recorder = ClaudeRunRecorder(
             agent_id=self.agent_id,
@@ -1720,7 +1732,7 @@ class ManagerAgent:
             return await self._converse(token, prepared)
         except BaseException as exc:
             failure = exc
-            self._state_turn_ended(prepared.run.state, seen=False)
+            self._state_turn_ended(prepared.run, seen=False)
             raise
         finally:
             try:
@@ -2241,7 +2253,7 @@ class ManagerAgent:
             nonlocal session_unsaved
             recorder.account(payload)
             if payload.get("type") == "system" and payload.get("subtype") == "compact_boundary":
-                self._state_compacted = True
+                self._context_changed("a compaction")
             # The session is taken at once, not as the event is handled: a stop that cuts the handling short (a
             # slow persistence) still saves it, and the next process resumes it.
             session_id = payload.get("session_id")
@@ -2359,6 +2371,12 @@ class ManagerAgent:
                             await show("thinking", phase=True, activity="thinking")
 
         try:
+            if run.state is not None and run.state_generation != self._state_generation:
+                # A compaction or a turn of its own since the state was rendered: the session may not hold the block.
+                run.state, run.state_generation = (self._render_state(prepared.state, launch, prepared.switch),
+                                                   self._state_generation)
+                await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
+            # (Nothing is awaited from here until the message is written: a later change shows in the generation.)
             text = prepared.turn_text if run.state is None else "\n".join([*run.state.lines, prepared.turn_text])
             turn_text = f"{brief}\n\n{text}" if brief else text
             if token.cancel.requested:
@@ -2497,7 +2515,7 @@ class ManagerAgent:
             failed = (f"{label} turn did not succeed: {detail}"[:500] if detail else
                       f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
         replied = succeeded and failed is None and not over_cap and bool(final_text)
-        self._state_turn_ended(run.state, seen=replied)
+        self._state_turn_ended(run, seen=replied)
         # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
         # keeps what it spent.
         await recorder.finish(
@@ -2928,6 +2946,7 @@ class ManagerAgent:
 
         async def begin(after: Any) -> AutonomousRun:
             self._last_activity = self._clock()
+            self._context_changed("a turn of its own")  # its stream is not read for a compaction
             last = after if isinstance(after, MessageEnvelope) else None
             origin = _message_origin(last) if last is not None else {"channel": None, "channel_id": None, "chat": None}
             turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"])
@@ -2949,8 +2968,7 @@ class ManagerAgent:
             await recorder.start()
 
             async def on_end(text: str, resident: ResidentTurn) -> None:
-                # Its stream is not read for a compaction: the next user turn sends the state whole.
-                self._state_shown = None
+                self._context_changed("a turn of its own")  # a turn rendered while it ran may follow a compaction
                 try:
                     await self._link_turn_task(recorder, turn)
                     if self.ops is not None:
@@ -3049,17 +3067,25 @@ class ManagerAgent:
             reason = "new session"
         elif not self._claude.started:
             reason = "new process"
+        elif shown is None:
+            reason = self._state_lost
         return state_view.render(sections, shown, session=self._session_id, whole_reason=reason)
 
-    def _state_turn_ended(self, rendered: Rendered | None, *, seen: bool) -> None:
-        """After a turn: the session holds ``rendered``'s whole block once the turn went through (``seen``). A
-        compaction meanwhile, or a turn that started with the state and did not go through, leaves no block a later
-        turn may refer to."""
-        if self._state_compacted or (rendered is not None and not seen):
-            self._state_shown = None
-        elif rendered is not None:
-            self._state_shown = replace(rendered.shown, session=self._session_id)
-        self._state_compacted = False
+    def _context_changed(self, reason: str) -> None:
+        """The session may no longer hold the last whole block (``reason``: a compaction, a turn of its own)."""
+        self._state_generation += 1
+        self._state_shown, self._state_lost = None, reason
+
+    def _state_turn_ended(self, run: RunState, *, seen: bool) -> None:
+        """After a turn that started with the state: the session holds its whole block once the turn went through
+        (``seen``) with the generation it was rendered for. A turn that did not go through leaves no block a later
+        turn may refer to; a compaction or a turn of its own meanwhile forgot it already (``_context_changed``)."""
+        if run.state is None:
+            return
+        if not seen:
+            self._state_shown, self._state_lost = None, "the last turn did not go through"
+        elif run.state_generation == self._state_generation:
+            self._state_shown = replace(run.state.shown, session=self._session_id)
 
     async def _projects_section(self, listed: db_tasks.TaskFilter | None = None) -> list[str]:
         """The existing projects, so Claude can name a task's project."""
@@ -3185,8 +3211,10 @@ class ManagerAgent:
             waits = "the Planner, which is answering" if gate.get("waiting_for_planner") else "the user"
             questions = "; ".join(f"{item.get('id')} {clip(str(item.get('question') or ''), 80)}"
                                   for item in gate.get("agenda") or [] if item.get("status") in (None, "open"))
+            since = (f"opened {_opened(gate.get('opened_at'))}" if self._stable_context
+                     else f"open for {_waited(gate.get('opened_at'))}")
             lines.append(f"  - task {gate['task_id']} (project {gate.get('project_name') or '?'}), gate "
-                         f"{gate['step_key']} \"{clip(gate['topic'], 80)}\": open for {_waited(gate.get('opened_at'))},"
+                         f"{gate['step_key']} \"{clip(gate['topic'], 80)}\": {since},"
                          f" waiting for {waits}{where}; open questions: {questions or 'none'}")
         lines.append("")
         return lines

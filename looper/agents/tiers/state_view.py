@@ -18,10 +18,12 @@ from enum import Enum
 from typing import Any
 
 STABLE_CONTEXT_KEY = "manager.stable_context"
-# A new whole block instead of a change note when more than this share of the last whole block's lines changed, or
-# the note would be longer than this share of the whole block.
-CHANGED_LINES_MAX = 0.30
-NOTE_CHARS_MAX = 0.40
+# A new whole block instead of a change note when more than this percentage of the last whole block's non-blank
+# lines changed (each line added or removed counts once, so a replaced line twice), or the note would be longer than
+# this percentage of the new whole block (characters of the joined lines: the note with its heading line, the block
+# without its rev line). Exactly at either limit it is still a note.
+CHANGED_LINES_MAX_PERCENT = 30
+NOTE_CHARS_MAX_PERCENT = 40
 
 # The end of the Manager's contract while the switch is on, after every other part of it.
 STABLE_CONTEXT_CONTRACT = """\
@@ -90,10 +92,9 @@ def render(current: Sequence[str], shown: StateShown | None, *, session: str | N
             return Rendered(StateView.UNCHANGED, shown.rev, "unchanged",
                             [f"Looper state: unchanged since rev {shown.rev}", ""], shown)
         note, changed = _changes(shown, lines)
-        whole_text = len("\n".join(lines))
-        if changed > CHANGED_LINES_MAX * sum(1 for line in shown.lines if line.strip()):
+        if 100 * changed > CHANGED_LINES_MAX_PERCENT * sum(1 for line in shown.lines if line.strip()):
             whole_reason = "many lines changed"
-        elif len("\n".join(note)) > NOTE_CHARS_MAX * whole_text:
+        elif 100 * len("\n".join(note)) > NOTE_CHARS_MAX_PERCENT * len("\n".join(lines)):
             whole_reason = "long change note"
         else:
             return Rendered(StateView.CHANGES, shown.rev, "changes", [*note, ""], shown)
