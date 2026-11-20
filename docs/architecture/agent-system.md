@@ -4163,13 +4163,64 @@ it to a chat (`origin = schedule`, `dm` for an allowlisted direct chat, `group`
 for a bound chat; only a run that ended its task, and only when `notify` sends
 that run's message). The row keeps the notice it stands for (`fallback`) and a
 `dedupe_key` (the `GOAL_STATUS` message's id, or `schedule_run:<run id>`).
-Until the completion turn exists every row is `skipped` with reason `off`: the
-notice is sent exactly as before and `sent_at` records that it was handed to
-the channel. A replayed message finds its row and sends nothing, unless
-`sent_at` is empty; a database that cannot be written logs the failure and
-sends the notice anyway. Rows older than 30 days are deleted by housekeeping,
-and a deleted task takes its rows with it. The operator-only operation
-`manager_events.summary` counts the last 24 hours by state and reason.
+With the system setting `manager.completion_turns` at `off` (the default)
+every row is `skipped` with reason `off`: the notice is sent exactly as before
+and `sent_at` records that it was handed to the channel. A replayed message
+finds its row and sends nothing, unless `sent_at` is empty; a database that
+cannot be written logs the failure and sends the notice anyway. Rows older
+than 30 days are deleted by housekeeping, and a deleted task takes its rows
+with it. The operator-only operation `manager_events.summary` counts the last
+24 hours by state and reason.
+
+**Completion turns.** With `manager.completion_turns` at `dm_only` (set with
+`chat_settings.update`; it applies to the next task end), the end of a task
+asked for in a dashboard chat session or a Telegram or Lark direct chat is told
+by the Manager instead of the notice. Its row is `pending` (due at once) when
+the report reached the task's own Manager (`tasks.manager_id`; a report handed
+to the default Manager is `skipped` with `manager_off`, as is one reaching a
+Manager that is turned off); a group chat's is `skipped` with `group_chat` and
+gets the notice; a schedule's run message is still recorded `skipped` with
+`off`. The Manager queues itself a `COMPLETION_DUE` (the chat: Manager, bot or
+`channel-web`, chat), and when its message loop reaches it, claims every
+pending event of that chat (`running`, at most 10, one `batch`) and runs one
+turn on the message `[COMPLETION]`: each ended task's id, name, project,
+outcome, duration, cost, the start of its result, its delivery summary and
+branch, then the contract for the reply (one sentence per task, only the
+outputs and decisions the facts name, at most two next steps as questions, no
+links, at most 8 lines). The message goes into the Manager's session without
+the sections a user's message carries, and is not stored as a chat message;
+the system prompt, the tools and the runtime's command are the same as in a
+user's turn, whichever the setting. The turn's ops `Turn` has
+`origin = completion`: like a turn Claude runs on its own it answers no
+message, so a change answers `needs_user_turn` (still recorded in
+`manager_actions`, with an empty `message_id`) and `looper_confirm` is refused
+without touching an operation waiting in the chat. Its run record is the
+Manager's (no task), with `metadata.completion` (`batch`, `event_ids`,
+`task_ids`). It is the chat's live turn while it runs, so `/stop` there stops
+it; nothing streams to the chat. A reply goes where the notice would: into the
+dashboard chat session, or as the `CHAT_NOTICE` of the recorded target with its
+text replaced (stored in that chat's history); code appends each task's link
+line (and a worktree task's branch line) after it, and the events become
+`delivered` with the run's `record_id`. Otherwise the batch falls back and
+every event's recorded notice is sent unchanged: `turn_failed` (the turn
+failed, or the tools' token was refused), `turn_timeout` (no reply within 120
+seconds of the claim: the notices go at once, then the turn is stopped as a stop
+ends a turn, a runtime run per turn ending its process tree; if it has not ended
+within 10 seconds it is cancelled and its runtime stopped, so the next message
+starts a fresh one; a turn that does not end even then is let go of, its lock
+and binding released and a fresh runtime used, and it only writes its record),
+`turn_stopped`, `empty_reply`, `send_failed` (the reply could not be handed to
+the channel), and, at the claim, `off` (the setting was turned off) or
+`manager_off` (the Manager was turned off). A wake-up whose events cannot be
+read (the database fails) queues a new `COMPLETION_DUE` after 5 seconds, before
+it is acknowledged. When a Manager starts, before its message loop, the events
+its earlier turns left `running` fall back with `restart`, every fallen-back
+event of the last 24 hours whose notice was never sent sends it, and each chat
+with `pending` events gets a wake-up: a turn a restart cut off may cost an
+extra notice, never the notice. A Manager retired with a `COMPLETION_DUE`
+queued or in hand sends the notices of that chat's open events
+(`manager_off`). The 60-second gathering window, the 15-minute queue limit, the
+schedules' run messages and the Settings → Chat controls are not built yet.
 
 ### Task templates
 
@@ -4660,11 +4711,13 @@ project, with no task, gate, template or work directory; `requirement` is the
 processor's instructions. Its stream is a row of `subscriptions` (request field
 `subscription`): `source_id`, `chat_kinds` (`p2p`, `group`, `topic`, `unknown`),
 `include_chats` and `exclude_chats`, `sender_kinds` (`user`, `app`),
-`exclude_mentions_me`, `include_history` (history and imports), `max_age_minutes`
+`exclude_mentions_me`, `include_history` (history and imports), `window`
+(`cursor`, the default, or `lookback`), `delivery_policy` (`per_run`, the default,
+or `daily`), `max_age_minutes`
 (5–10080), `max_events` (1–2000), `text_max_chars` (20–4000), `render`
 (`lines_v1`), `quiet_word` (default `SKIP`), `output_header`, and the state
 `cursor_seq`, `cursor_at` and `target_confirmed_at`. A new schedule is disabled
-and its cursor starts at its source's `committed_seq`. The API refuses a field it
+and in cursor mode its cursor starts at its source's `committed_seq`. The API refuses a field it
 cannot use, naming it; a `parallel` overlap (two runs would read one window), no
 `run_budget_usd`, a source that does not exist, and a processor whose profile
 cannot run (`processor.chosen_profile`'s `problem`, on enabling) are refused.
@@ -4742,8 +4795,98 @@ Manager's `looper_schedules` cannot create or change one.
   requests are not asked: they leave it cleared, and the schedule's row says so,
   with "Confirm push target…" showing the same text (`subscription.confirmation`
   of the schedule's answer) before it calls `confirm_target`.
+- **Rules** (`subscription.rules`, up to 20; empty: the filter above applies, and
+  `lines_v1` reads exactly as before). With rules a message is kept when any
+  rule takes it, the first that does naming it. A rule has a `name` (rules with
+  one name add up in counts), a `label` (the tag), `chat_kinds`,
+  `include_chats` and `exclude_chats`, `sender_kinds`, `exclude_self` (not sent
+  by the source's own user), `mentions_me` (`any`, `only`, `exclude`),
+  `text_match`, `never_quiet` and `areas` (chat id to a name). `lines_v2` writes
+  `[time] 【label·area】《chat》 sender: text`. `output_header` may hold
+  `{count}` and `{count:RULE NAME}`, filled from what the window kept only when
+  `rules` is nonempty; without rules these placeholders remain literal text. A
+  `text_match` is an operator-owned regular expression, checked on Python's own
+  parse tree where it is saved: at most 500 characters; no repeat whose body holds
+  a repeat or a branch (`(a+)+`, `(a|aa)+`, also as `{,n}` or under `(?x)`); at
+  most 2 repeats that can run long (unbounded, or a maximum over 10), 8 repeats
+  of any kind and 8 alternations. It runs on the first 1,000 characters of each
+  message in a separate process that is killed after 5 s (the match is inside
+  the firing transaction, so a window holds the schedule's row for at most that
+  long); past it no pattern takes anything in that window and the run's
+  `match_timeouts` is 1. When the processor answers
+  the quiet word but the window holds a message of a `never_quiet` rule, code
+  writes the list of those messages (per label, at most 30, 200 characters
+  each, the same @ stripping) and it is pushed and delivered like the
+  processor's output. A subscription that can select private content (a direct
+  chat or a chat of unknown kind, `mentions_me` `only`, or `never_quiet`) may target only the operator's own direct chat (a Lark chat with the user the
+  source is bound to, `user_open_id`; a colleague's direct chat, a group, Telegram
+  and a source with no bound user are refused) when it is created, updated or
+  confirmed and again before every message of a push, and its confirmation says it
+  includes private messages. A run selects and writes with the configuration it
+  started with (`subscription_runs.config`) and pins the subscription's
+  `config_epoch`, which counts every change to its stream, rules, target, rule,
+  zone, notify, enabled state, processor Profile choice and every confirmation: a
+  change that is later undone still leaves the run's push on the dashboard. Rules are set through
+  the API; the dashboard shows that they exist.
+- **Lookback and daily digests.** `window: "lookback"` reads messages sent between
+  the firing time minus `max_age_minutes` and the firing time, inclusive, up to
+  the source's committed sequence. It ignores the cursor, including messages
+  already present when the subscription was created. It keeps the newest
+  `max_events`, then renders them oldest first (sequence breaks equal-time ties).
+  The cursor is never initialized, reset or advanced by lookback; empty windows,
+  quiet output, failures and restart recovery all leave it alone. Age is required
+  on creation and bounded as above; a partial update retains the stored age.
+  All existing source exclusions, history/import selection, rules, caps and the
+  private-content guard still apply. `{date}` in `output_header` expands to the
+  scheduled fire's local date (`YYYY-MM-DD`, in the schedule's timezone; manual
+  runs use their request time), with or without rules. Count placeholders still
+  require nonempty `rules`.
+
+  `delivery_policy: "daily"` reserves `(schedule_id, local_date)` in
+  `subscription_daily_claims` before starting the processor, in the firing's
+  transaction. The claim date is saved on `subscription_runs.daily_date`; ending
+  a run never recomputes it from the current timezone. The guard covers manual
+  runs, queued fires and catch-up (`catch_up: "once"` collapses missed fires into
+  one attempt on the latest missed firing's local date). A retained claim also
+  blocks earlier dates, so moving the timezone backwards does not reopen them.
+  A repeated attempt is `skipped_gate` with its reason on the dashboard; it does
+  not clear a failure streak or update `last_ok_at`. Only a genuinely empty
+  window counts as a healthy skip and reserves nothing.
+  Quiet output, dashboard-only output and any sent or uncertain message retain
+  the claim across restart. Failure or restart interruption with nothing sent
+  or uncertain releases that run's recorded date in the same transaction that
+  ends it, allowing a retry. Confirm the target before the first attempt.
+  In-flight delivery recovery uses the same run and segment claims, without
+  starting another daily attempt. `per_run` allows
+  multiple lookback runs when that is wanted. The two options are independent;
+  existing cursor subscriptions and gossip keep their input, order and delivery
+  behavior, processor prompt, tool list and launch flags.
+
+  For a daily schedule, set these subscription fields through
+  `schedule_admin.create` / `schedule_admin.update` (also available through the
+  generated CLI), alongside its source, selection rules and processor instructions:
+
+  ```json
+  {
+    "window": "lookback",
+    "max_age_minutes": 1440,
+    "delivery_policy": "daily",
+    "render": "lines_v2",
+    "max_events": 600,
+    "text_max_chars": 300,
+    "rules": [{"name": "all", "chat_kinds": ["group", "topic"]}],
+    "output_header": "Daily digest · {date} · {count} messages"
+  }
+  ```
+
+  Changing window mode or delivery policy clears the target's confirmation;
+  these options also participate in its configuration version. Source, window
+  and policy changes are refused while a run is open. Switching back to cursor
+  starts at the source's current end. The dashboard keeps its existing form and
+  run output; these options are configured through the API. Lark and Telegram
+  use their existing bot delivery paths; neither needs a new chat command.
 - **The cursor** (`schedule_admin.reset_cursor` with `after`, a time with its
-  offset; a confirmation shows how many events it will read): it moves to just
+  offset; a confirmation shows how many events it will read; cursor mode only): it moves to just
   before the first event the source stored after that time (`ingested_at`), so
   the next run reads exactly those. It is refused while a run is in progress.
   It waits for the source's writer lock (a pass reading its files, up to 20 s,
@@ -4752,7 +4895,7 @@ Manager's `looper_schedules` cannot create or change one.
   cursor at the new source's end, and is refused while a run is open.
 - **Not here:** the Manager's tools and prompts, export and import (a
   subscription's cursor and confirmation stay on the machine: a configuration
-  file leaves it out), the digest and daily subscriptions, and Looper's own
+  file leaves it out), migrating existing digest and daily jobs, and Looper's own
   collection.
 
 ### Intents
@@ -5576,7 +5719,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
 | `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
-| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, and `sent_at`; kept 30 days |
+| `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at` and `sent_at`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Advisor RFC](rfcs/advisor-v0.zh-CN.md), section 5.2; nothing starts one yet): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at`; nothing writes it yet |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |

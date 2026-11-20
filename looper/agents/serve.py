@@ -858,6 +858,7 @@ async def _run_agent_system_watched(
                 claude_bin=claude_bin,
                 work_dir=work_dir,
                 http_ready=asyncio.Event(),
+                dashboard_url=dashboard_url,
             )
 
             # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
