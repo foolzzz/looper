@@ -117,8 +117,12 @@ TASK_DETAIL["properties"]["advisor"] = _object({"consults": _array(_object({
     "failure": _NULL_STR, "rounds": _INT, "returns": _INT, "spent_usd": _NUMBER, "status": _NULL_STR,
     "checks": _array(_object({"stage": _STR, "category": _STR, "count": _INT}, closed=True)),
     "answers": _array(_object({"question_id": _STR, "conclusion": _STR, "confidence": _NULL_STR}, closed=True)),
-    "adoption": _NULL_STR, "unlocked": {"type": ["boolean", "null"]}, "created_at": _STR, "finished_at": _NULL_STR},
-    closed=True))}, ["consults"], closed=True)
+    "adoption": _NULL_STR, "unlocked": {"type": ["boolean", "null"]},
+    "question": {"type": ["object", "null"]}, "needs_info": _array({"type": "object"}),
+    "advice": {"type": ["object", "null"]},
+    "adoption_items": _array(_object({"ref": _NULL_STR, "use": _NULL_STR, "why": _STR}, closed=True)),
+    "created_at": _STR, "finished_at": _NULL_STR, "duration_s": _NULL_NUMBER},
+    closed=True)), "summary": _STR}, ["consults", "summary"], closed=True)
 SCHEMAS = {"TaskInfo": TASK_INFO, "TaskDetail": TASK_DETAIL}
 RESULTS = {}
 OPERATIONS = (

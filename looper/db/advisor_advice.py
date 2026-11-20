@@ -13,6 +13,9 @@ import asyncpg
 
 from .connection import get_pool
 
+# The kinds of request (``advice.AdviceKind``'s values; the db package does not import the agents').
+_KINDS = frozenset({"diagnose", "design_choice", "plan_review", "unblock"})
+
 SOURCES = ("ladder", "checkpoint", "optional")
 
 
@@ -82,13 +85,16 @@ async def for_step(step_id: str, *, pool: asyncpg.Pool | None = None) -> list[di
 
 async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The task's consults of the advisor, oldest first, as its page shows them: where each came from and for which
-    attempt, how it ended (its state and why it failed), its rounds, returns and spend, the checks its request failed
-    (their stage and category, with how many times), the advisor's conclusions, what the Planner took of them and
-    whether the attempt passed. Never the request's text, nor where a check matched."""
+    attempt, how it ended (its state and why it failed), its rounds, returns, spend and duration, the checks its
+    request failed (their stage and category, with how many times), the request that was sent (``question``: only
+    one that passed every check, never its bindings), the advisor's questions back (``needs_info``), its answer
+    (``advice``), what the Planner took of it and why (``adoption`` and ``adoption_items``) and whether the attempt
+    passed. Never a request that was sent back, nor where a check matched."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """SELECT s.id, s.step_id, s.state, s.rounds, s.returns, s.spent_usd, s.brief, s.result,
-                  s.created_at, s.finished_at, a.kind, a.attempt, a.advice, a.adoption, a.unlocked
+                  s.created_at, s.finished_at, a.kind, a.attempt, a.question, a.advice, a.adoption, a.adoption_detail,
+                  a.unlocked
              FROM agent_spawns s LEFT JOIN advisor_advice a ON a.spawn_id = s.id
             WHERE s.task_id = $1 AND s.kind = 'advisor' ORDER BY s.id""", task_id)
     consults = []
@@ -97,8 +103,14 @@ async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
         advice = json.loads(row["advice"]) if isinstance(row["advice"], str) else (row["advice"] or {})
         result = json.loads(row["result"]) if isinstance(row["result"], str) else (row["result"] or {})
         checks = Counter((str(c.get("stage")), str(c.get("category"))) for c in result.get("checks", []))
+        question = json.loads(row["question"]) if isinstance(row["question"], str) else row["question"]
+        detail = json.loads(row["adoption_detail"]) if isinstance(row["adoption_detail"], str) else (
+            row["adoption_detail"] or {})
+        ended = row["finished_at"]
         consults.append({
-            "id": row["id"], "step_id": row["step_id"], "source": brief.get("source"), "kind": row["kind"],
+            # a request that never passed has no question: its kind is the one the Planner first wrote, when it is one
+            "id": row["id"], "step_id": row["step_id"], "source": brief.get("source"),
+            "kind": row["kind"] or (brief.get("asked") if brief.get("asked") in _KINDS else None),
             "attempt": row["attempt"] if row["attempt"] is not None else brief.get("attempt"),
             "state": row["state"], "failure": result.get("failure"), "rounds": row["rounds"], "returns": row["returns"],
             "spent_usd": float(row["spent_usd"]), "status": advice.get("status"),
@@ -107,7 +119,37 @@ async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
             "answers": [{"question_id": a["question_id"], "conclusion": a["conclusion"],
                          "confidence": a.get("confidence")} for a in advice.get("answers", [])],
             "adoption": row["adoption"], "unlocked": row["unlocked"],
+            "question": question, "needs_info": list(result.get("needs_info") or []),
+            "advice": advice or None,
+            "adoption_items": [{"ref": i.get("ref"), "use": i.get("use"), "why": i.get("why", "")}
+                               for i in detail.get("items", [])],
             "created_at": row["created_at"].isoformat(),
-            "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None,
+            "finished_at": ended.isoformat() if ended else None,
+            "duration_s": round((ended - row["created_at"]).total_seconds(), 1) if ended else None,
         })
     return consults
+
+
+async def summary_line(task_id: str, *, pool: asyncpg.Pool | None = None) -> str | None:
+    """The line a task's summary gives its consults of the advisor (the advisor RFC, section 14): how many, what
+    they spent, the points the Planner took and the consults whose attempt then passed, and the steps whose
+    checkpoint consult did not finish; None for a task without one."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        """SELECT count(*) AS consults, COALESCE(sum(s.spent_usd), 0) AS spent,
+                  COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(a.adoption_detail->'items') i
+                                 WHERE i->>'use' IN ('adopted', 'partial'))), 0) AS taken,
+                  count(*) FILTER (WHERE a.unlocked) AS helped,
+                  array_remove(array_agg(DISTINCT st.step_key) FILTER (
+                      WHERE s.brief->>'source' = 'checkpoint' AND s.state <> 'answered'
+                      AND s.finished_at IS NOT NULL), NULL) AS incomplete
+             FROM agent_spawns s LEFT JOIN advisor_advice a ON a.spawn_id = s.id
+             LEFT JOIN task_steps st ON st.id = s.step_id
+            WHERE s.task_id = $1 AND s.kind = 'advisor'""", task_id)
+    if not row["consults"]:
+        return None
+    line = (f"请教 advisor {row['consults']} 次，花费 {float(row['spent']):.2f} 美元，采纳 {row['taken']} 条，"
+            f"其中 {row['helped']} 条帮步骤通过")
+    if row["incomplete"]:
+        line += f"；检查点请教未完成：{', '.join(sorted(row['incomplete']))}"
+    return line

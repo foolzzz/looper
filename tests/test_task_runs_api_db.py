@@ -51,9 +51,11 @@ def test_runs_are_compact_rows_matching_the_records(monkeypatch: pytest.MonkeyPa
         assert len(str(runs)) < 3000
         for run in runs:
             assert set(run) == {"id", "role", "agent_id", "step_id", "status", "created_at", "runtime", "model",
-                                "effort", "profile", "task_role"}
+                                "effort", "profile", "task_role", "kind", "parent_record_id"}
 
         assert [r["task_role"] for r in runs] == [None, None, defined, None, None]
+        assert [(r["kind"], r["parent_record_id"]) for r in runs] == [
+            ("planner", None), ("worker", None), ("reviewer", None), ("worker", None), ("worker", None)]
 
         by_id = {r["id"]: r for r in await llm_records.list_records(task_id="task-a", pool=pool)}
         for run in runs:

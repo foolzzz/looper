@@ -879,9 +879,10 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
     from .tiers.journal import progress_notes
 
     ran_as = run_roles(await list_task_runs([task_id]), raw.get("steps", []))
-    from ..db.advisor_advice import consults_view
+    from ..db.advisor_advice import consults_view, summary_line
 
     consults = await consults_view(task_id)
+    consult_line = await summary_line(task_id) if consults else None
     overrides = await profile_overrides(task_id)
     versions = await requirement_versions(task_id)
     actions = await manager_actions(task_id)
@@ -965,7 +966,7 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         # in a task with such runs.
         **({"run_roles": ran_as} if ran_as else {}),
         # Its Planner's consults of the advisor, oldest first (advisor_advice.consults_view); only in a task with some.
-        **({"advisor": {"consults": consults}} if consults else {}),
+        **({"advisor": {"consults": consults, "summary": consult_line or ""}} if consults else {}),
         "origin_channel_id": raw.get("origin_channel_id", ""),
         "result_summary": raw.get("result_summary"),
         "process_record": raw.get("process_record"),

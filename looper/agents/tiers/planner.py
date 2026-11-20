@@ -5501,6 +5501,7 @@ class PlannerAgent:
         judgments = [e for e in plan.journal if e.kind is JournalKind.REVIEW_ADJUDICATED]
         if judgments:
             summary += "\n\n## Review adjudications\n" + "\n".join(f"- {e.step}: {e.summary}" for e in judgments)
+        summary += await self._advisor_summary()
         process = await self._process_record(plan)
         if process is not None:
             summary += "\n\n" + workflows.process_record_summary(process)
@@ -5521,6 +5522,20 @@ class PlannerAgent:
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
+
+    async def _advisor_summary(self) -> str:
+        """The task's consults of the advisor, as a line for its summary (``advisor_advice.summary_line``); empty
+        without the advisor or a consult."""
+        if not self._execution.advisor_on:
+            return ""
+        from ...db import advisor_advice
+
+        try:
+            line = await advisor_advice.summary_line(self._task_id)
+        except Exception:
+            logger.warning("task %s: cannot read its consults for its summary", self._task_id, exc_info=True)
+            return ""
+        return f"\n\n## Advisor\n{line}" if line else ""
 
     async def _cap_reached(self) -> float | None:
         """The task's cap once spent, or None when under it or its cost cannot be read."""
@@ -5666,6 +5681,7 @@ class PlannerAgent:
         summary = closing_note(plan.fail_reason or "A step failed and the Planner could not go on.",
                                ((s.label, s.status, s.result) for s in plan.steps),
                                process=workflows.process_record_summary(process) if process is not None else "")
+        summary += await self._advisor_summary()
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
