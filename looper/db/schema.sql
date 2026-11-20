@@ -1982,7 +1982,7 @@ CREATE TABLE IF NOT EXISTS intents (
     chat_id       TEXT NOT NULL,                       -- the chat of its first source
     project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
     workflow_key  TEXT,                                -- a workflows.key, checked when it builds a task
-    merged_into   BIGINT REFERENCES intents(id) ON DELETE CASCADE,
+    merged_into   BIGINT,                              -- its key and its detaching are the intent merges block's
     task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     flagged       BOOLEAN NOT NULL DEFAULT false,      -- one of its sources is in its run's instructions_seen
     expires_at    TIMESTAMPTZ,                         -- 24 hours after its latest push; NULL while never pushed
@@ -2064,3 +2064,21 @@ INSERT INTO intent_type_versions (type_key, version, name, guidance, priority, e
      'urgent', 'builtin')
 ON CONFLICT DO NOTHING;
 -- message leads end
+
+-- An intent merged into another is its own matter, made from its own messages: deleting the intent it was merged
+-- into (its messages deleted, its chat purged, any code path) makes it pending again instead of deleting it. The key
+-- takes no action of its own, so a path that skipped the trigger would fail rather than cascade. connection.py applies
+-- this block to databases whose leads block predates it (their key cascaded), so keep it between the markers and
+-- idempotent.
+-- intent merges begin
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_merged_into_fkey;
+ALTER TABLE intents ADD CONSTRAINT intents_merged_into_fkey FOREIGN KEY (merged_into) REFERENCES intents(id);
+CREATE OR REPLACE FUNCTION intents_detach_merged() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE intents SET state = 'pending', merged_into = NULL, updated_at = now() WHERE merged_into = OLD.id;
+    RETURN OLD;
+END $$;
+DROP TRIGGER IF EXISTS intents_detach_merged ON intents;
+CREATE TRIGGER intents_detach_merged BEFORE DELETE ON intents
+    FOR EACH ROW EXECUTE FUNCTION intents_detach_merged();
+-- intent merges end

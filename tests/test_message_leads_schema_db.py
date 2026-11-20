@@ -39,12 +39,16 @@ def test_deleting_any_source_message_deletes_the_lead_and_the_intent_made_from_i
         assert await pool.fetchval("SELECT count(*) FROM message_lead_people WHERE lead_id = $1", both) == 0
         assert await pool.fetchval("SELECT count(*) FROM message_leads WHERE id = $1", kept) == 1
         await pool.execute("DELETE FROM source_events WHERE seq = $1", first)
-        # The intent goes, with its posts and the intent merged into it (the same matter).
-        assert await pool.fetchval("SELECT count(*) FROM intents WHERE id = ANY($1::bigint[])", [target, merged]) == 0
+        # The intent goes with its posts; the one merged into it was made from other messages and stays, pending.
+        assert await pool.fetchval("SELECT count(*) FROM intents WHERE id = $1", target) == 0
         assert await pool.fetchval("SELECT count(*) FROM intent_posts") == 0
+        assert dict(await pool.fetchrow("SELECT state, merged_into FROM intents WHERE id = $1", merged)) == {
+            "state": "pending", "merged_into": None}
         await pool.execute("DELETE FROM message_leads WHERE id = $1", kept)  # a lead deleted itself takes its sources
         assert await pool.fetchval("SELECT count(*) FROM message_lead_sources") == 0
         assert await pool.fetchval("SELECT count(*) FROM source_events WHERE seq = $1", other) == 1
+        await pool.execute("DELETE FROM source_events WHERE seq = $1", other)  # and its own message takes it
+        assert await pool.fetchval("SELECT count(*) FROM intents WHERE id = $1", merged) == 0
 
     run_db(check, monkeypatch, timeout=20)
 
@@ -187,3 +191,48 @@ def test_search_states_order_and_paging(monkeypatch):
             await found(state="stale")
 
     run_db(check, monkeypatch, timeout=20)
+
+
+def test_an_intent_merged_into_a_deleted_one_is_pending_again_whatever_deletes_it(monkeypatch):
+    async def check(pool):
+        ours, theirs, shared = await _events(pool, "please fix the login page", "same login issue here", "both")
+        target = await sup.intent(pool, [ours])
+        elsewhere = await sup.intent(pool, [theirs], state="merged", merged_into=target)
+        same_message = await sup.intent(pool, [shared], state="merged", merged_into=target)
+        await pool.execute("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2)", target, shared)
+        await pool.execute("DELETE FROM intents WHERE id = $1", target)  # a code path deleting the target itself
+        assert dict(await pool.fetchrow("SELECT state, merged_into, handled_at FROM intents WHERE id = $1",
+                                        elsewhere)) == {"state": "pending", "merged_into": None, "handled_at": None}
+        target = await sup.intent(pool, [ours])
+        await pool.execute("UPDATE intents SET state = 'merged', merged_into = $2 WHERE id = ANY($1::bigint[])",
+                           [elsewhere, same_message], target)
+        await pool.execute("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2)", target, shared)
+        await pool.execute("DELETE FROM source_events WHERE seq = $1", shared)  # a message both were made from
+        assert await pool.fetchval("SELECT count(*) FROM intents WHERE id = ANY($1::bigint[])",
+                                   [target, same_message]) == 0
+        assert await pool.fetchval("SELECT state FROM intents WHERE id = $1", elsewhere) == "pending"
+        # The key itself never cascades: without the trigger, deleting a merge target fails instead.
+        assert await pool.fetchval("SELECT confdeltype FROM pg_constraint WHERE conname = 'intents_merged_into_fkey'") in ("a", b"a")
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_a_database_whose_merge_key_cascades_is_upgraded(monkeypatch):
+    async def check(pool):
+        await pool.execute(
+            "DROP TRIGGER intents_detach_merged ON intents; ALTER TABLE intents DROP CONSTRAINT intents_merged_into_fkey; "
+            "ALTER TABLE intents ADD CONSTRAINT intents_merged_into_fkey FOREIGN KEY (merged_into) REFERENCES intents(id) "
+            "ON DELETE CASCADE; DELETE FROM schema_migrations WHERE name = 'intent_merges'")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+        ours, theirs = await _events(pool, "please fix it", "same here")
+        target = await sup.intent(pool, [ours])
+        merged = await sup.intent(pool, [theirs], state="merged", merged_into=target)
+        await pool.execute("DELETE FROM source_events WHERE seq = $1", ours)
+        assert await pool.fetchval("SELECT state FROM intents WHERE id = $1", merged) == "pending"
+        await connection.ensure_schema(pool)  # and a second upgrade changes nothing
+
+    run_db(check, monkeypatch, timeout=30)
