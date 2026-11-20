@@ -17,17 +17,24 @@ tell me" has an answer. The rules, first match wins:
 
 The digest a deferred message goes into (``Decision.digest_date``) is named by the local date pushes resume on:
 the end of the next quiet hours (the next local day when there are none). With the system setting
-``delivery.enabled`` off (the default) no send point calls ``deliver``.
+``delivery.enabled`` off (the default) no send point calls ``deliver``; on, a send point calls ``decide``, which
+reads the policy and the chat's count, decides and records the decision in ``proactive_deliveries`` once per
+message.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
+logger = logging.getLogger(__name__)
+
 ENABLED_KEY = "delivery.enabled"
+# The user's IANA timezone, which the quiet hours and the day of the cap are in; without it, the server's own.
+TIMEZONE_KEY = "user.timezone"
 DEFAULT_QUIET_START = time(22, 0)
 DEFAULT_QUIET_END = time(8, 0)
 DEFAULT_DM_DAILY_CAP = 5
@@ -217,3 +224,47 @@ def deliver(delivery: Delivery, policy: DeliveryPolicy, state: DeliveryState) ->
 
 def _later(reason: Reason, policy: DeliveryPolicy, state: DeliveryState) -> Decision:
     return Decision(Outcome.DIGEST, reason, digest_date=digest_date(policy, state.now))
+
+
+# --- What a send point calls: the policy and the chat's count read, the decision made and recorded once ---
+
+
+async def load_policy() -> DeliveryPolicy:
+    """The operator's policy: the built-in rules in ``user.timezone``, else in the server's own zone (an unknown
+    name is logged and ignored)."""
+    from ..db import system_settings
+    from . import cron
+
+    name = (await system_settings.get_settings([TIMEZONE_KEY])).get(TIMEZONE_KEY)
+    if name:
+        try:
+            return DeliveryPolicy(timezone=cron.zone(name))
+        except ValueError:
+            logger.warning("%s is not a timezone (%r); the server's own applies", TIMEZONE_KEY, name)
+    return DeliveryPolicy(timezone=cron.zone(cron.local_zone_name()))
+
+
+async def decide(delivery: Delivery, *, dedupe_key: str, channel_id: str, chat: str,
+                 last_user_message_at: datetime | None, task_id: str | None = None, step_id: str | None = None,
+                 schedule_id: str | None = None, now: datetime | None = None) -> Decision:
+    """Decide on one proactive message and record the decision (``proactive_deliveries``). A message already
+    decided on (``dedupe_key``: the send point and its message, tried again) keeps its first decision. The decisions
+    on one chat are taken one at a time, so its daily cap holds across send points."""
+    from ..db import connection, proactive_deliveries as db
+
+    policy = await load_policy()
+    async with connection.get_pool().acquire() as conn, conn.transaction():
+        await db.lock_chat(conn, channel_id, chat)
+        if (row := await db.get(conn, dedupe_key)) is not None:
+            return Decision(Outcome(row["outcome"]), Reason(row["reason"]), row["counted"], row["digest_date"])
+        now = now or datetime.now(timezone.utc)
+        local_date = now.astimezone(policy.timezone).date()
+        state = DeliveryState(now, await db.counted_on(conn, channel_id, chat, local_date), last_user_message_at)
+        decision = deliver(delivery, policy, state)
+        await db.insert(conn, {
+            "dedupe_key": dedupe_key, "kind": delivery.kind.value, "urgency": delivery.urgency.value,
+            "channel_id": channel_id, "chat": chat, "chat_kind": delivery.chat.value, "task_id": task_id,
+            "step_id": step_id, "schedule_id": schedule_id, "outcome": decision.outcome.value,
+            "reason": decision.reason.value, "counted": decision.counted, "local_date": local_date,
+            "digest_date": decision.digest_date, "decided_at": now})
+    return decision
