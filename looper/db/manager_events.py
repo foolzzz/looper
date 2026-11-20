@@ -1,15 +1,18 @@
 """Completion events: one row per task end that has a chat to tell (manager completion ledger RFC).
 
 The row keeps the code notice the end would send (``fallback``) so that whatever happens to a later Manager turn,
-the notice goes out exactly as it always did. ``dedupe_key`` makes a replayed message record once.
+the notice goes out exactly as it always did. ``dedupe_key`` makes a replayed message record once. Every change of
+state is one ``UPDATE ... WHERE state = <the old one>``: when two callers move the same row, one of them does.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 
@@ -18,6 +21,8 @@ from .connection import get_pool
 Db = asyncpg.Pool | asyncpg.Connection
 
 RETENTION_DAYS = 30
+# The most events one completion turn tells.
+CLAIM_LIMIT = 10
 PRUNE_BATCH = 5000
 SUMMARY_HOURS = 24
 
@@ -55,8 +60,10 @@ async def record(*, manager_id: str, task_id: str, origin: str, target_kind: str
               "state": state, "reason": reason}
     marks = ", ".join(f"${n}" + ("::jsonb" if name in ("payload", "fallback") else "")
                       for n, name in enumerate(_COLUMNS, 1))
+    # A pending event is due at once (no gathering window yet).
     row = await db.fetchrow(
-        f"INSERT INTO manager_events ({', '.join(_COLUMNS)}) VALUES ({marks}) "
+        f"INSERT INTO manager_events ({', '.join(_COLUMNS)}, due_at) VALUES ({marks}, "
+        f"CASE WHEN ${_COLUMNS.index('state') + 1} = 'pending' THEN now() END) "
         "ON CONFLICT (dedupe_key) DO NOTHING RETURNING *", *(values[name] for name in _COLUMNS))
     if row is not None:
         return Recorded(dict(row), True)
@@ -71,6 +78,45 @@ async def mark_sent(event_id: int, *, pool: Db | None = None) -> None:
     await (pool or get_pool()).execute(
         "UPDATE manager_events SET sent_at = now(), finished_at = COALESCE(finished_at, now()) "
         "WHERE id = $1 AND sent_at IS NULL", event_id)
+
+
+async def claim(manager_id: str, channel_id: str, chat: str, batch: UUID, *, limit: int = CLAIM_LIMIT,
+                pool: Db | None = None) -> list[dict[str, Any]]:
+    """Take the chat's pending events (the oldest ``limit``) into the completion turn ``batch``; [] when there are
+    none (another caller took them, or they fell back)."""
+    rows = await (pool or get_pool()).fetch(
+        "UPDATE manager_events SET state = 'running', batch = $4, started_at = now() WHERE id IN ("
+        "SELECT id FROM manager_events WHERE manager_id = $1 AND channel_id = $2 AND chat = $3 AND state = 'pending' "
+        "ORDER BY id LIMIT $5 FOR UPDATE SKIP LOCKED) AND state = 'pending' RETURNING *",
+        manager_id, channel_id, chat, batch, limit)
+    return sorted((dict(row) for row in rows), key=lambda row: row["id"])
+
+
+async def deliver(batch: UUID, *, record_id: int | None, pool: Db | None = None) -> list[dict[str, Any]]:
+    """The completion turn's reply was handed to the channel: its running events are delivered."""
+    rows = await (pool or get_pool()).fetch(
+        "UPDATE manager_events SET state = 'delivered', record_id = $2, sent_at = now(), finished_at = now() "
+        "WHERE batch = $1 AND state = 'running' RETURNING *", batch, record_id)
+    return [dict(row) for row in rows]
+
+
+async def fall_back(*, reason: str, batch: UUID | None = None, target: Sequence[str] | None = None,
+                    states: Sequence[str] = ("running",), record_id: int | None = None,
+                    pool: Db | None = None) -> list[dict[str, Any]]:
+    """Move events to ``fallback`` with ``reason`` and answer them, oldest first, for the caller to send their code
+    notices: the running events of ``batch``, or the events of the chat ``target`` (manager, channel, chat) still in
+    ``states``. Moved once: a second caller gets nothing."""
+    if (batch is None) == (target is None):
+        raise ValueError("give a batch or a target")
+    if batch is not None:
+        where, args = "batch = $3", [batch]
+    else:
+        where, args = "manager_id = $3 AND channel_id = $4 AND chat = $5", list(target or ())
+    rows = await (pool or get_pool()).fetch(
+        "UPDATE manager_events SET state = 'fallback', reason = $1, finished_at = now(), "
+        f"record_id = COALESCE($2, record_id) WHERE {where} AND state = ANY(${len(args) + 3}::text[]) RETURNING *",
+        reason, record_id, *args, list(states))
+    return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
 async def prune(conn: Db, before: datetime) -> int:

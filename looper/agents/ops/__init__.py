@@ -97,9 +97,19 @@ class TurnState(str, Enum):
     ENDED = "ended"
 
 
+class TurnOrigin(str, Enum):
+    """Why a Manager turn runs: a user's message (``user``), Claude on its own (``own``), or Looper telling the chat
+    that tasks ended (``completion``). Only a user's turn changes anything."""
+
+    USER = "user"
+    OWN = "own"
+    COMPLETION = "completion"
+
+
 @dataclass
 class Turn:
-    """The Manager turn calls belong to: the message it answers and its chat, or one Claude runs on its own.
+    """The Manager turn calls belong to: the message it answers and its chat, one Claude runs on its own, or a
+    completion turn (``origin``).
 
     ``blocks`` is what Looper itself adds to the turn's reply, after Claude's
     words: text code wrote (a task's configuration, what a confirmation is
@@ -132,10 +142,17 @@ class Turn:
     client_id: str | None = None
     client_name: str | None = None
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
+    # Why the turn runs; by default a user's when it answers a message, else Claude's own.
+    origin: TurnOrigin | None = None
+
+    def __post_init__(self) -> None:
+        if self.origin is None:
+            self.origin = TurnOrigin.USER if self.message_id is not None else TurnOrigin.OWN
 
     @property
     def autonomous(self) -> bool:
-        return self.message_id is None
+        """It answers no user's message: its calls only read (a change answers ``needs_user_turn``)."""
+        return self.origin is not TurnOrigin.USER
 
     @property
     def chat_key(self) -> tuple[str | None, str | None, str | None]:
