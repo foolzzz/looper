@@ -360,12 +360,16 @@ async def _confirming(call: Call) -> str | None:
         after = {"path": str(config.path) if config else None,
                  "writable": list(config.writable) if config else [],
                  "rules_file": config.rules_file if config else None}
+        manager_read = bool(config and config.manager_read)
         return "\n".join([
             "要修改知识库设置吗？",
             f"- 目录：{before['path'] or '未配置'} → {after['path'] or '未配置'}",
             f"- 可写目录：{before_folders} → {', '.join(after['writable']) or '无'}",
             f"- 规则文件：{before['rules_file'] or '无'} → {after['rules_file'] or '无'}",
+            *([f"- 管家在你自己的聊天里读笔记：{'是' if before.get('manager_read') else '否'} → "
+               f"{'是' if manager_read else '否'}"] if manager_read or before.get("manager_read") else []),
             "开着知识库的项目里，任务的 agent 可以读这个目录里的全部笔记，并直接写入可写目录（每次写入是一次 git 提交）。",
+            *(["默认管家可以在控制台和你本人的私聊里搜索、读取这些笔记（只读），群聊里没有这个工具。"] if manager_read else []),
         ])
     if call.arguments["action"] != "set":
         return None
