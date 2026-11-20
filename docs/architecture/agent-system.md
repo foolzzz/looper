@@ -3581,9 +3581,10 @@ channel allowlists, missing Claude session identities, the exact pre-rename
 system harness sentence, accounting basis, and gate channel ids. User files
 and other historical rows stay.
 
-`serve` takes a verified full custom-format `pg_dump` before that conversion.
-A schema-only dump or a config export cannot restore history. Backup failure
-stops the upgrade. `--skip-backup` is refused for this registry upgrade. The
+`serve` takes a verified custom-format `pg_dump` before that conversion. The
+dump keeps every table's schema and leaves out the rows of `source_events`
+(message bodies). A schema-only dump or a config export cannot restore history.
+Backup failure stops the upgrade. `--skip-backup` is refused for this registry upgrade. The
 dump is proved readable by, in order, `backup.verify_command` (dump on stdin),
 `docker exec -i <container> pg_restore --list` when `backup.command` is
 `docker exec [options] <container> pg_dump ...`, or the local `pg_restore`.
@@ -3608,7 +3609,8 @@ also defers the online steps with a warning until a start outside one. The lock
 is released on completion, failure or cancellation (and on connection loss).
 
 Rollback means stopping the new service, leaving the upgraded database
-unchanged, restoring the verified full backup into a separate database, and
+unchanged, restoring the verified schema-change backup into a separate database
+(it has the `source_events` schema and not its rows), and
 pointing the guarded older release at that database. Do not downgrade or
 mutate the original database. Writes made after the backup stay only in the
 upgraded database. Import preview is not evidence that a database upgrade is
@@ -4633,8 +4635,18 @@ source that is `off`, the server does one query per tick.
   bridging on or off (the dashboard's switch). `looper msgflow import --days N
   [--dry-run] [--source ID]` reads every file from its start and stores the last
   N days; `--dry-run` rolls back what it counted.
+- **Backups:** a schema-change `pg_dump` keeps the `source_events` schema and
+  leaves out its rows. `[backup] messages = "daily"` (off unless the ops file
+  says so; no environment variable) writes `looper-<database>-<stamp>.messages.dump`
+  in the same `backups/` directory at most once a day and keeps the newest 7.
+  That suffix cannot match a schema-change dump (`looper-<database>-<stamp>.dump`),
+  so each rotation deletes only its own files. Stopping the service terminates
+  the daily `pg_dump`, kills it if it is still running, and reaps it.
 - **Not yet:** a retention job for bodies already stored, deleting a chat, the
-  collector.
+  collector. There is no deletion confirmation yet. When exclude-and-delete
+  exists, its confirmation says delivered output remains, and that a daily
+  message backup keeps 7 copies and then ages them out (with the backup off,
+  nothing keeps the original text).
 
 ### Subscriptions: a message stream on a time rule
 
@@ -5644,8 +5656,10 @@ Deployment settings are the ops file, `<runtime root>/ops/server.toml`
 another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
-in) and `verify_command` (an argv array that lists the dump read on stdin like
-`pg_restore --list`), `[operator_notes] root` (an absolute path),
+in), `verify_command` (an argv array that lists the dump read on stdin like
+`pg_restore --list`) and `messages` (`"off"` by default, omitted from the file;
+`"daily"` dumps `source_events` once a day into the same backups directory and
+keeps 7 copies; file only), `[operator_notes] root` (an absolute path),
 `[projects] root` (an absolute parent directory for new projects; file only,
 unset by default), and
 `[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only), and

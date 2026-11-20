@@ -446,7 +446,8 @@ def test_the_password_reaches_pg_dump_only_through_its_environment(
     db_backup.back_up(db_backup.find_dumper(16), "postgresql://u:p%40ss@127.0.0.1:1/loopx", tmp_path / "backups")
 
     dump = json.loads(calls.read_text().splitlines()[-1])
-    assert dump == {"argv": ["--format=custom", "--no-password", "--dbname=postgresql://u@127.0.0.1:1/loopx"],
+    assert dump == {"argv": ["--format=custom", "--no-password", "--exclude-table-data=source_events",
+                            "--dbname=postgresql://u@127.0.0.1:1/loopx"],
                     "PGPASSWORD": "p@ss"}
 
 
@@ -462,7 +463,7 @@ def test_a_backup_command_runs_as_given_with_the_database_filled_in(
     path, checked = db_backup.back_up(dumper, "postgresql://alice:pw@127.0.0.1:1/loopx", tmp_path / "backups")
 
     assert [json.loads(line)["argv"] for line in calls.read_text().splitlines()] == [
-        ["--format=custom", "-U", "alice", "loopx"]]
+        ["--format=custom", "-U", "alice", "loopx", "--exclude-table-data=source_events"]]
     assert path.read_bytes() == b"PGDMP offline" and "listed" in checked
 
 
@@ -585,7 +586,8 @@ def test_a_docker_backup_is_dumped_and_listed_inside_the_container(tmp_path, mon
 
     assert checked == "listed with docker exec -i pgc pg_restore --list"
     dump, listing = _docker_calls(calls)
-    assert dump["argv"] == ["exec", "pgc", "pg_dump", "--format=custom", "-U", "alice", "loopx"]
+    assert dump["argv"] == ["exec", "pgc", "pg_dump", "--format=custom", "-U", "alice", "loopx",
+                            "--exclude-table-data=source_events"]
     assert listing == {"argv": ["exec", "-i", "pgc", "pg_restore", "--list"], "stdin": "PGDMP docker"}
     assert path.read_bytes() == b"PGDMP docker"
 
