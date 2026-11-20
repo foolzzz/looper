@@ -863,6 +863,9 @@ async def _run_agent_system_watched(
             drain = DrainState()  # A new control plane always starts serving; drain is never stored.
             scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
                                   runtime_root=runtime_root, drain=drain)
+            # The advisor's alerts go to the operator's chat through the same channels.
+            from . import advisor_alerts
+            advisor_alerts.configure(registry.notify)
             # It notes the user gates that have waited for the user for their project's reminder interval; the courier
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()

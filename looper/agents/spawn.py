@@ -70,6 +70,7 @@ class ChildFailure(str, Enum):
     TIMEOUT = "timeout"
     BUDGET = "budget"  # it reached its cap, cost more, its cost is unknown, or too little was left to start it
     REFUSED = "refused"  # its model refused, or another model answered
+    RATE_LIMITED = "rate_limited"  # its model's rate limit or quota stopped it (HTTP 429)
 
 
 @dataclass(frozen=True)
@@ -242,6 +243,8 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
         failed = ChildFailure.TIMEOUT, f"no output within {child.timeout_s:g} s"
     elif result is None:
         failed = ChildFailure.RUNTIME, "its run ended without a result"
+    elif result.get("api_error_status") == 429:
+        failed = ChildFailure.RATE_LIMITED, "its model's rate limit or quota stopped it"
     elif (refused := _refusal(result, launch.model)) is not None:
         failed = ChildFailure.REFUSED, refused
     elif launch.runtime.budget_error(result) is not None:

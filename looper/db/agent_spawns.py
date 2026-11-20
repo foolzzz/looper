@@ -150,3 +150,15 @@ async def has_source(step_id: str, source: str, *, pool: asyncpg.Pool | None = N
     pool = pool or get_pool()
     return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM agent_spawns WHERE step_id = $1 "
                                     "AND brief->>'source' = $2)", step_id, source))
+
+
+async def asked(task_id: str, step_id: str | None, *, kind: str | None = None, evidence: str,
+                states: tuple[str, ...] = (), pool: asyncpg.Pool | None = None) -> bool:
+    """Whether the task has a consult about ``step_id`` (None: the plan) asked with ``evidence``, of ``kind`` when
+    given, in one of ``states`` when given."""
+    pool = pool or get_pool()
+    return bool(await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM agent_spawns WHERE task_id = $1 AND step_id IS NOT DISTINCT FROM $2 "
+        "AND brief->>'evidence' = $3 AND ($4::text IS NULL OR brief->>'asked' = $4) "
+        "AND (cardinality($5::text[]) = 0 OR state = ANY($5::text[])))",
+        task_id, step_id, evidence, kind, list(states)))
