@@ -42,7 +42,7 @@ class ManagerTurnTools:
 
     async def specs(self) -> list[ToolSpec]:
         return [ToolSpec(tool["name"], tool["description"], tool["inputSchema"])
-                for tool in await self._ops.current_listing(self._ops.bound(self._binding))]
+                for tool in await self._ops.current_listing()]
 
     async def call(self, call: ToolCall) -> ToolOutcome:
         arguments = object_arguments(call.arguments)

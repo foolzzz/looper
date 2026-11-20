@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents import leads_model
 from looper.agents.profile_registry import BUILTIN_PROFILE, RegistryError, RegistryNotFound
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, adapter
 from tests.runtime_model_helpers import resolved_profile, with_model_name
@@ -56,7 +57,7 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worke
     monkeypatch.setattr(module.db_profiles, "get_api_key", AsyncMock(return_value="test-only"))
     monkeypatch.setattr(module.db_roles, "get_config", AsyncMock(return_value={
         "system_prompt": "Configured role", "default_prompt": "Configured role"}))
-    monkeypatch.setattr(module.leads_model, "leads_enabled", AsyncMock(return_value=False))
+    monkeypatch.setattr(leads_model, "leads_enabled", AsyncMock(return_value=False))
     return module, profile, layers
 
 
@@ -129,7 +130,7 @@ def test_manager_preview_matches_live_directory_guidance(monkeypatch, tmp_path, 
     from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT, ManagerAgent, ManagerConfig
 
     module, profile, _ = _dependencies(monkeypatch, role="manager")
-    monkeypatch.setattr(module.leads_model, "leads_enabled", AsyncMock(return_value=leads))
+    monkeypatch.setattr(leads_model, "leads_enabled", AsyncMock(return_value=leads))
     monkeypatch.setattr(projects, "projects_root", lambda: root)
     role = "Custom role\n" + DEFAULT_SYSTEM_PROMPT if custom else DEFAULT_SYSTEM_PROMPT
     monkeypatch.setattr(module.db_roles, "get_config", AsyncMock(return_value={

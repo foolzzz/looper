@@ -54,7 +54,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ... import child_env
-from .. import chat_settings, leads_model
+from .. import chat_settings
 from ...db import manager_actions as db_actions, managers as db_managers, tasks as db_tasks, workflows as db_workflows
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
@@ -62,7 +62,7 @@ from ..operator_identity import is_operator, operator_sender_id
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from .config import TOOLS as CONFIG_TOOLS, project_tool
-from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH
+from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
 from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool, task_workflow_tool
@@ -313,11 +313,7 @@ class ManagerOps:
         other Manager's as it is. Off, the default Manager's is what it was before leads existed."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
             return scope
-        try:
-            wanted = await leads_model.leads_enabled()
-        except Exception:  # no database to read the switch from: leads count as off
-            logger.debug("could not read leads.enabled", exc_info=True)
-            wanted = False
+        wanted = await leads_on()
         if wanted == (LEADS_TOOL in scope.tools):
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name != LEADS_TOOL]
@@ -330,18 +326,11 @@ class ManagerOps:
         return [task_directory_tool(project_tool(tool)).listing() for tool in self._scope.tools.values()
                 if _audience(tool) is Audience.ANY]
 
-    @property
-    def running_turn(self) -> Turn | None:
-        """The turn running now (``begin_turn``), if any."""
-        return self._turn
-
-    def bound(self, binding: str | None) -> Turn | None:
-        """The turn ``binding`` names, if Looper gave it (``register``)."""
-        return self._bindings.get(binding) if binding else None
-
     async def current_listing(self, turn: Turn | None = None) -> list[dict[str, Any]]:
-        """The tools the Manager has now (``current_scope``), as ``tools/list`` names them, for ``turn``: a tool only
-        the user's own turns run is listed only in such a turn, never with no turn."""
+        """The tools the Manager has now (``current_scope``), as ``tools/list`` names them, for ``turn`` (by default
+        the one running, as MCP's ``tools/list`` and the API runtime ask): a tool only the user's own turns run is
+        listed only in such a turn, never with no turn running."""
+        turn = turn or self._turn
         tools = list((await self.current_scope()).tools.values())
         if any(_audience(tool) is Audience.OPERATOR for tool in tools) and not (
                 turn is not None and await _operator_turn(turn)):

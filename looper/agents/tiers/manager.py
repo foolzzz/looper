@@ -2143,7 +2143,7 @@ class ManagerAgent:
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
             contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
-        elif self._leads_on:
+        elif getattr(self, "_leads_on", False):  # a Manager without the switch read is leads-off
             contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
         return build_system_prompt(
             harness=agent_settings.harness,

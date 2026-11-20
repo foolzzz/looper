@@ -91,6 +91,16 @@ class _Answer(dict):  # type: ignore[type-arg]
         self.lead_ids = list(lead_ids)
 
 
+async def leads_on() -> bool:
+    """Whether leads are on for what Looper offers a model (the tool, the contract): ``leads.enabled``, and off when
+    the switch cannot be read (no database)."""
+    try:
+        return await leads_model.leads_enabled()
+    except Exception:
+        logger.debug("could not read leads.enabled; leads count as off", exc_info=True)
+        return False
+
+
 async def _run(call: Call) -> dict[str, Any]:
     from ..leads import search
     from ..subscriptions import strip_mentions

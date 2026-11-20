@@ -1060,7 +1060,7 @@ class AgentHTTPServer:
                                                             "required"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
             try:
-                writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing(ops.running_turn)}))
+                writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing()}))
             except OpError as exc:
                 writer.write(_json_response(HTTP_503, {"error": str(exc)}))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":

@@ -256,12 +256,12 @@ def test_the_tool_is_offered_only_in_the_users_own_turns(monkeypatch: pytest.Mon
         assert TOOL in _names(await ops.current_listing(_web())) and TOOL in _names(await ops.current_listing(dm))
         # No turn: none. MCP's tools/list (as the endpoint asks): the running turn's.
         assert TOOL not in _names(await ops.current_listing())
-        assert TOOL not in _names(await ops.current_listing(ops.running_turn))
+        assert TOOL not in _names(await ops.current_listing())
         ops.begin_turn(turn, binding=None if turn.autonomous else "b-other")
-        assert TOOL not in _names(await ops.current_listing(ops.running_turn))
+        assert TOOL not in _names(await ops.current_listing())
         ops.end_turn(turn)
         ops.begin_turn(_web(), binding="b-web")
-        assert TOOL in _names(await ops.current_listing(ops.running_turn))
+        assert TOOL in _names(await ops.current_listing())
 
     run_with_channel_configs(test, monkeypatch)
 
