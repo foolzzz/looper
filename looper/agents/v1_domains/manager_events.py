@@ -12,7 +12,7 @@ RESULTS = {}
 OPERATIONS = (
     Operation("manager_events.summary", "POST", "/api/v1/manager_events/summary",
               "Count the task-end completion events of the last 24 hours, by state and reason.",
-              "Count the task-end completion events of the last 24 hours, by state and reason, with what their "
+              "Count the task-end completion events of the last 24 hours, by state and reason. With what their "
               "completion turns cost, the events waiting now and whether the last turns all fell back. Counts "
               "only; never a task's text.", _object({}, closed=True), SUMMARY, risk="read", operator_only=True),
 )

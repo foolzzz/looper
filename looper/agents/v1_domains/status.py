@@ -64,8 +64,9 @@ OPERATIONS = (
               "Read dashboard status.", _object({}, closed=True), _STATUS, risk="read"),
     Operation("system.health", "POST", "/api/v1/system/health",
               "Read the server's liveness: its scheduler's latest tick, and the Manager's completion turns.",
-              "Read the server's liveness: its scheduler's latest tick, and the Manager's completion turns "
-              "(waiting events, the last 24 hours by state and reason, and whether they keep falling back).",
+              "Read the server's liveness: its scheduler's latest tick, and the Manager's completion turns. The "
+              "completion counts are the waiting events, the last 24 hours by state and reason, and whether the "
+              "turns keep falling back, as the completion service last read them.",
               _object({}, closed=True), _HEALTH, risk="read"),
 )
 
