@@ -4789,9 +4789,20 @@ here pushes: the intent push service polls `intents`.
 - **The window is oldest first and drops nothing**
   (`db.subscriptions.extraction_window`): at most `max_events`, and the cursor
   moves only to the last event read. A full window ends the run with `more`, and
-  the scheduler fires it again at once, at most six times in a row (the daily
+  the scheduler fires it again at once, at most six times in a row, and only
+  while the subscription is still enabled and its kind's switch on (the daily
   budget still admits each run); an input over 60,000 characters leaves its
   newest events for the next run the same way.
+- **A run is pinned to what was confirmed.** Its plan records, in
+  `schedule_runs.execution_snapshot`, the subscription fields it reads with
+  (source, kind, chat lists, age, size, text length), the `config_version` and
+  the `target_confirmed_at` it was planned under; it reads its window with
+  those. Before the processor starts, and again in the transaction that stores
+  (the schedule's row locked, so a change or a confirmation either committed
+  before or waits), the confirmation must still be that one, for that version,
+  with the kind's switch on and the processor launched with the confirmed
+  Profile; otherwise the run is `cancelled`, nothing is stored and the cursor
+  stays.
 - **The input** (`extraction.render`): the participants `P1…` (the user marked
   `（用户本人）`, an alert bot `（告警机器人）`), for leads the known active leads
   `L1…` of the window's chats from the last 14 days (40 lines, 8,000
@@ -4810,12 +4821,19 @@ here pushes: the intent push service polls `intents`.
   that exist in the input with the right letter, at least one `m` source, not
   both `supersedes` and `same_as`, a valid date, and, for an intent whose
   sources are all alert-bot messages, the `alert_triage` type; a bad one is
-  dropped and counted by reason, unknown fields are ignored, at most 50 items
-  are read, and a lead's `valid_until` is the end of its day, clamped to
-  [tomorrow, now + `leads.valid_days`].
+  dropped and counted by reason (a value of the wrong type is its field's reason,
+  anything else unforeseen `malformed`: one bad item never fails the window),
+  unknown fields are ignored, at most 50 items are read, and a lead's
+  `valid_until` is the end of its day, clamped to [tomorrow, now +
+  `leads.valid_days`].
 - **Storing** is one transaction with the run's end and the cursor, its sources
   locked first (a deleted one is left out; with no `m` source left the item is
-  `source_deleted`). A lead is new, or merged into the active lead it is
+  `source_deleted`), and their chats' rows `FOR SHARE`: an item with a source in
+  a chat excluded from the stream or from extraction is dropped
+  (`chat_excluded`). An exclusion updates that row and deletes what was
+  extracted from the chat in one transaction, so it either committed first
+  and nothing from the chat is written, or it waits and its delete sees what
+  was written. A lead is new, or merged into the active lead it is
   `same_as` (sources and people added, the later `valid_until`), and the active
   leads it `supersedes` become `superseded`; its people are the senders and the
   @-mentioned of its sources and the participants it is `about`. An intent is
@@ -4846,8 +4864,11 @@ here pushes: the intent push service polls `intents`.
   runs when it has some), and writes nothing. `--run --budget-usd X` runs the windows oldest
   first through the same rendering, processor, parsing and storing (leads
   marked `backfill`, no run), saves its progress after each window
-  (`leads.backfill.<schedule id>`) and stops before a window would pass the
-  budget; it resumes.
+  (`leads.backfill.<schedule id>`), caps each processor run at what is left of
+  the budget (or the subscription's own cap, if lower) and stops before a window
+  would pass it by the running mean; it resumes. One runner per subscription:
+  it holds an advisory lock (`looper.leads.backfill:<schedule id>`) from before
+  it reads its progress to its end, and a second one exits saying so.
 
 ### The ledger
 
