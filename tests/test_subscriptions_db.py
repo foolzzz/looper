@@ -13,81 +13,18 @@ from typing import Any
 
 import pytest
 
-from looper.agents import processor, subscription_runs
+from looper.agents import processor
 from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.agents.task_notice import TargetKind
 from looper.db import schedules as db_schedules, subscriptions as db_subs
 from tests.db_support import DSN, run_db, v1_api
 from tests.lark_cli_stand_in import lark_cli_stand_in  # noqa: F401  (a fixture)
-from tests.schedule_support import ScheduleEnv, run_scheduled, with_sender
-from tests.subscription_support import (DM, GROUP, SOURCE, INSTRUCTIONS, SUBSCRIPTION, UNBOUND_GROUP, Poster, add, lark_targets, minutes_ago, person, processor_says, scheduler_with, source)
+from tests.schedule_support import ScheduleEnv, with_sender
+from tests.subscription_support import (DM, GROUP, INSTRUCTIONS, SOURCE, SUBSCRIPTION, UNBOUND_GROUP, UPDATE, add, confirm, confirmed_at, cursor, fire, latest, minutes_ago, person, lark_targets, scenario, scheduler_with, source, started, version_of)
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 UTC = timezone.utc
 CREATE = "/api/v1/schedule_admin/create"
-UPDATE = "/api/v1/schedule_admin/update"
-
-
-async def started(env: ScheduleEnv, *, target: Any = {"channel": "lark", "chat": DM}, subscription: dict | None = None,
-                  enable: bool = True, **fields: Any) -> str:
-    """A subscription on the stream (its cursor at the source's end), enabled; its schedule id."""
-    await source(env.pool)
-    body = {"kind": "subscription", "requirement": INSTRUCTIONS, "run_budget_usd": 0.5, "notify": "failures",
-            "subscription": {**SUBSCRIPTION, **(subscription or {})}, **({"notify_target": target} if target else {}),
-            **fields}
-    sid = (await env.schedule(**body))["schedule_id"]
-    if enable:
-        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"enabled": True}})
-    return sid
-
-
-async def version_of(env: ScheduleEnv, sid: str) -> str:
-    view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
-    return view["subscription"]["config_version"]
-
-
-async def confirm(env: ScheduleEnv, sid: str) -> None:
-    """The operator confirms what the schedule's view shows."""
-    await env.ok("POST", "/api/v1/schedule_admin/confirm_target",
-                 {"schedule_id": sid, "config_version": await version_of(env, sid)})
-
-
-async def fire(env: ScheduleEnv, sid: str) -> dict[str, Any]:
-    """Make the schedule due, run one scheduler pass and the run it started; the run's row and its subscription's."""
-    await env.due(sid)
-    await env.scheduler.tick()
-    await env.scheduler.idle()
-    return await latest(env, sid)
-
-
-async def latest(env: ScheduleEnv, sid: str) -> dict[str, Any]:
-    row = dict(await env.pool.fetchrow("SELECT * FROM schedule_runs WHERE schedule_id = $1 "
-                                       "ORDER BY created_at DESC, id DESC LIMIT 1", sid))
-    stream = await env.pool.fetchrow("SELECT * FROM subscription_runs WHERE run_id = $1", row["id"])
-    return {**row, "stream": dict(stream) if stream else None}
-
-
-async def cursor(env: ScheduleEnv, sid: str) -> int:
-    return await env.pool.fetchval("SELECT cursor_seq FROM subscriptions WHERE schedule_id = $1", sid)
-
-
-async def confirmed_at(env: ScheduleEnv, sid: str) -> Any:
-    return await env.pool.fetchval("SELECT target_confirmed_at FROM subscriptions WHERE schedule_id = $1", sid)
-
-
-def scenario(test, monkeypatch, tmp_path, *, reply: str = "- 《Ops room》: someone spilled coffee"):
-    """Run ``test(env, poster, fake)`` with the Lark targets, a scheduler that pushes through ``poster`` and a
-    processor that answers ``reply``."""
-    fake = processor_says(monkeypatch, reply)
-    monkeypatch.setattr(subscription_runs, "RETRY_DELAY_SECONDS", 0)
-
-    async def body(env: ScheduleEnv) -> None:
-        await lark_targets(env.pool)
-        poster = Poster()
-        scheduler_with(env, poster=poster)
-        await test(env, poster, fake)
-
-    run_scheduled(body, monkeypatch, tmp_path)
 
 
 # --- Reading the stream ---
@@ -117,6 +54,8 @@ def test_the_window_is_the_filtered_events_newest_first_under_the_collectors_lin
         await source(env.pool)
         await person(env.pool, "ou_alice", "Alice")
         sid = await started(env)
+        sub = await db_subs.get(sid)
+        assert (sub["window"], sub["delivery_policy"]) == ("cursor", "per_run")
         for text, chat_id, kind, extra in [
                 ("old group", "oc_ops", "group", {"sent_at": minutes_ago(env, 30)}),
                 ("a topic", "oc_topic", "topic", {"sent_at": minutes_ago(env, 20), "chat_name": "Topic room"}),

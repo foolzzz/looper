@@ -106,6 +106,13 @@ async def _command_edit(row: Mapping[str, Any],
     return None
 
 
+def _subscription_for_manager(sub: Mapping[str, Any]) -> dict[str, Any]:
+    """A subscription as a Manager sees it: its settings and state, and how many rules it has; not the rules' chat ids
+    or patterns, the chats it lists, or the confirmation text."""
+    hidden = {"confirmation", "rules", "include_chats", "exclude_chats"}
+    return {**{k: v for k, v in sub.items() if k not in hidden}, "rules_count": len(sub.get("rules") or [])}
+
+
 def _run_listed(run: Mapping[str, Any]) -> dict[str, Any]:
     # A subscription run's summary is its output, and its error may carry what the messages said: a Manager, which
     # may be in a group chat, sees its state and cost only.
@@ -277,7 +284,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
         view = await _in_scope(call, (await answered(schedules.get_schedule(row["id"])))["schedule"])
         runs = await answered(schedules.list_runs(row["id"], {"limit": str(RUNS_SHOWN), "skips": "hide"}))
         return {"schedule": {**{k: v for k, v in view.items() if k not in {"last_run", "manager_id", "manager_name"}},
-                             **({"subscription": {k: v for k, v in view["subscription"].items() if k != "confirmation"}}
+                             **({"subscription": _subscription_for_manager(view["subscription"])}
                                 if view.get("subscription") else {}),
                              "requirement": clip(view["requirement"], 1_000)},
                 "latest_runs": [_run_listed(run) for run in await _runs_in_scope(call, runs["runs"])],

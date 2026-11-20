@@ -76,7 +76,7 @@ from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
 from . import subscriptions
-from .extraction import CATCH_UP_MAX, Skipped, kind_on as extraction_on
+from .extraction import CATCH_UP_MAX, kind_on as extraction_on
 from .subscription_runs import OwnApps, Poster, SubscriptionRuns
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 
@@ -859,7 +859,8 @@ class Scheduler:
         timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
                                                                       schedule["run_timeout_seconds"], conn)}
         if subscription:
-            return await self._start_subscription(conn, schedule, now, common=common, run_id=run_id, timeout=timeout)
+            return await self._start_subscription(conn, schedule, now, scheduled_for=firing.scheduled_for,
+                                                  common=common, run_id=run_id, timeout=timeout)
         if schedule["gate_command"]:
             from .schedule_templates import effective_schedule, fingerprint
             try:
@@ -882,25 +883,26 @@ class Scheduler:
         return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
 
     async def _start_subscription(self, conn: asyncpg.Connection, schedule: dict[str, Any], now: datetime, *,
-                                  common: Mapping[str, Any] | None, run_id: str | None,
+                                  scheduled_for: datetime, common: Mapping[str, Any] | None, run_id: str | None,
                                   timeout: Mapping[str, Any]) -> _Launched:
         """A subscription's firing: its window is fixed now. With nothing selected in it no agent starts, and the
         firing is a ``skipped_gate`` (counted on the day's latest one) with the cursor moved past the window; else the
         run is ``running`` and ``SubscriptionRuns.execute`` takes it after the commit."""
-        window = await self._subscriptions.plan(conn, schedule, now=now)
-        if window is None or isinstance(window, Skipped):
-            error = window.error if window is not None else "no new messages in the window"
+        window = await self._subscriptions.plan(conn, schedule, now=now, scheduled_for=scheduled_for)
+        if window is None or window.get("skip_reason"):
+            reason = window["skip_reason"] if window else "no new messages in the window"
             if run_id is None:
                 assert common is not None
                 skipped = await self._skip(conn, "skipped_gate", now, common, kind="subscription", fired_at=now,
-                                           error=error)
+                                           error=reason)
                 if subscriptions.is_extraction(schedule["subscription"]):  # a merged skip says the latest reason
-                    await db_schedules.update_run(conn, skipped, error=error)
+                    await db_schedules.update_run(conn, skipped, error=reason)
             else:
                 await db_schedules.update_run(conn, run_id, status="skipped_gate", fired_at=now, finished_at=now,
-                                              error=error)
+                                              error=reason)
                 skipped = run_id
-            await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
+            if window is None:  # only an empty window is a healthy skip; a daily claim says nothing about health
+                await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
             return _Launched(skipped)
         run_id = await self._put(conn, run_id, common, status=db_schedules.RUNNING, fired_at=now,
                                  runner_pid=os.getpid(), runner_started=self._subscriptions.instance, **timeout)

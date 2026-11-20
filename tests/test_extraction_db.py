@@ -30,7 +30,7 @@ from tests.subscription_support import DM, GROUP, SOURCE, Poster, add, chat, lar
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 UTC = timezone.utc
-ME = "ou_mesynthetic"  # the source's own user
+ME = DM  # the source's own user: the operator, whose direct chat is the only target private content may go to
 ALERT_BOT = "cli_alertsynthetic"
 ZONE = "America/Los_Angeles"
 
@@ -555,9 +555,16 @@ def test_a_run_whose_kind_is_turned_off_is_skipped_without_a_processor_and_keeps
     scenario(check, monkeypatch, tmp_path, reply="NONE")
 
 
-def test_an_intents_subscription_is_confirmed_only_with_a_direct_chat_target(monkeypatch, tmp_path):
+def test_an_intents_subscription_is_confirmed_only_with_the_operators_direct_chat(monkeypatch, tmp_path):
     async def check(env, poster, fake):
-        sid = await extractor(env, "intents", target={"channel": "lark", "chat": GROUP}, confirm=False)
+        await stream(env.pool)
+        fields = {**await preset_fields(env, "intents"), "cron": "*/5 * * * *", "timezone": ZONE}
+        # A group is refused as it is set: what intents read is private (the digest subscriptions' guard).
+        status, body = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": {
+            **fields, "notify_target": {"channel": "lark", "chat": GROUP}}})
+        assert status == 400 and "only to your own direct chat" in json.dumps(body)
+        sid = (await env.ok("POST", "/api/v1/schedule_admin/create",
+                            {"project_id": env.project_id, "fields": fields}))["schedule"]["schedule_id"]
         status, body = await confirm_it(env, sid)
         assert status == 400 and "needs a direct chat" in json.dumps(body)
         await env.ok("POST", "/api/v1/schedule_admin/update",
@@ -566,6 +573,24 @@ def test_an_intents_subscription_is_confirmed_only_with_a_direct_chat_target(mon
         assert status == 200 and (await view(env, sid))["subscription"]["target_confirmed_at"] is not None
         text = (await view(env, sid))["subscription"]["confirmation"]
         assert "单聊、@ 你的消息和你自己发的消息" in text and "- 推送目标：" in text and "（私聊）" in text
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("extra", [{"window": "lookback"}, {"delivery_policy": "daily"},
+                                   {"rules": [{"name": "直接", "chat_kinds": ["p2p"]}]}])
+def test_rules_lookback_and_daily_delivery_are_refused_for_an_extraction(monkeypatch, tmp_path, extra):
+    async def check(env, poster, fake):
+        await stream(env.pool)
+        fields = await preset_fields(env, "leads")
+        fields["subscription"].update(extra)
+        status, body = await env.call("POST", "/api/v1/schedule_admin/create",
+                                      {"project_id": env.project_id, "fields": fields})
+        assert status == 400 and "apply to push subscriptions only" in json.dumps(body)
+        sid = await extractor(env)
+        status, body = await env.call("POST", "/api/v1/schedule_admin/update",
+                                      {"schedule_id": sid, "fields": {"subscription": extra}})
+        assert status == 400 and "apply to push subscriptions only" in json.dumps(body)
 
     scenario(check, monkeypatch, tmp_path)
 

@@ -1165,6 +1165,9 @@ export interface SubscriptionInfo {
   text_max_chars: number;
   quiet_word: string;
   output_header: string;
+  render?: "lines_v1" | "lines_v2";
+  /** Selection rules (set through the API); empty: the filter above. */
+  rules?: { name: string; label: string; never_quiet: boolean }[];
   /** Where its next run starts reading. */
   cursor_seq: number;
   cursor_at: string | null;

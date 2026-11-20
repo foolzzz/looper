@@ -129,13 +129,6 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 @dataclass(frozen=True)
-class Skipped:
-    """A firing that reads nothing and leaves the cursor: why."""
-
-    error: str
-
-
-@dataclass(frozen=True)
 class Participants:
     """Who may appear in a window: names by open_id (``source_people``) and the user's own open_id."""
 
@@ -698,20 +691,20 @@ async def batch(conn: Any, kind: str, sub: Mapping[str, Any], picked: Mapping[st
 
 
 async def plan(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, now: datetime,
-               own_apps: Collection[str]) -> dict[str, Any] | Skipped | None:
-    """The run's window (``SubscriptionRuns.plan``): ``Skipped`` while its kind's switch (``leads.enabled``,
-    ``intents.enabled``) is off or the operator's confirmation does not hold for the configuration now (the cursor
-    stays, no processor starts); None when nothing in the window is read (the cursor moves past it); else the window
-    the run is recorded with."""
+               own_apps: Collection[str]) -> dict[str, Any] | None:
+    """The run's window (``SubscriptionRuns.plan``): a skip (``{"skip_reason": ...}``) while its kind's switch
+    (``leads.enabled``, ``intents.enabled``) is off or the operator's confirmation does not hold for the configuration
+    now (the cursor stays, no processor starts); None when nothing in the window is read (the cursor moves past it);
+    else the window the run is recorded with."""
     from . import subscriptions
 
     sub = schedule["subscription"]
     kind = subscriptions.output_kind(sub)
     if not await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(conn):
-        return Skipped(TURNED_OFF[kind])
+        return {"skip_reason": TURNED_OFF[kind]}
     version = await subscriptions.config_version(schedule)
     if sub["target_confirmed_at"] is None or sub.get("target_confirmed_version") != version:
-        return Skipped(NOT_CONFIRMED)
+        return {"skip_reason": NOT_CONFIRMED}
     to_seq = await db_subs.committed_seq(conn, sub["source_id"])
     from_seq = sub["cursor_seq"]
     if to_seq is None or to_seq <= from_seq:
@@ -724,7 +717,8 @@ async def plan(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, now: da
     snapshot = {"subscription": {name: sub[name] for name in PINNED}, "config_version": version,
                 "confirmed_at": sub["target_confirmed_at"].isoformat()}
     return {"from_seq": from_seq, "to_seq": to_seq, **picked, "over_cap": 0, "target": None,
-            "config_version": version, "snapshot": snapshot}
+            "config_version": version, "snapshot": snapshot, "window_mode": "cursor", "daily_date": None,
+            "config": db_subs.snapshot(sub), "config_epoch": sub["config_epoch"], "match_timeouts": 0}
 
 
 # What a run reads is fixed as it is planned, with the confirmation it was planned under (``schedule_runs.
@@ -755,6 +749,8 @@ async def confirmation_problem(db: Any, schedule_id: str, snapshot: Mapping[str,
     if (confirmed is None or confirmed.isoformat() != snapshot["confirmed_at"]
             or sub.get("target_confirmed_version") != snapshot["config_version"]):
         return "its confirmation was cleared or given again while it ran"
+    if snapshot.get("config_epoch") is not None and sub["config_epoch"] != snapshot["config_epoch"]:
+        return "the subscription was changed since the run started (even if changed back)"
     if await subscriptions.config_version(schedule, profile=profile) != snapshot["config_version"]:
         return ("the processor launched with a Profile other than the confirmed one" if profile is not None
                 else "its configuration changed since it was confirmed")

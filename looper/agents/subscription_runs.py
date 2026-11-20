@@ -33,7 +33,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import extraction, processor, subscriptions
+from . import cron, extraction, processor, subscription_rules, subscriptions
 from .channels.base import PostOutcome
 from .message import builtin_channel_id
 from .task_notice import NotifyTarget, TargetKind
@@ -62,6 +62,13 @@ def push_target(channel: str, chat: str) -> NotifyTarget:
                         group=chat.startswith(("oc_", "-")))
 
 
+async def _matcher(db: Any, sub: Mapping[str, Any]) -> subscription_rules.Matcher | None:
+    """The subscription's rules for one window, or None when it selects with its own filter."""
+    if not sub.get("rules"):
+        return None
+    return subscription_rules.Matcher(sub["rules"], me=await db_subs.source_user(db, sub["source_id"]))
+
+
 class SubscriptionRuns:
     """The runs of subscriptions of one server: planning inside the scheduler's transaction, executing and settling."""
 
@@ -78,35 +85,51 @@ class SubscriptionRuns:
     # --- Firing ---
 
     async def plan(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], *,
-                   now: datetime) -> dict[str, Any] | extraction.Skipped | None:
+                   now: datetime, scheduled_for: datetime) -> dict[str, Any] | None:
         """The run's window: None when nothing in it is selected, then the cursor moves past it; else the window the
         run is recorded with (``subscription_runs`` is written here, in the firing's transaction), with the target the
         run may push to: the schedule's, when the operator has confirmed it for the configuration it has now. An
-        extraction's (``extraction.plan``) may also be ``Skipped``: not confirmed, the cursor stays."""
+        extraction's (``extraction.plan``) may also be a skip (``skip_reason``): turned off or not confirmed, the
+        cursor stays."""
         sub = schedule["subscription"]
         if subscriptions.is_extraction(sub):
             return await extraction.plan(conn, schedule, now=now, own_apps=await self._own_apps())
         to_seq = await db_subs.committed_seq(conn, sub["source_id"])
-        from_seq = sub["cursor_seq"]
+        mode = sub.get("window", "cursor")
+        from_seq = sub["cursor_seq"] if mode == "cursor" else 0
         if to_seq is None or to_seq <= from_seq:
             return None
         picked = await db_subs.window(conn, sub, from_seq=from_seq, to_seq=to_seq, now=now,
-                                      own_apps=await self._own_apps())
+                                      own_apps=await self._own_apps(), matcher=await _matcher(conn, sub))
         if not picked["rows"]:
-            await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=to_seq, at=now)
+            if mode == "cursor":
+                await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=to_seq, at=now)
             return None
+        daily_date = (scheduled_for.astimezone(cron.zone(schedule["timezone"])).date()
+                      if sub.get("delivery_policy") == "daily" else None)
+        if daily_date is not None and not await db_subs.claim_day(conn, schedule["id"], daily_date):
+            return {"skip_reason": "the subscription already attempted this local day's digest or a later one"}
         version = await subscriptions.config_version(schedule)
         confirmed = (sub["target_confirmed_at"] is not None and sub.get("target_confirmed_version") == version
                      and schedule.get("notify_channel") and schedule["notify"] != "never")
-        return {"from_seq": from_seq, "to_seq": to_seq, **picked,
+        if confirmed:  # a target that private content may not go to is not pinned: the output stays on the dashboard
+            try:
+                subscriptions.check_private_target(sub, schedule["notify_channel"], schedule["notify_chat"],
+                                                   await db_subs.source_user(conn, sub["source_id"]))
+            except ValueError:
+                confirmed = False
+        return {"from_seq": from_seq, "to_seq": to_seq, "window_mode": mode, "daily_date": daily_date, **picked,
                 "target": (schedule["notify_channel"], schedule["notify_chat"]) if confirmed else None,
-                "config_version": version if confirmed else None}
+                "config_version": version if confirmed else None, "config": db_subs.snapshot(sub),
+                "config_epoch": sub["config_epoch"], "match_timeouts": int(picked["match_timed_out"])}
 
     async def record(self, conn: asyncpg.Connection, run_id: str, window: Mapping[str, Any]) -> None:
         await db_subs.insert_run(conn, run_id, from_seq=window["from_seq"], to_seq=window["to_seq"],
                                  in_window=window["in_window"], selected=len(window["rows"]),
                                  too_old=window["too_old"], over_cap=window["over_cap"], target=window["target"],
-                                 config_version=window["config_version"])
+                                 config_version=window["config_version"], window_mode=window["window_mode"],
+                                 daily_date=window["daily_date"], config=window["config"], config_epoch=window["config_epoch"],
+                                 match_timeouts=window["match_timeouts"])
         if window.get("snapshot"):  # an extraction's pinned configuration and confirmation (``extraction.plan``)
             await db_schedules.update_run(conn, run_id, execution_snapshot=window["snapshot"])
 
@@ -138,31 +161,34 @@ class SubscriptionRuns:
         stream = await db_subs.get_run(run_id)
         if run is None or schedule is None or stream is None or run["status"] != db_schedules.RUNNING:
             return False
-        sub = schedule["subscription"]
-        pool = db_connection.get_pool()
-        if subscriptions.is_extraction(sub):
+        if subscriptions.is_extraction(schedule["subscription"]):
+            pool = db_connection.get_pool()
             snapshot = run.get("execution_snapshot") or {}
             planned = extraction.pinned(schedule, snapshot) if snapshot.get("subscription") else schedule
             picked = await db_subs.extraction_window(
                 pool, planned["subscription"], output_kind=subscriptions.output_kind(planned["subscription"]),
                 from_seq=stream["from_seq"], to_seq=stream["to_seq"], now=run["fired_at"],
                 own_apps=await self._own_apps())
-            return await extraction.execute(self, run_id, planned, stream, {**picked, "snapshot": snapshot or None})
+            snapshot = {**snapshot, "config_epoch": stream["config_epoch"]} if snapshot else None
+            return await extraction.execute(self, run_id, planned, stream, {**picked, "snapshot": snapshot})
         await self._push_run(run_id, run, schedule, stream)
         return False
 
     async def _push_run(self, run_id: str, run: Mapping[str, Any], schedule: Mapping[str, Any],
                         stream: Mapping[str, Any]) -> None:
-        sub = schedule["subscription"]
+        # The run selects, renders and writes with the configuration it started with (``subscription_runs.config``): a
+        # subscription changed meanwhile, and changed back, does not make it read what it was not meant to.
+        sub = {**schedule["subscription"], **(stream["config"] or {}), "window": stream["window_mode"]}
         pool = db_connection.get_pool()
         picked = await db_subs.window(pool, sub, from_seq=stream["from_seq"], to_seq=stream["to_seq"],
-                                      now=run["fired_at"], own_apps=await self._own_apps())
+                                      now=run["fired_at"], own_apps=await self._own_apps(),
+                                      matcher=await _matcher(pool, sub))
         if not picked["rows"]:  # every message of it was deleted since the run was planned
             await self._end(run_id, status="completed", outcome="quiet", summary="the window's messages were deleted",
                             advance=True)
             return
         text = subscriptions.processor_input(picked["rows"], text_max_chars=sub["text_max_chars"],
-                                             zone_name=schedule["timezone"])
+                                             zone_name=schedule["timezone"], render=sub["render"], rules=sub["rules"])
         if self._runtime_root is None:
             await self._end(run_id, status="failed", outcome="failed", error="this server cannot run a processor")
             return
@@ -184,10 +210,20 @@ class SubscriptionRuns:
             return
         reply = result.reply or ""
         if subscriptions.is_quiet(reply, sub["quiet_word"]):
-            await self._end(run_id, status="completed", outcome="quiet", cost=result.cost_usd, advance=True,
-                            summary="没有内容（处理器回复了静默词）")
-            return
-        message = subscriptions.push_text(reply, sub["output_header"])
+            # What a rule says must never be quiet is listed by code, as the processor's own output would be pushed.
+            reply = subscription_rules.fallback_text(picked["rows"], sub["rules"]) if sub["rules"] else ""
+            if not reply:
+                await self._end(run_id, status="completed", outcome="quiet", cost=result.cost_usd, advance=True,
+                                summary="没有内容（处理器回复了静默词）")
+                return
+        header = sub["output_header"]
+        if sub["rules"]:
+            header = subscription_rules.format_header(header, subscription_rules.counts(picked["rows"], sub["rules"]),
+                                                     len(picked["rows"]))
+        if "{date}" in header:
+            local_date = stream["daily_date"] or run["scheduled_for"].astimezone(cron.zone(schedule["timezone"])).date()
+            header = header.replace("{date}", local_date.isoformat())
+        message = subscriptions.push_text(reply, header)
         if not message:
             await self._end(run_id, status="failed", outcome="output_invalid", cost=result.cost_usd,
                             error="the reply was empty once its @ marks were removed")
@@ -223,6 +259,13 @@ class SubscriptionRuns:
             return "the schedule is gone"
         sub = schedule["subscription"]
         pinned = (stream["target_channel"], stream["target_chat"])
+        if stream["config_epoch"] is not None and sub["config_epoch"] != stream["config_epoch"]:
+            return "the subscription was changed since the run started (even if changed back)"
+        try:  # what the run selected may not go to a target that is not the operator's own direct chat
+            subscriptions.check_private_target({**sub, **(stream["config"] or {})}, *pinned,
+                                               await db_subs.source_user(db_connection.get_pool(), sub["source_id"]))
+        except ValueError:
+            return "it can select private messages and its target is not your own direct chat"
         if (schedule.get("notify_channel"), schedule.get("notify_chat")) != pinned:
             return "its push target was changed"
         if schedule["notify"] == "never":
@@ -306,7 +349,7 @@ class SubscriptionRuns:
                    error: str | None = None, summary: str | None = None, advance: bool = False,
                    output: str | None = None, pushed: tuple[str, str] | None = None) -> None:
         """End the run in one transaction: its status, its outcome and output, the push's notification, and, when it
-        succeeded, the cursor."""
+        succeeded, the cursor. A failed or interrupted attempt with nothing sent or uncertain releases its daily claim."""
         now = self._clock()
         async with db_connection.transaction() as conn:
             run = await db_schedules.get_run(run_id, pool=conn)
@@ -326,7 +369,10 @@ class SubscriptionRuns:
             if not finished:
                 return
             await db_subs.update_run(conn, run_id, **fields)
-            if advance:
+            if not advance and stream["daily_date"] is not None:
+                await conn.execute("DELETE FROM subscription_daily_claims WHERE schedule_id = $1 AND local_date = $2",
+                                   run["schedule_id"], stream["daily_date"])
+            if advance and stream["window_mode"] == "cursor":
                 await db_subs.advance_cursor(conn, run["schedule_id"], from_seq=stream["from_seq"],
                                              to_seq=stream["to_seq"], at=now)
         logger.info("subscription run %s ended %s (%s)", run_id, status, outcome)
