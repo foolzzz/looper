@@ -1,13 +1,38 @@
+import { AlertTriangle } from "lucide-react";
 import { useEffect, useId, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { fetchChatSettings, updateChatSettings, type ChatSettings } from "@/lib/api";
+import {
+  fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
+  type CompletionTurns,
+} from "@/lib/api";
 import { errorText } from "@/lib/use-action";
 
-/** Settings → Chat: whether a reply can be stopped (Esc, the Stop button, /stop). Experimental, off by default. */
+const SELECT = "mt-1 w-full max-w-sm rounded-md border border-input bg-transparent px-3 py-1.5 text-sm text-foreground "
+  + "pointer-coarse:h-11 pointer-coarse:text-base focus:outline-none focus:ring-2 focus:ring-primary/50";
+
+/** Why a completion turn's events got the code notice instead, in words (``manager_events.reason``). */
+const FALLBACK_REASONS: Record<string, string> = {
+  turn_failed: "the turn failed",
+  turn_timeout: "it took over 2 minutes",
+  turn_stopped: "stopped",
+  empty_reply: "no reply",
+  send_failed: "not sent",
+  queue_deadline: "waited 15 minutes",
+  restart: "the server restarted",
+  manager_off: "Manager off",
+  off: "turned off",
+};
+
+/** Settings → Chat: whether a reply can be stopped (Esc, the Stop button, /stop; experimental, off by default), and
+ * whether the Manager tells a direct chat or the dashboard chat that its task ended (off by default), with the last
+ * 24 hours of task ends by how they were told. */
 export function ChatSettingsSection() {
   const id = useId();
   const [settings, setSettings] = useState<ChatSettings | null>(null);
+  const [summary, setSummary] = useState<CompletionSummary | null>(null);
+  const [summaryError, setSummaryError] = useState("");
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -19,14 +44,19 @@ export function ChatSettingsSection() {
     }).catch((err: unknown) => {
       if (alive) setError(errorText(err));
     });
+    fetchCompletionSummary().then((value) => {
+      if (alive) setSummary(value);
+    }).catch((err: unknown) => {
+      if (alive) setSummaryError(errorText(err));
+    });
     return () => { alive = false; };
   }, [attempt]);
 
-  const save = async (stop_enabled: boolean) => {
+  const save = async (body: { stop_enabled?: boolean; completion_turns?: CompletionTurns }) => {
     setSaving(true);
     setError("");
     try {
-      setSettings(await updateChatSettings({ stop_enabled }));
+      setSettings(await updateChatSettings(body));
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -46,19 +76,71 @@ export function ChatSettingsSection() {
           <p role="status" className="text-sm text-muted-foreground">Loading…</p>
         )
       ) : (
-        <div className="space-y-1.5">
-          <label htmlFor={`${id}-stop`} className="flex items-center gap-2 text-sm font-medium">
-            <input id={`${id}-stop`} type="checkbox" checked={settings.stop_enabled} disabled={saving}
-                   aria-describedby={`${id}-stop-help`} onChange={(event) => void save(event.target.checked)} />
-            Allow stopping a reply
-          </label>
-          <p id={`${id}-stop-help`} className="text-xs text-muted-foreground">
-            Experimental, off by default: Esc, the Stop button, and /stop on Telegram and Lark. Telegram's command menu
-            lists /stop after the server restarts.
-          </p>
+        <div className="space-y-5">
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-stop`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-stop`} type="checkbox" checked={settings.stop_enabled} disabled={saving}
+                     aria-describedby={`${id}-stop-help`}
+                     onChange={(event) => void save({ stop_enabled: event.target.checked })} />
+              Allow stopping a reply
+            </label>
+            <p id={`${id}-stop-help`} className="text-xs text-muted-foreground">
+              Experimental, off by default: Esc, the Stop button, and /stop on Telegram and Lark. Telegram's command menu
+              lists /stop after the server restarts.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-completion`} className="block text-sm font-medium">
+              When a task ends
+            </label>
+            <select id={`${id}-completion`} value={settings.completion_turns} disabled={saving}
+                    aria-describedby={`${id}-completion-help`} className={SELECT}
+                    onChange={(event) => void save({ completion_turns: event.target.value as CompletionTurns })}>
+              <option value="off">Send the task notice</option>
+              <option value="dm_only">The Manager tells the chat</option>
+            </select>
+            <p id={`${id}-completion-help`} className="text-xs text-muted-foreground">
+              Off by default. On, in direct chats and the dashboard chat the Manager writes the message in a read-only
+              turn a minute after the first task ends, for the tasks that end by then, and Looper adds each task's
+              link. Group chats always get the task notice, and so does a chat whose turn fails or takes over 2
+              minutes.
+            </p>
+            <CompletionCounts summary={summary} error={summaryError} />
+          </div>
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>
       )}
     </Card>
+  );
+}
+
+function CompletionCounts({ summary, error }: { summary: CompletionSummary | null; error: string }) {
+  if (error) return <p className="text-xs text-muted-foreground">Task-end counts are unavailable: {error}</p>;
+  if (!summary) return null;
+  const told = summary.by_state.delivered ?? 0;
+  const fallback = summary.by_state.fallback ?? 0;
+  const notices = summary.by_state.skipped ?? 0;
+  const reasons = Object.entries(summary.by_reason)
+    .filter(([reason]) => reason in FALLBACK_REASONS && reason !== "off")
+    .map(([reason, count]) => `${FALLBACK_REASONS[reason]} ${count}`);
+  return (
+    <div className="space-y-1.5 pt-1">
+      <p className="text-xs text-muted-foreground">
+        Last {summary.window_hours} hours:{" "}
+        <span className="tabular-nums text-foreground/90">{told}</span> told by the Manager ·{" "}
+        <span className="tabular-nums text-foreground/90">{fallback}</span> sent as the notice after a turn
+        {fallback > 0 && reasons.length > 0 ? ` (${reasons.join(", ")})` : ""} ·{" "}
+        <span className="tabular-nums text-foreground/90">{notices}</span> {notices === 1 ? "notice" : "notices"}
+        {" "}without a turn ·{" "}
+        <span className="tabular-nums text-foreground/90">${summary.turn_cost_usd.toFixed(2)}</span> on turns
+        {summary.pending > 0 ? ` · ${summary.pending} waiting` : ""}
+      </p>
+      {summary.failing && (
+        <Badge variant="warning" className="gap-1">
+          <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+          The last 5 turns all fell back to the notice
+        </Badge>
+      )}
+    </div>
   );
 }

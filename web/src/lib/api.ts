@@ -537,10 +537,34 @@ export async function stopChatReply(messageId: string): Promise<{ state: string;
   }
 }
 
+/** Who tells a direct chat or the dashboard chat that its task ended: the code notice, or the Manager. */
+export type CompletionTurns = "off" | "dm_only";
+
 /** The chat's system settings (Settings → Chat). */
 export interface ChatSettings {
   /** Whether a reply can be stopped (Esc, the Stop button, /stop). Experimental; off by default. */
   stop_enabled: boolean;
+  /** Whether the Manager tells direct chats and the dashboard chat of a task's end (off by default). */
+  completion_turns: CompletionTurns;
+}
+
+/** The task ends of the last 24 hours, by how they were told (``manager_events.summary``). */
+export interface CompletionSummary {
+  window_hours: number;
+  total: number;
+  by_state: Partial<Record<"pending" | "running" | "delivered" | "fallback" | "skipped", number>>;
+  by_reason: Record<string, number>;
+  turn_cost_usd: number;
+  pending: number;
+  oldest_pending_seconds: number | null;
+  /** The last completion turns all fell back to the code notice (the feature spends and does not work). */
+  failing: boolean;
+}
+
+export async function fetchCompletionSummary(): Promise<CompletionSummary> {
+  const result = await callV1<CompletionSummary>("/api/v1/manager_events/summary", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function fetchChatSettings(): Promise<ChatSettings> {
@@ -549,7 +573,9 @@ export async function fetchChatSettings(): Promise<ChatSettings> {
   return result;
 }
 
-export async function updateChatSettings(body: { stop_enabled: boolean | null }): Promise<ChatSettings> {
+export async function updateChatSettings(
+  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null },
+): Promise<ChatSettings> {
   const result = await callV1<ChatSettings>("/api/v1/chat_settings/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
