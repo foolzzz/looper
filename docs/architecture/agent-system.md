@@ -5448,8 +5448,11 @@ message's `digest_date` is the local date the next quiet hours end on. Each
 decision is one row of `proactive_deliveries` (keyed by the send point's
 message, so a message tried again keeps its first decision; decisions on one
 chat are taken one at a time, so the cap holds across send points), with
-`sent_at` once the channel took it. Wired so far: gate reminders only, which
-are always `blocking`. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+`sent_at` once the channel took it (reason `off` is kept for a message sent
+with the layer off and only recorded, and `replied_at` for the user's first
+message after it, both for the proactive-message metrics). Wired so far: gate
+reminders only, which are always `blocking`; a decision that fails is logged
+and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
 
 ### User gates
 
