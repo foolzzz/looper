@@ -4180,6 +4180,10 @@ by the Manager instead of the notice. Its row is `pending` when the report
 reached the task's own Manager (`tasks.manager_id`; a report handed to the
 default Manager is `skipped` with `manager_off`, as is one reaching a Manager
 that is turned off); a group chat's is `skipped` with `group_chat` and gets the
+notice. A turn runs in the direct chat itself (its `/stop`, its history): a
+Lark notice names the person, so the chat is the task's reply route, or, for a
+task that recorded none, the one the same person's latest task with that bot
+recorded; when none did, the end is `skipped` with `no_chat` and gets the
 notice. A schedule's run message to an allowlisted direct chat (only a run that
 ended its task, and only when `notify` sends it) is `pending` for the default
 Manager; to a chat bound to a Manager it is `skipped` with `group_chat`. A
@@ -4227,7 +4231,9 @@ seconds of the claim: the notices go at once, then the turn is stopped as a stop
 ends a turn, a runtime run per turn ending its process tree; if it has not ended
 within 10 seconds it is cancelled and its runtime stopped, so the next message
 starts a fresh one; a turn that does not end even then is let go of, its lock
-and binding released and a fresh runtime used, and it only writes its record),
+and binding released and a fresh runtime used, and whenever it ends it writes
+only its record: never the session, the runtime, the binding or the token of
+the turn after it),
 `turn_stopped`, `empty_reply`, `send_failed` (the reply could not be handed to
 the channel), and, at the claim, `off` (the setting was turned off) or
 `manager_off` (the Manager was turned off). A wake-up whose events cannot be
