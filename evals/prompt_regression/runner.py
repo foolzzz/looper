@@ -123,8 +123,9 @@ def _database_url(url: str, database: str) -> str:
 
 
 @contextmanager
-def fresh_database(admin_url: str) -> Iterator[tuple[str, float]]:
-    """A new database on ``admin_url``'s server, dropped afterwards: (its URL, database clock − local clock)."""
+def fresh_database(admin_url: str, *, keep: bool = False) -> Iterator[tuple[str, float]]:
+    """A new database on ``admin_url``'s server, dropped afterwards unless ``keep``: (its URL, database clock − local
+    clock)."""
     import asyncpg
 
     admin_db = urllib.parse.urlsplit(admin_url).path.lstrip("/")
@@ -157,7 +158,10 @@ def fresh_database(admin_url: str) -> Iterator[tuple[str, float]]:
     try:
         yield _database_url(admin_url, name), offset
     finally:
-        asyncio.run(drop())
+        if keep:
+            print(f"kept the database {name}", file=sys.stderr)
+        else:
+            asyncio.run(drop())
 
 
 # --- Server --------------------------------------------------------------------------------------------

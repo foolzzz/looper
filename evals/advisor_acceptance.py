@@ -341,7 +341,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     selected = [case for case in CASES if not args.cases or case.name in args.cases]
     log_path = args.out_dir / f"advisor-acceptance-{report['started'].replace(':', '')}.server.log"
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    with runner.fresh_database(args.pg_url) as (database_url, clock_offset), runner.running_server(
+    with runner.fresh_database(args.pg_url, keep=args.keep_database) as (database_url, clock_offset), \
+            runner.running_server(
         database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
         port=args.port,
     ) as api:
@@ -415,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cases", nargs="*", choices=[case.name for case in CASES])
     parser.add_argument("--shots", type=Path, help="take headless screenshots into this directory (needs node)")
     parser.add_argument("--out-dir", type=Path, default=runner.DEFAULT_OUT_DIR)
+    parser.add_argument("--keep-database", action="store_true",
+                        help="keep the run's database to look into afterwards (drop it yourself)")
     args = parser.parse_args(argv)
     report = run(args)
     for case in report["cases"]:
