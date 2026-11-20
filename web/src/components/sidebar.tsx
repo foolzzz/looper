@@ -8,6 +8,7 @@ import {
   Bot,
   CalendarClock,
   Radio,
+  ListChecks,
   ChevronDown,
   Sliders,
   Folder,
@@ -20,13 +21,14 @@ import { SignOut } from "@/components/sign-out";
 import { ProjectDialog } from "@/components/project-dialog";
 import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { fetchOverview } from "@/lib/api";
+import { intentsSettingsGet } from "@/lib/api-leads";
 import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { cn } from "@/lib/utils";
 
 /** "history" is one agent's session, or every run of one role; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page = "dashboard" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "settings" | "history";
+export type Page = "dashboard" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "intents" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -65,6 +67,18 @@ export function Sidebar({
 }: SidebarProps) {
   const waitingGates = useWaitingGates();
   const [version, setVersion] = useState<string | null>(null);
+  const [intentsOn, setIntentsOn] = useState(false);
+  useEffect(() => {
+    let live = true;
+    intentsSettingsGet().then(
+      (settings) => { if (live) setIntentsOn(settings.enabled === true); },
+      () => { if (live) setIntentsOn(false); },
+    );
+    return () => { live = false; };
+  }, []);
+  const navItems = intentsOn
+    ? [...NAV_ITEMS, { page: "intents" as const, label: "Intents 意图", icon: ListChecks }]
+    : NAV_ITEMS;
   useEffect(() => {
     let live = true;
     fetchOverview()
@@ -109,7 +123,7 @@ export function Sidebar({
       </div>
 
       <nav className="shrink-0 px-2 py-3 space-y-0.5">
-        {NAV_ITEMS.map(({ page, label, icon: Icon }) => (
+        {navItems.map(({ page, label, icon: Icon }) => (
           <button
             key={page}
             type="button"
