@@ -1,0 +1,188 @@
+"""Interactive lead operations use the ops file's database without a running service."""
+
+import asyncio
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import asyncpg
+import pytest
+
+from looper import cli
+from looper.agents import leads, leads_model
+from looper.db.connection import ensure_schema
+from tests import leads_support as sup, subscription_support as stream
+from tests.db_support import DSN
+
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+UTC = timezone.utc
+
+
+def db_call(url, call):
+    async def run():
+        conn = await asyncpg.connect(url)
+        try:
+            return await call(conn)
+        finally:
+            await conn.close()
+    return asyncio.run(run())
+
+
+@pytest.fixture
+def database(monkeypatch):
+    monkeypatch.delenv("LOOPER_AGENT_RUN", raising=False)
+    schema = f"leads_cli_{uuid.uuid4().hex}"
+    db_call(DSN, lambda conn: conn.execute(f'CREATE SCHEMA "{schema}"'))
+    parts = urlsplit(DSN)
+    url = urlunsplit(parts._replace(query=urlencode([*parse_qsl(parts.query), ("search_path", schema)])))
+    async def setup(conn):
+        await ensure_schema(conn)
+        await stream.source(conn)
+        await stream.person(conn, "ou_synthetic", "示例同事")
+    db_call(url, setup)
+    try:
+        yield url
+    finally:
+        db_call(DSN, lambda conn: conn.execute(f'DROP SCHEMA "{schema}" CASCADE'))
+
+
+def run_cli(tmp_path, url, *argv):
+    config = tmp_path / "server.toml"
+    config.write_text(f'[database]\nurl = "{url}"\n')
+    config.chmod(0o600)
+    return cli.main(["leads", *argv, "--config", str(config), "--runtime-root", str(tmp_path / "runtime")])
+
+
+def enable(url):
+    db_call(url, lambda conn: conn.execute("INSERT INTO system_settings (key, value) VALUES ('leads.enabled', 'true')"))
+
+
+def add(url, *, chat_id="oc_synthetic", **columns):
+    async def seed(conn):
+        now = datetime.now(UTC)
+        first = await stream.add(conn, "Synthetic source", sender="ou_synthetic", sent_at=now - timedelta(hours=1),
+                                 chat_id=chat_id, chat_name="示例讨论")
+        second = await stream.add(conn, "Another synthetic source", sender="ou_synthetic", sent_at=now,
+                                  chat_id=chat_id)
+        return await sup.lead(conn, [first, second], people=[("ou_synthetic", "sender")], **columns)
+    return db_call(url, seed)
+
+
+def test_disabled_empty_json_and_no_results(tmp_path, database, capsys):
+    for argv in (("search",), ("mark", "1", "--inaccurate"), ("delete", "1")):
+        assert run_cli(tmp_path, database, *argv) == 3
+        assert capsys.readouterr().err.strip() == "消息线索没有启用：在控制台的消息流页打开"
+    enable(database)
+    assert run_cli(tmp_path, database, "search", "missing") == 1
+    assert capsys.readouterr().out.strip() == "没有找到线索（查询：missing）"
+    assert run_cli(tmp_path, database, "search", "--json") == 1
+    answer = json.loads(capsys.readouterr().out)
+    assert answer == {"notice": leads_model.NOTICE, "query": {"words": [], "chat": None, "person": None,
+        "since": None, "kind": None, "state": "active", "limit": 10}, "leads": [], "more": 0}
+
+
+def test_each_state_and_sourced_lines(tmp_path, database, capsys):
+    enable(database)
+    ids = {}
+    for state in ("active", "expired", "superseded", "inaccurate", "promoted"):
+        actual = "active" if state in ("expired", "promoted") else state
+        ids[state] = add(database, summary=f"示例{state}", state=actual,
+                         valid_until=datetime.now(UTC) + timedelta(days=-1 if state == "expired" else 90))
+    db_call(database, lambda conn: conn.execute(
+        "UPDATE message_leads SET state='promoted', promoted_kind='vault_proposal' WHERE id=$1", ids["promoted"]))
+    db_call(database, lambda conn: conn.execute(
+        "UPDATE message_leads SET superseded_by=$1 WHERE id=$2", ids["active"], ids["superseded"]))
+    assert run_cli(tmp_path, database, "search", "--state", "all") == 0
+    output = capsys.readouterr().out
+    assert output.splitlines()[0] == leads_model.NOTICE
+    assert f"lead-{ids['active']} [决定·高] 示例active（有效至 " in output
+    for state, suffix in (("expired", "（已过期）"), ("inaccurate", "（不准确）"), ("promoted", "（已晋升）"),
+                          ("superseded", f"（已被推翻 → lead-{ids['active']}）")):
+        assert f"示例{state}{suffix}" in output
+    assert "  出处：《示例讨论》示例同事 " in output
+    assert " · om_" in output and "https://applink.feishu.cn/" in output and "（另 1 条）" in output
+    assert run_cli(tmp_path, database, "search", "--state", "all", "--limit", "1") == 0
+    assert "另有 4 条，用 --limit 看更多" in capsys.readouterr().out
+    add(database, state="superseded", summary="示例无替代", chat_id="synthetic_dm")
+    assert run_cli(tmp_path, database, "search", "--state", "superseded", "--chat", "synthetic_dm") == 0
+    output = capsys.readouterr().out
+    assert "示例无替代（已被推翻）" in output and "https://" not in output
+
+
+def test_json_shapes_strip_mentions_and_mark_delete(tmp_path, database, capsys):
+    enable(database)
+    number = add(database, summary='发布<at user_id="all">所有人</at>计划')
+    assert run_cli(tmp_path, database, "search", "--json") == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert set(answer) == {"notice", "query", "leads", "more"}
+    assert set(answer["query"]) == {"words", "chat", "person", "since", "kind", "state", "limit"}
+    item, = answer["leads"]
+    assert set(item) == {"id", "kind", "summary", "detail", "confidence", "state", "valid_until", "sources"}
+    assert set(item["sources"][0]) == {"chat", "sender", "sent_at", "message_id", "link"}
+    assert "<at" not in item["summary"]
+    assert run_cli(tmp_path, database, "mark", str(number), "--inaccurate", "--note", "  示例备注  ") == 0
+    assert capsys.readouterr().out.strip() == f"lead-{number} 已标为不准确"
+    assert run_cli(tmp_path, database, "search", "--state", "inaccurate", "--json") == 0
+    assert json.loads(capsys.readouterr().out)["leads"][0]["id"] == f"lead-{number}"
+    row = db_call(database, lambda conn: conn.fetchrow("SELECT marked_via, marked_note FROM message_leads WHERE id=$1", number))
+    assert dict(row) == {"marked_via": "cli", "marked_note": "示例备注"}
+    assert run_cli(tmp_path, database, "delete", f"lead-{number}") == 0
+    assert capsys.readouterr().out.strip() == f"lead-{number} 已删除"
+    assert db_call(database, lambda conn: conn.fetchval("SELECT count(*) FROM message_lead_sources")) == 0
+    for argv in (("mark", "99999", "--inaccurate"), ("delete", "lead-99999")):
+        assert run_cli(tmp_path, database, *argv) == 5
+
+
+def test_filters_pass_through_and_dates_use_local_zone(tmp_path, database, capsys, monkeypatch):
+    enable(database)
+    add(database)
+    original = leads.search
+    seen = []
+    async def search(**kwargs):
+        seen.append(kwargs)
+        return await original(**kwargs)
+    monkeypatch.setattr(leads, "search", search)
+    before = datetime.now().astimezone() - timedelta(days=2)
+    assert run_cli(tmp_path, database, "search", "示例", "--chat", "oc_synthetic", "--person", "ou_synthetic",
+                   "--days", "2", "--kind", "decision", "--json") == 0
+    answer = json.loads(capsys.readouterr().out)
+    call = seen[-1]
+    assert call["words"] == ["示例"] and call["chat"] == "oc_synthetic" and call["person"] == "ou_synthetic"
+    assert before <= call["since"] <= datetime.now().astimezone() - timedelta(days=2)
+    assert answer["query"]["since"] == call["since"].isoformat()
+    assert run_cli(tmp_path, database, "search", "--since", "2020-01-02", "--json") == 0
+    capsys.readouterr()
+    assert seen[-1]["since"] == datetime(2020, 1, 2).astimezone()
+
+
+@pytest.mark.parametrize("argv", [("search",), ("mark", "1", "--inaccurate"), ("delete", "1")])
+def test_every_command_is_refused_in_agent_run(tmp_path, database, capsys, monkeypatch, argv):
+    monkeypatch.setenv("LOOPER_AGENT_RUN", "worker")
+    assert run_cli(tmp_path, database, *argv) == 4
+    assert capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [
+    ("search", "--since", "2026-01-01", "--days", "2"), ("search", "--limit", "0"),
+    ("search", "--limit", "51"), ("search", "--days", "0"), ("search", "--days", "3651"),
+    ("search", "--since", "tomorrow"), ("mark", "one", "--inaccurate"),
+    ("mark", "1"), ("mark", "1", "--inaccurate", "--note", "n" * 501),
+])
+def test_usage(tmp_path, database, capsys, argv):
+    enable(database)
+    try:
+        code = run_cli(tmp_path, database, *argv)
+    except SystemExit as exc:
+        code = exc.code
+    assert code == 2
+
+
+def test_unusable_or_missing_tables(tmp_path, database, capsys):
+    assert run_cli(tmp_path, "postgresql://nobody@127.0.0.1:1/none", "search") == 6
+    assert capsys.readouterr().err
+    assert run_cli(tmp_path, "postgresql://nobody@127.0.0.1:invalid/none", "search") == 6
+    assert capsys.readouterr().err
+    db_call(database, lambda conn: conn.execute("DROP TABLE message_leads CASCADE"))
+    assert run_cli(tmp_path, database, "search") == 6
+    assert "looper serve" in capsys.readouterr().err
