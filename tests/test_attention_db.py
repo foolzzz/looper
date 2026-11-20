@@ -1,0 +1,214 @@
+"""The "needs you" summary (``agents.attention``): each section read from its own source, what is left out, a source
+that cannot be read, and the API that serves it."""
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from looper.agents import api_v1, attention
+from looper.db import ledger, schedules as db_schedules
+from tests import ledger_support as sup, leads_support as leads, subscription_support as stream
+from tests.db_support import DSN, run_db, v1_api
+
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+NOW = datetime.now(timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def no_status_reader(monkeypatch):
+    monkeypatch.setattr(attention, "_status_checks", None)  # what a serve elsewhere in this process may have set
+
+
+def section(summary, kind):
+    return next((s for s in summary["sections"] if s["kind"] == kind), None)
+
+
+def titles(summary, kind):
+    return [item["title"] for item in section(summary, kind)["items"]]
+
+
+async def setting(pool, key, value="true"):
+    await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+                       "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", key, value)
+
+
+async def schedule(pool, schedule_id, **columns):
+    names = ["id", "project_id", "name", "cron", "timezone", "requirement", *columns]
+    values = [schedule_id, "proj", schedule_id, "0 9 * * *", "UTC", "Check it", *columns.values()]
+    await pool.execute(f"INSERT INTO schedules ({', '.join(names)}) "
+                       f"VALUES ({', '.join(f'${i + 1}' for i in range(len(names)))})", *values)
+
+
+def test_gates_lists_the_gates_that_wait_for_the_user(monkeypatch):
+    async def check(pool):
+        await sup.seed(pool)  # task-1's gate-1 is open
+        await pool.execute("INSERT INTO task_steps (id, task_id, step_index, instruction, kind) "
+                           "VALUES ('gate-2', 'task-1', 1, 'Ask again', 'gate')")
+        await pool.execute("INSERT INTO task_user_gates (step_id, task_id, topic, state, summary) "
+                           "VALUES ('gate-2', 'task-1', 'Settled already', 'passed', '{}')")
+        summary = await attention.collect()
+        gates = section(summary, "gates")
+        assert (gates["state"], gates["count"], titles(summary, "gates")) == ("ok", 1, ["Pick a database"])
+        (item,) = gates["items"]
+        assert item["context"] == "Do the thing" and item["href"].startswith("#tasks/task-1?gate=")
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_schedules_lists_failures_in_a_row_and_active_alerts(monkeypatch):
+    async def check(pool):
+        await sup.seed(pool)
+        await schedule(pool, "nightly", consecutive_failures=2)
+        await schedule(pool, "weekly", stale_alert_at=NOW - timedelta(hours=3))
+        await schedule(pool, "healthy")
+        summary = await attention.collect()
+        found = {item["title"]: item for item in section(summary, "schedules")["items"]}
+        assert set(found) == {"nightly", "weekly"}
+        assert (found["nightly"]["facts"]["failures"], found["nightly"]["facts"]["alerts"]) == (2, [])
+        assert found["weekly"]["facts"]["alerts"] == ["stale"] and found["weekly"]["href"] == "#schedules/weekly"
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_intents_lists_the_pending_ones_while_intents_are_on(monkeypatch):
+    async def check(pool):
+        await stream.source(pool)
+        event = await stream.add(pool, "Synthetic request", sent_at=NOW)
+        await leads.intent(pool, [event], title="Fix the login page")
+        await leads.intent(pool, [event], title="Already a task", state="tasked")
+        assert section(await attention.collect(), "intents") is None  # off: no section
+        await setting(pool, "intents.enabled")
+        summary = await attention.collect()
+        assert titles(summary, "intents") == ["Fix the login page"]
+        assert section(summary, "intents")["items"][0]["ref"] == "I-0001"
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_ledger_lists_its_own_items_that_wait_for_the_user_while_it_is_on(monkeypatch):
+    async def check(pool):
+        seeded = await sup.seed(pool)
+        await sup.add_own(pool, "pending", title="Reply by Friday")
+        await sup.add_own(pool, "decision", sup.RELAYED, title="Use PostgreSQL")  # waits for the user's confirmation
+        await sup.add_own(pool, "decision", title="Ship on Monday")  # the user's own: confirmed
+        await sup.add_own(pool, "work_item", title="Write the report", due_at=NOW - timedelta(days=1))
+        await sup.add_own(pool, "work_item", title="Plan next week", due_at=NOW + timedelta(days=1))
+        await sup.add_own(pool, "pending", title="Someone else's", owner_kind="manager", owner_ref="manager")
+        done = await sup.add_own(pool, "pending", title="Done already")
+        await ledger.apply("close", sup.USER, item_id=done["number"], db=pool)
+        await sup.add_sourced(pool, seeded, "gate")  # listed under gates
+        assert section(await attention.collect(), "ledger") is None  # off: no section
+        await setting(pool, "ledger.enabled")
+        items = section(await attention.collect(), "ledger")["items"]
+        assert [(item["title"], item["facts"]["overdue"]) for item in items] == [
+            ("Write the report", True), ("Reply by Friday", False), ("Use PostgreSQL", False)]
+        assert all(item["ref"].startswith("L-") for item in items)
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_deliveries_lists_what_may_not_have_arrived_in_the_window(monkeypatch):
+    async def check(pool):
+        await sup.seed(pool)
+        await stream.source(pool)
+        event = await stream.add(pool, "Synthetic request", sent_at=NOW)
+        intent = await leads.intent(pool, [event], title="Fix the login page")
+        old = await leads.intent(pool, [event], title="Long ago")
+        for intent_id, state, at in ((intent, "uncertain", NOW), (intent, "sent", NOW),
+                                     (old, "uncertain", NOW - attention.DELIVERY_WINDOW - timedelta(hours=1))):
+            await pool.execute("INSERT INTO intent_posts (intent_id, kind, channel_id, chat, text, state, updated_at) "
+                               "VALUES ($1, 'push', 'channel-lark', 'ou_me', 'Push', $2, $3)", intent_id, state, at)
+        await pool.execute(
+            "INSERT INTO manager_events (manager_id, kind, task_id, origin, target_kind, channel_id, chat, dedupe_key, "
+            "payload, fallback, state, batch, delivery) VALUES ('manager', 'task_end', 'task-1', 'chat', 'dm', "
+            "'channel-lark', 'ou_me', 'end-1', '{}', '[]', 'delivered', gen_random_uuid(), 'uncertain')")
+        await schedule(pool, "digest", kind="subscription")
+        for run in ("run-1", "run-2"):
+            await pool.execute("INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status) "
+                               "VALUES ($1, 'digest', now(), 'scheduled', 'completed')", run)
+        await pool.execute("INSERT INTO subscriptions (schedule_id, source_id, chat_kinds, sender_kinds, "
+                           "max_age_minutes, max_events, text_max_chars) "
+                           "VALUES ('digest', $1, '{group}', '{user}', 60, 10, 200)", stream.SOURCE)
+        for run, outcome in (("run-1", "uncertain"), ("run-2", "delivered")):
+            await pool.execute("INSERT INTO subscription_runs (run_id, from_seq, to_seq, outcome, target_channel) "
+                               "VALUES ($1, 0, 1, $2, 'lark')", run, outcome)
+        for run, segment, state in (("run-1", 1, "uncertain"), ("run-1", 2, "uncertain"), ("run-2", 1, "sent")):
+            # one push in two messages is one item; a sent one is none
+            await pool.execute("INSERT INTO subscription_deliveries (run_id, segment, text, state) "
+                               "VALUES ($1, $2, 'Part', $3)", run, segment, state)
+        items = section(await attention.collect(), "deliveries")["items"]
+        assert sorted((item["facts"]["source"], item["title"], item["href"]) for item in items) == [
+            ("intent", "Fix the login page", "#intents"), ("subscription", "digest", "#schedules/digest"),
+            ("task_end", "Do the thing", "#tasks/task-1")]
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_confirmations_come_from_each_managers_memory_and_are_unknown_without_them(monkeypatch):
+    def ops(*waiting):
+        return SimpleNamespace(waiting_confirmations=lambda: list(waiting))
+
+    def waiting(confirmation_id, channel, waited):
+        return {"confirmation_id": confirmation_id, "tool": "looper_task_control", "impact": f"Cancel {confirmation_id}",
+                "channel": channel, "channel_id": None, "chat": "chat", "waited_seconds": waited,
+                "expires_in_seconds": 600 - waited}
+
+    async def check(pool):
+        agents = [SimpleNamespace(agent_id="manager", name="Manager"), SimpleNamespace(agent_id="ops", name="Ops")]
+        found = {"manager": ops(waiting("c-new", "web", 10)), "ops": ops(waiting("c-old", "lark", 300))}
+        fleet = SimpleNamespace(agents=lambda: agents, ops=found.get)
+        items = section(await attention.collect(managers=fleet), "confirmations")["items"]
+        assert [(item["ref"], item["context"], item["href"]) for item in items] == [
+            ("c-old", "Ops", None), ("c-new", "Manager", "#chat")]
+        assert section(await attention.collect(), "confirmations")["state"] == "unknown"
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_logins_lists_the_failing_login_checks_and_are_unknown_without_a_reader(monkeypatch):
+    async def checks():
+        return [{"id": "claude_login", "status": "fail", "label": "Claude login", "detail": "not logged in", "fix": "x"},
+                {"id": "codex_login", "status": "warn", "label": "Codex login", "detail": "slow", "fix": ""},
+                {"id": "git", "status": "fail", "label": "git", "detail": "missing", "fix": ""}]
+
+    async def check(pool):
+        assert section(await attention.collect(), "logins")["state"] == "unknown"
+        monkeypatch.setattr(attention, "_status_checks", checks)
+        assert titles(await attention.collect(), "logins") == ["Claude login"]
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_a_source_that_cannot_be_read_is_an_error_not_an_empty_section(monkeypatch):
+    async def broken(**_):
+        raise ConnectionError("schedules unreadable")
+
+    async def check(pool):
+        monkeypatch.setattr(db_schedules, "failing", broken)
+        summary = await attention.collect()
+        failed = section(summary, "schedules")
+        assert failed["state"] == "error" and "schedules unreadable" in failed["error"]
+        assert section(summary, "gates")["state"] == "ok"
+        assert "没能读取" in attention.summary_text(summary)
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_the_api_is_the_operators_and_answers_conflict_while_off(monkeypatch, tmp_path):
+    async def check(pool):
+        await sup.seed(pool)
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("attention.summary")
+            assert status == 409 and "not enabled" in str(answer), answer
+            await setting(pool, attention.ENABLED_KEY)
+            status, answer = await call("attention.summary", client=True)
+            assert status == 403, answer
+            status, answer = await call("attention.summary")
+            assert status == 200, answer
+            declared = next(op for op in api_v1.operations() if op.operation_id == "attention.summary")
+            api_v1.validate_arguments(declared.result, answer["result"])
+            assert answer["result"]["total"] == 1 and titles(answer["result"], "gates") == ["Pick a database"]
+
+    run_db(check, monkeypatch, timeout=30)

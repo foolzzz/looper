@@ -804,17 +804,11 @@ async def first_run_at(conn: Db, schedule_id: str) -> datetime | None:
     return await conn.fetchval("SELECT min(scheduled_for) FROM schedule_runs WHERE schedule_id = $1", schedule_id)
 
 
-async def overview(since: datetime, *, pool: Db | None = None) -> dict[str, Any]:
-    """Every project's schedules at a glance: the counts, the next fires, the failing ones and the runs skipped
-    since ``since``, by reason."""
-    db = pool or get_pool()
-    counts = await db.fetchrow("SELECT count(*) AS total, count(*) FILTER (WHERE enabled) AS enabled FROM schedules")
-    upcoming = await db.fetch(
-        "SELECT s.id, s.name, s.project_id, p.name AS project_name, s.next_fire_at, s.timezone "
-        "FROM schedules s JOIN projects p ON p.id = s.project_id WHERE s.enabled AND s.next_fire_at IS NOT NULL "
-        "ORDER BY s.next_fire_at, s.id LIMIT 5",
-    )
-    failing = await db.fetch(
+async def failing(*, db: Db | None = None) -> list[dict[str, Any]]:
+    """The failing schedules (failures in a row, or an alert active), those with an alert first, each with its
+    project and the status of its last finished run."""
+    db = db or get_pool()
+    rows = await db.fetch(
         """
         SELECT s.id, s.name, s.project_id, p.name AS project_name, s.timezone, s.consecutive_failures,
                s.failures_alert_at, s.stale_alert_at, s.deadline_alert_at, s.overlap_alert_at, s.last_success_at,
@@ -829,10 +823,24 @@ async def overview(since: datetime, *, pool: Db | None = None) -> dict[str, Any]
         """,
         list(OPEN_STATUSES),
     )
+    return [dict(row) for row in rows]
+
+
+async def overview(since: datetime, *, pool: Db | None = None) -> dict[str, Any]:
+    """Every project's schedules at a glance: the counts, the next fires, the failing ones and the runs skipped
+    since ``since``, by reason."""
+    db = pool or get_pool()
+    counts = await db.fetchrow("SELECT count(*) AS total, count(*) FILTER (WHERE enabled) AS enabled FROM schedules")
+    upcoming = await db.fetch(
+        "SELECT s.id, s.name, s.project_id, p.name AS project_name, s.next_fire_at, s.timezone "
+        "FROM schedules s JOIN projects p ON p.id = s.project_id WHERE s.enabled AND s.next_fire_at IS NOT NULL "
+        "ORDER BY s.next_fire_at, s.id LIMIT 5",
+    )
+    failing_rows = await failing(db=db)
     skipped = await db.fetch(
         "SELECT status, sum(firings) AS n FROM schedule_runs WHERE created_at >= $1 AND status = ANY($2::text[]) "
         "GROUP BY status", since, list(SKIPPED),
     )
     return {"total": counts["total"], "enabled": counts["enabled"],
-            "upcoming": [dict(row) for row in upcoming], "failing": [dict(row) for row in failing],
+            "upcoming": [dict(row) for row in upcoming], "failing": failing_rows,
             "skipped": {row["status"]: row["n"] for row in skipped}}

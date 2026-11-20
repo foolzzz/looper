@@ -991,6 +991,8 @@ async def _run_agent_system_watched(
                 loop_watch=loop_watch,
             )
         fence.http_server = http_server
+        from . import attention
+        attention.use_status_checks(http_server._checks_now)  # the "needs you" logins, as system/status reads them
         with startup.measure("http"):
             await http_server.start()
         logger.info("startup steps: %s", startup.finish())
