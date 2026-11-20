@@ -137,6 +137,8 @@ _PROCESSOR_ROLE = "processor_role"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _SUBSCRIPTIONS = "subscriptions"
+_SUBSCRIPTION_RULES = "subscription_rules"
+_SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
 _RUN_TREE = "run_tree"
 _AGENT_SPAWNS = "agent_spawns"
@@ -146,6 +148,7 @@ _PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
 _LEDGER = "ledger"
 _MESSAGE_LEADS = "message_leads"
+_INTENT_MERGES = "intent_merges"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
@@ -349,6 +352,17 @@ def _subscriptions_ddl() -> str:
 
 _LEDGER_BLOCK = re.compile(r"-- ledger begin\n(.*?)-- ledger end", re.S)
 _MESSAGE_LEADS_BLOCK = re.compile(r"-- message leads begin\n(.*?)-- message leads end", re.S)
+
+
+_INTENT_MERGES_BLOCK = re.compile(r"-- intent merges begin\n(.*?)-- intent merges end", re.S)
+
+
+def _intent_merges_ddl() -> str:
+    """How a merged intent survives the intent it was merged into, as schema.sql defines it."""
+    found = _INTENT_MERGES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its intent merges block")
+    return found.group(1)
 
 
 def _message_leads_ddl() -> str:
@@ -694,10 +708,75 @@ async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('subscriptions') IS NOT NULL")
 
 
+async def _subscription_rules_pending(conn: asyncpg.Connection) -> bool:
+    """A database whose ``subscriptions`` predates the selection rules; a fresh one already has the column."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SUBSCRIPTION_RULES):
+        return False
+    return bool(await conn.fetchval(
+        "SELECT to_regclass('subscriptions') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('subscriptions') AND attname = 'rules' AND attnum > 0 AND NOT attisdropped)"))
+
+
+_SUBSCRIPTION_RULES_DDL = """
+ALTER TABLE subscriptions ADD COLUMN rules JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array');
+ALTER TABLE subscriptions ADD COLUMN config_epoch BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE subscription_runs ADD COLUMN config JSONB, ADD COLUMN config_epoch BIGINT,
+    ADD COLUMN match_timeouts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_render_check,
+    ADD CONSTRAINT subscriptions_render_check CHECK (render IN ('lines_v1', 'lines_v2'));
+"""
+
+
+async def _subscription_lookback_pending(conn: asyncpg.Connection) -> bool:
+    """Unmarked databases may already have some daily objects; recorded upgrades never repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SUBSCRIPTION_LOOKBACK):
+        return False
+    return bool(await conn.fetchval("""
+        SELECT to_regclass('subscriptions') IS NOT NULL AND (
+            to_regclass('subscription_daily_claims') IS NULL OR EXISTS (
+                SELECT 1 FROM (VALUES ('subscriptions', 'window'), ('subscriptions', 'delivery_policy'),
+                                     ('subscription_runs', 'window_mode'), ('subscription_runs', 'daily_date'))
+                    AS required(table_name, column_name)
+                WHERE NOT EXISTS (SELECT 1 FROM pg_attribute
+                    WHERE attrelid = to_regclass(required.table_name) AND attname = required.column_name
+                    AND attnum > 0 AND NOT attisdropped)))
+    """))
+
+
+_SUBSCRIPTION_LOOKBACK_DDL = """
+ALTER TABLE subscriptions
+    ADD COLUMN IF NOT EXISTS "window" TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
+    ADD COLUMN IF NOT EXISTS delivery_policy TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'));
+ALTER TABLE subscription_runs
+    ADD COLUMN IF NOT EXISTS window_mode TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
+    ADD COLUMN IF NOT EXISTS daily_date DATE;
+CREATE TABLE IF NOT EXISTS subscription_daily_claims (
+    schedule_id TEXT NOT NULL REFERENCES subscriptions(schedule_id) ON DELETE CASCADE,
+    local_date DATE NOT NULL,
+    PRIMARY KEY (schedule_id, local_date)
+);
+"""
+
+
 async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
     return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
+
+
+async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
+    """Whether the intents table lacks the AFTER DELETE detach trigger ``A_intents_detach_merged``, still has the
+    earlier BEFORE trigger, or has a merge key that cascades. Judged by the catalog, not the marker, so a database that
+    ran an earlier version of this block is upgraded too."""
+    if not await conn.fetchval("SELECT to_regclass('intents') IS NOT NULL"):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'intents'::regclass "
+        "AND tgname = 'A_intents_detach_merged') "
+        "AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'intents'::regclass "
+        "AND tgname = 'intents_detach_merged') "
+        "AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'intents_merged_into_fkey' "
+        "AND conrelid = 'intents'::regclass AND confdeltype = 'c')")
 
 
 async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
@@ -1093,6 +1172,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _subscriptions_pending(conn):
             await conn.execute(_subscriptions_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTIONS)
+        if await _subscription_rules_pending(conn):
+            await conn.execute(_SUBSCRIPTION_RULES_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_RULES)
+        if await _subscription_lookback_pending(conn):
+            await conn.execute(_SUBSCRIPTION_LOOKBACK_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_LOOKBACK)
         if await _ledger_pending(conn):
             await conn.execute(_ledger_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
@@ -1188,6 +1273,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _message_leads_pending(conn):
             await conn.execute(_message_leads_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_LEADS)
+        if await _intent_merges_pending(conn):
+            await conn.execute(_intent_merges_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                               _INTENT_MERGES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1231,9 +1320,11 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
-            or await _subscriptions_pending(conn)
+            or await _subscriptions_pending(conn) or await _subscription_rules_pending(conn)
+            or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _message_leads_pending(conn)
+            or await _intent_merges_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _project_advisor_pending(conn)

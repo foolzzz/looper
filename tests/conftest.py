@@ -512,6 +512,7 @@ def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents import chat_settings
 
     monkeypatch.setattr(chat_settings, "_stop_enabled", chat_settings.DEFAULT_STOP_ENABLED)
+    monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.DEFAULT_COMPLETION_TURNS)
 
 
 @pytest.fixture(scope="session", autouse=True)
