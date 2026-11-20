@@ -2558,8 +2558,10 @@ def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bo
     from looper.agents.claude_cli import BUDGET_SUBTYPE
 
     records = api.post("/api/v1/runs/list", {"agent_id": agent_id, "limit": 500})["result"]["records"]
+    # Neither Claude's own turns nor a completion turn (a task that ended meanwhile) answer the message.
     new = [record for record in records if record["id"] > since
-           and not (record.get("metadata") or {}).get("autonomous")]
+           and not (record.get("metadata") or {}).get("autonomous")
+           and not (record.get("metadata") or {}).get("completion")]
     if not new and withdraw:
         return
     if not new:
