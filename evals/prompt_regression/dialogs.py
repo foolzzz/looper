@@ -477,43 +477,72 @@ def _requirement_has_the_lead(look: Look) -> str | None:
 
 # --- The research order: where the Manager looks before it asks the user ---
 
+RECORD_TOOLS = ("looper_tasks", "looper_projects")
 # A reply that asks the user for something: a question, or a request to tell, give or add it.
 _ASKS = re.compile(r"[？?]|告诉我|请提供|请补充|你可以补充|麻烦提供|tell me|let me know", re.IGNORECASE)
+# A reply that asks the user to supply facts (an offer of more help, "需要的话告诉我", is not one).
+_REQUESTS = re.compile(r"请提供|请补充|你可以补充|麻烦提供|please provide", re.IGNORECASE)
 
 
 def _asks(reply: str) -> bool:
     return bool(_ASKS.search(reply))
 
 
+def research_lookups(actions: list[dict[str, Any]]) -> list[str]:
+    """The turn's successful lookups, in the order they were made: Looper's records and the leads."""
+    return [a["tool"] for a in actions if a["status"] == "ok" and a["tool"] in (*RECORD_TOOLS, LEADS_TOOL)]
+
+
+def research_order_problem(lookups: list[str]) -> str | None:
+    """Looper's own records come before the leads: a leads search before any records read is out of order."""
+    if LEADS_TOOL in lookups and not set(lookups[:lookups.index(LEADS_TOOL)]) & set(RECORD_TOOLS):
+        return f"the Manager searched the leads before Looper's own records: {lookups}"
+    return None
+
+
 def _found_in_leads(look: Look) -> str | None:
-    """The answer is in a lead: the Manager searches the leads, gives it from there, and asks the user nothing."""
-    searches = [a for a in _searches(look, this_turn=True) if a["status"] == "ok"]
-    if not searches:
-        return "the Manager did not search the leads before answering"
+    """The answer is only in a lead: the Manager reads Looper's records first, then searches the leads, answers from
+    them, and asks the user nothing."""
+    lookups = research_lookups(look.turn_actions())
+    if LEADS_TOOL not in lookups:
+        return f"the Manager did not search the leads before answering: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
     if _writes(look):
         return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
     if look.fake:
         return None
-    return None if "ZX-42" in look.reply else "the reply does not give what the lead says (ZX-42)"
+    if "ZX-42" not in look.reply:
+        return "the reply does not give what the lead says (ZX-42)"
+    return "the reply asks the user for what the lead says" if _REQUESTS.search(look.reply) else None
 
 
 def _found_in_records(look: Look) -> str | None:
-    """The answer is in a ready task's requirement: the Manager reads its tasks and answers from there."""
-    reads = [a for a in _reads(look, this_turn=True) if a["tool"] == "looper_tasks"]
-    if not reads:
-        return "the Manager did not read its tasks before answering"
+    """The answer is in a ready task's requirement: the Manager reads its tasks, stops there (no leads search after
+    it found the answer), answers from it, and asks the user nothing."""
+    lookups = research_lookups(look.turn_actions())
+    if "looper_tasks" not in lookups:
+        return f"the Manager did not read its tasks before answering: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
+    if LEADS_TOOL in lookups:
+        return f"the Manager went on to the leads after its records had the answer: {lookups}"
     if _writes(look):
         return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
     if look.fake:
         return None
-    return None if "done" in look.reply else "the reply does not give what the task's requirement says (done)"
+    if "done" not in look.reply:
+        return "the reply does not give what the task's requirement says (done)"
+    return "the reply asks the user for what the task says" if _REQUESTS.search(look.reply) else None
 
 
 def _looked_then_asked(look: Look) -> str | None:
-    """Nothing anywhere answers it: the Manager looks first (its records or the leads), then asks the user."""
-    looked = [a for a in look.turn_actions() if a["tool"] in (LEADS_TOOL, "looper_tasks", "looper_projects")]
-    if not looked:
-        return "the Manager asked the user without looking anywhere first"
+    """Nothing anywhere answers it: the Manager reads Looper's records, then searches the leads, then asks the user."""
+    lookups = research_lookups(look.turn_actions())
+    if not set(lookups) & set(RECORD_TOOLS) or LEADS_TOOL not in lookups:
+        return f"the Manager asked before looking in both its records and the leads: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
     if _writes(look):
         return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
     if look.fake:
@@ -2409,14 +2438,16 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("Nebula 项目的上线日期定下来了吗？", _leads_used_with_sources, ((LEADS_TOOL, {"query": "Nebula"}),)),
     ), leads=True, tags=("manager", "leads")),
     Dialog("research_leads", (
-        Say("Nebula 发布前要跑哪个回归套件？", _found_in_leads, ((LEADS_TOOL, {"query": "Nebula"}),)),
+        Say("Nebula 发布前要跑哪个回归套件？", _found_in_leads,
+            (("looper_tasks", {"action": "list"}), (LEADS_TOOL, {"query": "Nebula"}))),
     ), leads=True, research=True, tags=("manager", "research")),
     Dialog("research_records", (
         Say("done.txt 那个任务，文件里最后要写什么内容？", _found_in_records,
             (("looper_tasks", {"action": "list"}),)),
-    ), ready_task=True, research=True, tags=("manager", "research")),
+    ), ready_task=True, leads=True, research=True, tags=("manager", "research")),
     Dialog("research_ask", (
-        Say("Orion 项目的预算上限是多少？", _looked_then_asked, ((LEADS_TOOL, {"query": "Orion"}),)),
+        Say("Orion 项目的预算上限是多少？", _looked_then_asked,
+            (("looper_projects", {"action": "list"}), (LEADS_TOOL, {"query": "Orion"}))),
     ), leads=True, research=True, tags=("manager", "research")),
     Dialog("leads_dont_search", (
         Say("别查消息，直接说你知道的：Nebula 项目的上线日期定了吗？", _no_search),
