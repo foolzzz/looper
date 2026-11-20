@@ -86,6 +86,8 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
     monkeypatch.setattr(housekeeping.db_schedules, "open_log_paths", AsyncMock(return_value=[]))
     monkeypatch.setattr(housekeeping.manager_events, "prune", AsyncMock(return_value=0))
     monkeypatch.setattr(housekeeping, "_prune_llm_requests", AsyncMock())
+    outbox_purge = AsyncMock(return_value=2)
+    monkeypatch.setattr(housekeeping.channel_outbox, "purge", outbox_purge)
     old = chat_attachments.message_dir(tmp_path, "web", "expired")
     fresh = chat_attachments.message_dir(tmp_path, "web", "recent")
     (old / "note.txt").write_text("old")
@@ -96,5 +98,7 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
     with caplog.at_level("INFO", logger=housekeeping.__name__):
         report = asyncio.run(housekeeping.run_once(tmp_path, NOW, current_runner=None, commands=None))
     assert report.chat_attachments == 1 and report.failed_steps == {}
+    assert report.channel_outbox == 2
+    outbox_purge.assert_awaited_once_with(NOW)
     assert not old.exists() and (fresh / "note.txt").read_text() == "recent"
     assert "chat_attachments=1" in caplog.text

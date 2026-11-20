@@ -826,3 +826,27 @@ def test_group_attachment_failure_notifies_once_and_failed_notice_still_publishe
             await bus.shutdown()
 
     asyncio.run(main())
+
+
+def test_gated_transport_preserves_cli_identity_and_reads():
+    from looper.agents.channels.lark_transport import GatedLarkTransport, LarkTransportKind
+    from looper.agents.channels.outbound import Gateway
+
+    inner = CliTransport('synthetic')
+    wrapped = GatedLarkTransport(inner, Gateway('channel-lark'), enabled=lambda: False)
+    assert wrapped.kind is LarkTransportKind.CLI
+    assert wrapped.consumer_started is inner.consumer_started
+    assert wrapped.get_message == inner.get_message
+
+
+def test_disabled_outbound_ignores_malformed_reply_route():
+    from looper.agents.channels.base import DeliveryFailure
+
+    async def check():
+        adapter = LarkChannelAdapter(allowlist=SenderAllowlist('lark', frozenset([OPEN_ID])),
+                                     transport=StubTransport())
+        envelope = MessageEnvelope.create(source=MANAGER_ADDRESS, target=channel_address('lark'),
+            message_type=MessageType.AGENT_REPLY, payload={'text': 'answer'}, metadata={'reply_route': 'invalid'})
+        receipt = await adapter.deliver(envelope)
+        assert receipt.success is False and receipt.failure is DeliveryFailure.NO_CHAT
+    asyncio.run(check())

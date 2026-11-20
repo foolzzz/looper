@@ -156,6 +156,7 @@ _STEP_DIFFICULTY = "step_difficulty"
 _ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
+_CHANNEL_OUTBOX = "channel_outbox"
 _LEDGER = "ledger"
 _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
@@ -832,6 +833,20 @@ CREATE TABLE IF NOT EXISTS subscription_daily_claims (
 """
 
 
+async def _channel_outbox_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CHANNEL_OUTBOX):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('channel_outbox') IS NOT NULL")
+
+
+def _channel_outbox_ddl() -> str:
+    found = re.search(r"-- channel outbox begin\n(.*?)-- channel outbox end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its channel outbox block")
+    return found.group(1)
+
+
 async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
@@ -1336,6 +1351,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _subscription_lookback_pending(conn):
             await conn.execute(_SUBSCRIPTION_LOOKBACK_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_LOOKBACK)
+        if await _channel_outbox_pending(conn):
+            await conn.execute(_channel_outbox_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHANNEL_OUTBOX)
         if await _ledger_pending(conn):
             await conn.execute(_ledger_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
@@ -1533,7 +1551,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
             or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
-            or await _ledger_pending(conn)
+            or await _channel_outbox_pending(conn) or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)

@@ -556,6 +556,7 @@ export interface ChatSettings {
   stop_enabled: boolean;
   /** Whether the Manager tells direct chats and the dashboard chat of a task's end (off by default). */
   completion_turns: CompletionTurns;
+  outbound_enabled: boolean;
 }
 
 /** The task ends of the last 24 hours, by how they were told (``manager_events.summary``). */
@@ -584,7 +585,7 @@ export async function fetchChatSettings(): Promise<ChatSettings> {
 }
 
 export async function updateChatSettings(
-  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null },
+  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; outbound_enabled?: boolean | null },
 ): Promise<ChatSettings> {
   const result = await callV1<ChatSettings>("/api/v1/chat_settings/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);

@@ -30,7 +30,8 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
                      "started_at": _STR, "state": _STR, "method": _NULL_STR,
                      "stopping": _BOOL, "can_interrupt": _BOOL})
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
-CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL})
+CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS,
+                         "research_order": _BOOL, "outbound_enabled": _BOOL})
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -43,7 +44,14 @@ def _op(name, description, request, result, risk="read", *, operator_only=False)
                      request, result, risk=risk, confirms=risk == "high", operator_only=operator_only)
 
 
+OUTBOUND_SETTINGS = _object({"outbound_enabled": _BOOL})
+
 OPERATIONS = (
+    _op("outbound_settings.get", "Read the operator's outbound channel control.",
+        _object({}, closed=True), OUTBOUND_SETTINGS, operator_only=True),
+    _op("outbound_settings.update", "Enable or disable the outbound gateway and durable Lark outbox.",
+        _object({"outbound_enabled": {"type": ["boolean", "null"]}}, ["outbound_enabled"], closed=True),
+        OUTBOUND_SETTINGS, "high", operator_only=True),
     _op("manager_session.get", "Read a Manager's session and available Agent Profiles.",
         _object({"manager": _STR}, [], closed=True), SESSION_VIEW),
     _op("manager_session.select_profile", "Choose a Manager session's profile; null follows Settings.",
@@ -61,19 +69,27 @@ OPERATIONS = (
     _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
-                 "research_order": {"type": ["boolean", "null"]}},
+                 "research_order": {"type": ["boolean", "null"]},
+                 "outbound_enabled": {"type": ["boolean", "null"]}},
                 [], closed=True), CHAT_SETTINGS, "high"),
 )
 
 
 async def impact(server, operation, arguments, principal, headers):
-    if operation.operation_id != "chat_settings.update":
+    if operation.operation_id not in ("chat_settings.update", "outbound_settings.update"):
         return None
     try:
         values = chat_settings.checked(arguments)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
+    if "outbound_enabled" in values and principal.kind != "operator":
+        raise OpError(ErrorCode.FORBIDDEN, "outbound_enabled requires operator identity")
     changes = []
+    if "outbound_enabled" in values:
+        value = values["outbound_enabled"]
+        enabled = chat_settings.DEFAULT_OUTBOUND_ENABLED if value is None else value
+        changes.append(f"Set channels.outbound.enabled to {str(enabled).lower()}? "
+                       "Lark messages use a durable outbox, keyed retries and a shared rate limit when enabled.")
     if "stop_enabled" in values:
         value = values["stop_enabled"]
         enabled = chat_settings.DEFAULT_STOP_ENABLED if value is None else value
@@ -122,9 +138,16 @@ def _stop_state(agent, message_id):
 
 async def run(server, operation, arguments, principal, headers):
     name = operation.operation_id
+    if name == "outbound_settings.get":
+        return {"outbound_enabled": chat_settings.outbound_enabled()}
+    if name == "outbound_settings.update":
+        await chat_settings.update(arguments)
+        return {"outbound_enabled": chat_settings.outbound_enabled()}
     if name == "chat_settings.get":
         return chat_settings.settings_view()
     if name == "chat_settings.update":
+        if "outbound_enabled" in arguments and principal.kind != "operator":
+            raise OpError(ErrorCode.FORBIDDEN, "outbound_enabled requires operator identity")
         try:
             return await chat_settings.update(arguments)
         except ValueError as exc:

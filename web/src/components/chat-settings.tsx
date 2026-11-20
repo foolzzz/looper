@@ -53,7 +53,7 @@ export function ChatSettingsSection() {
     return () => { alive = false; };
   }, [attempt]);
 
-  const save = async (body: { stop_enabled?: boolean; completion_turns?: CompletionTurns }) => {
+  const save = async (body: { stop_enabled?: boolean; completion_turns?: CompletionTurns; outbound_enabled?: boolean }) => {
     setSaving(true);
     setError("");
     try {
@@ -107,6 +107,17 @@ export function ChatSettingsSection() {
               minutes.
             </p>
             <CompletionCounts summary={summary} error={summaryError} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-outbound`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-outbound`} type="checkbox" checked={settings.outbound_enabled} disabled={saving}
+                     aria-describedby={`${id}-outbound-help`}
+                     onChange={(event) => void save({ outbound_enabled: event.target.checked })} />
+              出站统一限流和重试（飞书、Telegram）
+            </label>
+            <p id={`${id}-outbound-help`} className="text-xs text-muted-foreground">
+              默认关闭。当前接入飞书，发送前保存，遇到超时会按幂等键重试；Telegram 将在后续接入。
+            </p>
           </div>
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>

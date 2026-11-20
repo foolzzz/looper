@@ -33,6 +33,7 @@ class LarkApiError(LarkCliError):
     def __init__(self, message: str, *, code: int | None = None, http_status: int | None = None) -> None:
         super().__init__(f"{message} (code {code})" if code is not None else message, code=code)
         self.http_status = http_status
+        self.retry_after: float | None = None
 
 
 class BotInfo(NamedTuple):
@@ -121,6 +122,22 @@ class LarkApi:
             token = await self.tenant_token()
             response = await self._request(method, path, params=params, body=body,
                                            headers={"Authorization": f"Bearer {token}"})
+            if response.status_code == 429:
+                try:
+                    answer = self._json(response)
+                except LarkApiError as exc:
+                    error = exc
+                    answer = {}
+                else:
+                    error = self._error(answer, response.status_code, token=token)
+                raw_delay = response.headers.get("Retry-After") or answer.get("retry_after")
+                try:
+                    delay = float(raw_delay)
+                    if math.isfinite(delay) and delay >= 0:
+                        error.retry_after = delay
+                except (ValueError, TypeError):
+                    pass
+                raise error
             if response.status_code == 401:
                 if self._token == token:
                     self._token = None

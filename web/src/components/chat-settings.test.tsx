@@ -15,12 +15,12 @@ const SUMMARY = {
 describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let stored: { stop_enabled: boolean; completion_turns: string };
+  let stored: { stop_enabled: boolean; completion_turns: string; outbound_enabled: boolean };
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
 
   beforeEach(() => {
-    stored = { stop_enabled: false, completion_turns: "off" };
+    stored = { stop_enabled: false, completion_turns: "off", outbound_enabled: false };
     summary = SUMMARY;
     puts = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -61,6 +61,16 @@ describe("Chat settings", () => {
     await act(async () => box.click());
     expect(puts).toEqual([{ stop_enabled: true }]);
     expect((container.querySelector("input[type=checkbox]") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("enables outbound retries without changing the other chat settings", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$=-outbound]") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(container.textContent).toContain("出站统一限流和重试（飞书、Telegram）");
+    await act(async () => box.click());
+    expect(puts).toEqual([{ outbound_enabled: true }]);
+    expect(box.checked).toBe(true);
   });
 
   it("switches the Manager's completion turns on alone, and shows the day's counts", async () => {

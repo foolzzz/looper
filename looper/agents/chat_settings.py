@@ -10,8 +10,11 @@ ledger RFC section 3.7).
 ``manager.research_order``: whether the default Manager's contract says where to look things up, and in what order,
 before it asks the user (``research_order``; off by default).
 
-Stop, the completion events and the Manager's prompt check them from synchronous code, so they are kept in memory: ``load`` reads them
-at startup and ``update`` refreshes them. Until loaded, both are off.
+``channels.outbound.enabled``: the operator's shared write gateway and durable channel outbox
+(``outbound_enabled``; off by default). Lark is wired first; Telegram follows separately.
+
+Stop, the completion events, outbound writes and the Manager's prompt check them from synchronous code, so they are kept in memory: ``load`` reads them
+at startup and ``update`` refreshes them. Until loaded, all are off.
 """
 
 from __future__ import annotations
@@ -27,7 +30,9 @@ DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
 RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
-FIELDS = ("stop_enabled", "completion_turns", "research_order")
+OUTBOUND_ENABLED_KEY = "channels.outbound.enabled"
+DEFAULT_OUTBOUND_ENABLED = False
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "outbound_enabled")
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -44,6 +49,7 @@ DEFAULT_COMPLETION_TURNS = CompletionTurns.OFF
 _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
+_outbound_enabled = DEFAULT_OUTBOUND_ENABLED
 
 
 def stop_enabled() -> bool:
@@ -76,12 +82,24 @@ def set_research_order(value: bool) -> None:
     _research_order = value
 
 
+def outbound_enabled() -> bool:
+    return _outbound_enabled
+
+
+def set_outbound_enabled(value: bool) -> None:
+    """Apply the operator's outbound control in memory; persistent updates go through ``update``."""
+    global _outbound_enabled
+    _outbound_enabled = value
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY])
+    stored = await db_settings.get_settings(
+        [STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, OUTBOUND_ENABLED_KEY])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
+    set_outbound_enabled(stored.get(OUTBOUND_ENABLED_KEY) == "true")
     try:
         turns = CompletionTurns(stored.get(COMPLETION_TURNS_KEY, DEFAULT_COMPLETION_TURNS.value))
     except ValueError:
@@ -91,7 +109,8 @@ async def load() -> bool:
 
 
 def settings_view() -> dict[str, Any]:
-    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value, "research_order": _research_order}
+    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value, "research_order": _research_order,
+            "outbound_enabled": _outbound_enabled}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -116,6 +135,11 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("research_order must be true, false or null")
         values["research_order"] = value
+    if "outbound_enabled" in body:
+        value = body["outbound_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("outbound_enabled must be true, false or null")
+        values["outbound_enabled"] = value
     return values
 
 
@@ -132,6 +156,9 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if "research_order" in values:
         value = values["research_order"]
         stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
+    if "outbound_enabled" in values:
+        value = values["outbound_enabled"]
+        stored[OUTBOUND_ENABLED_KEY] = None if value is None else ("true" if value else "false")
     await db_settings.put_settings(stored)
     await load()
     return settings_view()
