@@ -191,3 +191,23 @@ def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch: pytest.Mon
         await connection.ensure_schema(pool)  # a second upgrade changes nothing
 
     run_db(test, monkeypatch, timeout=30)
+
+
+def test_a_reminder_the_layer_cannot_decide_on_is_posted_as_with_the_switch_off(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents.gate_courier import GateCourier
+
+        chat_settings.set_delivery_enabled(True)
+
+        async def refused(*args: Any, **kwargs: Any) -> delivery.Decision:
+            raise RuntimeError("the database refused the row")
+
+        monkeypatch.setattr(delivery, "decide", refused)
+        await _reminded(pool)
+        poster = _Poster()
+        await GateCourier(poster).run_once()
+        assert [post["text"][:1] for post in poster.posts] == ["⏸", "⏰"]
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
+
+    run_db(test, monkeypatch)

@@ -17,7 +17,8 @@ says so.
 With the system setting ``delivery.enabled`` on, a reminder passes the delivery layer (``proactive_delivery``)
 before it is posted, and the decision is recorded. A reminder is only due for a gate that waits for the user in a
 task still running (``db.user_gates.due_reminders``), and a waiting gate holds back the steps after it, so it is
-``blocking`` and always sent, at night and over the daily cap too.
+``blocking`` and always sent, at night and over the daily cap too. A decision that cannot be made (the database
+refused it) is logged and the reminder posted as with the layer off: the layer never holds a blocking message back.
 
 A post that sent nothing is tried again, after ``POST_RETRY_SEC``, up to
 ``POST_ATTEMPTS`` in all, and the gate's later messages wait behind it; only
@@ -260,11 +261,16 @@ class GateCourier:
         if row["kind"] != MessageKind.REMINDER.value or not chat_settings.delivery_enabled():
             return None
         kind = delivery.ChatKind.GROUP if chat.in_group else delivery.ChatKind.DIRECT
-        # Blocking: neither the cap nor the grace after the user wrote applies, so no last message is looked up.
-        return await delivery.decide(
-            delivery.Delivery(delivery.DeliveryKind.GATE_REMINDER, delivery.Urgency.BLOCKING, kind),
-            dedupe_key=_delivery_key(row), channel_id=chat.channel_id, chat=chat.target.id, last_user_message_at=None,
-            task_id=row["task_id"], step_id=row["step_id"], schedule_id=row.get("schedule_id"))
+        try:
+            # Blocking: neither the cap nor the grace after the user wrote applies, so no last message is looked up.
+            return await delivery.decide(
+                delivery.Delivery(delivery.DeliveryKind.GATE_REMINDER, delivery.Urgency.BLOCKING, kind),
+                dedupe_key=_delivery_key(row), channel_id=chat.channel_id, chat=chat.target.id,
+                last_user_message_at=None, task_id=row["task_id"], step_id=row["step_id"],
+                schedule_id=row.get("schedule_id"))
+        except Exception:
+            logger.exception("no delivery decision on gate message %s; posting it as with the layer off", row["id"])
+            return None
 
     @staticmethod
     async def _reply_to(row: Mapping[str, Any], chat: GateChat) -> str | None:
