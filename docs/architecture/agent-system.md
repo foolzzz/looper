@@ -44,6 +44,32 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   with `looper_task_gate_reply`, which sends the user's own message (asking
   first which gate when it could be more than one), and nothing else does; refer to what Looper writes itself instead
   of repeating it; and never say an operation ran unless its answer was `ok`
+- With the system setting `manager.stable_context` `true` (default off), those
+  sections and the active goals are one block, `Looper state (rev R)`, R a
+  hash of its lines (`tiers/state_view.py`), so the resident session's growing
+  history keeps hitting the prompt cache. A turn starts with the whole block
+  when its session may not hold the last one: a new session (`/new`, a
+  session switch such as a full context), a new process (a server restart, an
+  idle close), after a compaction the session reported (`compact_boundary`)
+  or a turn it ran on its own, after a turn that did not go through, and on
+  every turn of a runtime whose resident session does not report its
+  compactions (`RuntimeAdapter.resident_compaction_events`, only Claude
+  Code's). A compaction or a turn of its own moves a context generation on: a
+  turn rendered before it is rendered again whole just before its message is
+  written, and a turn keeps its block only for the generation it was rendered
+  for. Any other turn starts with `Looper state: unchanged since rev R`, or
+  with the lines added and removed since that whole block (never since the
+  previous note), each under its section's heading; a note that changes more
+  than 30 % of the block's non-blank lines (a replaced line counts twice) or is
+  longer than 40 % of its characters is a new whole block instead, and exactly
+  30 % or 40 % is still a note. An open gate's line says when it opened (UTC,
+  to the minute) instead of how long it has been open, so the block does not
+  change every minute. What the session holds is in the Manager's memory
+  only. The contract then ends with `STABLE_CONTEXT_CONTRACT` (the latest
+  whole block with the newest note after it is the current state), and each
+  turn's record has `metadata.looper_state` (`view`, `rev`, `reason`). Off,
+  the turns, the prompt, the tool list and the process signature are as they
+  were without the setting
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
