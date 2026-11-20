@@ -164,6 +164,7 @@ _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
+_CHAT_DIRECT_THREADS = "chat_direct_threads"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -410,6 +411,17 @@ def _leads_check_ddl() -> str:
     found = _LEADS_CHECK_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its leads check block")
+    return found.group(1)
+
+
+_CHAT_DIRECT_THREADS_BLOCK = re.compile(r"-- chat direct threads begin\n(.*?)-- chat direct threads end", re.S)
+
+
+def _chat_direct_threads_ddl() -> str:
+    """Who a stored direct chat is with, as schema.sql defines it."""
+    found = _CHAT_DIRECT_THREADS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its chat direct threads block")
     return found.group(1)
 
 
@@ -869,6 +881,12 @@ async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_LEADS):
         return False
     return not await conn.fetchval("SELECT to_regclass('message_leads') IS NOT NULL")
+
+
+async def _chat_direct_threads_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CHAT_DIRECT_THREADS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('chat_direct_threads') IS NOT NULL")
 
 
 async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
@@ -1439,6 +1457,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _LEADS_CHECK)
             await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
+        if await _chat_direct_threads_pending(conn):
+            await conn.execute(_chat_direct_threads_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_DIRECT_THREADS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1501,4 +1522,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
-            or await _processor_role_pending(conn)))
+            or await _processor_role_pending(conn) or await _chat_direct_threads_pending(conn)))

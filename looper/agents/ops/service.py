@@ -65,6 +65,7 @@ from . import ledger as ledger_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
 from .schedules import TOOLS as SCHEDULE_TOOLS
+from .session_search import TOOL as SESSION_SEARCH, enabled as session_search_on
 from .settings import TOOLS as SETTINGS_TOOLS
 from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool, task_workflow_tool
 
@@ -143,6 +144,8 @@ READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Every tool a Manager may have had: a call of one it no longer has is told so. The leads search is the default
 # Manager's while leads are on (``ManagerOps._with_leads``).
 _MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH)}
+# The session search is the default Manager's while it is on (``ManagerOps._with_session_search``).
+_MANAGER_TOOL_NAMES[SESSION_SEARCH.name] = SESSION_SEARCH
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
 
 
@@ -289,6 +292,7 @@ class ManagerOps:
             self._scope = scope
         scope = await self._with_ledger_tools(scope)
         scope = await self._with_leads(scope)
+        scope = await self._with_session_search(scope)
         if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
             return scope
         try:
@@ -339,6 +343,20 @@ class ManagerOps:
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name != LEADS_TOOL]
         adjusted = replace(scope, tools=_tool_map([*kept, LEADS_SEARCH] if wanted else kept))
+        if self._scope is scope:
+            self._scope = adjusted
+        return adjusted
+
+    async def _with_session_search(self, scope: OpsScope) -> OpsScope:
+        """``scope`` with ``looper_session_search`` exactly while ``manager.session_search.enabled`` is on, for the
+        default Manager; any other Manager's as it is. Off, the default Manager's is what it was before it existed."""
+        if scope.manager_id != DEFAULT_MANAGER_ID:
+            return scope
+        wanted = await session_search_on()
+        if wanted == (SESSION_SEARCH.name in scope.tools):
+            return scope
+        kept = [tool for tool in scope.tools.values() if tool.name != SESSION_SEARCH.name]
+        adjusted = replace(scope, tools=_tool_map([*kept, SESSION_SEARCH] if wanted else kept))
         if self._scope is scope:
             self._scope = adjusted
         return adjusted
@@ -460,7 +478,8 @@ class ManagerOps:
                 tool = await self._authorize(scope, name, arguments)
             if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
                 raise OpError(ErrorCode.FORBIDDEN, "message leads are searched only in the user's own direct chat "
-                                                   "or on the dashboard")
+                                                   "or on the dashboard" if tool.name == LEADS_TOOL else
+                              f"{tool.name} runs only in the user's own direct chat or on the dashboard")
             _check_answering(turn)
             matched_turn = turn if enforced else bound
             if (matched_turn is not None and matched_turn.require_match and binding

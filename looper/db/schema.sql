@@ -2214,3 +2214,16 @@ ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_dropped;
 ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
+
+-- Who a stored Lark or Telegram direct chat (a chat_messages session) is with, recorded when one of their messages
+-- is stored while the Manager's session search is on (manager.session_search.enabled). The search counts the chat as
+-- the user's own while its sender is the bot's operator (channel_configs.config operator_sender_id). connection.py
+-- applies this block to databases that predate it, so keep it between the markers and idempotent.
+-- chat direct threads begin
+CREATE TABLE IF NOT EXISTS chat_direct_threads (
+    session_id  TEXT PRIMARY KEY,
+    channel_id  TEXT NOT NULL REFERENCES channel_configs(channel_id) ON DELETE CASCADE,
+    sender_id   TEXT NOT NULL CHECK (btrim(sender_id) <> ''),
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- chat direct threads end

@@ -95,6 +95,7 @@ from .state_view import Rendered, StateShown
 from ..ops import Turn, TurnOrigin, leads as ops_leads
 from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
+from ..ops import session_search as ops_sessions
 from ..task_notice import Notice, ends_task, web_end_text
 from ..message import (
     MANAGER_ADDRESS,
@@ -1534,7 +1535,9 @@ class ManagerAgent:
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] == ops_leads.LEADS_TOOL for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
-        if self._has_templates or has_workflows or has_leads or has_ledger or self.agent_id != DEFAULT_MANAGER_ID:
+        has_sessions = any(t["name"] == ops_sessions.TOOL_NAME for t in tools)
+        if (self._has_templates or has_workflows or has_leads or has_ledger or has_sessions
+                or self.agent_id != DEFAULT_MANAGER_ID):
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
@@ -3261,6 +3264,7 @@ class ManagerAgent:
                 session_id=key, message_id=message_id,
                 role=role, content=content, channel=channel, manager_id=self.agent_id,
             )
+            await ops_sessions.note_direct_thread(key, _message_origin(env))
         except Exception:
             logger.warning("%s: could not persist a %s chat turn", self._log, channel, exc_info=True)
 
