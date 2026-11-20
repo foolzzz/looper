@@ -155,6 +155,7 @@ _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
+_OUTBOUND_REVIEWS = "outbound_reviews"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -272,6 +273,29 @@ def _agent_spawns_ddl() -> str:
     return found.group(1)
 
 
+_OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
+
+
+def _outbound_reviews_ddl() -> tuple[str, ...]:
+    """The review table as schema.sql defines it, and the classifier in the checks that list roles and run kinds.
+    llm_records is large: its check comes back NOT VALID (no scan while the schema transaction holds its lock) and is
+    validated in ``_ONLINE_STEPS``."""
+    from .llm_records import RUN_KINDS
+
+    found = _OUTBOUND_REVIEWS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its outbound reviews block")
+    kinds = ", ".join(f"'{kind}'" for kind in RUN_KINDS)
+    return (
+        found.group(1),
+        "ALTER TABLE llm_records DROP CONSTRAINT llm_records_run_kind_check, "
+        f"ADD CONSTRAINT llm_records_run_kind_check CHECK (run_kind IN ({kinds})) NOT VALID",
+        "ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check, "
+        "ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', "
+        "'processor', 'advisor', 'advice_check', 'outbound_check'))",
+    )
+
+
 def _run_tree_ddl() -> tuple[str, ...]:
     """The run tree columns of llm_records, as schema.sql defines them, added without a scan or a rewrite: llm_records
     is large, and these statements hold its ACCESS EXCLUSIVE lock until the schema transaction commits. No older row
@@ -310,6 +334,8 @@ _ONLINE_STEPS = (
                           "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL"),)),
     _OnlineStep(_STEP_DIFFICULTY, "step_difficulty_online",
                 validate=(("task_steps", "task_steps_difficulty_check"),)),
+    _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online",
+                validate=(("llm_records", "llm_records_run_kind_check"),)),
 )
 
 
@@ -715,6 +741,13 @@ async def _agent_spawns_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _AGENT_SPAWNS):
         return False
     return not await conn.fetchval("SELECT to_regclass('agent_spawns') IS NOT NULL")
+
+
+async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _OUTBOUND_REVIEWS):
+        return False
+    # Fresh baselines create the table and the widened checks together.
+    return not await conn.fetchval("SELECT to_regclass('outbound_reviews') IS NOT NULL")
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -1298,6 +1331,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute(_intent_merges_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _INTENT_MERGES)
+        if await _outbound_reviews_pending(conn):
+            for ddl in _outbound_reviews_ddl():
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1345,7 +1382,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _message_leads_pending(conn)
-            or await _intent_merges_pending(conn)
+            or await _intent_merges_pending(conn) or await _outbound_reviews_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _project_advisor_pending(conn)

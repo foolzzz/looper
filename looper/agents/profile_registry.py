@@ -201,6 +201,8 @@ BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
                                   BUILTIN_PROVIDER, "claude-fable-5-2", effort="high"),
     "advice_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
                                        BUILTIN_PROVIDER, "claude-sonnet-5-5"),
+    "outbound_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
+                                         BUILTIN_PROVIDER, "claude-sonnet-5-5"),
 })
 
 
