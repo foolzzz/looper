@@ -4194,15 +4194,23 @@ line (and a worktree task's branch line) after it, and the events become
 `delivered` with the run's `record_id`. Otherwise the batch falls back and
 every event's recorded notice is sent unchanged: `turn_failed` (the turn
 failed, or the tools' token was refused), `turn_timeout` (no reply within 120
-seconds of the claim: the notices go at once, a runtime that can interrupt is
-stopped as `/stop` stops it, another runs to its end and its reply only stays on
-its record), `turn_stopped`, `empty_reply`, `send_failed` (the reply could not
-be handed to the channel), and, at the claim, `off` (the setting was turned
-off) or `manager_off` (the Manager was turned off). A Manager retired with a
-`COMPLETION_DUE` queued or in hand sends the notices of that chat's open events
+seconds of the claim: the notices go at once, then the turn is stopped as a stop
+ends a turn, a runtime run per turn ending its process tree; if it has not ended
+within 10 seconds it is cancelled and its runtime stopped, so the next message
+starts a fresh one; a turn that does not end even then is let go of, its lock
+and binding released and a fresh runtime used, and it only writes its record),
+`turn_stopped`, `empty_reply`, `send_failed` (the reply could not be handed to
+the channel), and, at the claim, `off` (the setting was turned off) or
+`manager_off` (the Manager was turned off). A wake-up whose events cannot be
+read (the database fails) queues a new `COMPLETION_DUE` after 5 seconds, before
+it is acknowledged. When a Manager starts, before its message loop, the events
+its earlier turns left `running` fall back with `restart`, every fallen-back
+event of the last 24 hours whose notice was never sent sends it, and each chat
+with `pending` events gets a wake-up: a turn a restart cut off may cost an
+extra notice, never the notice. A Manager retired with a `COMPLETION_DUE`
+queued or in hand sends the notices of that chat's open events
 (`manager_off`). The 60-second gathering window, the 15-minute queue limit, the
-startup fallback of `running` events, the schedules' run messages and the
-Settings → Chat controls are not built yet.
+schedules' run messages and the Settings → Chat controls are not built yet.
 
 ### Task templates
 
