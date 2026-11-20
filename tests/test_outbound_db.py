@@ -325,6 +325,25 @@ def test_a_review_whose_audit_write_hangs_blocks_within_its_deadline(monkeypatch
     run_db(test, monkeypatch, setup=_setup)
 
 
+def test_code_refuses_a_change_of_loopers_own_files_with_its_audit_row(monkeypatch: pytest.MonkeyPatch,
+                                                                       tmp_path: Path) -> None:
+    from looper.agents import outbound
+    from looper.agents.outbound import ActionLevel, Failure
+
+    async def test(pool: Any) -> None:
+        origin = outbound.Origin("manager", outbound.Source.HOOK)
+        action = _action(tool="Write", action=None, level=ActionLevel.UNKNOWN, target_kind="file",
+                         target="/rt/.local/prompts/claude-settings/x.json", summary="Write a settings file",
+                         content="")
+        review = await outbound.refuse(action, origin, Failure.PROTECTED)
+        assert not review.allowed and review.record_id is None and "Looper's own" in review.reason
+        assert (await _row(pool, review.review_id))["failure"] == "protected" and _seen(tmp_path) == []
+        with pytest.raises(ValueError):
+            await outbound.refuse(action, origin, Failure.TIMEOUT)
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
 def test_no_action_is_allowed_without_its_audit_row(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.db import outbound_reviews
 

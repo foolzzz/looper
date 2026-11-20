@@ -122,6 +122,7 @@ class Failure(str, Enum):
     UNAVAILABLE = "unavailable"
     BUDGET = "budget"
     TOO_LONG = "too_long"  # the text it would send is longer than the review reads
+    PROTECTED = "protected"  # it would change Looper's own files (its settings, its hook): blocked by code
     REFUSED = "refused"  # its model declined to judge, or another model answered (``spawn.ChildFailure.REFUSED``)
 
 
@@ -350,6 +351,7 @@ _FAILURE_REASONS: Mapping[Failure, str] = {
     Failure.RATE_LIMITED: "the review's model is rate-limited or out of quota, so the action was blocked",
     Failure.UNAVAILABLE: "the review cannot run (its role or Agent Profile), so the action was blocked",
     Failure.BUDGET: "the review reached its spend cap, so the action was blocked",
+    Failure.PROTECTED: "it would change Looper's own settings or its review hook, so the action was blocked",
     Failure.TOO_LONG: f"the text is longer than the review reads ({CONTENT_MAX_CHARS:,} characters), so the action "
                       "was blocked",
     Failure.REFUSED: "the review's model declined to judge this action, so the action was blocked",
@@ -385,6 +387,17 @@ async def review(action: Action, asker: Asker, origin: Origin, *, context: Seque
             logger.exception("the outbound review of %s by %s could not run", action.tool, origin.agent_id)
             outcome = _blocked(Failure.RUNTIME)
     return await _record(action, origin, *outcome, run)
+
+
+# What code blocks without the classifier, when its caller tells it so (``refuse``).
+CODE_FAILURES = frozenset({Failure.PROTECTED})
+
+
+async def refuse(action: Action, origin: Origin, failure: Failure) -> Review:
+    """Block ``action`` for ``failure``, which code decided (one of ``CODE_FAILURES``), and write its audit row."""
+    if failure not in CODE_FAILURES:
+        raise ValueError(f"{failure.value} is not decided by code")
+    return await _record(action, origin, *_blocked(failure), _Run())
 
 
 _Outcome = tuple[Decision, str, Sequence[Signal], Failure | None]
