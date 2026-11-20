@@ -432,7 +432,7 @@ class Scheduler:
         self._loop_task: asyncio.Task[None] | None = None
         self._last_tick_at: datetime | None = None
         self._last_ok_tick_at: datetime | None = None
-        self._notifier = Notifier(sender=sender, clock=clock, dashboard_url=dashboard_url)
+        self._notifier = Notifier(sender=sender, clock=clock, dashboard_url=dashboard_url, poster=poster)
         self._day_zone = cron.zone(day_zone or cron.local_zone_name())
         self._commands = CommandRuns(runtime_root) if runtime_root is not None else None
         self._runtime_root = runtime_root
@@ -1235,6 +1235,16 @@ class Scheduler:
                 logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
 
     # --- Ending ---
+
+    async def post_run_message(self, run_id: str, channel_id: str, chat: str, text: str, manager_event_id: int, *,
+                               send: bool = True, reply: bool = False) -> Any:
+        """A run's message as its completion event tells it (``Notifier.post_run_message``)."""
+        return await self._notifier.post_run_message(run_id, channel_id, chat, text, manager_event_id, send=send,
+                                                     reply=reply)
+
+    async def run_target_ok(self, run_id: str, channel_id: str, chat: str) -> bool:
+        """Whether the run's messages still go to the chat its completion event recorded (``Notifier``)."""
+        return await self._notifier.run_target_ok(run_id, channel_id, chat)
 
     async def task_ended(self, task_id: str, status: str) -> None:
         """The TaskRouter's report that a task ended: finish its run, then start the schedule's queued run."""

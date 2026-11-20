@@ -177,7 +177,7 @@ CREATE INDEX IF NOT EXISTS idx_manager_events_created ON manager_events (created
 4. 限时 120 秒，从回合开始算。成功且回复去掉空白后非空：回复加代码块（第 3.6 节）发到目标，整批 `delivered`，写 `record_id`、`sent_at`。
 5. 其他情况整批 `fallback`，逐个事件发代码通知：回合出错 `turn_failed`；超时 `turn_timeout`；你停止 `turn_stopped`；空回复 `empty_reply`；回复交给渠道失败 `send_failed`（再试一次代码通知，失败的照现在记日志）。超时时，能中断的运行时（`can_interrupt`）按 `/stop` 的路径中断；不能中断的（按轮启动的运行时）让它跑完，回复只进运行记录，不发。
 
-**「至少一次」的边界：** 回复已经交给渠道、写 `delivered` 之前服务崩溃，重启后这批按 `restart` 再发一次代码通知。宁可多发一条，不丢。
+**送达的边界：** 回复和代码通知都按订阅推送的做法记送达状态：交给渠道之前先提交 `sending`；渠道明确没发出的（`failed`）才重试，可能已发出的（超时、读不到回答、拆开发送时已发出一部分，或停在 `sending` 的）记 `uncertain`，不再发送。回复已经在 `sending`、写 `delivered` 之前服务崩溃的，重启后记为 `delivered`、`uncertain`，不补发代码通知；回复已发出但记账写失败的，只重试记账（三次），仍写不上的停在 `sending`，10 分钟后由完成服务记为 `delivered`、`uncertain`，这个会话的下一轮照常开始。每次发送带一个 claim（回复用 batch，代码通知每次重试一个新 id），只有这次发送的回答能结算它；被记成 `uncertain` 之后这次发送才回报成功的，改记 `sent`，任何情况下都不重发。
 
 ### 3.5 `[COMPLETION]` 回合（模型可见）
 
@@ -219,7 +219,7 @@ Read with your tools (looper_tasks get, looper_costs) only when the facts above 
 
 **能做什么：** 只读。这一轮的 ops `Turn` 没有 `message_id`，`Turn.autonomous` 为真：`write`、`high` 档的调用返回 `needs_user_turn` 并照常留痕，`looper_confirm` 一律拒绝，不消耗任何待确认的操作。工具列表不变（常驻进程的工具列表在启动时就定了，按回合换列表会让进程重启）；「只读」由 ops 按回合执行，不靠提示词。`Turn` 新增类型化的 `origin`（`user`、`own`、`completion`），`autonomous` 改为 `origin != user`，现有两种回合的判定不变。
 
-**运行记录：** `llm_records` 一行，`agent_id` 是 Manager，`metadata.completion = {batch, event_ids, task_ids}`，花费算 Manager 的，不挂到任务上。每次运行的花费上限沿用 Manager 角色现有的设置，收尾回合不另设上限（Q9）。Runs 页能按「收尾回合」筛出。
+**运行记录：** `llm_records` 一行，`agent_id` 是 Manager，`metadata.completion = {batch, event_ids, task_ids}`，花费算 Manager 的，不挂到任务上。每次运行的花费上限沿用 Manager 角色现有的设置，收尾回合不另设上限（Q9）。
 
 ### 3.6 回复与兜底
 
@@ -614,7 +614,7 @@ Looper 没有单独的指标系统，照命令型定时任务 RFC 第 15.2 节�
   - `briefing snapshot run=… items=n shown=m more=k`；`briefing output run=… source=processor|code reason=…`
   - 日志里不写回复正文、原话和条目标题。
 - **`system.health`：** 待投递完成事件的数量和最老的年龄、最近 24 小时 `delivered` / `fallback`（按原因）/ `skipped`；账本未结的待确认数、待核实的转述决定数、最近一次对账补登记数；晨报沿用定时任务和订阅的健康数据。
-- **控制台：** Settings → Chat 的收尾计数；Runs 页的收尾回合（花费、时长）；待办页；订阅运行历史里晨报的快照条数、输出来源和花费。
+- **控制台：** Settings → Chat 的收尾计数和花费；待办页；订阅运行历史里晨报的快照条数、输出来源和花费。
 - **告警：**
 
 | 级别 | 条件 | 去向 |

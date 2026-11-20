@@ -895,6 +895,8 @@ async def _run_agent_system_watched(
             task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                                      on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
             wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
+            from . import completion_events
+            completion_events.set_scheduler(scheduler)
             source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
             intent_push_service = IntentPushService(registry, drain=drain)
             ledger_reconciler = LedgerReconciler()
@@ -927,6 +929,10 @@ async def _run_agent_system_watched(
                 ownership.push_async_callback(fleet.stop)
             task_router.manager_running = fleet.is_running
             await fleet.load()
+            from .completion_service import CompletionService
+            completion_service = CompletionService(
+                bus=bus, manager_running=fleet.is_running, drain=drain,
+                running_managers=lambda: [agent.agent_id for agent in fleet.agents()])
         # Start receiving only once every enabled Manager is known, so backlog is not lost or sent to a disabled one.
         await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",),
                              stop_chat=fleet.stop_chat, startup=startup)
@@ -1025,6 +1031,8 @@ async def _run_agent_system_watched(
         await gate_reminders.start()
         # Check due waits only after the task router and HTTP API are ready.
         await wait_service.start()
+        # Once every Manager started (and recovered its own turns): the chats' completion events, as they come due.
+        await completion_service.start()
         # Sources that are off (the default) cost one query per tick.
         await source_service.start()
         await intent_push_service.start()
@@ -1088,6 +1096,7 @@ async def _run_agent_system_watched(
             await gate_reminders.stop()
             # Cancel and reap in-flight wait checks before stopping agents and their bus.
             await wait_service.stop()
+            await completion_service.stop()
             await source_service.stop()
             await intent_push_service.stop()
             await ledger_reconciler.stop()

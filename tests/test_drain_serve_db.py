@@ -53,8 +53,8 @@ if step:
     sys.stdin.readline()
     label = step.group(1)
     log("worker", step=label)
-    if variant in ("restart", "deadline") and label == "s1":
-        # Keep the restart Worker held through dispatch and the next task's planning turn.
+    if variant == "restart" or (variant == "deadline" and label == "s1"):
+        # Hold whichever independent restart step wins the slot, through dispatch and drain.
         limit = time.monotonic() + (180 if variant == "restart" else 90)
         while not (state / ("release-" + variant)).exists():
             if time.monotonic() >= limit:
@@ -82,7 +82,8 @@ for line in sys.stdin:
     if text.startswith("This run's requirement"):
         text = text[text.index("[PLAN]"):]
     if text.startswith("[PLAN]") or "Your last reply broke the reply contract" in text:
-        reply = {"steps": [spec("s1"), *([spec("s2")] if variant == "restart" else [])]}
+        labels = json.loads((state / "restart-steps.json").read_text()) if variant == "restart" else ["s1"]
+        reply = {"steps": [spec(label) for label in labels]}
     elif text.startswith("[DECISION]"):
         reply = {"decision": "accept", "summary": "finished",
                  **({"final": final} if "the task's last open step" in text else {})}
@@ -121,13 +122,14 @@ def _events(state: Path, kind: str, variant: str | None = None):
 
 
 @contextmanager
-def _fixture(root: Path):
+def _fixture(root: Path, *, restart_steps=("s1", "s2")):
     # Match the repository's disposable-server policy before creating any database.
     require_disposable_database(str(DSN), served=False)
     assert urlsplit(str(DSN)).port in (5432, 54329)
     state, bin_dir, runtime, home = (root / part for part in ("state", "bin", "runtime", "home"))
     for directory in (state, bin_dir, runtime, home):
         directory.mkdir()
+    (state / "restart-steps.json").write_text(json.dumps(restart_steps))
     script = root / "fake_claude.py"
     script.write_text(_CLI)
     executable = bin_dir / "claude"
@@ -184,9 +186,10 @@ def _completed(api, task):
     return detail
 
 
-def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_moving(tmp_path):
+@pytest.mark.parametrize("restart_steps", [("s1", "s2"), ("s2", "s1")])
+def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_moving(tmp_path, restart_steps):
     """Worker results reach a decision before DRAINED; TASK_START remains usable throughout."""
-    with _fixture(tmp_path) as (url, state, server):
+    with _fixture(tmp_path, restart_steps=restart_steps) as (url, state, server):
         with running_server(**server, log_path=tmp_path / "before.log") as api:
             api.post("/api/v1/agent_settings/update_role", {"role": "worker", "values": {"max_concurrency": 1}})
             project = _project(api, tmp_path, "restart")
@@ -194,7 +197,7 @@ def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_mov
             _until(lambda: any(m["message_id"] == "before-drain:reply" for m in _messages(api)),
                    "the serving Manager's positive control reply")
             task = _task(api, project, "restart")
-            _until(lambda: _events(state, "worker", "restart"), "the first Worker to start")
+            (held,) = _until(lambda: _events(state, "worker", "restart"), "the first Worker to start")
             dispatched = []
 
             def both_dispatched():
@@ -234,7 +237,8 @@ def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_mov
                              "the Worker result and Planner decision to drain")
             assert all(not value for value in drained["waiting"].values())
             steps = {step["step_key"]: step["status"] for step in _detail(api, task)["steps"]}
-            assert steps == {"s1": "verified", "s2": "dispatched"}
+            assert steps == {label: "verified" if label == held["step"] else "dispatched"
+                             for label in restart_steps}
             assert any(row["text"].startswith("[DECISION]") for row in _events(state, "planner", "restart"))
 
         with running_server(**server, log_path=tmp_path / "after.log") as api:
@@ -247,7 +251,8 @@ def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_mov
             reply = next(m for m in _messages(api) if m["message_id"] == "held-during-drain:reply")
             assert reply["content"].startswith("Drain fixture answer: ")
             assert "held-during-drain" in reply["content"]
-            assert [row["step"] for row in _events(state, "worker", "restart")] == ["s1", "s2"]
+            assert [row["step"] for row in _events(state, "worker", "restart")] == [
+                held["step"], next(label for label in restart_steps if label != held["step"])]
             assert len(_events(state, "worker", "fresh")) == 1
             assert sum("held-during-drain" in row["text"] for row in _events(state, "manager")) == 1
             reply = next(m for m in _messages(api) if m["message_id"] == "held-during-drain:reply")
