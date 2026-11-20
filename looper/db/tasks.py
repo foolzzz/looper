@@ -635,12 +635,23 @@ async def project_tasks(project_id: str, *, manager_id: str | None = None,
         "ORDER BY created_at, id", project_id, manager_id)]
 
 
+def _covered_statuses(names: Sequence[str]) -> list[str]:
+    """Task statuses the filter names cover, first seen first. An unknown name matches itself."""
+    covered: list[str] = []
+    for name in names:
+        for status in STATUS_FILTERS.get(name, (name,)):
+            if status not in covered:
+                covered.append(status)
+    return covered
+
+
 async def list_tasks(
     *,
     limit: int = 50,
     offset: int = 0,
     project_id: str | None = None,
     status: str | None = None,
+    statuses: Sequence[str] | None = None,
     group: TaskGroup | None = None,
     schedule_id: str | None = None,
     before: str | None = None,
@@ -652,12 +663,14 @@ async def list_tasks(
 ) -> list[dict[str, Any]]:
     """The newest tasks (by creation, then id), each with its ``project_name`` and ``schedule_name``; only one
     project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those covered by the
-    ``status`` filter (unknown filters match exactly), or in
+    ``status`` filter or the union of ``statuses`` (unknown names match exactly), or in
     ``group``, when it is, only those older than the task ``before`` when it is, and only ``manager_id``'s when given.
     ``query`` searches the id, title, requirement, project name and goal before paging. ``exclude_scheduled`` leaves
     out the tasks an agent schedule created."""
     pool = pool or get_pool()
-    statuses, inside = _group_filter(group)
+    group_statuses, inside = _group_filter(group)
+    covered = (_covered_statuses(statuses) if statuses is not None
+               else STATUS_FILTERS.get(status, (status,)) if status is not None else None)
     rows = await pool.fetch(
         f"""
         {_WITH_PROJECT}
@@ -669,8 +682,8 @@ async def list_tasks(
           AND (NOT $12 OR t.schedule_id IS NULL)
         ORDER BY t.created_at DESC, t.id DESC LIMIT $7 OFFSET $8
         """,
-        project_id, STATUS_FILTERS.get(status, (status,)) if status is not None else None,
-        statuses, inside, schedule_id, before, limit, offset, manager_id, query, project_ids,
+        project_id, covered,
+        group_statuses, inside, schedule_id, before, limit, offset, manager_id, query, project_ids,
         exclude_scheduled,
     )
     return [_task(r) for r in rows]
