@@ -86,6 +86,8 @@ class Reason(StrEnum):
     QUIET_HOURS = "quiet_hours"
     DAILY_CAP = "daily_cap"
     WITHIN_LIMITS = "within_limits"
+    # Never ``deliver``'s: a message sent with the layer off and only recorded (the proactive-message metrics).
+    OFF = "off"
 
 
 @dataclass(frozen=True)

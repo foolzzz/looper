@@ -2217,9 +2217,11 @@ ALTER TABLE intents ADD CONSTRAINT intents_dropped
 
 -- Proactive deliveries (proactive delivery RFC section 4): one row per proactive message a send point decided on with
 -- the delivery layer on (``agents/proactive_delivery.py``): sent, into the digest or dropped, the rule that settled it,
--- whether it counts toward its direct chat's daily cap, and when the channel took it. dedupe_key names the send point's
--- message, so a message tried again keeps its first decision. connection.py applies this block to databases that
--- predate it, so keep it between the markers and idempotent.
+-- whether it counts toward its direct chat's daily cap, and when the channel took it. Reason 'off' is a message sent
+-- with the layer off and only recorded (the proactive-message metrics); replied_at is the user's first message in the
+-- chat after it went, which the metrics write. dedupe_key names the send point's message, so a message tried again
+-- keeps its first decision. connection.py applies this block to databases that predate it, so keep it between the
+-- markers and idempotent.
 -- proactive deliveries begin
 CREATE TABLE IF NOT EXISTS proactive_deliveries (
     id          BIGSERIAL PRIMARY KEY,
@@ -2235,15 +2237,18 @@ CREATE TABLE IF NOT EXISTS proactive_deliveries (
     schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL,
     outcome     TEXT NOT NULL CHECK (outcome IN ('send', 'digest', 'drop')),
     reason      TEXT NOT NULL CHECK (reason IN ('silent', 'urgent', 'outside_active_hours', 'recent_reply',
-                                                'quiet_hours', 'daily_cap', 'within_limits')),
+                                                'quiet_hours', 'daily_cap', 'within_limits', 'off')),
     counted     BOOLEAN NOT NULL DEFAULT false,
     local_date  DATE NOT NULL,  -- the decision's date in the policy's timezone: the cap counts by it
     digest_date DATE,
     decided_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     sent_at     TIMESTAMPTZ,
+    replied_at  TIMESTAMPTZ,
     CONSTRAINT proactive_deliveries_digest CHECK ((outcome = 'digest') = (digest_date IS NOT NULL)),
     CONSTRAINT proactive_deliveries_counted CHECK (NOT counted OR outcome = 'send'),
-    CONSTRAINT proactive_deliveries_sent CHECK (sent_at IS NULL OR outcome = 'send')
+    CONSTRAINT proactive_deliveries_sent CHECK (sent_at IS NULL OR outcome = 'send'),
+    CONSTRAINT proactive_deliveries_off CHECK (reason <> 'off' OR (outcome = 'send' AND NOT counted)),
+    CONSTRAINT proactive_deliveries_replied CHECK (replied_at IS NULL OR sent_at IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_counted
     ON proactive_deliveries (channel_id, chat, local_date) WHERE counted;

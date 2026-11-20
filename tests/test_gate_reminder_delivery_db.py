@@ -211,3 +211,35 @@ def test_a_reminder_the_layer_cannot_decide_on_is_posted_as_with_the_switch_off(
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
 
     run_db(test, monkeypatch)
+
+
+def test_the_table_takes_every_value_the_code_has_and_keeps_its_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        import asyncpg
+
+        insert = ("INSERT INTO proactive_deliveries (dedupe_key, kind, urgency, channel_id, chat, chat_kind, outcome, "
+                  "reason, counted, local_date, digest_date, sent_at, replied_at) "
+                  "VALUES ($1, $2, $3, 'channel-lark', 'ou_1', $4, $5, $6, $7, '2026-11-20', $8, $9, $10)")
+        row = {"kind": "task_notice", "urgency": "normal", "chat": "direct", "outcome": "send",
+               "reason": "within_limits", "counted": False, "digest": None, "sent": None, "replied": None}
+        values = [*({"kind": k.value} for k in delivery.DeliveryKind),
+                  *({"urgency": u.value} for u in delivery.Urgency), *({"chat": c.value} for c in delivery.ChatKind),
+                  *({"reason": r.value} for r in delivery.Reason),
+                  {"outcome": "digest", "digest": date(2026, 11, 21)}, {"outcome": "drop", "reason": "silent"},
+                  {"counted": True}, {"sent": datetime.now(timezone.utc), "replied": datetime.now(timezone.utc)}]
+        for n, change in enumerate(values):
+            r = {**row, **change}
+            await pool.execute(insert, f"ok:{n}", r["kind"], r["urgency"], r["chat"], r["outcome"], r["reason"],
+                               r["counted"], r["digest"], r["sent"], r["replied"])
+        refused = [{"kind": "heartbeat"}, {"reason": "because"}, {"outcome": "digest"},  # a digest needs its date
+                   {"digest": date(2026, 11, 21)}, {"outcome": "drop", "counted": True},
+                   {"outcome": "drop", "sent": datetime.now(timezone.utc)},
+                   {"reason": "off", "counted": True}, {"reason": "off", "outcome": "drop"},
+                   {"replied": datetime.now(timezone.utc)}]  # a reply to what never went
+        for n, change in enumerate(refused):
+            r = {**row, **change}
+            with pytest.raises(asyncpg.CheckViolationError):
+                await pool.execute(insert, f"bad:{n}", r["kind"], r["urgency"], r["chat"], r["outcome"], r["reason"],
+                                   r["counted"], r["digest"], r["sent"], r["replied"])
+
+    run_db(test, monkeypatch)
