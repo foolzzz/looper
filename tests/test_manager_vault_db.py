@@ -381,3 +381,28 @@ def test_a_scenario_manager_never_reads_the_vault_under_any_switches(
         assert not {SEARCH, READ, WRITE} & set(base[0])
 
     run_with_channel_configs(test, monkeypatch)
+
+
+def test_the_research_orders_knowledge_step_appears_exactly_where_the_vault_reads_are_offered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The research order lists the vault first only in a turn whose own listing has both reads: the user's own
+    turn with manager_read on; never a group turn, never with manager_read off."""
+    from looper.agents.research_order import ResearchSources, section
+    from looper.agents.runtimes import LoadedSources
+
+    launch = SimpleNamespace(runtime=SimpleNamespace(loaded_sources=lambda launch: LoadedSources(),
+                                                     web_tools=lambda launch: False))
+
+    async def test(pool: Any) -> None:
+        root = await _setting(tmp_path, manager_read=True)
+        await _operator(pool)
+        ops = _ops()
+        own = ResearchSources.of(await ops.current_listing(_web()), launch)
+        group = ResearchSources.of(await ops.current_listing(OTHER_TURNS["group"]), launch)
+        assert own.vault and "knowledge vault" in section(own)
+        assert not group.vault and "vault" not in section(group)
+        await vault.update_settings({"path": str(root), "writable": ["agent"], "rules_file": None})
+        assert not ResearchSources.of(await ops.current_listing(_web()), launch).vault
+
+    run_with_channel_configs(test, monkeypatch)

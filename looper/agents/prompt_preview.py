@@ -94,6 +94,11 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
 
         if await manager_vault() is not None:  # as ManagerAgent._composed_prompt adds it
             contract_name, contract = contract_name + "+VAULT_CONTRACT", contract + "\n" + VAULT_CONTRACT
+        from . import chat_settings
+
+        if chat_settings.research_order():
+            notes.append("The Manager's research order (where to look things up) is composed for each turn from "
+                         "the tools that turn has; it is not shown here.")
         from .tiers import state_view
 
         try:

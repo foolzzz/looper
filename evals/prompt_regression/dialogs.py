@@ -192,6 +192,7 @@ class Dialog:
     fake_task: dict[str, Any] | None = None  # fake mode: the stand-in Planner's script for its tasks (else slow)
     leads: bool = False  # leads are on, and the database holds the synthetic leads (``_seed_leads``)
     vault: bool = False  # a synthetic knowledge vault the Manager may read (``_seed_vault``: ``manager_read`` on)
+    research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -539,6 +540,94 @@ def _answered_from_the_vault(fact: str) -> Callable[[Look], str | None]:
             return None
         return None if fact in look.reply else f"the reply does not give what the note says ({fact})"
     return check
+# --- The research order: where the Manager looks before it asks the user ---
+
+RECORD_TOOLS = ("looper_tasks", "looper_projects")
+# A reply that asks the user for something: a question, or a request to tell, give or add it.
+_ASKS = re.compile(r"[？?]|告诉我|请提供|请补充|你可以补充|麻烦提供|tell me|let me know", re.IGNORECASE)
+# A reply that asks the user to supply or confirm facts; an offer of more help ("需要的话告诉我", "let me know if you
+# want …") is not one.
+_REQUESTS = re.compile(
+    r"请提供|请补充|你可以补充|麻烦提供|请告诉我|请确认|告诉我(?:最终|具体|准确|正确|实际)|能(?:否|不能)告诉我"
+    r"|(?:please|could you|can you|would you)\s+(?:provide|tell me|confirm|share|send)"
+    r"|let me know (?:the|what|which|whether)", re.IGNORECASE)
+
+
+def asks_back(reply: str, fact: str) -> bool:
+    """Whether ``reply`` asks the user for an answer it has (``fact``): a request to supply or confirm it, or a
+    question about the fact itself ("是 done 吗？", "is it done?")."""
+    if _REQUESTS.search(reply):
+        return True
+    return any(fact.lower() in sentence.lower() and sentence.rstrip().endswith(("？", "?"))
+               for sentence in re.split(r"(?<=[。！!？?\n])", reply))
+
+
+def _asks(reply: str) -> bool:
+    return bool(_ASKS.search(reply))
+
+
+def research_lookups(actions: list[dict[str, Any]]) -> list[str]:
+    """The turn's successful lookups, in the order they were made: Looper's records and the leads."""
+    return [a["tool"] for a in actions if a["status"] == "ok" and a["tool"] in (*RECORD_TOOLS, LEADS_TOOL)]
+
+
+def research_order_problem(lookups: list[str]) -> str | None:
+    """Looper's own records come before the leads: a leads search before any records read is out of order."""
+    if LEADS_TOOL in lookups and not set(lookups[:lookups.index(LEADS_TOOL)]) & set(RECORD_TOOLS):
+        return f"the Manager searched the leads before Looper's own records: {lookups}"
+    return None
+
+
+def _found_in_leads(look: Look) -> str | None:
+    """The answer is only in a lead: the Manager reads Looper's records first, then searches the leads, answers from
+    them, and asks the user nothing."""
+    lookups = research_lookups(look.turn_actions())
+    if LEADS_TOOL not in lookups:
+        return f"the Manager did not search the leads before answering: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    if "ZX-42" not in look.reply:
+        return "the reply does not give what the lead says (ZX-42)"
+    return "the reply asks the user for what the lead says" if asks_back(look.reply, "ZX-42") else None
+
+
+def _found_in_records(look: Look) -> str | None:
+    """The answer is in a ready task's requirement: the Manager reads its tasks, stops there (no leads search after
+    it found the answer), answers from it, and asks the user nothing."""
+    lookups = research_lookups(look.turn_actions())
+    if "looper_tasks" not in lookups:
+        return f"the Manager did not read its tasks before answering: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
+    # Any later try counts, also one that failed: it went on looking after its records had the answer.
+    attempts = [a["tool"] for a in look.turn_actions() if a["tool"] in (*RECORD_TOOLS, LEADS_TOOL)]
+    if LEADS_TOOL in attempts:
+        return f"the Manager went on to the leads after its records had the answer: {attempts}"
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    if "done" not in look.reply:
+        return "the reply does not give what the task's requirement says (done)"
+    return "the reply asks the user for what the task says" if asks_back(look.reply, "done") else None
+
+
+def _looked_then_asked(look: Look) -> str | None:
+    """Nothing anywhere answers it: the Manager reads Looper's records, then searches the leads, then asks the user."""
+    lookups = research_lookups(look.turn_actions())
+    if not set(lookups) & set(RECORD_TOOLS) or LEADS_TOOL not in lookups:
+        return f"the Manager asked before looking in both its records and the leads: {lookups}"
+    if found := research_order_problem(lookups):
+        return found
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    return None if _asks(look.reply) else "the reply does not ask the user"
 
 
 def _manager_capabilities(look: Look) -> str | None:
@@ -2441,6 +2530,18 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("leads_background", (
         Say("Nebula 项目的上线日期定下来了吗？", _leads_used_with_sources, ((LEADS_TOOL, {"query": "Nebula"}),)),
     ), leads=True, tags=("manager", "leads")),
+    Dialog("research_leads", (
+        Say("Nebula 发布前要跑哪个回归套件？", _found_in_leads,
+            (("looper_tasks", {"action": "list"}), (LEADS_TOOL, {"query": "Nebula"}))),
+    ), leads=True, research=True, tags=("manager", "research")),
+    Dialog("research_records", (
+        Say("done.txt 那个任务，文件里最后要写什么内容？", _found_in_records,
+            (("looper_tasks", {"action": "list"}),)),
+    ), ready_task=True, leads=True, research=True, tags=("manager", "research")),
+    Dialog("research_ask", (
+        Say("Orion 项目的预算上限是多少？", _looked_then_asked,
+            (("looper_projects", {"action": "list"}), (LEADS_TOOL, {"query": "Orion"}))),
+    ), leads=True, research=True, tags=("manager", "research")),
     Dialog("leads_dont_search", (
         Say("别查消息，直接说你知道的：Nebula 项目的上线日期定了吗？", _no_search),
     ), leads=True, tags=("manager", "leads")),
@@ -3255,6 +3356,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _seed_leads(database_url)
         if dialog.vault:
             _seed_vault(api)
+        if dialog.research:
+            api.post("/api/v1/chat_settings/update", {"research_order": True})
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
