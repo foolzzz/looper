@@ -33,7 +33,7 @@ _SUBSCRIPTION = _object({
     "text_max_chars": {"type": "integer", "minimum": 20, "maximum": 4000},
     "quiet_word": {"type": "string", "minLength": 1, "maxLength": 40},
     "output_header": {"type": "string", "maxLength": subscriptions.HEADER_MAX_CHARS},
-    "output_kind": _enum("push"), "render": _enum("lines_v1", "lines_v2"),
+    "output_kind": _enum(*subscriptions.OUTPUT_KINDS), "render": _enum("lines_v1", "lines_v2"),
     "rules": _array(_object({
         "name": _STR, "label": _STR, "chat_kinds": _array(_enum("p2p", "group", "topic", "unknown")),
         "include_chats": _array(_STR), "exclude_chats": _array(_STR), "sender_kinds": _array(_enum("user", "app")),
@@ -143,10 +143,13 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
         window = (f"events from the last {sub['max_age_minutes']} minutes, ignoring its cursor"
                   if sub["window"] == "lookback" else "the events after its cursor")
         daily = " It skips if this local date already has an attempt." if sub["delivery_policy"] == "daily" else ""
+        if subscriptions.is_extraction(sub):
+            pushes = (f"stores what it finds as {subscriptions.output_kind(sub)} (only once it is confirmed; until "
+                      "then the run is skipped)")
         return (f"Run {subject} once now: it reads {window}, runs its processor within its caps and "
                 f"{pushes}. Its next fire stays.{daily}")
     if action == "confirm_target":
-        if not row["notify_channel"]:
+        if not row["notify_channel"] and not subscriptions.is_extraction(row["subscription"]):
             raise OpError(ErrorCode.INVALID, "the subscription has no notify_target to confirm")
         try:
             await schedules.check_private_target(row["subscription"], row["notify_channel"], row["notify_chat"])
@@ -192,6 +195,8 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
     except schedules.RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     asked = {**fields, **({"enabled": data["enabled"]} if "enabled" in data else {})}
+    if subscriptions.is_extraction(row["subscription"]):  # its chats and source are confirmed too
+        asked.update(stream or {})
     enabling = bool(data.get("enabled")) and not row["enabled"]
     if not (enabling or subscriptions.needs_confirmation(row, asked, stream=stream)):
         return None
@@ -210,7 +215,9 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
     # Only a client that was asked and confirmed has the operator's word, and only for what it was shown: the
     # dashboard's own request is not asked, and its operator confirms the target after (``confirm_target``).
     arguments["_confirm_version"] = (await subscriptions.config_version(after)
-                                     if principal.kind == "client" and after.get("notify_channel") else None)
+                                     if principal.kind == "client" and (after.get("notify_channel") or
+                                                                        subscriptions.is_extraction(after["subscription"]))
+                                     else None)
     return await subscriptions.confirmation_text(after, now=now, action=f"{'启用并更新' if enabling else '更新'}")
 
 

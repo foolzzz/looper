@@ -338,7 +338,7 @@ async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None
         # (``confirm_target`` is their word).
         view["subscription"]["confirmation"] = (
             await subscriptions.confirmation_text(row, now=_utcnow(), action="确认推送目标：")
-            if row["notify_channel"] else None)
+            if row["notify_channel"] or subscriptions.is_extraction(row["subscription"]) else None)
     return {"schedule": view}
 
 
@@ -771,6 +771,10 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     _check_kind_fields(kind, {**fields, "profile_overrides": profiles,
                              **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
     if stream is not None:
+        try:
+            subscriptions.check_extraction(stream)
+        except ValueError as exc:
+            raise RequestError(HTTP_400, str(exc)) from None
         await check_private_target(stream, fields.get("notify_channel"), fields.get("notify_chat"))
     profiles = (await _profile_overrides(profiles, roles=(*TASK_PROFILE_ROLES, "processor"))
                 if "profile_overrides" in data else None)
@@ -844,12 +848,22 @@ async def _subscription_changes(conn: asyncpg.Connection, row: Mapping[str, Any]
     the new source's end when the source changes, and the push target's confirmation (the module's notes)."""
     changes = dict(stream or {})
     current = row["subscription"]
+    if changes.get("output_kind", subscriptions.output_kind(current)) != subscriptions.output_kind(current):
+        raise RequestError(HTTP_400, "a subscription's output_kind cannot change; create a new subscription")
+    try:
+        subscriptions.check_extraction({**current, **changes})
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
     if changes.get("window", current["window"]) == "cursor" and (
             changes.get("source_id", current["source_id"]) != current["source_id"] or current["window"] != "cursor"):
         changes["cursor_seq"] = await db_subs.committed_seq(conn, changes.get("source_id", current["source_id"]))
         changes["cursor_at"] = now
     target = fields.get("notify_channel", row["notify_channel"])
     asked = {**fields, **({"enabled": enabled} if enabled is not None else {})}
+    if subscriptions.is_extraction(current):  # it reads the operator's messages, with a target or without
+        if subscriptions.needs_confirmation(row, {**asked, **(stream or {})}):
+            changes.update(target_confirmed_at=None, target_confirmed_version=None)
+        return changes
     if (target is None and current["target_confirmed_at"] is not None) or (
             target is not None and subscriptions.needs_confirmation(row, asked, stream=stream)):
         changes.update(target_confirmed_at=None, target_confirmed_version=None)
@@ -870,7 +884,8 @@ async def confirm_target(schedule_id: str, *, config_version: str, now: datetime
             raise RequestError(HTTP_409, str(exc)) from None
         if row["kind"] != Kind.SUBSCRIPTION.value:
             raise RequestError(HTTP_400, "only a subscription has a push target to confirm")
-        if not row["notify_channel"]:
+        _check_extraction_target(row)
+        if not row["notify_channel"] and not subscriptions.is_extraction(row["subscription"]):
             raise RequestError(HTTP_400, "the subscription has no notify_target: its output stays on the dashboard")
         await check_private_target(row["subscription"], row["notify_channel"], row["notify_chat"], conn)
         current = await subscriptions.config_version(row)
@@ -881,6 +896,19 @@ async def confirm_target(schedule_id: str, *, config_version: str, now: datetime
                                                  "target_confirmed_version": current})
         await db_subs.bump_epoch(conn, schedule_id)
     return await _schedule_answer(schedule_id, runtime_root=runtime_root)
+
+
+def _check_extraction_target(row: Mapping[str, Any]) -> None:
+    """An intents subscription is confirmed only with a direct chat as its target (a Lark ``ou_…`` or a positive
+    Telegram id): what it finds comes from the operator's direct and @-mentioning messages. A leads one needs none."""
+    if subscriptions.output_kind(row.get("subscription")) != "intents":
+        return
+    chat = row.get("notify_chat") or ""
+    direct = (row.get("notify_channel") in ("lark", "lark_bot") and chat.startswith("ou_")) or (
+        row.get("notify_channel") == "telegram" and chat.isdigit() and int(chat) > 0)
+    if not direct:
+        raise RequestError(HTTP_400, "an intents subscription needs a direct chat as its notify_target (a Lark ou_… "
+                                     "or a positive Telegram id): intents come from the operator's own messages")
 
 
 async def reset_cursor(schedule_id: str, after: datetime, *, runtime_root: Path | None = None) -> dict[str, Any]:
