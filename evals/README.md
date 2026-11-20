@@ -609,6 +609,13 @@ above say, with `--dialogs leads_background,leads_dont_search,leads_conflict,lea
 `status` and `confirm_create_start` with leads off show that the default path is unchanged. Group chats, other
 senders and turning leads off are unit tests (`tests/test_leads_manager_tool_db.py`).
 
+#### The Manager's state block
+
+`--stable-context` turns `manager.stable_context` on in every dialog's database before its first message, so the
+Manager's turns start with the "Looper state" block (`looper/agents/tiers/state_view.py`) instead of the sections,
+and each row lists what its Manager turns started with (`state_views`: `whole`, `unchanged` or `changes`). Run the
+Manager PR commands above with `--stable-context`, and compare them with the same dialogs without it.
+
 #### Manager capability installs
 
 `manager_capability_installed`, `manager_capability_isolated` and
@@ -885,7 +892,8 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
   --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres
 ```
 
-Options: `--dialogs status,ask_project`, `--model`, `--agent`,
+Options: `--dialogs status,ask_project`, `--model`, `--agent`, `--stable-context` (the Manager's state block on in
+every dialog's database),
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
 does not establish a cap for the current 69 dialogs; give it
