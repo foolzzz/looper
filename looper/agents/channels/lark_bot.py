@@ -42,8 +42,8 @@ class BotTransport:
         return await self._api.reply(message_id, text=text, markdown=markdown, idempotency_key=idempotency_key,
                                      **({"reply_in_thread": True} if reply_in_thread else {}))
 
-    async def edit(self, message_id: str, *, text: str) -> None:
-        await self._api.edit(message_id, text=text)
+    async def edit(self, message_id: str, *, text: str | None = None, markdown: str | None = None) -> None:
+        await self._api.edit(message_id, text=text, markdown=markdown)
 
     async def react(self, message_id: str) -> None:
         await self._api.react(message_id)

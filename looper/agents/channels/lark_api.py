@@ -170,8 +170,8 @@ class LarkApi:
         return sent_message_id(await self.call("POST", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
                                                body=body))
 
-    async def edit(self, message_id: str, *, text: str) -> None:
-        await self.call("PUT", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}", body=self._message(text, None))
+    async def edit(self, message_id: str, *, text: str | None = None, markdown: str | None = None) -> None:
+        await self.call("PUT", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}", body=self._message(text, markdown))
 
     async def react(self, message_id: str, emoji: str = "Get") -> None:
         await self.call("POST", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reactions",

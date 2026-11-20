@@ -198,8 +198,8 @@ def _name_taken(name: str) -> RequestError:
     return ProjectNameTaken(name)
 
 
-async def _existing_project(project_id: str, *, manager_id: str | None = None) -> dict[str, Any]:
-    project = await db_projects.get_project(project_id, manager_id=manager_id)
+async def _existing_project(project_id: str, *, manager_id: str | None = None, pool: Any = None) -> dict[str, Any]:
+    project = await db_projects.get_project(project_id, manager_id=manager_id, **({"pool": pool} if pool is not None else {}))
     if project is None:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
     return project
@@ -532,6 +532,7 @@ async def create_task_core(
     template_name: str | None = None, lock_manager: bool = False, named: bool | None = None,
     visible_to: str | None = None, task_filter: db_tasks.TaskFilter | None = None, show_configuration: bool = False,
     template_display: tuple[str, Sequence[tuple[str, str]]] | None = None,
+    conn: Any = None,
 ) -> dict[str, Any]:
     """Place, check and store a ready task for either entry point. Adapters supply channel/template metadata;
     console config, project fields and role overrides share the same persistence path."""
@@ -550,7 +551,7 @@ async def create_task_core(
     if new_project is None:
         if not isinstance(project_id, str):
             raise RequestError(HTTP_400, "project_id must be a string")
-        project = await _existing_project(project_id)
+        project = await _existing_project(project_id, pool=conn)
     else:
         if not isinstance(new_project, dict):
             raise RequestError(HTTP_400, "project must be an object with a name")
@@ -564,7 +565,7 @@ async def create_task_core(
     config = data.get("config")
     if config is not None and not isinstance(config, dict):
         raise RequestError(HTTP_400, "config must be a JSON object")
-    profiles = await _profile_overrides(data.get("profile_overrides")) if profiles is None else profiles
+    profiles = await _profile_overrides(data.get("profile_overrides"), pool=conn) if profiles is None else profiles
     if new_project is not None and not projects_root():
         _task_work_dir(data.get("work_dir"), new_fields.get("work_dir", ""))
     named = bool(str(data.get("work_dir") or "").strip()) if named is None else named
@@ -634,19 +635,21 @@ async def create_task_core(
         return created, task, workspace
 
     try:
-        if (project is not None and not profiles and not lock_manager and not roles
+        if conn is not None:
+            created, task, workspace = await persist(conn)
+        elif (project is not None and not profiles and not lock_manager and not roles
                 and workflow is None and not project.get("default_workflow")):
             created, task, workspace = await persist()
         else:
             with project_directories() as created_directories:
-                async with db_connection.transaction() as conn:
-                    created, task, workspace = await persist(conn)
+                async with db_connection.transaction() as transaction_conn:
+                    created, task, workspace = await persist(transaction_conn)
     except asyncpg.UniqueViolationError:
         # The Manager adapter keeps its existing concurrent-create instruction.
         raise _name_taken(new_fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") from None
-    await db_ledger.register_task(task["task_id"])
+    await db_ledger.register_task(task["task_id"], db=conn)
     work_dir = task["work_dir"]
     shown = task["title"] or task["goal_id"] or task["task_id"]
     block = (await configuration_block(task["task_id"], shown, project, work_dir, new_project is not None,
@@ -718,13 +721,13 @@ async def check_workspace(query: dict[str, str]) -> dict[str, Any]:
     return {**workspace["check"], "default_mode": default.value, "notes_on": execution.notes_on}
 
 
-async def _profile_overrides(raw: Any, *, roles: Sequence[str] = TASK_PROFILE_ROLES) -> dict[str, str]:
+async def _profile_overrides(raw: Any, *, roles: Sequence[str] = TASK_PROFILE_ROLES, pool: Any = None) -> dict[str, str]:
     """``profile_overrides``, a new task's (or a schedule's) choice of Agent Profile per role, checked as
     ``profile_choices`` checks a task's choice (by id or name), as role -> profile id; an empty or null entry
     chooses nothing."""
     if isinstance(raw, dict):
         raw = {role: None if profile == "" else profile for role, profile in raw.items()}
-    chosen = await profile_choices(raw, clearing=True, field="profile_overrides", roles=roles)
+    chosen = await profile_choices(raw, clearing=True, field="profile_overrides", roles=roles, pool=pool)
     return {role: profile_id for role, profile_id in chosen.items() if profile_id is not None}
 
 
@@ -1144,10 +1147,10 @@ async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter)
     return {"task_id": task_id, "project_id": project_id, "project_name": project["name"]}
 
 
-async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress) -> dict[str, Any]:
+async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress, *, pool: Any = None) -> dict[str, Any]:
     """Have the TaskRouter start a ready task (created, never started; ``TASK_START``), from the dashboard or the
     Manager: 404 for an unknown task, 400 for one that is not ready. It runs at once."""
-    task = await db_tasks.get_task(task_id)
+    task = await db_tasks.get_task(task_id, **({"pool": pool} if pool is not None else {}))
     if task is None:
         raise RequestError(HTTP_404, "task not found")
     if task["status"] != db_tasks.READY:

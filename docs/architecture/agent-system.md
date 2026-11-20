@@ -5090,6 +5090,73 @@ here pushes: the intent push service polls `intents`.
   it holds an advisory lock (`looper.leads.backfill:<schedule id>`) from before
   it reads its progress to its end, and a second one exits saying so.
 
+### Intents
+
+Intent handling is off until `intents.enabled` is true. Extraction subscriptions
+write typed suggestions; `IntentPushService` checks for deliveries every ten
+seconds and expiries every five minutes. It sends only to the configured bot's
+operator direct chat, only when that target is offered by the channel and the
+subscription's current configuration is confirmed. Quiet types stay on the
+operator's intents list. New evidence replies to the original push, extending
+a pending suggestion's expiry to 24 hours after that delivery.
+
+`建 I-0042` (or `建` quoting a push) creates and starts one task;
+`驳回 I-0042` rejects the suggestion. Code handles these before the Manager's
+model and checks the operator's typed identity, including dashboard turns.
+An unbound chat requires a project selection: numbered replies use the project
+candidates saved with the push, or the currently listed candidates before its
+first push. Deleted candidates retain their positions; selecting one returns a
+typed refusal. A project must have a default directory. Route
+preparation only reads; task creation, start requests, rejection and final edits
+run after the Manager's final stop check. A stopped or timed-out preparation
+changes no intents or tasks; timeout and task-validation failures receive
+code-written replies. Task creation and the transition are one database
+transaction; task notices belong to the operator's direct chat, never the source
+conversation. The requirement
+contains only the displayed title, summary and up to five source references,
+marked as background rather than instructions. Tasks created from the dashboard
+leave `origin_channel_id` empty, as other dashboard-created tasks do.
+
+The one state writer permits `pending → tasked | rejected | expired` and
+`expired → tasked`. Handling attempts one final edit per transition, tracked by
+`intent_posts.edited_at >= intents.handled_at`; type, sender or chat renames,
+added evidence and timezone changes do not edit an already finalized push.
+`expired → tasked` advances `handled_at`, allowing one further edit. A failed
+edit queues one final-state reply, with the existing bounded delivery retries.
+Lark post edits use Markdown rich-text posts, matching the original message;
+status-message edits keep their original plain-text format. Delivery claims
+commit before sending; an uncertain result is never resent, while an explicit failure has a bounded
+retry count. Channel errors remain visible in `intent_posts`.
+[Feishu's edit API](https://open.feishu.cn/document/server-docs/im-v1/message/update)
+reports an administrator-configured editing time limit (230075) and a maximum
+of twenty edits (230072).
+[Telegram's editMessageText](https://core.telegram.org/bots/api#editmessagetext)
+documents a 48-hour limit for business messages not sent by the bot without an
+inline keyboard; it specifies no general age limit for the bot's own text
+messages. Both adapters retain the final-state reply fallback.
+
+The operator-only v1 operations (all POST) are:
+
+- `intents.list`, `get`, `update`, `build`, `reject`, `stats`, `settings_get`
+  and `settings_put`, under `/api/v1/intents/`. Views include sources, effective
+  workflow, candidates, delivery state and handling metadata; list pagination
+  uses `before_id`. Stats report counts and adoption/rejection rates by type.
+- `intent_types.list`, `history`, `create`, `save`, `rollback`, `archive` and
+  `set_project_template`, under `/api/v1/intent_types/`. Changing a type's
+  instructions creates an immutable version; rollback copies an old version
+  into a new one. Enable toggles do not create versions. Built-ins cannot be
+  archived, and at most ten unarchived types can be enabled.
+- `intent_bindings.list`, `put`, `delete`, under `/api/v1/intent_bindings/`,
+  bind source chats to projects. `intent_alert_senders.list`, `put`, `delete`,
+  under `/api/v1/intent_alert_senders/`, maintain the alert app allowlist;
+  candidates exclude Looper's own apps.
+
+Only build and reject require intents to be enabled, so the operator can
+prepare configuration while it is off. Disabling also disables intents
+subscriptions in the same transaction; enabling does not restart them. No
+intent operation is a Manager tool. The dashboard page and extraction runs
+are delivered separately; CLI callers use the same operator API operations.
+
 ### The ledger
 
 The ledger lists what waits for the user (`pending`), what was decided

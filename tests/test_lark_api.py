@@ -586,3 +586,17 @@ def test_directory_matches_only_name_english_name_or_email() -> None:
             assert complete
             assert [person["open_id"] for person in people] == ["ou_name"]
     asyncio.run(run())
+
+
+def test_post_edit_preserves_the_original_markdown_message_type() -> None:
+    async def run() -> None:
+        async with platform() as (fake, api):
+            from looper.agents.channels.lark_bot import BotTransport
+
+            transport = object.__new__(BotTransport)
+            transport._api = api
+            message = await transport.send(user_id="ou_synthetic_operator", markdown="original")
+            await transport.edit(message, markdown="final")
+            assert fake.sent[0]["msg_type"] == fake.sent[1]["msg_type"] == "post"
+            assert fake.sent[1]["content"] == {"zh_cn": {"content": [[{"tag": "md", "text": "final"}]]}}
+    asyncio.run(run())

@@ -600,3 +600,19 @@ def test_cli_rejects_unexpected_saved_path_and_only_cleans_inside_message_direct
                                             directory / "1.part", max_bytes=1024))
     assert not list(directory.iterdir())
     assert (tmp_path / "outside.part").exists() is elsewhere.startswith("..")
+
+
+def test_cli_transport_edits_markdown_posts_as_markdown(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.lark_transport import CliTransport
+
+    async def run():
+        call = AsyncMock()
+        monkeypatch.setattr(lark_cli, "run", call)
+        transport = CliTransport(profile="synthetic")
+        await transport.edit("om_synthetic_post", markdown="final")
+        assert call.await_args.args[0] == lark_cli.edit_command(
+            "om_synthetic_post", markdown="final", profile="synthetic")
+    asyncio.run(run())
