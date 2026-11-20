@@ -48,7 +48,9 @@ _PREVIEW = _object({"source_id": _STR, "scope": _STR, "events": _INT, "confirmat
 LIMITS = (
     "Outputs already pushed to chats cannot be recalled by this deletion.",
     "Processor run outputs already stored are not deleted and may summarize these messages.",
-    "Full database upgrade backups retain their contents until rotated out.",
+    "Schema-change backups exclude source_events rows; older upgrade backups retain their contents until rotated out.",
+    "When enabled, daily message backups keep the newest 7 copies; older copies age out through rotation. "
+    "When disabled, no new message backup is created.",
     "The lark-chat archive and the upstream collector files are outside Looper and are not deleted.",
 )
 CONFIRMATION_SECONDS = 600

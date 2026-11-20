@@ -93,6 +93,7 @@ def test_chat_controls_and_two_step_deletion_do_not_return_bodies(monkeypatch, t
         dbname = await pool.fetchval("SELECT current_database()")
         (backups / f"looper-{dbname}-20261101T000000.000000Z.dump").write_bytes(b"synthetic archive")
         (backups / f"looper-{dbname}-20261115T000000.000000Z.dump").write_bytes(b"synthetic archive")
+        (backups / f"looper-{dbname}-20261119T000000.000000Z.messages.dump").write_bytes(b"synthetic message archive")
         (backups / "looper-another-db-20260101T000000.000000Z.dump").write_bytes(b"unrelated")
         async with v1_api(tmp_path / "api", pool) as call:
             status, answer = await call("message_stream.chats", {"search": "oc_synthetic"})
@@ -110,7 +111,9 @@ def test_chat_controls_and_two_step_deletion_do_not_return_bodies(monkeypatch, t
             preview = answer["result"]
             assert preview["events"] == 1 and preview["backups"]["count"] == 2
             assert preview["backups"]["earliest_at"].startswith("2026-11-01")
-            assert len(preview["limits"]) == 4
+            assert len(preview["limits"]) == 5
+            assert any("daily message backups keep the newest 7 copies" in limit and "older copies age out" in limit
+                       for limit in preview["limits"])
             assert "private synthetic body" not in str(preview)
             token = preview["confirmation_token"]
             status, _ = await call("message_stream.delete", {**target, "message_id": "other", "confirmation_token": token})

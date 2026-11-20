@@ -313,7 +313,8 @@ function Deletion({ sourceId, onDeleted }: { sourceId: string; onDeleted: () => 
             <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
               <li>Already pushed outputs in destination chats.</li>
               <li>Processor run outputs stored in run history.</li>
-              <li>{review.preview.backups.count} upgrade backups; earliest: {review.preview.backups.earliest_at || "none"}. They remain until rotated away.</li>
+              <li>{review.preview.backups.count} upgrade backups; earliest: {review.preview.backups.earliest_at || "none"}. Older backups retain their contents until rotated away; schema-change backups now exclude message rows.</li>
+              <li>When enabled, daily message backups keep the newest 7 copies; older copies age out through rotation. When disabled, no new message backup is created.</li>
               <li>The external lark-chat archive and other collector files.</li>
             </ul>
             <div className="flex flex-wrap gap-2">

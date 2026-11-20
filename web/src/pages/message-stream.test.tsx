@@ -180,6 +180,8 @@ describe("MessageStreamPage", () => {
     expect(container.textContent).toContain("Already pushed outputs");
     expect(container.textContent).toContain("Processor run outputs");
     expect(container.textContent).toContain("2 upgrade backups");
+    expect(container.textContent).toContain("daily message backups keep the newest 7 copies");
+    expect(container.textContent).toContain("older copies age out");
     expect(container.textContent).toContain("2026-10-01");
     expect(container.textContent).toContain("lark-chat");
     await click("Confirm deletion");

@@ -54,6 +54,7 @@ def test_cli_previews_cancels_and_then_deletes_one_message(tmp_path, monkeypatch
         assert asyncio.run(count(url)) == 1
         output = capsys.readouterr().out
         assert "Processor" in output and "lark-chat" in output and "backups: 0" in output
+        assert "daily message backups keep the newest 7 copies" in output and "older copies age out" in output
         monkeypatch.setattr("builtins.input", lambda _: "delete")
         assert cli.main(args) == 0
         assert asyncio.run(count(url)) == 0
