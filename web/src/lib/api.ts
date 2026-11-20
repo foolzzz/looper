@@ -422,7 +422,7 @@ export interface TasksPage {
 }
 
 /** A page of tasks: `limit` (default 50, at most 200) of them older than the task `before`, filtered by project,
- * group, schedule, Manager, query and status. */
+ * group, schedule, Manager, query and status. `statuses` is the union of several status filters. */
 export async function fetchTasks(
   filters: {
     projectId?: string;
@@ -430,6 +430,8 @@ export async function fetchTasks(
     group?: TaskGroup;
     scheduleId?: string;
     status?: string;
+    /** Two or more status filter names. The page is their union. Not together with `status`. */
+    statuses?: string[];
     before?: string | null;
     limit?: number;
     query?: string;
@@ -443,6 +445,7 @@ export async function fetchTasks(
     ...(filters.group ? { group: filters.group } : {}),
     ...(filters.scheduleId ? { schedule_id: filters.scheduleId } : {}),
     ...(filters.status ? { status: filters.status } : {}),
+    ...(filters.statuses?.length ? { statuses: filters.statuses } : {}),
     ...(filters.before ? { before: filters.before } : {}),
     ...(filters.limit ? { limit: filters.limit } : {}),
     ...(filters.query ? { query: filters.query } : {}),
@@ -2880,6 +2883,13 @@ export interface LlmRecord {
     env?: { sha256: string; keys: Record<string, string> };
     /** The repository's own CLAUDE.md and AGENTS.md the runtime was given (runs recorded before it lack it). */
     project_instructions?: ProjectInstructionFile[];
+    /** Catalog entries this runtime left unloaded. Absent, or `skipped` empty, when it loaded them or had none. */
+    runtime_catalog?: {
+      runtime?: string;
+      skipped?: (string | { name?: string; reason?: string; item?: string; path?: string })[];
+      skills_as_documents?: string[];
+      skill_dirs?: string[];
+    };
     presentation?: RecordPresentation;
     accounting_basis?: "subscription_equivalent";
     /** Not a Claude run: the user sent /new and the Manager dropped this session (sender: Lark open_id or

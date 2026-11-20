@@ -56,13 +56,14 @@ afterEach(() => {
 });
 
 describe("Sidebar User Gates item", () => {
-  it("sits between Tasks and Runs, is active and navigates", async () => {
+  it("sits between Tasks and Schedules, is active and navigates", async () => {
     await render();
     const labels = [...host.querySelectorAll("nav")[0].querySelectorAll("button")].map((b) => b.textContent ?? "");
     const at = (name: string) => labels.findIndex((l) => l.includes(name));
     expect(at("Tasks")).toBeGreaterThanOrEqual(0);
     expect(at("User Gates")).toBe(at("Tasks") + 1);
-    expect(at("Runs")).toBe(at("User Gates") + 1);
+    expect(at("Schedules")).toBe(at("User Gates") + 1);
+    expect(labels.some((label) => label.includes("Runs"))).toBe(false);
     expect(gatesButton().className).toContain("text-primary");
     act(() => (gatesButton() as HTMLButtonElement).click());
     expect(onNavigate).toHaveBeenCalledWith("gates");

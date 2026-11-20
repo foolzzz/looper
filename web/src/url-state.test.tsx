@@ -180,13 +180,93 @@ describe("the dashboard keeps its place in the URL", () => {
       })]);
     });
 
-    it("writes the chosen status, keeps the other filters, and writes no default", async () => {
+    const pageBodies = () => vi.mocked(fetch).mock.calls
+      .filter(([url]) => url === "/api/v1/tasks/page")
+      .map(([, options]) => JSON.parse(String(options?.body)) as Record<string, unknown>);
+
+    it("asks for every unfinished status when the address has no status, group or schedule", async () => {
+      await open("#tasks");
+      expect(hash()).toBe("#tasks");
+      const body = pageBodies().at(-1);
+      expect(body?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
+      expect(body).not.toHaveProperty("status");
+      expect(body?.exclude_scheduled).toBe(true);
+    });
+
+    it("keeps a project's task list on the unfinished statuses", async () => {
+      await open("#tasks?project=p1");
+      expect(hash()).toBe("#tasks?project=p1");
+      const body = pageBodies().at(-1);
+      expect(body?.project_id).toBe("p1");
+      expect(body?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
+      expect(body).not.toHaveProperty("status");
+    });
+
+    it("lists every task in a group or a schedule when the address has no status", async () => {
+      await open("#tasks?group=needs_you");
+      expect(hash()).toBe("#tasks?group=needs_you");
+      let body = pageBodies().at(-1);
+      expect(body?.group).toBe("needs_you");
+      expect(body).not.toHaveProperty("status");
+      expect(body).not.toHaveProperty("statuses");
+
+      await open("#tasks?group=needs_you&scheduled=include");
+      expect(hash()).toBe("#tasks?group=needs_you&scheduled=include");
+      body = pageBodies().at(-1);
+      expect(body?.group).toBe("needs_you");
+      expect(body).not.toHaveProperty("exclude_scheduled");
+      expect(body).not.toHaveProperty("status");
+      expect(body).not.toHaveProperty("statuses");
+
+      await open("#tasks?schedule=sched-1");
+      expect(hash()).toBe("#tasks?schedule=sched-1");
+      body = pageBodies().at(-1);
+      expect(body?.schedule_id).toBe("sched-1");
+      expect(body).not.toHaveProperty("exclude_scheduled");
+      expect(body).not.toHaveProperty("status");
+      expect(body).not.toHaveProperty("statuses");
+
+      await open("#tasks?group=needs_you&status=failed");
+      body = pageBodies().at(-1);
+      expect(body).toMatchObject({ group: "needs_you", status: "failed" });
+      expect(body).not.toHaveProperty("statuses");
+      await click("All");
+      expect(hash()).toBe("#tasks?group=needs_you");
+      body = pageBodies().at(-1);
+      expect(body).not.toHaveProperty("status");
+      expect(body).not.toHaveProperty("statuses");
+    });
+
+    it("toggles a status onto the default selection and writes All explicitly", async () => {
       await open("#tasks?project=p1");
       await click("Failed");
-      expect(new URLSearchParams(hash().split("?")[1]).get("status")).toBe("failed");
-      expect(new URLSearchParams(hash().split("?")[1]).get("project")).toBe("p1");
+      const params = new URLSearchParams(hash().split("?")[1]);
+      expect(params.get("status")).toBe("init,running,waiting,waiting_user,pending,failed");
+      expect(params.get("project")).toBe("p1");
+      expect(pageBodies().at(-1)?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending", "failed"]);
       await click("All");
-      expect(hash()).toBe("#tasks?project=p1");
+      expect(hash()).toBe("#tasks?project=p1&status=all");
+      const all = pageBodies().at(-1);
+      expect(all).not.toHaveProperty("status");
+      expect(all).not.toHaveProperty("statuses");
+    });
+
+    it("selects only the clicked status from All and returns to All when it is cleared", async () => {
+      await open("#tasks?project=p1&status=all");
+      await click("Failed");
+      expect(hash()).toBe("#tasks?project=p1&status=failed");
+      expect(pageBodies().at(-1)).toMatchObject({ status: "failed" });
+      expect(pageBodies().at(-1)).not.toHaveProperty("statuses");
+      await click("Failed");
+      expect(hash()).toBe("#tasks?project=p1&status=all");
+    });
+
+    it("round-trips a comma-separated selection and a single legacy status", async () => {
+      await open("#tasks?status=pending,init,running,waiting");
+      expect(pageBodies().at(-1)?.statuses).toEqual(["init", "running", "waiting", "pending"]);
+      await open("#tasks?status=failed,bogus");
+      expect(pageBodies().at(-1)?.status).toBe("failed");
+      expect(pageBodies().at(-1)).not.toHaveProperty("statuses");
     });
 
     it("hides schedule-created tasks unless the hash says scheduled=include", async () => {
@@ -196,13 +276,17 @@ describe("the dashboard keeps its place in the URL", () => {
         .map(([, options]) => JSON.parse(String(options?.body)));
       expect(bodies.some((body) => body.exclude_scheduled === true)).toBe(true);
       expect(bodies.at(-1)).not.toHaveProperty("exclude_scheduled");
+      expect(bodies.at(-1)?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
     });
 
     it("lists every task for an unknown status", async () => {
       await open("#tasks?status=bogus");
       const pages = vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/v1/tasks/page");
       expect(pages.length).toBeGreaterThan(0);
-      expect(pages.every(([, options]) => !("status" in JSON.parse(String(options?.body))))).toBe(true);
+      expect(pages.every(([, options]) => {
+        const body = JSON.parse(String(options?.body));
+        return !("status" in body) && !("statuses" in body);
+      })).toBe(true);
     });
 
     it("returns from a task to the list it was opened from, status included", async () => {
