@@ -17,7 +17,7 @@ import asyncpg
 
 from .chat import PLANNER_THREAD_PREFIX
 from .connection import get_pool
-from .text_search import Match, Term
+from .text_search import RELATIVE_MIN, Match, Term
 
 Db = asyncpg.Pool | asyncpg.Connection
 LIMIT_MAX = 10
@@ -67,9 +67,11 @@ WITH candidates AS MATERIALIZED (
     SELECT v.*, {weights} FROM covered v
 ), scored AS (
     SELECT w.*, {score} AS score FROM weighed w
+), ranked AS (
+    SELECT r.*, max(score) OVER () AS best FROM scored r WHERE score > 0
 )
 SELECT id, session_id, role, content, created_at, score, count(*) OVER () AS total
-FROM scored WHERE score > 0
+FROM ranked WHERE score >= {relative} * best
 ORDER BY score DESC, created_at DESC, id DESC
 LIMIT $6
 """
@@ -86,7 +88,7 @@ async def search(found: Sequence[Term], *, operators: Sequence[tuple[str, str]],
     prefilter = match.prefilter("lower(m.content)")
     coverage = ", ".join(f"{match.coverage('c.doc', i)} AS {column}" for i, column in enumerate(columns))
     sql = _SEARCH.format(coverage=coverage, prefilter=prefilter, weights=match.weights(columns),
-                         score=Match.score(columns), planner=PLANNER_THREAD_PREFIX,
+                         score=Match.score(columns), relative=RELATIVE_MIN, planner=PLANNER_THREAD_PREFIX,
                          planner_len=len(PLANNER_THREAD_PREFIX))
     limit = max(1, min(int(limit), LIMIT_MAX))
     rows = await _db(db).fetch(sql, since, [bot for bot, _ in operators], [sender for _, sender in operators],

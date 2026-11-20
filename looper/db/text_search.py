@@ -9,8 +9,9 @@ the PostgreSQL image, so a query is split here and nothing is tokenized in the d
 - a text covers a term fully when it holds the term as written, ignoring case (what the word search matched), and
   otherwise by the share of the term's tokens it holds: a CJK pair anywhere, an ASCII token at the start of a word
   (three characters or more as a prefix, two as a whole word);
-- a term counts for a text it covers at least ``HIT``; the text's score is the sum of its counted terms' coverage,
-  each weighted by how rare the term is among the candidates, ``ln(1 + candidates / holders)``.
+- a text matches when it covers some term at least ``HIT``; its score is then the sum of its coverage of every term,
+  each weighted by how rare the term is among the candidates, ``ln(1 + candidates / holders)`` (holders: the
+  candidates covering it at least ``HIT``), and a text scoring under ``RELATIVE_MIN`` of the best one is left out.
 
 ``Match`` builds the SQL: a prefilter (the lower-cased text holds a term or one of its tokens) and a CASE
 expression per term; every value is a parameter, numbered from where the caller's own end.
@@ -25,6 +26,7 @@ from dataclasses import dataclass
 TERMS_MAX = 8
 TOKENS_MAX = 16  # per term
 HIT = 0.5  # the coverage at which a term counts for a text
+RELATIVE_MIN = 0.6  # a match scoring under this share of the best match is left out
 PREFIX_MIN = 3  # an ASCII token this long matches the start of a word; a shorter one only a whole word
 
 _CJK = "㐀-䶿一-鿿豈-﫿"
@@ -121,6 +123,9 @@ class Match:
 
     @staticmethod
     def score(columns: Sequence[str]) -> str:
-        """A candidate's score from the coverage ``columns`` and the ``weights`` columns."""
-        return " + ".join(f"CASE WHEN {column} >= {HIT} THEN {column} * ln(1 + n::float8 / d{i}) ELSE 0 END"
-                          for i, column in enumerate(columns))
+        """A candidate's score from the coverage ``columns`` and the ``weights`` columns: 0 unless it covers some
+        term at least ``HIT``, else every term's coverage, weighted. Keep the rows whose score is at least
+        ``RELATIVE_MIN`` of the best one's (``max(score) OVER ()`` of those above 0)."""
+        counted = " OR ".join(f"{column} >= {HIT}" for column in columns)
+        weighted = " + ".join(f"{column} * ln(1 + n::float8 / greatest(d{i}, 1))" for i, column in enumerate(columns))
+        return f"CASE WHEN {counted} THEN {weighted} ELSE 0 END"

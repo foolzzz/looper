@@ -237,19 +237,27 @@ def test_chinese_matches_most_of_a_words_characters_and_english_the_start_of_a_w
     run_with_channel_configs(test, monkeypatch)
 
 
-def test_more_words_and_rarer_words_rank_first_then_newer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_more_words_and_rarer_words_rank_first_and_much_weaker_matches_are_left_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def test(pool: Any) -> None:
         await _switch(pool)
         for day in range(6):
             await _say(pool, "chat-old", f"上线的事明天再说 {day}", days=10 + day)
         await _say(pool, "chat-old", "Nebula 上线日期定在 12 月 15 日", days=20)
         await _say(pool, "chat-old", "Nebula 的设计评审通过了", days=19)
-        found = _texts(await _search(_ops(), _web(), "Nebula 上线", limit=10))
-        assert found[0] == "Nebula 上线日期定在 12 月 15 日"  # both words
-        assert found[1] == "Nebula 的设计评审通过了"  # the rarer word alone outranks the commoner one
-        assert found[2:] == [f"上线的事明天再说 {day}" for day in range(6)]  # then newest first
-        answer = await _search(_ops(), _web(), "Nebula 上线", limit=2)
-        assert answer["result"]["more"] == 6
+        # Both words first; the rarer word alone next; the commoner one alone scores under 60 % of the best.
+        assert _texts(await _search(_ops(), _web(), "Nebula 上线", limit=10)) == [
+            "Nebula 上线日期定在 12 月 15 日", "Nebula 的设计评审通过了"]
+        answer = await _search(_ops(), _web(), "Nebula 上线", limit=1)
+        assert answer["result"]["more"] == 1
+        # A word a message covers only in part does not make it match, but ranks it among those that do.
+        assert _texts(await _search(_ops(), _web(), "Nebula 上线时间", limit=10))[0] == "Nebula 上线日期定在 12 月 15 日"
+        assert _texts(await _search(_ops(), _web(), "上线时间", limit=10)) == []
+        await _say(pool, "chat-old", "上线的事明天再说 newest", days=1)
+        found = _texts(await _search(_ops(), _web(), "上线", limit=10))
+        assert found == ["上线的事明天再说 newest", *[f"上线的事明天再说 {day}" for day in range(6)],
+                         "Nebula 上线日期定在 12 月 15 日"]  # equal scores: newest first
 
     run_with_channel_configs(test, monkeypatch)
 
