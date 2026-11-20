@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from looper.agents import api_v1, attention
-from looper.db import ledger, schedules as db_schedules
+from looper.db import connection, ledger, schedules as db_schedules
 from tests import ledger_support as sup, leads_support as leads, subscription_support as stream
 from tests.db_support import DSN, run_db, v1_api
 
@@ -138,6 +138,10 @@ def test_deliveries_lists_what_may_not_have_arrived_in_the_window(monkeypatch):
             # one push in two messages is one item; a sent one is none
             await pool.execute("INSERT INTO subscription_deliveries (run_id, segment, text, state) "
                                "VALUES ($1, $2, 'Part', $3)", run, segment, state)
+        monkeypatch.setattr(attention, "SHOWN", 2)
+        limited = section(await attention.collect(), "deliveries")
+        assert (limited["count"], len(limited["items"])) == (3, 2)  # counted in full, listed up to SHOWN
+        monkeypatch.setattr(attention, "SHOWN", 20)
         items = section(await attention.collect(), "deliveries")["items"]
         assert sorted((item["facts"]["source"], item["title"], item["href"]) for item in items) == [
             ("intent", "Fix the login page", "#intents"), ("subscription", "digest", "#schedules/digest"),
@@ -152,7 +156,7 @@ def test_confirmations_come_from_each_managers_memory_and_are_unknown_without_th
 
     def waiting(confirmation_id, channel, waited):
         return {"confirmation_id": confirmation_id, "tool": "looper_task_control", "impact": f"Cancel {confirmation_id}",
-                "channel": channel, "channel_id": None, "chat": "chat", "waited_seconds": waited,
+                "channel": channel, "channel_id": None, "chat": f"{channel}-session-1", "waited_seconds": waited,
                 "expires_in_seconds": 600 - waited}
 
     async def check(pool):
@@ -161,7 +165,7 @@ def test_confirmations_come_from_each_managers_memory_and_are_unknown_without_th
         fleet = SimpleNamespace(agents=lambda: agents, ops=found.get)
         items = section(await attention.collect(managers=fleet), "confirmations")["items"]
         assert [(item["ref"], item["context"], item["href"]) for item in items] == [
-            ("c-old", "Ops", None), ("c-new", "Manager", "#chat")]
+            ("c-old", "Ops", None), ("c-new", "Manager", "#chat?conversation=web-session-1")]
         assert section(await attention.collect(), "confirmations")["state"] == "unknown"
 
     run_db(check, monkeypatch, timeout=20)
@@ -210,5 +214,27 @@ def test_the_api_is_the_operators_and_answers_conflict_while_off(monkeypatch, tm
             declared = next(op for op in api_v1.operations() if op.operation_id == "attention.summary")
             api_v1.validate_arguments(declared.result, answer["result"])
             assert answer["result"]["total"] == 1 and titles(answer["result"], "gates") == ["Pick a database"]
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_a_database_without_the_uncertain_delivery_indexes_builds_them_online(monkeypatch):
+    names = [name for name, _ in connection._UNCERTAIN_DELIVERY_INDEXES]
+
+    async def definitions(pool):
+        rows = await pool.fetch("SELECT indexname, indexdef FROM pg_indexes WHERE indexname = ANY($1::text[]) "
+                                "AND schemaname = current_schema()", names)
+        return {row["indexname"]: row["indexdef"] for row in rows}
+
+    async def check(pool):
+        fresh = await definitions(pool)
+        assert set(fresh) == set(names) and all("WHERE" in definition for definition in fresh.values())
+        await pool.execute("; ".join(f"DROP INDEX {name}" for name in names))
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+        assert await definitions(pool) == fresh  # built online, as a new database has them
 
     run_db(check, monkeypatch, timeout=30)

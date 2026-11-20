@@ -121,6 +121,14 @@ def test_nothing_waiting_says_so():
     assert attention.summary_text(empty) == attention.NOTHING
 
 
+def test_todo_never_says_nothing_waits_while_a_source_is_unread():
+    unread = {"read_at": NOW, "total": 0, "sections": [
+        {"kind": "gates", "state": "ok", "count": 0, "items": [], "error": None},
+        {"kind": "logins", "state": "unknown", "count": 0, "items": [], "error": None}]}
+    text = attention.summary_text(unread)
+    assert text != attention.NOTHING and "登录失效：这里读不到" in text
+
+
 def test_no_agent_tool_default_prompt_or_command_list_mentions_it():
     from looper.agents import agent_settings, chat_commands
     from looper.agents.ops import clients, planner, room, service

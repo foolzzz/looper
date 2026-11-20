@@ -1,5 +1,6 @@
 """The reads of the "needs you" summary (``agents.attention``) that no other module has: pending intents, the
-ledger's own items that wait for the user, and deliveries that may not have arrived. Read only."""
+ledger's own items that wait for the user, and deliveries that may not have arrived. Read only. Each returns at most
+``limit`` rows and how many match in all."""
 
 from __future__ import annotations
 
@@ -13,41 +14,44 @@ from .connection import get_pool
 Db = asyncpg.Pool | asyncpg.Connection
 
 
-async def pending_intents(*, db: Db | None = None) -> list[dict[str, Any]]:
-    """The intents still waiting to be built or rejected, urgent types first, then the newest."""
+async def _limited(db: Db | None, sql: str, order: str, limit: int, *args: Any) -> tuple[list[dict[str, Any]], int]:
+    """The first ``limit`` rows of ``sql`` in ``order`` (of its columns) and the count of all of them."""
     rows = await (db or get_pool()).fetch(
-        """
+        f"SELECT *, count(*) OVER () AS matching FROM ({sql}) AS found ORDER BY {order} LIMIT ${len(args) + 1}",
+        *args, limit)
+    return [{key: row[key] for key in row.keys() if key != "matching"} for row in rows], (
+        rows[0]["matching"] if rows else 0)
+
+
+async def pending_intents(limit: int, *, db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
+    """The intents still waiting to be built or rejected, urgent types first, then the newest."""
+    return await _limited(db, """
         SELECT i.id, i.title, i.confidence, i.created_at, i.expires_at, v.name AS type_name, v.priority
         FROM intents i JOIN intent_type_versions v ON v.type_key = i.type_key AND v.version = i.type_version
         WHERE i.state = 'pending'
-        ORDER BY (v.priority = 'urgent') DESC, i.created_at DESC, i.id DESC
-        """)
-    return [dict(row) for row in rows]
+        """, "(priority = 'urgent') DESC, created_at DESC, id DESC", limit)
 
 
-async def ledger_waiting(*, db: Db | None = None) -> list[dict[str, Any]]:
+async def ledger_waiting(limit: int, *, db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
     """The ledger's own open items that wait for the user: a to-do of the user's, a decision the user has not
     confirmed (a relayed one), and anything of the user's past its due time; the overdue first. Sourced items are
     left out: their gates and confirmations are listed from their sources."""
-    rows = await (db or get_pool()).fetch(
-        """
+    return await _limited(db, """
         SELECT id, kind, title, owner_kind, due_at, created_at, COALESCE(due_at <= now(), false) AS overdue
         FROM ledger_items
         WHERE source_kind IS NULL AND status = 'open'
           AND ((kind = 'pending' AND owner_kind = 'user') OR (kind = 'decision' AND confirmed_event_id IS NULL)
                OR (owner_kind = 'user' AND due_at <= now()))
-        ORDER BY overdue DESC, due_at NULLS LAST, id
-        """)
-    return [dict(row) for row in rows]
+        """, "overdue DESC, due_at NULLS LAST, id", limit)
 
 
-async def uncertain_deliveries(since: datetime, *, db: Db | None = None) -> list[dict[str, Any]]:
+async def uncertain_deliveries(since: datetime, limit: int, *,
+                               db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
     """Messages Looper may or may not have sent since ``since`` (``uncertain``: the send was under way when the
     process died, or the channel's answer was lost; never sent again): a subscription's push (one row per run), a
-    message about an intent, and the message telling a task's end. Newest first."""
-    rows = await (db or get_pool()).fetch(
-        """
-        SELECT * FROM (
+    message about an intent, and the message telling a task's end. Newest first. Each table's partial index of its
+    uncertain rows (schema.sql) keeps this off its history."""
+    return await _limited(db, """
             SELECT 'subscription' AS source, d.run_id AS key, s.id AS ref, s.name AS title,
                    r.target_channel AS channel, max(d.updated_at) AS at, NULL::text AS goal_id,
                    NULL::text AS requirement
@@ -66,7 +70,4 @@ async def uncertain_deliveries(since: datetime, *, db: Db | None = None) -> list
                    left(t.requirement, 200)
             FROM manager_events e JOIN tasks t ON t.id = e.task_id
             WHERE e.delivery = 'uncertain' AND e.created_at >= $1
-        ) AS found
-        ORDER BY at DESC, source, key
-        """, since)
-    return [dict(row) for row in rows]
+        """, "at DESC, source, key", limit, since)

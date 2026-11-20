@@ -166,6 +166,13 @@ _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
+_UNCERTAIN_DELIVERIES = "uncertain_deliveries"
+# The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
+_UNCERTAIN_DELIVERY_INDEXES = (
+    ("idx_subscription_deliveries_uncertain", "ON subscription_deliveries (updated_at) WHERE state = 'uncertain'"),
+    ("idx_intent_posts_uncertain", "ON intent_posts (updated_at) WHERE state = 'uncertain'"),
+    ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
+)
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -341,6 +348,8 @@ _ONLINE_STEPS = (
                                          "check_record_id_fkey", "dropped")))),
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
+    # The delivery tables can be large: their partial indexes are built without blocking writes.
+    _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
 )
 
 
@@ -569,6 +578,15 @@ async def _processor_role_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_setting_layers') "
         "AND conname = 'agent_setting_layers_role_check' "
         "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'processor'")
+
+
+async def _uncertain_deliveries_pending(conn: asyncpg.Connection) -> bool:
+    """A database without the partial indexes of uncertain deliveries: the migration only records itself, and its
+    online step builds them after the commit (a new database has them from schema.sql)."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _UNCERTAIN_DELIVERIES):
+        return False
+    return not await conn.fetchval("SELECT bool_and(to_regclass(name) IS NOT NULL) FROM unnest($1::text[]) AS name",
+                                   [name for name, _ in _UNCERTAIN_DELIVERY_INDEXES])
 
 
 async def _headless_compaction_pending(conn: asyncpg.Connection) -> bool:
@@ -1487,6 +1505,8 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                   ADD COLUMN failure_kind TEXT CHECK (failure_kind IN ('task_budget'));
             """)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_SESSION_BOUNDS)
+        if await _uncertain_deliveries_pending(conn):
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1538,6 +1558,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
+            or await _uncertain_deliveries_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _project_advisor_pending(conn)

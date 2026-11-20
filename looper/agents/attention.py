@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
+from urllib.parse import urlencode
 
 from ..db import attention as store, ledger as db_ledger, schedules as db_schedules, tasks as db_tasks
 from ..db import system_settings as db_settings
@@ -109,16 +110,23 @@ async def _confirmations(managers: Any) -> Read:
     for agent in managers.agents():
         ops = managers.ops(agent.agent_id)
         for waiting in ops.waiting_confirmations() if ops is not None else ():
-            web = waiting["channel"] == "web"
             items.append(_item(
                 f"confirmation:{waiting['confirmation_id']}", waiting["impact"] or waiting["tool"],
                 context=getattr(agent, "name", None) or agent.agent_id,
                 since=now - timedelta(seconds=waiting["waited_seconds"]),
-                href=(f"#chat?target={agent.agent_id}" if agent.agent_id != "manager" else "#chat") if web else None,
+                href=_chat_href(agent.agent_id, waiting["chat"]) if waiting["channel"] == "web" else None,
                 ref=waiting["confirmation_id"], tool=waiting["tool"], channel=waiting["channel"],
                 expires_in_seconds=waiting["expires_in_seconds"]))
     items.sort(key=lambda item: item["since"])
     return items[:SHOWN], len(items)
+
+
+def _chat_href(manager_id: str, conversation: str | None) -> str:
+    """The dashboard chat with ``manager_id`` open on the web conversation that asked (the Chat page's query: the
+    default Manager and no conversation are left out)."""
+    query = urlencode({key: value for key, value in (("target", manager_id if manager_id != "manager" else None),
+                                                     ("conversation", conversation)) if value})
+    return f"#chat?{query}" if query else "#chat"
 
 
 _SCHEDULE_ALERTS = (("failures", "failures_alert_at"), ("stale", "stale_alert_at"),
@@ -152,22 +160,22 @@ async def _logins(_: Any) -> Read:
 async def _intents(_: Any) -> Read:
     if not await leads_model.intents_enabled():
         return NotRead.OFF
-    rows = await store.pending_intents()
+    rows, count = await store.pending_intents(SHOWN)
     items = [_item(f"intent:{row['id']}", row["title"], context=row["type_name"], since=row["created_at"],
                    href="#intents", ref=leads_model.format_intent_id(row["id"]), priority=row["priority"],
                    confidence=row["confidence"], expires_at=row["expires_at"])
-             for row in rows[:SHOWN]]
-    return items, len(rows)
+             for row in rows]
+    return items, count
 
 
 async def _ledger(_: Any) -> Read:
     if not await db_ledger.enabled():
         return NotRead.OFF
-    rows = await store.ledger_waiting()
+    rows, count = await store.ledger_waiting(SHOWN)
     items = [_item(f"ledger:{row['id']}", row["title"], since=row["created_at"], ref=db_ledger.format_id(row["id"]),
                    kind=row["kind"], due_at=row["due_at"], overdue=row["overdue"])
-             for row in rows[:SHOWN]]
-    return items, len(rows)
+             for row in rows]
+    return items, count
 
 
 def _channel_type(channel: str | None) -> str | None:
@@ -180,14 +188,14 @@ _DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "tas
 
 
 async def _deliveries(_: Any) -> Read:
-    rows = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW)
+    rows, count = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW, SHOWN)
     items = [_item(f"delivery:{row['source']}:{row['key']}",
                    _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"], since=row["at"],
                    href=_DELIVERY_HREF[row["source"]].format(ref=row["ref"]),
                    ref=leads_model.format_intent_id(int(row["ref"])) if row["source"] == "intent" else None,
                    source=row["source"], channel=_channel_type(row["channel"]))
-             for row in rows[:SHOWN]]
-    return items, len(rows)
+             for row in rows]
+    return items, count
 
 
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
@@ -274,23 +282,27 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
 
 
 def summary_text(summary: Mapping[str, Any]) -> str:
-    """The summary as a chat message: each section with something in it, or that could not be read."""
+    """The summary as a chat message: each section with something in it, or that could not be read. It says
+    nothing waits only when every section was read and is empty."""
     now = datetime.now(timezone.utc)
-    parts = []
+    parts, unread = [], []
     for section in summary["sections"]:
         kind = section["kind"]
         if section["state"] == "error":
-            parts.append(f"{_TITLES[kind]}：没能读取（{section['error']}）")
+            unread.append(f"{_TITLES[kind]}：没能读取（{section['error']}）")
+        elif section["state"] == "unknown":
+            unread.append(f"{_TITLES[kind]}：这里读不到")
         elif section["state"] == "ok" and section["count"]:
             lines = [f"{_TITLES[kind]} {section['count']}：", *(_line(kind, item, now) for item in section["items"])]
             if section["count"] > len(section["items"]):
                 lines.append(f"- 另有 {section['count'] - len(section['items'])} 项，见控制台「Needs you」页")
             hint = _HINTS[kind].format(ref=section["items"][0]["ref"]) if kind in _HINTS else ""
             parts.append("\n".join(lines) + (f"\n\n{hint}" if hint else ""))
-    if not parts:
+    if not parts and not unread:
         return NOTHING
-    head = f"需要你处理（{summary['total']} 项）：" if summary["total"] else "需要你处理："
-    return "\n\n".join([head, *parts])
+    head = (f"需要你处理（{summary['total']} 项）：" if parts
+            else "读到的来源里没有需要你处理的事，但下面这些没读到，不能说没有：")
+    return "\n\n".join([head, *parts, *unread])
 
 
 async def command_reply(envelope: MessageEnvelope, *, managers: Any = None) -> str:
