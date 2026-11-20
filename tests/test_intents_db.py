@@ -337,3 +337,40 @@ def test_build_does_not_borrow_another_connection(monkeypatch, tmp_path):
                                                         for iid in ids)), 10)
         assert len(results) == 3 and await pool.fetchval("SELECT count(*) FROM tasks") == 3
     run_db(check, monkeypatch, max_size=3)
+
+
+def test_type_workflow_storage_preserves_api_history(monkeypatch):
+    async def check(pool):
+        await pool.execute("INSERT INTO workflows(key,name,definition) VALUES('synthetic','Synthetic','{}')")
+        created = (await intents.type_create("custom", name="Custom", guidance="Synthetic guidance", priority="normal",
+                                              default_workflow="synthetic"))["type"]
+        assert created["default_workflow"] == "synthetic"
+        assert await pool.fetchval("SELECT workflow_key FROM intent_type_versions WHERE type_key='custom' AND version=1") == "synthetic"
+        await intents.type_save("custom", default_workflow=None)
+        restored = (await intents.type_rollback("custom", 1))["type"]
+        assert restored["default_workflow"] == "synthetic" and restored["version"] == 3
+        versions = (await intents.type_history("custom"))["versions"]
+        assert [v["default_workflow"] for v in versions] == ["synthetic", None, "synthetic"]
+        assert all("workflow_key" not in v for v in versions)
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("removed", ["intent", "type_project", "type"])
+def test_build_skips_deleted_workflows(monkeypatch, tmp_path, removed):
+    async def check(pool):
+        import json
+        for key in (removed, "project"):
+            await pool.execute("INSERT INTO workflows(key,name,definition) VALUES($1,$1,'{}')", key)
+        p = await project(pool, str(tmp_path))
+        await pool.execute("UPDATE projects SET default_workflow='project' WHERE id=$1", p["id"])
+        iid = await seed(pool, project_id=p["id"], workflow_key="intent" if removed == "intent" else None)
+        if removed == "type_project":
+            await intents.set_project_template("dev_task", p["id"], removed)
+        if removed == "type":
+            await intents.type_save("dev_task", default_workflow=removed)
+        await pool.execute("DELETE FROM workflows WHERE key=$1", removed)
+        await intents.settings_put(True)
+        result = await intents.build(iid, via="dashboard", platform=SimpleNamespace(bus=SimpleNamespace(publish=AsyncMock())))
+        workflow = await pool.fetchval("SELECT workflow FROM tasks WHERE id=$1", result["task_id"])
+        assert json.loads(workflow)["key"] == "project"
+    run_db(check, monkeypatch)

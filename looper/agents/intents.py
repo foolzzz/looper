@@ -82,7 +82,7 @@ async def candidates(intent_id: int, *, db: Any = None, now: datetime | None = N
 
 
 async def _workflow(row: Mapping, project: Mapping | None, *, db: Any, explicit: Any = None) -> dict | None:
-    type_row = await db.fetchrow("SELECT v.default_workflow FROM intent_types t JOIN intent_type_versions v "
+    type_row = await db.fetchrow("SELECT v.workflow_key AS default_workflow FROM intent_types t JOIN intent_type_versions v "
                                 "ON v.type_key=t.key AND v.version=t.version WHERE t.key=$1", row["type_key"])
     bound = await db.fetchval("SELECT workflow_key FROM intent_type_projects WHERE type_key=$1 AND project_id=$2",
                               row["type_key"], project["id"]) if project else None
@@ -261,15 +261,15 @@ async def reject(intent_id: int, *, via: str, reason: str | None = None, now: da
 
 async def types_list(*, db: Any = None) -> dict:
     db = _db(db)
-    rows = await db.fetch("SELECT t.*,v.name,v.guidance,v.priority,v.default_workflow, "
+    rows = await db.fetch("SELECT t.*,v.name,v.guidance,v.priority,v.workflow_key AS default_workflow, "
         "(t.builtin AND v.name=b.name AND v.guidance=b.guidance AND v.priority=b.priority "
-        "AND v.default_workflow IS NOT DISTINCT FROM b.default_workflow AND b.edited_via='builtin') AS recommended "
+        "AND v.workflow_key IS NOT DISTINCT FROM b.workflow_key AND b.edited_via='builtin') AS recommended "
         "FROM intent_types t JOIN intent_type_versions v ON v.type_key=t.key AND v.version=t.version "
         "JOIN intent_type_versions b ON b.type_key=t.key AND b.version=1 ORDER BY t.builtin DESC,t.key")
     result = []
     for row in rows:
         bindings = await db.fetch("SELECT b.project_id,p.name AS project_name,b.workflow_key FROM intent_type_projects b "
-                                 "JOIN projects p ON p.id=b.project_id WHERE b.type_key=$1 AND b.workflow_key IS NOT NULL ORDER BY p.name,p.id", row["key"])
+                                 "JOIN projects p ON p.id=b.project_id JOIN workflows w ON w.key=b.workflow_key WHERE b.type_key=$1 ORDER BY p.name,p.id", row["key"])
         result.append({key: row[key] for key in ("key", "builtin", "enabled", "version", *TYPE_FIELDS, "recommended")}
                       | {"archived": row["archived_at"] is not None, "projects": [dict(b) for b in bindings]})
     return {"types": result}
@@ -282,7 +282,7 @@ async def _type_result(key: str, db: Any) -> dict:
 async def type_history(key: str, *, db: Any = None) -> dict:
     db = _db(db)
     current = await _require_row("intent_types", "key", key, db)
-    rows = await db.fetch("SELECT version,name,guidance,priority,default_workflow,rolled_back_from,edited_via,created_at "
+    rows = await db.fetch("SELECT version,name,guidance,priority,workflow_key AS default_workflow,rolled_back_from,edited_via,created_at "
                           "FROM intent_type_versions WHERE type_key=$1 ORDER BY version DESC", key)
     return {"key": key, "current": current["version"],
             "versions": [{**dict(row), "created_at": _iso(row["created_at"])} for row in rows]}
@@ -316,7 +316,7 @@ async def _new_version(conn: Any, key: str, version: int, fields: Mapping, *, ed
     if edited_via not in ("dashboard", "api"):
         raise ValueError("edited_via must be dashboard or api")
     await conn.execute("INSERT INTO intent_type_versions "
-        "(type_key,version,name,guidance,priority,default_workflow,rolled_back_from,edited_via) "
+        "(type_key,version,name,guidance,priority,workflow_key,rolled_back_from,edited_via) "
         "VALUES($1,$2,$3,$4,$5,$6,$7,$8)", key, version, *(fields.get(k) for k in TYPE_FIELDS), rolled_back_from, edited_via)
     await conn.execute("UPDATE intent_types SET version=$2 WHERE key=$1", key, version)
 
@@ -348,7 +348,7 @@ async def type_save(key: str, *, edited_via: str = "dashboard", db: Any = None, 
         changes = await _validate_type(fields, conn)
         if changes.get("enabled") is True and not current["enabled"]:
             await _type_capacity(conn, excluding=key)
-        old = dict(await conn.fetchrow("SELECT * FROM intent_type_versions WHERE type_key=$1 AND version=$2",
+        old = dict(await conn.fetchrow("SELECT *,workflow_key AS default_workflow FROM intent_type_versions WHERE type_key=$1 AND version=$2",
                                       key, current["version"]))
         new = {**old, **changes}
         if any(new[k] != old[k] for k in TYPE_FIELDS):
@@ -364,7 +364,7 @@ async def type_rollback(key: str, version: int, *, edited_via: str = "dashboard"
         current = await _require_row("intent_types", "key", key, conn)
         if current["archived_at"]:
             raise IntentRefused("this intent type is archived")
-        old = await conn.fetchrow("SELECT * FROM intent_type_versions WHERE type_key=$1 AND version=$2", key, version)
+        old = await conn.fetchrow("SELECT *,workflow_key AS default_workflow FROM intent_type_versions WHERE type_key=$1 AND version=$2", key, version)
         if old is None:
             raise ValueError("unknown type version")
         await _validate_type({k: old[k] for k in TYPE_FIELDS}, conn)
