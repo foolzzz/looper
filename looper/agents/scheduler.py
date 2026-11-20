@@ -833,14 +833,15 @@ class Scheduler:
         firing is a ``skipped_gate`` (counted on the day's latest one) with the cursor moved past the window; else the
         run is ``running`` and ``SubscriptionRuns.execute`` takes it after the commit."""
         window = await self._subscriptions.plan(conn, schedule, now=now)
-        if window is None:
+        if window is None or window.get("skip_reason"):
+            reason = window["skip_reason"] if window else "no new messages in the window"
             if run_id is None:
                 assert common is not None
                 skipped = await self._skip(conn, "skipped_gate", now, common, kind="subscription", fired_at=now,
-                                           error="no new messages in the window")
+                                           error=reason)
             else:
                 await db_schedules.update_run(conn, run_id, status="skipped_gate", fired_at=now, finished_at=now,
-                                              error="no new messages in the window")
+                                              error=reason)
                 skipped = run_id
             await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
             return _Launched(skipped)

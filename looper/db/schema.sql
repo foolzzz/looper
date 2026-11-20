@@ -1608,7 +1608,15 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     -- to still be what the schedule is.
     target_confirmed_version TEXT,
     -- Selection rules (agents/subscription_rules.py): empty, the subscription's own filter above applies.
-    rules               JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array')
+    rules               JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array'),
+    "window"            TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
+    delivery_policy     TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'))
+);
+-- Reserve an attempt before its processor starts. Keep it after failure or restart: at most once per local day.
+CREATE TABLE IF NOT EXISTS subscription_daily_claims (
+    schedule_id TEXT NOT NULL REFERENCES subscriptions(schedule_id) ON DELETE CASCADE,
+    local_date  DATE NOT NULL,
+    PRIMARY KEY (schedule_id, local_date)
 );
 CREATE TABLE IF NOT EXISTS subscription_runs (
     run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,
@@ -1629,7 +1637,8 @@ CREATE TABLE IF NOT EXISTS subscription_runs (
     -- otherwise (its output stays on the dashboard).
     target_channel    TEXT,
     target_chat       TEXT,
-    config_version    TEXT
+    config_version    TEXT,
+    window_mode       TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback'))
 );
 -- One message of a run's push: pending, then sending (written before the channel is asked), then sent, failed (the
 -- channel said no: asked again) or uncertain (it was being sent when the process died, or the channel's answer was

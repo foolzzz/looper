@@ -822,13 +822,14 @@ async def _subscription_changes(conn: asyncpg.Connection, row: Mapping[str, Any]
     the new source's end when the source changes, and the push target's confirmation (the module's notes)."""
     changes = dict(stream or {})
     current = row["subscription"]
-    if "source_id" in changes and changes["source_id"] != current["source_id"]:
-        changes["cursor_seq"] = await db_subs.committed_seq(conn, changes["source_id"])
+    if changes.get("window", current["window"]) == "cursor" and (
+            changes.get("source_id", current["source_id"]) != current["source_id"] or current["window"] != "cursor"):
+        changes["cursor_seq"] = await db_subs.committed_seq(conn, changes.get("source_id", current["source_id"]))
         changes["cursor_at"] = now
     target = fields.get("notify_channel", row["notify_channel"])
     asked = {**fields, **({"enabled": enabled} if enabled is not None else {})}
     if (target is None and current["target_confirmed_at"] is not None) or (
-            target is not None and subscriptions.needs_confirmation(row, asked)):
+            target is not None and subscriptions.needs_confirmation(row, asked, stream=stream)):
         changes.update(target_confirmed_at=None, target_confirmed_version=None)
     return changes
 
@@ -869,6 +870,8 @@ async def reset_cursor(schedule_id: str, after: datetime, *, runtime_root: Path 
             raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
         if row["kind"] != Kind.SUBSCRIPTION.value:
             raise RequestError(HTTP_400, "only a subscription has a cursor")
+        if row["subscription"]["window"] == "lookback":
+            raise RequestError(HTTP_400, "a lookback subscription does not use a cursor")
         if after > _utcnow():
             raise RequestError(HTTP_400, "after is in the future: events not stored yet cannot be skipped")
         if await db_schedules.open_runs(conn, schedule_id):
@@ -956,11 +959,11 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             except ValueError as exc:
                 raise RequestError(HTTP_400, str(exc)) from None
             will_run = row["enabled"] if enabled is None else enabled
-            if (stream and stream.get("source_id", row.get("subscription", {}).get("source_id"))
-                    != (row.get("subscription") or {}).get("source_id")
+            if (stream and any(name in stream and stream[name] != (row.get("subscription") or {}).get(name)
+                               for name in ("source_id", "window", "delivery_policy"))
                     and await db_schedules.open_runs(conn, schedule_id)):
-                raise RequestError(HTTP_409, "a run of the subscription is in progress: change its source when it "
-                                             "ends (its window belongs to the source it started on)")
+                raise RequestError(HTTP_409, "a run of the subscription is in progress: change its source, window or "
+                                             "delivery_policy when it ends (its window belongs to the source it started on)")
             if "profile_overrides" in data and kind == Kind.SUBSCRIPTION.value and confirm_version is not None:
                 raise RequestError(HTTP_400, "change the processor's Agent Profile in a request of its own: what the "
                                              "operator confirms is the profile that runs")

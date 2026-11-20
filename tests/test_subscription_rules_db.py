@@ -128,6 +128,7 @@ def test_a_subscription_without_rules_reads_exactly_as_before(monkeypatch, tmp_p
         await fire(env, sid)
         assert fake.calls[0]["input_text"].splitlines()[1].split("]", 1)[1].startswith("《Ops room》 ")  # lines_v1: no tag
         assert poster.sent[0]["text"].startswith("🍉 吃瓜速报 · 过去1小时\n\n")
+        assert await env.pool.fetchval("SELECT count(*) FROM subscription_daily_claims WHERE schedule_id = $1", sid) == 0
 
     scenario(check, monkeypatch, tmp_path)
 

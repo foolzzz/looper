@@ -99,7 +99,8 @@ def test_counts_add_up_by_rule_name_and_fill_the_headers_placeholders():
     assert rules.format_header("🍉 plain", found, 4) == "🍉 plain"
 
 
-@pytest.mark.parametrize("header", ["{count:x}{count}", "no braces", "{count:直接} {count:告警}"])
+@pytest.mark.parametrize("header", ["{count:x}{count}", "no braces", "{count:直接} {count:告警}",
+                                   "{date}", "{date} · {count} · {count:评审}"])
 def test_a_headers_counts_are_accepted(header):
     assert rules.check_header(header) == header
 
