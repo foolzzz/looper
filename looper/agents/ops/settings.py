@@ -173,8 +173,7 @@ def _shown_value(name: str, value: Any, profiles: Mapping[str, str]) -> str:
 
 _SCHEDULER_WORDS = {"min_interval_seconds": "定时任务的最小间隔", "run_timeout_seconds": "定时任务的默认运行超时",
                     "run_retention_days": "定时任务的运行记录保留天数",
-                    "session_context_max_tokens": "Planner 会话上下文上限",
-                    "session_history_runs": "新 Planner 会话的最近运行数"}
+                    "session_context_max_tokens": "Planner 会话上下文上限"}
 _WAIT_WORDS = {"max_wait_seconds": "单步最长等待时间", "min_check_seconds": "等待检查的最小间隔"}
 _SOURCE_WORDS = {"setting": "设置", "env": "旧环境变量", "built-in": "内置默认"}
 
@@ -208,8 +207,7 @@ async def _scheduler_confirming(call: Call) -> str:
     lines = ["要修改定时任务的系统设置吗？"]
     for name, value in values.items():
         days = name == "run_retention_days"
-        unit = ("tokens" if name == "session_context_max_tokens" else
-                "次" if name == "session_history_runs" else "天" if days else "秒")
+        unit = "tokens" if name == "session_context_max_tokens" else "天" if days else "秒"
         session_unit = unit if name in scheduler_settings.SESSION_SETTING_LIMITS else None
         built_in = (f"{before[name]['built_in']} {unit}" if session_unit or days else
                     _seconds(before[name]['built_in']))
@@ -225,9 +223,9 @@ async def _scheduler_set(call: Call) -> dict[str, Any]:
     before = await scheduler_settings.settings_view()
     after = await answered(schedules.update_scheduler_settings(values))
     return {"changes": [{"setting": name, "before": _scheduler_shown(before[name], days=name == "run_retention_days",
-                            unit={"session_context_max_tokens": "tokens", "session_history_runs": "次"}.get(name)),
+                            unit={"session_context_max_tokens": "tokens"}.get(name)),
                          "after": _scheduler_shown(after[name], days=name == "run_retention_days",
-                            unit={"session_context_max_tokens": "tokens", "session_history_runs": "次"}.get(name))}
+                            unit={"session_context_max_tokens": "tokens"}.get(name))}
                         for name in values]}
 
 
@@ -522,9 +520,9 @@ async def _view(call: Call) -> dict[str, Any]:
         timeouts = {c["role"]: c["timeout_seconds"] for c in await db_roles.list_configs()}
         scheduler = await scheduler_settings.settings_view()
         vault_view = await vault.settings_view()
-        answer = {"scheduler": {name: _scheduler_shown(entry, days=name == "run_retention_days")
-                                for name, entry in scheduler.items()
-                                if name not in scheduler_settings.SESSION_SETTING_LIMITS},
+        answer = {"scheduler": {name: _scheduler_shown(entry, days=name == "run_retention_days",
+                                    unit={"session_context_max_tokens": "tokens"}.get(name))
+                                for name, entry in scheduler.items()},
                 "waits": await waits.settings_view(),
                 "llmrec": await llmrec_settings.settings_view(),
                 "gateway": _gateway_view(await gateway.settings(call.platform.runtime_root)),

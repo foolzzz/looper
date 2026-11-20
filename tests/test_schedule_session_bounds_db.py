@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 
 @pytest.mark.parametrize("name,default,own", [
-    ("session_context_max_tokens", 100_000, 5000), ("session_history_runs", 3, 2),
+    ("session_context_max_tokens", 100_000, 40_000),
 ])
 def test_session_bound_settings_validate_and_reset(monkeypatch, tmp_path, name, default, own):
     async def test(env):
@@ -22,7 +22,7 @@ def test_session_bound_settings_validate_and_reset(monkeypatch, tmp_path, name, 
         assert view[name]["value"] == default
         saved = await env.ok("POST", "/api/v1/scheduler_settings/update", {name: own})
         assert saved[name]["value"] == own and saved[name]["source"] == "setting"
-        for bad in (0, -1, True, 1.5, "5000", scheduler_settings.SESSION_SETTING_LIMITS[name] + 1):
+        for bad in (0, -1, 39_999, True, 1.5, "5000", scheduler_settings.SESSION_SETTING_LIMITS[name] + 1):
             status, _ = await env.call("POST", "/api/v1/scheduler_settings/update", {name: bad})
             assert status == 400
         assert (await env.ok("POST", "/api/v1/scheduler_settings/get", {}))[name]["value"] == own
@@ -62,7 +62,7 @@ def test_session_metrics_follow_holder_and_reset_and_runs_keep_audit(monkeypatch
     run_scheduled(test, monkeypatch, tmp_path)
 
 
-def test_claim_carries_last_run_measurements_and_bounded_recent_results(monkeypatch, tmp_path):
+def test_claim_carries_last_run_measurements_without_duplicate_history_or_budget(monkeypatch, tmp_path):
     async def test(env):
         sid = (await env.schedule(run_budget_usd=2))["schedule_id"]
         for index in range(5):
@@ -74,8 +74,8 @@ def test_claim_carries_last_run_measurements_and_bounded_recent_results(monkeypa
         await tasks.create_task(task_id="next", requirement="Read", project_id=env.project_id, work_dir=env.work_dir)
         await env.pool.execute("UPDATE tasks SET schedule_id=$1 WHERE id='next'", sid)
         claim = await schedules.claim_planner_session("next")
-        assert (claim["context_tokens"], claim["run_cost_usd"], claim["run_budget_usd"]) == (120_000, 1.1, 2)
-        assert [r["summary"] for r in claim["recent_runs"]] == ["report 4", "report 3", "report 2"]
+        assert (claim["context_tokens"], claim["run_cost_usd"]) == (120_000, 1.1)
+        assert "recent_runs" not in claim and "run_budget_usd" not in claim
         assert claim["previous"]["summary"] == "report 4"
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -83,7 +83,7 @@ def test_claim_carries_last_run_measurements_and_bounded_recent_results(monkeypa
 def test_budget_failure_alert_uses_typed_reason_and_effective_context_threshold(monkeypatch, tmp_path):
     async def test(env):
         sid = (await env.schedule(notify="alerts"))["schedule_id"]
-        await scheduler_settings.update({"session_context_max_tokens": 5000})
+        await scheduler_settings.update({"session_context_max_tokens": 40_000})
         for index in range(3):
             task_id = f"budget-{index}"
             await tasks.create_task(task_id=task_id, requirement="Read", project_id=env.project_id, work_dir=env.work_dir)
@@ -91,17 +91,33 @@ def test_budget_failure_alert_uses_typed_reason_and_effective_context_threshold(
                                    "error='Done: nothing' WHERE id=$2", sid, task_id)
             run_id = await schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock(), trigger="manual",
                                                 status="running", task_id=task_id)
-            await env.pool.execute("UPDATE schedule_runs SET planner_context_tokens=6000 WHERE id=$1", run_id)
+            await env.pool.execute("UPDATE schedule_runs SET planner_context_tokens=60_000 WHERE id=$1", run_id)
             await env.scheduler.task_ended(task_id, "failed")
         await env.scheduler.idle()
         notices = await schedules.list_notifications(sid, limit=20)
         alert = next(row for row in notices if row["kind"] == "failures_alert")
         assert "任务预算" in alert["text"]
-        assert "6000" in alert["text"] and "5000" in alert["text"]
+        assert "60000" in alert["text"] and "40000" in alert["text"]
         assert (await schedules.get_run(run_id))["failure_kind"] == "task_budget"
         plain = failures_alert_text({"id":sid, "project_id":env.project_id, "name":"report", "consecutive_failures":3}, "Example",
                                     {"status":"failed", "error":"task_budget appeared in a source document"})
         assert "任务预算" not in plain
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("status", ["completed", "cancelled"])
+def test_successful_or_cancelled_run_does_not_publish_a_stale_failure_kind(monkeypatch, tmp_path, status):
+    async def test(env):
+        sid = (await env.schedule())["schedule_id"]
+        await tasks.create_task(task_id="recovered", requirement="Read", project_id=env.project_id, work_dir=env.work_dir)
+        await env.pool.execute("UPDATE tasks SET schedule_id=$1, status=$2, fail_kind='task_budget' WHERE id='recovered'",
+                               sid, status)
+        run_id = await schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock(), trigger="manual",
+                                            status="running", task_id="recovered")
+        await env.scheduler.task_ended("recovered", status)
+        await env.scheduler.idle()
+        row = await schedules.get_run(run_id)
+        assert row["status"] == status and row["failure_kind"] is None
     run_scheduled(test, monkeypatch, tmp_path)
 
 
@@ -124,7 +140,7 @@ def test_measurements_use_all_task_planner_turns_and_rotation_records_first_cont
         assert row["planner_cost_usd"] == .5
         assert row["planner_context_tokens"] == 13_000 and row["planner_session_after_tokens"] == 12_000
         await env.pool.execute("INSERT INTO llm_records (agent_id,task_id) VALUES ('planner-measured','measured')")
-        await schedules.record_planner_session_run("measured", context_tokens=None, planner_cost_usd=None)
+        await schedules.record_planner_session_run("measured", context_tokens=None, planner_cost_usd=.3)
         row = await schedules.get_run(run_id)
         assert row["planner_cost_usd"] is None and row["planner_context_tokens"] == 13_000
     run_scheduled(test, monkeypatch, tmp_path)

@@ -300,19 +300,15 @@ async def claim_planner_session(task_id: str) -> dict[str, Any] | None:
         await conn.execute("UPDATE schedules SET planner_session_task_id = $2 WHERE id = $1", schedule_id, task_id)
         await conn.execute("UPDATE tasks SET planner_session_label = $2 WHERE id = $1", task_id,
                            planner_storage_label(schedule_id))
-        from ..agents import scheduler_settings
-        history = await conn.fetch(
+        previous = await conn.fetchrow(
             "SELECT status, summary, error FROM schedule_runs WHERE schedule_id = $1 AND finished_at IS NOT NULL "
-            "AND task_id IS DISTINCT FROM $2 ORDER BY finished_at DESC, id DESC LIMIT $3", schedule_id, task_id,
-            await scheduler_settings.session_history_runs(conn),
+            "AND task_id IS DISTINCT FROM $2 ORDER BY finished_at DESC, id DESC LIMIT 1", schedule_id, task_id,
         )
-        previous = history[0] if history else None
         return {"claimed": True, "session_id": row["planner_session_id"], "session_totals": totals,
                 "runtime_type": row["planner_session_runtime"], "provider_id": row["planner_session_provider"],
                 "profile_id": row["planner_session_profile"], "previous": dict(previous) if previous else None,
-                "recent_runs": [dict(run) for run in history],
                 "context_tokens": row["planner_session_context_tokens"],
-                "run_cost_usd": row["planner_session_run_cost_usd"], "run_budget_usd": row["run_budget_usd"]}
+                "run_cost_usd": row["planner_session_run_cost_usd"]}
 
 
 async def save_planner_session(task_id: str, session_id: str | None, totals: Mapping[str, Any], *,

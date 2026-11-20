@@ -72,7 +72,7 @@ def _vault(tmp_path):
 
 @pytest.mark.parametrize("family,fields", [
     ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds", "run_retention_days",
-                            "session_context_max_tokens", "session_history_runs"}),
+                            "session_context_max_tokens"}),
     ("wait_settings", {"max_wait_seconds", "min_check_seconds"}),
     ("knowledge_vault", {"configured", "path", "writable", "rules_file", "git", "problem"}),
 ])
@@ -95,6 +95,7 @@ NUMERIC_RULES = [
     ("scheduler_settings", "min_interval_seconds", 1, None),
     ("scheduler_settings", "run_timeout_seconds", 1, scheduler.RUN_TIMEOUT_MAX_SECONDS),
     ("scheduler_settings", "run_retention_days", 1, scheduler.RUN_RETENTION_MAX_DAYS),
+    ("scheduler_settings", "session_context_max_tokens", 40_000, 100_000_000),
     ("wait_settings", "max_wait_seconds", *waits.MAX_WAIT_RANGE),
     ("wait_settings", "min_check_seconds", *waits.MIN_CHECK_RANGE),
 ]
@@ -162,6 +163,7 @@ def test_client_confirmation_is_isolated_and_abandoned_changes_do_not_persist(tm
 @pytest.mark.parametrize("family,data", [
     ("scheduler_settings", {}), ("wait_settings", {}),
     ("scheduler_settings", {"unknown": 1}), ("wait_settings", {"unknown": 1}),
+    ("scheduler_settings", {"session_history_runs": 3}),
     ("wait_settings", {"max_wait_seconds": 60, "min_check_seconds": 61}),
     ("knowledge_vault", {}), ("knowledge_vault", {"path": None, "git": True}),
 ])

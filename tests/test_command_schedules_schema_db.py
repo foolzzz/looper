@@ -33,7 +33,18 @@ _RUN_COLUMNS = """    started_at TIMESTAMPTZ,
     log_truncated BOOLEAN NOT NULL DEFAULT false,
     log_tail TEXT,
     runner_pid INTEGER,
-    runner_started TEXT
+    runner_started TEXT,
+"""
+_SESSION_COLUMNS = """    planner_session_context_tokens BIGINT CHECK (planner_session_context_tokens >= 0),
+    planner_session_run_cost_usd DOUBLE PRECISION CHECK (planner_session_run_cost_usd >= 0),
+"""
+_SESSION_RUN_COLUMNS = """    planner_context_tokens BIGINT CHECK (planner_context_tokens >= 0),
+    planner_cost_usd DOUBLE PRECISION CHECK (planner_cost_usd >= 0),
+    planner_session_action TEXT CHECK (planner_session_action IN ('compacted', 'rotated')),
+    planner_session_reason TEXT CHECK (planner_session_reason IN ('context', 'cost')),
+    planner_session_before_tokens BIGINT CHECK (planner_session_before_tokens >= 0),
+    planner_session_after_tokens BIGINT CHECK (planner_session_after_tokens >= 0),
+    failure_kind TEXT CHECK (failure_kind IN ('task_budget'))
 """
 _KIND_CHECK = """    CONSTRAINT schedules_kind_fields_check CHECK (
         (kind = 'command') = (command IS NOT NULL)
@@ -48,6 +59,7 @@ async def existing_baseline(conn):
     pieces = ["    notify_format TEXT NOT NULL DEFAULT 'report' CHECK (notify_format IN ('report', 'deliverable')),\n",
               "    CONSTRAINT schedules_command_notify_format_check CHECK (kind <> 'command' OR notify_format = 'report'),\n",
               *_SCHEDULE_COLUMNS.splitlines(keepends=True), *_RUN_COLUMNS.splitlines(keepends=True),
+              *_SESSION_COLUMNS.splitlines(keepends=True), *_SESSION_RUN_COLUMNS.splitlines(keepends=True),
               "    deferred_by_drain BOOLEAN NOT NULL DEFAULT false,\n",
               _KIND_CHECK, "                      'succeeded', 'interrupted')),\n",
               "                                              'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered')),\n",
@@ -90,9 +102,11 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
             assert await structure(old) == shape
             await connection.ensure_schema(old)
             expected = {line.strip().split()[0]: None for line in _SCHEDULE_COLUMNS.splitlines()}
+            expected.update({line.strip().split()[0]: None for line in _SESSION_COLUMNS.splitlines()})
             expected.update(kind="agent", env="{}", consecutive_overlaps=0, notify_format="report")
             assert dict(await old.fetchrow("SELECT * FROM schedules")) == {**before["schedules"][0], **expected}
             run_defaults = {line.strip().split()[0]: None for line in _RUN_COLUMNS.splitlines()}
+            run_defaults.update({line.strip().split()[0]: None for line in _SESSION_RUN_COLUMNS.splitlines()})
             run_defaults["log_truncated"] = False
             run_defaults["deferred_by_drain"] = False
             assert dict(await old.fetchrow("SELECT * FROM schedule_runs")) == {**before["schedule_runs"][0], **run_defaults}

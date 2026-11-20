@@ -1004,8 +1004,8 @@ class PlannerAgent:
         self._schedule_session_id: str | None = None
         self._schedule_previous: Mapping[str, Any] | None = None
         self._schedule_bound: SessionBound | None = None
-        self._schedule_recent: list[Mapping[str, Any]] = []
-        self._schedule_rotated = False
+        self._schedule_max_tokens = scheduler_settings.SESSION_CONTEXT_MAX_TOKENS
+        self._schedule_run_cost: float | None = None
         self._schedule_compacted_tokens: int | None = None
         self._schedule_session_writes = False
         # Where this task's session files live. The schedule directory is used only for the stored
@@ -4690,9 +4690,17 @@ class PlannerAgent:
                 await self._activity("phase", ("Schedule Planner session replaced: the stored session cannot be "
                                               f"resumed ({switch.describe()}); this run starts fresh")[:500])
             await self._switch_session(plan, switch, settings.timeout_seconds)
-        if self._schedule_bound and plan.session_id and Capability.HEADLESS_COMPACTION not in launch.runtime.capabilities:
-            await self._rotate_schedule_session(plan)
-            message = self._plan_message(plan, await self._template_lines(plan))
+        if self._schedule_bound and plan.session_id:
+            context = self._schedule_bound.before_tokens
+            price = launch.price
+            estimated_cost = price(launch.model, Usage(input_tokens=context)) if price and context is not None else None
+            budget = self._execution.task_budget_usd
+            if (Capability.HEADLESS_COMPACTION not in launch.runtime.capabilities
+                    or context is None or self._schedule_run_cost is None
+                    or context > self._schedule_max_tokens * 3
+                    or (budget is not None and (estimated_cost is None or estimated_cost > budget / 2))):
+                await self._rotate_schedule_session(plan)
+                message = self._plan_message(plan, await self._template_lines(plan))
         label = self._directory_label(plan)
         if label == self.agent_id and not plan.session_id:
             # This fresh session is the task's, not the schedule's: the run gave the session up, it is
@@ -5297,10 +5305,6 @@ class PlannerAgent:
         # still writes). Parallel runs and runs that did not claim leave the message as it was.
         continuing = bool(self._schedule_session_id) and self._schedule_session_id == plan.session_id
         parts = [continuing_run_preface(self._task_id, self._schedule_previous)] if continuing else []
-        if self._schedule_rotated and self._schedule_recent:
-            parts.append("Recent scheduled run results (oldest first):\n" + "\n".join(
-                f"- {row['status']}: {str(row.get('summary') or row.get('error') or '')[:300]}"
-                for row in reversed(self._schedule_recent)))
         if self._schedule_session_writes or continuing:
             parts.append(f"{SCHEDULE_RUN_REQUIREMENT_HEADING}\n{clip_task_requirement(plan.requirement)}")
         parts.append("\n".join([
@@ -6134,8 +6138,6 @@ class PlannerAgent:
         """Only a new non-parallel schedule plan borrows the stored conversation."""
         self._schedule_session_id, self._schedule_previous = None, None
         self._schedule_bound = None
-        self._schedule_recent = []
-        self._schedule_rotated = False
         self._schedule_session_writes = False
         self._schedule_directory_adopted = False
         if not self._scheduled:
@@ -6164,14 +6166,12 @@ class PlannerAgent:
             plan.session_runtime, plan.session_provider = claimed["runtime_type"], claimed["provider_id"]
             plan.session_profile = claimed["profile_id"]
             self._schedule_previous = claimed["previous"]
-            self._schedule_recent = claimed.get("recent_runs", [])
             if plan.session_id:
-                budget = claimed.get("run_budget_usd")
-                if budget is None:
-                    budget = self._execution.task_budget_usd
+                self._schedule_max_tokens = await scheduler_settings.session_context_max_tokens()
+                self._schedule_run_cost = claimed.get("run_cost_usd")
                 self._schedule_bound = session_bound(
-                    claimed.get("context_tokens"), claimed.get("run_cost_usd"), budget,
-                    await scheduler_settings.session_context_max_tokens())
+                    claimed.get("context_tokens"), self._schedule_run_cost, self._execution.task_budget_usd,
+                    self._schedule_max_tokens)
         except Exception as exc:
             logger.exception("failed to claim the schedule session of %s", self.agent_id)
             await self._activity("phase", f"Schedule Planner session not claimed: {exc}; this run starts fresh"[:500])
@@ -6192,7 +6192,6 @@ class PlannerAgent:
         plan.session_id = self._schedule_session_id = None
         plan.session_totals = Usage()
         self._schedule_bound = None
-        self._schedule_rotated = True
         await self._save_session(plan)
         await self._record_schedule_bound(bound, "rotated", None)
 

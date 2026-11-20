@@ -11,29 +11,42 @@ from looper.agents.runtimes import CLAUDE_CODE, Capability
 from looper.db import schedules, tasks
 
 
-@pytest.mark.parametrize("context,cost,budget,compact,outcome", [
-    (100_001, 0.1, 1, "success", "compacted"),
-    (100_001, 0.1, 1, "unsupported", "rotated"),
-    (100_001, 0.1, 1, "error", "rotated"),
-    (100_001, 0.1, 1, "no_boundary", "rotated"),
-    (100_000, 0.5, 1, "success", None),
-    (50_000, 0.5001, 1, "success", "compacted"),
-    (50_000, 1, None, "success", None),
+@pytest.mark.parametrize("context,cost,budget,compact,outcome,rate", [
+    (100_001, 0.1, 1, "success", "compacted", .1),
+    (100_001, 0.1, 1, "unsupported", "rotated", .1),
+    (100_001, 0.1, 1, "error", "rotated", .1),
+    (100_001, 0.1, 1, "no_boundary", "rotated", .1),
+    (100_000, 0.5, 1, "success", None, .1),
+    (50_000, 0.5001, 1, "success", "compacted", .1),
+    (50_000, 1, None, "success", None, .1),
+    (None, None, 1, "success", "rotated", .1),
+    (369_000, 0.1, 1, "success", "rotated", .1),
+    (300_000, 0.1, 1, "success", "compacted", .1),
+    (100_001, 0.1, 1, "success", "rotated", 10),
+    (50_000, 0.6, 1, "success", "compacted", 10),
+    (49_999, 0.9, 1, "unsupported", None, .1),
+    (50_000, None, 1, "success", "rotated", .1),
+    (100_001, 0.1, 1, "success", "rotated", None),
+    (49_999, None, 1, "unsupported", None, .1),
 ])
 def test_next_run_bounds_only_an_expensive_stored_session(
-    monkeypatch, agent_db, planner_claude, context, cost, budget, compact, outcome,
+    monkeypatch, agent_db, planner_claude, context, cost, budget, compact, outcome, rate,
 ):
     from looper.agents import scheduler_settings
+    from looper.agents.agent_settings import Launch
+    from looper.agents.runtimes.pricing import ModelPrice, PriceSnapshot
     from tests.test_planner_agent import WORK_OK, _project, always, decide, drive, plan, step
 
-    agent_db.get_task_project.return_value = {**_project(), "task_schedule_id": "sched-a"}
+    agent_db.get_task_project.return_value = {**_project(), "task_schedule_id": "sched-a",
+                                            "task_budget_usd": budget}
     claim = AsyncMock(return_value={
         "claimed": True, "session_id": "sess-p", "session_totals": {},
         "runtime_type": "claude-code", "profile_id": None,
         "provider_id": "prov-claude-subscription", "previous": None,
-        "context_tokens": context, "run_cost_usd": cost, "run_budget_usd": budget,
-        "recent_runs": [{"status": "completed", "summary": "Previous report marker"}],
+        "context_tokens": context, "run_cost_usd": cost,
     })
+    monkeypatch.setattr(Launch, "price", property(lambda launch: None if rate is None else PriceSnapshot(
+        {launch.model: ModelPrice(rate, rate, rate, rate)}, {}, {}, {})))
     monkeypatch.setattr(schedules, "claim_planner_session", claim)
     monkeypatch.setattr(tasks, "set_continues_schedule_session", AsyncMock())
     monkeypatch.setattr(schedules, "save_planner_session", AsyncMock())
@@ -78,13 +91,15 @@ def test_next_run_bounds_only_an_expensive_stored_session(
         assert bounded.await_count == 1
         facts = bounded.await_args.kwargs
         assert facts["action"] == outcome
-        assert facts["reason"] == ("context" if context > 100_000 else "cost")
+        assert facts["reason"] == ("context" if context is None or context > 100_000 else "cost")
         assert facts["before_tokens"] == context
         assert facts["after_tokens"] == (4000 if outcome == "compacted" else None)
-        assert bool(compactions) is (compact != "unsupported")
+        direct = (context is None or context > 300_000 or cost is None or rate is None
+                  or context * rate / 1e6 > (budget or float("inf")) / 2)
+        assert bool(compactions) is (compact != "unsupported" and not direct)
         if outcome == "rotated":
             assert "--resume" not in claude.argvs()[-1]
-            assert "Previous report marker" in claude.turns()[0]["text"]
+            assert "Recent scheduled run results" not in claude.turns()[0]["text"]
     else:
         bounded.assert_not_awaited()
         assert not compactions
@@ -102,9 +117,6 @@ def test_replanning_does_not_reuse_a_previous_rotation_decision(monkeypatch, age
     agent = PlannerAgent(task_id="replanned", runtime_root=tmp_path)
     agent._scheduled = True
     agent._schedule_bound = SessionBound(BoundReason.CONTEXT, 120_000)
-    agent._schedule_rotated = True
-    agent._schedule_recent = [{"status": "completed", "summary": "Old rotation result"}]
     plan = TaskPlan("plan", "goal", "Read", str(tmp_path))
     asyncio.run(agent._claim_schedule_session(plan))
     assert agent._schedule_bound is None
-    assert "Old rotation result" not in agent._plan_message(plan)

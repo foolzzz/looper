@@ -1259,7 +1259,8 @@ class Scheduler:
         error = task.get("error") if outcome == "failed" else None
         async with db_connection.transaction() as conn:
             finished = await db_schedules.finish_run(conn, run["id"], status=outcome, at=now, summary=summary,
-                                                     cost_usd=float(cost), error=error, failure_kind=task.get("fail_kind"))
+                                                     cost_usd=float(cost), error=error,
+                                                     failure_kind=task.get("fail_kind") if outcome == "failed" else None)
         if finished:
             logger.info("schedule %s: run %s %s (task %s)", run["schedule_id"], run["id"], outcome, run["task_id"])
             self._spawn(self._notifier.run_ended(run["id"]))

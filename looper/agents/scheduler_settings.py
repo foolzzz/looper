@@ -23,10 +23,9 @@ MIN_INTERVAL_KEY = "scheduler.min_interval_seconds"
 RUN_TIMEOUT_KEY = "scheduler.run_timeout_seconds"
 RUN_RETENTION_KEY = "scheduler.run_retention_days"
 SESSION_CONTEXT_KEY = "scheduler.session_context_max_tokens"
-SESSION_HISTORY_KEY = "scheduler.session_history_runs"
 SESSION_CONTEXT_MAX_TOKENS = 100_000
-SESSION_HISTORY_RUNS = 3
-SESSION_SETTING_LIMITS = {"session_context_max_tokens": 100_000_000, "session_history_runs": 100}
+SESSION_CONTEXT_MIN_TOKENS = 40_000
+SESSION_SETTING_LIMITS = {"session_context_max_tokens": 100_000_000}
 DEFAULT_RUN_RETENTION_DAYS = 30
 RUN_RETENTION_MAX_DAYS = 3650
 DEFAULT_MIN_INTERVAL_SECONDS = 300
@@ -34,8 +33,7 @@ DEFAULT_MIN_INTERVAL_SECONDS = 300
 MIN_INTERVAL_GATED_SECONDS = 60
 DEFAULT_RUN_TIMEOUT_SECONDS: int | None = None  # no limit, as a schedule without a timeout always had
 RUN_TIMEOUT_MAX_SECONDS = 30 * 86400
-FIELDS = ("min_interval_seconds", "run_timeout_seconds", "run_retention_days",
-          "session_context_max_tokens", "session_history_runs")
+FIELDS = ("min_interval_seconds", "run_timeout_seconds", "run_retention_days", "session_context_max_tokens")
 
 _min_interval = DEFAULT_MIN_INTERVAL_SECONDS
 _min_source: str | None = None  # "setting"; None: the built-in
@@ -126,8 +124,8 @@ async def run_retention_days(conn: Any = None) -> int:
 
 def _session_setting(raw: Any, name: str) -> int:
     high = SESSION_SETTING_LIMITS[name]
-    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= high:
-        raise ValueError(f"{name} must be a whole number from 1 to {high}")
+    if isinstance(raw, bool) or not isinstance(raw, int) or not SESSION_CONTEXT_MIN_TOKENS <= raw <= high:
+        raise ValueError(f"{name} must be a whole number from {SESSION_CONTEXT_MIN_TOKENS} to {high}")
     return raw
 
 
@@ -148,11 +146,6 @@ async def session_context_max_tokens(conn: Any = None) -> int:
     return SESSION_CONTEXT_MAX_TOKENS if stored is None else stored
 
 
-async def session_history_runs(conn: Any = None) -> int:
-    stored = await _stored_session_setting("session_history_runs", conn)
-    return SESSION_HISTORY_RUNS if stored is None else stored
-
-
 async def effective_run_timeout(mode: str, seconds: int | None, conn: Any = None) -> int | None:
     """A schedule's timeout for a run that starts now (None: no limit); ``conn`` as ``default_run_timeout``."""
     if mode == RunTimeoutMode.INHERIT.value:
@@ -165,12 +158,12 @@ async def settings_view() -> dict[str, Any]:
     run_timeout = await _stored_run_timeout()
     retention = await _stored_run_retention()
     session = {}
-    for name, default in (("session_context_max_tokens", SESSION_CONTEXT_MAX_TOKENS),
-                          ("session_history_runs", SESSION_HISTORY_RUNS)):
+    for name, default in (("session_context_max_tokens", SESSION_CONTEXT_MAX_TOKENS),):
         stored = await _stored_session_setting(name)
         session[name] = {"value": default if stored is None else stored,
                          "source": Source.DEFAULT.value if stored is None else Source.SETTING.value,
-                         "built_in": default, "minimum": 1, "maximum": SESSION_SETTING_LIMITS[name]}
+                         "built_in": default, "minimum": SESSION_CONTEXT_MIN_TOKENS,
+                         "maximum": SESSION_SETTING_LIMITS[name]}
     return {
         **session,
         "min_interval_seconds": {
@@ -207,8 +200,7 @@ def checked(body: Mapping[str, Any]) -> dict[str, int | None]:
 
 
 _KEYS = {"min_interval_seconds": MIN_INTERVAL_KEY, "run_timeout_seconds": RUN_TIMEOUT_KEY,
-         "run_retention_days": RUN_RETENTION_KEY, "session_context_max_tokens": SESSION_CONTEXT_KEY,
-         "session_history_runs": SESSION_HISTORY_KEY}
+         "run_retention_days": RUN_RETENTION_KEY, "session_context_max_tokens": SESSION_CONTEXT_KEY}
 
 
 async def store(name: str, value: int, *, conn: Any) -> None:

@@ -243,7 +243,8 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
         from looper.agents import config_transfer
 
         await env.ok("POST", "/api/v1/scheduler_settings/update", {
-            "min_interval_seconds": 60, "run_timeout_seconds": 600, "run_retention_days": 7})
+            "min_interval_seconds": 60, "run_timeout_seconds": 600, "run_retention_days": 7,
+            "session_context_max_tokens": 40_000})
         ids = {name: (await env.schedule(name=name, **fields))["schedule_id"] for name, fields in (
             ("follows", {}), ("numbered", {"run_timeout_seconds": 90}), ("unlimited", {"run_timeout_seconds": None}))}
         path = tmp_path / "config.json"
@@ -253,32 +254,38 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
                     conn, include_projects=True, include_secrets=False)]), encoding="utf-8")
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["settings"]["scheduler"] == {
-            "min_interval_seconds": 60, "run_timeout_seconds": 600, "run_retention_days": 7}
+            "min_interval_seconds": 60, "run_timeout_seconds": 600, "run_retention_days": 7,
+            "session_context_max_tokens": 40_000}
         assert {s["name"]: s["run_timeout_seconds"] for s in data["projects"][0]["schedules"]} == {
             "follows": "default", "numbered": 90, "unlimited": None}
 
         # Changed here, the file puts both back; a setting left at the built-in is not carried.
         await env.ok("POST", "/api/v1/scheduler_settings/update", {
-            "min_interval_seconds": 200, "run_timeout_seconds": None, "run_retention_days": None})
+            "min_interval_seconds": 200, "run_timeout_seconds": None, "run_retention_days": None,
+            "session_context_max_tokens": None})
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": ids['follows'], "fields": {"run_timeout_seconds": 5}})
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": ids['numbered'], "fields": {"run_timeout_seconds": "default"}})
         async with env.pool.acquire() as conn:
             plan = await config_transfer.run_import(conn, config_transfer.read_file(path), apply=False)
         scheduler = {c.key: c.action.value for c in plan.changes if c.section == "settings.scheduler"}
-        assert scheduler == {"min_interval_seconds": "changed", "run_timeout_seconds": "added", "run_retention_days": "added"}
+        assert scheduler == {"min_interval_seconds": "changed", "run_timeout_seconds": "added", "run_retention_days": "added",
+                             "session_context_max_tokens": "added"}
         async with env.pool.acquire() as conn:
             await config_transfer.run_import(conn, config_transfer.read_file(path), apply=True)
         view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
         assert (view["min_interval_seconds"]["value"], view["run_timeout_seconds"]["value"]) == (200, 600)
         assert view["run_retention_days"]["value"] == 7
+        assert view["session_context_max_tokens"]["value"] == 40_000
         got = {s["name"]: s["run_timeout_seconds"] for s in (await env.ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"]}
         assert got == {"follows": "default", "numbered": 90, "unlimited": None}
 
-        data["settings"]["scheduler"] = {"min_interval_seconds": 0, "run_timeout_seconds": None, "other": 1}
+        data["settings"]["scheduler"] = {"min_interval_seconds": 0, "run_timeout_seconds": None, "other": 1,
+                                          "session_context_max_tokens": 39_999, "session_history_runs": 3}
         async with env.pool.acquire() as conn:
             plan = await config_transfer.run_import(conn, data, apply=False)
         skipped = {c.key: c.reason for c in plan.changes if c.section == "settings.scheduler"}
-        assert set(skipped) == {"min_interval_seconds", "run_timeout_seconds", "other"}
+        assert set(skipped) == {"min_interval_seconds", "run_timeout_seconds", "other", "session_context_max_tokens",
+                                "session_history_runs"}
         assert all(c.action.value == "skipped" for c in plan.changes if c.section == "settings.scheduler")
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -296,7 +303,8 @@ def test_the_manager_changes_the_scheduler_settings_after_the_user_confirms(
         (view,) = await chat.say("定时任务的设置", ("looper_settings", {"action": "view"}))
         assert view["result"]["scheduler"] == {"min_interval_seconds": "300 秒（内置默认）",
                                                "run_timeout_seconds": "不限（内置默认）",
-                                               "run_retention_days": "30 天（内置默认）"}
+                                               "run_retention_days": "30 天（内置默认）",
+                                               "session_context_max_tokens": "100000 tokens（内置默认）"}
         (bad,) = await chat.say("改成 0", ("looper_settings", {"action": "scheduler",
                                                                "scheduler": {"min_interval_seconds": 0}}))
         assert _error(bad) == "invalid" and "min_interval_seconds must be a whole number" in bad["error"]["message"]

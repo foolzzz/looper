@@ -135,6 +135,7 @@ _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _TASK_CHAT_GROUP = "task_chat_group"
 _PROCESSOR_ROLE = "processor_role"
+_HEADLESS_COMPACTION = "headless_compaction"
 _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _MESSAGE_STREAM_DELETIONS = "message_stream_deletions"
@@ -311,6 +312,8 @@ _ONLINE_STEPS = (
                           "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL"),)),
     _OnlineStep(_STEP_DIFFICULTY, "step_difficulty_online",
                 validate=(("task_steps", "task_steps_difficulty_check"),)),
+    _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
+                validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
 )
 
 
@@ -475,6 +478,14 @@ ALTER TABLE schedule_profile_overrides DROP CONSTRAINT schedule_profile_override
 """
 
 
+_HEADLESS_COMPACTION_DDL = """
+ALTER TABLE agent_runtimes DROP CONSTRAINT agent_runtimes_capabilities_check,
+    ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume',
+        'structured_output', 'claude_plugins', 'mcp', 'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
+        'read_tools', 'steer', 'no_tools', 'headless_compaction']) NOT VALID;
+"""
+
+
 # The advisor and its judge: their role layers. No row changes.
 _ADVISOR_ROLES_DDL = """
 ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check,
@@ -520,6 +531,15 @@ async def _processor_role_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_setting_layers') "
         "AND conname = 'agent_setting_layers_role_check' "
         "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'processor'")
+
+
+async def _headless_compaction_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _HEADLESS_COMPACTION):
+        return False
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_runtimes') "
+        "AND conname = 'agent_runtimes_capabilities_check' "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'headless_compaction'")
 
 
 _CURSOR_LOGIN_DDL = """
@@ -1164,6 +1184,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _processor_role_pending(conn):
             await conn.execute(_PROCESSOR_ROLE_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROCESSOR_ROLE)
+        if await _headless_compaction_pending(conn):
+            await conn.execute(_HEADLESS_COMPACTION_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _HEADLESS_COMPACTION)
         if await _advisor_roles_pending(conn):
             await conn.execute(_ADVISOR_ROLES_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _ADVISOR_ROLES)
@@ -1384,4 +1407,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
-            or await _processor_role_pending(conn)))
+            or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)))
