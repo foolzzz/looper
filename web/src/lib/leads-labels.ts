@@ -9,11 +9,12 @@ export const LEAD_KIND_ZH: Record<string, string> = {
 export const CONFIDENCE_ZH: Record<string, string> = { high: "高", medium: "中", low: "低" };
 
 export const LEAD_STATE_ZH: Record<string, string> = {
-  active: "有效", expired: "已过期", superseded: "已被推翻", promoted: "已提升", inaccurate: "不准确", all: "全部",
+  active: "有效", expired: "已过期", superseded: "已被推翻", promoted: "已提升", inaccurate: "不准确",
+  dropped: "已被复核丢弃", all: "全部",
 };
 
 export const INTENT_STATE_ZH: Record<string, string> = {
-  pending: "待处理", tasked: "已建任务", rejected: "已驳回", expired: "已过期", merged: "已合并",
+  pending: "待处理", tasked: "已建任务", rejected: "已驳回", expired: "已过期", merged: "已合并", dropped: "已被复核丢弃",
 };
 
 export const PRIORITY_ZH: Record<string, string> = { urgent: "紧急", normal: "普通", quiet: "不推送" };

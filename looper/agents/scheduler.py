@@ -453,7 +453,7 @@ class Scheduler:
 
         # What subscriptions push through (``poster``: the channels' ``post``) and which Lark apps are Looper's own.
         self._subscriptions = SubscriptionRuns(poster=poster, own_apps=own_apps or no_apps, runtime_root=runtime_root,
-                                               clock=clock, claude_bin=claude_bin)
+                                               clock=clock, claude_bin=claude_bin, day_start=self.day_start)
         self._catch_ups: dict[str, int] = {}  # an extraction's catch-up firings in a row, by schedule
 
     def drain_waiting(self) -> dict[str, int]:

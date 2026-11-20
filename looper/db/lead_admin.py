@@ -34,6 +34,8 @@ async def mark_inaccurate(lead_id: int, *, via: str, note: str | None, db: Db | 
         state = await conn.fetchval("SELECT state FROM message_leads WHERE id = $1 FOR UPDATE", lead_id)
         if state == "promoted":
             raise LeadConflictError("a promoted lead cannot be marked inaccurate")
+        if state == "dropped":
+            raise LeadConflictError("the check already dropped this lead: it is out of the default search")
         # Clear obsolete references atomically with the transition.
         return await conn.fetchval(
             "UPDATE message_leads SET state = 'inaccurate', marked_via = $2, marked_note = $3, "

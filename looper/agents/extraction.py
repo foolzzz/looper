@@ -13,7 +13,9 @@ rows of ``message_leads`` or ``intents`` (message-leads-intents RFC, sections 4 
    next run.
 3. **One tool-less processor run** (``processor.run`` with ``contract``): its reply is ``NONE`` or one JSON object.
 4. **Parse** (``parse``): typed fields, enums, lengths and refs; a bad item is dropped and counted by reason,
-   unknown fields are ignored, nothing in the reply is run or sent.
+   unknown fields are ignored, nothing in the reply is run or sent. With the subscription's ``check_items`` on, a
+   second model then checks each item against the messages it cites (``leads_check``): it keeps it, drops it (stored
+   as ``dropped``) or changes its confidence; a check that fails leaves every item unchecked.
 5. **Store** (``store_leads``, ``store_intents``): one transaction with the run's end and the cursor, which moves
    only to the last row read. A reply that is not ``NONE`` or such an object is ``output_invalid``: the run fails
    and the cursor stays.
@@ -26,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time as time_
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -463,19 +466,26 @@ async def _lead_links(conn: asyncpg.Connection, lead_id: int, sources: Sequence[
                            "ON CONFLICT DO NOTHING", [(lead_id, *person) for person in sorted(people)])
 
 
+def _check_columns(item: Mapping[str, Any]) -> tuple[str | None, str | None, int | None]:
+    """An item's check (``leads_check.apply``) as its columns: verdict, reason, record; all None when unchecked."""
+    check = item.get("check") or {}
+    return check.get("verdict"), check.get("reason"), check.get("record_id")
+
+
 async def store_leads(conn: asyncpg.Connection, parsed: Parsed, *, source_id: str, run_id: str | None,
                       record_id: int | None, backfill: bool, more: bool) -> dict[str, Any]:
     """Write the parsed leads in the caller's transaction: a new lead, or its sources added to the active lead it is
-    ``same_as`` (merged), and the active leads it ``supersedes`` marked so. Returns the counts ``extract_counts``
-    keeps."""
+    ``same_as`` (merged), and the active leads it ``supersedes`` marked so. A lead the check dropped is stored as
+    ``dropped``, merges into none and supersedes none. Returns the counts ``extract_counts`` keeps."""
     counts = {**_counts(parsed, more=more), "superseded": 0}
     events, revoked = await _lock_sources(conn, source_id, [seq for item in parsed.items for seq in item["sources"]])
     for item in parsed.items:
         sources = _live(item, events, revoked, counts)
         if sources is None:
             continue
+        verdict, reason, checked_by = _check_columns(item)
         first, last = min(events[seq]["sent_at"] for seq in sources), max(events[seq]["sent_at"] for seq in sources)
-        if item["same_as"] is not None and await conn.fetchval(
+        if verdict != "drop" and item["same_as"] is not None and await conn.fetchval(
                 "UPDATE message_leads SET valid_until = GREATEST(valid_until, $3), first_sent_at = LEAST(first_sent_at, $4), "
                 "last_sent_at = GREATEST(last_sent_at, $5), updated_at = now() "
                 "WHERE id = $1 AND source_id = $2 AND state = 'active' RETURNING id",
@@ -485,10 +495,14 @@ async def store_leads(conn: asyncpg.Connection, parsed: Parsed, *, source_id: st
             continue
         lead_id = await conn.fetchval(
             "INSERT INTO message_leads (source_id, kind, summary, detail, confidence, valid_until, first_sent_at, "
-            "last_sent_at, run_id, record_id, backfill) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+            "last_sent_at, run_id, record_id, backfill, state, check_verdict, check_reason, check_record_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) "
             "RETURNING id", source_id, item["kind"], item["summary"], item["detail"], item["confidence"],
-            item["valid_until"], first, last, run_id, record_id, backfill)
+            item["valid_until"], first, last, run_id, record_id, backfill, "dropped" if verdict == "drop" else "active",
+            verdict, reason, checked_by)
         await _lead_links(conn, lead_id, sources, events, item["about"])
+        if verdict == "drop":
+            continue
         counts["new"] += 1
         for target in item["supersedes"]:
             if await conn.fetchval("UPDATE message_leads SET state = 'superseded', superseded_by = $2, updated_at = now() "
@@ -502,7 +516,9 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
                         run_id: str | None, record_id: int | None, now: datetime, more: bool) -> dict[str, Any]:
     """Write the parsed intents in the caller's transaction: ``pending``, or ``merged`` into the intent it is
     ``same_as`` when that one is pending or tasked within ``SAME_MATTER_WITHIN`` or rejected within
-    ``REJECTED_WITHIN``. Each keeps only its own sources. Returns the counts ``extract_counts`` keeps."""
+    ``REJECTED_WITHIN`` (a ``dropped`` one never: nothing is merged into it). One the check dropped is stored as
+    ``dropped``, handled by the system at ``now`` and merged into none, so it is never pushed. Each keeps only its own
+    sources. Returns the counts ``extract_counts`` keeps."""
     counts = _counts(parsed, more=more)
     versions = {row["key"]: row["version"] for row in await conn.fetch("SELECT key, version FROM intent_types")}
     events, revoked = await _lock_sources(conn, source_id, [seq for item in parsed.items for seq in item["sources"]])
@@ -514,23 +530,28 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
         chat_id = events[min(sources, key=lambda seq: (events[seq]["sent_at"], seq))]["chat_id"]
         project_id = await conn.fetchval("SELECT project_id FROM message_chat_projects WHERE source_id = $1 AND chat_id = $2",
                                          source_id, chat_id)
+        verdict, reason, checked_by = _check_columns(item)
+        dropped = verdict == "drop"
         target = None
-        if item["same_as"] is not None:
+        if item["same_as"] is not None and not dropped:
             target = await conn.fetchval(
                 "SELECT id FROM intents WHERE id = $1 AND source_id = $2 AND ((state IN ('pending', 'tasked') "
                 "AND created_at >= $3) OR (state = 'rejected' AND created_at >= $4))",
                 item["same_as"], source_id, now - SAME_MATTER_WITHIN, now - REJECTED_WITHIN)
         intent_id = await conn.fetchval(
             "INSERT INTO intents (source_id, schedule_id, type_key, type_version, title, summary, confidence, state, "
-            "chat_id, project_id, merged_into, flagged, run_id, record_id) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id",
+            "chat_id, project_id, merged_into, flagged, run_id, record_id, handled_at, handled_via, check_verdict, "
+            "check_reason, check_record_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id",
             source_id, schedule_id, item["type"], versions[item["type"]], item["title"], item["summary"],
-            item["confidence"], "merged" if target else "pending", chat_id, project_id, target,
-            any(seq in seen for seq in sources), run_id, record_id)
+            item["confidence"], "dropped" if dropped else "merged" if target else "pending", chat_id, project_id,
+            target, any(seq in seen for seq in sources), run_id, record_id, now if dropped else None,
+            "system" if dropped else None, verdict, reason, checked_by)
         # Only its own sources: the messages its text came from (a merged one's are not the target's).
         await conn.executemany("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                                [(intent_id, seq) for seq in sources])
-        counts["merged" if target else "new"] += 1
+        if not dropped:
+            counts["merged" if target else "new"] += 1
     return counts
 
 
@@ -542,7 +563,13 @@ def count_line(kind: str, counts: Mapping[str, Any]) -> str:
     parts.append(f"丢弃 {dropped}")
     if counts.get("instructions_seen"):
         parts.append(f"夹带指令的消息 {counts['instructions_seen']}")
-    return "，".join(parts) + ("；还有消息没读完，接着读" if counts.get("more") else "")
+    line = "，".join(parts)
+    if "checked" in counts:  # the subscription's check is on (``leads_check.counts``)
+        line += (f"；复核 {counts['checked']} 条：保留 {counts['check_kept']}，复核丢弃 {counts['check_dropped']}，"
+                 f"改置信度 {counts['check_fixed']}")
+        if counts["check_failed"]:
+            line += "；复核没有完成，其余条目未经复核入库"
+    return line + ("；还有消息没读完，接着读" if counts.get("more") else "")
 
 
 # --- What a run reads besides its window ---
@@ -662,6 +689,9 @@ class Batch:
     more: bool
     context: int
     known: int
+    # The rows it was given (window and context) by seq, and who may appear in them: what the check renders from.
+    messages: Mapping[int, Mapping[str, Any]] = field(default_factory=dict)
+    participants: Participants | None = None
 
 
 async def batch(conn: Any, kind: str, sub: Mapping[str, Any], picked: Mapping[str, Any], *, zone_name: str,
@@ -684,7 +714,8 @@ async def batch(conn: Any, kind: str, sub: Mapping[str, Any], picked: Mapping[st
     seqs = {seq for ref, seq in refs.items() if ref[0] in "mc"}
     apps = frozenset(row["seq"] for row in (*rows, *context) if row["sender_kind"] == "app" and row["seq"] in seqs)
     return Batch(rows, text, refs, apps, last_seq, more, len(context),
-                 sum(1 for ref in refs if ref[0] in "LI"))
+                 sum(1 for ref in refs if ref[0] in "LI"),
+                 {row["seq"]: row for row in (*context, *rows) if row["seq"] in seqs}, people)
 
 
 # --- A run ---
@@ -724,14 +755,16 @@ async def plan(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, now: da
 # What a run reads is fixed as it is planned, with the confirmation it was planned under (``schedule_runs.
 # execution_snapshot``): ``execute`` reads the window with these and stores only while that confirmation holds.
 PINNED = ("source_id", "output_kind", "include_chats", "exclude_chats", "max_age_minutes", "max_events",
-          "text_max_chars")
+          "text_max_chars", "check_items")
 
 
 async def confirmation_problem(db: Any, schedule_id: str, snapshot: Mapping[str, Any] | None, *,
-                               profile: Mapping[str, Any] | None = None) -> str | None:
+                               profile: Mapping[str, Any] | None = None,
+                               checker: Mapping[str, Any] | None = None) -> str | None:
     """Why a run planned under ``snapshot`` may not read or store now, read afresh through ``db``: its kind's switch
     is off, the confirmation it was planned under was cleared or given again (another epoch), or the configuration
-    (and, with ``profile``, the Profile the processor launched with) is not the one confirmed. None: it may."""
+    (and, with ``profile`` and ``checker``, the Profiles the processor and the check launched with) is not the one
+    confirmed. None: it may."""
     from . import subscriptions
 
     if not snapshot:
@@ -751,9 +784,10 @@ async def confirmation_problem(db: Any, schedule_id: str, snapshot: Mapping[str,
         return "its confirmation was cleared or given again while it ran"
     if snapshot.get("config_epoch") is not None and sub["config_epoch"] != snapshot["config_epoch"]:
         return "the subscription was changed since the run started (even if changed back)"
-    if await subscriptions.config_version(schedule, profile=profile) != snapshot["config_version"]:
-        return ("the processor launched with a Profile other than the confirmed one" if profile is not None
-                else "its configuration changed since it was confirmed")
+    if await subscriptions.config_version(schedule, profile=profile, checker=checker) != snapshot["config_version"]:
+        return ("its configuration changed since it was confirmed" if profile is None and checker is None
+                else "the processor launched with a Profile other than the confirmed one" if checker is None
+                else "the processor or the check launched with a Profile other than the confirmed one")
     return None
 
 
@@ -781,10 +815,10 @@ class _Finished(Exception):
 
 async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: str, cost: float | None = None,
                   error: str | None = None, summary: str | None = None, advance_to: int | None = None,
-                  store: Any = None, held: Mapping[str, Any] | None = None) -> None:
+                  store: Any = None, held: Mapping[str, Any] | None = None, check_status: str | None = None) -> None:
     """End the run in one transaction: what ``store(conn)`` writes (it returns the counts), the run's status, outcome,
-    counts and count line, and, when ``advance_to`` is given, the cursor. An ``extracted`` run that stored nothing is
-    ``quiet``. With ``held`` (the run's snapshot and the Profile it launched with), the schedule's row is locked first
+    counts and count line, what its check did (``check_status``, kept only with what it stored) and, when
+    ``advance_to`` is given, the cursor. An ``extracted`` run that stored nothing is ``quiet``. With ``held`` (the run's snapshot and the Profile it launched with), the schedule's row is locked first
     (a change or a confirmation waits, or has committed) and the confirmation checked again: when it no longer holds
     nothing is stored, the run is ``cancelled`` and the cursor stays."""
     from .subscriptions import digest
@@ -799,7 +833,7 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
             if store is not None and held is not None:
                 await conn.execute("SELECT 1 FROM schedules WHERE id = $1 FOR NO KEY UPDATE", run["schedule_id"])
                 if problem := await confirmation_problem(conn, run["schedule_id"], held["snapshot"],
-                                                         profile=held.get("profile")):
+                                                         profile=held.get("profile"), checker=held.get("checker")):
                     store, advance_to, summary, status, outcome = None, None, None, "cancelled", "failed"
                     error = f"nothing was stored: {problem}; the next confirmed run reads its window again"
             counts = dict(await store(conn)) if store is not None else None
@@ -811,9 +845,9 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
                 raise _Finished
             await conn.execute(
                 "UPDATE subscription_runs SET outcome = $2, extract_counts = $3::jsonb, output_text = $4, "
-                "output_sha256 = $5 WHERE run_id = $1", run_id, outcome,
+                "output_sha256 = $5, check_status = $6 WHERE run_id = $1", run_id, outcome,
                 json.dumps(counts, sort_keys=True) if counts is not None else None, line,
-                digest(line) if line else None)
+                digest(line) if line else None, check_status if counts is not None else None)
             if advance_to is not None:
                 await db_subs.advance_cursor(conn, run["schedule_id"], from_seq=stream["from_seq"], to_seq=advance_to,
                                              at=now)
@@ -865,6 +899,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     reference = {"kind": f"{kind}_window", "schedule_id": schedule["id"], "run_id": run_id,
                  "from_seq": stream["from_seq"], "to_seq": found.last_seq, "events": len(found.rows),
                  "context": found.context, "known": found.known}
+    started = time_.monotonic()
     result = await processor.run(
         owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types), input_text=found.text,
         input_ref=reference, quiet_word=QUIET_WORD, budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout),
@@ -884,15 +919,59 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         await end(status="failed", outcome="output_invalid", cost=result.cost_usd,
                   error=f"the processor's reply could not be read: {parsed.reason}")
         return False
+    checked = None
+    if sub.get("check_items"):
+        checked = await _check(runs, kind, parsed, found, schedule, run_id=run_id, types=types,
+                               extracted_usd=result.cost_usd or 0.0, record_id=result.record_id, now=now,
+                               left_s=float(timeout) - (time_.monotonic() - started))
 
     async def store(conn: asyncpg.Connection) -> Mapping[str, Any]:
         if kind == "leads":
-            return await store_leads(conn, parsed, source_id=sub["source_id"], run_id=run_id,
-                                     record_id=result.record_id, backfill=False, more=found.more)
-        return await store_intents(conn, parsed, source_id=sub["source_id"], schedule_id=schedule["id"], run_id=run_id,
-                                   record_id=result.record_id, now=now, more=found.more)
+            counts = await store_leads(conn, parsed, source_id=sub["source_id"], run_id=run_id,
+                                       record_id=result.record_id, backfill=False, more=found.more)
+        else:
+            counts = await store_intents(conn, parsed, source_id=sub["source_id"], schedule_id=schedule["id"],
+                                         run_id=run_id, record_id=result.record_id, now=now, more=found.more)
+        return {**counts, **checked.counts} if checked is not None else counts
 
-    await end(status="completed", outcome="extracted", cost=result.cost_usd, advance_to=found.last_seq, store=store,
+    cost = result.cost_usd if checked is None else (result.cost_usd or 0.0) + checked.counts["check_cost_usd"]
+    # What the check did, typed: skipped (off, or nothing to check), checked or failed (fail-open: stored unchecked).
+    check_status = ("skipped" if checked is None or not (parsed.state == "items" and parsed.items)
+                    else "failed" if checked.counts["check_failed"] else "checked")
+    await end(status="completed", outcome="extracted", cost=cost, advance_to=found.last_seq, store=store,
               summary="没有可整理的（处理器回复了 NONE）" if parsed.state == "quiet" else None,
-              held={"snapshot": snapshot, "profile": result.profile})
+              held={"snapshot": snapshot, "profile": result.profile,
+                    "checker": checked.profile if checked is not None else None}, check_status=check_status)
     return found.more
+
+
+async def _check(runs: Any, kind: str, parsed: Parsed, found: Batch, schedule: Mapping[str, Any], *, run_id: str,
+                 types: Sequence[Mapping[str, Any]], extracted_usd: float, record_id: int | None, now: datetime,
+                 left_s: float) -> Any:
+    """The second model's check of what ``parsed`` found (``leads_check``), before anything is stored: its cap is
+    what is left of the run's after the extraction, and of the day's budget; its deadline what is left of the run's
+    and at most ``leads_check.CHECK_TIMEOUT_SEC``. Nothing found: nothing to check."""
+    from . import leads_check
+
+    if parsed.state != "items" or not parsed.items:
+        return leads_check.Outcome({**leads_check.counts(None, cost_usd=0.0), "check_failed": False})
+    cap = schedule["run_budget_usd"] - extracted_usd
+    if schedule.get("daily_budget_usd") is not None:
+        spent = await db_schedules.spent_since(db_connection.get_pool(), schedule["id"], runs.day_start(now))
+        cap = min(cap, schedule["daily_budget_usd"] - spent - extracted_usd)
+    reference = {"kind": f"{kind}_check", "schedule_id": schedule["id"], "run_id": run_id, "record_id": record_id}
+    try:
+        outcome = await leads_check.check(
+            kind, parsed.items, messages=found.messages, participants=found.participants or Participants({}, None),
+            zone_name=schedule["timezone"], text_max_chars=schedule["subscription"]["text_max_chars"],
+            types={row["key"]: row for row in types}, owner=schedule["id"], reference=reference,
+            budget_usd=round(cap, 6), timeout_s=min(left_s, float(leads_check.CHECK_TIMEOUT_SEC)),
+            runtime_root=runs._runtime_root, claude_bin=runs._claude_bin)
+    except Exception as exc:  # the check never stops what was found: its items are stored unchecked
+        for item in parsed.items:
+            item.pop("check", None)
+        outcome = leads_check.Outcome(leads_check.counts(None, cost_usd=0.0), detail=type(exc).__name__)
+    if outcome.counts["check_failed"]:
+        logger.info("extraction run %s: the leads check gave no verdicts (%s); its items are stored unchecked",
+                    run_id, outcome.detail)
+    return outcome

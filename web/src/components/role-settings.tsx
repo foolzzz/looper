@@ -31,9 +31,11 @@ import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
-const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check"];
-/** The roles another run starts (the advisor's): only their own row chooses their profile, else their built-in one. */
-const SPAWNED: readonly string[] = ["advisor", "advice_check"];
+const ROLES: readonly AgentRole[] = [
+  "manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check", "leads_check"];
+/** The roles another run starts (the advisor's, the leads check's): only their own row chooses their profile, else
+ *  their built-in one. */
+const SPAWNED: readonly string[] = ["advisor", "advice_check", "leads_check"];
 const isRole = (role: string): role is AgentRole => (ROLES as readonly string[]).includes(role);
 
 /** The role configs in the order a task meets them. */
@@ -294,6 +296,7 @@ const ROLE_JOBS: Record<AgentRole, string> = {
   processor: "turns messages others wrote into what its instructions ask, with no tools",
   advisor: "answers the Planner's checked request about a hard step, with no tools",
   advice_check: "checks the Planner's request before it goes to the advisor, with no tools",
+  leads_check: "checks each extracted lead and intent against its messages before it is stored, with no tools",
 };
 
 /** The Shared defaults row (the system layer): its id, and its link #settings/roles/shared. */

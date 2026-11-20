@@ -52,11 +52,13 @@ class LeadState(StrEnum):
     SUPERSEDED = "superseded"
     PROMOTED = "promoted"
     INACCURATE = "inaccurate"
+    DROPPED = "dropped"  # the second model's check found its sources do not support it (``leads_check``)
 
 
-# The states a lead is shown in and searched by: the stored ones and the derived ``expired``.
+# The states a lead is shown in and searched by: the stored ones and the derived ``expired``. The default search
+# (``active``) never shows a dropped lead; ``all`` shows it after the rest.
 EXPIRED = "expired"
-SHOWN_LEAD_STATES = ("active", EXPIRED, "superseded", "promoted", "inaccurate")
+SHOWN_LEAD_STATES = ("active", EXPIRED, "superseded", "promoted", "inaccurate", "dropped")
 SEARCH_STATES = (*SHOWN_LEAD_STATES, "all")
 
 
@@ -66,6 +68,7 @@ class IntentState(StrEnum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     MERGED = "merged"
+    DROPPED = "dropped"  # the check found its sources do not support it: handled by the system, never pushed
 
 
 class IntentPriority(StrEnum):

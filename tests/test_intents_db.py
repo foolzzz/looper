@@ -231,9 +231,11 @@ def test_stats_arithmetic_including_merged(monkeypatch):
         for state in ("tasked", "tasked", "rejected", "expired"):
             await seed(pool, state=state)
         await seed(pool, state="merged", merged_into=target)
+        for _ in range(2):  # the check dropped these: never shown, so neither recognized nor in a rate
+            await seed(pool, state="dropped", handled_via="system", check_verdict="drop")
         result = await intents.stats(now=datetime.now(timezone.utc))
         row = next(r for r in result["types"] if r["key"] == "dev_task")
-        assert row["recognized"] == 5 and row["merged"] == 1
+        assert row["recognized"] == 5 and row["merged"] == 1 and row["dropped"] == 2
         assert row["adoption_rate"] == .5 and row["rejection_rate"] == .25
         quiet = next(r for r in result["types"] if r["key"] == "bug_triage")
         assert quiet["adoption_rate"] is None and quiet["rejection_rate"] is None
