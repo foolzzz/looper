@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -273,15 +274,19 @@ async def name_conflict(conn: Any, project_id: str, item_id: str | None, name: s
     return None
 
 
-async def install(data: Any) -> dict[str, Any]:
-    """Install an item: ``{item_id, scope, project_id (a project scope), roles?, enabled?}``.
+@dataclass(frozen=True)
+class _InstallPlan:
+    item: Mapping[str, Any]
+    scope: Scope
+    roles: list[str]
+    enabled: bool
+    project: Mapping[str, Any] | None
 
-    ``roles`` defaults to every role the scope allows. Returns the install and the item.
-    """
-    import asyncpg
 
+async def _install_plan(data: Any) -> _InstallPlan:
+    """What ``install`` would write, checked without writing: raises what it would raise before its transaction."""
     from ..db import library as db_library
-    from ..db.project_documents import locked_project
+    from ..db import projects as db_projects
 
     if not isinstance(data, Mapping):
         raise CatalogError("body must be a JSON object")
@@ -301,82 +306,127 @@ async def install(data: Any) -> dict[str, Any]:
         raise CatalogNotFound(f"no catalog item {data['item_id']!r}")
     if item["origin"] == Origin.PROJECT.value and scope is Scope.GLOBAL:
         raise CatalogError("a project's own skill is installed in projects only, not globally")
+    project = None
+    if scope is Scope.PROJECT and (project := await db_projects.get_project(project_id)) is None:
+        raise CatalogNotFound(f"project {project_id!r} not found")
+    return _InstallPlan(item, scope, roles, enabled, project)
+
+
+async def _unchanged(conn: Any, item_id: str, expected_sha256: str | None) -> None:
+    """Hold the item's configuration as it is until the caller's transaction ends; refuse when it is no longer the one
+    the user confirmed (``expected_sha256``: its ``library_items.sha256`` when they were asked)."""
+    if expected_sha256 is None:
+        return
+    sha256 = await conn.fetchval("SELECT sha256 FROM library_items WHERE id = $1 FOR SHARE", item_id)
+    if sha256 != expected_sha256:
+        raise CatalogConflict("the MCP server's configuration changed after it was confirmed; nothing was "
+                              "changed, ask again to see it as it is now")
+
+
+async def install(data: Any, *, expected_sha256: str | None = None) -> dict[str, Any]:
+    """Install an item: ``{item_id, scope, project_id (a project scope), roles?, enabled?}``.
+
+    ``roles`` defaults to every role the scope allows. Returns the install and the item. With ``expected_sha256``
+    (a confirmed MCP install) the item's configuration must still be that one.
+    """
+    import asyncpg
+
+    from ..db import library as db_library
+    from ..db.connection import get_pool
+    from ..db.project_documents import locked_project
+
+    plan = await _install_plan(data)
+    item, scope, roles, enabled = plan.item, plan.scope, plan.roles, plan.enabled
     taken = CatalogConflict("the item is installed there already; change that install instead")
     try:
         if scope is Scope.PROJECT:
+            project_id = data["project_id"]
             async with locked_project(project_id) as (conn, project):
                 if project is None:
                     raise CatalogNotFound(f"project {project_id!r} not found")
                 if item["origin"] == Origin.PROJECT.value and (
                         reason := await name_conflict(conn, project_id, item["id"], item["name"])):
                     raise CatalogConflict(reason)
+                await _unchanged(conn, item["id"], expected_sha256)
                 row = await db_library.insert_install(conn, item_id=item["id"], scope=scope.value,
                                                       project_id=project_id, roles=roles, enabled=enabled)
         else:
-            from ..db.connection import get_pool
-
-            row = await db_library.insert_install(get_pool(), item_id=item["id"], scope=scope.value, project_id=None,
-                                                  roles=roles, enabled=enabled)
+            async with get_pool().acquire() as conn, conn.transaction():
+                await _unchanged(conn, item["id"], expected_sha256)
+                row = await db_library.insert_install(conn, item_id=item["id"], scope=scope.value, project_id=None,
+                                                      roles=roles, enabled=enabled)
     except asyncpg.UniqueViolationError:
         raise taken from None
     return {"install": install_view(row), "item": await _item(item["id"])}
 
 
+def _shown_url(url: str) -> str:
+    """``url`` as the user is shown it: its userinfo and every query value masked, as either may be a credential."""
+    from urllib.parse import parse_qsl, urlsplit, urlunsplit
+
+    from .log_redaction import redact
+    from .mcp import MASK
+
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return MASK
+    netloc = (f"{MASK}@" if parts.username is not None or parts.password is not None else "")
+    netloc += (f"[{host}]" if ":" in host else host) + (f":{port}" if port is not None else "")
+    query = "&".join(f"{name}={MASK}" for name, _ in parse_qsl(parts.query, keep_blank_values=True))
+    return redact(urlunsplit((parts.scheme, netloc, parts.path, query, "")))
+
+
 def _launch_text(item: Mapping[str, Any]) -> str:
     """How an MCP item runs, from its public view: the command line and its environment variables' names (never
-    their values), or the URL it connects to."""
+    their values), or the URL it connects to (without credentials) and its headers' names."""
     server = item["mcp"] or {}
     if server.get("transport") == "stdio":
         line = " ".join([server.get("command") or "", *server.get("args", ())]).strip()
         names = sorted(server.get("env") or {})
         return f"在这台机器上运行 `{line}`" + (f"，带环境变量 {'、'.join(names)}（值不显示）" if names else "")
-    return f"连接 {server.get('url') or ''}"
+    headers = sorted(server.get("headers") or {})
+    return f"连接 {_shown_url(server.get('url') or '')}" + (
+        f"，带请求头 {'、'.join(headers)}（值不显示）" if headers else "")
 
 
-async def mcp_install_impact(data: Mapping[str, Any]) -> str | None:
+@dataclass(frozen=True)
+class McpConfirmation:
+    """What the user is asked before an MCP server is installed or enabled again (``text``), and what the confirmed
+    call is bound to: the item, its configuration as shown (``library_items.sha256``) and the project, by id."""
+
+    text: str
+    item_id: str
+    sha256: str
+    project_id: str | None = None
+
+    def binding(self) -> dict[str, Any]:
+        return {"item_id": self.item_id, "item_sha256": self.sha256, "project_id": self.project_id}
+
+
+async def mcp_install_impact(data: Mapping[str, Any]) -> McpConfirmation | None:
     """What installing (``install``'s ``data``) an MCP server does, for the user to confirm: every run of its roles
-    starts it on this machine. None for any other item, or a disabled install (enabling it is asked then)."""
+    starts it on this machine. None for any other item, or a disabled install (enabling it is asked then). Raises
+    what the install would raise before its transaction, so a call that cannot run is refused before asking."""
     from .library import ItemKind
 
-    item = await _item(str(data.get("item_id") or ""))
-    if item["kind"] != ItemKind.MCP.value or data.get("enabled") is False:
+    plan = await _install_plan(data)
+    if plan.item["kind"] != ItemKind.MCP.value or not plan.enabled:
         return None
-    scope = _scope(data.get("scope"))
-    roles = install_roles(data["roles"], scope) if "roles" in data else list(scope_roles(scope))
-    if any(i["scope"] == scope.value and i["project_id"] == data.get("project_id") for i in item["installs"]):
+    item = await _item(plan.item["id"])
+    project_id = plan.project["id"] if plan.project is not None else None
+    if any(i["scope"] == plan.scope.value and i["project_id"] == project_id for i in item["installs"]):
         raise CatalogConflict("the item is installed there already; change that install instead")  # before asking
-    where = "全局"
-    if scope is Scope.PROJECT:
-        from ..db import projects as db_projects
-
-        project = await db_projects.get_project(str(data.get("project_id") or ""))
-        where = f"项目「{project['name'] if project else data.get('project_id')}」"
-    return (f"要把 MCP 服务器「{item['qualified_name']}」装到{where}，给 {'、'.join(roles)} 用吗？装上以后，这些角色的每次"
-            f"运行都会{_launch_text(item)}。")
+    where = f"项目「{plan.project['name']}」" if plan.project is not None else "全局"
+    return McpConfirmation(
+        f"要把 MCP 服务器「{item['qualified_name']}」装到{where}，给 {'、'.join(plan.roles)} 用吗？装上以后，这些角色的"
+        f"每次运行都会{_launch_text(item)}。", item["item_id"], item["sha256"], project_id)
 
 
-async def mcp_enable_impact(install_id: str, data: Mapping[str, Any]) -> str | None:
-    """What enabling an MCP server's install again (``update_install``'s ``data`` with ``enabled`` true) does, for the
-    user to confirm; None for any other change or item."""
-    from ..db import library as db_library
-    from .library import ItemKind
-
-    if data.get("enabled") is not True:
-        return None
-    current = await db_library.get_install(install_id)
-    if current is None or current["enabled"]:
-        return None
-    item = await _item(current["item_id"])
-    if item["kind"] != ItemKind.MCP.value:
-        return None
-    where = f"项目「{current['project_name']}」" if current["project_id"] else "全局"
-    roles = list(data["roles"]) if "roles" in data else list(current["roles"])
-    return (f"要重新启用 MCP 服务器「{item['qualified_name']}」在{where}的安装，给 {'、'.join(roles)} 用吗？启用以后，"
-            f"这些角色的每次运行都会{_launch_text(item)}。")
-
-
-async def update_install(install_id: str, data: Any) -> dict[str, Any]:
-    """Change an install's ``roles`` or ``enabled``; returns the install and the item."""
+async def _change_plan(install_id: str, data: Any) -> tuple[dict[str, Any], list[str] | None, bool | None]:
+    """The install ``update_install`` would change and its new roles and enabled flag, checked without writing."""
     from ..db import library as db_library
 
     if not isinstance(data, Mapping):
@@ -389,7 +439,39 @@ async def update_install(install_id: str, data: Any) -> dict[str, Any]:
         raise CatalogNotFound(f"no install {install_id!r}")
     roles = install_roles(data["roles"], Scope(current["scope"])) if "roles" in data else None
     enabled = _enabled(data["enabled"]) if "enabled" in data else None
-    row = await db_library.update_install(install_id, roles=roles, enabled=enabled)
+    return current, roles, enabled
+
+
+async def mcp_enable_impact(install_id: str, data: Mapping[str, Any]) -> McpConfirmation | None:
+    """What enabling an MCP server's install again (``update_install``'s ``data`` with ``enabled`` true) does, for the
+    user to confirm; None for any other change or item. Raises what the change would raise."""
+    from .library import ItemKind
+
+    if data.get("enabled") is not True:
+        return None
+    current, roles, _ = await _change_plan(install_id, data)
+    if current["enabled"]:
+        return None
+    item = await _item(current["item_id"])
+    if item["kind"] != ItemKind.MCP.value:
+        return None
+    where = f"项目「{current['project_name']}」" if current["project_id"] else "全局"
+    return McpConfirmation(
+        f"要重新启用 MCP 服务器「{item['qualified_name']}」在{where}的安装，给 {'、'.join(roles or current['roles'])} "
+        f"用吗？启用以后，这些角色的每次运行都会{_launch_text(item)}。", item["item_id"], item["sha256"],
+        current["project_id"])
+
+
+async def update_install(install_id: str, data: Any, *, expected_sha256: str | None = None) -> dict[str, Any]:
+    """Change an install's ``roles`` or ``enabled``; returns the install and the item. With ``expected_sha256`` (a
+    confirmed enabling of an MCP server) the item's configuration must still be that one."""
+    from ..db import library as db_library
+    from ..db.connection import get_pool
+
+    current, roles, enabled = await _change_plan(install_id, data)
+    async with get_pool().acquire() as conn, conn.transaction():
+        await _unchanged(conn, current["item_id"], expected_sha256)
+        row = await db_library.update_install(install_id, roles=roles, enabled=enabled, pool=conn)
     if row is None:
         raise CatalogNotFound(f"no install {install_id!r}")
     return {"install": install_view(row), "item": await _item(row["item_id"])}

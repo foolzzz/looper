@@ -555,27 +555,34 @@ def _item_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 
 async def _catalog_impact(call: Call) -> str | None:
     """What installing an MCP server, or enabling an install of one again, does, for the user to confirm; None for
-    every other call (a skill or plugin installs at once). Freezes the item it resolved for the confirmed call."""
+    every other call (a skill or plugin installs at once). The confirmed call is bound to the item, its
+    configuration as shown and the project, by id (``call.confirmation``)."""
     arguments, action = call.arguments, call.arguments["action"]
+    asked = None
     if action == "install":
         _required(arguments, action, "item")
         project = await project_named(arguments["project"]) if arguments.get("project") is not None else None
         items = (await answered(catalog.catalog_view()))["items"]
         item = by_id_or_name(items, arguments["item"], id_key="item_id", what="catalog item",
                              keys=("qualified_name", "name"))
-        call.arguments["item"] = item["item_id"]
-        return await answered(catalog.mcp_install_impact({
+        asked = await answered(catalog.mcp_install_impact({
             "item_id": item["item_id"], "scope": "project" if project else "global",
             **({"project_id": project["id"]} if project else {}), **_given(arguments, ("roles",))}))
-    if action == "update" and arguments.get("enabled") is True:
+    elif action == "update" and arguments.get("enabled") is True:
         _required(arguments, action, "install_id")
-        return await answered(catalog.mcp_enable_impact(arguments["install_id"], _given(arguments, ("roles", "enabled"))))
-    return None
+        asked = await answered(catalog.mcp_enable_impact(arguments["install_id"],
+                                                         _given(arguments, ("roles", "enabled"))))
+    if asked is None:
+        return None
+    call.confirmation.update(asked.binding())
+    return asked.text
 
 
 async def _catalog(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
-    project = await project_named(arguments["project"]) if arguments.get("project") is not None else None
+    bound = call.confirmation if call.confirmation.get("item_sha256") else None  # a confirmed MCP install
+    project = (await project_named(arguments["project"]) if arguments.get("project") is not None and bound is None
+               else None)
     if action == "list":
         if project is not None:
             view = await answered(catalog.project_view(project["id"]))
@@ -587,18 +594,22 @@ async def _catalog(call: Call) -> dict[str, Any]:
                           for item in view["items"]]}
     if action == "install":
         _required(arguments, action, "item")
-        items = (await answered(catalog.catalog_view()))["items"]
-        item = by_id_or_name(items, arguments["item"], id_key="item_id", what="catalog item",
-                             keys=("qualified_name", "name"))
-        data = {"item_id": item["item_id"], "scope": "project" if project else "global",
-                **({"project_id": project["id"]} if project else {}), **_given(arguments, ("roles",))}
-        answer = await answered(catalog.install(data))
+        if bound is not None:  # where the user confirmed it, renamed or not
+            item_id, project_id = bound["item_id"], bound["project_id"]
+        else:
+            items = (await answered(catalog.catalog_view()))["items"]
+            item_id = by_id_or_name(items, arguments["item"], id_key="item_id", what="catalog item",
+                                    keys=("qualified_name", "name"))["item_id"]
+            project_id = project["id"] if project else None
+        data = {"item_id": item_id, "scope": "project" if project_id else "global",
+                **({"project_id": project_id} if project_id else {}), **_given(arguments, ("roles",))}
+        answer = await answered(catalog.install(data, expected_sha256=bound["item_sha256"] if bound else None))
         return {"install": _install_listed(answer["install"]), "item": _item_listed(answer["item"]),
                 "note": "it loads from each agent's next run on"}
     _required(arguments, action, "install_id")
     if action == "update":
-        answer = await answered(catalog.update_install(arguments["install_id"],
-                                                       _given(arguments, ("roles", "enabled"))))
+        answer = await answered(catalog.update_install(arguments["install_id"], _given(arguments, ("roles", "enabled")),
+                                                       expected_sha256=bound["item_sha256"] if bound else None))
         return {"install": _install_listed(answer["install"]), "item": _item_listed(answer["item"])}
     answer = await answered(catalog.uninstall(arguments["install_id"]))
     return {"deleted": arguments["install_id"], "item": _item_listed(answer["item"])}

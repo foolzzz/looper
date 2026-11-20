@@ -198,6 +198,27 @@ def test_an_api_client_installing_or_enabling_an_mcp_server_is_asked_first(tmp_p
     run_db(run, monkeypatch, timeout=30)
 
 
+def test_an_api_clients_mcp_install_is_checked_before_it_is_asked_and_bound_to_what_was_shown(tmp_path, monkeypatch):
+    async def run(pool):
+        server = (await mcp.create({"name": "search", "transport": "stdio", "command": "python3"}))["item"]
+        async with _api(tmp_path, pool) as call:
+            # what the install itself would refuse is refused before the client is asked
+            status, answer = await call("installs.create", {"item_id": server["item_id"], "scope": "global",
+                                                            "project_id": "p-x"}, client=True)
+            assert status == 400 and "global install has no project_id" in answer["error"]["message"], answer
+            status, answer = await call("installs.create", {"item_id": server["item_id"], "scope": "project",
+                                                            "project_id": "p-missing"}, client=True)
+            assert status == 404, answer
+            status, asked = await call("installs.create", {"item_id": server["item_id"], "scope": "global"},
+                                       client=True)
+            assert status == 202, asked
+            await mcp.update(server["item_id"], {"command": "sh"})
+            status, done = await call("confirm", {"confirmation_id": asked["confirmation_id"]}, client=True)
+            assert status == 409 and "ask again" in done["error"]["message"], done
+            assert (await catalog.item_detail(server["item_id"]))["item"]["installs"] == []
+    run_db(run, monkeypatch, timeout=30)
+
+
 def test_delete_confirmation_and_ordinary_uninstall_preserve_unrelated_state(tmp_path, monkeypatch):
     async def run(pool):
         item, other = await _skill(), await _skill("other")
