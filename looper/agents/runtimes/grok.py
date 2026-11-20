@@ -78,8 +78,9 @@ from ... import child_env
 from ..run_usage import Usage, request_tokens, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, ResidentTransport, RoomPush,
-    RunChannel, RunCost, RuntimeAdapter, RuntimeUnsupported, grok_login, instructions, runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, CostSource, Launcher, LoadedSources, Probe, PromptBlock, ProviderBinding, ReadOnly,
+    ResidentTransport, RoomPush, RunChannel, RunCost, RuntimeAdapter, RuntimeUnsupported, grok_login, instructions,
+    plugin_skills, runtime_prompt_text,
 )
 from .codex import _HASHED, _toml_key, _toml_value
 from .instructions import InstructionFile
@@ -384,6 +385,15 @@ class GrokRuntime(RuntimeAdapter):
         """Every instruction file Grok knows in each directory of the project, the root's first, which Grok reads
         itself (``INSTRUCTION_NAMES``)."""
         return tuple(map(InstructionFile, every_named(cwd, INSTRUCTION_NAMES)))
+
+    def loaded_sources(self, launch: Launch) -> LoadedSources:
+        """The MCP servers Grok reaches and the skills of the plugins' skill directories it scans."""
+        return LoadedSources(tuple(name for name, _ in mcp_servers(launch.library)[0]),
+                             plugin_skills(launch.library.plugin_dirs))
+
+    def web_tools(self, launch: Launch) -> bool:
+        """Grok searches the web unless the profile turns it off (``--disable-web-search``)."""
+        return bool(launch.profile.web_search)
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """The skills Grok loads natively and what it does not get, when there are any (RFC P9)."""

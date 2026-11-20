@@ -70,6 +70,22 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   turn's record has `metadata.looper_state` (`view`, `rev`, `reason`). Off,
   the turns, the prompt, the tool list and the process signature are as they
   were without the setting
+- **Research order** (`looper/agents/research_order.py`; Settings → Chat, `manager.research_order`, off by default,
+  `chat_settings.update` `research_order`). On, the default Manager's contract gets a `## Looking things up`
+  section (`+RESEARCH_ORDER` in its contract layer; before `STABLE_CONTEXT_CONTRACT`, which stays last). It says where to look when an answer needs facts the Manager
+  does not have, and in what order: the user's knowledge vault, Looper's own records (tasks and projects), message
+  leads, the tools installed for it (named), then the web. It stops as soon as there is enough to answer, says where
+  each fact came from, and asks the user only for what none of these has, or for a decision that is theirs. A browser
+  comes after the web once there is one. Each turn lists only the sources it really has (`ResearchSources.of`):
+  - the vault, records and leads by the turn's own tool listing, so a group turn, which has no leads search, is not
+    told to search leads, and the vault appears only in a turn whose own listing has `looper_vault_search` and
+    `looper_vault_read`;
+  - the installed tools by the library its runtime loads (MCP servers; skills for a runtime that loads Claude
+    plugins), Looper's own server left out;
+  - the web by the runtime's `web_tools` (the `api` runtime has none) and the profile's `web_search`.
+
+  A scenario Manager never gets the section. Off, the prompt, the tool list and the process signature are what they
+  were before. The section is composed per turn, so the prompt preview only notes it
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
