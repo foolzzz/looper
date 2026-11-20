@@ -83,6 +83,15 @@ session = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "consult" / (fork
 session.parent.mkdir(parents=True, exist_ok=True)
 session.write_text("fork")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
+if mode == "blocked":  # a prompt hook refused it: no model turn, and a "success" that echoes the prompt
+    print(json.dumps({"type": "system", "subtype": "informational",
+                      "content": "UserPromptSubmit operation blocked by hook:\\nblocked by policy"}), flush=True)
+    ids = [int(i) for i in re.findall(r"^- #(\\d+) from", prompt, re.MULTILINE)]
+    echo = json.dumps({"answers": [{"reply_to": i, "body": "echoed"} for i in ids], "unsure": ""})
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 0,
+                      "result": "UserPromptSubmit operation blocked by hook:\\nblocked by policy\\n\\nOriginal prompt: "
+                                + prompt + "\\n" + echo, "total_cost_usd": 37}), flush=True)
+    sys.exit(0)
 if mode in ("stderr", "no_result"):
     sys.stderr.write("x" * 1_000_000 + "stderr tail")
     sys.stderr.flush()
@@ -623,6 +632,7 @@ def test_a_running_consult_is_recorded_for_the_next_start_and_a_shutdown_ends_it
     ("other_profile", "answer", "runtime_cannot"),  # the seat's profile now runs with another provider
     ("ran", "gone", "session_gone"),
     ("ran", "prose", "contract"),
+    ("ran", "blocked", "contract"),  # what a blocked prompt echoes is never taken as its answer
 ])
 def test_a_question_no_consult_can_answer_goes_to_the_planner_with_why(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, setup: str, mode: str, reason: str,

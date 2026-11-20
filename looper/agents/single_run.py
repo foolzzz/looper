@@ -49,6 +49,9 @@ class Finished(NamedTuple):
     result: dict[str, Any] | None  # the run's last result event; None when it gave none
     started: bool  # whether it began a session (Claude Code names it in its init event)
     timed_out: bool  # whether it ran over the deadline
+    # Why a Claude Code prompt hook refused the turn (``claude_cli.prompt_block``), when one did: no model turn ran,
+    # and the result's text is the hook's notice and the prompt echoed back, never an answer.
+    blocked: str | None = None
 
 
 async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str, prompt: str, launch: Launch,
@@ -71,6 +74,7 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
     started = False
     known: proc_tree.Tree = {}
     stderr_tail = ""
+    blocked: str | None = None
 
     async def stderr() -> None:
         nonlocal stderr_tail
@@ -89,8 +93,12 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
     watching = asyncio.create_task(watch_tree())
 
     async def read() -> None:
-        nonlocal result, started, known
+        nonlocal result, started, known, blocked
+        from .claude_cli import prompt_block
+
         async for event in runtime.parse_process(process, model=launch.model, launch=launch):
+            if (refused := prompt_block(event, cwd)) is not None:
+                blocked = refused.reason
             if event.get("type") == "result":
                 # Read before the record is awaited, which a stop may cut short.
                 known.update(await asyncio.to_thread(proc_tree.tree_of, process))
@@ -118,7 +126,9 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
     error: str | None = None
     try:
         await asyncio.wait_for(run(), timeout=timeout)
-        if result is None or result.get("is_error"):
+        if blocked is not None:
+            error = f"a Claude Code hook blocked the prompt of {what}: {blocked}"
+        elif result is None or result.get("is_error"):
             error = f"{what} gave no result"
     except asyncio.TimeoutError:
         error = f"{what} ran over {timeout:g} s"
@@ -134,10 +144,11 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
                 if not background.done():
                     background.cancel()
             await asyncio.gather(draining, watching, return_exceptions=True)
-            output = str((result or {}).get("result") or "") or None
+            # A blocked turn's result echoes the prompt: it is not the run's output.
+            output = None if blocked is not None else str((result or {}).get("result") or "") or None
             if quiet:
                 output = output if result is not None and unsuccessful(result) is None else None
             elif error and stderr_tail:
                 error += "\n" + stderr_tail
             await recorder.finish(output_text=output, result_event=result, error=error)
-    return Finished(result, started, False)
+    return Finished(result, started, False, blocked)

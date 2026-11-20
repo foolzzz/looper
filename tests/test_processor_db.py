@@ -49,6 +49,15 @@ if mode == "error_text":  # what a failing run writes may carry the batch
     emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": "s-1",
           "result": turn["message"]["content"], "errors": [turn["message"]["content"]], "total_cost_usd": 0.01})
     sys.exit(1)
+if mode == "blocked":  # a prompt hook blocked it: Claude Code says so, then answers success with no model turn,
+    # echoing the prompt as its result
+    emit({"type": "system", "subtype": "informational", "session_id": "s-1",
+          "content": "UserPromptSubmit operation blocked by hook:\nRequest Blocked by Security Policy"})
+    zero = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 0, "session_id": "s-1",
+          "result": "UserPromptSubmit operation blocked by hook:\nRequest Blocked by Security Policy\n\n"
+                    "Original prompt: " + turn["message"]["content"], "total_cost_usd": 0, "usage": zero})
+    sys.exit(0)
 usage = {"input_tokens": 40, "output_tokens": 6, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
 emit({"type": "assistant", "session_id": "s-1", "message": {"id": "m-1", "role": "assistant", "model": "claude-sonnet",
       "content": [{"type": "thinking", "thinking": "The batch says: " + turn["message"]["content"][-60:]},
@@ -240,6 +249,7 @@ def test_a_leads_check_run_is_its_own_role_with_its_own_profile_prompt_and_recor
     ("over_cap", "budget", "over its cap of 0.1 USD"),
     ("error", "failed", "ended in error"),
     ("error_text", "failed", "ended in error"),
+    ("blocked", "blocked", "a Claude Code hook blocked its prompt: Request Blocked by Security Policy"),
 ])
 def test_a_processor_run_without_a_reply_says_why_and_keeps_no_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, failure: str, why: str,
