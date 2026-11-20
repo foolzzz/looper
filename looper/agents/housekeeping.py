@@ -268,7 +268,10 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
                 break
 
     with _step(report, "decision snapshots"):
-        while True:
+        # Off, nothing writes the table, this cleanup included: rows of an earlier window stay with their task.
+        async with db_connection.transaction() as conn:
+            snapshots_on = await decision_snapshots.enabled(db=conn)
+        while snapshots_on:
             async with db_connection.transaction() as conn:
                 count = await decision_snapshots.prune(conn, now - timedelta(days=decision_snapshots.RETENTION_DAYS))
             report.decision_snapshots += count

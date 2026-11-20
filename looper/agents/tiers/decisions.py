@@ -14,6 +14,7 @@ and feeds nothing back; a failure to read the switch or to write is logged, and 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -30,6 +31,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 VERSION = 1
+# The most a snapshot's database work (the switch, the turn's record, the write; connection waits included) may take
+# before it is dropped with a warning: the decision it records never waits longer.
+TIMEOUT_SECONDS = 1.0
 # What the activity line keeps of a decision's reason.
 REASON_MAX_CHARS = 500
 # The command-line flags that name a run's tools, on the runtimes that take them.
@@ -45,9 +49,13 @@ _REPOS: Mapping[str, Repo | Unusable] = {
 
 
 async def enabled() -> bool:
-    """Whether snapshots are written; off when the switch cannot be read."""
+    """Whether snapshots are written; off when the switch cannot be read within ``TIMEOUT_SECONDS``."""
     try:
-        return await db_snapshots.enabled()
+        return await asyncio.wait_for(db_snapshots.enabled(), TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning("reading %s timed out after %s s, decision snapshots stay off", db_snapshots.ENABLED_KEY,
+                       TIMEOUT_SECONDS)
+        return False
     except Exception as exc:
         logger.warning("could not read %s, decision snapshots stay off: %s", db_snapshots.ENABLED_KEY, exc)
         return False
@@ -139,7 +147,11 @@ class Dispatch:
 
     async def save(self, task_id: str, ready: Sequence[PlanStep], start: Sequence[PlanStep]) -> None:
         try:
-            await db_snapshots.add(task_id, "dispatch", inputs=self.inputs, decision=self.decision(ready, start))
+            await asyncio.wait_for(db_snapshots.add(task_id, "dispatch", inputs=self.inputs,
+                                                    decision=self.decision(ready, start)), TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning("could not record a decision snapshot (dispatch) for task %s: timed out after %s s",
+                           task_id, TIMEOUT_SECONDS)
         except Exception:
             logger.warning("could not record a decision snapshot (dispatch) for task %s", task_id, exc_info=True)
 
@@ -210,28 +222,39 @@ def turn_digest(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 async def step_decision(task_id: str, step: PlanStep, context: DecisionContext, reply: DecisionReply,
-                        record_id: int | None) -> None:
-    """Record the Planner's decision on ``step``'s result, made in the turn of run record ``record_id``, before Looper
-    applies it (while snapshots are on)."""
-    if not await enabled():
-        return
+                        record_id: int | None, *, adjudicated_accept: bool = False) -> None:
+    """Record the Planner's decision on ``step``'s result, made in the turn of run record ``record_id`` (offered an
+    adjudicated accept or not), before Looper applies it, while snapshots are on; all of it within
+    ``TIMEOUT_SECONDS``."""
     try:
-        turn = turn_digest(await db_snapshots.turn(record_id)) if record_id is not None else None
-        inputs = {"version": VERSION, "step": step.step_id, "key": step.label, "attempt": step.retries + 1,
-                  "context": _context(context), "turn": turn}
-        reason = reply.feedback if reply.decision is Decision.RETRY else reply.reason
-        decision = {
-            "allowed": [allowed.value for allowed in context.allowed()], "decision": reply.decision.value,
-            "reason": (reason or "")[:REASON_MAX_CHARS],
-            "gates": [{"id": change.id, "action": _value(change.action)} for change in reply.gates],
-            "waits": [{"id": change.id, "action": _value(change.action)} for change in reply.waits],
-            "steps": [spec.id for spec in reply.steps],
-        }
-        await db_snapshots.add(task_id, "step_decision", step_id=step.step_id, record_id=record_id,
-                               inputs=inputs, decision=decision)
+        await asyncio.wait_for(_step_decision(task_id, step, context, reply, record_id, adjudicated_accept),
+                               TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning("could not record a decision snapshot (step_decision) for task %s step %s: timed out after "
+                       "%s s", task_id, step.step_id, TIMEOUT_SECONDS)
     except Exception:
         logger.warning("could not record a decision snapshot (step_decision) for task %s step %s", task_id,
                        step.step_id, exc_info=True)
+
+
+async def _step_decision(task_id: str, step: PlanStep, context: DecisionContext, reply: DecisionReply,
+                         record_id: int | None, adjudicated_accept: bool) -> None:
+    if not await db_snapshots.enabled():
+        return
+    turn = turn_digest(await db_snapshots.turn(record_id)) if record_id is not None else None
+    inputs = {"version": VERSION, "step": step.step_id, "key": step.label, "attempt": step.retries + 1,
+              "context": _context(context), "adjudicated_accept": adjudicated_accept, "turn": turn}
+    reason = reply.feedback if reply.decision is Decision.RETRY else reply.reason
+    decision = {
+        "allowed": [allowed.value for allowed in context.offered(adjudicated_accept)],
+        "decision": reply.decision.value,
+        "reason": (reason or "")[:REASON_MAX_CHARS],
+        "gates": [{"id": change.id, "action": _value(change.action)} for change in reply.gates],
+        "waits": [{"id": change.id, "action": _value(change.action)} for change in reply.waits],
+        "steps": [spec.id for spec in reply.steps],
+    }
+    await db_snapshots.add(task_id, "step_decision", step_id=step.step_id, record_id=record_id,
+                           inputs=inputs, decision=decision)
 
 
 # --- Replay ---
@@ -260,7 +283,8 @@ def replay(row: Mapping[str, Any]) -> Replayed:
         if row["kind"] == "dispatch":
             replayed = _replay_dispatch(inputs)
             return Replayed(row["id"], row["kind"], replayed == recorded, recorded, replayed)
-        allowed = [decision.value for decision in _context_of(inputs["context"]).allowed()]
+        offered = _context_of(inputs["context"]).offered(bool(inputs.get("adjudicated_accept", False)))
+        allowed = [decision.value for decision in offered]
         same = allowed == recorded.get("allowed") and recorded.get("decision") in allowed
         return Replayed(row["id"], row["kind"], same, recorded, {"allowed": allowed})
     except Exception as exc:

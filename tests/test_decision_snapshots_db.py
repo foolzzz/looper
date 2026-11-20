@@ -94,7 +94,8 @@ def test_the_switch_and_a_turns_record(monkeypatch):
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_housekeeping_deletes_snapshots_after_thirty_days(monkeypatch, tmp_path):
+@pytest.mark.parametrize("on", [True, False])
+def test_housekeeping_deletes_snapshots_after_thirty_days_only_while_on(monkeypatch, tmp_path, on):
     async def test(pool):
         await pool.execute(TASK)
         for age in (31, 31, 29):
@@ -103,11 +104,49 @@ def test_housekeeping_deletes_snapshots_after_thirty_days(monkeypatch, tmp_path)
                                                decision=decision)
             await pool.execute("UPDATE decision_snapshots SET created_at = $1 WHERE id = $2",
                                NOW - timedelta(days=age), row)
+        if on:
+            await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true')",
+                               decision_snapshots.ENABLED_KEY)
+        deleted = []
+        prune = decision_snapshots.prune
+
+        async def counted(conn, before):
+            deleted.append(before)
+            return await prune(conn, before)
+
+        monkeypatch.setattr(decision_snapshots, "prune", counted)
         report = await housekeeping.run_once(tmp_path, NOW, current_runner=None, commands=None)
-        assert report.decision_snapshots == 2 and "decision snapshots" not in report.failed_steps
-        assert await pool.fetchval("SELECT count(*) FROM decision_snapshots") == 1
+        assert "decision snapshots" not in report.failed_steps
+        # Off, housekeeping writes nothing to the table: the rows of an earlier window stay with their task.
+        assert report.decision_snapshots == (2 if on else 0) and bool(deleted) is on
+        assert await pool.fetchval("SELECT count(*) FROM decision_snapshots") == (1 if on else 3)
 
     run_db(test, monkeypatch, timeout=60)
+
+
+def test_a_locked_table_or_settings_row_never_holds_the_decision(monkeypatch, caplog):
+    from looper.agents.tiers import decisions
+
+    monkeypatch.setattr(decisions, "TIMEOUT_SECONDS", 0.3)
+
+    async def test(pool):
+        await pool.execute(TASK)
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true')", decision_snapshots.ENABLED_KEY)
+        plan = TaskPlan("p", "g", "r", "/w", steps=[PlanStep("id-s1", 0, "do s1", key="s1")])
+        async with pool.acquire() as locker, locker.transaction():
+            await locker.execute("LOCK TABLE decision_snapshots IN ACCESS EXCLUSIVE MODE")
+            started = asyncio.get_running_loop().time()
+            await Dispatch(plan, isolate_steps=False).save("t1", plan.steps, plan.steps)
+            assert asyncio.get_running_loop().time() - started < 2
+            await locker.execute("LOCK TABLE system_settings IN ACCESS EXCLUSIVE MODE")
+            started = asyncio.get_running_loop().time()
+            assert await decisions.enabled() is False
+            assert asyncio.get_running_loop().time() - started < 2
+        assert await pool.fetchval("SELECT count(*) FROM decision_snapshots") == 0
+        assert "timed out" in caplog.text
+        assert await decisions.enabled() is True  # the lock gone, the switch reads again
+
+    run_db(test, monkeypatch, timeout=30, max_size=4)
 
 
 def test_replay_command_compares_each_snapshot(monkeypatch, tmp_path, capsys):

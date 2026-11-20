@@ -458,6 +458,11 @@ class DecisionContext:
         allowed += [Decision.REPLAN, Decision.FAIL]
         return tuple(allowed)
 
+    def offered(self, adjudicated_accept: bool = False) -> tuple[Decision, ...]:
+        """The decisions a [DECISION] turn is offered: ``allowed()``, or, when the turn may downgrade blocking
+        findings and accept (an adjudicated accept), the ones a passing review would allow."""
+        return replace(self, succeeded=True).allowed() if adjudicated_accept else self.allowed()
+
 
 def extract_reply(text: str) -> dict[str, Any]:
     """The JSON object in the one ```json block that ends ``text``.

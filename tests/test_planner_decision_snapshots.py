@@ -99,3 +99,28 @@ def test_on_records_each_dispatch_and_decision_and_each_replays(planner_claude, 
     assert turn["model"] and turn["system_prompt_sha256"] and turn["prompt_layers"]["contract"]["sha256"]
     assert turn["sizes"]["input_chars"] > 0
     assert all(replay(row).same for row in rows), [replay(row) for row in rows if not replay(row).same]
+
+
+def test_an_adjudicated_accept_records_what_the_turn_was_offered(planner_claude, agent_db, monkeypatch):
+    from tests.test_planner_agent import REVIEW_PASS
+    from tests.test_review_panel_planner import BLOCK, configure, held_reviews
+
+    configure(agent_db, monkeypatch, adjudication=True)
+    rows = _snapshots(monkeypatch, agent_db, on=True)
+    judgment = {"member": "review_a", "finding": 0, "level": "suggestion", "reason": "Already covered by validation"}
+    claude = planner_claude(plan(step("s1", review=True)), decide("review"),
+                            decide("accept", adjudications=[judgment]))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 3)
+        await h.release(BLOCK)
+        await h.release(REVIEW_PASS)
+        await h.until(lambda: h.planner._plan.steps[0].status == "verified")
+        await h.release(REVIEW_PASS)
+        await h.finished()
+
+    drive(claude, held_reviews, scenario)
+    [accepted] = [row for row in rows if row["kind"] == "step_decision" and row["decision"]["decision"] == "accept"]
+    assert all(replay(row).same for row in rows), [replay(row) for row in rows if not replay(row).same]
+    assert accepted["inputs"]["adjudicated_accept"] is True and "accept" in accepted["decision"]["allowed"]

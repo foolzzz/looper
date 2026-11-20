@@ -3255,7 +3255,8 @@ class PlannerAgent:
         except PlannerTurnError as exc:
             await self._undecided(plan, step, context, exc)
             return
-        await self._apply_decision(plan, step, context, reply)
+        await self._apply_decision(plan, step, context, reply,
+                                   adjudicated_accept=self._offers_adjudicated_accept(plan, step, context))
 
     async def _undecided(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, exc: Exception) -> None:
         """No valid decision on ``step``'s result came: a mandatory review still runs, else the step's own verdict
@@ -3286,10 +3287,13 @@ class PlannerAgent:
                                                   "failed it.")
 
     async def _apply_decision(
-        self, plan: TaskPlan, step: PlanStep, context: DecisionContext, reply: DecisionReply,
+        self, plan: TaskPlan, step: PlanStep, context: DecisionContext, reply: DecisionReply, *,
+        adjudicated_accept: bool = False,
     ) -> None:
-        """Do what a DECISION reply decided: its changes to gates and waits first, then the decision on ``step``."""
-        await decisions.step_decision(self._task_id, step, context, reply, self._last_record_id)
+        """Do what a DECISION reply decided: its changes to gates and waits first, then the decision on ``step``
+        (``adjudicated_accept``: its turn was offered an accept that downgrades blocking findings)."""
+        await decisions.step_decision(self._task_id, step, context, reply, self._last_record_id,
+                                      adjudicated_accept=adjudicated_accept)
         at = f"the decision on step {step.label}"
         gates_cancelled = await self._apply_gate_changes(plan, reply.gates, at)
         waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
@@ -5452,7 +5456,7 @@ class PlannerAgent:
         from .review_adjudication import required_downgrades
         who = "Reviewer" if context.result is ResultKind.REVIEW else "Worker"
         adjudicated_accept = self._offers_adjudicated_accept(plan, step, context)
-        choices = replace(context, succeeded=True).allowed() if adjudicated_accept else context.allowed()
+        choices = context.offered(adjudicated_accept)
         allowed = []
         for decision in choices:
             if decision is Decision.RETRY:
