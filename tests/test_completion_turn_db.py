@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +25,7 @@ from looper.agents.message import (MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, Message
                                    channel_address)
 from looper.agents.ops import Turn, TurnOrigin
 from looper.agents.run_usage import Usage
+from looper.agents.tiers.turn_token import TurnStopped
 from looper.agents.task_notice import Notice, NotifyChannel, NotifyTarget, TargetKind, web_end_text
 from looper.db import projects, tasks
 from tests.api_manager_support import USAGE, _manager
@@ -85,10 +87,22 @@ async def _events(pool: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in await pool.fetch("SELECT * FROM manager_events ORDER BY id")]
 
 
+def _service(bus: Any, *, running: Any = lambda manager_id: True) -> Any:
+    from looper.agents.completion_service import CompletionService
+
+    return CompletionService(bus=bus, manager_running=running, running_managers=lambda: ["manager"])
+
+
+async def _due(bus: Any, *, after: float = 61.0, service: Any = None) -> list[MessageEnvelope]:
+    """The wake-ups the completion service queues ``after`` seconds from now (past the gathering window)."""
+    await (service or _service(bus)).run_once(now=datetime.now(timezone.utc) + timedelta(seconds=after))
+    return [e for e in _drain(bus, "manager") if e.message_type is MessageType.COMPLETION_DUE]
+
+
 async def _end_and_tell(chat: Any, envelope: MessageEnvelope) -> None:
-    """The task's end reaches the Manager, then the wake-up it queued for itself."""
+    """The task's end reaches the Manager, then the wake-up the completion service queues once its window closed."""
     await chat.manager._handle(envelope)
-    (due,) = [e for e in _drain(chat.bus, "manager") if e.message_type is MessageType.COMPLETION_DUE]
+    (due,) = await _due(chat.bus)
     await chat.manager._handle(due)
 
 
@@ -112,8 +126,8 @@ def test_the_dashboard_chat_gets_the_managers_message_and_the_tasks_link_instead
             assert [e.message_type for e in _drain(chat.bus, "channel-web")] == []  # no code notice
             (row,) = await _events(pool)
             assert (row["state"], row["reason"], row["due_at"] is not None) == ("pending", None, True)
-            (due,) = _drain(chat.bus, "manager")
-            assert due.message_type is MessageType.COMPLETION_DUE
+            assert _drain(chat.bus, "manager") == [] and await _due(chat.bus, after=59) == []  # the window is open
+            (due,) = await _due(chat.bus)
             assert due.payload == {"manager_id": "manager", "channel_id": "channel-web", "chat": THREAD}
             await chat.manager._handle(due)
             (reply,) = _drain(chat.bus, "channel-web")
@@ -195,7 +209,7 @@ def test_a_turn_that_does_not_reply_falls_back_to_the_notice_as_recorded(monkeyp
         async with _manager(pool, tmp_path, monkeypatch, [script]) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
-            (due,) = _drain(chat.bus, "manager")
+            (due,) = await _due(chat.bus)
             telling = asyncio.create_task(chat.manager._handle(due))
             if case == "stop":
                 await asyncio.wait_for(script.gate_reached.wait(), 20)
@@ -246,7 +260,7 @@ def test_a_manager_turned_off_or_a_switch_turned_off_before_the_turn_sends_the_n
                 chat_settings.set_completion_turns(chat_settings.CompletionTurns.DM_ONLY)
                 chat.manager._turned_off = False
                 await chat.manager._handle(_goal_status())
-                (due,) = _drain(chat.bus, "manager")
+                (due,) = await _due(chat.bus)
                 turn_off()
                 await chat.manager._handle(due)
                 (notice,) = _drain(chat.bus, "channel-web")
@@ -289,15 +303,14 @@ def test_ends_a_turn_cannot_tell_are_skipped_and_their_notice_sent_at_once(monke
     run_db(run, monkeypatch, timeout=60)
 
 
-def test_a_replayed_end_that_waits_for_its_turn_wakes_the_manager_again_and_sends_nothing(monkeypatch, tmp_path,
-                                                                                         turns_on):
+def test_a_replayed_end_that_waits_for_its_turn_records_once_and_sends_nothing(monkeypatch, tmp_path, turns_on):
     async def run(pool):
         async with _manager(pool, tmp_path, monkeypatch, []) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             envelope = _goal_status()
             await chat.manager._handle(envelope)
             await chat.manager._handle(envelope)  # the bus replays it
-            assert [e.message_type for e in _drain(chat.bus, "manager")] == [MessageType.COMPLETION_DUE] * 2
+            assert len(await _due(chat.bus)) == 1
             assert _drain(chat.bus, "channel-web") == []
             assert [row["state"] for row in await _events(pool)] == ["pending"]
 
@@ -311,7 +324,7 @@ def test_a_retired_managers_waiting_events_send_their_notices(monkeypatch, tmp_p
         async with _manager(pool, tmp_path, monkeypatch, []) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
-            (due,) = _drain(chat.bus, "manager")
+            (due,) = await _due(chat.bus)
             fleet = ManagerFleet.__new__(ManagerFleet)
             fleet._supervisor = SimpleNamespace(bus=chat.bus)
             await fleet._deal_with("manager", [due])  # the Manager was turned off with the wake-up queued
@@ -374,7 +387,8 @@ def test_the_switch_changes_no_prompt_tool_or_command_of_a_users_turn(monkeypatc
     run_db(run, monkeypatch, timeout=90)
 
 
-def test_a_turn_a_restart_cut_off_sends_its_notice_before_a_replayed_wake_up(monkeypatch, tmp_path, turns_on):
+@pytest.mark.parametrize("cut", ["turn", "reply"])
+def test_a_turn_a_restart_cut_off_settles_before_a_replayed_wake_up(monkeypatch, tmp_path, turns_on, cut):
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
     from looper.db import manager_events as store
     from tests.db_support import until
@@ -383,23 +397,33 @@ def test_a_turn_a_restart_cut_off_sends_its_notice_before_a_replayed_wake_up(mon
         async with _manager(pool, tmp_path, monkeypatch, []) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
-            (due,) = _drain(chat.bus, "manager")
-            # The turn took the event, then the service stopped before it ended.
-            (taken,) = await store.claim("manager", "channel-web", THREAD, uuid.uuid4())
+            (due,) = await _due(chat.bus)
+            # The turn took the event (and, for "reply", was handing its reply over), then the server stopped.
+            batch = uuid.uuid4()
+            (taken,) = await store.claim("manager", "channel-web", THREAD, batch)
+            if cut == "reply":
+                await store.claim_reply(batch)
             restarted = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
             chat.bus.get_queue("manager").put_nowait(due)  # the journal replays the wake-up
             await restarted.start(chat.bus)
             try:
-                await until(lambda: chat.bus.get_queue("channel-web").qsize() > 0, "the notice")
                 await until(lambda: chat.bus.get_queue("manager").qsize() == 0 and restarted._handling is None,
                             "the replayed wake-up")
             finally:
                 await restarted.stop()
+            (row,) = await _events(pool)
+            if cut == "reply":  # the reply may have gone: nothing more is sent, ever
+                assert (row["state"], row["delivery"], row["sent_at"]) == ("delivered", "uncertain", None)
+                await _service(chat.bus).run_once()
+                assert _drain(chat.bus, "channel-web") == []
+                return
+            assert (row["id"], row["state"], row["reason"], row["delivery"]) == (
+                taken["id"], "fallback", "restart", "pending")
+            await _service(chat.bus).run_once()  # the completion service delivers it
             (notice,) = _drain(chat.bus, "channel-web")
             assert notice.payload["text"] == web_end_text("completed", "calc", "## Done\nadd and sub pass")
             (row,) = await _events(pool)
-            assert (row["id"], row["state"], row["reason"], row["sent_at"] is not None) == (
-                taken["id"], "fallback", "restart", True)
+            assert (row["delivery"], row["sent_at"] is not None) == ("sent", True)
 
     run_db(run, monkeypatch, timeout=60)
 
@@ -422,7 +446,7 @@ def test_a_wake_up_whose_events_cannot_be_read_is_queued_again(monkeypatch, tmp_
         async with _manager(pool, tmp_path, monkeypatch, [_text(REPLY)]) as chat:
             await _task(pool, tmp_path, origin_thread=THREAD)
             await chat.manager._handle(_goal_status())
-            (due,) = _drain(chat.bus, "manager")
+            (due,) = await _due(chat.bus)
             await chat.manager._handle(due)
             (again,) = _drain(chat.bus, "manager")  # queued before the first is acknowledged
             assert again.message_type is MessageType.COMPLETION_DUE and again.payload == due.payload
@@ -444,12 +468,14 @@ class _Hung:
     shares_bridge = False
     can_interrupt = False
 
-    def __init__(self, *, swallow: bool = False) -> None:
+    def __init__(self, *, swallow: bool = False, hold: asyncio.Event | None = None) -> None:
         self.started, self.starts, self.stops, self.swallow = False, 0, 0, swallow
         self.command: list[str] = []
         self.totals = Usage()
         self.texts: list[str] = []
         self.release = asyncio.Event()
+        self.hold = hold  # a user's turn waits for it (the test's moment to end a late turn meanwhile)
+        self.holding = asyncio.Event()
 
     def stale(self, signature: Any) -> bool:
         return False
@@ -469,6 +495,13 @@ class _Hung:
                 except asyncio.CancelledError:
                     if not self.swallow:
                         raise
+            # A late exit: its transport's callback, a new session's id and spend: none of them is the Manager's now.
+            await on_event({"type": "system", "subtype": "transport"})
+            await on_event({"type": "system", "subtype": "init", "session_id": "sess-late"})
+            self.totals = Usage(cost_usd=9.0)
+        elif self.hold is not None:
+            self.holding.set()
+            await self.hold.wait()
         return ResidentTurn({"type": "result", "subtype": "success", "is_error": False, "result": "好的",
                              "session_id": "sess-1"})
 
@@ -500,7 +533,7 @@ def test_a_turn_past_its_deadline_on_a_runtime_without_interrupt_does_not_hold_t
                                runtime_root=tmp_path)
         manager._bus, manager._claude = bus, hung
         await manager._handle(_goal_status())
-        (due,) = _drain(bus, "manager")
+        (due,) = await _due(bus)
         await asyncio.wait_for(manager._handle(due), 10)  # the message loop goes on
         (notice,) = _drain(bus, "channel-web")
         assert notice.payload["text"] == web_end_text("completed", "calc", "## Done\nadd and sub pass")
@@ -519,5 +552,94 @@ def test_a_turn_past_its_deadline_on_a_runtime_without_interrupt_does_not_hold_t
         await asyncio.sleep(0.05)
         assert not manager._late_turns or not swallow
         await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=60)
+
+
+def test_a_turn_let_go_of_that_exits_late_touches_nothing_of_the_turn_after_it(monkeypatch, tmp_path, turns_on):
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    monkeypatch.setattr(completion_events, "TURN_SECONDS", 0.5)
+    monkeypatch.setattr(completion_events, "END_SECONDS", 0.3)
+    hold = asyncio.Event()
+    late, fresh = _Hung(swallow=True), _Hung(hold=hold)
+    monkeypatch.setattr(ClaudeCodeRuntime, "resident_session", lambda self, label: fresh)
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\nexit 0\n")
+    claude.chmod(0o755)
+
+    async def run(pool):
+        from looper.agents.bus import MessageBus
+
+        await _task(pool, tmp_path, origin_thread=THREAD)
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(claude_bin=str(claude), work_dir=tmp_path),
+                               runtime_root=tmp_path)
+        manager._bus, manager._claude = bus, late
+        bindings: list[Any] = []
+        publish = manager._publish_binding
+        monkeypatch.setattr(manager, "_publish_binding", lambda token: (bindings.append(token), publish(token)))
+        await manager._handle(_goal_status())
+        (due,) = await _due(bus)
+        await asyncio.wait_for(manager._handle(due), 10)  # let go of: it swallowed the cancellation
+        (late_run,) = [task for task in manager._late_turns if not task.get_coro().__name__ == "stop"] or [None]
+        assert manager._claude is fresh and late_run is not None
+        session = manager._session_id
+        asking = asyncio.create_task(manager._handle(MessageEnvelope.create(
+            source=channel_address("web"), target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+            payload={"text": "还在吗？", "channel_context": {"session_id": THREAD}}, correlation_id="c2",
+            metadata={"origin_channel_id": "channel-web"})))
+        await asyncio.wait_for(fresh.holding.wait(), 10)
+        token, bound = manager._running_token, len(bindings)
+        assert token is not None and token.live
+        late.release.set()  # the late turn exits now, while the next one runs
+        done, _ = await asyncio.wait({late_run}, timeout=10)
+        assert done and isinstance(late_run.exception(), TurnStopped)  # it ends as stopped, on its own record
+        assert manager._running_token is token and token.live  # its token, its binding and its runtime are its own
+        assert bindings[bound:] == [] and fresh.stops == 0 and fresh.started
+        assert manager._session_id == session and manager._session_totals.cost_usd != 9.0
+        hold.set()
+        await asyncio.wait_for(asking, 10)
+        (reply,) = [e for e in _drain(bus, "channel-web") if e.message_type is MessageType.AGENT_REPLY
+                    and "chat_session_id" not in e.payload]
+        assert reply.payload["text"] == "好的"
+        await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize("known", [True, False], ids=["another_task_recorded_it", "unknown"])
+def test_a_lark_direct_chat_the_task_did_not_record_is_resolved_or_told_by_its_notice(monkeypatch, tmp_path,
+                                                                                      turns_on, known):
+    gate = asyncio.Event()
+    script = ResponseScript(events=text_events(REPLY, usage=USAGE), gate=gate)
+
+    async def run(pool):
+        async with _manager(pool, tmp_path, monkeypatch, [script]) as chat:
+            await _task(pool, tmp_path)  # recorded no reply route
+            if known:  # the same person's earlier task with this bot recorded their direct chat
+                project = await pool.fetchval("SELECT project_id FROM tasks WHERE id = 't1'")
+                await tasks.create_task(task_id="t0", requirement="r", project_id=project, work_dir=str(tmp_path),
+                                        status="completed", pool=pool, origin_channel_id="channel-lark",
+                                        chat_id=OPEN_ID, chat_kind="user", origin_reply_route={"chat_id": DM_CHAT})
+            await chat.manager._handle(_goal_status(thread=None, notice=_dm_notice(),
+                                                    origin_channel_id="channel-lark"))
+            (row,) = await _events(pool)
+            if not known:
+                assert (row["state"], row["reason"], row["sent_at"] is not None) == ("skipped", "no_chat", True)
+                (sent,) = _drain(chat.bus, "channel-lark")
+                assert sent.payload == _dm_notice().payload()
+                return
+            assert row["state"] == "pending" and json.loads(row["payload"])["chat_id"] == DM_CHAT
+            (due,) = await _due(chat.bus)
+            telling = asyncio.create_task(chat.manager._handle(due))
+            await asyncio.wait_for(script.gate_reached.wait(), 20)
+            (token,) = chat.manager.live_for_chat("channel-lark", DM_CHAT)  # the turn /stop in that chat finds
+            assert token.chat == DM_CHAT
+            gate.set()
+            await asyncio.wait_for(telling, 20)
+            (sent,) = _drain(chat.bus, "channel-lark")
+            assert sent.metadata["chat_record"]["session_id"] == f"lark:{DM_CHAT}"
 
     run_db(run, monkeypatch, timeout=60)

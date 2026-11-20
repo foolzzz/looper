@@ -19,7 +19,8 @@ jobs:
     name: Agent system tests (shard ${{ matrix.shard }}/4)
     # Keep the runner's PostgreSQL 16 client package available alongside the service.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Include service setup and dashboard staging, plus headroom for runner variance.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

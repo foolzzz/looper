@@ -96,7 +96,9 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
             run_defaults["log_truncated"] = False
             run_defaults["deferred_by_drain"] = False
             assert dict(await old.fetchrow("SELECT * FROM schedule_runs")) == {**before["schedule_runs"][0], **run_defaults}
-            assert [dict(row) for row in await old.fetch("SELECT * FROM schedule_notifications")] == before["schedule_notifications"]
+            # The outbox gains the completion event that told a run (none for a row from before it).
+            assert [dict(row) for row in await old.fetch("SELECT * FROM schedule_notifications")] == [
+                {**row, "manager_event_id": None} for row in before["schedule_notifications"]]
             await connection.ensure_schema(fresh)
             assert await structure(old) == await structure(fresh)
             assert [row["name"] for row in await fresh.fetch("SELECT name FROM schema_migrations")] == ["post_bridge_baseline"]

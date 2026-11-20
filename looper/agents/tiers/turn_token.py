@@ -83,6 +83,9 @@ class TurnToken:
     outcome: Any = None  # ReplyOutcome
     method: Any = None  # StopMethod: how the runtime ended the turn; None until known
     envelope: MessageEnvelope | None = field(default=None, repr=False)  # what the stop's status is published for
+    # The Manager let go of the turn (a completion turn past its deadline that did not end): whenever it ends, it
+    # writes only its own record, never the Manager's session, runtime, binding or another turn's token.
+    abandoned: bool = False
     on_settle: Callable[[TurnToken], None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
