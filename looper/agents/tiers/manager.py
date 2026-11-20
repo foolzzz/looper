@@ -1686,7 +1686,8 @@ class ManagerAgent:
                 if prepared.run.recorder is not None:
                     await prepared.run.recorder.end_left_open(failure)
             finally:
-                self._publish_binding(None)  # drained or boundedly abandoned, even if closing the record is cancelled
+                if not token.abandoned:  # (a turn the Manager let go of: another may hold the binding by now)
+                    self._publish_binding(None)  # drained or boundedly abandoned, even if closing the record is cancelled
                 self._last_activity = self._clock()
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
@@ -1729,7 +1730,7 @@ class ManagerAgent:
         """The turn ends stopped (its token already settled): the record finishes as interrupted, with what it
         spent, the session is saved, and the reply is the partial text. The writes get ``STOP_FINISH_SEC``: a
         database that holds them holds neither the reply nor the Manager's lock."""
-        if turn is not None:
+        if turn is not None and not token.abandoned:
             self._session_totals = self._claude.totals
         # Drained assistant events may not have streamed after the stop; use deltas only if none were handled.
         partial = "".join(text_parts) or token.partial
@@ -1756,12 +1757,13 @@ class ManagerAgent:
             "usage_complete": turn is None or (turn.usage_complete and turn.usage.cost_usd is not None),
         }})
         await self._link_turn_task(recorder, ops_turn)
-        await self._save_session_state()
+        if not token.abandoned:
+            await self._save_session_state()
 
-    def _settle(self) -> None:
-        """The running turn's end is decided (an answer or a failure): ``stop_turn`` refuses it from now on."""
-        if self._running_token is not None:
-            self._running_token.settle()
+    def _settle(self, token: TurnToken) -> None:
+        """The turn's end is decided (an answer or a failure): ``stop_turn`` refuses it from now on. Its own token:
+        a turn the Manager let go of never settles the one running now."""
+        token.settle()
 
     async def _finish_stopped_early(self, token: TurnToken, recorder: ClaudeRunRecorder,
                                     ops_turn: Turn | None) -> None:
@@ -2009,6 +2011,8 @@ class ManagerAgent:
             return
         logger.error("%s: the completion turn %s did not end once cancelled; it is left to end on its own",
                      self._log, batch)
+        if token is not None:
+            token.abandoned = True
         self._late_turns.add(run)
         run.add_done_callback(self._late_turns.discard)
         if self._lock_owner is token:
@@ -2203,7 +2207,7 @@ class ManagerAgent:
             # slow persistence) still saves it, and the next process resumes it.
             session_id = payload.get("session_id")
             if (payload.get("session_started") is not False and isinstance(session_id, str)
-                    and session_id and session_id != self._session_id):
+                    and session_id and session_id != self._session_id and not token.abandoned):
                 self._session_id, self._clean_start = session_id, False
                 if self._session_runtime != "api" or not self._pending_handoff:
                     self._pending_switch = self._pending_handoff = None  # CLI sessions own the prompt at init
@@ -2266,7 +2270,7 @@ class ManagerAgent:
             nonlocal streamed_partials, session_unsaved
             await recorder.persist(payload)
 
-            if session_unsaved:
+            if session_unsaved and not token.abandoned:
                 session_unsaved = False
                 await self._save_session_state()
 
@@ -2347,7 +2351,7 @@ class ManagerAgent:
             # until they have, and a stop meanwhile is not too late.
             await handled()
         except asyncio.CancelledError as exc:
-            self._settle()
+            self._settle(token)
             try:
                 await abandon_handling()
             finally:
@@ -2359,13 +2363,14 @@ class ManagerAgent:
             raise
         except BaseException as exc:
             if not isinstance(exc, TurnStopped):
-                self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
+                self._settle(token)  # the turn failed: a stop that comes while it is cleaned up is too late
             try:
                 await abandon_handling()
                 if isinstance(exc, TurnStopped):
                     raise
-                # Never leave Claude running once the Manager gives up on it.
-                await self._claude.stop(kill=True)
+                # Never leave Claude running once the Manager gives up on it (a turn it let go of stopped its own).
+                if not token.abandoned:
+                    await self._claude.stop(kill=True)
             except asyncio.CancelledError as cancelled:
                 await recorder.end_left_open(cancelled, output_text="".join(text_parts) or token.partial or None)
                 raise
@@ -2434,7 +2439,7 @@ class ManagerAgent:
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
                                         token=token, quoted=prepared.quoted)
 
-        self._settle()
+        self._settle(token)
 
         result_event = turn.result_event
         # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
@@ -2464,9 +2469,9 @@ class ManagerAgent:
             usage=turn.usage,
         )
         await self._link_turn_task(recorder, ops_turn)
-        if over_cap:
+        if over_cap and not token.abandoned:
             await self._claude.stop()
-        if not exited:
+        if not exited and not token.abandoned:
             self._session_totals = self._claude.totals
             await self._save_session_state()
 

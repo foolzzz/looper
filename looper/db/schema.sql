@@ -1794,7 +1794,7 @@ CREATE TABLE IF NOT EXISTS manager_events (
     state           TEXT NOT NULL CHECK (state IN ('pending', 'running', 'delivered', 'fallback', 'skipped')),
     reason          TEXT CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', 'turn_timeout',
                                            'turn_stopped', 'empty_reply', 'send_failed', 'queue_deadline',
-                                           'restart')),
+                                           'restart', 'no_chat')),
     batch           UUID,
     record_id       BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),

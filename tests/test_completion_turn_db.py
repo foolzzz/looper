@@ -25,6 +25,7 @@ from looper.agents.message import (MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, Message
                                    channel_address)
 from looper.agents.ops import Turn, TurnOrigin
 from looper.agents.run_usage import Usage
+from looper.agents.tiers.turn_token import TurnStopped
 from looper.agents.task_notice import Notice, NotifyChannel, NotifyTarget, TargetKind, web_end_text
 from looper.db import projects, tasks
 from tests.api_manager_support import USAGE, _manager
@@ -456,12 +457,14 @@ class _Hung:
     shares_bridge = False
     can_interrupt = False
 
-    def __init__(self, *, swallow: bool = False) -> None:
+    def __init__(self, *, swallow: bool = False, hold: asyncio.Event | None = None) -> None:
         self.started, self.starts, self.stops, self.swallow = False, 0, 0, swallow
         self.command: list[str] = []
         self.totals = Usage()
         self.texts: list[str] = []
         self.release = asyncio.Event()
+        self.hold = hold  # a user's turn waits for it (the test's moment to end a late turn meanwhile)
+        self.holding = asyncio.Event()
 
     def stale(self, signature: Any) -> bool:
         return False
@@ -481,6 +484,12 @@ class _Hung:
                 except asyncio.CancelledError:
                     if not self.swallow:
                         raise
+            # A late exit: a new session's id and spend, which only the turn's own record may take.
+            await on_event({"type": "system", "subtype": "init", "session_id": "sess-late"})
+            self.totals = Usage(cost_usd=9.0)
+        elif self.hold is not None:
+            self.holding.set()
+            await self.hold.wait()
         return ResidentTurn({"type": "result", "subtype": "success", "is_error": False, "result": "好的",
                              "session_id": "sess-1"})
 
@@ -531,5 +540,94 @@ def test_a_turn_past_its_deadline_on_a_runtime_without_interrupt_does_not_hold_t
         await asyncio.sleep(0.05)
         assert not manager._late_turns or not swallow
         await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=60)
+
+
+def test_a_turn_let_go_of_that_exits_late_touches_nothing_of_the_turn_after_it(monkeypatch, tmp_path, turns_on):
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    monkeypatch.setattr(completion_events, "TURN_SECONDS", 0.5)
+    monkeypatch.setattr(completion_events, "END_SECONDS", 0.3)
+    hold = asyncio.Event()
+    late, fresh = _Hung(swallow=True), _Hung(hold=hold)
+    monkeypatch.setattr(ClaudeCodeRuntime, "resident_session", lambda self, label: fresh)
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\nexit 0\n")
+    claude.chmod(0o755)
+
+    async def run(pool):
+        from looper.agents.bus import MessageBus
+
+        await _task(pool, tmp_path, origin_thread=THREAD)
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(claude_bin=str(claude), work_dir=tmp_path),
+                               runtime_root=tmp_path)
+        manager._bus, manager._claude = bus, late
+        bindings: list[Any] = []
+        publish = manager._publish_binding
+        monkeypatch.setattr(manager, "_publish_binding", lambda token: (bindings.append(token), publish(token)))
+        await manager._handle(_goal_status())
+        (due,) = await _due(bus)
+        await asyncio.wait_for(manager._handle(due), 10)  # let go of: it swallowed the cancellation
+        (late_run,) = [task for task in manager._late_turns if not task.get_coro().__name__ == "stop"] or [None]
+        assert manager._claude is fresh and late_run is not None
+        session = manager._session_id
+        asking = asyncio.create_task(manager._handle(MessageEnvelope.create(
+            source=channel_address("web"), target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+            payload={"text": "还在吗？", "channel_context": {"session_id": THREAD}}, correlation_id="c2",
+            metadata={"origin_channel_id": "channel-web"})))
+        await asyncio.wait_for(fresh.holding.wait(), 10)
+        token, bound = manager._running_token, len(bindings)
+        assert token is not None and token.live
+        late.release.set()  # the late turn exits now, while the next one runs
+        done, _ = await asyncio.wait({late_run}, timeout=10)
+        assert done and isinstance(late_run.exception(), TurnStopped)  # it ends as stopped, on its own record
+        assert manager._running_token is token and token.live  # its token, its binding and its runtime are its own
+        assert bindings[bound:] == [] and fresh.stops == 0 and fresh.started
+        assert manager._session_id == session and manager._session_totals.cost_usd != 9.0
+        hold.set()
+        await asyncio.wait_for(asking, 10)
+        (reply,) = [e for e in _drain(bus, "channel-web") if e.message_type is MessageType.AGENT_REPLY
+                    and "chat_session_id" not in e.payload]
+        assert reply.payload["text"] == "好的"
+        await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize("known", [True, False], ids=["another_task_recorded_it", "unknown"])
+def test_a_lark_direct_chat_the_task_did_not_record_is_resolved_or_told_by_its_notice(monkeypatch, tmp_path,
+                                                                                      turns_on, known):
+    gate = asyncio.Event()
+    script = ResponseScript(events=text_events(REPLY, usage=USAGE), gate=gate)
+
+    async def run(pool):
+        async with _manager(pool, tmp_path, monkeypatch, [script]) as chat:
+            await _task(pool, tmp_path)  # recorded no reply route
+            if known:  # the same person's earlier task with this bot recorded their direct chat
+                project = await pool.fetchval("SELECT project_id FROM tasks WHERE id = 't1'")
+                await tasks.create_task(task_id="t0", requirement="r", project_id=project, work_dir=str(tmp_path),
+                                        status="completed", pool=pool, origin_channel_id="channel-lark",
+                                        chat_id=OPEN_ID, chat_kind="user", origin_reply_route={"chat_id": DM_CHAT})
+            await chat.manager._handle(_goal_status(thread=None, notice=_dm_notice(),
+                                                    origin_channel_id="channel-lark"))
+            (row,) = await _events(pool)
+            if not known:
+                assert (row["state"], row["reason"], row["sent_at"] is not None) == ("skipped", "no_chat", True)
+                (sent,) = _drain(chat.bus, "channel-lark")
+                assert sent.payload == _dm_notice().payload()
+                return
+            assert row["state"] == "pending" and json.loads(row["payload"])["chat_id"] == DM_CHAT
+            (due,) = await _due(chat.bus)
+            telling = asyncio.create_task(chat.manager._handle(due))
+            await asyncio.wait_for(script.gate_reached.wait(), 20)
+            (token,) = chat.manager.live_for_chat("channel-lark", DM_CHAT)  # the turn /stop in that chat finds
+            assert token.chat == DM_CHAT
+            gate.set()
+            await asyncio.wait_for(telling, 20)
+            (sent,) = _drain(chat.bus, "channel-lark")
+            assert sent.metadata["chat_record"]["session_id"] == f"lark:{DM_CHAT}"
 
     run_db(run, monkeypatch, timeout=60)

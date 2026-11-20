@@ -294,6 +294,16 @@ async def project_of(task_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.
     return {row["id"]: row["project_id"] for row in rows}
 
 
+async def direct_chat_of(channel_id: str, person: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None
+                         ) -> str | None:
+    """The direct chat ``person`` (a Lark open_id) talks to the bot ``channel_id`` in, as their latest task asked for
+    there recorded it (``origin_reply_route.chat_id``); None when none did."""
+    return await (pool or get_pool()).fetchval(
+        "SELECT origin_reply_route->>'chat_id' FROM tasks WHERE origin_channel_id = $1 AND chat_id = $2 "
+        "AND chat_kind = 'user' AND NOT chat_group AND origin_reply_route ? 'chat_id' "
+        "ORDER BY created_at DESC LIMIT 1", channel_id, person)
+
+
 async def names_and_projects_of(
     task_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, dict[str, Any]]:

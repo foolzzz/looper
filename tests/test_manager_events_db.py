@@ -435,3 +435,21 @@ def test_the_foreign_keys_that_are_cleared_or_cascaded_have_indexes(monkeypatch)
         assert {"idx_manager_events_task", "idx_manager_events_schedule_run", "idx_manager_events_record"} <= found
 
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_a_database_whose_events_cannot_record_no_chat_gets_it_on_upgrade(monkeypatch, tmp_path):
+    async def check(pool):
+        await pool.execute(
+            "ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
+            "manager_events_reason_check CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', "
+            "'turn_timeout', 'turn_stopped', 'empty_reply', 'send_failed', 'queue_deadline', 'restart')); "
+            "DELETE FROM schema_migrations WHERE name = 'manager_event_no_chat'")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+        await with_task(pool, tmp_path)
+        await insert(pool, dedupe_key="k", state="skipped", reason="no_chat")
+
+    run_db(check, monkeypatch, timeout=30)

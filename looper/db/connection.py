@@ -141,6 +141,10 @@ _SUBSCRIPTION_RULES = "subscription_rules"
 _SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
 _SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
+_MANAGER_EVENT_NO_CHAT = "manager_event_no_chat"
+# The reasons a completion event may record (schema.sql's manager events block lists the same).
+_MANAGER_EVENT_REASONS = ("off", "group_chat", "manager_off", "turn_failed", "turn_timeout", "turn_stopped",
+                          "empty_reply", "send_failed", "queue_deadline", "restart", "no_chat")
 _RUN_TREE = "run_tree"
 _AGENT_SPAWNS = "agent_spawns"
 _STEP_DIFFICULTY = "step_difficulty"
@@ -772,6 +776,16 @@ async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
 
 
+async def _manager_event_no_chat_pending(conn: asyncpg.Connection) -> bool:
+    """A database whose completion events cannot record ``no_chat`` (they predate it)."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _MANAGER_EVENT_NO_CHAT):
+        return False
+    definition = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                                     "WHERE conname = 'manager_events_reason_check'")
+    return definition is not None and "no_chat" not in definition
+
+
 async def _schedule_notification_events_pending(conn: asyncpg.Connection) -> bool:
     """A database whose completion events predate ``schedule_notifications.manager_event_id`` (the block above
     adds it to one that gets the table now, and schema.sql to a new one)."""
@@ -1177,6 +1191,11 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT "
                                "REFERENCES manager_events(id) ON DELETE SET NULL")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFICATION_EVENTS)
+        if await _manager_event_no_chat_pending(conn):
+            reasons = ", ".join(f"'{reason}'" for reason in _MANAGER_EVENT_REASONS)
+            await conn.execute("ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
+                               f"manager_events_reason_check CHECK (reason IN ({reasons}))")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_NO_CHAT)
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():
                 await conn.execute(ddl)
@@ -1317,6 +1336,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
+            or await _manager_event_no_chat_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)

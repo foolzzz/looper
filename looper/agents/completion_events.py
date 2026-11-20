@@ -6,7 +6,8 @@ With ``manager.completion_turns`` off (the default) every event is ``skipped`` (
 always did, and the row only counts it. With it ``dm_only``, the end of a task asked for in a direct chat or the
 dashboard chat, whose own Manager handles the report, is ``pending``: the Manager is woken (``COMPLETION_DUE``),
 claims the chat's pending events and runs a read-only ``[COMPLETION]`` turn; its reply, with each task's link added
-by code, replaces the notice. Whatever goes wrong (the turn fails, runs past ``TURN_SECONDS``, is stopped, replies
+by code, replaces the notice (a Lark direct chat whose chat id no task of that person recorded is told by its
+notice: ``no_chat``). Whatever goes wrong (the turn fails, runs past ``TURN_SECONDS``, is stopped, replies
 nothing, or the reply cannot be handed to the channel; the Manager or the switch was turned off), the events fall
 back and their notices go out exactly as recorded; a Manager that starts does the same for the events a restart
 left ``running`` (``recover``). A group chat's end is ``skipped`` (``group_chat``), and so is
@@ -32,7 +33,7 @@ from ..db import manager_events as store, tasks as db_tasks
 from . import chat_settings
 from .links import task_link
 from .message import AgentAddress, MessageEnvelope, MessageType, channel_address, parse_channel_id
-from .task_notice import Notice, NotifyChannel, lead, link_line
+from .task_notice import Notice, NotifyChannel, TargetKind, lead, link_line
 
 logger = logging.getLogger(__name__)
 
@@ -141,12 +142,30 @@ async def record_notice_end(manager_id: str, envelope: MessageEnvelope, notice: 
     kind = target_kind(notice)
     route = envelope.metadata.get("reply_route")
     chat_id = route.get("chat_id") if isinstance(route, dict) and isinstance(route.get("chat_id"), str) else None
+    payload = facts(envelope, name=envelope.metadata.get("task_title") or "", chat_id=chat_id)
+
+    async def decide() -> tuple[str, str | None]:
+        state, reason = await _initial_state(manager_id, envelope, kind, available=available)
+        if state == "pending" and not payload.get("chat_id"):
+            # The turn must run in the direct chat itself: its /stop, its history and its replies are keyed by it.
+            payload["chat_id"] = await _direct_chat(notice)
+            if not payload["chat_id"]:
+                return "skipped", "no_chat"
+        return state, reason
+
     return await _record(
         manager_id, envelope.payload.get("task_id"), origin="chat", target_kind=kind,
         channel_id=notice.channel_id, chat=notice.target.id, dedupe_key=envelope.message_id,
-        decide=lambda: _initial_state(manager_id, envelope, kind, available=available),
-        payload=facts(envelope, name=envelope.metadata.get("task_title") or "", chat_id=chat_id),
-        fallback=[{"via": "notice", "notice": notice.payload()}])
+        decide=decide, payload=payload, fallback=[{"via": "notice", "notice": notice.payload()}])
+
+
+async def _direct_chat(notice: Notice) -> str | None:
+    """The direct chat a notice's person talks to the bot in, for a task that did not record it: a Telegram
+    notice names the chat itself; a Lark one names the person, whose chat another of their tasks with this bot
+    recorded. None when no task did: the end is told by its notice (``no_chat``)."""
+    if not (notice.channel.is_lark and notice.target.kind is TargetKind.USER):
+        return notice.target.id
+    return await db_tasks.direct_chat_of(notice.channel_id, notice.target.id)
 
 
 async def record_web_end(manager_id: str, envelope: MessageEnvelope, thread: str, text: str, *,
