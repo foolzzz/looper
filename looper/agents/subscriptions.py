@@ -409,7 +409,7 @@ SCOPE_ZH = {
 
 
 def _usd(value: float) -> str:
-    return f"{value:.1f}" if value >= 1 else f"{value:.2f}"
+    return f"{value:.1f}" if value >= 1 else f"{value:.2f}" if value >= 0.1 else f"{value:.3f}"
 
 
 async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime, action: str) -> str:
