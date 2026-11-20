@@ -419,7 +419,7 @@ def test_an_unconfirmed_extraction_is_skipped_without_moving_its_cursor_and_a_ne
         confirmation = (await view(env, sid))["subscription"]["confirmation"]
         assert "它会用不带工具的处理器整理你的消息" in confirmation
         # One message, one run: the measured fixed part per run and the part per message.
-        assert ("- 预计花费：约 $0.005–0.008 每天（按最近 24 小时 1 条、最多 1 次运行估算；单价 2026-11-19 实测："
+        assert ("- 预计花费：约 $0.005–0.008 每天（按最近 24 小时 1 条、最多 1 次运行估算；单价 2026-11-20 实测："
                 "每次约 $0.005–0.008，每条约 $0.0002）") in confirmation
         assert confirmation.splitlines()[-1] == "确认后按规则无人值守地整理；改规则、来源、会话范围或 Profile 都要再确认。"
         status, _ = await confirm_it(env, sid)
@@ -701,7 +701,7 @@ def test_the_backfill_dry_run_counts_by_kind_and_day_and_writes_nothing(tmp_path
         assert out.startswith("dry run: leads backfill of 消息线索")
         assert "in-scope events: 3 (group 2, p2p 1)" in out and "windows: 1 of at most 500 events" in out
         # Three events in one window: the measured fixed part per window and the part per event.
-        assert "estimate: $0.006–$0.009 (measured on 2026-11-19: 0.005–0.008 USD per window and 0.0002 USD per event)" \
+        assert "estimate: $0.006–$0.009 (measured on 2026-11-20: 0.005–0.008 USD per window and 0.0002 USD per event)" \
             in out and "实测均价" not in out
         assert len(asyncio.run(_rows(url, "SELECT key FROM system_settings"))) == settings
         assert asyncio.run(_rows(url, "SELECT count(*) AS n FROM message_leads"))[0]["n"] == 0
