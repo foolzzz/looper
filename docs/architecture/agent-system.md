@@ -4987,7 +4987,13 @@ never source message bodies; message-derived text loses mention markup. The
 `leads check` block (migration `leads_check`, applied when the catalog lacks it)
 adds the `dropped` state to leads and intents, their `check_verdict`,
 `check_reason` and `check_record_id` (a row is `dropped` exactly when its verdict
-is `drop`), `subscriptions.check_items` and the `leads_check` role layer.
+is `drop`), `subscriptions.check_items` and `check_alert_at`,
+`subscription_runs.check_status`, the notification kinds `check_alert` and
+`check_recovered`, and the `leads_check` role layer. Its columns come without
+constraints and its constraints `NOT VALID`, so nothing is scanned under the
+migration's locks; the online step `leads_check_online` validates them after the
+schema transaction commits (resumed by the next start if one stops first). A
+fresh database validates them on its empty tables in its own transaction.
 
 `looper leads search [WORDS ...]` reads the database directly, even while serve
 is stopped, with `--chat`, `--person`, `--since YYYY-MM-DD` or `--days N`,
@@ -5006,10 +5012,13 @@ alone. Deletion remains available while leads are disabled.
 `eval-export --out FILE [--sample N]` writes the leads check's local eval set as
 JSONL: every lead marked inaccurate (label `inaccurate`) and N random active ones
 (default 20, at most 500; label `presumed_good`), each with its kind, summary,
-detail, confidence and source messages (ref, chat, sender, `sent_at`, text). The
-file is created mode 600, only outside any git work tree or where
-`git check-ignore` matches it (`evals/runs/`); anything else is refused (exit 4)
-before the database is read. It prints counts only.
+detail, confidence and source messages (ref, chat, sender, `sent_at`, text). It
+is written only outside any git work tree or where `git check-ignore` matches it
+(`evals/runs/`), both judged on the path with its symbolic links resolved; a
+target that is itself a symbolic link, or anything else, is refused (exit 4)
+before the database is read. It is written through a mode-600 temporary file in
+the resolved directory that replaces the target at once, so a failure (exit 2)
+leaves nothing behind. It prints counts only.
 
 Operator-only POST operations under `/api/v1/leads/` are `search`, `mark`,
 `delete`, `settings_get`, `settings_put`, `chats` and `set_chat`; API clients
@@ -5147,7 +5156,14 @@ here pushes: the intent push service polls `intents`.
   keeps it; each checked item records `check_verdict`, `check_reason` (at most
   200 characters) and `check_record_id`. A failed check (refused, timed out,
   over budget, unreadable, or nothing left to spend) stores every item
-  unchecked; the run still succeeds. `extract_counts` adds `checked`,
+  unchecked; the run still succeeds. Each extraction run that stores records
+  `subscription_runs.check_status`: `skipped` (the check is off, or nothing was
+  found), `checked` or `failed`. When as many runs in a row as the schedule's
+  failure alert waits for (3 by default) have `failed`, skipped ones neither
+  ending nor adding to the streak, the subscription's notices get one
+  `check_alert` per streak (`subscriptions.check_alert_at`), and the next
+  `checked` run a `check_recovered`; they go where its failure alerts go.
+  `extract_counts` adds `checked`,
   `check_kept`, `check_dropped`, `check_fixed`, `check_failed` and
   `check_cost_usd`, the count line says them, and the run's cost is both runs'.
   The leads backfill does not run it. The intents stats count `dropped` apart:
