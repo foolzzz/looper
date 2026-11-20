@@ -34,3 +34,13 @@ async def put_settings(values: Mapping[str, str | None], *, pool: asyncpg.Pool |
                     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
                     key, value,
                 )
+
+
+async def claim(key: str, value: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Set ``key`` to ``value`` unless it has that value already: True when this call set it (so of several callers,
+    in any process, only one gets True for a value)."""
+    pool = pool or get_pool()
+    return await pool.fetchval(
+        "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now() "
+        "WHERE system_settings.value <> EXCLUDED.value RETURNING true", key, value) is True

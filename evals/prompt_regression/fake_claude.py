@@ -143,6 +143,11 @@ def _answer(session_id: str, text: str, cost: float, *, writes: dict[str, str] |
            "total_cost_usd": round(cost, 6), "usage": {"input_tokens": 10, "output_tokens": 10}})
 
 
+# The advisor's and the advice check's reply contracts (looper/agents/advice.py), which mark their runs.
+_ADVISOR_MARKER = '{"status": "answered | needs_info | out_of_scope",'
+_JUDGE_MARKER = '"leaks": [{"category": "local_path | url | identity'
+
+
 def _fenced(value: dict[str, Any]) -> str:
     return "```json\n" + json.dumps(value, ensure_ascii=False) + "\n```"
 
@@ -155,11 +160,22 @@ FINAL = {"delivered": "the task's files", "how_to_use": "read them", "verificati
 
 
 def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> dict[str, Any]:
-    """The decision on a step: accept, else review, else retry (``retried`` counts the retries of each step, for
-    ``retry_feedback``), else fail."""
+    """The decision on a step: with the advisor, its checkpoint's request (``advice_request``) and, after its answer,
+    the decision with what it takes of it; else accept, else review, else retry (``retried`` counts the retries of
+    each step, for ``retry_feedback``), else fail."""
     allowed_line = re.search(r"^Allowed decisions now: (.*)\.$", message, re.MULTILINE)
     allowed = {item.split(" ")[0] for item in (allowed_line.group(1).split(", ") if allowed_line else [])}
     step = re.match(r"\[DECISION\] Step (\S+)", message)
+    if allowed == {"advise"}:  # a critical step's checkpoint
+        return {"decision": "advise", "advice_request": script["advice_request"]}
+    if "the advisor answered your request" in message:
+        label = step.group(1) if step else ""
+        adoption = {"adoption": "adopted", "items": [{"ref": "q1", "use": "adopted", "steps": [label],
+                                                       "why": "it fits the plan"}]}
+        if "proceed" in allowed:
+            return {"decision": "proceed", "advice_adoption": adoption}
+        return {**_decide(script, message.replace("the advisor answered your request", ""), retried),
+                "advice_adoption": adoption}
     gates = (script.get("decision_gates") or {}).get(step.group(1) if step else "")
     if script.get("panel_adjudications") and "review_a (required): FAIL" in message:
         return {"decision": "accept", "reason": "the blocking finding contradicts the requirement",
@@ -264,6 +280,8 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
             reply = {**_decide(script, message, retried), "progress": PROGRESS}
         elif message.startswith("[GATE]"):
             reply = _gate(script, message)
+        elif message.startswith("[ADVICE]"):
+            reply = {"advice": "withdraw", "reason": "the step can go on without it"}
         elif message.startswith("[ROOM]"):
             reply = {"reply": script.get("room_reply", "Noted."), "action": "none"}
         elif message.startswith("[CHAT]"):
@@ -384,6 +402,25 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     if "learnings" in attempt:
         report["learnings"] = attempt["learnings"]
     _answer("fake-worker", attempt.get("raw") or "Done.\n" + json.dumps(report), WORKER_RUN_COST)
+
+
+def _advisor(script: dict[str, Any], stdin: _Stdin) -> None:
+    """The advisor's run: answer each question of the request its turn holds (the script's ``advice`` when set)."""
+    prompt = _user_text(stdin.readline() or "{}")
+    found = re.search(r"```json\n(.*)\n```", prompt, re.S)
+    questions = json.loads(found.group(1)).get("questions", []) if found else []
+    reply = script.get("advice") or {"status": "answered", "answers": [
+        {"question_id": q["id"], "conclusion": "The order is safe; check the row counts before switching.",
+         "basis": ["the backup comes first"], "confidence": "med"} for q in questions],
+        "next_steps": [{"id": "s1", "action": "compare the row counts", "verify": "both files have every row"}]}
+    _answer("fake-advisor", "Advice.\n" + _fenced(reply), WORKER_RUN_COST)
+
+
+def _judge(stdin: _Stdin) -> None:
+    """The advice check's run: the request stands on its own, leaks nothing and can be answered."""
+    stdin.readline()
+    _answer("fake-judge", json.dumps({"standalone": True, "leaks": [], "answerable": 0.9, "missing": []}),
+            WORKER_RUN_COST / 10)
 
 
 def _consult(script: dict[str, Any], stdin: _Stdin) -> None:
@@ -537,6 +574,10 @@ def main(argv: list[str]) -> int:
         _manager(scenarios_path, args, stdin)
     elif "## Your answer (required; code reads it)" in system_prompt:  # a consult of a run's session
         _consult(script, stdin)
+    elif _ADVISOR_MARKER in system_prompt:
+        _advisor(script, stdin)
+    elif _JUDGE_MARKER in system_prompt:
+        _judge(stdin)
     elif review:
         _reviewer(script, system_prompt, stdin)
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):

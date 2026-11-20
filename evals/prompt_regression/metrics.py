@@ -268,6 +268,27 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
     }
 
 
+def advisor_metrics(activity: list[Mapping[str, Any]], records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """What the Planner did with the advisor (the advisor RFC): the DECISION turns that offered it, the consults
+    (of them at a checkpoint), their requests sent back, the answers, the decisions that said what they took of
+    one, and the advisor's and the judge's runs."""
+    from looper.agents.tiers.planner_advice import OFFER
+
+    summaries = [str(row.get("summary") or "") for row in activity]
+    records = list(records)
+    return {
+        "advisor_offers": sum(1 for r in records if role(r) == "planner" and OFFER in str(r.get("input_text") or "")),
+        "advisor_consults": sum(1 for text in summaries if ": asking the advisor (" in text),
+        "advisor_checkpoints": sum(1 for text in summaries if ": asking the advisor (checkpoint" in text),
+        "advisor_returns": sum(1 for text in summaries if ": the advisor's request went back to be fixed" in text),
+        "advisor_answered": sum(1 for text in summaries if ": the advisor's consult ended answered" in text),
+        "advisor_adoptions": sum(1 for text in summaries if re.search(r": the Planner (adopted|partial|rejected) the "
+                                                                       r"advice", text)),
+        "advisor_runs": sum(1 for r in records if str(r.get("agent_id") or "").startswith("advisor-")),
+        "advice_check_runs": sum(1 for r in records if str(r.get("agent_id") or "").startswith("advice_check-")),
+    }
+
+
 def wait_metrics(detail: Mapping[str, Any]) -> dict[str, int]:
     """Waits opened, their typed checks, directly dependent steps (once per step), and current timeouts."""
     waits = detail.get("waits") or []
@@ -676,6 +697,7 @@ def task_metrics(
         **room_metrics(detail, activity, events),
         # What its runtime refused the read-only Planner.
         "planner_denials": planner_denials(records),
+        **advisor_metrics(activity, records),
         **vault_metrics(vault_log, task_id),
         "vault_closeout": int(any(str(row.get("summary") or "").startswith("Vault closeout:") for row in activity)),
     }

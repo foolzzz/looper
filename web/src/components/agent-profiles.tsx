@@ -490,7 +490,7 @@ function UsedBy({ used }: { used: ProfileUsedBy }) {
 function SystemPromptPreview({ profile }: { profile: AgentProfile }) {
   const id = useId();
   // The processor's prompt is composed for each run from what it processes: there is nothing to preview.
-  const roles = profile.roles.filter((item) => item !== "processor");
+  const roles = profile.roles.filter((item) => !["processor", "advisor", "advice_check"].includes(item));
   const [role, setRole] = useState<AgentRole>(roles[0] ?? "worker");
   const [preview, setPreview] = useState<PromptPreview | null>(null);
   const action = useAction();

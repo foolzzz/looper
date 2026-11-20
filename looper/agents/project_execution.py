@@ -65,7 +65,17 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
 - the room's consults: ``room_consult_budget_usd`` (what one may spend,
   ``CONSULT_BUDGET_RANGE``, 0.50 when unset), ``room_consult_timeout_seconds``
   and ``room_consults_per_task`` (0: every question for a seat no run is in
-  goes to the Planner), in ``ROOM_LIMITS``.
+  goes to the Planner), in ``ROOM_LIMITS``;
+- ``advisor``: whether the project's Planners consult the advisor (``on``) or
+  not (``off``, also when unset; the advisor RFC), and its limits
+  (``AdvisorLimits``): ``advisor_consult_budget_usd`` (what one consult may
+  spend, 0.01 to 5, 1 when unset: always enforced); ``advisor_budget_usd``
+  (what a task's consults may spend in all, 0.01 to 50),
+  ``advisor_consults_per_task`` (0 to 100) and ``advisor_consults_per_step``
+  (0 to 10), none when unset (the first phase has no caps, only alerts);
+  ``advisor_fallback_profile`` (an Agent Profile's name, unused in the first
+  phase); ``advisor_internal_domains`` (at most 20 domains the code checks
+  treat as URLs, hosts under them included).
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
@@ -77,6 +87,7 @@ layer and its roles' layers (``agent_settings``).
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -113,6 +124,20 @@ ROOM_LIMITS: dict[str, tuple[int, int, int, str]] = {
 # What one consult may spend, in USD, and its default.
 CONSULT_BUDGET_RANGE = (0.01, 5.0)
 DEFAULT_CONSULT_BUDGET_USD = 0.50
+# The advisor's limits: each USD amount's range and default, and each count's (``AdvisorLimits``); a default of
+# None is no limit (the first phase has none, only alerts).
+ADVISOR_BUDGETS: dict[str, tuple[float, float, float | None, str]] = {
+    "advisor_consult_budget_usd": (0.01, 5.0, 1.0, "what one consult of the advisor may spend"),
+    "advisor_budget_usd": (0.01, 50.0, None, "what a task's consults of the advisor may spend in all"),
+}
+ADVISOR_COUNTS: dict[str, tuple[int, int, None, str]] = {
+    "advisor_consults_per_task": (0, 100, None, "consults of the advisor a task may have"),
+    "advisor_consults_per_step": (0, 10, None, "consults of the advisor a step may have"),
+}
+ADVISOR_DOMAINS_MAX = 20
+# Every advisor setting of a project; while ``advisor`` is off, what the models are given leaves them out.
+ADVISOR_FIELDS = ("advisor", *ADVISOR_BUDGETS, *ADVISOR_COUNTS, "advisor_fallback_profile", "advisor_internal_domains")
+_DOMAIN = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 
 
 class ReviewPolicy(str, Enum):
@@ -185,6 +210,21 @@ class RoomLimits:
     consult_budget_usd: float = DEFAULT_CONSULT_BUDGET_USD
 
 
+class AdvisorMode(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
+@dataclass(frozen=True)
+class AdvisorLimits:
+    """A project's limits on consults of the advisor, each set or its default; None is no limit."""
+
+    consult_budget_usd: float = 1.0
+    budget_usd: float | None = None
+    consults_per_task: int | None = None
+    consults_per_step: int | None = None
+
+
 class LessonsMode(str, Enum):
     OFF = "off"
     DRAFT = "draft"
@@ -221,6 +261,13 @@ class ProjectExecution:
     room_consult_budget_usd: float | None = None
     room_consult_timeout_seconds: int | None = None
     room_consults_per_task: int | None = None
+    advisor: AdvisorMode | None = None
+    advisor_consult_budget_usd: float | None = None
+    advisor_budget_usd: float | None = None
+    advisor_consults_per_task: int | None = None
+    advisor_consults_per_step: int | None = None
+    advisor_fallback_profile: str | None = None
+    advisor_internal_domains: tuple[str, ...] | None = None
 
     def overlaid(self, workflow: Mapping[str, Any] | None) -> ProjectExecution:
         """Apply the immutable task workflow over the project's current settings."""
@@ -318,6 +365,17 @@ class ProjectExecution:
         return RoomLimits(**limits)
 
     @property
+    def advisor_on(self) -> bool:
+        """Whether the project's Planners consult the advisor: only when turned on."""
+        return self.advisor is AdvisorMode.ON
+
+    @property
+    def advisor_limits(self) -> AdvisorLimits:
+        return AdvisorLimits(**{field.removeprefix("advisor_"): value
+                                for field in (*ADVISOR_BUDGETS, *ADVISOR_COUNTS)
+                                if (value := getattr(self, field)) is not None})
+
+    @property
     def on_task_budget(self) -> TaskBudgetAction:
         return self.task_budget_action or TaskBudgetAction.FAIL
 
@@ -390,6 +448,27 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, UserGates)
     if field == "agent_room":
         return _choice(field, raw, AgentRoom)
+    if field == "advisor":
+        return _choice(field, raw, AdvisorMode)
+    if field in ADVISOR_BUDGETS:
+        low, high, default, what = ADVISOR_BUDGETS[field]
+        value = budget_usd(raw, field=field)
+        if value is None or not low <= value <= high:
+            unset = f"null for {default:g}" if default is not None else "null for no limit"
+            raise ValueError(f"{field} ({what}) must be from {low:g} to {high:g} USD, or {unset}")
+        return value
+    if field in ADVISOR_COUNTS:
+        low, high, _, what = ADVISOR_COUNTS[field]
+        if isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high:
+            raise ValueError(f"{field} ({what}) must be a whole number from {low} to {high}, or null for no limit")
+        return raw
+    if field == "advisor_fallback_profile":
+        if not isinstance(raw, str) or not raw.strip() or len(raw.strip()) > 200:
+            raise ValueError("advisor_fallback_profile must be an Agent Profile's name (1 to 200 characters), or "
+                             "null for none")
+        return raw.strip()
+    if field == "advisor_internal_domains":
+        return _domains(raw)
     if field == "room_consult_budget_usd":
         low, high = CONSULT_BUDGET_RANGE
         value = budget_usd(raw, field=field)
@@ -435,6 +514,22 @@ def _lessons_mode(raw: Any) -> LessonsMode:
         return LessonsMode(raw)
     except ValueError:
         raise ValueError("distill_lessons must be one of off, draft, write, or null for off") from None
+
+
+def _domains(raw: Any) -> tuple[str, ...] | None:
+    """Distinct domain names, lower case; [] is none."""
+    if not isinstance(raw, (list, tuple)) or not all(isinstance(item, str) for item in raw):
+        raise ValueError("advisor_internal_domains must be a list of domain names (such as corp.example), or null")
+    if len(raw) > ADVISOR_DOMAINS_MAX:
+        raise ValueError(f"advisor_internal_domains may have at most {ADVISOR_DOMAINS_MAX} domains, not {len(raw)}")
+    domains: list[str] = []
+    for index, item in enumerate(raw):
+        name = item.strip().strip(".").lower()
+        if not _DOMAIN.fullmatch(name):
+            raise ValueError(f"advisor_internal_domains[{index}] is not a domain name such as corp.example")
+        if name not in domains:
+            domains.append(name)
+    return tuple(domains) or None
 
 
 def _links(raw: Any, *, field: str = "workspace_links") -> tuple[str, ...] | None:

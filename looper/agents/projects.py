@@ -35,7 +35,7 @@ from typing import Any
 import asyncpg
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
-from ..db import projects as db_projects, schedules as db_schedules, tasks as db_tasks
+from ..db import ledger as db_ledger, projects as db_projects, schedules as db_schedules, tasks as db_tasks
 from .agent_settings import CONCURRENCY_MAX, PLANNER_CHOICE_ROLES, TASK_LIMIT_ROLES, AgentType, SettingsError
 from .agent_settings import concurrency, index_layers, task_agents_view
 from .agent_settings import TASK_ROLES, AgentSettings, Layer, resolve, resolve_task_concurrency
@@ -649,6 +649,7 @@ async def create_task_core(
         raise _name_taken(new_fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") from None
+    await db_ledger.register_task(task["task_id"])
     work_dir = task["work_dir"]
     shown = task["title"] or task["goal_id"] or task["task_id"]
     block = (await configuration_block(task["task_id"], shown, project, work_dir, new_project is not None,
@@ -882,6 +883,10 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
     from .tiers.journal import progress_notes
 
     ran_as = run_roles(await list_task_runs([task_id]), raw.get("steps", []))
+    from ..db.advisor_advice import consults_view, summary_line
+
+    consults = await consults_view(task_id)
+    consult_line = await summary_line(task_id) if consults else None
     overrides = await profile_overrides(task_id)
     versions = await requirement_versions(task_id)
     actions = await manager_actions(task_id)
@@ -964,6 +969,8 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
         # in a task with such runs.
         **({"run_roles": ran_as} if ran_as else {}),
+        # Its Planner's consults of the advisor, oldest first (advisor_advice.consults_view); only in a task with some.
+        **({"advisor": {"consults": consults, "summary": consult_line or ""}} if consults else {}),
         "origin_channel_id": raw.get("origin_channel_id", ""),
         "result_summary": raw.get("result_summary"),
         "process_record": raw.get("process_record"),
@@ -1040,6 +1047,13 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
     journal = task.get("journal") or []
     supplements = [entry for entry in journal if entry.get("kind") == db_changes.SUPPLEMENT]
     progress = [entry for entry in journal if entry.get("kind") == "progress"]
+    result = task.get("result_summary") or ""
+    if result and (await db_projects.get_task_project(task_id) or {}).get("advisor") != "on":
+        # What the model sees leaves out the advisor while its project has it off (the advisor RFC, section 13);
+        # the task's page keeps its history.
+        from ..db.advisor_advice import without_summary
+
+        result = without_summary(result)
     return {
         **task_listed(task),
         "workflow": task.get("workflow"),
@@ -1064,7 +1078,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
         "supplements": [{"text": clip(entry["summary"], 300), "delivered": entry.get("delivered_at") is not None}
                         for entry in supplements],
         "latest_progress": progress[-1]["summary"] if progress else None,
-        "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
+        "result": clip(result or task.get("error") or "", 1_000) or None,
         **({"process_record": process_record_text(task["process_record"])} if task.get("process_record") else {}),
         "cost_usd": (cost or {}).get("cost_usd"),
         # How many of its Workers and Reviewers run at once, with the source; its own limits (task).

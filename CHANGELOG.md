@@ -18,6 +18,31 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.21] - 2026-11-20
+
+### Added
+
+- **Subscription selection rules (default off).** ([#1446](https://github.com/foolzzz/looper/pull/1446)) Additive migration `subscription_rules`: `subscriptions.rules` (a JSON array, default `[]`), `subscriptions.config_epoch`, and on `subscription_runs` the columns `config`, `config_epoch` and `match_timeouts`. `subscriptions.render` accepts `lines_v2` as well as `lines_v1`. A subscription with no rules is unchanged. Rules, `lines_v2`, header counts and `never_quiet` do nothing until a subscription is created with them and its push target is confirmed. A subscription with no rules that reads only groups and topics (a gossip digest) keeps the same input, byte for byte, and the same `config_version`.
+- **A lookback window and a daily claim (default off).** ([#1447](https://github.com/foolzzz/looper/pull/1447)) Additive migration `subscription_lookback`: `subscriptions.window` (`cursor`, the default, or `lookback`), `subscriptions.delivery_policy` (`per_run`, the default, or `daily`), `subscription_runs.window_mode`, `subscription_runs.daily_date`, and the table `subscription_daily_claims`. Existing subscriptions stay on `cursor` and `per_run`. Nothing about a daily digest runs until one is created and its target is confirmed.
+- **A daily backup of message text (default off).** ([#1454](https://github.com/foolzzz/looper/pull/1454)) `[backup] messages = "daily"` in the ops file writes `source_events` (schema and rows) at most once a day and keeps the newest 7 copies. Omit the key, or set `"off"`, and serve neither writes nor deletes one. There is no environment variable.
+- **Advisor phase 1 groundwork (nothing starts a consult).** ([#1436](https://github.com/foolzzz/looper/pull/1436), [#1438](https://github.com/foolzzz/looper/pull/1438)) Additive migrations `run_tree` (`llm_records.parent_record_id`, `llm_records.run_kind`; online marker `run_tree_online` validates the constraints and builds `idx_llm_records_parent`), `step_difficulty` (`task_steps.difficulty`; online marker `step_difficulty_online` validates it), `agent_spawns` (tables `agent_spawns` and `advisor_advice`) and `advisor_roles` (the role check admits `advisor` and `advice_check`). Seeds add the profiles `claude-code/fable-5-2` and `claude-code/haiku-5-5`. The project switch `advisor` and the Planner side are not in this release. No task opens a consult.
+- **A read-only Manager completion turn (default off).** ([#1455](https://github.com/foolzzz/looper/pull/1455)) System setting `manager.completion_turns`: `off` (the default) or `dm_only`. While it is off, a task end is still the code notice. No new table.
+- **Message leads and intents, tables only (default off).** ([#1452](https://github.com/foolzzz/looper/pull/1452), [#1459](https://github.com/foolzzz/looper/pull/1459)) Additive migration `message_leads` creates `message_leads`, `message_lead_sources`, `message_lead_people`, `intent_types`, `intent_type_versions`, `intent_type_projects`, `message_chat_projects`, `intent_alert_senders`, `intents`, `intent_sources` and `intent_posts`; adds `source_chats.extraction` (default `included`) and `extraction_excluded_at`; widens `subscriptions.output_kind` so it also accepts `leads` and `intents`; and lets `subscription_runs.outcome` be `extracted`, with `extract_counts`. The write API still accepts only `output_kind` `push`. Migration `intent_merges` makes `intents.merged_into` `NO ACTION` and adds the `AFTER DELETE` trigger `A_intents_detach_merged`, which sets intents merged into a deleted one back to `pending`. No extraction run, tool, command or page uses these tables yet.
+
+### Changed
+
+- **A schema-change backup keeps the `source_events` schema and leaves out its rows.** ([#1454](https://github.com/foolzzz/looper/pull/1454)) Built-in `pg_dump`, and a `backup.command` whose program is `pg_dump` (including `docker exec ... pg_dump`), appends `--exclude-table-data=source_events`. The other message-stream tables keep their rows, as does delivered subscription output. A command that is not `pg_dump` is run as given and has to exclude that data itself. This applies on the next schema-changing start, with or without the daily message backup.
+- **Provider-priced Claude cache writes bill a one-hour entry at twice the input price.** ([#1438](https://github.com/foolzzz/looper/pull/1438)) `claude-fable-5-2` is 8 / 40 / 0.20 / 10 USD per million tokens, and 16 for a one-hour cache write. The `fable` alias resolves to it. Anthropic models in the built-in table bill a five-minute cache write at 1.25× input and a one-hour write at 2× input. A write whose duration is not known is billed at the one-hour rate. A run whose cost comes from the runtime's own report is unchanged.
+- **A new run record stores `run_kind`.** ([#1436](https://github.com/foolzzz/looper/pull/1436)) Older rows stay NULL. Readers still take a missing kind from the agent id. No prompt, tool list or command line changes.
+
+### Fixed
+
+- **Online schema steps no longer deadlock across processes.** ([#1453](https://github.com/foolzzz/looper/pull/1453)) After the schema transaction commits, validation and concurrent index builds take one database-wide session advisory lock, wait at most five seconds, and otherwise defer. A caller that is already inside a transaction defers too. Unmarked steps resume on a later start.
+
+### Documentation
+
+- **Message leads and intent recognition RFC.** ([#1450](https://github.com/foolzzz/looper/pull/1450)) Design and the parallel slices. No code or behavior change. The extraction, search tool, intent push and pages are not in this release.
+
 ## [2.15.20] - 2026-11-19
 
 ### Added
