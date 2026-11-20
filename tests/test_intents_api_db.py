@@ -157,3 +157,53 @@ def test_binding_templates_and_alert_allowlist_round_trip_with_declared_schemas(
             assert answers[6]["senders"][0]["messages_30d"] == 1 and answers[6]["candidates"] == []
             assert answers[7]["senders"] == []
     run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("state,expected", [
+    ("tasked", "I-0001 已经建过任务 task-synthetic。"),
+    ("rejected", "I-0001 已驳回过。"),
+    ("merged", "I-0001 已合并到 I-0002，请处理那一条。"),
+])
+def test_api_conflict_names_the_existing_outcome(monkeypatch, tmp_path, state, expected):
+    async def check(pool):
+        await stream.source(pool)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('intents.enabled','true')")
+        project = await projects.create_project(name="Synthetic project", work_dir=str(tmp_path))
+        await pool.execute("INSERT INTO tasks(id,project_id,title,requirement,work_dir,status) "
+                           "VALUES ('task-synthetic',$1,'Synthetic','Synthetic',$2,'completed')",
+                           project["id"], str(tmp_path))
+        event = await stream.add(pool, "Synthetic request", sent_at=datetime.now(timezone.utc))
+        iid = await leads.intent(pool, [event])
+        if state == "merged":
+            other = await leads.intent(pool, [event])
+            await pool.execute("UPDATE intents SET state='merged',merged_into=$2 WHERE id=$1", iid, other)
+        else:
+            await pool.execute("UPDATE intents SET state=$2,handled_at=now(),handled_via='dashboard',"
+                               "task_id=$3 WHERE id=$1", iid, state, "task-synthetic" if state == "tasked" else None)
+        async with v1_api(tmp_path, pool) as call:
+            for action in ("build", "reject"):
+                status, answer = await call(f"intents.{action}", {"intent_id": "I-1"})
+                assert status == 409, answer
+                assert answer["error"] == {"code": "conflict", "message": expected}
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("with_candidates", [False, True])
+def test_api_needs_project_returns_the_same_selection_instruction(monkeypatch, tmp_path, with_candidates):
+    async def check(pool):
+        await stream.source(pool)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('intents.enabled','true')")
+        event = await stream.add(pool, "Synthetic request", sent_at=datetime.now(timezone.utc))
+        await leads.intent(pool, [event])
+        if with_candidates:
+            project = await projects.create_project(name="Synthetic project", work_dir=str(tmp_path))
+            await pool.execute("INSERT INTO tasks(id,project_id,title,requirement,work_dir,status) "
+                               "VALUES ('task-candidate',$1,'Synthetic','Synthetic',$2,'completed')",
+                               project["id"], str(tmp_path))
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("intents.build", {"intent_id": "I-1"})
+            assert status == 409, answer
+            expected = ("项目：这个会话没有绑定项目。候选：1. Synthetic project\n回复「建 I-0001 <编号>」"
+                        if with_candidates else "请到意图页选择项目。")
+            assert answer["error"] == {"code": "conflict", "message": expected}
+    run_db(check, monkeypatch, timeout=30)
