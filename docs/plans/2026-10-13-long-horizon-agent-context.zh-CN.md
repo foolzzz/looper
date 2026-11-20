@@ -558,6 +558,11 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-19 | 发布 v2.15.19：包含账本 L1 与迁移 `ledger`（#1434，默认关闭）、Tasks 页一次按多个状态筛选且默认显示未完成（#1440）、两个负载敏感测试改为确定结果（#1442）、去掉仪表盘 Runs 页（#1443，后端运行 API 保留）。 |
+| 2026-11-19 | Manager 收尾 M8 L1：账本表、唯一写入者与命令行（#1434，已合入，默认关闭）：迁移 `ledger` 创建 `ledger_items` 和 `ledger_events`（只有 DDL，不写账本行）。唯一写入者是 `db.ledger.apply`。`looper ledger` 的 `list`、`show`、`add`、`close`、`confirm` 直接读写数据库，服务停着也能用；写入记为用户、`via=cli`，必须带 `--session`，环境变量 `LOOPER_AGENT_RUN` 已设置时拒绝（退出码 4），本版本还不会给 agent 运行设置这个变量。只读 `POST /api/v1/ledger/list` 和 `POST /api/v1/ledger/get`（操作员和 API 客户端，不是 Manager 工具）。系统设置 `ledger.enabled` 不为 `true`（没有这一行也算关闭）时，命令行退出码 3，两个读接口返回 `conflict`，提示词、工具列表和 agent 命令行都不提账本。没有仪表盘开关、HTTP 写入、自动登记和待办页。 |
+| 2026-11-19 | Tasks 页一次按多个状态筛选（#1440，已合入）：地址里没有 `status`、`group`、`schedule` 时，默认是 Ready、Running、Waiting、Waiting for you、Pending（`#tasks?project=` 仍用这个默认）。群和定时任务的链接不加状态，列出该组或该定时任务的全部任务；单独的 `scheduled=include` 不关掉默认。Waiting for you 计数为 0 时不显示，除非它是唯一选中项。`POST /api/v1/tasks/page` 新增可选 `statuses`（1 到 10 个、与 `status` 相同的名字，取并集）；省略 `status` 和 `statuses` 仍返回全部任务，两者同传或未知名字是非法参数，`counts` 仍按每个筛选计数。Telegram、Lark、CLI 和 Manager 的紧凑列表不传 `statuses`，不用改。 |
+| 2026-11-19 | 两个受负载影响的测试改为确定结果（#1442，已合入，只改测试）：启动自检的测试把等待探测开始放宽到 10 秒、探测睡眠改为 8 秒，检查的仍是慢的建议检查期间 HTTP 照常应答；房间测试改为 `post` 返回后再读收件箱。生产代码未改动。 |
+| 2026-11-19 | 仪表盘去掉 Runs 页（#1443，已合入）：删除该页、路由和侧栏入口。旧的 `#runs` 与带角色的 `#runs/` 转到 History；角色是 manager、planner、worker、reviewer、processor 时保留筛选，其他角色打开不筛选的 History 且不请求列表。Settings → Roles 的 Its runs 和 Manager 安装说明改链到按角色筛选的 History。打开一条运行时，在 Plugins & skills 旁边、`metadata.runtime_catalog.skipped` 非空时列出这些跳过项。后端运行 API 保留，History、Chat、任务、CLI 和 `/api/v1/runs` 仍用它们。 |
 | 2026-11-19 | 发布 v2.15.18：包含不写死运行时（#1417）、任务结束事件入库与 `manager_events` 迁移（#1431）、飞书引用并行读取测试稳定化（#1429）。 |
 | 2026-11-19 | Manager 收尾 M8 C1：任务结束事件入库（#1431，已合入）：新增 `manager_events` 表（迁移 `manager_events`），Manager 的任务结束处理（dashboard、私聊、群聊，只记 `completed`、`failed`）和定时任务发到聊天的运行消息各写一行，状态 `skipped`、原因 `off`，通知照旧发送并记 `sent_at`；同一 `dedupe_key` 重放只记一行且不再重发，`sent_at` 为空时补发；写库失败只记日志、通知照发。housekeeping 删 30 天前的事件，仅操作员的 `manager_events.summary` 给出近 24 小时按状态与原因的计数。没有改动提示词、工具列表和命令行。 |
 | 2026-11-19 | 飞书引用并行读取测试稳定化（#1429，已合入，只改测试）：两个并行读取测试原来从替身的日志推断调用，被提前杀掉的单条读取在解释器启动前不留日志；改为用 `launched` fixture 在 Looper 启动子进程时记录，并把首次尝试放宽到 2 秒。30 次顺序和 30 次 `-n 8` 并行全部通过。 |
