@@ -447,11 +447,8 @@ def test_unusual_rows_warn_and_keep_bridge_reading(bridge_source, caplog, damage
             if table == "tasks":
                 assert json.loads(after[0]["config"]) == {}
             elif table == "llm_records":
-                # The run tree's columns are added: a kind where the agent id says one, never a parent.
-                from looper.db.llm_records import run_kind_of
-
-                assert after == [{**r, "parent_record_id": None, "run_kind": run_kind_of(r["agent_id"])}
-                                 for r in before]
+                # The run tree's columns are added and no row is rewritten: older rows have no kind and no parent.
+                assert after == [{**r, "parent_record_id": None, "run_kind": None} for r in before]
             else:
                 assert after == before
             assert any(r.levelname == "WARNING" and identity in r.message for r in caplog.records)

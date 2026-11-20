@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import asyncpg
 import pytest
 
 from looper import child_env
@@ -81,49 +82,103 @@ async def _shape(conn: Any) -> dict[str, Any]:
         "WHERE table_schema = current_schema() AND table_name = ANY($1) ORDER BY table_name, ordinal_position",
         tables)
     constraints = await conn.fetch(
-        "SELECT conrelid::regclass::text AS tbl, conname, pg_get_constraintdef(oid) AS def FROM pg_constraint "
-        "WHERE conrelid = ANY(SELECT to_regclass(t) FROM unnest($1::text[]) AS t) ORDER BY 1, 2", tables)
+        "SELECT conrelid::regclass::text AS tbl, conname, pg_get_constraintdef(oid) AS def, convalidated "
+        "FROM pg_constraint WHERE conrelid = ANY(SELECT to_regclass(t) FROM unnest($1::text[]) AS t) ORDER BY 1, 2",
+        tables)
     indexes = await conn.fetch(
-        "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+        "SELECT tablename, indexname, indexdef, i.indisvalid FROM pg_indexes "
+        "JOIN pg_index i ON i.indexrelid = to_regclass(indexname) WHERE schemaname = current_schema() "
         "AND tablename = ANY($1) ORDER BY 1, 2", tables)
     return {"columns": [dict(r) for r in columns], "constraints": [dict(r) for r in constraints],
             "indexes": [{**dict(r), "indexdef": r["indexdef"].split(" ON ", 1)[1]} for r in indexes]}
 
 
-def test_a_database_from_before_the_run_tree_gets_it_with_run_kinds_backfilled_and_the_fresh_shape() -> None:
+async def _before_the_run_tree(conn: Any) -> None:
+    """The database as it was before: no run tree, no spawn tables, no step difficulty, no markers for them."""
+    await conn.execute("DROP TABLE advisor_advice, agent_spawns")
+    await conn.execute("ALTER TABLE llm_records DROP COLUMN parent_record_id, DROP COLUMN run_kind")
+    await conn.execute("ALTER TABLE task_steps DROP COLUMN difficulty")
+    await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1)", [
+        "run_tree", "agent_spawns", "step_difficulty", "run_tree_online", "step_difficulty_online"])
+
+
+def test_a_database_from_before_the_run_tree_gets_it_without_a_row_rewritten_and_with_the_fresh_shape() -> None:
     from looper.db import connection
+    from looper.db.llm_records import RUN_KIND
 
     async def main() -> None:
         async with fresh_connection(command_timeout=60) as conn:
             await connection.ensure_schema(conn)
             fresh = await _shape(conn)
-            # The database as it was before: no run tree, no spawn tables, no step difficulty, no markers for them.
-            await conn.execute("DROP TABLE advisor_advice, agent_spawns")
-            await conn.execute("ALTER TABLE llm_records DROP COLUMN parent_record_id, DROP COLUMN run_kind")
-            await conn.execute("ALTER TABLE task_steps DROP COLUMN difficulty")
-            await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1)",
-                               ["run_tree", "agent_spawns", "step_difficulty"])
+            await _before_the_run_tree(conn)
             agents = ["manager", "manager-ops", "planner-t1", "worker-0a1b2c3d4e5f", "reviewer-0a1b2c3d4e5f",
                       "processor:sched-1", "consult-0a1b2c3d4e5f", "gate-run-1", "managerx", "planner_x"]
             for agent in agents:
                 await conn.execute("INSERT INTO llm_records (agent_id) VALUES ($1)", agent)
+            rows = "SELECT id, ctid::text, xmin::text FROM llm_records ORDER BY id"
+            before = [tuple(r) for r in await conn.fetch(rows)]
             assert await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
             assert not await connection.schema_change_pending(conn)
-            kinds = {r["agent_id"]: r["run_kind"] for r in await conn.fetch("SELECT agent_id, run_kind FROM llm_records")}
+            # No row was rewritten: each keeps its place and the transaction that wrote it.
+            assert [tuple(r) for r in await conn.fetch(rows)] == before
+            assert await conn.fetchval("SELECT count(*) FROM llm_records WHERE run_kind IS NOT NULL "
+                                       "OR parent_record_id IS NOT NULL") == 0
+            # Readers take an older row's kind from its agent id.
+            kinds = {r["agent_id"]: r["kind"] for r in await conn.fetch(f"SELECT agent_id, {RUN_KIND} AS kind "
+                                                                           "FROM llm_records")}
             assert kinds == {"manager": "manager", "manager-ops": "manager", "planner-t1": "planner",
                              "worker-0a1b2c3d4e5f": "worker", "reviewer-0a1b2c3d4e5f": "reviewer",
                              "processor:sched-1": "processor", "consult-0a1b2c3d4e5f": "consult",
                              "gate-run-1": None, "managerx": None, "planner_x": None}
-            assert await conn.fetchval("SELECT count(*) FROM llm_records WHERE parent_record_id IS NOT NULL") == 0
             markers = {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
-            assert {"run_tree", "agent_spawns", "step_difficulty"} <= markers
-            assert await _shape(conn) == fresh
+            assert {"run_tree", "agent_spawns", "step_difficulty", "run_tree_online",
+                    "step_difficulty_online"} <= markers
+            assert await _shape(conn) == fresh  # its constraints validated and its index valid, as a fresh one's
             # A marked database is never repaired: dropping a column again leaves it dropped.
             await conn.execute("ALTER TABLE task_steps DROP COLUMN difficulty")
             await connection.ensure_schema(conn)
             assert ("task_steps", "difficulty") not in {
                 (r["table_name"], r["column_name"]) for r in (await _shape(conn))["columns"]}
+
+    asyncio.run(main())
+
+
+def test_a_start_stopped_after_the_run_tree_committed_finishes_it_on_the_next_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import connection
+
+    async def stopped(conn: Any) -> None:
+        return None
+
+    async def main() -> None:
+        async with fresh_connection(command_timeout=60) as conn:
+            await connection.ensure_schema(conn)
+            fresh = await _shape(conn)
+            await _before_the_run_tree(conn)
+            with monkeypatch.context() as patch:  # the start stops once the schema transaction committed
+                patch.setattr(connection, "_finish_online", stopped)
+                await connection.ensure_schema(conn)
+            shape = await _shape(conn)
+            assert not {c["conname"]: c["convalidated"] for c in shape["constraints"]}[
+                "llm_records_run_kind_check"]
+            assert "idx_llm_records_parent" not in {i["indexname"] for i in shape["indexes"]}
+            assert not {"run_tree_online", "step_difficulty_online"} & {
+                r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
+            # A concurrent build that stopped leaves an invalid index (here a unique one two children break); the
+            # next start drops and rebuilds it.
+            parent = await conn.fetchval("INSERT INTO llm_records (agent_id) VALUES ('planner-t1') RETURNING id")
+            for child in ("advisor-0a1b2c3d4e5f", "advice_check-0a1b2c3d4e5f"):
+                await conn.execute("INSERT INTO llm_records (agent_id, parent_record_id) VALUES ($1, $2)", child,
+                                   parent)
+            with pytest.raises(asyncpg.UniqueViolationError):
+                await conn.execute("CREATE UNIQUE INDEX CONCURRENTLY idx_llm_records_parent "
+                                   "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL")
+            assert not await conn.fetchval("SELECT indisvalid FROM pg_index "
+                                           "WHERE indexrelid = to_regclass('idx_llm_records_parent')")
+            await connection.ensure_schema(conn)
+            assert await _shape(conn) == fresh
 
     asyncio.run(main())
 
