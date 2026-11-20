@@ -129,6 +129,7 @@ class PiRuntime(RuntimeAdapter):
     room_receipt_fallback = False
     label = "pi"
     streams_usage = True
+    reports_request_context = True
     default_executable = "pi"
     # MCP means the Looper platform bridge only; catalog MCP is recorded as skipped.
     capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME, Capability.STEER,
