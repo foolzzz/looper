@@ -50,6 +50,13 @@ class LarkTransport(Protocol):
     async def aclose(self) -> None: ...
 
 
+# All protocol writes require explicit wrappers. Forward only reviewed reads/receive state, so a newly added
+# transport write cannot silently bypass the gateway even before it is added to the protocol.
+LARK_WRITE_METHODS: frozenset[str] = frozenset({'send', 'reply', 'edit', 'react'})
+_LARK_READ_ATTRIBUTES = frozenset({'download', 'events', 'names', 'available', 'consumer_started',
+                                 'get_message', 'list_messages', 'list_threads', 'list_thread_messages'})
+
+
 def _batch_items(batch: asyncio.Future[dict[str, Any]], message_id: str) -> list[dict[str, Any]] | None:
     """The batch read's answer when it stands for the single read's: the message alone, not recalled (the single
     read says why), and neither a merged forward nor a card; else None."""
@@ -377,6 +384,8 @@ class GatedLarkTransport:
         return getattr(self.inner, "kind", None)
 
     def __getattr__(self, name: str) -> Any:
+        if name in LARK_WRITE_METHODS or name not in _LARK_READ_ATTRIBUTES:
+            raise AttributeError(f"{type(self).__name__} has no gated method {name!r}")
         return getattr(self.inner, name)
 
     @contextmanager

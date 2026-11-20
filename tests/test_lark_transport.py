@@ -658,8 +658,8 @@ def test_make_adapter_selects_the_domain_and_keeps_the_bot_channel_identity(
         assert made == [("cli_example", "example-secret", expected)]
         assert "example-secret" not in str(adapter.healthcheck())
         assert adapter._backoff is True
-        assert adapter._transport._admit({"sender_id": OPEN_ID}) is True
-        assert adapter._transport._admit({"sender_id": OTHER_ID}) is False
+        assert adapter._transport.inner._admit({"sender_id": OPEN_ID}) is True
+        assert adapter._transport.inner._admit({"sender_id": OTHER_ID}) is False
         await adapter.stop()
 
     asyncio.run(main())
@@ -850,3 +850,24 @@ def test_disabled_outbound_ignores_malformed_reply_route():
         receipt = await adapter.deliver(envelope)
         assert receipt.success is False and receipt.failure is DeliveryFailure.NO_CHAT
     asyncio.run(check())
+
+
+def test_protocol_writes_require_explicit_gateway_wrappers():
+    from looper.agents.channels import lark_transport as transport
+
+    reads = {'download', 'events', 'names', 'available', 'aclose'}
+    methods = {name for name, value in vars(transport.LarkTransport).items()
+               if not name.startswith('_') and callable(value)}
+    assert methods - reads == transport.LARK_WRITE_METHODS
+    assert all(name in vars(transport.GatedLarkTransport) for name in transport.LARK_WRITE_METHODS)
+
+
+def test_unknown_transport_write_cannot_bypass_gateway():
+    from looper.agents.channels.lark_transport import GatedLarkTransport
+    from looper.agents.channels.outbound import Gateway
+
+    inner = CliTransport()
+    inner.send_card = lambda: None
+    wrapped = GatedLarkTransport(inner, Gateway('synthetic'), enabled=lambda: True)
+    with pytest.raises(AttributeError):
+        wrapped.send_card
