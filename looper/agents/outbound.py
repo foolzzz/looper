@@ -349,7 +349,10 @@ class _Run:
 async def review(action: Action, asker: Asker, origin: Origin, *, context: Sequence[tuple[str, str]] = (),
                  runtime_root: Path, claude_bin: str = "claude") -> Review:
     """Review ``action``: blocked by code in a turn that is not the operator's, else the classifier's verdict, or
-    blocked when it gives none. Writes the audit row; when that fails, the action is blocked too."""
+    blocked when it gives none. Writes the audit row; when that fails, the action is blocked too. Only an
+    ``external`` or ``unknown`` action is reviewed: asking about another is the caller's mistake."""
+    if action.level not in REVIEWED:
+        raise ValueError(f"{action.level.value} actions are not reviewed")
     run = _Run()
     if asker.who is not Who.OPERATOR:
         return await _record(action, origin, Decision.BLOCK, _FAILURE_REASONS[Failure.NOT_OPERATOR], (),

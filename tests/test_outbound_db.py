@@ -191,10 +191,14 @@ def test_a_blocked_action_keeps_the_classifiers_reason_and_signals(monkeypatch: 
 def test_an_action_in_a_turn_that_is_not_the_operators_is_blocked_by_code_without_a_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    from looper.agents.outbound import ActionLevel
+
     async def test(pool: Any) -> None:
         for who in ("allowlisted_person", "group_member", "autonomous"):
             review = await _review(tmp_path, who=who)
             assert not review.allowed and review.failure.value == "not_operator" and review.record_id is None
+        with pytest.raises(ValueError, match="origin actions are not reviewed"):
+            await _review(tmp_path, action=_action(level=ActionLevel.ORIGIN))
         assert _seen(tmp_path) == []
         rows = await pool.fetch("SELECT verdict, failure, record_id, cost_usd FROM outbound_reviews")
         assert [tuple(r) for r in rows] == [("block", "not_operator", None, None)] * 3
