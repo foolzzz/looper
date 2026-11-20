@@ -32,7 +32,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import processor, subscriptions
+from . import processor, subscription_rules, subscriptions
 from .channels.base import PostOutcome
 from .message import builtin_channel_id
 from .task_notice import NotifyTarget, TargetKind
@@ -61,6 +61,13 @@ def push_target(channel: str, chat: str) -> NotifyTarget:
                         group=chat.startswith(("oc_", "-")))
 
 
+async def _matcher(db: Any, sub: Mapping[str, Any]) -> subscription_rules.Matcher | None:
+    """The subscription's rules for one window, or None when it selects with its own filter."""
+    if not sub.get("rules"):
+        return None
+    return subscription_rules.Matcher(sub["rules"], me=await db_subs.source_user(db, sub["source_id"]))
+
+
 class SubscriptionRuns:
     """The runs of subscriptions of one server: planning inside the scheduler's transaction, executing and settling."""
 
@@ -87,22 +94,30 @@ class SubscriptionRuns:
         if to_seq is None or to_seq <= from_seq:
             return None
         picked = await db_subs.window(conn, sub, from_seq=from_seq, to_seq=to_seq, now=now,
-                                      own_apps=await self._own_apps())
+                                      own_apps=await self._own_apps(), matcher=await _matcher(conn, sub))
         if not picked["rows"]:
             await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=to_seq, at=now)
             return None
         version = await subscriptions.config_version(schedule)
         confirmed = (sub["target_confirmed_at"] is not None and sub.get("target_confirmed_version") == version
                      and schedule.get("notify_channel") and schedule["notify"] != "never")
+        if confirmed:  # a target that private content may not go to is not pinned: the output stays on the dashboard
+            try:
+                subscriptions.check_private_target(sub, schedule["notify_channel"], schedule["notify_chat"],
+                                                   await db_subs.source_user(conn, sub["source_id"]))
+            except ValueError:
+                confirmed = False
         return {"from_seq": from_seq, "to_seq": to_seq, **picked,
                 "target": (schedule["notify_channel"], schedule["notify_chat"]) if confirmed else None,
-                "config_version": version if confirmed else None}
+                "config_version": version if confirmed else None, "config": db_subs.snapshot(sub),
+                "config_epoch": sub["config_epoch"], "match_timeouts": int(picked["match_timed_out"])}
 
     async def record(self, conn: asyncpg.Connection, run_id: str, window: Mapping[str, Any]) -> None:
         await db_subs.insert_run(conn, run_id, from_seq=window["from_seq"], to_seq=window["to_seq"],
                                  in_window=window["in_window"], selected=len(window["rows"]),
                                  too_old=window["too_old"], over_cap=window["over_cap"], target=window["target"],
-                                 config_version=window["config_version"])
+                                 config_version=window["config_version"], config=window["config"],
+                                 config_epoch=window["config_epoch"], match_timeouts=window["match_timeouts"])
 
     # --- Executing ---
 
@@ -130,16 +145,19 @@ class SubscriptionRuns:
         stream = await db_subs.get_run(run_id)
         if run is None or schedule is None or stream is None or run["status"] != db_schedules.RUNNING:
             return
-        sub = schedule["subscription"]
+        # The run selects, renders and writes with the configuration it started with (``subscription_runs.config``): a
+        # subscription changed meanwhile, and changed back, does not make it read what it was not meant to.
+        sub = {**schedule["subscription"], **(stream["config"] or {})}
         pool = db_connection.get_pool()
         picked = await db_subs.window(pool, sub, from_seq=stream["from_seq"], to_seq=stream["to_seq"],
-                                      now=run["fired_at"], own_apps=await self._own_apps())
+                                      now=run["fired_at"], own_apps=await self._own_apps(),
+                                      matcher=await _matcher(pool, sub))
         if not picked["rows"]:  # every message of it was deleted since the run was planned
             await self._end(run_id, status="completed", outcome="quiet", summary="the window's messages were deleted",
                             advance=True)
             return
         text = subscriptions.processor_input(picked["rows"], text_max_chars=sub["text_max_chars"],
-                                             zone_name=schedule["timezone"])
+                                             zone_name=schedule["timezone"], render=sub["render"], rules=sub["rules"])
         if self._runtime_root is None:
             await self._end(run_id, status="failed", outcome="failed", error="this server cannot run a processor")
             return
@@ -161,10 +179,17 @@ class SubscriptionRuns:
             return
         reply = result.reply or ""
         if subscriptions.is_quiet(reply, sub["quiet_word"]):
-            await self._end(run_id, status="completed", outcome="quiet", cost=result.cost_usd, advance=True,
-                            summary="没有内容（处理器回复了静默词）")
-            return
-        message = subscriptions.push_text(reply, sub["output_header"])
+            # What a rule says must never be quiet is listed by code, as the processor's own output would be pushed.
+            reply = subscription_rules.fallback_text(picked["rows"], sub["rules"]) if sub["rules"] else ""
+            if not reply:
+                await self._end(run_id, status="completed", outcome="quiet", cost=result.cost_usd, advance=True,
+                                summary="没有内容（处理器回复了静默词）")
+                return
+        header = sub["output_header"]
+        if sub["rules"]:
+            header = subscription_rules.format_header(header, subscription_rules.counts(picked["rows"], sub["rules"]),
+                                                     len(picked["rows"]))
+        message = subscriptions.push_text(reply, header)
         if not message:
             await self._end(run_id, status="failed", outcome="output_invalid", cost=result.cost_usd,
                             error="the reply was empty once its @ marks were removed")
@@ -200,6 +225,13 @@ class SubscriptionRuns:
             return "the schedule is gone"
         sub = schedule["subscription"]
         pinned = (stream["target_channel"], stream["target_chat"])
+        if stream["config_epoch"] is not None and sub["config_epoch"] != stream["config_epoch"]:
+            return "the subscription was changed since the run started (even if changed back)"
+        try:  # what the run selected may not go to a target that is not the operator's own direct chat
+            subscriptions.check_private_target({**sub, **(stream["config"] or {})}, *pinned,
+                                               await db_subs.source_user(db_connection.get_pool(), sub["source_id"]))
+        except ValueError:
+            return "it can select private messages and its target is not your own direct chat"
         if (schedule.get("notify_channel"), schedule.get("notify_chat")) != pinned:
             return "its push target was changed"
         if schedule["notify"] == "never":

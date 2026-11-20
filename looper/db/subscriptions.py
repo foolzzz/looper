@@ -9,7 +9,8 @@ where the run started (``advance_cursor``): a reset made meanwhile wins.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection, Mapping, Sequence
+import json
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -22,7 +23,7 @@ Db = asyncpg.Pool | asyncpg.Connection
 # What a request sets on a subscription (``looper/agents/subscriptions.py`` validates it).
 FIELDS = ("source_id", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds", "exclude_mentions_me",
           "include_history", "max_age_minutes", "max_events", "render", "text_max_chars", "quiet_word",
-          "output_header", "output_kind")
+          "output_header", "output_kind", "rules")
 STATE_COLUMNS = ("cursor_seq", "cursor_at", "target_confirmed_at", "target_confirmed_version")
 CHAT_KINDS = ("p2p", "group", "topic", "unknown")
 SENDER_KINDS = ("user", "app")
@@ -32,25 +33,40 @@ def _db(db: Db | None) -> Db:
     return db if db is not None else get_pool()
 
 
+def _row(row: Mapping[str, Any]) -> dict[str, Any]:
+    found = dict(row)
+    if isinstance(found.get("rules"), str):
+        found["rules"] = json.loads(found["rules"])
+    return found
+
+
+def _marks(names: Sequence[str], first: int) -> list[str]:
+    return [f"${i}::jsonb" if name == "rules" else f"${i}" for i, name in enumerate(names, first)]
+
+
+def _value(name: str, value: Any) -> Any:
+    return json.dumps(value, ensure_ascii=False) if name == "rules" else value
+
+
 async def get(schedule_id: str, *, db: Db | None = None) -> dict[str, Any] | None:
     row = await _db(db).fetchrow("SELECT * FROM subscriptions WHERE schedule_id = $1", schedule_id)
-    return dict(row) if row else None
+    return _row(row) if row else None
 
 
 async def get_many(schedule_ids: Sequence[str], *, db: Db | None = None) -> dict[str, dict[str, Any]]:
     rows = await _db(db).fetch("SELECT * FROM subscriptions WHERE schedule_id = ANY($1::text[])", list(schedule_ids))
-    return {row["schedule_id"]: dict(row) for row in rows}
+    return {row["schedule_id"]: _row(row) for row in rows}
 
 
 async def create(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str, Any]) -> None:
     """The subscription of a new schedule; its cursor starts at its source's ``committed_seq``, so it reads what
     arrives after it exists."""
     names = [name for name in FIELDS if name in fields]
-    placeholders = ", ".join(f"${i}" for i in range(2, len(names) + 2))
+    placeholders = ", ".join(_marks(names, 2))
     await conn.execute(
         f"INSERT INTO subscriptions (schedule_id, {', '.join(names)}, cursor_seq, cursor_at) "
         f"SELECT $1, {placeholders}, s.committed_seq, now() FROM event_sources s WHERE s.id = ${len(names) + 2}",
-        schedule_id, *(fields[name] for name in names), fields["source_id"])
+        schedule_id, *(_value(name, fields[name]) for name in names), fields["source_id"])
 
 
 async def update(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str, Any]) -> None:
@@ -58,9 +74,9 @@ async def update(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str
     names = [name for name in (*FIELDS, *STATE_COLUMNS) if name in fields]
     if not names:
         return
-    sets = ", ".join(f"{name} = ${i}" for i, name in enumerate(names, 2))
+    sets = ", ".join(f"{name} = {mark}" for name, mark in zip(names, _marks(names, 2)))
     await conn.execute(f"UPDATE subscriptions SET {sets} WHERE schedule_id = $1", schedule_id,
-                       *(fields[name] for name in names))
+                       *(_value(name, fields[name]) for name in names))
 
 
 async def committed_seq(conn: Db, source_id: str) -> int | None:
@@ -125,12 +141,23 @@ async def advance_cursor(conn: asyncpg.Connection, schedule_id: str, *, from_seq
     return result.endswith(" 1")
 
 
+async def source_user(conn: Db, source_id: str) -> str | None:
+    """The user the source is bound to (whose messages ``exclude_self`` leaves out and whose @-mentions are marked)."""
+    return await conn.fetchval("SELECT user_open_id FROM event_sources WHERE id = $1", source_id)
+
+
 async def window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int, now: datetime,
-                 own_apps: Collection[str]) -> dict[str, Any]:
+                 own_apps: Collection[str], matcher: Callable[[Mapping[str, Any]], int | None] | None = None
+                 ) -> dict[str, Any]:
     """What the subscription selects from the events after ``from_seq`` up to ``to_seq``: ``in_window`` (every event
     stored in that range), ``too_old`` (selected by the filter but sent before ``max_age_minutes``), ``over_cap``
     (older than the newest ``max_events``) and ``rows``, newest first, with the chat's and the sender's names.
-    Messages of Looper's own apps are never selected, whatever the filter says."""
+    Messages of Looper's own apps are never selected, whatever the filter says. With a ``matcher`` (the rules of the
+    subscription) an event is selected when it returns an index, kept on the row as ``rule``; the subscription's own
+    chat, sender and @me filter is then not applied."""
+    if matcher is not None:
+        return await _rules_window(conn, sub, from_seq=from_seq, to_seq=to_seq, now=now, own_apps=own_apps,
+                                   matcher=matcher)
     found = await conn.fetch(
         """
         WITH base AS (
@@ -158,24 +185,80 @@ async def window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int
     fresh = [dict(row) for row in found if row["fresh"]]
     kept = fresh[:sub["max_events"]]
     return {"in_window": in_window, "too_old": len(found) - len(fresh), "over_cap": len(fresh) - len(kept),
-            "rows": kept}
+            "rows": kept, "match_timed_out": False}
+
+
+async def _rules_window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int, now: datetime,
+                        own_apps: Collection[str], matcher: Callable[[Mapping[str, Any]], int | None]) -> dict[str, Any]:
+    found = await conn.fetch(
+        """
+        SELECT e.seq, e.sent_at, e.chat_id, e.sender_id, e.sender_kind, e.text, e.mentions_me, c.kind AS chat_kind,
+               c.name AS chat_name, p.name AS sender_name,
+               e.sent_at >= $4::timestamptz - make_interval(mins => $5) AS fresh
+        FROM source_events e
+        JOIN source_chats c ON c.source_id = e.source_id AND c.chat_id = e.chat_id
+        LEFT JOIN source_people p ON p.source_id = e.source_id AND p.open_id = e.sender_id
+        WHERE e.source_id = $1 AND e.seq > $2 AND e.seq <= $3 AND c.inclusion = 'included'
+          AND ($6::boolean OR e.origin = 'live')
+          AND NOT (e.sender_kind = 'app' AND e.sender_id = ANY($7::text[]))
+        ORDER BY e.sent_at DESC, e.seq DESC
+        """,
+        sub["source_id"], from_seq, to_seq, now, sub["max_age_minutes"], sub["include_history"], list(own_apps))
+    in_window = await conn.fetchval("SELECT count(*) FROM source_events WHERE source_id = $1 AND seq > $2 AND seq <= $3",
+                                    sub["source_id"], from_seq, to_seq)
+    prepare = getattr(matcher, "prepare", None)
+    if prepare is not None:  # the text patterns run in a process that is killed at its deadline
+        await prepare(found)
+    chosen = []
+    for row in found:
+        rule = matcher(row)
+        if rule is not None:
+            chosen.append({**dict(row), "rule": rule})
+    fresh = [row for row in chosen if row["fresh"]]
+    kept = fresh[:sub["max_events"]]
+    return {"in_window": in_window, "too_old": len(chosen) - len(fresh), "over_cap": len(fresh) - len(kept),
+            "rows": kept, "match_timed_out": bool(getattr(matcher, "timed_out", False))}
+
+
+async def bump_epoch(conn: asyncpg.Connection, schedule_id: str) -> None:
+    """Count a change to what a push depends on (``config_epoch`` in the schema)."""
+    await conn.execute("UPDATE subscriptions SET config_epoch = config_epoch + 1 WHERE schedule_id = $1", schedule_id)
+
+
+async def epoch(schedule_id: str, *, db: Db | None = None) -> int | None:
+    return await _db(db).fetchval("SELECT config_epoch FROM subscriptions WHERE schedule_id = $1", schedule_id)
+
+
+def snapshot(sub: Mapping[str, Any]) -> dict[str, Any]:
+    """What a run selects and writes with: the subscription's request fields, as they are when it starts."""
+    return {name: (list(sub[name]) if isinstance(sub[name], (list, tuple)) else sub[name]) for name in FIELDS}
 
 
 async def insert_run(conn: asyncpg.Connection, run_id: str, *, from_seq: int, to_seq: int, in_window: int,
                      selected: int, too_old: int, over_cap: int, target: tuple[str, str] | None = None,
-                     config_version: str | None = None) -> None:
+                     config_version: str | None = None, config: Mapping[str, Any] | None = None,
+                     config_epoch: int | None = None, match_timeouts: int = 0) -> None:
     """The run's window and, when it started with its push target confirmed, where it may push and under which
     configuration (``config_version``)."""
     await conn.execute(
         "INSERT INTO subscription_runs (run_id, from_seq, to_seq, events_in_window, events_selected, events_too_old, "
-        "events_over_cap, target_channel, target_chat, config_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "events_over_cap, target_channel, target_chat, config_version, config, config_epoch, match_timeouts) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)",
         run_id, from_seq, to_seq, in_window, selected, too_old, over_cap, target[0] if target else None,
-        target[1] if target else None, config_version)
+        target[1] if target else None, config_version, json.dumps(config, ensure_ascii=False) if config is not None else None,
+        config_epoch, match_timeouts)
+
+
+def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    found = dict(row)
+    if isinstance(found.get("config"), str):
+        found["config"] = json.loads(found["config"])
+    return found
 
 
 async def get_run(run_id: str, *, db: Db | None = None) -> dict[str, Any] | None:
     row = await _db(db).fetchrow("SELECT * FROM subscription_runs WHERE run_id = $1", run_id)
-    return dict(row) if row else None
+    return _run_row(row) if row else None
 
 
 async def get_runs(run_ids: Sequence[str], *, db: Db | None = None) -> dict[str, dict[str, Any]]:

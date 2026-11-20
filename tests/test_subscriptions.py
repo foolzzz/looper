@@ -25,7 +25,7 @@ def test_a_new_subscription_names_what_it_reads():
     ("chat_kinds", []), ("chat_kinds", ["channel"]), ("sender_kinds", ["bot"]), ("max_age_minutes", 4),
     ("max_age_minutes", 10081), ("max_events", 0), ("max_events", 2001), ("text_max_chars", 19),
     ("text_max_chars", True), ("quiet_word", "two words"), ("quiet_word", ""), ("exclude_mentions_me", "yes"),
-    ("render", "lines_v2"), ("output_kind", "memory"), ("include_chats", "oc_x"), ("output_header", "x" * 201),
+    ("output_kind", "memory"), ("include_chats", "oc_x"), ("output_header", "x" * 201),
     ("source_id", " "), ("cursor_seq", 5), ("target_confirmed_at", "2026-01-01"), ("unknown", 1)])
 def test_an_invalid_field_is_refused_and_named(field, value):
     with pytest.raises(ValueError, match=field):

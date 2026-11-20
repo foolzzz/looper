@@ -1605,7 +1605,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     include_history     BOOLEAN NOT NULL DEFAULT false,
     max_age_minutes     INTEGER NOT NULL CHECK (max_age_minutes BETWEEN 5 AND 10080),
     max_events          INTEGER NOT NULL CHECK (max_events BETWEEN 1 AND 2000),
-    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1')),
+    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1', 'lines_v2')),
     text_max_chars      INTEGER NOT NULL CHECK (text_max_chars BETWEEN 20 AND 4000),
     quiet_word          TEXT NOT NULL DEFAULT 'SKIP' CHECK (quiet_word ~ '^[^[:space:]]{1,40}$'),
     output_header       TEXT NOT NULL DEFAULT '' CHECK (length(output_header) <= 200),
@@ -1615,7 +1615,12 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     target_confirmed_at TIMESTAMPTZ,
     -- What the operator was shown when they confirmed (``agents/subscriptions.py`` ``config_version``): a push needs it
     -- to still be what the schedule is.
-    target_confirmed_version TEXT
+    target_confirmed_version TEXT,
+    -- Selection rules (agents/subscription_rules.py): empty, the subscription's own filter above applies.
+    rules               JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(rules) = 'array'),
+    -- Counts every change to what a push depends on (the stream, the target, the rule, the zone, whether it runs, a
+    -- confirmation): a run pins it, and a push needs it unchanged, so a change and its undoing both stop the run.
+    config_epoch        BIGINT NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS subscription_runs (
     run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,
@@ -1636,7 +1641,13 @@ CREATE TABLE IF NOT EXISTS subscription_runs (
     -- otherwise (its output stays on the dashboard).
     target_channel    TEXT,
     target_chat       TEXT,
-    config_version    TEXT
+    config_version    TEXT,
+    -- The subscription's configuration and epoch as the run started: its window is selected with these, not with what
+    -- the subscription is by then.
+    config            JSONB,
+    config_epoch      BIGINT,
+    -- Windows whose text_match pattern run was stopped at its deadline: no pattern took anything in them.
+    match_timeouts    INTEGER NOT NULL DEFAULT 0
 );
 -- One message of a run's push: pending, then sending (written before the channel is asked), then sent, failed (the
 -- channel said no: asked again) or uncertain (it was being sent when the process died, or the channel's answer was

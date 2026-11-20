@@ -28,11 +28,17 @@ _SUBSCRIPTION = _object({
     "sender_kinds": _array(_enum("user", "app")), "include_chats": _array(_STR), "exclude_chats": _array(_STR),
     "exclude_mentions_me": _BOOL, "include_history": _BOOL,
     "max_age_minutes": {"type": "integer", "minimum": 5, "maximum": 10080},
-    "max_events": {"type": "integer", "minimum": 1, "maximum": 2000}, "render": _enum("lines_v1"),
+    "max_events": {"type": "integer", "minimum": 1, "maximum": 2000},
     "text_max_chars": {"type": "integer", "minimum": 20, "maximum": 4000},
     "quiet_word": {"type": "string", "minLength": 1, "maxLength": 40},
     "output_header": {"type": "string", "maxLength": subscriptions.HEADER_MAX_CHARS},
-    "output_kind": _enum("push")}, [], closed=True)
+    "output_kind": _enum("push"), "render": _enum("lines_v1", "lines_v2"),
+    "rules": _array(_object({
+        "name": _STR, "label": _STR, "chat_kinds": _array(_enum("p2p", "group", "topic", "unknown")),
+        "include_chats": _array(_STR), "exclude_chats": _array(_STR), "sender_kinds": _array(_enum("user", "app")),
+        "exclude_self": _BOOL, "mentions_me": _enum("any", "only", "exclude"), "text_match": _STR,
+        "never_quiet": _BOOL, "areas": {"type": "object", "additionalProperties": _STR}}, ["name"], closed=True))},
+    [], closed=True)
 _BUDGET = _nullable({"type": "number", "exclusiveMinimum": 0, "maximum": BUDGET_MAX_USD})
 _FIELDS = {
     "kind": _enum("agent", "command", "subscription"), "subscription": _SUBSCRIPTION,
@@ -137,6 +143,10 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
     if action == "confirm_target":
         if not row["notify_channel"]:
             raise OpError(ErrorCode.INVALID, "the subscription has no notify_target to confirm")
+        try:
+            await schedules.check_private_target(row["subscription"], row["notify_channel"], row["notify_chat"])
+        except schedules.RequestError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
         arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
         shown = await subscriptions.config_version(row)
         if arguments.get("config_version") not in (None, shown):
@@ -168,6 +178,10 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
             {"profile_overrides": profiles} if "profile_overrides" in rest else {})})
         schedules._check_rule(fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"]), now,
                               gated=True)
+        if schedules.touches_target(row, fields, stream):  # disabling and renaming are always possible
+            await schedules.check_private_target({**row["subscription"], **(stream or {})},
+                                                 fields.get("notify_channel", row["notify_channel"]),
+                                                 fields.get("notify_chat", row["notify_chat"]))
     except schedules.RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     asked = {**fields, **({"enabled": data["enabled"]} if "enabled" in data else {})}
