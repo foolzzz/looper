@@ -1798,6 +1798,8 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
           : <><AlertCircle className="h-3.5 w-3.5 text-warning" aria-hidden="true" /><span className="text-warning">Push target not confirmed: output stays on this page.</span></>)
           : "Dashboard only: nothing is pushed."}
         <span className="tabular-nums">Cursor {sub.cursor_seq}</span>
+        {!!sub.rules?.length && <span title={sub.rules.map((rule) => rule.label || rule.name).join(", ")}>
+          Selects by {sub.rules.length} rule{sub.rules.length === 1 ? "" : "s"} (set through the API)</span>}
         {!!sub.uncertain_deliveries && <span className="text-warning" role="status">
           {sub.uncertain_deliveries} message{sub.uncertain_deliveries === 1 ? "" : "s"} of the last 7 days may not have been sent
           (cut off while sending; never sent again)</span>}

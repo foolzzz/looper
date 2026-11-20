@@ -29,7 +29,8 @@ SESSION_VIEW = _object({
 CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channel": _STR,
                      "started_at": _STR, "state": _STR, "method": _NULL_STR,
                      "stopping": _BOOL, "can_interrupt": _BOOL})
-CHAT_SETTINGS = _object({"stop_enabled": _BOOL})
+COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
+CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS})
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -54,22 +55,39 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read the experimental chat stop setting.",
+    _op("chat_settings.get", "Read the chat settings: stopping a reply, and the Manager's completion turns.",
         _object({}, closed=True), CHAT_SETTINGS),
-    _op("chat_settings.update", "Change the experimental chat stop setting; null restores its built-in default.",
-        _object({"stop_enabled": {"type": ["boolean", "null"]}}, closed=True), CHAT_SETTINGS, "high"),
+    _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
+        _object({"stop_enabled": {"type": ["boolean", "null"]},
+                 "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]}},
+                [], closed=True), CHAT_SETTINGS, "high"),
 )
 
 
 async def impact(server, operation, arguments, principal, headers):
     if operation.operation_id != "chat_settings.update":
         return None
-    value = arguments["stop_enabled"]
-    enabled = chat_settings.DEFAULT_STOP_ENABLED if value is None else value
-    return (f"Set chat.stop_enabled to {str(enabled).lower()}"
-            f"{' (built-in default)' if value is None else ''}? "
-            "This immediately enables or disables stopping Manager replies through the dashboard, "
-            "Telegram and Lark. It does not stop a running reply by itself.")
+    try:
+        values = chat_settings.checked(arguments)
+    except ValueError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
+    changes = []
+    if "stop_enabled" in values:
+        value = values["stop_enabled"]
+        enabled = chat_settings.DEFAULT_STOP_ENABLED if value is None else value
+        changes.append(f"Set chat.stop_enabled to {str(enabled).lower()}"
+                       f"{' (built-in default)' if value is None else ''}? "
+                       "This immediately enables or disables stopping Manager replies through the dashboard, "
+                       "Telegram and Lark. It does not stop a running reply by itself.")
+    if "completion_turns" in values:
+        value = values["completion_turns"]
+        turns = chat_settings.DEFAULT_COMPLETION_TURNS.value if value is None else value
+        changes.append(f"Set manager.completion_turns to {turns}{' (built-in default)' if value is None else ''}? "
+                       + ("From the next task end, the Manager tells direct chats and the dashboard chat that a task "
+                          "ended, in a read-only turn of its own, instead of the code notice; a group chat still "
+                          "gets the code notice." if turns != "off" else
+                          "From the next task end, every chat gets the code notice again."))
+    return " ".join(changes)
 
 
 def _manager(server, manager_id):
@@ -96,7 +114,10 @@ async def run(server, operation, arguments, principal, headers):
     if name == "chat_settings.get":
         return chat_settings.settings_view()
     if name == "chat_settings.update":
-        return await chat_settings.update(arguments)
+        try:
+            return await chat_settings.update(arguments)
+        except ValueError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
     if name.startswith("manager_session."):
         agent = _manager(server, arguments.get("manager"))
         if name == "manager_session.get":

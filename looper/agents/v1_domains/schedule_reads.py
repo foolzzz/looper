@@ -2,7 +2,7 @@
 
 from ...db import schedules as db_schedules
 from .. import schedules
-from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
+from ..api_v1 import Operation, _array, _object, _OBJ, _STR, _NULL_STR, _INT, _BOOL
 from ..ops.config import answered
 from ..ops.service import _plain
 
@@ -59,14 +59,15 @@ _SCHEDULE_FIELDS = {
         ("runtime", "profile", "last_task_id", "last_task_title", "updated_at"), _NULL_STR)})}
 # What a subscription schedule reads (its ``subscription``), and what each of its runs read and made.
 SUBSCRIPTION = _object({
+    "window": _enum("cursor", "lookback"), "delivery_policy": _enum("per_run", "daily"),
     "source_id": _STR, "chat_kinds": _array(_STR), "include_chats": _array(_STR), "exclude_chats": _array(_STR),
     "sender_kinds": _array(_STR), "exclude_mentions_me": _BOOL, "include_history": _BOOL, "max_age_minutes": _INT,
     "max_events": _INT, "render": _STR, "text_max_chars": _INT, "quiet_word": _STR, "output_header": _STR,
-    "output_kind": _STR, "cursor_seq": _INT, **dict.fromkeys(("cursor_at", "target_confirmed_at"), _NULL_STR)},
+    "output_kind": _STR, "rules": _array(_OBJ), "cursor_seq": _INT, **dict.fromkeys(("cursor_at", "target_confirmed_at"), _NULL_STR)},
     # ``confirmation``: what the operator is shown to confirm the push target, in a single schedule's answer.
     [name for name in ("source_id", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds",
                        "exclude_mentions_me", "include_history", "max_age_minutes", "max_events", "render",
-                       "text_max_chars", "quiet_word", "output_header", "output_kind", "cursor_seq", "cursor_at",
+                       "text_max_chars", "quiet_word", "output_header", "output_kind", "rules", "cursor_seq", "cursor_at",
                        "target_confirmed_at")])
 SUBSCRIPTION["properties"]["confirmation"] = _NULL_STR
 SUBSCRIPTION["properties"]["config_version"] = _STR  # what a confirmation of the target must name
