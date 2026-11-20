@@ -1881,6 +1881,8 @@ def _completion_delivered(look: Look) -> str | None:
         event = facts["event"]
         if facts["status"] in ACTIVE or facts["status"] == "init":
             return f"the task is {facts['status']}, not {' or '.join(ready)}"
+        if look.fake:  # the path only: the end waits for its turn (the minute's window is not waited for here)
+            return None if event is not None else "the task's end has no manager_events row"
         if event is None or not (event["finished_at"] or event["sent_at"]):
             return "the task's manager_events row is not finished"
         return None if facts["message"] is not None else "the chat has no message since the task ended"
@@ -1892,6 +1894,9 @@ def _completion_delivered(look: Look) -> str | None:
     event = facts["event"]
     if facts["status"] not in ready:
         return f"the task is {facts['status']}, not {' or '.join(ready)}"
+    if look.fake:
+        return None if event["state"] in ("pending", "running", "delivered") else (
+            f"the event row is {event['state']} ({event['reason']}), not waiting for its turn or delivered")
     if event["state"] != "delivered":
         return f"the event row is {event['state']} ({event['reason']}), not delivered"
     # The message itself, for whoever reads the run's log (the JSON keeps only the problems).
