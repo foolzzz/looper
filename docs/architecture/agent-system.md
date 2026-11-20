@@ -4734,9 +4734,8 @@ Manager's `looper_schedules` cannot create or change one.
 The ledger lists what waits for the user (`pending`), what was decided
 (`decision`) and who does what (`work_item`) ([Completion and ledger
 RFC](rfcs/manager-completion-ledger-v0.zh-CN.md), section 4). It is off until
-the system setting `ledger.enabled` is `true`; this stage holds the tables, the
-one writer, the command line and the reads. The Manager has no ledger tool yet,
-nothing registers items by itself, and no prompt or tool list mentions it.
+the system setting `ledger.enabled` is `true`; the dashboard has no switch yet.
+Off, no prompt, tool list or command line mentions it.
 
 - **Tables** (`ledger_items`, `ledger_events`; migration `ledger`): an own item
   (a decision, a hand-made to-do) keeps its `status` (`open`, `done`,
@@ -4746,7 +4745,7 @@ nothing registers items by itself, and no prompt or tool list mentions it.
   `task_group`). Events are only ever added. Confirming or closing an item
   points at an event whose actor is `user`, through a composite key, so a
   `relayed` event cannot be pointed at even by raw SQL; the system can only
-  `add` a sourced item.
+  `add` sourced items, and sourced items are only added by the system.
 - **Who may do what** (`db.ledger.PERMISSIONS`, applied by `db.ledger.apply`,
   the only writer): a relayed message (another person, an API client, a group)
   can add an own item and add a note; confirming, closing, cancelling,
@@ -4754,18 +4753,43 @@ nothing registers items by itself, and no prompt or tool list mentions it.
   is confirmed from the start; a relayed one waits for the user's confirmation.
   A sourced item's state is changed at its source: the ledger answers
   `conflict` and says where.
+- **The Manager's tools** (`looper/agents/ops/ledger.py`): `looper_ledger_add`
+  and `looper_ledger_update` (list, get, confirm, amend, note, close, cancel,
+  reopen), only for the default Manager and only while the ledger is on
+  (`ManagerOps.current_scope` adds and removes them; a change restarts the
+  resident process through its tool-list hash). Who is speaking is code's
+  decision from the turn (`actor_for`): the dashboard's own chat is the user;
+  a direct chat is the user only when the sender is the bot's
+  `operator_sender_id` (Settings → Channels, "My ID": one allowlisted sender;
+  unset means every direct message is relayed); a group, an API client and any
+  other sender are relayed. A `quote` must be a passage of the message the
+  turn answers (whitespace merged), and a decision needs one. After a write
+  code adds one line to the reply (`Turn.blocks`) naming the item. A group
+  turn lists and reads only the items added in that chat. A turn Claude runs on
+  its own can read but not write (`needs_user_turn`).
+- **Registration** (`db.ledger.register_*`): after the source's own write, a
+  gate that waits for the user (`plans.save`), a task that was not made by a
+  schedule, and a Manager question that needs confirmation each get a sourced
+  item; a failure only logs. `LedgerReconciler` (serve) calls
+  `ledger.reconcile` on the first tick after the ledger is turned on and every
+  five minutes: it registers waiting gates, tasks that run or wait to start and
+  unanswered questions from the last ten minutes that have no item, and logs
+  a warning when it had to (a hook missed one).
 - **Command line** (`looper ledger list|show|add|close|confirm`): reads and
   writes the database directly, so it works with the service stopped. A write
   is recorded as the user, `via = cli`, with the `--session` label, and is
-  refused when `LOOPER_AGENT_RUN` is set. Nothing sets it yet (pi's shell and dsh's
-  config refuse a `LOOPER_*` variable, so marking runs is a separate change),
-  and it would be a speed bump, not isolation: an agent runs as the same user. Exit codes: 0 done, 1 nothing listed, 2 usage, 3
-  ledger not enabled, 4 refused, 5 no such item, 6 database unusable.
+  refused (exit 4) when `LOOPER_AGENT_RUN` is set. `Launch.environment()`
+  sets it, to the run's role (`agent` without one), on every agent process
+  after the runtime adapter built its environment, so it does not depend on
+  each runtime's own variable filters (pi's shell keeps it). It is a speed
+  bump, not isolation: an agent runs as the same user. Exit codes: 0 done, 1
+  nothing listed, 2 usage, 3 ledger not enabled, 4 refused, 5 no such item, 6
+  database unusable.
 - **Reads:** `ledger.list` and `ledger.get` (`/api/v1`, read-only, open to an
-  API client and the operator, not Manager tools) answer `conflict` while the
-  ledger is off.
-- **Not yet:** the Manager's tools, automatic registration, the operator's ID
-  setting, the To-do page, the setting's switch in the dashboard.
+  API client and the operator) answer `conflict` while the ledger is off.
+- **Not yet:** the To-do page and the dashboard switch, the ledger contract in
+  the Manager's system prompt (the tool descriptions are all it has), HTTP
+  writes.
 
 ### User gates
 
