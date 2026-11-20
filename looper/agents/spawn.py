@@ -166,8 +166,9 @@ def _refusal(result: Mapping[str, Any], model: str) -> str | None:
     if result.get("stop_reason") == "refusal":
         return "its model refused to answer"
     usage = result.get("modelUsage")
-    if isinstance(usage, Mapping) and usage and base_model(model) not in CLAUDE_CODE_ALIASES:
-        others = sorted(name for name in usage if base_model(str(name)) != base_model(model))
+    if isinstance(usage, Mapping) and usage:
+        expected = base_model(CLAUDE_CODE_ALIASES.get(base_model(model), model))  # an alias, as the model it runs
+        others = sorted(name for name in usage if base_model(str(name)) != expected)
         if others:
             return f"another model answered ({', '.join(others)})"
     return None
