@@ -700,10 +700,10 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 0.1a | `turn_metrics`、`AckBoard`、`proactive_deliveries` 表与写入、回复标记、`manager.metrics.enabled`、`manager_metrics.get` | — | 回合记录不变，表为空 | 否 | 第 4.1 节；第 10 节 |
 | 0.1b | 首页「管家」一组（含开关关时的说明） | 0.1a | — | 否 | 无头浏览器截图（1280、390） |
 | 0.3 | `evals/assistant_experience.py`、20 条用例、假模式通过、基线文件格式；真实基线在预算获批后跑 | — | — | 否（只加评测） | 假模式 20 条都能跑通；真实基线四类都有通过率 |
-| 1.1 | `turn_context`、说话人、两个用户设置、渲染、契约、授权检查、Settings 字段 | 0.3（评测用例） | prompt 逐字节不变 | 是 | 时间、身份类对比基线；第 10 节 |
+| 1.1 | `turn_context`、说话人、两个用户设置、渲染、契约、授权检查、Settings 字段 | 0.3（评测用例）、1.7a（列出机器人的函数） | prompt 逐字节不变 | 是 | 时间、身份类对比基线；第 10 节 |
 | 1.2 | `manager.persona`、v1 操作、渲染、Settings 表单 | 0.3 | 逐字节不变 | 是 | 语气类；改名下一轮生效 |
 | 1.3a | 抽出 `ManagerSession`（只有 `main`），不改行为 | — | 不变 | 否 | 现有测试全部通过 |
-| 1.3b | `manager_sessions`、迁移、`session_key_for`、派发、每槽绑定、送达确认、常驻上限与回收、收尾回合和自己说的话回到原槽、`manager.session_routing.enabled` | 1.3a | 单会话 | 否（会话内容不变） | 并行与回收、重启重放、绑定隔离的测试；真实路径：控制台长回合时群照常回复 |
+| 1.3b | `manager_sessions`、迁移、`session_key_for`、派发、每槽绑定、送达确认、常驻上限与回收、收尾回合和自己说的话回到原槽、`manager.session_routing.enabled` | 1.3a、1.7a | 单会话 | 否（会话内容不变） | 并行与回收、重启重放、绑定隔离的测试；真实路径：控制台长回合时群照常回复 |
 | 1.3c | 群和 dm 槽的裁剪：开场摘录、续接简报范围、人格裁剪、第二道 | 1.3b（人格裁剪需 1.2） | 不变 | 是 | 串话类全部通过、`dm_still_knows` 通过 |
 | 1.3d | `manager_sessions.list`、首页会话列表与重置 | 1.3b | — | 否 | 截图 |
 | 1.4 | 管家路径的 `session_bound`、维护回合 `/compact`、`SESSION_BOUND` 换新、最近 3 次任务结果、单轮软上限、`manager.turn_budget_usd`、`agent_sessions` 两列、次数指标 | #1473、1.3b | 行为不变 | 是（续接简报多一段、超限提示） | 第 5.4 节 |
