@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentType
+from looper.agents.agent_settings import Access, AgentType
 from looper.agents.claude_cli import isolation_args, iter_lines, system_prompt_args
 
 
@@ -306,7 +306,7 @@ class TestClaudeRunRecorder:
 
         recorder = ClaudeRunRecorder(
             agent_id="consult-usage", task_id=None, command=["claude", "--fork-session"], cwd="/tmp",
-            input_text="question", launch=_builtin_launch(consult=True), whole_process=True)
+            input_text="question", launch=_builtin_launch(access=Access.CONSULT), whole_process=True)
         rows = (Path(__file__).parent / "fixtures/claude_stream/auto_compact.jsonl").read_bytes().splitlines()
         end = next(i for i, row in enumerate(rows) if json.loads(row)["type"] == "result")
         result = json.loads(rows[end])
@@ -370,7 +370,7 @@ class TestClaudeRunRecorder:
         from looper.agents.claude_cli import ClaudeRunRecorder, stream_events
 
         launch = _priced_launch() if provider_priced else _builtin_launch()
-        launch = replace(launch, consult=session == "consult")
+        launch = replace(launch, access=Access.CONSULT if session == "consult" else None)
         recorder = ClaudeRunRecorder(
             agent_id="consult-usage", task_id=None, command=["claude", *([] if launch.consult else [session])],
             cwd="/tmp", input_text="question", launch=launch, whole_process=True)
@@ -434,7 +434,7 @@ class TestClaudeRunRecorder:
         from looper.agents.claude_cli import ClaudeRunRecorder
 
         launch = _priced_launch() if provider_priced else _builtin_launch()
-        launch = replace(launch, consult=session == "consult", settings=replace(launch.settings, max_budget_usd=2))
+        launch = replace(launch, access=Access.CONSULT if session == "consult" else None, settings=replace(launch.settings, max_budget_usd=2))
         model = "m-main" if provider_priced else "claude-sonnet-5-5"
         own = {"input_tokens": 100_000, "output_tokens": 10_000,
                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
@@ -507,7 +507,7 @@ class TestClaudeRunRecorder:
         from looper.agents.runtimes.pricing import usage_event
 
         recorder = ClaudeRunRecorder(agent_id="consult-usage", task_id=None, command=["claude", "--resume", "source"],
-                                     cwd="/tmp", input_text="question", launch=_builtin_launch(consult=True),
+                                     cwd="/tmp", input_text="question", launch=_builtin_launch(access=Access.CONSULT),
                                      whole_process=True)
 
         async def run() -> None:
@@ -1159,7 +1159,7 @@ def _teams_launch(role: AgentType | None, *, teams: bool, consult: bool = False)
     from looper.agents.profile_registry import builtin_resolved_profile
 
     return Launch(AgentSettings(profile=replace(builtin_resolved_profile(), agent_teams=teams)), role=role,
-                  consult=consult)
+                  access=Access.CONSULT if consult else None)
 
 
 def _denied(args: list[str]) -> list[str]:

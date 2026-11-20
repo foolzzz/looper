@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.http_server import AgentHTTPServer, HTTP_200, _json_response
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.ops import Turn
@@ -53,7 +53,7 @@ def _launch(role: str, library: AgentLibrary = AgentLibrary(), *, endpoint: str 
                             base_url=endpoint, api_key="sk-disposable-provider")
     profile = resolved_profile("agent-pi-test", "test", RuntimeSpec("rt-pi", "pi", "pi", capabilities=CAPABILITIES),
                            provider, "selected", "")
-    return Launch(AgentSettings(profile=profile), library=library, role=AgentType(role), consult=consult)
+    return Launch(AgentSettings(profile=profile), library=library, role=AgentType(role), access=Access.CONSULT if consult else None)
 
 
 def test_pi_advertises_only_the_rfc_capabilities_and_all_four_roles() -> None:

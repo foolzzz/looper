@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from looper.agents.agent_settings import Access
 from looper import child_env
 from looper.agents.consult import CONSULT_CONTRACT
 from looper.agents.room import FallbackReason, RoomService
@@ -1550,7 +1551,7 @@ def test_dsh_consult_snapshot_records_answer_and_new_run_without_changing_source
         assert record["session_id"] == sid
         assert service._session_dir("dsh", "task-r", "worker-1", record) == directory
         fork = tmp_path / "consult-fork"
-        readonly = replace(launch, consult=True)
+        readonly = replace(launch, access=Access.CONSULT)
         argv = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=readonly,
                                        session_id=sid, session_dir=directory, fork_dir=fork)
         answer_text = json.dumps({"answers": [{"reply_to": question["id"], "body": "the field is qty"}],

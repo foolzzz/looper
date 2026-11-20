@@ -15,6 +15,7 @@ import pytest
 
 from fake_claude import fake_claude
 from fake_grok_acp import FAKE_ACP
+from looper.agents.agent_settings import Access
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.room import MemberKind, RoomInput, Seat, room_section
@@ -79,7 +80,7 @@ def test_steering_command_keeps_the_run_home_and_restricts_tools_in_an_agent_pro
 ) -> None:
     runtime = GrokRuntime()
     _operator(tmp_path, monkeypatch)
-    launch = dataclasses.replace(_steering_launch(), consult=True)
+    launch = dataclasses.replace(_steering_launch(), access=Access.CONSULT)
     command = runtime.steer_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch,
                                     max_turns=3)
     assert command[:3] == ["env", f"GROK_HOME={_home(command)}", f"HOME={_home(command)}"]

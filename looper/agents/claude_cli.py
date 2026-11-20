@@ -1459,8 +1459,13 @@ class ClaudeRunRecorder:
         whole_process: bool = False,
         pid_of: Callable[[], int | None] | None = None,
         keep: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+        run_kind: str | None = None,
+        parent_record_id: int | None = None,
     ) -> None:
         self._agent_id = agent_id
+        # What kind of run it is (None: what its agent id says) and the run that started it (``llm_records``).
+        self._run_kind = run_kind
+        self._parent_record_id = parent_record_id
         # What the record keeps of each event: the event to store, or None for nothing (None: each one but usage
         # and partial deltas, whole); every event is still counted.
         self._keep = keep
@@ -1556,6 +1561,8 @@ class ClaudeRunRecorder:
                 task_id=self._task_id,
                 session_id=self._session_id,
                 input_text=self._input_text,
+                run_kind=self._run_kind,
+                parent_record_id=self._parent_record_id,
                 metadata={
                     "command": self._command,
                     # What Looper appended (its file holds the same text); Claude Code's own prompt is not included.

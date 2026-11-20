@@ -7,6 +7,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import asyncpg
@@ -132,6 +133,9 @@ _GATEWAY_ALIASES = "gateway_aliases"
 _MESSAGE_STREAM = "message_stream"
 _SUBSCRIPTIONS = "subscriptions"
 _MANAGER_EVENTS = "manager_events"
+_RUN_TREE = "run_tree"
+_AGENT_SPAWNS = "agent_spawns"
+_STEP_DIFFICULTY = "step_difficulty"
 _PROJECT_ACTIVITY = "project_activity"
 _LEDGER = "ledger"
 _LLM_REQUESTS = "llm_requests"
@@ -228,6 +232,7 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
+_AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 
 
 def _message_stream_ddl() -> str:
@@ -236,6 +241,71 @@ def _message_stream_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its message stream block")
     return found.group(1)
+
+
+def _agent_spawns_ddl() -> str:
+    """The spawn and advice tables as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _AGENT_SPAWNS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its agent spawns block")
+    return found.group(1)
+
+
+def _run_tree_ddl() -> tuple[str, ...]:
+    """The run tree columns of llm_records, as schema.sql defines them, added without a scan or a rewrite: llm_records
+    is large, and these statements hold its ACCESS EXCLUSIVE lock until the schema transaction commits. No older row
+    is updated: its run_kind stays NULL, and readers take its kind from its agent id (``llm_records.RUN_KIND``). The
+    constraints come NOT VALID (every older row is NULL, so they hold) and the index comes later, both in
+    ``_ONLINE_STEPS``."""
+    from .llm_records import RUN_KINDS
+
+    kinds = ", ".join(f"'{kind}'" for kind in RUN_KINDS)
+    return (
+        "ALTER TABLE llm_records ADD COLUMN parent_record_id BIGINT, ADD COLUMN run_kind TEXT",
+        f"ALTER TABLE llm_records ADD CONSTRAINT llm_records_run_kind_check CHECK (run_kind IN ({kinds})) NOT VALID, "
+        "ADD CONSTRAINT llm_records_parent_record_id_fkey FOREIGN KEY (parent_record_id) REFERENCES llm_records(id) "
+        "ON DELETE SET NULL NOT VALID",
+    )
+
+
+@dataclass(frozen=True)
+class _OnlineStep:
+    """What a migration finishes after the schema transaction commits, taking no lock that stops reads or writes: it
+    validates its NOT VALID constraints (SHARE UPDATE EXCLUSIVE) and builds its indexes concurrently (an index a
+    stopped build left invalid is dropped first). It runs once ``migration``'s marker is there and until its own
+    ``marker`` is: a start stopped halfway resumes it, and a finished one never runs it again."""
+
+    migration: str
+    marker: str
+    validate: tuple[tuple[str, str], ...] = ()  # (table, constraint)
+    indexes: tuple[tuple[str, str], ...] = ()  # (name, what follows the name in CREATE INDEX)
+
+
+_ONLINE_STEPS = (
+    _OnlineStep(_RUN_TREE, "run_tree_online",
+                validate=(("llm_records", "llm_records_run_kind_check"),
+                          ("llm_records", "llm_records_parent_record_id_fkey")),
+                indexes=(("idx_llm_records_parent",
+                          "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL"),)),
+    _OnlineStep(_STEP_DIFFICULTY, "step_difficulty_online",
+                validate=(("task_steps", "task_steps_difficulty_check"),)),
+)
+
+
+async def _finish_online(conn: asyncpg.Connection) -> None:
+    """Run the ``_ONLINE_STEPS`` still owed. In a caller's transaction, where no index can be built concurrently,
+    they build it plainly; ``looper serve`` ensures the schema outside one."""
+    how = "" if conn.is_in_transaction() else " CONCURRENTLY"
+    done = {row["name"] for row in await conn.fetch("SELECT name FROM schema_migrations")}
+    for step in _ONLINE_STEPS:
+        if step.migration not in done or step.marker in done:
+            continue
+        for table, constraint in step.validate:
+            await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+        for name, definition in step.indexes:
+            await conn.execute(f"DROP INDEX{how} IF EXISTS {name}")
+            await conn.execute(f"CREATE INDEX{how} {name} {definition}")
+        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
 
 
 def _subscriptions_ddl() -> str:
@@ -517,6 +587,30 @@ async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_STREAM):
         return False
     return not await conn.fetchval("SELECT to_regclass('event_sources') IS NOT NULL")
+
+
+async def _column_pending(conn: asyncpg.Connection, marker: str, table: str, column: str) -> bool:
+    """An unmarked database whose ``table`` lacks ``column`` needs its additive upgrade; recorded upgrades never
+    repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", marker):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2 "
+        "AND attnum > 0 AND NOT attisdropped)", table, column)
+
+
+async def _run_tree_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _RUN_TREE, "llm_records", "run_kind")
+
+
+async def _step_difficulty_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _STEP_DIFFICULTY, "task_steps", "difficulty")
+
+
+async def _agent_spawns_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _AGENT_SPAWNS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('agent_spawns') IS NOT NULL")
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -918,6 +1012,18 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _manager_events_pending(conn):
             await conn.execute(_manager_events_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
+        if await _run_tree_pending(conn):
+            for ddl in _run_tree_ddl():
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _RUN_TREE)
+        if await _step_difficulty_pending(conn):
+            await conn.execute("ALTER TABLE task_steps ADD COLUMN difficulty TEXT")
+            await conn.execute("ALTER TABLE task_steps ADD CONSTRAINT task_steps_difficulty_check "
+                               "CHECK (difficulty IN ('routine', 'hard', 'critical')) NOT VALID")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _STEP_DIFFICULTY)
+        if await _agent_spawns_pending(conn):
+            await conn.execute(_agent_spawns_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _AGENT_SPAWNS)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -1003,6 +1109,8 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         # fingerprint was pruned. Opening a current database never repairs DDL.
         if state != "current" or await conn.fetchval("SELECT to_regclass('schema_fingerprint') IS NOT NULL"):
             await conn.execute(_RECORD_FINGERPRINT.format(sha256=schema_fingerprint(sql)))
+    async with _connection(pool) as conn:
+        await _finish_online(conn)
     logger.info("schema ensured")
 
 
@@ -1035,6 +1143,8 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscriptions_pending(conn)
             or await _ledger_pending(conn)
             or await _manager_events_pending(conn)
+            or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
+            or await _agent_spawns_pending(conn)
             or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)

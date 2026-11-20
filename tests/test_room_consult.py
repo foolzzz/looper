@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents.agent_settings import Access
 from looper.agents.consult import CONSULT_CONTRACT, ConsultService, consult_answers, consult_prompt
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
 
@@ -128,7 +129,7 @@ def test_dsh_consult_verifies_the_process_exit(monkeypatch: pytest.MonkeyPatch, 
     script = ("import sys; sys.stdin.read(); "
               f"sys.stdout.buffer.write({payload!r}); sys.stdout.flush(); sys.exit({exit_code})")
     service = ConsultService(room=None, worker_pool=None, runtime_root=tmp_path)
-    launch = replace(_run_launch(tmp_path), consult=True)
+    launch = replace(_run_launch(tmp_path), access=Access.CONSULT)
     result, started, timed_out = asyncio.run(service._execute(
         "task", {"id": "step"}, "consult-test", [sys.executable, "-c", script], str(tmp_path),
         "Answer the question", SystemPrompt(CONSULT_CONTRACT, {}), launch, 5))
@@ -164,7 +165,7 @@ def test_claude_consult_budget_checks_own_recorded_cost(
     from looper.agents.profile_registry import builtin_resolved_profile
     from looper.agents.room import FallbackReason, MemberKind
 
-    launch = Launch(AgentSettings(profile=builtin_resolved_profile()), role=AgentType.WORKER, consult=True)
+    launch = Launch(AgentSettings(profile=builtin_resolved_profile()), role=AgentType.WORKER, access=Access.CONSULT)
     room = SimpleNamespace(finish_consult=AsyncMock())
     service = ConsultService(room=room, worker_pool=None, runtime_root=tmp_path)
     record = {"id": 1, "status": "completed", "session_id": "source-session",
@@ -238,7 +239,7 @@ def _digests(directory: Path) -> dict[str, str]:
 def test_a_pi_consult_forks_only_the_requested_session_copy(tmp_path: Path) -> None:
     from fake_claude import fake_claude
 
-    launch = _pi_launch(consult=True)
+    launch = _pi_launch(access=Access.CONSULT)
     source = tmp_path / "source"
     session = _pi_session(source)
     _pi_session(source, "unrelated-session", "other.jsonl")
@@ -288,7 +289,7 @@ with fork.open('a') as saved:
 def test_a_pi_consult_requires_one_exact_private_session(tmp_path: Path, missing: str) -> None:
     from looper.agents.runtimes import RuntimeUnsupported
 
-    launch = _pi_launch(consult=True)
+    launch = _pi_launch(access=Access.CONSULT)
     source = tmp_path / "source"
     if missing != "directory":
         session_id = {"session": "another-session", "prefix": "source-session-longer"}.get(missing, "source-session")
@@ -315,7 +316,7 @@ def test_a_pi_consult_reclaims_a_partial_fork_when_preparation_fails(
 ) -> None:
     from looper.agents.runtimes import pi
 
-    launch = _pi_launch(consult=True)
+    launch = _pi_launch(access=Access.CONSULT)
     source = tmp_path / "source"
     _pi_session(source)
     before = _digests(source)
@@ -350,7 +351,7 @@ def test_pi_limits_tools_only_for_planners_and_consults(tmp_path: Path, role: st
     prompt.parent.mkdir(parents=True)
     prompt.write_text("instructions")
     for consult in (False, True):
-        selected = replace(launch, consult=consult)
+        selected = replace(launch, access=Access.CONSULT if consult else None)
         command = selected.runtime.run_command("pi", cwd=tmp_path, prompt_file=prompt, launch=selected)
         if consult or role == "planner":
             assert set(command[command.index("--tools") + 1].split(",")) == {
@@ -530,7 +531,7 @@ def test_a_failed_run_with_a_valid_final_is_not_delivered_as_an_answer(monkeypat
     payload = (Path(__file__).parent / "fixtures/dsh_json/success.jsonl").read_bytes()
     script = f"import sys; sys.stdin.read(); sys.stdout.buffer.write({payload!r}); sys.stdout.flush(); sys.exit(7)"
     service = ConsultService(room=None, worker_pool=None, runtime_root=tmp_path)
-    launch = replace(_run_launch(tmp_path), consult=True)
+    launch = replace(_run_launch(tmp_path), access=Access.CONSULT)
     result, _, _ = asyncio.run(service._execute(
         "task", {"id": "step"}, "consult-test", [sys.executable, "-c", script], str(tmp_path),
         "Answer the question", SystemPrompt(CONSULT_CONTRACT, {}), launch, 5))

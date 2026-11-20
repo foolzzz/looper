@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.agent_settings import Access, AgentSettings, Launch
 from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec
 from tests.runtime_model_helpers import resolved_profile
 from looper.agents.run_usage import Usage
@@ -137,7 +137,7 @@ def test_consult_forks_a_finished_seat_with_history_and_read_only_tools(tmp_path
         fork_dir = tmp_path / 'consult'
         consult = PI.consult_command(
             executable, cwd=tmp_path, prompt_file=tmp_path / '.local' / 'prompts' / 'prompt.md',
-            launch=replace(_launch(), consult=True), session_id=turn.result_event['session_id'],
+            launch=replace(_launch(), access=Access.CONSULT), session_id=turn.result_event['session_id'],
             session_dir=source.parent, fork_dir=fork_dir)
         process = await asyncio.create_subprocess_exec(
             *consult, cwd=tmp_path, env=PI.environment(_launch()), stdin=asyncio.subprocess.PIPE,

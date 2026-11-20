@@ -121,7 +121,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                          {"sequencename": "source_runs_id_seq", "last_value": None},
                          {"sequencename": "ledger_events_id_seq", "last_value": None},
                          {"sequencename": "ledger_items_id_seq", "last_value": None},
-                         {"sequencename": "manager_events_id_seq", "last_value": None}],
+                         {"sequencename": "manager_events_id_seq", "last_value": None},
+                         {"sequencename": "agent_spawns_id_seq", "last_value": None}],
                         key=lambda row: row["sequencename"])
                 elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
                     # New builtins and additive defaults must leave every historical field intact.
@@ -447,6 +448,9 @@ def test_unusual_rows_warn_and_keep_bridge_reading(bridge_source, caplog, damage
             after = (await witness(conn))[table]
             if table == "tasks":
                 assert json.loads(after[0]["config"]) == {}
+            elif table == "llm_records":
+                # The run tree's columns are added and no row is rewritten: older rows have no kind and no parent.
+                assert after == [{**r, "parent_record_id": None, "run_kind": None} for r in before]
             else:
                 assert after == before
             assert any(r.levelname == "WARNING" and identity in r.message for r in caplog.records)

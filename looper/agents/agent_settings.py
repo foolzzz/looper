@@ -911,28 +911,54 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
 # --- The launch ---
 
 
+class Access(str, Enum):
+    """What a run may do (the advisor RFC, section 6). ``full``: every tool; ``read_only``: no change to files (a
+    Planner's); ``consult``: only the reading tools, in a resumed fork of a seat's session (an agent room consult);
+    ``advisor``: no tool at all, its system prompt replaced (an advisor's or a judge's run)."""
+
+    FULL = "full"
+    READ_ONLY = "read_only"
+    CONSULT = "consult"
+    ADVISOR = "advisor"
+
+
 @dataclass(frozen=True)
 class Launch:
     """What one agent run starts with besides its prompt: its settings (the Agent Profile with its effort, the
     environment and per-run cap), the installed items and, for a task agent, the project knowledge; and its
-    permissions: every tool, but a Planner's run or a consult is read-only (``read_only``). The profile's runtime
-    lays them out (``runtime``)."""
+    access level (``access_level``): every tool, but a Planner's run or a consult is read-only and an advisor's has no
+    tool. The profile's runtime lays them out (``runtime``)."""
 
     settings: AgentSettings = BUILTIN_SETTINGS
     library: AgentLibrary = EMPTY_LIBRARY
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
     role: AgentType | None = None  # the role the run is for; None: one that follows its profile in everything
-    # A run that must not change anything (an agent room consult): its runtime's read-only mode in place of every
-    # permission (RFC decision 8's one exception), and no agent teams.
-    consult: bool = False
+    # What the run may do; None: its role's (``access_level``). An agent room consult is ``consult``: its runtime's
+    # read-only mode in place of every permission (RFC decision 8's one exception), and no agent teams.
+    access: Access | None = None
     # Additional directories a read-only run may inspect, such as its steps' isolated worktrees.
     read_dirs: tuple[str, ...] = ()
     llmrec: LlmrecRoute | LlmrecSkip | None = None
 
     @property
+    def access_level(self) -> Access:
+        """The run's access level: the launch's, else its role's (a Planner's is read-only, every other role's
+        full)."""
+        if self.access is not None:
+            return self.access
+        return Access.READ_ONLY if self.role is AgentType.PLANNER else Access.FULL
+
+    @property
+    def consult(self) -> bool:
+        """Whether the run is an agent room consult (``Access.CONSULT``)."""
+        return self.access_level is Access.CONSULT
+
+    @property
     def system_prompt_mode(self) -> SystemPromptMode:
         """What the run uses: its role's mode, whatever the runtime (append for a launch with no role and for a
-        runtime whose adapter cannot replace)."""
+        runtime whose adapter cannot replace); an advisor's run always replaces."""
+        if self.access_level is Access.ADVISOR:
+            return SystemPromptMode.REPLACE
         # A consult resumes a seat's session and is read-only: it appends, whatever the seat's role.
         if self.role is None or self.consult:
             return SystemPromptMode.APPEND
@@ -955,16 +981,16 @@ class Launch:
 
     @property
     def no_tools(self) -> bool:
-        """Whether the run has no tool at all (the processor's): its runtime leaves out every built-in tool, MCP
-        server, plugin, skill, command and knowledge directory (``Capability.NO_TOOLS``)."""
-        return self.role is AgentType.PROCESSOR
+        """Whether the run has no tool at all (the processor's, an advisor's): its runtime leaves out every built-in
+        tool, MCP server, plugin, skill, command and knowledge directory (``Capability.NO_TOOLS``)."""
+        return self.role is AgentType.PROCESSOR or self.access_level is Access.ADVISOR
 
     @property
     def read_only(self) -> bool:
-        """Whether the run must not change files: a consult or a Planner's. A Planner plans and decides, and gives
-        every change to a Worker; its runtime refuses the tools and commands that would change files where it can,
-        and otherwise the Planner checks its task directory after each turn (``RuntimeAdapter.read_only``)."""
-        return self.role is AgentType.PLANNER or self.consult
+        """Whether the run must not change files: every access level but ``full``. A Planner plans and decides, and
+        gives every change to a Worker; its runtime refuses the tools and commands that would change files where it
+        can, and otherwise the Planner checks its task directory after each turn (``RuntimeAdapter.read_only``)."""
+        return self.access_level is not Access.FULL
 
     @property
     def read_only_mode(self) -> ReadOnly:

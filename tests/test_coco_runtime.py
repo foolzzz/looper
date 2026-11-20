@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.claude_cli import ClaudeRunRecorder
 from looper.agents.library import AgentLibrary
 from looper.agents.mcp import write_config
@@ -100,7 +100,7 @@ def test_coco_tokens_have_no_builtin_price_even_when_the_model_name_matches():
 def test_run_uses_its_own_home_config_login_link_and_permissions(tmp_path, read_only):
     library = AgentLibrary(mcp_config=str(write_config(tmp_path, [
         ("probe", {"type": "stdio", "command": "probe-mcp", "args": ["--safe"]})])))
-    launch = replace(_launch(library=library), consult=read_only)
+    launch = replace(_launch(library=library), access=Access.CONSULT if read_only else None)
     prompt_file = SystemPrompt("COCO INSTRUCTIONS").write_file(tmp_path)
     command = COCO.run_command("coco", cwd=tmp_path, prompt_file=prompt_file, launch=launch)
     home = Path(command[1].removeprefix("TRAE_HOME="))

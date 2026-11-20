@@ -20,6 +20,7 @@ import time
 import pytest
 
 from evals.prompt_regression.runner import EvalError, fresh_database
+from looper.agents.agent_settings import Access
 from tests.dsh_installed_stand_in import Reply, messages_wire, tool
 from tests.dsh_runner_support import require_dsh
 from tests.runner_support import require_disposable_database, serving
@@ -293,7 +294,7 @@ def cli_consult_request(tmp_path, *, state, source, system_prompt, cwd, prompt):
             frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), base_url=server.url, api_key=KEY)
         profile = resolved_profile("offline", "Synthetic", RuntimeSpec("offline", "DSH", "dsh", executable,
             runtime.capabilities), provider, "deepseek-flash", "high")
-        launch = Launch(AgentSettings(profile=profile), role=AgentType.WORKER, consult=True)
+        launch = Launch(AgentSettings(profile=profile), role=AgentType.WORKER, access=Access.CONSULT)
         command = runtime.consult_command(executable, cwd=cwd, prompt_file=file, launch=launch,
             session_id=source, session_dir=owner, fork_dir=tmp_path / "cli-fork")
         process = subprocess.Popen(command, cwd=cwd, env={"PATH": os.environ["PATH"],
