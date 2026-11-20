@@ -21,7 +21,11 @@ bounded background tasks and failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature-delivery reply rates for 1–30 days. Housekeeping retains
-proactive rows for 90 days. Off, turns have no metrics key and sends add no writes.
+proactive rows for 90 days. This feature owns the table's single named migration:
+one row per message, with the send receipt in `outcome`. Nullable `decision`,
+`reason`, deduplication, cap and digest fields are reserved for the delivery layer's
+future single `decide()` write point; metrics sends leave them unset.
+Off, turns have no metrics key and sends add no writes.
 `chat_settings.update` requires operator identity, including updates to its existing
 chat controls. The dashboard presentation is a separate change.
 
