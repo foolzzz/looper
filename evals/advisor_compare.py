@@ -34,7 +34,7 @@ class Sizes:
     400,000 cache-read, 60,000 written and 15,000 out."""
 
     advisor_model: str = "claude-fable-5-2"
-    judge_model: str = "claude-haiku-4-5"
+    judge_model: str = "claude-sonnet-5-5"
     worker_model: str = "claude-sonnet-5-5"
     abstract_in: int = 3_000
     raw_in: int = 150_000

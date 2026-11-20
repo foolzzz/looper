@@ -18,6 +18,21 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.19] - 2026-11-19
+
+### Added
+
+- **The ledger (default off).** ([#1434](https://github.com/foolzzz/looper/pull/1434)) Additive migration `ledger` (`ledger_items`, `ledger_events`). `db.ledger.apply` is the one writer. `looper ledger list|show|add|close|confirm` reads and writes the database directly. Read-only `POST /api/v1/ledger/list` and `POST /api/v1/ledger/get`. Off unless the system setting `ledger.enabled` is `true`; while it is off the command exits 3, the reads answer `conflict`, and no prompt, tool list or agent command line mentions it.
+
+### Changed
+
+- **The Tasks page filters by several statuses at once.** ([#1440](https://github.com/foolzzz/looper/pull/1440)) The default view, when the address has neither `status` nor `group` nor `schedule`, is Ready, Running, Waiting, Waiting for you and Pending. Group and schedule links stay unfiltered. An empty Waiting for you chip stays hidden unless it is the only selection. `POST /api/v1/tasks/page` accepts an optional `statuses` array; omitting both `status` and `statuses` still lists every task.
+- **The dashboard Runs page is removed.** ([#1443](https://github.com/foolzzz/looper/pull/1443)) Old `#runs` links open History, which filters by role (manager, planner, worker, reviewer, processor) and shows runtime catalog skips on an open run. The backend run APIs remain.
+
+### Fixed
+
+- **Tests: two load-sensitive tests no longer depend on timing under load.** ([#1442](https://github.com/foolzzz/looper/pull/1442)) Test only, no behavior change.
+
 ## [2.15.18] - 2026-11-19
 
 ### Added

@@ -80,7 +80,10 @@ describe("the processor's settings", () => {
       expect(panel.querySelector("[id$='-profile']")).toBeTruthy();
       expect(panel.querySelector("[id$='-harness']")).toBeNull();
       expect(panel.querySelector("[id$='-prompt-mode']")).toBeNull();  // it always replaces the runtime's prompt
-      if (view === "roles") expect(panel.textContent).toContain("No tools");
+      if (view === "roles") {
+        expect(panel.textContent).toContain("No tools");
+        expect(panel.querySelector('a[href="#history?role=processor"]')?.textContent).toContain("Its runs");
+      }
     } finally {
       done();
     }

@@ -207,13 +207,16 @@ CREATE TABLE IF NOT EXISTS projects (
     wait_commands TEXT CHECK (wait_commands IN ('off', 'on')),
     dependency_conditions TEXT CHECK (dependency_conditions IN ('off', 'on')),
     -- The advisor (the advisor RFC, section 5.4): off unless on; each consult's budget, the task's consults and
-    -- their total, and a step's consults.
+    -- their total, and a step's consults (no limit when NULL); a fallback profile (unused for now); the project's
+    -- internal domains.
     advisor TEXT CHECK (advisor IN ('off', 'on')),
     advisor_consult_budget_usd DOUBLE PRECISION
     CHECK (advisor_consult_budget_usd >= 0.01 AND advisor_consult_budget_usd <= 5),
     advisor_budget_usd DOUBLE PRECISION CHECK (advisor_budget_usd >= 0.01 AND advisor_budget_usd <= 50),
     advisor_consults_per_task INTEGER CHECK (advisor_consults_per_task >= 0 AND advisor_consults_per_task <= 100),
     advisor_consults_per_step INTEGER CHECK (advisor_consults_per_step >= 0 AND advisor_consults_per_step <= 10),
+    advisor_fallback_profile TEXT CHECK (length(advisor_fallback_profile) BETWEEN 1 AND 200),
+    advisor_internal_domains TEXT[] CHECK (cardinality(advisor_internal_domains) <= 20),
     distill_lessons TEXT NOT NULL DEFAULT 'off' CONSTRAINT projects_distill_lessons_check
         CHECK (distill_lessons IN ('off', 'draft', 'write'))
 );
@@ -1123,7 +1126,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     planner_session_profile TEXT,
     planner_session_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     planner_session_since TIMESTAMPTZ,
-    kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command')),
+    kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command', 'subscription')),
     command TEXT,
     env JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(env) = 'object'),
     env_file TEXT,
@@ -1250,7 +1253,7 @@ CREATE TABLE IF NOT EXISTS llm_records (
     compactions JSONB,
     cost_source TEXT CHECK (cost_source IN ('runtime', 'provider_price')),
     -- The run that started this one (an advisor's or a judge's run: the Planner's turn that asked), and what kind
-    -- of run it is (llm_records.RUN_KINDS; older rows backfilled from their agent id, else NULL).
+    -- of run it is (llm_records.RUN_KINDS; NULL on rows from before it, whose readers take it from their agent id).
     parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     run_kind TEXT CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'consult', 'advisor',
                                       'advice_check'))
@@ -1597,6 +1600,170 @@ CREATE INDEX IF NOT EXISTS idx_source_events_run ON source_events (run_id) WHERE
 CREATE INDEX IF NOT EXISTS idx_source_events_body ON source_events (sent_at) WHERE body IS NOT NULL;
 -- message stream end
 
+-- Subscriptions (message-stream RFC, section 7): the schedule kind that turns the events a source ingested after a
+-- cursor into one tool-less processor run and, once its target is confirmed, a push. Default off: no row, no
+-- behavior. connection.py applies this block (with the widened schedules.kind check) to databases that predate it, so
+-- keep it between the markers and idempotent.
+-- subscriptions begin
+CREATE TABLE IF NOT EXISTS subscriptions (
+    schedule_id         TEXT PRIMARY KEY REFERENCES schedules(id) ON DELETE CASCADE,
+    source_id           TEXT NOT NULL REFERENCES event_sources(id),
+    chat_kinds          TEXT[] NOT NULL CHECK (cardinality(chat_kinds) > 0 AND chat_kinds <@ ARRAY['p2p', 'group', 'topic', 'unknown']),
+    include_chats       TEXT[] NOT NULL DEFAULT '{}',
+    exclude_chats       TEXT[] NOT NULL DEFAULT '{}',
+    sender_kinds        TEXT[] NOT NULL CHECK (cardinality(sender_kinds) > 0 AND sender_kinds <@ ARRAY['user', 'app']),
+    exclude_mentions_me BOOLEAN NOT NULL DEFAULT false,
+    include_history     BOOLEAN NOT NULL DEFAULT false,
+    max_age_minutes     INTEGER NOT NULL CHECK (max_age_minutes BETWEEN 5 AND 10080),
+    max_events          INTEGER NOT NULL CHECK (max_events BETWEEN 1 AND 2000),
+    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1')),
+    text_max_chars      INTEGER NOT NULL CHECK (text_max_chars BETWEEN 20 AND 4000),
+    quiet_word          TEXT NOT NULL DEFAULT 'SKIP' CHECK (quiet_word ~ '^[^[:space:]]{1,40}$'),
+    output_header       TEXT NOT NULL DEFAULT '' CHECK (length(output_header) <= 200),
+    output_kind         TEXT NOT NULL DEFAULT 'push' CHECK (output_kind IN ('push')),
+    cursor_seq          BIGINT NOT NULL DEFAULT 0 CHECK (cursor_seq >= 0),
+    cursor_at           TIMESTAMPTZ,
+    target_confirmed_at TIMESTAMPTZ,
+    -- What the operator was shown when they confirmed (``agents/subscriptions.py`` ``config_version``): a push needs it
+    -- to still be what the schedule is.
+    target_confirmed_version TEXT
+);
+CREATE TABLE IF NOT EXISTS subscription_runs (
+    run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,
+    from_seq          BIGINT NOT NULL,
+    to_seq            BIGINT NOT NULL,
+    events_in_window  INTEGER NOT NULL DEFAULT 0,
+    events_selected   INTEGER NOT NULL DEFAULT 0,
+    events_too_old    INTEGER NOT NULL DEFAULT 0,
+    events_over_cap   INTEGER NOT NULL DEFAULT 0,
+    record_id         BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    outcome           TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (outcome IN ('pending', 'delivering', 'delivered', 'uncertain', 'quiet', 'dashboard_only',
+                                         'output_invalid', 'failed')),
+    output_text       TEXT,
+    output_sha256     TEXT,
+    notification_id   TEXT REFERENCES schedule_notifications(id) ON DELETE SET NULL,
+    -- Where the run may push and under which configuration: set when it started with the target confirmed, NULL
+    -- otherwise (its output stays on the dashboard).
+    target_channel    TEXT,
+    target_chat       TEXT,
+    config_version    TEXT
+);
+-- One message of a run's push: pending, then sending (written before the channel is asked), then sent, failed (the
+-- channel said no: asked again) or uncertain (it was being sent when the process died, or the channel's answer was
+-- lost: never sent again).
+CREATE TABLE IF NOT EXISTS subscription_deliveries (
+    run_id       TEXT NOT NULL REFERENCES subscription_runs(run_id) ON DELETE CASCADE,
+    segment      INTEGER NOT NULL CHECK (segment >= 1),
+    text         TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    error        TEXT,
+    external_ids TEXT[] NOT NULL DEFAULT '{}',
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, segment)
+);
+-- subscriptions end
+
+-- ledger begin
+-- The Manager's ledger (completion-ledger RFC, section 4): what waits for the user, what was decided, who does what.
+-- An own item keeps its state here; a sourced item (a gate, a confirmation, a task) has no status and reads its
+-- source's. ledger_events only ever grows. Confirming or closing an own item points at a 'user' event, and the
+-- composite keys below make a 'relayed' event impossible to point at, even from raw SQL.
+CREATE TABLE IF NOT EXISTS ledger_items (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kind          TEXT NOT NULL CHECK (kind IN ('pending', 'decision', 'work_item')),
+    title         TEXT NOT NULL CHECK (btrim(title) <> '' AND char_length(title) <= 200),
+    detail        TEXT NOT NULL DEFAULT '' CHECK (char_length(detail) <= 4000),
+    source_kind   TEXT CHECK (source_kind IN ('gate', 'confirmation', 'task')),
+    gate_step_id  TEXT REFERENCES task_user_gates(step_id) ON DELETE CASCADE,
+    action_id     BIGINT REFERENCES manager_actions(id) ON DELETE CASCADE,
+    task_id       TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    status        TEXT CHECK (status IN ('open', 'done', 'cancelled', 'superseded')),
+    owner_kind    TEXT NOT NULL DEFAULT 'user' CHECK (owner_kind IN ('user', 'manager', 'task', 'chat')),
+    owner_ref     TEXT,
+    project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    due_at        TIMESTAMPTZ,
+    refs          JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(refs) = 'array'),
+    superseded_by BIGINT REFERENCES ledger_items(id) ON DELETE SET NULL,
+    confirmed_event_id BIGINT,
+    confirmed_actor    TEXT CHECK (confirmed_actor = 'user'),
+    closed_event_id    BIGINT,
+    closed_actor       TEXT CHECK (closed_actor = 'user'),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    closed_at     TIMESTAMPTZ,
+    sourced       BOOLEAN GENERATED ALWAYS AS (source_kind IS NOT NULL) STORED,
+    UNIQUE (id, sourced),
+    CONSTRAINT ledger_items_source CHECK (COALESCE(
+        (source_kind IS NULL AND gate_step_id IS NULL AND action_id IS NULL AND task_id IS NULL
+         AND status IS NOT NULL)
+        OR (source_kind = 'gate' AND kind = 'pending' AND gate_step_id IS NOT NULL
+            AND action_id IS NULL AND task_id IS NULL AND status IS NULL)
+        OR (source_kind = 'confirmation' AND kind = 'pending' AND action_id IS NOT NULL
+            AND gate_step_id IS NULL AND task_id IS NULL AND status IS NULL)
+        OR (source_kind = 'task' AND kind = 'work_item' AND task_id IS NOT NULL
+            AND gate_step_id IS NULL AND action_id IS NULL AND status IS NULL), false)),
+    CONSTRAINT ledger_items_owner CHECK ((owner_kind = 'user') = (owner_ref IS NULL)),
+    CONSTRAINT ledger_items_confirmed CHECK ((confirmed_event_id IS NULL) = (confirmed_actor IS NULL)
+                                             AND (confirmed_event_id IS NULL OR kind = 'decision')),
+    -- an own item is closed exactly when it points at a closing event; a sourced item never does
+    CONSTRAINT ledger_items_closed CHECK ((closed_event_id IS NULL) = (closed_actor IS NULL)
+                                          AND (status IS NOT NULL OR closed_event_id IS NULL)
+                                          AND (status IS NULL OR (status = 'open') = (closed_event_id IS NULL))),
+    CONSTRAINT ledger_items_superseded CHECK (superseded_by IS NULL OR (status = 'superseded' AND kind = 'decision'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_items_gate ON ledger_items (gate_step_id) WHERE gate_step_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_items_action ON ledger_items (action_id) WHERE action_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_items_task ON ledger_items (task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ledger_items_open ON ledger_items (kind, due_at) WHERE status = 'open';
+
+CREATE TABLE IF NOT EXISTS ledger_events (
+    id            BIGSERIAL PRIMARY KEY,
+    item_id       BIGINT NOT NULL REFERENCES ledger_items(id) ON DELETE CASCADE,
+    item_sourced  BOOLEAN NOT NULL,   -- whether the item is sourced; the key below keeps it true to the item
+    action        TEXT NOT NULL CHECK (action IN ('add', 'note', 'amend', 'confirm', 'close', 'cancel',
+                                                  'supersede', 'reopen')),
+    actor_kind    TEXT NOT NULL CHECK (actor_kind IN ('user', 'relayed', 'system')),
+    actor_id      TEXT,
+    relayed_by    TEXT,
+    via           TEXT NOT NULL CHECK (via IN ('dashboard', 'lark', 'telegram', 'cli', 'api', 'system')),
+    manager_id    TEXT REFERENCES managers(id) ON DELETE RESTRICT,
+    channel_id    TEXT,
+    chat          TEXT,
+    message_id    TEXT,
+    session_label TEXT,
+    quote         TEXT CHECK (char_length(quote) <= 1000),
+    note          TEXT CHECK (char_length(note) <= 2000),
+    changes       JSONB CHECK (changes IS NULL OR jsonb_typeof(changes) = 'object'),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (id, actor_kind),
+    FOREIGN KEY (item_id, item_sourced) REFERENCES ledger_items (id, sourced),
+    -- the system adds sourced items and only those; the user and a relayed message add own items
+    CONSTRAINT ledger_events_add CHECK (action <> 'add' OR (actor_kind = 'system') = item_sourced),
+    CONSTRAINT ledger_events_actor CHECK (action IN ('add', 'note') OR actor_kind = 'user'),
+    CONSTRAINT ledger_events_system CHECK ((actor_kind = 'system') = (via = 'system')
+                                           AND (actor_kind <> 'system' OR action = 'add')),
+    CONSTRAINT ledger_events_relayed CHECK ((actor_kind = 'relayed') = (relayed_by IS NOT NULL)),
+    CONSTRAINT ledger_events_cli CHECK ((via = 'cli') = (session_label IS NOT NULL)),
+    CONSTRAINT ledger_events_cli_user CHECK (via <> 'cli' OR actor_kind = 'user'),
+    CONSTRAINT ledger_events_quote CHECK (quote IS NULL OR actor_kind IN ('user', 'relayed'))
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_events_item ON ledger_events (item_id, id);
+
+DO $ledger$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'ledger_items'::regclass
+                      AND conname = 'ledger_items_confirm_fk') THEN
+        ALTER TABLE ledger_items ADD CONSTRAINT ledger_items_confirm_fk
+            FOREIGN KEY (confirmed_event_id, confirmed_actor) REFERENCES ledger_events (id, actor_kind);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'ledger_items'::regclass
+                      AND conname = 'ledger_items_close_fk') THEN
+        ALTER TABLE ledger_items ADD CONSTRAINT ledger_items_close_fk
+            FOREIGN KEY (closed_event_id, closed_actor) REFERENCES ledger_events (id, actor_kind);
+    END IF;
+END $ledger$;
+-- ledger end
 -- Manager completion events (manager completion ledger RFC, C1): one row per task end that has a chat to tell.
 -- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
 -- manager events begin

@@ -146,8 +146,8 @@ def test_with_the_advisor_on_each_part_changes(tmp_path: Path) -> None:
             agent._decision_message(plan, step, context, ["Worker: x"])
     worker = WorkerPool.__new__(WorkerPool)
     payload = {"task_id": "step-a", "step_key": "s1", "instruction": "Profile the loop.", "attempt": 2}
-    assert worker._build_work_prompt({**payload, "advice": "Advice the Planner took: cache hot keys."}) != \
-        worker._build_work_prompt(payload)
+    # The Worker never gets the advisor's words: a consult only names itself on its record.
+    assert worker._build_work_prompt({**payload, "advisor_consult": 3}) == worker._build_work_prompt(payload)
     view = PlanView(started={"s1": ()}, pending={"s2": ("s1",)}, advisor=True)
     reply = parse_plan('```json\n{"steps": [{"id": "s1", "instruction": "x", "acceptance_criteria": [], '
                        '"depends_on": [], "review": false, "difficulty": "critical"}]}\n```', advisor=True)

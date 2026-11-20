@@ -427,7 +427,7 @@ export interface TasksPage {
 }
 
 /** A page of tasks: `limit` (default 50, at most 200) of them older than the task `before`, filtered by project,
- * group, schedule, Manager, query and status. */
+ * group, schedule, Manager, query and status. `statuses` is the union of several status filters. */
 export async function fetchTasks(
   filters: {
     projectId?: string;
@@ -435,6 +435,8 @@ export async function fetchTasks(
     group?: TaskGroup;
     scheduleId?: string;
     status?: string;
+    /** Two or more status filter names. The page is their union. Not together with `status`. */
+    statuses?: string[];
     before?: string | null;
     limit?: number;
     query?: string;
@@ -448,6 +450,7 @@ export async function fetchTasks(
     ...(filters.group ? { group: filters.group } : {}),
     ...(filters.scheduleId ? { schedule_id: filters.scheduleId } : {}),
     ...(filters.status ? { status: filters.status } : {}),
+    ...(filters.statuses?.length ? { statuses: filters.statuses } : {}),
     ...(filters.before ? { before: filters.before } : {}),
     ...(filters.limit ? { limit: filters.limit } : {}),
     ...(filters.query ? { query: filters.query } : {}),
@@ -1116,7 +1119,7 @@ export async function deleteProject(projectId: string, confirmation?: V1PendingC
 export type ScheduleOverlap = "skip" | "queue" | "parallel";
 /** After downtime: "once" runs once for all missed fires; "skip" skips them unless the latest was within 2 minutes. */
 export type ScheduleCatchUp = "once" | "skip";
-export type ScheduleKind = "agent" | "command";
+export type ScheduleKind = "agent" | "command" | "subscription";
 export type ScheduleRunTrigger = "scheduled" | "catch_up" | "manual";
 /** Final: all but "queued", "gating" and "running". Failures: "failed", "timed_out", "gate_failed" and "interrupted". */
 export type ScheduleRunStatus =
@@ -1153,8 +1156,58 @@ export interface ScheduleNotifyTargetOption extends ScheduleNotifyTarget {
   channel_enabled: boolean;
 }
 
+/** What a subscription reads (the events of a message source after its cursor) and how its output is made. */
+export interface SubscriptionInfo {
+  source_id: string;
+  chat_kinds: SubscriptionChatKind[];
+  include_chats: string[];
+  exclude_chats: string[];
+  sender_kinds: SubscriptionSenderKind[];
+  exclude_mentions_me: boolean;
+  include_history: boolean;
+  max_age_minutes: number;
+  max_events: number;
+  text_max_chars: number;
+  quiet_word: string;
+  output_header: string;
+  /** Where its next run starts reading. */
+  cursor_seq: number;
+  cursor_at: string | null;
+  /** When the operator last confirmed the push target; null: output stays on the dashboard. */
+  target_confirmed_at: string | null;
+  /** What the operator is shown to confirm the push target (only in a single schedule's answer). */
+  confirmation?: string | null;
+  /** What a confirmation must name: the target, rule, zone, source and processor Profile as they are now. */
+  config_version?: string;
+  /** Messages of the last 7 days whose sending was cut off: they may not have been sent, and are not sent again. */
+  uncertain_deliveries?: number;
+}
+export type SubscriptionChatKind = "p2p" | "group" | "topic" | "unknown";
+export type SubscriptionSenderKind = "user" | "app";
+/** The fields of a subscription a request sets; an update names the ones it changes. */
+export type SubscriptionFields = Partial<Pick<SubscriptionInfo, "source_id" | "chat_kinds" | "include_chats" |
+  "exclude_chats" | "sender_kinds" | "exclude_mentions_me" | "include_history" | "max_age_minutes" | "max_events" |
+  "text_max_chars" | "quiet_word" | "output_header">>;
+/** What one subscription run read and made. */
+export interface SubscriptionRunInfo {
+  from_seq: number;
+  to_seq: number;
+  events_in_window: number;
+  events_selected: number;
+  events_too_old: number;
+  events_over_cap: number;
+  record_id: number | null;
+  /** "delivered" (pushed), "quiet", "dashboard_only" (the target is not confirmed), "failed", "output_invalid". */
+  outcome: "pending" | "delivering" | "delivered" | "uncertain" | "quiet" | "dashboard_only" | "output_invalid" | "failed";
+  output_text: string | null;
+  notification_id: string | null;
+  /** Each message of its push: pending, sending, sent, failed or uncertain. */
+  deliveries?: { segment: number; state: string; attempts: number; error: string | null }[];
+}
+
 /** One firing of a schedule (or a "Run now"), and the task it started. */
 export interface ScheduleRunInfo {
+  subscription?: SubscriptionRunInfo;
   run_id: string;
   schedule_id: string;
   manager_id: string;
@@ -1196,6 +1249,8 @@ export interface ScheduleRunInfo {
 
 export interface ScheduleInfo {
   kind: ScheduleKind;
+  /** A subscription schedule's stream. */
+  subscription?: SubscriptionInfo;
   command: string | null;
   env: Record<string, string>;
   env_file: string | null;
@@ -1349,9 +1404,9 @@ export interface ScheduleFields {
 }
 
 /** Ownership is chosen only when a schedule is created. */
-export type ScheduleCreate = ScheduleFields & { kind?: ScheduleKind; manager_id?: string };
+export type ScheduleCreate = ScheduleFields & { kind?: ScheduleKind; manager_id?: string; subscription?: SubscriptionFields };
 /** Any mutable schedule field, plus turning it on or off. */
-export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
+export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean; subscription?: SubscriptionFields };
 
 /** One of the scheduler's system settings and where its value comes from. */
 export interface SchedulerSetting {
@@ -1421,6 +1476,23 @@ export async function updateSchedule(scheduleId: string, fields: ScheduleUpdate)
     "/api/v1/schedule_admin/update", { schedule_id: scheduleId, fields });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.schedule;
+}
+
+/** The operator's word on a subscription's push target as it is now (they were shown `subscription.confirmation`). */
+export async function confirmSubscriptionTarget(scheduleId: string, configVersion: string): Promise<ScheduleInfo> {
+  const result = await callV1<{ schedule: ScheduleInfo }>("/api/v1/schedule_admin/confirm_target",
+    { schedule_id: scheduleId, config_version: configVersion });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.schedule;
+}
+
+/** Move a subscription's cursor to just before the first event its source ingested after `after` (an ISO time with its offset). */
+export async function resetSubscriptionCursor(scheduleId: string, after: string):
+    Promise<{ schedule: ScheduleInfo; cursor: { cursor_seq: number; committed_seq: number; events_after: number } }> {
+  const result = await callV1<{ schedule: ScheduleInfo; cursor: { cursor_seq: number; committed_seq: number; events_after: number } }>(
+    "/api/v1/schedule_admin/reset_cursor", { schedule_id: scheduleId, after });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Delete a schedule with its runs; the tasks it created stay. */
@@ -2841,6 +2913,13 @@ export interface LlmRecord {
     env?: { sha256: string; keys: Record<string, string> };
     /** The repository's own CLAUDE.md and AGENTS.md the runtime was given (runs recorded before it lack it). */
     project_instructions?: ProjectInstructionFile[];
+    /** Catalog entries this runtime left unloaded. Absent, or `skipped` empty, when it loaded them or had none. */
+    runtime_catalog?: {
+      runtime?: string;
+      skipped?: (string | { name?: string; reason?: string; item?: string; path?: string })[];
+      skills_as_documents?: string[];
+      skill_dirs?: string[];
+    };
     presentation?: RecordPresentation;
     accounting_basis?: "subscription_equivalent";
     /** Not a Claude run: the user sent /new and the Manager dropped this session (sender: Lark open_id or

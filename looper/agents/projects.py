@@ -717,13 +717,13 @@ async def check_workspace(query: dict[str, str]) -> dict[str, Any]:
     return {**workspace["check"], "default_mode": default.value, "notes_on": execution.notes_on}
 
 
-async def _profile_overrides(raw: Any) -> dict[str, str]:
+async def _profile_overrides(raw: Any, *, roles: Sequence[str] = TASK_PROFILE_ROLES) -> dict[str, str]:
     """``profile_overrides``, a new task's (or a schedule's) choice of Agent Profile per role, checked as
     ``profile_choices`` checks a task's choice (by id or name), as role -> profile id; an empty or null entry
     chooses nothing."""
     if isinstance(raw, dict):
         raw = {role: None if profile == "" else profile for role, profile in raw.items()}
-    chosen = await profile_choices(raw, clearing=True, field="profile_overrides")
+    chosen = await profile_choices(raw, clearing=True, field="profile_overrides", roles=roles)
     return {role: profile_id for role, profile_id in chosen.items() if profile_id is not None}
 
 
@@ -736,12 +736,14 @@ def task_listed(task: Mapping[str, Any]) -> dict[str, Any]:
 
 async def list_tasks_page(
     *, limit: int = TASKS_PAGE, project_id: str | None = None, status: str | None = None,
+    statuses: Sequence[str] | None = None,
     group: db_tasks.TaskGroup | None = None, schedule_id: str | None = None, before: str | None = None,
     manager_id: str | None = None, project_ids: Sequence[str] | None = None,
     query: str = "", compact: bool = False, search_limit: int = 200, exclude_scheduled: bool = False,
 ) -> dict[str, Any]:
     """A console page or the Manager's compact list; keyword searches retain its bounded recent-task search.
-    ``exclude_scheduled`` leaves out tasks an agent schedule created and reports how many the other filters hid."""
+    ``exclude_scheduled`` leaves out tasks an agent schedule created and reports how many the other filters hid.
+    ``statuses`` is the union of those status filters and is not combined with ``status``. Counts stay per filter."""
     from ..db import managers as db_managers
     from ..db.llm_records import task_costs
 
@@ -750,6 +752,15 @@ async def list_tasks_page(
         raise RequestError(HTTP_400, f"before must be a task id; {before!r} is not one")
     if exclude_scheduled and schedule_id is not None:
         raise RequestError(HTTP_400, "exclude_scheduled cannot be combined with schedule_id")
+    if statuses is not None and status is not None:
+        raise RequestError(HTTP_400, "give status or statuses, not both")
+    if statuses is not None:
+        if not 1 <= len(statuses) <= 10:
+            raise RequestError(HTTP_400, "statuses takes 1 to 10 status filter names")
+        unknown = next((name for name in statuses if name not in db_tasks.STATUS_GROUPS), None)
+        if unknown is not None:
+            accepted = ", ".join(db_tasks.STATUS_GROUPS)
+            raise RequestError(HTTP_400, f"unknown status filter {unknown!r}; status accepts {accepted}")
     if manager_id is not None and await db_managers.get_manager(manager_id) is None:
         return {"tasks": [], "more": False} if compact else {
             "tasks": [], "counts": {}, "next_before": None, "hidden_scheduled": 0}
@@ -758,7 +769,8 @@ async def list_tasks_page(
     fetch_limit = (search_limit if query else limit) if compact else limit + 1
     search = {"query": query} if query and not compact else {}
     hiding = {"exclude_scheduled": True} if exclude_scheduled else {}
-    page = await db_tasks.list_tasks(limit=fetch_limit, status=status, before=before, **filters, **search, **hiding)
+    page = await db_tasks.list_tasks(limit=fetch_limit, status=status, statuses=statuses, before=before,
+                                     **filters, **search, **hiding)
     if compact:
         if query:
             page = [t for t in page if query in " ".join(
@@ -1306,7 +1318,8 @@ def _prompt_modes(raw: Any) -> dict[str, str | None]:
 
 
 async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
-                          pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, str | None]:
+                          pool: asyncpg.Pool | asyncpg.Connection | None = None,
+                          roles: Sequence[str] = TASK_PROFILE_ROLES) -> dict[str, str | None]:
     """``profiles`` (the request's ``field``), a task's choice of Agent Profile per role (by id or name), as role ->
     profile id (None: drop the task's choice, only when ``clearing``); each one registered and able to run its role.
     400 otherwise."""
@@ -1316,13 +1329,14 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
     if not raw:
         return {}
     if not isinstance(raw, dict):
-        raise RequestError(HTTP_400, f'{field} must be an object: {{"planner" | "worker" | "reviewer": profile}}')
+        listed = " | ".join(f'"{role}"' for role in roles)
+        raise RequestError(HTTP_400, f"{field} must be an object: {{{listed}: profile}}")
     registered: list[dict[str, Any]] | None = None
     chosen: dict[str, str | None] = {}
     for role, wanted in raw.items():
-        if role not in TASK_PROFILE_ROLES:
+        if role not in roles:
             raise RequestError(HTTP_400, f"{field}: a task chooses the Agent Profile of its "
-                                         f"{', '.join(TASK_PROFILE_ROLES)} only, not {role!r}")
+                                         f"{', '.join(roles)} only, not {role!r}")
         if wanted is None:
             if not clearing:
                 raise RequestError(HTTP_400, f"{field}.{role}: give an Agent Profile, or leave the role out")

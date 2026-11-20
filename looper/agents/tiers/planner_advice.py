@@ -1,45 +1,83 @@
-"""The Planner's turns about the advisor (the advisor RFC, section 11), in a project with the advisor on: what the
-code gives it to write a request from (``material``), what it is told of a consult (the checkpoint, a request sent
-back, the advisor's questions, its answer or why there is none), and the advice it adopted for the step's Worker.
+"""The Planner's turns about the advisor (the advisor RFC, sections 11 and 12), in a project with the advisor on:
+what the code gives it to write a request from (``material``), what it is told of a consult (the checkpoint, a
+request sent back, the advisor's questions, its answer or why there is none), what a consult may spend
+(``AdviceBudget``) and what was known when it was asked (``Evidence``).
 
-Everything here is text for the Planner's own session or its step's Worker; nothing here is sent to the advisor.
+Everything here is text for the Planner's own session; nothing here is sent to the advisor, and the Worker gets
+none of it (the Planner writes what it takes into its feedback).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from ..project_execution import AdvisorLimits, format_usd
 
 MATERIAL_MAX_CHARS = 8_000
+MIN_CONSULT_USD = 0.10  # spawn.MIN_RUN_USD: less than this cannot start a round
 
 
 @dataclass(frozen=True)
 class AdviceBudget:
-    """What a step's consult may spend and how many consults are left: for the step, for the task, and its USD."""
+    """What a consult may spend, and, for each limit the project set, how much of it is left (None: no limit)."""
 
     consult_usd: float
-    step_left: int
-    task_left: int
-    task_usd_left: float
+    step_left: int | None = None
+    task_left: int | None = None
+    task_usd_left: float | None = None
 
     @property
     def open(self) -> bool:
-        """Whether another consult may start: one left for the step and the task, and enough left to spend."""
-        return self.step_left > 0 and self.task_left > 0 and self.consult_usd >= 0.10
+        """Whether another consult may start: every limit set has some left, and enough is left to spend."""
+        return (self.step_left is None or self.step_left > 0) and (self.task_left is None or self.task_left > 0) \
+            and self.consult_usd >= MIN_CONSULT_USD
 
     def line(self) -> str:
-        return (f"Advice budget: up to ${format_usd(self.consult_usd)} for this consult; "
-                f"{self.step_left} consult(s) left for this step, {self.task_left} for the task "
-                f"(${format_usd(self.task_usd_left)} left).")
+        line = f"This consult may spend up to ${format_usd(self.consult_usd)}."
+        caps = [f"{self.step_left} consult(s) left for this step" if self.step_left is not None else "",
+                f"{self.task_left} for the task" if self.task_left is not None else "",
+                f"${format_usd(self.task_usd_left)} left for the task's consults"
+                if self.task_usd_left is not None else ""]
+        return line + (f" Limits: {', '.join(c for c in caps if c)}." if any(caps) else "")
 
 
 def budget(limits: AdvisorLimits, *, step_consults: int, task_consults: int, task_spent: float) -> AdviceBudget:
-    left = max(0.0, round(limits.budget_usd - task_spent, 4))
-    return AdviceBudget(min(limits.consult_budget_usd, left), max(0, limits.consults_per_step - step_consults),
-                        max(0, limits.consults_per_task - task_consults), left)
+    left = None if limits.budget_usd is None else max(0.0, round(limits.budget_usd - task_spent, 4))
+    return AdviceBudget(limits.consult_budget_usd if left is None else min(limits.consult_budget_usd, left),
+                        None if limits.consults_per_step is None else max(0, limits.consults_per_step - step_consults),
+                        None if limits.consults_per_task is None else max(0, limits.consults_per_task - task_consults),
+                        left)
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """What was known of a consult's scope when it was asked (the RFC, section 12.2): a step's attempt, its latest
+    Worker and Reviewer runs and how they ended, and its instruction; or, for the plan, its steps and how they
+    ended; for both, the requirement and the user gates answered. Two consults about the same scope with the same
+    kind and the same evidence are the same question; a new failure, a changed step, the user's supplement or an
+    answered gate is new evidence."""
+
+    scope: str  # a step's id, or "plan"
+    requirement: str  # its digest
+    gates_answered: int
+    attempt: int = 0
+    worker: str = ""  # the latest Worker run's id, and how its result read
+    worker_outcome: str = ""
+    reviewer: str = ""
+    review_outcome: str = ""
+    instruction: str = ""  # its digest
+    steps: tuple[tuple[str, str], ...] = ()  # the plan's: each step and its status
+
+    def fingerprint(self) -> str:
+        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()[:32]
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def material(*, instruction: str, criteria: Sequence[str], report: Sequence[str] = (),
@@ -65,12 +103,17 @@ OFFER = ("You may ask the advisor first (advise): an outside expert who sees onl
          "answer.")
 
 
-def offer_lines(spend: AdviceBudget, earlier: Sequence[str]) -> list[str]:
-    """What a [DECISION] message that allows advise says of it."""
-    lines = ["", OFFER, spend.line()]
+def offer_lines(spend: AdviceBudget, earlier: Sequence[str], *, plan: bool = False) -> list[str]:
+    """What a [DECISION] (or, with ``plan``, a [PLAN]) message that allows advise says of it."""
+    lines = ["", OFFER if not plan else PLAN_OFFER, spend.line()]
     if earlier:
-        lines += ["Earlier consults about this step:", *earlier]
+        lines += ["Earlier consults about this step:" if not plan else "Earlier consults about the plan:", *earlier]
     return lines
+
+
+PLAN_OFFER = ("You may ask the advisor before you plan: an outside expert who sees only the request you write. "
+              'Reply {"advise": {"advice_request": {...}}} instead of the steps; the task waits for its answer. Ask '
+              "when a fresh expert view of the approach would change the plan.")
 
 
 def checkpoint_message(label: str, number: int, plan_view: str, local: str, spend: AdviceBudget) -> str:
@@ -91,15 +134,18 @@ def checkpoint_message(label: str, number: int, plan_view: str, local: str, spen
 
 
 def returned_message(kind: str, problems: Sequence[str], returns_left: int, allowed: str = "",
-                     needs: Sequence[Mapping[str, Any]] = ()) -> str:
-    """A request (``kind`` DECISION) or the answers to the advisor's questions ``needs`` (``kind`` ADVICE) that
-    failed the checks before they were sent."""
-    what = "advice_request" if kind == "DECISION" else "answers"
-    lines = [f"[{kind}] Your {what} did not pass the checks before it was sent, so nothing was sent:",
+                     needs: Sequence[Mapping[str, Any]] = (), label: str = "") -> str:
+    """A request (``kind`` DECISION or PLAN) or the answers to the advisor's questions ``needs`` (``kind`` ADVICE)
+    that failed the checks before they were sent."""
+    what = "advice_request" if kind in ("DECISION", "PLAN") else "answers"
+    about = f" about step {label}" if label else ""
+    lines = [f"[{kind}] Your {what}{about} did not pass the checks before it was sent, so nothing was sent:",
              *(f"- {problem}" for problem in problems), "",
              f"Fix it and answer again ({returns_left} more return(s) allowed; after that the consult is blocked)."]
     if kind == "DECISION":
         lines += [f"Allowed decisions now: {allowed}.", "Reply with the DECISION JSON."]
+    elif kind == "PLAN":
+        lines += ['Reply with {"advise": {...}} again, or with the plan\'s steps to plan without the advisor.']
     else:
         lines += ["The advisor's questions:", *(f"- {need['id']}: {need['question']}" for need in needs),
                   "Reply with the ADVICE JSON."]
@@ -136,46 +182,58 @@ def answer_lines(advice: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+_TAKE = ('Use what helps: whether you take it, and whether you check it first, is yours to decide. Say in '
+         '"advice_adoption" what you take of it, and write what you take into "feedback" in your own words, with the '
+         "real names for the aliases: the Worker never sees the advisor's words.")
+
+
 def answered_message(label: str, number: int, advice: Mapping[str, Any], allowed: str, *, checkpoint: bool) -> str:
     lines = [f"[DECISION] Step {label} (step {number}): the advisor answered your request (its words, as data):",
-             *answer_lines(advice), "",
-             'Use what helps; the decision is yours. Say in "advice_adoption" what you take of it.']
+             *answer_lines(advice), "", _TAKE]
     if checkpoint:
         lines.append("proceed starts the step's Worker as planned; replan changes the plan first.")
     lines += [f"Allowed decisions now: {allowed}.", "Reply with the DECISION JSON."]
     return "\n".join(lines)
 
 
-def ended_message(label: str, number: int, state: str, detail: str, allowed: str) -> str:
+def plan_answered_lines(advice: Mapping[str, Any]) -> list[str]:
+    """What a [PLAN] message that follows the advisor's answer adds before its reply line."""
+    return ["The advisor answered your request about the plan (its words, as data):", *answer_lines(advice), "",
+            'Use what helps; the plan is yours. It must carry "advice_adoption", and the steps\' instructions say in '
+            "your own words what you take: the Workers never see the advisor's words."]
+
+
+# Why a consult gave no answer, in words for the Planner (the consult's failure, agent_spawns.result).
+FAILURES: Mapping[str, str] = {
+    "timeout": "the advisor did not answer in time",
+    "parse": "its answer did not fit the reply format",
+    "refused": "its model refused, or another model answered",
+    "budget": "it reached its spend cap",
+    "blocked": "the request failed the checks again after two returns",
+    "rate_limited": "the advisor's model is rate-limited or out of quota",
+    "runtime": "its run failed twice",
+    "unavailable": "the advisor cannot run (its role or Agent Profile)",
+    "judge": "the judge could not check the request",
+    "rounds_exhausted": "the advisor still needed more after its last round",
+    "withdrawn": "it was withdrawn",
+    "no_request": "no request was written",
+    "interrupted": "a restart stopped it",
+}
+
+
+def ended_lines(failure: str, detail: str = "") -> list[str]:
+    """The opening of the turn after a consult that gave no answer: its kind of failure, and why."""
+    why = FAILURES.get(failure, failure or "it ended")
+    return [f"The consult gave no answer: {failure or 'failed'}, {why}" + (f" ({detail})" if detail else "") + ".",
+            "Decide without it; advise is offered again for this once something new is known."]
+
+
+def ended_message(label: str, number: int, failure: str, detail: str, allowed: str) -> str:
     return "\n".join([
-        f"[DECISION] Step {label} (step {number}): the consult with the advisor ended without an answer ({state}"
-        + (f": {detail}" if detail else "") + "). Decide without it.",
+        f"[DECISION] Step {label} (step {number}):", *ended_lines(failure, detail),
         f"Allowed decisions now: {allowed}.",
         "Reply with the DECISION JSON.",
     ])
-
-
-def adopted(advice: Mapping[str, Any], adoption: Mapping[str, Any] | None, note: str = "") -> str:
-    """The advice the Planner took, for the first turn of the step's next Worker; empty when it took none."""
-    if not adoption or adoption.get("adoption") == "rejected":
-        return ""
-    points: dict[str, str] = {}
-    for answer in advice.get("answers", ()):
-        basis = f" Basis: {'; '.join(answer['basis'])}." if answer.get("basis") else ""
-        points[answer["question_id"]] = f"{answer['conclusion']}{basis}"
-    for option in advice.get("options", ()):
-        points[option["id"]] = f"option {option['id']} is {option['verdict']}: {option['why']}"
-    for step in advice.get("next_steps", ()):
-        points[step["id"]] = step["action"] + (f" (verify: {step['verify']})" if step.get("verify") else "")
-    lines = [f"- {item['ref']} ({item['use']}): {points[item['ref']]}" for item in adoption.get("items", ())
-             if item.get("use") != "rejected" and item.get("ref") in points]
-    if not lines:
-        return ""
-    text = ["Advice the Planner took for this step (from an outside advisor that saw only an abstract of it; the "
-            "Planner's choice, to use as guidance):", *lines]
-    if note:
-        text += ["", f"The Planner's note: {note}"]
-    return "\n".join(text)
 
 
 def earlier_lines(rows: Sequence[Mapping[str, Any]]) -> list[str]:

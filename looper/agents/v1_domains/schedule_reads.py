@@ -23,7 +23,7 @@ _RUN_STATUS = _enum(*dict.fromkeys((*db_schedules.OPEN_STATUSES, *db_schedules.S
                                    *db_schedules.FAILURES, *db_schedules.SKIPPED, "stopped", "cancelled")))
 RUN = _object({
     **dict.fromkeys(("run_id", "schedule_id", "manager_id", "scheduled_for", "trigger", "status"), _STR),
-    "missed": _INT, "firings": _INT, "kind": _enum("agent", "command"),
+    "missed": _INT, "firings": _INT, "kind": _enum("agent", "command", "subscription"),
     **dict.fromkeys(("fired_at", "task_id", "task_status", "task_title", "summary", "error", "finished_at",
                      "gate_output", "carried_from", "started_at", "log_tail"), _NULL_STR),
     "cost_usd": _NULL_NUMBER, "exit_code": _NULL_INT, "exit_signal": _NULL_INT,
@@ -33,7 +33,7 @@ _SCHEDULE_FIELDS = {
     **dict.fromkeys(("schedule_id", "project_id", "project_name", "manager_id", "name", "cron", "timezone", "description",
                      "requirement", "work_dir", "created_via", "created_at", "updated_at"), _STR),
     "manager_name": _NULL_STR, "template_key": _NULL_STR, "template_name": _NULL_STR,
-    "kind": _enum("agent", "command"), "command": _NULL_STR,
+    "kind": _enum("agent", "command", "subscription"), "command": _NULL_STR,
     "env": {"type": "object", "additionalProperties": _STR},
     "env_file": _NULL_STR, "success_deadline": _NULL_STR,
     "alert_policy": _object({
@@ -51,18 +51,42 @@ _SCHEDULE_FIELDS = {
     "run_timeout_effective_seconds": _NULL_INT, "run_budget_usd": _NULL_NUMBER,
     "daily_budget_usd": _NULL_NUMBER, "spent_today_usd": {"type": "number"},
     "gate_command": _NULL_STR, "gate_timeout_seconds": _NULL_INT,
-    "profile_overrides": _object(dict.fromkeys(("planner", "worker", "reviewer"), _STR), [], closed=True),
+    "profile_overrides": _object(dict.fromkeys(("planner", "worker", "reviewer", "processor"), _STR), [], closed=True),
     "task_limits": _object({"worker": _NULL_INT, "reviewer": _NULL_INT}),
     "notify_target": _nullable(_object({"channel": _STR, "chat": _STR})),
     "alerts": _object(dict.fromkeys(("failures_since", "stale_since", "deadline_since", "overlap_since"), _NULL_STR)),
     "planner_session": _object({"active": _BOOL, **dict.fromkeys(
         ("runtime", "profile", "last_task_id", "last_task_title", "updated_at"), _NULL_STR)})}
+# What a subscription schedule reads (its ``subscription``), and what each of its runs read and made.
+SUBSCRIPTION = _object({
+    "source_id": _STR, "chat_kinds": _array(_STR), "include_chats": _array(_STR), "exclude_chats": _array(_STR),
+    "sender_kinds": _array(_STR), "exclude_mentions_me": _BOOL, "include_history": _BOOL, "max_age_minutes": _INT,
+    "max_events": _INT, "render": _STR, "text_max_chars": _INT, "quiet_word": _STR, "output_header": _STR,
+    "output_kind": _STR, "cursor_seq": _INT, **dict.fromkeys(("cursor_at", "target_confirmed_at"), _NULL_STR)},
+    # ``confirmation``: what the operator is shown to confirm the push target, in a single schedule's answer.
+    [name for name in ("source_id", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds",
+                       "exclude_mentions_me", "include_history", "max_age_minutes", "max_events", "render",
+                       "text_max_chars", "quiet_word", "output_header", "output_kind", "cursor_seq", "cursor_at",
+                       "target_confirmed_at")])
+SUBSCRIPTION["properties"]["confirmation"] = _NULL_STR
+SUBSCRIPTION["properties"]["config_version"] = _STR  # what a confirmation of the target must name
+SUBSCRIPTION["properties"]["uncertain_deliveries"] = _INT  # messages of the last 7 days that may not have been sent
+SUBSCRIPTION_RUN = _object({
+    "from_seq": _INT, "to_seq": _INT, "events_in_window": _INT, "events_selected": _INT, "events_too_old": _INT,
+    "events_over_cap": _INT, "record_id": _NULL_INT, "outcome": _STR,
+    **dict.fromkeys(("output_text", "notification_id"), _NULL_STR)})
+SUBSCRIPTION_RUN["properties"]["deliveries"] = _array(_object({"segment": _INT, "state": _STR, "attempts": _INT,
+                                                               "error": _NULL_STR}))
+RUN["properties"]["subscription"] = SUBSCRIPTION_RUN  # a subscription's runs only
+RUN["required"] = [name for name in RUN["required"] if name != "subscription"]
+_SCHEDULE_FIELDS["subscription"] = SUBSCRIPTION  # a subscription's only
 SCHEDULE_WITHOUT_LAST_RUN = _object({key: value for key, value in _SCHEDULE_FIELDS.items()
                                     if key not in {"manager_id", "manager_name"}})
 SCHEDULE = _object({**_SCHEDULE_FIELDS, "last_run": _nullable(RUN)})
 # Full schedule projections include availability; compact tool results may omit it.
 for _schema in (SCHEDULE_WITHOUT_LAST_RUN, SCHEDULE):
     _schema["properties"]["notify_target_available"] = _BOOL
+    _schema["required"] = [name for name in _schema["required"] if name != "subscription"]
 SCHEDULE_LIMITS = _object({
     **dict.fromkeys(("name_max_chars", "requirement_max_chars", "min_interval_seconds",
                      "min_interval_gated_seconds", "run_timeout_max_seconds", "gate_command_max_chars",
@@ -88,12 +112,12 @@ NOTIFICATION = _object({
 LISTED_RUN = _object({
     **dict.fromkeys(("run_id", "status", "trigger"), _STR),
     **dict.fromkeys(("at", "task_id", "summary"), _NULL_STR), "cost_usd": _NULL_NUMBER, "firings": _INT,
-    "exit_code": _NULL_INT, "kind": _enum("agent", "command")},
+    "exit_code": _NULL_INT, "kind": _enum("agent", "command", "subscription")},
     ["run_id", "status", "trigger", "at", "task_id", "summary", "cost_usd", "exit_code", "kind"])
 LISTED_SCHEDULE = _object({
     **dict.fromkeys(("schedule_id", "name", "project", "cron", "timezone", "description"), _STR),
     "user_gates": _enum("off", "on"), "notify_format": _enum("report", "deliverable"),
-    "kind": _enum("agent", "command"),
+    "kind": _enum("agent", "command", "subscription"),
     "enabled": _BOOL, "next_fire_at": _NULL_STR, "consecutive_failures": _INT, "last_run": _nullable(LISTED_RUN)})
 RESULTS = {
     "schedules.list": _object({"schedules": _array(LISTED_SCHEDULE)}),

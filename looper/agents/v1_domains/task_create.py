@@ -43,7 +43,9 @@ NEW_PROJECT_FIELDS = _object({
                         "enum": ["off", "draft", "write", "", True, False, None],
                         "description": "Lessons mode; true maps to write, false, null and empty string map to off."},
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
-    **dict.fromkeys(("workspace_links", "verification_paths"), _inherit("array", items=_STR)),
+    **dict.fromkeys(("workspace_links", "verification_paths", "advisor_internal_domains"),
+                    _inherit("array", items=_STR)),
+    "advisor_fallback_profile": _inherit("string"),
     **{field: _choice("on", "off") for field in (
         "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room",
         "advisor")},
@@ -156,12 +158,19 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
         value = getattr(limits, field.removeprefix("room_"))
         values[field] = (label, format_usd(value) if field == "room_consult_budget_usd" else value)
     advisor = execution.advisor_limits
+    unlimited = "不限（只告警）"
     values.update({
         "advisor": ("Planner 请教 advisor", execution.advisor_on),
         "advisor_consult_budget_usd": ("每次请教花费上限，USD", format_usd(advisor.consult_budget_usd)),
-        "advisor_budget_usd": ("每任务请教总花费上限，USD", format_usd(advisor.budget_usd)),
-        "advisor_consults_per_task": ("每任务请教次数", advisor.consults_per_task),
-        "advisor_consults_per_step": ("每步请教次数", advisor.consults_per_step),
+        "advisor_budget_usd": ("每任务请教总花费上限，USD",
+                               unlimited if advisor.budget_usd is None else format_usd(advisor.budget_usd)),
+        "advisor_consults_per_task": ("每任务请教次数", unlimited if advisor.consults_per_task is None
+                                      else advisor.consults_per_task),
+        "advisor_consults_per_step": ("每步请教次数", unlimited if advisor.consults_per_step is None
+                                      else advisor.consults_per_step),
+        "advisor_fallback_profile": ("advisor 的备用 Profile（第一期不用）", execution.advisor_fallback_profile or "无"),
+        "advisor_internal_domains": ("请教包里算作 URL 的内部域名",
+                                     ", ".join(execution.advisor_internal_domains or ()) or "无"),
     })
     lines = []
     for field in FIELDS:

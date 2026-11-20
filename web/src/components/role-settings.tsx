@@ -24,6 +24,7 @@ import {
   type Registry,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
+import { historyHref } from "@/pages/agent-history";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
 import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
@@ -60,8 +61,8 @@ function RolePromptEditor({ id, value, onChange, processor, spawned = false }: {
         {processor ? (
           <>
             This text is the role layer. At launch Looper follows it with the instructions of what it processes and
-            the reply format, in place of the runtime&apos;s own prompt; a run&apos;s history page (from Runs) shows
-            that whole prompt.
+            the reply format, in place of the runtime&apos;s own prompt; a run&apos;s history page shows that whole
+            prompt.
           </>
         ) : spawned ? (
           <>
@@ -73,7 +74,7 @@ function RolePromptEditor({ id, value, onChange, processor, spawned = false }: {
           <>
             This text is the role layer. At launch Looper combines it with the harness, the project, the task and the
             reply format into the agent&apos;s system prompt, added to the runtime&apos;s own; a run&apos;s history
-            page (from Runs) shows that whole prompt.
+            page shows that whole prompt.
           </>
         )}
       </p>
@@ -354,7 +355,7 @@ export function RolesSection({ sub }: { sub: string }) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ role: string; text: string } | null>(null);
-  // A link to a row (from Runs or an Agent Profile's "used by") opens it, also while the page is showing.
+  // A link to a row (an Agent Profile's "used by") opens it, also while the page is showing.
   const row = useCollapsibleRows(sub.split("/")[0], !loading);
   const { registry } = useRegistry();
 
@@ -455,7 +456,7 @@ export function RolesSection({ sub }: { sub: string }) {
           const name = nameOf(config);
           const runs = (
             <a
-              href={`#runs/${encodeURIComponent(config.role)}`}
+              href={historyHref("", null, isRole(config.role) ? config.role : null)}
               className="flex shrink-0 items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
             >
               <History className="h-3.5 w-3.5" aria-hidden="true" />

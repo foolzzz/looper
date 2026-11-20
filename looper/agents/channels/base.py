@@ -9,7 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from ..bus import MessageBus
 from ..message import MessageEnvelope
@@ -34,6 +34,16 @@ class DeliveryReceipt:
     failure: DeliveryFailure | None = None  # when not ``success``: why, if not SEND_FAILED
 
 
+class PostOutcome(StrEnum):
+    """What posting a message did, as far as the poster can tell: ``SENT``, ``REJECTED`` (the platform answered, or the
+    call never left, so nothing was sent: asking again is safe) or ``UNKNOWN`` (the message may have been accepted: a
+    timeout, a lost connection, an answer that could not be read). An unknown post is never asked again."""
+
+    SENT = "sent"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class PostReceipt:
     """What posting a message to a chat did: the ids of the channel messages sent (several when it was split), or
@@ -44,6 +54,12 @@ class PostReceipt:
     external_ids: tuple[str, ...] = ()
     error: str | None = None
     parent_gone: bool = False
+    # Set by an adapter that can tell a refusal from a lost answer; a failure that says nothing is ``UNKNOWN``.
+    outcome: PostOutcome | None = None
+
+    @property
+    def result(self) -> PostOutcome:
+        return PostOutcome.SENT if self.success else (self.outcome or PostOutcome.UNKNOWN)
 
 
 class ChannelAdapter(ABC):
@@ -95,7 +111,8 @@ class ChannelAdapter(ABC):
         the ids of the messages sent, so replies to them can be routed back: a user gate's messages
         (``gate_courier``). A channel that can uses ``idempotency_key`` to send one message for it, however often it
         is asked."""
-        return PostReceipt(False, error=f"the {self.channel_type} channel cannot post messages")
+        return PostReceipt(False, error=f"the {self.channel_type} channel cannot post messages",
+                           outcome=PostOutcome.REJECTED)
 
     def healthcheck(self) -> dict[str, Any]:
         """Return channel health status. Override for richer diagnostics."""

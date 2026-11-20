@@ -25,7 +25,7 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
 - **Its record** (``llm_records``): ``agent_id`` ``processor:<owner>``, no task, the caller's metadata; model
   requests are not recorded (llmrec), and ``input_text`` holds only a reference to the batch (the caller's window
   reference, the text's sha256 and length), never the batch, and of its stream only the runtime's own events and
-  the result's typed fields (``_kept``): the model's messages, whose thinking may restate the batch, are counted,
+  the result's typed fields (``typed_events``): the model's messages, whose thinking may restate the batch, are counted,
   never stored; its error is only what happened, never what the process wrote (``single_run`` ``quiet``), its
   failure's category in ``metadata.processor_failure``.
   Deleting the messages deletes their text from every place Looper keeps it but the outputs.
@@ -98,7 +98,7 @@ _RESULT_FIELDS = ("type", "subtype", "is_error", "duration_ms", "duration_api_ms
                   "total_cost_usd", "usage", "modelUsage", "stop_reason", "uuid")
 
 
-def _kept(event: Mapping[str, Any]) -> dict[str, Any] | None:
+def typed_events(event: Mapping[str, Any]) -> dict[str, Any] | None:
     """What a processor run's record keeps of its stream: the runtime's own events (its init, with its tools and MCP
     servers) and the result's typed fields (``_RESULT_FIELDS``); never the model's messages."""
     if event.get("type") == "system":
@@ -133,6 +133,39 @@ async def _refuses_managed_hooks() -> bool:
     from ..db import system_settings
 
     return (await system_settings.get_settings([REFUSE_KEY])).get(REFUSE_KEY) == "true"
+
+
+def _public_url(url: str) -> str:
+    """An endpoint's URL without anything a credential could ride in (user, password, query, fragment)."""
+    from urllib.parse import urlsplit
+
+    found = urlsplit(url or "")
+    return f"{found.scheme}://{found.hostname or ''}{f':{found.port}' if found.port else ''}{found.path}" if found.scheme else ""
+
+
+def profile_facts(settings: AgentSettings, hooks: Mapping[str, Any] | None) -> dict[str, Any]:
+    """What a confirmation of the processor binds, from the settings a run launches with: the Profile, its runtime
+    (type, launcher, executable), its provider (account, vendor, auth, the names of its environment variables) and
+    endpoint (protocol, URL without credentials), the model (id, name, protocol), the effort, and the events of the
+    managed hooks that see what it is given. An in-place edit of any of them changes it. No credential is in it: not an
+    API key, not an environment value."""
+    profile = settings.profile
+    runtime, resolved = profile.runtime, getattr(profile, "resolved_model", None)
+    facts: dict[str, Any] = {
+        "profile_id": profile.id, "effort": profile.effort,
+        "runtime": {"id": runtime.id, "type": runtime.type, "launcher": getattr(runtime.launcher, "value", str(runtime.launcher)),
+                    "executable": runtime.executable},
+        "hooks": sorted((hooks or {}).get("events") or []) if hooks else None}
+    if resolved is not None:
+        provider, endpoint, model = resolved.provider, resolved.endpoint, resolved.model
+        facts.update(
+            provider={"id": provider.id, "vendor": getattr(provider.vendor_type, "value", str(provider.vendor_type)),
+                      "auth": getattr(provider.auth, "value", str(provider.auth)),
+                      "env_keys": sorted(key for key, _ in provider.env)},
+            endpoint={"protocol": getattr(endpoint.protocol, "value", str(endpoint.protocol)), "url": _public_url(endpoint.base_url),
+                      "runtime_default": endpoint.use_runtime_default},
+            model={"id": model.id, "name": model.name, "protocol": getattr(model.protocol, "value", str(model.protocol))})
+    return facts
 
 
 def _managed_hooks(settings: AgentSettings) -> Any:
@@ -188,6 +221,8 @@ class ProcessorRun:
     cost_usd: float | None = None
     failure: ProcessorFailure | None = None
     detail: str = ""
+    # The Agent Profile the run launched with (``profile_facts``), from the settings it was started on.
+    profile: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +278,13 @@ async def chosen_profile(project_id: str | None = None, schedule_id: str | None 
             "problem": problem}
 
 
+async def run_facts(project_id: str | None, schedule_id: str | None) -> dict[str, Any]:
+    """``profile_facts`` of the settings a run would launch with now."""
+    settings = await load_agent_settings(AgentType.PROCESSOR, project_id, schedule_id=schedule_id, wait=False)
+    hooks = _managed_hooks(settings)
+    return profile_facts(settings, hooks.view() if hooks is not None else None)
+
+
 def _system_prompt(settings: AgentSettings, role: _Role, instructions: str, quiet_word: str) -> Any:
     from .system_prompt import SystemPrompt, compose_system_prompt, prompt_layers
 
@@ -289,6 +331,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
     hooks = _managed_hooks(settings)
     if hooks is not None and await _refuses_managed_hooks():
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=_managed_refusal(hooks))
+    facts = profile_facts(settings, hooks.view() if hooks is not None else None)
     role = await _role()
     if not role.enabled:
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED,
@@ -320,7 +363,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
             return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
         recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
                                      input_text=reference, system_prompt=system_prompt, launch=launch,
-                                     whole_process=True, keep=_kept)
+                                     whole_process=True, keep=typed_events)
         await recorder.start()
         noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
         if noted:
@@ -358,5 +401,5 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
         failed = ProcessorFailure.BUDGET, f"it cost {cost:.4f} USD, over its cap of {cap:g} USD"
     if failed is not None:
         await recorder.annotate({"processor_failure": failed[0].value})
-        return ProcessorRun(None, record_id, cost, failure=failed[0], detail=failed[1])
-    return ProcessorRun(str(result.get("result") or ""), record_id, cost)
+        return ProcessorRun(None, record_id, cost, failure=failed[0], detail=failed[1], profile=facts)
+    return ProcessorRun(str(result.get("result") or ""), record_id, cost, profile=facts)

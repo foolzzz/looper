@@ -102,8 +102,9 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
 
 
 # What kind of run a record is (``llm_records.run_kind``), and the agent ids that say it: every record but a spawned
-# run's (an advisor's or a judge's, which names its kind) takes its kind from these, and the run tree migration
-# backfilled older rows by them. An agent id none of them matches leaves the kind NULL.
+# run's (an advisor's or a judge's, which names its kind) takes its kind from these. Records from before the run tree
+# have no run_kind (its migration rewrites no row), and readers take theirs from these too (``RUN_KIND``). An agent
+# id none of them matches has no kind.
 RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check")
 _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     # (kind, exact ids, id prefixes)
@@ -132,6 +133,10 @@ def run_kind_case(column: str) -> str:
         tests = [f"{column} = '{value}'" for value in exact] + [f"{column} LIKE '{like(value)}'" for value in prefixes]
         whens.append(f"WHEN {' OR '.join(tests)} THEN '{kind}'")
     return f"CASE {' '.join(whens)} END"
+
+
+# A record's kind for a reader that filters or groups on it: its run_kind, else what its agent id says.
+RUN_KIND = f"COALESCE(run_kind, {run_kind_case('agent_id')})"
 
 
 async def start_record(
@@ -383,7 +388,7 @@ _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
 # The agents that work on one task, whose runs make up its cost; the Manager is not one of them. The runs the Planner's
 # consults of the advisor start (the advisor's and its judge's) are the Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
-_PLANNER_SPAWNS = "run_kind IN ('advisor', 'advice_check')"
+_PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check')"
 _TASK_ROLE = (
     f"CASE WHEN {_PLANNER_SPAWNS} THEN 'planner' "
     + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"

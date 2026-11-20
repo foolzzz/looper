@@ -238,6 +238,11 @@ class WaitChange:
 @dataclass(frozen=True)
 class PlanReply:
     steps: tuple[StepSpec, ...]
+    # With the advisor on: the request of a PLAN reply that asks the advisor before it plans (no steps then), and
+    # what the plan that follows its answer takes of it.
+    advice_request: Mapping[str, Any] | None = None
+    advice_bindings: Any = None
+    adoption: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -440,7 +445,7 @@ class DecisionContext:
         if self.checkpoint:
             return (Decision.PROCEED, Decision.REPLAN, Decision.FAIL) if self.answered else (Decision.ADVISE,)
         if self.escalate or self.verification_repair_required:
-            return (Decision.REPLAN, Decision.FAIL)
+            return ((Decision.ADVISE,) if self.advise and not self.answered else ()) + (Decision.REPLAN, Decision.FAIL)
         allowed = []
         if self.acceptable:
             allowed.append(Decision.ACCEPT)
@@ -485,9 +490,27 @@ def extract_reply(text: str) -> dict[str, Any]:
 def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy(),
                conditions: bool = False, isolate_steps: bool = False, review_panel: bool = False,
-               verification_role: str | None = None, work_role: str | None = None, advisor: bool = False) -> PlanReply:
+               verification_role: str | None = None, work_role: str | None = None, advisor: bool = False,
+               advise: bool = False, answered: bool = False) -> PlanReply:
+    """A PLAN reply. With the advisor on, ``advise`` lets it ask the advisor instead
+    (``{"advise": {"advice_request": ..., "advice_bindings": ...}}``), and after its answer (``answered``) the plan
+    must carry ``advice_adoption``."""
     data = extract_reply(text)
-    _only_keys(data, {"steps"}, "the PLAN reply")
+    if advise and not answered and "advise" in data:
+        _only_keys(data, {"advise"}, "the PLAN reply that asks the advisor")
+        ask = data["advise"]
+        if not isinstance(ask, dict) or not isinstance(ask.get("advice_request"), dict):
+            raise ProtocolError('advise needs {"advice_request": {...}}: the request, an object in the AdviceRequest '
+                                'v1 shape, with "advice_bindings" optional')
+        _only_keys(ask, {"advice_request", "advice_bindings"}, "advise")
+        return PlanReply((), advice_request=ask["advice_request"], advice_bindings=ask.get("advice_bindings"))
+    _only_keys(data, {"steps", "advice_adoption"} if answered else {"steps"}, "the PLAN reply")
+    adoption = None
+    if answered:
+        if "advice_adoption" not in data:
+            raise ProtocolError('this plan follows the advisor\'s answer, so it must carry "advice_adoption": which '
+                                "points you take, how far, for which steps and why")
+        adoption = parse_adoption(data["advice_adoption"])
     steps = _step_list(data.get("steps"), "steps", conditions=conditions, review_panel=review_panel, advisor=advisor)
     if not steps:
         raise ProtocolError("steps must list at least one step")
@@ -496,7 +519,7 @@ def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                                                isolate_steps=isolate_steps, review_panel=review_panel,
                                                verification_role=verification_role,
                                                work_role=work_role, advisor=advisor), replace_pending=True)
-    return PlanReply(steps)
+    return PlanReply(steps, adoption=adoption)
 
 
 def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjudications: bool = False) -> DecisionReply:
@@ -941,7 +964,8 @@ def _refusal(decision: Decision, context: DecisionContext) -> str:
                else f"step {context.step} is critical: ask the advisor to review its plan before its Worker starts")
     elif decision is Decision.ADVISE:
         why = ("the advisor has answered for this decision" if context.answered
-               else "the advisor's limits for this step or task are reached")
+               else "the advisor is not offered now: this step has a consult going, or nothing new is known since "
+                    "its last one, or a limit is reached")
     elif decision is Decision.PROCEED:
         why = "proceed only follows the advisor's review of a critical step's plan"
     elif decision is Decision.RETRY:
@@ -1808,26 +1832,31 @@ _CONDITION_RULES = """- ready_when (optional on work, gate and wait steps): a de
 
 # The advisor's parts of the contract (the advisor RFC, section 11), in a project with the advisor on.
 _ADVISOR_DIFFICULTY = """\
-- difficulty (optional on work steps): "routine", "hard" or "critical". Mark
-  critical a step whose mistake is costly to undo (an interface, a data
-  structure, a migration): before its Worker starts, you ask the advisor to
-  review your plan for it.
+- difficulty (optional on work steps): "routine", "hard" or "critical".
+  critical is a step that changes an interface or a data structure, runs a
+  migration, deletes data or changes production configuration. Before a
+  critical step's Worker starts, you ask the advisor to review your plan for
+  it; such a step cannot skip that review.
 """
 _ADVISOR_DECISIONS = """\
 - advise (only when the message lists it): ask the advisor, an outside
   expert who sees only the request you write, nothing of the task. Give
   "advice_request" (required, the shape below) and "advice_bindings"
   (optional, kept here and never sent: [{"alias": "service A",
-  "refers_to": "what it stands for here"}]). Its answer comes in the next
-  [DECISION] message.
+  "refers_to": "what it stands for here"}]). Only this step waits for the
+  answer; the other steps go on. The answer comes in a later [DECISION]
+  message; so does a consult that gave none, with why. Ask again about the
+  same thing only once something new is known.
 - proceed (only after the advisor reviewed a critical step's plan): start
   the step's Worker as planned; "feedback" (optional) is passed to it.
 - advice_adoption (required in the decision that follows the advisor's
   answer): {"adoption": "adopted | partial | rejected", "items": [{"ref":
   "q1", "use": "adopted | partial | rejected", "steps": ["s2"], "why":
   "..."}]}: which points of the answer (a question's id, an option's, a next
-  step's) you take, how far, for which steps and why. The advice is input;
-  the decision is yours. The points you take reach the step's next Worker.
+  step's) you take, how far, for which steps and why. The advice is input:
+  whether you take it, and whether you check it first, is yours to decide.
+  The Worker never sees the advisor's words: write what you take into
+  "feedback" in your own words, with the real names for the aliases.
 """
 _ADVISOR_SECTION = """\
 Asking the advisor (advise): the request is all it sees. Write it so a
@@ -1859,6 +1888,11 @@ stranger can answer it.
   Restate the local material; do not copy it.
 - Code checks the request, and a judge reads it, before it is sent; a
   request that fails comes back with what to fix, at most twice.
+- In [PLAN] you may ask before you plan, when the message says so: reply
+  {"advise": {"advice_request": {...}, "advice_bindings": [...]}} instead of
+  the steps; the answer comes in a later [PLAN] message, whose plan carries
+  "advice_adoption".
+- Never in [CHAT] or [GATE]: those turns answer the user.
 [ADVICE]: the advisor asks for more before it answers your request. Answer
 in the same terms (it goes through the same checks), or withdraw it.
 ```json

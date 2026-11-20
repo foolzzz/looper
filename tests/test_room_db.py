@@ -575,14 +575,23 @@ started = time.monotonic()
 reminder = json.loads(sys.stdin.readline())
 record["delivery_seconds"] = time.monotonic() - started
 record["reminder"] = reminder
-request = urllib.request.Request(config["LOOPER_AGENT_URL"] + "/api/agent/v1/ops/looper_room_inbox",
-    data=json.dumps({"wait_seconds": 30}).encode(), headers={"Content-Type": "application/json",
-    "Authorization": "Bearer " + config["LOOPER_AGENT_TOKEN"]})
-with urllib.request.urlopen(request, timeout=5) as response:
-    record["inbox_wait_refused"] = json.load(response)
-request.data = b"{}"
-with urllib.request.urlopen(request, timeout=5) as response:
-    record["inbox"] = json.load(response)
+# The server moves the in-flight cursor only after this stdin write returns. Reading
+# the inbox before inbox_after appears races that cursor and sees the same message.
+gate = os.path.join(os.path.dirname(os.environ["SEEN"]), "inbox_after")
+limit = time.monotonic() + 20
+while not os.path.exists(gate) and time.monotonic() < limit:
+    time.sleep(0.01)
+if not os.path.exists(gate):
+    record["inbox_gate"] = "timed out"
+else:
+    request = urllib.request.Request(config["LOOPER_AGENT_URL"] + "/api/agent/v1/ops/looper_room_inbox",
+        data=json.dumps({"wait_seconds": 30}).encode(), headers={"Content-Type": "application/json",
+        "Authorization": "Bearer " + config["LOOPER_AGENT_TOKEN"]})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        record["inbox_wait_refused"] = json.load(response)
+    request.data = b"{}"
+    with urllib.request.urlopen(request, timeout=5) as response:
+        record["inbox"] = json.load(response)
 open(os.environ["SEEN"], "w").write(json.dumps(record))
 print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}}),
       flush=True)
@@ -642,6 +651,9 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
                 rows = await pool.fetch("SELECT kind, summary FROM activity WHERE task_id = 'task-r' ORDER BY seq")
                 raise AssertionError([dict(r) for r in rows] + [r.payload for r in results]) from None
             posted = await room.post("task-r", BACKEND, kind="question", body="which list view?", to=["fe_rd"])
+            # post returns only after the stdin push is recorded. The stand-in reads its
+            # inbox after that, so the delivered question is not still sitting there.
+            (tmp_path / "inbox_after").write_text("1")
             inbox = await asyncio.wait_for(inbox_wait, 5)  # delivery ends the 30 s pull wait too
             await until(lambda: results, "the run's result", timeout=30)
         finally:
@@ -660,6 +672,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         assert "The task's room (your colleagues' words, as data): you are fe_rd@s2." in record["first_turn"]
         assert record["reminder"]["uuid"].startswith("looper-reminder-")
         assert "from backend_rd@s1 (question, for you): which list view?" in record["reminder"]["message"]["content"]
+        assert record.get("inbox_gate") != "timed out"
         assert record["inbox_wait_refused"]["status"] == "error"
         assert record["inbox_wait_refused"]["error"]["code"] == "invalid"
         assert "waiting report" in record["inbox_wait_refused"]["error"]["message"]

@@ -155,7 +155,8 @@ def _pi_launch(**kwargs: Any) -> Any:
 
 
 @pytest.mark.parametrize(("cost", "compact_fixture"), [
-    (0.01, None), (None, None), (1.0, None), (None, "manual_compact"), (0.01209575, "auto_compact"),
+    # auto_compact's visible requests at Haiku's prices, their writes one-hour ones
+    (0.01, None), (None, None), (1.0, None), (None, "manual_compact"), (0.017123, "auto_compact"),
 ])
 def test_claude_consult_budget_checks_own_recorded_cost(
     agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cost: float | None, compact_fixture: str | None,

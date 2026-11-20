@@ -2430,7 +2430,9 @@ def _the_run_was_written(result: dict[str, Any], path: Path, tmp_path: Path) -> 
 
 
 # (offers, consults, checkpoints, returns, answered, adoptions, advisor runs, advice check runs)
-_ADVISOR = {"advisor_checkpoint": (0, 1, 1, 0, 1, 1, 1, 1), "advisor_optional_flaky": (1, 0, 0, 0, 0, 0, 0, 0)}
+# advise is offered in every decision with the advisor on: after the checkpoint's step succeeded, and after the
+# flaky step's failure and its success.
+_ADVISOR = {"advisor_checkpoint": (1, 1, 1, 0, 1, 1, 1, 1), "advisor_optional_flaky": (2, 0, 0, 0, 0, 0, 0, 0)}
 _ADVISOR_KEYS = ("advisor_offers", "advisor_consults", "advisor_checkpoints", "advisor_returns", "advisor_answered",
                  "advisor_adoptions", "advisor_runs", "advice_check_runs")
 

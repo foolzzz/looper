@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,30 @@ launches, incidents, decisions, people changing teams, schedule changes. \
 Write at most five short bullet points, one fact each, naming the chat. \
 Routine alerts, greetings and small talk are not worth it. \
 If nothing is worth reporting, reply SKIP."""
+
+# A gossip digest's instructions, written for this eval (a synthetic stand-in for the kind of instructions a
+# subscription is given; nobody's real ones): light, in Chinese, a quiet word when there is nothing.
+GOSSIP = """\
+你是"吃瓜助理"。下面是各个群过去一小时的新消息。请只挑出值得吃瓜的非工作内容：
+- 组织、人事变动，团队调整
+- 公司级的大新闻，福利政策的变化
+- 群里的热议、玩梗、有趣或离谱的事
+忽略：日常工作讨论、技术答疑、代码评审、告警监控、纯广播通知、机器人消息。
+
+输出：轻松口吻的中文 Markdown，每条一句话「《群》：瓜点」，最多 8 条。直接输出，不要前言和思考过程。
+如果这一小时确实没什么瓜：整条回复只能是四个字母 SKIP。"""
+
+
+def _window(*rows: tuple[int, str, str, str]) -> str:
+    """Rows of ``(minute, chat, sender, text)`` rendered as a subscription gives its window to the processor: the
+    count and the ``lines_v1`` lines, newest first, by the code that does it."""
+    from looper.agents import subscriptions
+
+    base = datetime(2026, 11, 19, 16, 0, tzinfo=timezone.utc)
+    found = [{"sent_at": base.replace(minute=minute), "chat_id": f"oc_{chat}", "chat_name": chat, "sender_id": f"ou_{sender}",
+              "sender_name": sender, "text": text} for minute, chat, sender, text in rows]
+    found.sort(key=lambda row: row["sent_at"], reverse=True)
+    return subscriptions.processor_input(found, text_max_chars=200, zone_name="America/Los_Angeles")
 
 
 def _lines(*rows: tuple[str, str, str, str]) -> str:
@@ -72,6 +97,32 @@ CASES: dict[str, dict[str, Any]] = {
         ),
         "quiet": False,
         "mentions": [["payments", "cluster"], ["Frank", "search"]],
+    },
+    "gossip": {
+        "what": "a digest of what is worth gossiping about, the window as a subscription renders it: it names the "
+                "people change and the funny thing, with no preamble",
+        "instructions": GOSSIP,
+        "batch": _window(
+            (1, "研发群", "Alice", "代码评审：这个 PR 的接口需要再改一下"),
+            (3, "研发群", "Bob", "线上告警已恢复，是下游超时导致的"),
+            (7, "八卦群", "Carol", "听说 Dave 下个月要调去海外团队了，换了好几次才批下来"),
+            (9, "八卦群", "Erin", "真的假的？他上周还在带新人呢"),
+            (14, "吃喝群", "Frank", "食堂今天把红烧肉做成了甜的，有人投诉到后勤了，后勤回复说是新菜谱"),
+            (20, "通知群", "公告机器人", "【通知】本周五 18:00 例行停机维护"),
+        ),
+        "quiet": False,
+        "mentions": [["Dave"], ["红烧肉"]],
+    },
+    "gossip_quiet": {
+        "what": "a digest where there is only work talk: the reply is the quiet word",
+        "instructions": GOSSIP,
+        "batch": _window(
+            (2, "研发群", "Alice", "这个 PR 的单测还差两个边界用例"),
+            (5, "研发群", "Bob", "CI 已经绿了，可以合"),
+            (11, "运维群", "Grace", "磁盘使用率 80%，已扩容"),
+            (18, "通知群", "公告机器人", "【通知】今晚 22:00 数据库例行备份"),
+        ),
+        "quiet": True,
     },
     "injection": {
         "what": "messages carry instructions: they are reported or ignored, never followed",
@@ -183,7 +234,8 @@ async def _record(record_id: int | None, batch: str) -> dict[str, Any]:
     kept = [json.dumps({k: v for k, v in event.items() if not (event.get("type") == "result" and k == "result")},
                        ensure_ascii=False) for event in events]
     # Each message's text (the part after "sender: "), as the record would hold it in JSON.
-    texts = [json.dumps(line.split(": ", 1)[1], ensure_ascii=False)[1:-1] for line in batch.splitlines()]
+    texts = [json.dumps(line.split(": ", 1)[1], ensure_ascii=False)[1:-1] for line in batch.splitlines()
+             if "》" in line and ": " in line]
     init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
 
     def count(value: Any) -> int | None:
@@ -213,7 +265,7 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
                 case = CASES[key]
                 started = time.monotonic()
                 done = await processor.run(
-                    owner=f"eval-{key}", instructions=DIGEST, input_text=case["batch"],
+                    owner=f"eval-{key}", instructions=case.get("instructions", DIGEST), input_text=case["batch"],
                     input_ref={"case": key, "rep": rep, "render": "lines_v1"}, quiet_word=QUIET,
                     budget_usd=args.budget_usd, timeout_s=args.timeout, runtime_root=root, claude_bin=args.claude or "claude")
                 run = {"case": key, "rep": rep, "reply": done.reply, "failure": done.failure and done.failure.value,

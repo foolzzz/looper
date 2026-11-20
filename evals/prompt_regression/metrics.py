@@ -279,7 +279,7 @@ def advisor_metrics(activity: list[Mapping[str, Any]], records: Iterable[Mapping
     return {
         "advisor_offers": sum(1 for r in records if role(r) == "planner" and OFFER in str(r.get("input_text") or "")),
         "advisor_consults": sum(1 for text in summaries if ": asking the advisor (" in text),
-        "advisor_checkpoints": sum(1 for text in summaries if ": asking the advisor (checkpoint)" in text),
+        "advisor_checkpoints": sum(1 for text in summaries if ": asking the advisor (checkpoint" in text),
         "advisor_returns": sum(1 for text in summaries if ": the advisor's request went back to be fixed" in text),
         "advisor_answered": sum(1 for text in summaries if ": the advisor's consult ended answered" in text),
         "advisor_adoptions": sum(1 for text in summaries if re.search(r": the Planner (adopted|partial|rejected) the "

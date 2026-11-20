@@ -327,7 +327,7 @@ class TestProjectEndpoints:
                              "room_consult_timeout_seconds", "room_consults_per_task", "task_workspaces",
                              "operator_notes", "vault", "dependency_conditions", "default_workflow", "advisor",
                              "advisor_consult_budget_usd", "advisor_budget_usd", "advisor_consults_per_task",
-                             "advisor_consults_per_step"}
+                             "advisor_consults_per_step", "advisor_fallback_profile", "advisor_internal_domains"}
         assert body["dependency_conditions"] is None
 
     def test_work_dir_is_optional(self, store: _Store) -> None:

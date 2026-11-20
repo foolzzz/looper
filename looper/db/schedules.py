@@ -21,7 +21,7 @@ import asyncpg
 
 from .connection import get_pool
 from .llm_records import TASK_RUN, _TASK_ROLE
-from . import agent_sessions, tasks
+from . import agent_sessions, subscriptions, tasks
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
@@ -68,6 +68,8 @@ def configuration_version(row: Mapping[str, Any], *, project_work_dir: str | Non
     A directory edit also binds its destination, which may inherit a different project directory."""
     settings = {key: row.get(key) for key in (*FIELDS, "id", "project_id", "manager_id", "enabled",
                                             "profile_overrides", "task_limits")}
+    if row.get("subscription"):
+        settings["subscription"] = {key: row["subscription"].get(key) for key in subscriptions.FIELDS}
     if row.get("kind") == "command":
         settings["effective_work_dir"] = row.get("work_dir") or project_work_dir or ""
         if changes is not None and "work_dir" in changes:
@@ -114,7 +116,9 @@ async def _task_limits(db: Db, schedule_ids: list[str]) -> dict[str, dict[str, i
 async def _with_overrides(db: Db, rows: list[asyncpg.Record]) -> list[dict[str, Any]]:
     ids = [row["id"] for row in rows]
     overrides, limits = await _overrides(db, ids), await _task_limits(db, ids)
-    views = [{**dict(row), "profile_overrides": overrides[row["id"]], "task_limits": limits[row["id"]]}
+    streams = await subscriptions.get_many([row["id"] for row in rows if row["kind"] == "subscription"], db=db)
+    views = [{**dict(row), "profile_overrides": overrides[row["id"]], "task_limits": limits[row["id"]],
+              **({"subscription": streams.get(row["id"])} if row["kind"] == "subscription" else {})}
              for row in rows]
     for row in views:
         for name in _JSON_FIELDS:
@@ -186,7 +190,8 @@ async def _set_task_limits(conn: asyncpg.Connection, schedule_id: str, limits: M
     )
 
 
-async def owner_error(conn: asyncpg.Connection, manager_id: str, *, enabled: bool = True, template_key: str | None = None) -> str | None:
+async def owner_error(conn: asyncpg.Connection, manager_id: str, *, enabled: bool = True, template_key: str | None = None,
+                      creates_tasks: bool = True) -> str | None:
     """Lock the owner after the schedule row, excluding deletion until this write commits.
 
     Disabled owners may save schedules; free-form schedules always require the owner's task policy to allow them.
@@ -200,7 +205,7 @@ async def owner_error(conn: asyncpg.Connection, manager_id: str, *, enabled: boo
         return f"schedule owner {manager_id!r} does not exist or was deleted"
     if enabled and not row["enabled"]:
         return f"schedule owner {manager_id!r} is disabled; enable the Manager first"
-    if row["task_policy"] == "templates_only" and not template_key:
+    if creates_tasks and row["task_policy"] == "templates_only" and not template_key:
         return f"schedule owner {manager_id!r} requires a template; free-form schedules are not allowed"
     return None
 
@@ -209,7 +214,8 @@ async def create_schedule(conn: asyncpg.Connection, *, project_id: str, fields: 
                           profiles: Mapping[str, str], task_limits: Mapping[str, int] | None = None,
                           created_via: str = "dashboard", manager_id: str = "manager") -> str:
     """A new schedule, disabled; its id."""
-    if error := await owner_error(conn, manager_id, enabled=False, template_key=fields.get("template_key")):
+    if error := await owner_error(conn, manager_id, enabled=False, template_key=fields.get("template_key"),
+                                  creates_tasks=fields.get("kind") != "subscription"):
         raise ValueError(error)
     schedule_id = f"sched-{uuid.uuid4().hex[:12]}"
     columns = [name for name in FIELDS if name in fields]
@@ -371,18 +377,20 @@ async def insert_run(conn: Db, *, schedule_id: str, scheduled_for: datetime, tri
                      created_at: datetime | None = None, carried_from: str | None = None,
                      run_timeout_seconds: int | None = None, run_id: str | None = None,
                      started_at: datetime | None = None, log_path: str | None = None,
-                     missed_since: datetime | None = None) -> str:
+                     missed_since: datetime | None = None, runner_pid: int | None = None,
+                     runner_started: str | None = None) -> str:
     if run_id is None:
         run_id = new_run_id()
     await conn.execute(
         """
         INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id,
                                    error, finished_at, created_at, carried_from, run_timeout_seconds, started_at, log_path,
-                                   missed_since)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13, $14, $15, $16)
+                                   missed_since, runner_pid, runner_started)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13, $14, $15, $16, $17, $18)
         """,
         run_id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id, error, finished_at,
-        created_at, carried_from, run_timeout_seconds, started_at, log_path, missed_since,
+        created_at, carried_from, run_timeout_seconds, started_at, log_path, missed_since, runner_pid,
+        runner_started,
     )
     return run_id
 
