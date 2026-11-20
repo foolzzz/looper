@@ -267,6 +267,8 @@ class ManagerFleet:
             "busy": agent.busy if agent else False,
             "healthy": agent.is_healthy() if agent else False,
         }
+        if withheld := getattr(agent, "leads_withheld", 0):  # group replies not sent: they quoted a searched lead
+            state["leads_withheld"] = withheld
         sync = self._sync.get(manager_id)
         state["sync"] = "pending" if sync else "ok"
         if sync:
