@@ -5,11 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/sidebar";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchGates, fetchOverview, fetchProjectsList, type GateList } from "@/lib/api";
+import { intentsSettingsGet } from "@/lib/api-leads";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
   fetchGates: vi.fn(), fetchProjectsList: vi.fn(), fetchOverview: vi.fn(),
 }));
+vi.mock("@/lib/api-leads", () => ({ intentsSettingsGet: vi.fn() }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => <div role="dialog" /> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -41,6 +43,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
   vi.mocked(fetchGates).mockResolvedValue(gates(2));
+  vi.mocked(intentsSettingsGet).mockResolvedValue({ enabled: false, subscriptions: [] });
   onNavigate.mockClear();
   vi.mocked(fetchOverview).mockResolvedValue({} as never);
   activePage = "gates";
@@ -64,6 +67,7 @@ describe("Sidebar User Gates item", () => {
     expect(at("User Gates")).toBe(at("Tasks") + 1);
     expect(at("Schedules")).toBe(at("User Gates") + 1);
     expect(labels.some((label) => label.includes("Runs"))).toBe(false);
+    expect(labels.some((label) => label.includes("Intents"))).toBe(false);
     expect(gatesButton().className).toContain("text-primary");
     act(() => (gatesButton() as HTMLButtonElement).click());
     expect(onNavigate).toHaveBeenCalledWith("gates");
@@ -114,6 +118,21 @@ describe("Sidebar User Gates item", () => {
   });
 });
 
+
+describe("Sidebar Intents item", () => {
+  it("appears only when intent recognition is on, and opens that page", async () => {
+    await render();
+    expect(host.textContent).not.toContain("Intents");
+    vi.mocked(intentsSettingsGet).mockResolvedValue({ enabled: true, subscriptions: [] });
+    act(() => root.unmount());
+    root = createRoot(host);
+    await render();
+    const button = [...host.querySelectorAll("nav button")].find((item) => item.textContent?.includes("Intents"))!;
+    expect(button.textContent).toContain("意图");
+    act(() => (button as HTMLButtonElement).click());
+    expect(onNavigate).toHaveBeenCalledWith("intents");
+  });
+});
 
 describe("Sidebar version label", () => {
   it("shows the overview's version next to the brand", async () => {
