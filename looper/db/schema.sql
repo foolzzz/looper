@@ -1580,6 +1580,105 @@ CREATE INDEX IF NOT EXISTS idx_source_events_run ON source_events (run_id) WHERE
 CREATE INDEX IF NOT EXISTS idx_source_events_body ON source_events (sent_at) WHERE body IS NOT NULL;
 -- message stream end
 
+-- ledger begin
+-- The Manager's ledger (completion-ledger RFC, section 4): what waits for the user, what was decided, who does what.
+-- An own item keeps its state here; a sourced item (a gate, a confirmation, a task) has no status and reads its
+-- source's. ledger_events only ever grows. Confirming or closing an own item points at a 'user' event, and the
+-- composite keys below make a 'relayed' event impossible to point at, even from raw SQL.
+CREATE TABLE IF NOT EXISTS ledger_items (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kind          TEXT NOT NULL CHECK (kind IN ('pending', 'decision', 'work_item')),
+    title         TEXT NOT NULL CHECK (btrim(title) <> '' AND char_length(title) <= 200),
+    detail        TEXT NOT NULL DEFAULT '' CHECK (char_length(detail) <= 4000),
+    source_kind   TEXT CHECK (source_kind IN ('gate', 'confirmation', 'task')),
+    gate_step_id  TEXT REFERENCES task_user_gates(step_id) ON DELETE CASCADE,
+    action_id     BIGINT REFERENCES manager_actions(id) ON DELETE CASCADE,
+    task_id       TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    status        TEXT CHECK (status IN ('open', 'done', 'cancelled', 'superseded')),
+    owner_kind    TEXT NOT NULL DEFAULT 'user' CHECK (owner_kind IN ('user', 'manager', 'task', 'chat')),
+    owner_ref     TEXT,
+    project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    due_at        TIMESTAMPTZ,
+    refs          JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(refs) = 'array'),
+    superseded_by BIGINT REFERENCES ledger_items(id) ON DELETE SET NULL,
+    confirmed_event_id BIGINT,
+    confirmed_actor    TEXT CHECK (confirmed_actor = 'user'),
+    closed_event_id    BIGINT,
+    closed_actor       TEXT CHECK (closed_actor = 'user'),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    closed_at     TIMESTAMPTZ,
+    sourced       BOOLEAN GENERATED ALWAYS AS (source_kind IS NOT NULL) STORED,
+    UNIQUE (id, sourced),
+    CONSTRAINT ledger_items_source CHECK (COALESCE(
+        (source_kind IS NULL AND gate_step_id IS NULL AND action_id IS NULL AND task_id IS NULL
+         AND status IS NOT NULL)
+        OR (source_kind = 'gate' AND kind = 'pending' AND gate_step_id IS NOT NULL
+            AND action_id IS NULL AND task_id IS NULL AND status IS NULL)
+        OR (source_kind = 'confirmation' AND kind = 'pending' AND action_id IS NOT NULL
+            AND gate_step_id IS NULL AND task_id IS NULL AND status IS NULL)
+        OR (source_kind = 'task' AND kind = 'work_item' AND task_id IS NOT NULL
+            AND gate_step_id IS NULL AND action_id IS NULL AND status IS NULL), false)),
+    CONSTRAINT ledger_items_owner CHECK ((owner_kind = 'user') = (owner_ref IS NULL)),
+    CONSTRAINT ledger_items_confirmed CHECK ((confirmed_event_id IS NULL) = (confirmed_actor IS NULL)
+                                             AND (confirmed_event_id IS NULL OR kind = 'decision')),
+    -- an own item is closed exactly when it points at a closing event; a sourced item never does
+    CONSTRAINT ledger_items_closed CHECK ((closed_event_id IS NULL) = (closed_actor IS NULL)
+                                          AND (status IS NOT NULL OR closed_event_id IS NULL)
+                                          AND (status IS NULL OR (status = 'open') = (closed_event_id IS NULL))),
+    CONSTRAINT ledger_items_superseded CHECK (superseded_by IS NULL OR (status = 'superseded' AND kind = 'decision'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_items_gate ON ledger_items (gate_step_id) WHERE gate_step_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_items_action ON ledger_items (action_id) WHERE action_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_items_task ON ledger_items (task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ledger_items_open ON ledger_items (kind, due_at) WHERE status = 'open';
+
+CREATE TABLE IF NOT EXISTS ledger_events (
+    id            BIGSERIAL PRIMARY KEY,
+    item_id       BIGINT NOT NULL REFERENCES ledger_items(id) ON DELETE CASCADE,
+    item_sourced  BOOLEAN NOT NULL,   -- whether the item is sourced; the key below keeps it true to the item
+    action        TEXT NOT NULL CHECK (action IN ('add', 'note', 'amend', 'confirm', 'close', 'cancel',
+                                                  'supersede', 'reopen')),
+    actor_kind    TEXT NOT NULL CHECK (actor_kind IN ('user', 'relayed', 'system')),
+    actor_id      TEXT,
+    relayed_by    TEXT,
+    via           TEXT NOT NULL CHECK (via IN ('dashboard', 'lark', 'telegram', 'cli', 'api', 'system')),
+    manager_id    TEXT REFERENCES managers(id) ON DELETE RESTRICT,
+    channel_id    TEXT,
+    chat          TEXT,
+    message_id    TEXT,
+    session_label TEXT,
+    quote         TEXT CHECK (char_length(quote) <= 1000),
+    note          TEXT CHECK (char_length(note) <= 2000),
+    changes       JSONB CHECK (changes IS NULL OR jsonb_typeof(changes) = 'object'),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (id, actor_kind),
+    FOREIGN KEY (item_id, item_sourced) REFERENCES ledger_items (id, sourced),
+    -- the system adds sourced items and only those; the user and a relayed message add own items
+    CONSTRAINT ledger_events_add CHECK (action <> 'add' OR (actor_kind = 'system') = item_sourced),
+    CONSTRAINT ledger_events_actor CHECK (action IN ('add', 'note') OR actor_kind = 'user'),
+    CONSTRAINT ledger_events_system CHECK ((actor_kind = 'system') = (via = 'system')
+                                           AND (actor_kind <> 'system' OR action = 'add')),
+    CONSTRAINT ledger_events_relayed CHECK ((actor_kind = 'relayed') = (relayed_by IS NOT NULL)),
+    CONSTRAINT ledger_events_cli CHECK ((via = 'cli') = (session_label IS NOT NULL)),
+    CONSTRAINT ledger_events_cli_user CHECK (via <> 'cli' OR actor_kind = 'user'),
+    CONSTRAINT ledger_events_quote CHECK (quote IS NULL OR actor_kind IN ('user', 'relayed'))
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_events_item ON ledger_events (item_id, id);
+
+DO $ledger$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'ledger_items'::regclass
+                      AND conname = 'ledger_items_confirm_fk') THEN
+        ALTER TABLE ledger_items ADD CONSTRAINT ledger_items_confirm_fk
+            FOREIGN KEY (confirmed_event_id, confirmed_actor) REFERENCES ledger_events (id, actor_kind);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'ledger_items'::regclass
+                      AND conname = 'ledger_items_close_fk') THEN
+        ALTER TABLE ledger_items ADD CONSTRAINT ledger_items_close_fk
+            FOREIGN KEY (closed_event_id, closed_actor) REFERENCES ledger_events (id, actor_kind);
+    END IF;
+END $ledger$;
+-- ledger end
 -- Manager completion events (manager completion ledger RFC, C1): one row per task end that has a chat to tell.
 -- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
 -- manager events begin
