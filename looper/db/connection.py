@@ -291,8 +291,8 @@ async def _lacks_outbound_check(conn: asyncpg.Connection, table: str, constraint
 
 async def _outbound_reviews_ddl(conn: asyncpg.Connection) -> list[str]:
     """The review table as schema.sql defines it (idempotent), and the classifier in each check that lists roles or
-    run kinds without it. llm_records is large: its check comes back NOT VALID (no scan while the schema transaction
-    holds its lock) and is validated in ``_ONLINE_STEPS``."""
+    run kinds without it. Each check comes back NOT VALID, so nothing is scanned while the schema transaction holds
+    their tables' locks, and is validated in ``_ONLINE_STEPS``."""
     from .llm_records import RUN_KINDS
 
     found = _OUTBOUND_REVIEWS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -304,7 +304,8 @@ async def _outbound_reviews_ddl(conn: asyncpg.Connection) -> list[str]:
         f"ADD CONSTRAINT llm_records_run_kind_check CHECK (run_kind IN ({kinds})) NOT VALID",
         "agent_setting_layers_role_check": "ALTER TABLE agent_setting_layers DROP CONSTRAINT "
         "agent_setting_layers_role_check, ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', "
-        "'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check', 'outbound_check'))",
+        "'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check', 'outbound_check')) "
+        "NOT VALID",
     }
     return [found.group(1)] + [widen[constraint] for table, constraint in _OUTBOUND_CHECKS
                                if await _lacks_outbound_check(conn, table, constraint)]
@@ -356,8 +357,7 @@ _ONLINE_STEPS = (
                           *((table, f"{table}_{name}") for table in ("message_leads", "intents")
                             for name in ("state_check", "check_verdict_check", "check_reason_check",
                                          "check_record_id_fkey", "dropped")))),
-    _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online",
-                validate=(("llm_records", "llm_records_run_kind_check"),)),
+    _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
 )
 
 
