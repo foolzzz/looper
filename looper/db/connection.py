@@ -696,21 +696,29 @@ ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_render_check,
 
 
 async def _subscription_lookback_pending(conn: asyncpg.Connection) -> bool:
+    """Unmarked databases may already have some daily objects; recorded upgrades never repair DDL."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SUBSCRIPTION_LOOKBACK):
         return False
-    return bool(await conn.fetchval(
-        "SELECT to_regclass('subscriptions') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_attribute "
-        "WHERE attrelid = to_regclass('subscriptions') AND attname = 'window' AND attnum > 0 AND NOT attisdropped)"))
+    return bool(await conn.fetchval("""
+        SELECT to_regclass('subscriptions') IS NOT NULL AND (
+            to_regclass('subscription_daily_claims') IS NULL OR EXISTS (
+                SELECT 1 FROM (VALUES ('subscriptions', 'window'), ('subscriptions', 'delivery_policy'),
+                                     ('subscription_runs', 'window_mode'), ('subscription_runs', 'daily_date'))
+                    AS required(table_name, column_name)
+                WHERE NOT EXISTS (SELECT 1 FROM pg_attribute
+                    WHERE attrelid = to_regclass(required.table_name) AND attname = required.column_name
+                    AND attnum > 0 AND NOT attisdropped)))
+    """))
 
 
 _SUBSCRIPTION_LOOKBACK_DDL = """
 ALTER TABLE subscriptions
-    ADD COLUMN "window" TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
-    ADD COLUMN delivery_policy TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'));
+    ADD COLUMN IF NOT EXISTS "window" TEXT NOT NULL DEFAULT 'cursor' CHECK ("window" IN ('cursor', 'lookback')),
+    ADD COLUMN IF NOT EXISTS delivery_policy TEXT NOT NULL DEFAULT 'per_run' CHECK (delivery_policy IN ('per_run', 'daily'));
 ALTER TABLE subscription_runs
-    ADD COLUMN window_mode TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
-    ADD COLUMN daily_date DATE;
-CREATE TABLE subscription_daily_claims (
+    ADD COLUMN IF NOT EXISTS window_mode TEXT NOT NULL DEFAULT 'cursor' CHECK (window_mode IN ('cursor', 'lookback')),
+    ADD COLUMN IF NOT EXISTS daily_date DATE;
+CREATE TABLE IF NOT EXISTS subscription_daily_claims (
     schedule_id TEXT NOT NULL REFERENCES subscriptions(schedule_id) ON DELETE CASCADE,
     local_date DATE NOT NULL,
     PRIMARY KEY (schedule_id, local_date)
