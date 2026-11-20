@@ -9,7 +9,7 @@ and never moves again. ``result`` holds typed outcomes only: each round, each ch
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Any
 
@@ -98,13 +98,14 @@ async def for_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[di
 
 async def move(spawn_id: int, to: SpawnState, *, expect: SpawnState, child_record_id: int | None = None,
                spent_usd: float = 0.0, result: Mapping[str, Any] | None = None,
-               append: Mapping[str, Mapping[str, Any]] | None = None, inputs: Mapping[str, Any] | None = None,
+               append: Mapping[str, Mapping[str, Any] | Sequence[Mapping[str, Any]]] | None = None,
+               inputs: Mapping[str, Any] | None = None,
                detail: str | None = None, returned: bool = False,
                pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     """Move the row from ``expect`` to ``to``; None, changing nothing, when it is no longer in ``expect``.
 
     With the move: ``spent_usd`` is added to what it spent; ``result``'s keys replace the result's, and each item of
-    ``append`` is added to the list under its key; ``inputs`` replaces its inputs; ``detail`` replaces its detail; a
+    ``append`` (one, or a list of them) is added to the list under its key, all as the row is now; ``inputs`` replaces its inputs; ``detail`` replaces its detail; a
     move to ``asking`` counts a round, and ``returned`` (``linting`` to ``drafting``) a return. Raises
     ``TransitionError`` for a move ``TRANSITIONS`` does not have."""
     if to not in TRANSITIONS.get(expect, frozenset()):
@@ -120,7 +121,8 @@ async def move(spawn_id: int, to: SpawnState, *, expect: SpawnState, child_recor
             return None
         merged = {**current["result"], **(result or {})}
         for key, item in (append or {}).items():
-            merged[key] = [*merged.get(key, []), dict(item)]
+            items = item if isinstance(item, (list, tuple)) else [item]
+            merged[key] = [*merged.get(key, []), *(dict(entry) for entry in items)]
         row = await conn.fetchrow(
             """UPDATE agent_spawns
                   SET state = $2, child_record_id = COALESCE($3, child_record_id), spent_usd = spent_usd + $4,

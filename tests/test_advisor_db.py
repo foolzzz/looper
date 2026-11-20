@@ -244,8 +244,18 @@ def test_a_request_the_judge_finds_unanswerable_goes_back_with_what_is_missing(
         assert [s["as"] for s in _seen(tmp_path)] == ["judge"]
         row = dict(await pool.fetchrow("SELECT * FROM agent_spawns WHERE id = $1", spawn))
         assert row["state"] == "drafting" and float(row["spent_usd"]) == pytest.approx(0.001)
-        assert json.loads(row["result"])["checks"] == [{"stage": "judge", "category": "unanswerable", "return": 1,
-                                                        "round": 1}]
+        result = json.loads(row["result"])
+        assert result["checks"] == [{"stage": "judge", "category": "unanswerable", "return": 1, "round": 1}]
+        # each judge run stays on the consult's record of its runs, however many times the request comes back
+        for _ in range(2):
+            await _submit(tmp_path, spawn, _request())
+        row = dict(await pool.fetchrow("SELECT * FROM agent_spawns WHERE id = $1", spawn))
+        result = json.loads(row["result"])
+        judges = [r["id"] for r in await pool.fetch("SELECT id FROM llm_records WHERE agent_id LIKE 'advice_check-%' "
+                                                    "ORDER BY id")]
+        assert row["state"] == "blocked" and len(judges) == 3
+        assert (result["runs"], result["booked"]) == (judges, judges)
+        assert float(row["spent_usd"]) == pytest.approx(0.003)
 
     run_db(test, monkeypatch, setup=_setup)
 
