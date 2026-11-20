@@ -2214,3 +2214,23 @@ ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_dropped;
 ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
+
+-- A window a subscription run did not use: the run is 'skipped' with why (skip_reason: a prompt hook blocked it, or
+-- the processor's reply could not be read when asked twice), and its cursor moves past it, since the same window
+-- would fail again with every run after it. connection.py applies this block to databases that predate it, so keep it
+-- between the markers and idempotent. Its column comes without a constraint and every constraint NOT VALID;
+-- connection._ONLINE_STEPS validates them after the migration commits (a fresh database validates them in its own
+-- transaction).
+-- run skips begin
+ALTER TABLE subscription_runs ADD COLUMN IF NOT EXISTS skip_reason TEXT;
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_outcome_check;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_outcome_check
+    CHECK (outcome IN ('pending', 'delivering', 'delivered', 'uncertain', 'quiet', 'dashboard_only', 'output_invalid',
+                       'failed', 'extracted', 'skipped')) NOT VALID;
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_skip_reason_check;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_skip_reason_check
+    CHECK (skip_reason IN ('blocked_by_hook', 'invalid_reply')) NOT VALID;
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_skipped;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_skipped
+    CHECK ((outcome = 'skipped') = (skip_reason IS NOT NULL)) NOT VALID;
+-- run skips end

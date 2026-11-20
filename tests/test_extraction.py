@@ -151,10 +151,21 @@ def test_none_or_an_empty_list_is_quiet(reply):
 
 
 @pytest.mark.parametrize("reply", ["Nothing here.", "none", "[]", '{"items": []}', '{"leads": {}}', '"NONE"',
-                                   '{"leads": [] } trailing'])
+                                   '{not json} at all', '{"leads": [', "```\nnotes only\n```"])
 def test_anything_else_than_none_or_an_object_with_the_list_is_invalid(reply):
     found = parsed_leads(reply)
     assert found.state == "invalid" and found.reason
+
+
+@pytest.mark.parametrize("wrap", [
+    "Here are the leads:\n{}\nThat is all.",                                    # prose around the object
+    "{} trailing",                                                                # words after it
+    "Notes first.\n```json\n{}\n```\nLater:\n```\nnot json\n```",               # the JSON fence among others
+    "```\nmy reasoning, not json\n```\n```json\n{}\n```",                         # a fence before the JSON one
+])
+def test_the_object_is_found_inside_prose_or_among_several_fences(wrap):
+    found = parsed_leads(wrap.format(leads(lead())))
+    assert found.state == "items" and len(found.items) == 1 and found.items[0]["sources"] == [101]
 
 
 def test_a_fenced_object_is_read_and_unknown_fields_are_ignored_at_every_level():

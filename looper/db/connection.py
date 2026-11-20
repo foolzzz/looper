@@ -159,6 +159,8 @@ _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
 _LEADS_CHECK_ONLINE = "leads_check_online"
+_RUN_SKIPS = "run_skips"
+_RUN_SKIPS_ONLINE = "run_skips_online"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
@@ -337,6 +339,9 @@ _ONLINE_STEPS = (
                           *((table, f"{table}_{name}") for table in ("message_leads", "intents")
                             for name in ("state_check", "check_verdict_check", "check_reason_check",
                                          "check_record_id_fkey", "dropped")))),
+    _OnlineStep(_RUN_SKIPS, _RUN_SKIPS_ONLINE,
+                validate=tuple(("subscription_runs", f"subscription_runs_{name}")
+                               for name in ("outcome_check", "skip_reason_check", "skipped"))),
 )
 
 
@@ -403,6 +408,15 @@ def _intent_merges_ddl() -> str:
 
 
 _LEADS_CHECK_BLOCK = re.compile(r"-- leads check begin\n(.*?)-- leads check end", re.S)
+_RUN_SKIPS_BLOCK = re.compile(r"-- run skips begin\n(.*?)-- run skips end", re.S)
+
+
+def _run_skips_ddl() -> str:
+    """A subscription run's skipped window and why, as schema.sql defines it."""
+    found = _RUN_SKIPS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its run skips block")
+    return found.group(1)
 
 
 def _leads_check_ddl() -> str:
@@ -863,6 +877,33 @@ async def _leads_check_unvalidated(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ANY($1::text[]) AND NOT convalidated "
         "AND connamespace = current_schema()::regnamespace)",
         [constraint for _, constraint in _leads_check_step().validate]))
+
+
+async def _run_skips_pending(conn: asyncpg.Connection) -> bool:
+    """Whether the subscription runs lack the skip's reason, its constraints, or ``skipped`` among their outcomes.
+    Judged by the catalog: a database that already has them is left alone."""
+    if not await conn.fetchval("SELECT to_regclass('subscription_runs') IS NOT NULL"):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'subscription_runs'::regclass "
+        "AND attname = 'skip_reason' AND NOT attisdropped) "
+        "AND (SELECT count(*) FROM pg_constraint WHERE conrelid = 'subscription_runs'::regclass "
+        "AND conname IN ('subscription_runs_skip_reason_check', 'subscription_runs_skipped')) = 2 "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'subscription_runs'::regclass "
+        "AND conname = 'subscription_runs_outcome_check' AND strpos(pg_get_constraintdef(oid), $1) > 0)",
+        "'skipped'")
+
+
+def _online_step(migration: str) -> _OnlineStep:
+    return next(step for step in _ONLINE_STEPS if step.migration == migration)
+
+
+async def _unvalidated(conn: asyncpg.Connection, migration: str) -> bool:
+    """Whether a constraint ``migration`` adds NOT VALID is still not validated."""
+    return bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ANY($1::text[]) AND NOT convalidated "
+        "AND connamespace = current_schema()::regnamespace)",
+        [constraint for _, constraint in _online_step(migration).validate]))
 
 
 async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
@@ -1439,6 +1480,18 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _LEADS_CHECK)
             await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
+        # After the leads block, which writes the outcomes' constraint without 'skipped'; validated as the leads
+        # check's is.
+        if await _run_skips_pending(conn):
+            await conn.execute(_run_skips_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _RUN_SKIPS)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _RUN_SKIPS_ONLINE)
+        elif state == "empty":
+            for table, constraint in _online_step(_RUN_SKIPS).validate:
+                await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+        elif await _unvalidated(conn, _RUN_SKIPS):
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _RUN_SKIPS)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _RUN_SKIPS_ONLINE)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1489,6 +1542,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
+            or await _run_skips_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _project_advisor_pending(conn)

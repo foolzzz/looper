@@ -234,11 +234,12 @@ async def _run_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = 
 
 def subscription_run_view(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a subscription run read and made: its window (cursor positions, events in it, selected, dropped as too old
-    or over the cap), the processor's record and its outcome with the output."""
+    or over the cap), the processor's record and its outcome with the output, and why a skipped run skipped it."""
     return {"from_seq": row["from_seq"], "to_seq": row["to_seq"], "events_in_window": row["events_in_window"],
             "events_selected": row["events_selected"], "events_too_old": row["events_too_old"],
             "events_over_cap": row["events_over_cap"], "record_id": row["record_id"], "outcome": row["outcome"],
-            "output_text": row["output_text"], "notification_id": row["notification_id"]}
+            "output_text": row["output_text"], "notification_id": row["notification_id"],
+            "skip_reason": row.get("skip_reason")}
 
 
 def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int | None]:

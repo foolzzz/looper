@@ -76,7 +76,7 @@ SUBSCRIPTION["properties"]["uncertain_deliveries"] = _INT  # messages of the las
 SUBSCRIPTION_RUN = _object({
     "from_seq": _INT, "to_seq": _INT, "events_in_window": _INT, "events_selected": _INT, "events_too_old": _INT,
     "events_over_cap": _INT, "record_id": _NULL_INT, "outcome": _STR,
-    **dict.fromkeys(("output_text", "notification_id"), _NULL_STR)})
+    **dict.fromkeys(("output_text", "notification_id", "skip_reason"), _NULL_STR)})
 SUBSCRIPTION_RUN["properties"]["deliveries"] = _array(_object({"segment": _INT, "state": _STR, "attempts": _INT,
                                                                "error": _NULL_STR}))
 RUN["properties"]["subscription"] = SUBSCRIPTION_RUN  # a subscription's runs only
