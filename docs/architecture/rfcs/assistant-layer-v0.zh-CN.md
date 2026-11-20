@@ -565,7 +565,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 熔断 | 同一应用 30 秒内连续 5 次失败（`rejected` 不算）就熔断 60 秒：发件箱的发送暂停；编辑和表情直接失败（和现在失败时一样被忽略）；60 秒后放一条探测，成功就恢复，失败再熔断 60 秒 |
 | 编辑限速 | 同一条消息两次编辑至少隔 1 秒，期间的编辑合并，最后一次的文字生效。现有状态行本来就最多 3 秒一次，这条是给所有编辑的兜底 |
 
-错误码的来源：`LarkCliError.code`（lark-cli 输出里的 `error.code`，没有 HTTP 状态）、`LarkApiError.code` 和 `http_status`（非 JSON 的 429 只有 `http_status`，所以分类要先看状态码）。lark-cli 遇到 429 时给出什么码需要验证（1.6b 开工时用替身和一次真实调用确认，真实调用只发到测试会话）。
+错误码的来源：`LarkCliError.code`（lark-cli 输出里的 `error.code`，没有 HTTP 状态）、`LarkApiError.code` 和 `http_status`（非 JSON 的 429 只有 `http_status`，所以分类要先看状态码）。lark-cli 遇到 429 时给出什么码需要验证（1.6a 用替身覆盖各种码；真实平台上的那一次由协调者用测试应用、测试会话确认，开发 agent 不调用真实平台）。
 
 #### 5.6.4 指标
 
@@ -706,10 +706,9 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 1.3d | `manager_sessions.list`、首页会话列表与重置 | 1.3b | — | 否 | 截图 |
 | 1.4 | 管家路径的 `session_bound`、维护回合 `/compact`、`SESSION_BOUND` 换新、最近 3 次任务结果、单轮软上限、`manager.turn_budget_usd`、`agent_sessions` 两列、次数指标 | #1473、1.3b | 行为不变 | 是（续接简报多一段、超限提示） | 第 5.4 节 |
 | 1.5 | `DeliveryDebt`、追加回合、固定失败提示、中途提醒（按 0.2）、`manager.delivery_guard.enabled` | — | 不变 | 是 | 第 5.5 节 |
-| 1.6a | `channel_outbox`、迁移、网关核心（令牌桶、分类、退避、熔断、编辑限速）、发送循环、`channels.outbound.enabled` | — | 不变 | 否 | 单元与数据库测试：注入 429、崩溃恢复 |
-| 1.6b | 飞书接入（`GatedLarkTransport`、适配器的发送走发件箱） | 1.6a | 调用序列不变 | 否 | 假飞书服务注入 429 全部送达且不重复；杀进程后补发 |
-| 1.6c | Telegram 接入（请求子类、发送走发件箱、分段的键） | 1.6a | 调用序列不变 | 否 | 替身注入 429；崩溃后 `uncertain` 不重发 |
-| 1.6d | 出站指标进 `manager_metrics.get` 和首页 | 1.6a、0.1b | — | 否 | 截图 |
+| 1.6a | `channel_outbox`、迁移、网关核心（令牌桶、分类、退避、熔断、编辑限速）、发送循环、`channels.outbound.enabled`；飞书接入（`GatedLarkTransport`、适配器的发送走发件箱） | — | 调用序列不变 | 否 | 替身注入 429、230020、99991400 后全部送达且不重复；发送中途停掉再启动后补发、不重复 |
+| 1.6b | Telegram 接入（请求子类、发送走发件箱、分段的键） | 1.6a | 调用序列不变 | 否 | 替身注入 429；崩溃后 `uncertain` 不重发 |
+| 1.6c | 出站指标进 `manager_metrics.get` 和首页 | 1.6a、0.1b | — | 否 | 截图 |
 
 **并行：**
 
@@ -719,7 +718,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 - 1.6b、1.6c 在 1.6a 之后可以并行。
 - 同时进行的开发会话不超过 4 个（开发计划第 1 节）。
 
-推荐的合入顺序：0.1a、0.3 → 1.3a → 0.1b、1.1、1.2、1.5、1.6a（并行）→ 1.3b、1.6b、1.6c → 1.3c、1.3d、1.6d → 1.4。
+推荐的合入顺序：0.1a、0.3 → 1.3a → 0.1b、1.1、1.2、1.5、1.6a（并行）→ 1.3b、1.6b → 1.3c、1.3d、1.6c → 1.4。
 
 ## 14. 出口标准
 
@@ -756,6 +755,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 1.3 的 PR ①–⑥ | 1.3a 重构、1.3b（表和迁移 + 路由和回收 + 通知回到原会话）、1.3c（裁剪 + 评测）、1.3d（会话列表） | 只有表没有用法不算一个结果；重构先行减少冲突 |
 | 1.1、1.2、1.5 各自的「② 评测」PR | 评测用例统一在 0.3，各功能 PR 自己跑开关打开时的评测 | 同一批用例只写一次 |
 | 1.4 的 PR ① 检查和换新、② 设置和指标 | 一个 PR | 改动小，设置是行为的一部分 |
+| 1.6 的 PR ① 表和发送循环、② 飞书、③ Telegram、④ 指标 | 1.6a（表、发送循环和飞书）、1.6b（Telegram）、1.6c（指标） | 没有调用方的发送循环不算一个结果；飞书是主要渠道，和核心一起评审 |
 | 「指标页」 | 控制台首页加一组 | 现在没有单独的指标页 |
 | 1.5 中途「注入一条提醒」 | 取决于 0.2 的「运行中能否接收输入」；不行就先不做 | 没有验证过的注入方式 |
 
