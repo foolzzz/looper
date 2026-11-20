@@ -105,6 +105,12 @@ _SLOW_FAKE = {
               "acceptance_criteria": ["done.txt holds done"], "depends_on": [], "review": False}],
     "attempts": {"s1": [{"status": "completed", "seconds": 60, "files": {"done.txt": "done\n"}}]},
 }
+# The same, quick: for a dialog that only needs its task to end (``Dialog.fake_task``).
+_QUICK_FAKE = {
+    "plan": [{"id": "s1", "instruction": "Create hello.py.", "acceptance_criteria": ["hello.py exists"],
+              "depends_on": [], "review": False}],
+    "attempts": {"s1": [{"status": "completed", "seconds": 1, "files": {"hello.py": "print('hello')\n"}}]},
+}
 ACTIVE = ("pending", "assigned", "running", "planning", "executing", "verifying", "stopping")
 
 
@@ -183,6 +189,7 @@ class Dialog:
     client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
     tags: tuple[str, ...] = field(default=())
     projects_root: bool = False  # the server has [projects] root set to a directory of the case
+    fake_task: dict[str, Any] | None = None  # fake mode: the stand-in Planner's script for its tasks (else slow)
     leads: bool = False  # leads are on, and the database holds the synthetic leads (``_seed_leads``)
 
 
@@ -2479,7 +2486,7 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。", "title": "hello 脚本",
                                      "project": PROJECT}),
              ("looper_task_control", {"task_id": "<task id>", "action": "start"}))),
-    ), seed=_seed_completion_failed),
+    ), seed=_seed_completion_failed, fake_task=_QUICK_FAKE),
     Dialog("gate_relay", (
         Say("关于那个任务在等我回答的问题：存储就用 PostgreSQL。", _relayed_to_the_gate,
             (("looper_task_gate_reply", {"task_id": "<task>", "gate": GATE_LABEL}),)),
@@ -3385,7 +3392,7 @@ def run(
             work_dir = case / "work" / "calc"
             work_dir.mkdir(parents=True)
             scenarios = case / "scenarios.json"
-            scenarios.write_text(json.dumps({os.path.realpath(work_dir): _SLOW_FAKE, "manager": {}}),
+            scenarios.write_text(json.dumps({os.path.realpath(work_dir): dialog.fake_task or _SLOW_FAKE, "manager": {}}),
                                  encoding="utf-8")
             install_claude(case / "bin", mode=mode, scenarios=scenarios,
                            max_budget_usd=None if register is not None else max_budget_usd,
