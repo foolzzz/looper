@@ -93,7 +93,7 @@ from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStop
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered, StateShown
-from ..ops import Turn, TurnOrigin, leads as ops_leads
+from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
@@ -820,6 +820,7 @@ class ManagerAgent:
         self._turned_off_told = False
         self._has_templates = False  # from the last read of the Manager's task templates
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
+        self._vault_on = False  # whether the default Manager reads the knowledge vault, from the last read
         self._research: ResearchSources | None = None  # where the turn being prepared may look things up, when on
         self._stable_context = False  # manager.stable_context, from the last read
         # The last whole "Looper state" block the session got (``state_view``); in memory only, so the first turn
@@ -1019,6 +1020,7 @@ class ManagerAgent:
             logger.debug("could not load manager config from database", exc_info=True)
         try:
             self._leads_on = await leads_model.leads_enabled()
+            self._vault_on = await ops_vault.manager_vault() is not None
         except Exception:
             logger.debug("could not read leads.enabled; keeping the last value", exc_info=True)
 
@@ -1540,7 +1542,7 @@ class ManagerAgent:
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
-        has_leads = any(t["name"] == ops_leads.LEADS_TOOL for t in tools)
+        has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
         if self._has_templates or has_workflows or has_leads or has_ledger or self.agent_id != DEFAULT_MANAGER_ID:
             # The MCP tool list is read when the process starts: a changed one restarts it.
@@ -2226,8 +2228,11 @@ class ManagerAgent:
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
             contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
-        elif getattr(self, "_leads_on", False):  # a Manager without the switch read is leads-off
-            contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
+        else:  # a Manager without the switches read has neither
+            if getattr(self, "_leads_on", False):
+                contract_name, contract = contract_name + "+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
+            if getattr(self, "_vault_on", False):
+                contract_name, contract = contract_name + "+VAULT_CONTRACT", contract + "\n" + ops_vault.VAULT_CONTRACT
         if (research := getattr(self, "_research", None)) is not None:  # the turn's sources (``_prepare_turn``)
             contract_name += f"+{research_order.CONTRACT_NAME}"
             contract += "\n" + research_order.section(research)

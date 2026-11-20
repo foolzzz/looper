@@ -748,14 +748,17 @@ class AgentHTTPServer:
             if self._client_ops is None:
                 raise OpError(ErrorCode.UNAVAILABLE, "the API is not ready")
 
+            # The operations whose confirmed run is bound to what their impact read (``call.confirmation``).
+            bound = operation.operation_id in ("manager_chat_bindings.put", "managers.update", "installs.create",
+                                               "installs.update")
+
             async def run(call: Call) -> dict[str, Any]:
-                if operation.operation_id in ("manager_chat_bindings.put", "managers.update"):
+                if bound:
                     return await invoke(domain.run, call.arguments, call.confirmation)
                 return await invoke(domain.run, call.arguments)
 
             async def impact(call: Call) -> str | None:
-                result = (await invoke(domain.impact, call.arguments, call.confirmation)
-                          if operation.operation_id in ("manager_chat_bindings.put", "managers.update") else
+                result = (await invoke(domain.impact, call.arguments, call.confirmation) if bound else
                           await invoke(domain.impact, call.arguments))
                 if (operation.risk == "high" and not isinstance(result, str)
                         and not (principal.kind == "operator" and operation.operation_id == "managers.update")):

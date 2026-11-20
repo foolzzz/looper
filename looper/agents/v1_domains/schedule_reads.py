@@ -28,6 +28,11 @@ RUN = _object({
                      "gate_output", "carried_from", "started_at", "log_tail"), _NULL_STR),
     "cost_usd": _NULL_NUMBER, "exit_code": _NULL_INT, "exit_signal": _NULL_INT,
     "duration_seconds": _NULL_NUMBER,
+    "planner_context_tokens": _NULL_INT, "planner_cost_usd": _NULL_NUMBER,
+    "planner_session_action": _nullable(_enum("compacted", "rotated")),
+    "planner_session_reason": _nullable(_enum("context", "cost")),
+    "planner_session_before_tokens": _NULL_INT, "planner_session_after_tokens": _NULL_INT,
+    "failure_kind": _nullable(_enum("task_budget")),
     "log": _nullable(_object({"path": _STR, "bytes": _NULL_INT, "truncated": _BOOL}))})
 _SCHEDULE_FIELDS = {
     **dict.fromkeys(("schedule_id", "project_id", "project_name", "manager_id", "name", "cron", "timezone", "description",
@@ -55,7 +60,7 @@ _SCHEDULE_FIELDS = {
     "task_limits": _object({"worker": _NULL_INT, "reviewer": _NULL_INT}),
     "notify_target": _nullable(_object({"channel": _STR, "chat": _STR})),
     "alerts": _object(dict.fromkeys(("failures_since", "stale_since", "deadline_since", "overlap_since"), _NULL_STR)),
-    "planner_session": _object({"active": _BOOL, **dict.fromkeys(
+    "planner_session": _object({"active": _BOOL, "context_tokens": _NULL_INT, "run_cost_usd": _NULL_NUMBER, **dict.fromkeys(
         ("runtime", "profile", "last_task_id", "last_task_title", "updated_at"), _NULL_STR)})}
 # What a subscription schedule reads (its ``subscription``), and what each of its runs read and made.
 SUBSCRIPTION = _object({
