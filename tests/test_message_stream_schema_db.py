@@ -50,11 +50,16 @@ def test_an_event_is_unique_per_source_and_goes_with_its_source(monkeypatch):
 
 
 def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
-    tables = ("subscription_deliveries", "subscription_runs", "subscriptions", "source_events", "source_runs", "source_threads", "source_people", "source_chats", "event_sources")
+    # A database older than the stream is older than the leads and intents made from it too.
+    leads = ("intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
+             "intent_type_projects", "intent_type_versions", "intent_types", "message_lead_people",
+             "message_lead_sources", "message_leads")
+    tables = (*leads, "subscription_deliveries", "subscription_runs", "subscriptions", "source_events", "source_runs", "source_threads", "source_people", "source_chats", "event_sources")
 
     async def check(pool):
         await pool.execute("; ".join(f"DROP TABLE {table}" for table in tables)
-                           + "; DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions')")
+                           + "; DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions', "
+                           "'message_leads')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
