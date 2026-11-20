@@ -16,8 +16,9 @@ def test_a_good_message_passes():
     assert problem("任务失败了：花费到了 $0.01 的上限。\n要我提高上限后重试吗？") is None
 
 
-def test_the_code_notice_fails():
-    assert "code notice" in dialogs.completion_message_problem(f"任务「x」失败：上限\n{LINK}", TASK, fake=False)
+def test_the_code_notice_fails_and_words_like_it_pass():
+    assert "code notice" in dialogs.completion_message_problem("任务「x」失败：上限", TASK, fake=False)
+    assert problem("任务「x」失败了：花费到了上限。要我重试吗？") is None
 
 
 def test_the_link_must_name_the_task():

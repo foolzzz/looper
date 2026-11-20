@@ -1817,14 +1817,15 @@ def _seed_completion_failed(api: Api, project_id: str) -> None:
 
 def completion_message_problem(text: str, task_id: str, *, fake: bool) -> str | None:
     """What is wrong with the completion message stored in the chat (the Manager's words and the link line)."""
-    if text.startswith("任务「"):
-        return "the chat got the code notice, not the Manager's message"
-    if f"#tasks/{task_id}" not in text:
+    # The code notice (``任务「…」失败：…``) has no link line; the Manager may well start its own words the same way.
+    found = _LINK_LINE.search(text)
+    if found is None:
+        return "the message has no link line after it: the chat got the code notice, not the Manager's message"
+    if f"#tasks/{task_id}" not in text[found.start():]:
         return f"the message has no link to {task_id}"
     if fake:
         return None
-    found = _LINK_LINE.search(text)
-    words = (text[:found.start()] if found else text).strip()
+    words = text[:found.start()].strip()
     lines = [line for line in words.splitlines() if line.strip()]
     if len(lines) > COMPLETION_MAX_LINES:
         return f"the Manager's words have {len(lines)} lines, more than {COMPLETION_MAX_LINES}"
@@ -1893,6 +1894,8 @@ def _completion_delivered(look: Look) -> str | None:
         return f"the task is {facts['status']}, not {' or '.join(ready)}"
     if event["state"] != "delivered":
         return f"the event row is {event['state']} ({event['reason']}), not delivered"
+    # The message itself, for whoever reads the run's log (the JSON keeps only the problems).
+    print(f"completion message ({task_id}): {json.dumps(facts['message'], ensure_ascii=False)}", flush=True)
     problem = completion_message_problem(facts["message"], task_id, fake=look.fake)
     if problem:
         return problem
