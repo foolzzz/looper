@@ -127,6 +127,7 @@ class OpsConfig:
     pg_dump: str = ""
     backup_command: tuple[str, ...] = ()
     backup_verify_command: tuple[str, ...] = ()
+    message_backups: str = "off"  # "daily" dumps source_events once a day; omitted from the file until then
     operator_notes_root: str = ""
     projects_root: str = ""
     pi_runtime: str = "runner"
@@ -222,6 +223,12 @@ def _probe_profile(value: Any, where: str) -> str:
     return value
 
 
+def _message_backups(value: Any, where: str) -> str:
+    if not isinstance(value, str) or value not in ("off", "daily"):
+        raise OpsConfigError(f"{where} must be off or daily")
+    return value
+
+
 def _command(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value or not all(isinstance(word, str) and word for word in value):
         raise OpsConfigError(f"{where} must be a non-empty array of non-empty strings, the program first")
@@ -285,6 +292,7 @@ SETTINGS = (
     _Setting("backup_command", "backup", "command", _command, variable="LOOPER_BACKUP_CMD", from_variable=_split),
     _Setting("backup_verify_command", "backup", "verify_command", _command, variable="LOOPER_BACKUP_VERIFY_CMD",
              legacy_prefix=False, from_variable=_split),
+    _Setting("message_backups", "backup", "messages", _message_backups),
     _Setting("operator_notes_root", "operator_notes", "root", _absolute_path, variable="LOOPER_OPERATOR_NOTES_ROOT",
              legacy_prefix=False, from_variable=lambda value, where: os.path.expanduser(value.strip())),
 )
@@ -520,6 +528,7 @@ def render(config: OpsConfig) -> str:
         (f"verify_command = [{', '.join(_toml_string(word) for word in config.backup_verify_command)}]"
          if config.backup_verify_command
          else '# verify_command = ["docker", "exec", "-i", "<container>", "pg_restore", "--list"]'),
+        *(['messages = "daily"'] if config.message_backups == "daily" else []),
         "",
         "[operator_notes]",
         f"root = {_toml_string(config.operator_notes_root)}" if config.operator_notes_root
