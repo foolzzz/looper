@@ -4754,11 +4754,13 @@ project, with no task, gate, template or work directory; `requirement` is the
 processor's instructions. Its stream is a row of `subscriptions` (request field
 `subscription`): `source_id`, `chat_kinds` (`p2p`, `group`, `topic`, `unknown`),
 `include_chats` and `exclude_chats`, `sender_kinds` (`user`, `app`),
-`exclude_mentions_me`, `include_history` (history and imports), `max_age_minutes`
+`exclude_mentions_me`, `include_history` (history and imports), `window`
+(`cursor`, the default, or `lookback`), `delivery_policy` (`per_run`, the default,
+or `daily`), `max_age_minutes`
 (5–10080), `max_events` (1–2000), `text_max_chars` (20–4000), `render`
 (`lines_v1`), `quiet_word` (default `SKIP`), `output_header`, and the state
 `cursor_seq`, `cursor_at` and `target_confirmed_at`. A new schedule is disabled
-and its cursor starts at its source's `committed_seq`. The API refuses a field it
+and in cursor mode its cursor starts at its source's `committed_seq`. The API refuses a field it
 cannot use, naming it; a `parallel` overlap (two runs would read one window), no
 `run_budget_usd`, a source that does not exist, and a processor whose profile
 cannot run (`processor.chosen_profile`'s `problem`, on enabling) are refused.
@@ -4836,8 +4838,98 @@ Manager's `looper_schedules` cannot create or change one.
   requests are not asked: they leave it cleared, and the schedule's row says so,
   with "Confirm push target…" showing the same text (`subscription.confirmation`
   of the schedule's answer) before it calls `confirm_target`.
+- **Rules** (`subscription.rules`, up to 20; empty: the filter above applies, and
+  `lines_v1` reads exactly as before). With rules a message is kept when any
+  rule takes it, the first that does naming it. A rule has a `name` (rules with
+  one name add up in counts), a `label` (the tag), `chat_kinds`,
+  `include_chats` and `exclude_chats`, `sender_kinds`, `exclude_self` (not sent
+  by the source's own user), `mentions_me` (`any`, `only`, `exclude`),
+  `text_match`, `never_quiet` and `areas` (chat id to a name). `lines_v2` writes
+  `[time] 【label·area】《chat》 sender: text`. `output_header` may hold
+  `{count}` and `{count:RULE NAME}`, filled from what the window kept only when
+  `rules` is nonempty; without rules these placeholders remain literal text. A
+  `text_match` is an operator-owned regular expression, checked on Python's own
+  parse tree where it is saved: at most 500 characters; no repeat whose body holds
+  a repeat or a branch (`(a+)+`, `(a|aa)+`, also as `{,n}` or under `(?x)`); at
+  most 2 repeats that can run long (unbounded, or a maximum over 10), 8 repeats
+  of any kind and 8 alternations. It runs on the first 1,000 characters of each
+  message in a separate process that is killed after 5 s (the match is inside
+  the firing transaction, so a window holds the schedule's row for at most that
+  long); past it no pattern takes anything in that window and the run's
+  `match_timeouts` is 1. When the processor answers
+  the quiet word but the window holds a message of a `never_quiet` rule, code
+  writes the list of those messages (per label, at most 30, 200 characters
+  each, the same @ stripping) and it is pushed and delivered like the
+  processor's output. A subscription that can select private content (a direct
+  chat or a chat of unknown kind, `mentions_me` `only`, or `never_quiet`) may target only the operator's own direct chat (a Lark chat with the user the
+  source is bound to, `user_open_id`; a colleague's direct chat, a group, Telegram
+  and a source with no bound user are refused) when it is created, updated or
+  confirmed and again before every message of a push, and its confirmation says it
+  includes private messages. A run selects and writes with the configuration it
+  started with (`subscription_runs.config`) and pins the subscription's
+  `config_epoch`, which counts every change to its stream, rules, target, rule,
+  zone, notify, enabled state, processor Profile choice and every confirmation: a
+  change that is later undone still leaves the run's push on the dashboard. Rules are set through
+  the API; the dashboard shows that they exist.
+- **Lookback and daily digests.** `window: "lookback"` reads messages sent between
+  the firing time minus `max_age_minutes` and the firing time, inclusive, up to
+  the source's committed sequence. It ignores the cursor, including messages
+  already present when the subscription was created. It keeps the newest
+  `max_events`, then renders them oldest first (sequence breaks equal-time ties).
+  The cursor is never initialized, reset or advanced by lookback; empty windows,
+  quiet output, failures and restart recovery all leave it alone. Age is required
+  on creation and bounded as above; a partial update retains the stored age.
+  All existing source exclusions, history/import selection, rules, caps and the
+  private-content guard still apply. `{date}` in `output_header` expands to the
+  scheduled fire's local date (`YYYY-MM-DD`, in the schedule's timezone; manual
+  runs use their request time), with or without rules. Count placeholders still
+  require nonempty `rules`.
+
+  `delivery_policy: "daily"` reserves `(schedule_id, local_date)` in
+  `subscription_daily_claims` before starting the processor, in the firing's
+  transaction. The claim date is saved on `subscription_runs.daily_date`; ending
+  a run never recomputes it from the current timezone. The guard covers manual
+  runs, queued fires and catch-up (`catch_up: "once"` collapses missed fires into
+  one attempt on the latest missed firing's local date). A retained claim also
+  blocks earlier dates, so moving the timezone backwards does not reopen them.
+  A repeated attempt is `skipped_gate` with its reason on the dashboard; it does
+  not clear a failure streak or update `last_ok_at`. Only a genuinely empty
+  window counts as a healthy skip and reserves nothing.
+  Quiet output, dashboard-only output and any sent or uncertain message retain
+  the claim across restart. Failure or restart interruption with nothing sent
+  or uncertain releases that run's recorded date in the same transaction that
+  ends it, allowing a retry. Confirm the target before the first attempt.
+  In-flight delivery recovery uses the same run and segment claims, without
+  starting another daily attempt. `per_run` allows
+  multiple lookback runs when that is wanted. The two options are independent;
+  existing cursor subscriptions and gossip keep their input, order and delivery
+  behavior, processor prompt, tool list and launch flags.
+
+  For a daily schedule, set these subscription fields through
+  `schedule_admin.create` / `schedule_admin.update` (also available through the
+  generated CLI), alongside its source, selection rules and processor instructions:
+
+  ```json
+  {
+    "window": "lookback",
+    "max_age_minutes": 1440,
+    "delivery_policy": "daily",
+    "render": "lines_v2",
+    "max_events": 600,
+    "text_max_chars": 300,
+    "rules": [{"name": "all", "chat_kinds": ["group", "topic"]}],
+    "output_header": "Daily digest · {date} · {count} messages"
+  }
+  ```
+
+  Changing window mode or delivery policy clears the target's confirmation;
+  these options also participate in its configuration version. Source, window
+  and policy changes are refused while a run is open. Switching back to cursor
+  starts at the source's current end. The dashboard keeps its existing form and
+  run output; these options are configured through the API. Lark and Telegram
+  use their existing bot delivery paths; neither needs a new chat command.
 - **The cursor** (`schedule_admin.reset_cursor` with `after`, a time with its
-  offset; a confirmation shows how many events it will read): it moves to just
+  offset; a confirmation shows how many events it will read; cursor mode only): it moves to just
   before the first event the source stored after that time (`ingested_at`), so
   the next run reads exactly those. It is refused while a run is in progress.
   It waits for the source's writer lock (a pass reading its files, up to 20 s,
@@ -4846,7 +4938,7 @@ Manager's `looper_schedules` cannot create or change one.
   cursor at the new source's end, and is refused while a run is open.
 - **Not here:** the Manager's tools and prompts, export and import (a
   subscription's cursor and confirmation stay on the machine: a configuration
-  file leaves it out), the digest and daily subscriptions, and Looper's own
+  file leaves it out), migrating existing digest and daily jobs, and Looper's own
   collection.
 
 ### The ledger
