@@ -1940,7 +1940,7 @@ CREATE TABLE IF NOT EXISTS intent_type_versions (
     name              TEXT NOT NULL CHECK (btrim(name) <> '' AND char_length(name) <= 30),
     guidance          TEXT NOT NULL CHECK (char_length(btrim(guidance)) BETWEEN 1 AND 2000),   -- model-visible
     priority          TEXT NOT NULL CHECK (priority IN ('urgent', 'normal', 'quiet')),
-    default_workflow  TEXT,                                -- a workflows.key; NULL: the project's default
+    workflow_key      TEXT,                                -- the type's default workflows.key; NULL: the project's
     rolled_back_from  INTEGER,
     edited_via        TEXT NOT NULL CHECK (edited_via IN ('builtin', 'dashboard', 'api')),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1950,7 +1950,7 @@ CREATE TABLE IF NOT EXISTS intent_type_versions (
 CREATE TABLE IF NOT EXISTS intent_type_projects (
     type_key     TEXT NOT NULL REFERENCES intent_types(key) ON DELETE CASCADE,
     project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    workflow_key TEXT REFERENCES workflows(key) ON DELETE SET NULL,
+    workflow_key TEXT,                     -- a workflows.key; code checks it still exists when it builds a task
     PRIMARY KEY (type_key, project_id)
 );
 -- A chat's project, set by the operator on the Intents page; an intent copies it when it is made.
@@ -1981,7 +1981,7 @@ CREATE TABLE IF NOT EXISTS intents (
                   CHECK (state IN ('pending', 'tasked', 'rejected', 'expired', 'merged')),
     chat_id       TEXT NOT NULL,                       -- the chat of its first source
     project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
-    workflow_key  TEXT REFERENCES workflows(key) ON DELETE SET NULL,
+    workflow_key  TEXT,                                -- a workflows.key, checked when it builds a task
     merged_into   BIGINT REFERENCES intents(id) ON DELETE CASCADE,
     task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     flagged       BOOLEAN NOT NULL DEFAULT false,      -- one of its sources is in its run's instructions_seen

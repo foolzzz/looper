@@ -3597,7 +3597,15 @@ example, are added without a default, with their constraints `NOT VALID`, and
 no older row is updated. After the schema transaction commits, `ensure_schema`
 validates those constraints and builds the index concurrently, which lets
 reads and writes go on (`connection._ONLINE_STEPS`). Each of these steps has
-its own marker, and a start that stopped halfway resumes it.
+its own marker, and a start that stopped halfway resumes it. A database-wide
+session advisory lock (`0x6C6F6F706F6E6C`, "looponl") serializes these steps
+across processes, with the markers read again after acquiring it. Lock attempts
+are nonblocking, with no transaction held between attempts, so a waiting
+starter cannot block the owner's concurrent index build. After five seconds
+of contention the starter logs a warning and continues; the owner or a later
+start finishes any unmarked steps. A caller that already holds a transaction
+also defers the online steps with a warning until a start outside one. The lock
+is released on completion, failure or cancellation (and on connection loss).
 
 Rollback means stopping the new service, leaving the upgraded database
 unchanged, restoring the verified full backup into a separate database, and
