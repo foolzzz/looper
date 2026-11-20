@@ -52,6 +52,22 @@ def test_real_mode_installs_no_claude_stand_in_when_no_agent_runs_it(tmp_path):
     assert installed == tmp_path / "real" / "claude" and "/bin/claude" in installed.read_text()
 
 
+def test_the_real_claude_wrapper_adds_the_eval_cap_only_to_a_call_without_its_own(tmp_path):
+    import subprocess
+
+    echo = tmp_path / "echo-args"
+    echo.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    echo.chmod(0o755)
+    wrapper = runner.install_claude(tmp_path / "bin", mode="real", real_claude=str(echo), max_budget_usd=0.25)
+
+    def args(*given: str) -> list[str]:
+        return subprocess.run([str(wrapper), *given], capture_output=True, text=True, check=True).stdout.split()
+
+    assert args("--print", "--model", "sonnet") == ["--print", "--model", "sonnet", "--max-budget-usd", "0.25"]
+    # a spawned run's cap (the advisor's 1 USD consult budget) is not lowered by the eval's
+    assert args("--print", "--max-budget-usd", "0.9994") == ["--print", "--max-budget-usd", "0.9994"]
+
+
 def test_stop_realpath_defaults_and_agent_flags(tmp_path):
     parsed = stop_realpath.parse_args(["--runtime", "claude"])
     assert (parsed.claude_model, parsed.deepseek_model, parsed.spec) == ("sonnet", "deepseek-flash", None)
