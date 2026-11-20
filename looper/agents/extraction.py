@@ -465,7 +465,7 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
                         run_id: str | None, record_id: int | None, now: datetime, more: bool) -> dict[str, Any]:
     """Write the parsed intents in the caller's transaction: ``pending``, or ``merged`` into the intent it is
     ``same_as`` when that one is pending or tasked within ``SAME_MATTER_WITHIN`` or rejected within
-    ``REJECTED_WITHIN`` (its sources are added to that one's too). Returns the counts ``extract_counts`` keeps."""
+    ``REJECTED_WITHIN``. Each keeps only its own sources. Returns the counts ``extract_counts`` keeps."""
     counts = _counts(parsed, more=more)
     versions = {row["key"]: row["version"] for row in await conn.fetch("SELECT key, version FROM intent_types")}
     events = await _lock_sources(conn, [seq for item in parsed.items for seq in item["sources"]])
@@ -490,9 +490,9 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
             source_id, schedule_id, item["type"], versions[item["type"]], item["title"], item["summary"],
             item["confidence"], "merged" if target else "pending", chat_id, project_id, target,
             any(seq in seen for seq in sources), run_id, record_id)
+        # Only its own sources: the messages its text came from (a merged one's are not the target's).
         await conn.executemany("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                               [(owner, seq) for owner in ((intent_id, target) if target else (intent_id,))
-                                for seq in sources])
+                               [(intent_id, seq) for seq in sources])
         counts["merged" if target else "new"] += 1
     return counts
 

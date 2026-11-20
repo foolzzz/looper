@@ -226,9 +226,11 @@ def test_intents_are_pending_or_merged_by_their_target_s_state_and_age(monkeypat
         assert [r["flagged"] for r in rows] == [False, False, False, True]
         assert {(r["chat_id"], r["project_id"], r["type_version"]) for r in rows} == {("oc_bound", project["id"], 1)}
         assert all(r["expires_at"] is None and r["handled_at"] is None for r in rows)
-        # The merged ones' sources are also the target's.
+        # Each keeps only its own sources: a merged one's are not copied onto its target.
         assert await pool.fetchval("SELECT array_agg(event_seq ORDER BY event_seq) FROM intent_sources "
-                                   "WHERE intent_id = $1", fresh) == [e[0], e[1]]
+                                   "WHERE intent_id = $1", fresh) == [e[0]]
+        assert await pool.fetchval("SELECT array_agg(event_seq) FROM intent_sources WHERE intent_id = $1",
+                                   rows[0]["id"]) == [e[1]]
         # The earliest source names the chat.
         assert await pool.fetchval("SELECT array_agg(event_seq ORDER BY event_seq) FROM intent_sources "
                                    "WHERE intent_id = $1", rows[3]["id"]) == [e[4], e[5]]
