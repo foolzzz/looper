@@ -45,11 +45,14 @@ def test_each_item_shows_its_kind_confidence_and_the_messages_it_cites_by_their_
         "X1": 0, "X2": 1, "m1": 2, "c1": 1, "P1": "ou_zhang", "P2": "ou_user"}
 
 
-def test_an_intent_shows_its_type_name_title_and_summary():
+def test_an_intent_shows_its_type_title_and_summary_and_each_type_is_described_once():
     item = {"type": "bug_triage", "title": "看登录页报错", "summary": "张三请你看", "confidence": "medium",
             "sources": [1], "window_sources": [1]}
-    text, _ = leads_check.render("intents", [item], ROWS, participants=PEOPLE, zone_name="Asia/Shanghai",
-                                 text_max_chars=500, type_names={"bug_triage": "bug 排查"})
+    text, _ = leads_check.render("intents", [item, {**item, "title": "又一条"}], ROWS, participants=PEOPLE,
+                                 zone_name="Asia/Shanghai", text_max_chars=500,
+                                 types={"bug_triage": {"name": "bug 排查", "guidance": "有人报告问题"}})
+    assert "意图类型（每条意图按它的类型说明判断）:\n- bug_triage bug 排查: 有人报告问题\n待复核的条目" in text
+    assert text.count("有人报告问题") == 1
     assert "X1 意图 [bug_triage bug 排查] 置信度 medium：看登录页报错\n摘要：张三请你看" in text
 
 
@@ -84,13 +87,17 @@ def test_a_reply_that_gives_no_readable_verdict_fails_the_check(reply):
     {"item": "X2", "verdict": "fix", "confidence": "certain"},
     {"item": "X2", "verdict": "keep", "confidence": "very"},
     {"item": "X2", "verdict": "discard"},
-    {"item": "X2", "verdict": "drop", "reason": "x" * 201},
     {"item": "X2", "verdict": "drop", "reason": ["no"]},
     {"item": 2, "verdict": "drop"},
 ])
 def test_a_missing_or_bad_verdict_leaves_only_that_item_unchecked(bad):
     found = leads_check.parse(_reply({"item": "X1", "verdict": "keep"}, *([bad] if bad else [])), REFS)
     assert found.state == "checked" and set(found.verdicts) == {0}
+
+
+def test_a_reason_past_its_length_is_cut_and_keeps_its_verdict():
+    found = leads_check.parse(_reply({"item": "X1", "verdict": "drop", "reason": "无" * 250}), REFS)
+    assert found.verdicts[0] == leads_check.Verdict("drop", "无" * leads_check.REASON_MAX)
 
 
 def test_two_verdicts_for_one_item_leave_it_unchecked():
@@ -109,17 +116,19 @@ def test_unknown_fields_are_ignored_and_instructions_seen_names_messages_only():
 
 
 def test_only_a_verdict_changes_an_item():
-    items = [_lead(), _lead(), _lead(), _lead()]
+    items = [_lead(), _lead(), _lead(), _lead(), _lead()]
     checked = leads_check.Checked("checked", verdicts={
         0: leads_check.Verdict("keep"), 1: leads_check.Verdict("fix", "猜测", "low"),
-        2: leads_check.Verdict("drop", "出处没说")})
+        2: leads_check.Verdict("drop", "出处没说"), 3: leads_check.Verdict("fix", "没问题", "high")})
     leads_check.apply(items, checked, record_id=7)
+    # A fix to the confidence it already has changes nothing: it is a keep.
     assert [item.get("check") for item in items] == [
         {"verdict": "keep", "reason": None, "record_id": 7}, {"verdict": "fix", "reason": "猜测", "record_id": 7},
-        {"verdict": "drop", "reason": "出处没说", "record_id": 7}, None]
-    assert [item["confidence"] for item in items] == ["high", "low", "high", "high"]
+        {"verdict": "drop", "reason": "出处没说", "record_id": 7}, {"verdict": "keep", "reason": "没问题", "record_id": 7},
+        None]
+    assert [item["confidence"] for item in items] == ["high", "low", "high", "high", "high"]
     assert leads_check.counts(checked, cost_usd=0.00031) == {
-        "checked": 3, "check_kept": 1, "check_dropped": 1, "check_fixed": 1, "check_failed": False,
+        "checked": 4, "check_kept": 2, "check_dropped": 1, "check_fixed": 1, "check_failed": False,
         "check_cost_usd": 0.00031}
 
 

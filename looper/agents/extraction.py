@@ -961,7 +961,7 @@ async def _check(runs: Any, kind: str, parsed: Parsed, found: Batch, schedule: M
         outcome = await leads_check.check(
             kind, parsed.items, messages=found.messages, participants=found.participants or Participants({}, None),
             zone_name=schedule["timezone"], text_max_chars=schedule["subscription"]["text_max_chars"],
-            type_names={row["key"]: row["name"] for row in types}, owner=schedule["id"], reference=reference,
+            types={row["key"]: row for row in types}, owner=schedule["id"], reference=reference,
             budget_usd=round(cap, 6), timeout_s=min(left_s, float(leads_check.CHECK_TIMEOUT_SEC)),
             runtime_root=runs._runtime_root, claude_bin=runs._claude_bin)
     except Exception as exc:  # the check never stops what was found: its items are stored unchecked
