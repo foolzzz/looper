@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     capabilities  TEXT[] NOT NULL DEFAULT '{}'
         CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
                                      'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
-                                     'read_tools', 'steer', 'no_tools']),
+                                     'read_tools', 'steer', 'no_tools', 'headless_compaction']),
     probed_at     TIMESTAMPTZ,
     probe_error   TEXT,
     builtin       BOOLEAN NOT NULL DEFAULT false,
@@ -1126,6 +1126,8 @@ CREATE TABLE IF NOT EXISTS schedules (
     planner_session_profile TEXT,
     planner_session_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     planner_session_since TIMESTAMPTZ,
+    planner_session_context_tokens BIGINT CHECK (planner_session_context_tokens >= 0),
+    planner_session_run_cost_usd DOUBLE PRECISION CHECK (planner_session_run_cost_usd >= 0),
     kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command', 'subscription')),
     command TEXT,
     env JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(env) = 'object'),
@@ -1202,7 +1204,14 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     log_truncated BOOLEAN NOT NULL DEFAULT false,
     log_tail TEXT,
     runner_pid INTEGER,
-    runner_started TEXT
+    runner_started TEXT,
+    planner_context_tokens BIGINT CHECK (planner_context_tokens >= 0),
+    planner_cost_usd DOUBLE PRECISION CHECK (planner_cost_usd >= 0),
+    planner_session_action TEXT CHECK (planner_session_action IN ('compacted', 'rotated')),
+    planner_session_reason TEXT CHECK (planner_session_reason IN ('context', 'cost')),
+    planner_session_before_tokens BIGINT CHECK (planner_session_before_tokens >= 0),
+    planner_session_after_tokens BIGINT CHECK (planner_session_after_tokens >= 0),
+    failure_kind TEXT CHECK (failure_kind IN ('task_budget'))
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs (schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_open ON schedule_runs (schedule_id) WHERE status IN ('queued', 'running');

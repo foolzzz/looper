@@ -23,6 +23,20 @@ from tests.test_schedule_planner_session import FRESH, SCHEDULE_RUN_REQUIREMENT_
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
+@pytest.fixture
+def planner_claude(planner_claude):
+    """These resume tests need a measured, small context to stay below session bounds."""
+    def measured(*args, **kwargs):
+        runtime = planner_claude(*args, **kwargs)
+        script = Path(runtime.bin + ".py")
+        source = script.read_text()
+        marker = "'message': {'content':"
+        assert marker in source
+        script.write_text(source.replace(marker, "'message': {'usage': {'input_tokens': 1000}, 'content':"))
+        return runtime
+    return measured
+
+
 async def _task(env: Any, sid: str, task_id: str) -> None:
     await tasks.create_task(task_id=task_id, requirement="Check the new input.", project_id=env.project_id,
                             work_dir=env.work_dir)
@@ -31,7 +45,8 @@ async def _task(env: Any, sid: str, task_id: str) -> None:
 
 async def _store(task_id: str, session_id: str, cost: float = 0.25, *, provider: str | None = None) -> None:
     await schedules.save_planner_session(task_id, session_id, Usage(cost_usd=cost).to_dict(),
-                                         runtime_type="claude-code", provider_id=provider, profile_id=None)
+                                         runtime_type="claude-code", provider_id=provider, profile_id=None,
+                                         context_tokens=1000, run_cost_usd=cost)
 
 
 async def _row(env: Any, sid: str) -> dict[str, Any]:

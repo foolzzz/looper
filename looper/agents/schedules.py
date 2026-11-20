@@ -215,6 +215,9 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None, *,
         "carried_from": row.get("carried_from"),
         # A skip that repeated counts every firing it stands for, from scheduled_for to finished_at.
         "firings": row.get("firings") or 1,
+        **{key: row.get(key) for key in (
+            "planner_context_tokens", "planner_cost_usd", "planner_session_action", "planner_session_reason",
+            "planner_session_before_tokens", "planner_session_after_tokens", "failure_kind")},
     }
 
 
@@ -313,6 +316,8 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
                    "deadline_since": row.get("deadline_alert_at"), "overlap_since": row.get("overlap_alert_at")},
         "planner_session": {
             "active": bool(row.get("planner_session_id")),
+            "context_tokens": row.get("planner_session_context_tokens"),
+            "run_cost_usd": row.get("planner_session_run_cost_usd"),
             **{key: row.get(column) if row.get("planner_session_id") else None for key, column in (
                 ("runtime", "planner_session_runtime"), ("profile", "planner_session_profile"),
                 ("last_task_id", "planner_session_task_id"), ("last_task_title", "planner_session_task_title"),
