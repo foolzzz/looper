@@ -133,6 +133,8 @@ def _parser() -> argparse.ArgumentParser:
                            "the other roles keep --model/--agent")
     talk.add_argument("--manager-effort", help="with --manager-model: its effort, such as xhigh")
     talk.add_argument("--dialogs", help="comma-separated dialog ids (default: all)")
+    talk.add_argument("--stable-context", action="store_true",
+                      help="turn manager.stable_context on in every dialog's database (the Manager's state block)")
     talk.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
     talk.add_argument("--jobs", type=_jobs, default=1, help=_JOBS_HELP)
     talk.add_argument("--case-budget-usd", type=_case_budget, help=_CASE_BUDGET_HELP)
@@ -264,6 +266,7 @@ def _dialogs(args: argparse.Namespace) -> int:
             switch_agent=json.loads(args.switch_agent.read_text(encoding="utf-8")) if args.switch_agent else None,
             pi_runtime=_selected_runtime(args, "pi"),
             dsh_runtime=_selected_runtime(args, "dsh"),
+            stable_context=args.stable_context,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)

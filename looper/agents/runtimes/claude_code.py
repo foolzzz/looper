@@ -144,6 +144,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # replies follow Looper's contracts by prompt, so no structured_output. Headless /compact on resume
     # was verified with 2.1.329: a manual compact_boundary and a later turn recalling the summary.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
+    # Verified against Claude Code 2.1.329: /compact and an automatic compaction in the resident stream-json session
+    # each write a compact_boundary event before the turn's result.
+    resident_compaction_events = True
     room_push = RoomPush.USER_TURN
     run_input = True  # stdin can stay open between a Worker's waiting turns
     keepable = True

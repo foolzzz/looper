@@ -42,3 +42,6 @@ logs/
 
 # Frontend delivery artifacts are built and qualified from source.
 /looper/web/dashboard/
+
+# Third-party source checkouts kept locally for study; never committed.
+/references/
