@@ -133,20 +133,18 @@ tasked、rejected、merged 是终态。
 - **Manager 对话评测**（sonnet `--reps 2` 加 opus xhigh `--reps 1`）：`leads_background`、`leads_dont_search`、`leads_conflict`、`leads_instruction`、`leads_task_requirement`。群聊拒绝、非操作者拒绝、关闭时逐字节不变用单元测试。
 - **本机样例：** 标「不准确」的线索可以导出到被 git 忽略的目录做本机回归，永远不进仓库。
 
-## 9. PR 拆分与冻结接口
+## 9. 并行切片与冻结接口
 
-**F 基础（#1452，先合入）：** 迁移 `message_leads`（第 3 节的全部表）；`looper/agents/leads_model.py`（类型、状态、编号、设置键 `leads.enabled`、`leads.valid_days`、`intents.enabled`、`NOTICE`、`shown_state`、`leads_enabled()`、`intents_enabled()`、`valid_days()`）；`looper/agents/leads.py` 的 `search()`、`lead_view()`、`source_view()`、`chat_link()`；`looper/agents/operator_identity.py`（`operator_sender_id(channel_id)`、`is_operator(...)`：操作者本人回合的唯一判断）；`tests/leads_support.py`。下面的 PR 都以它为基线，各自拥有文件，只通过表和冻结的接口相互依赖；每个默认关闭、可以独立回滚。
+**F 基础（#1452，先合入）：** 迁移 `message_leads`（第 3 节的全部表）；`looper/agents/leads_model.py`（类型、状态、编号、设置键 `leads.enabled`、`leads.valid_days`、`intents.enabled`、`NOTICE`、`shown_state`、`leads_enabled()`、`intents_enabled()`、`valid_days()`）；`looper/agents/leads.py` 的 `search()`、`lead_view()`、`source_view()`、`chat_link()`；`looper/agents/operator_identity.py`（`operator_sender_id(channel_id)`、`is_operator(...)`：操作者本人回合的唯一判断）；`tests/leads_support.py`。五个切片都以它为基线，各自拥有文件，只通过表和冻结的接口相互依赖；每个切片的 PR 默认关闭、可以独立回滚。
 
-| PR | 交付 | 提供的接口 | 依赖 | 模型可见 |
+| 切片（原 PR 编号） | 交付 | 提供的接口 | 依赖 | 模型可见 |
 |---|---|---|---|---|
-| **PR2** 线索的命令行与操作接口 | `looper leads search\|mark\|delete`；v1 `leads.search`、`leads.mark`、`leads.delete`、`leads.settings_get`、`leads.settings_put`、`leads.chats`、`leads.set_chat`；关闭线索时停用线索订阅；客户端 skill 一句话 | v1 JSON（PR5 用） | F | 否 |
-| **PR3** 抽取运行 | `processor.run(contract=)`；`output_kind` 的 `leads`、`intents` 和预设；抽取窗口、渲染、解析、入库、补跑；启用确认；`looper msgflow leads-backfill`（默认 dry-run）；v1 `schedule_admin.subscription_preset` | 写入的 `message_leads`、`intents` 行；预设 JSON（PR5 用） | F | 是：processor 评测 |
-| **PR4** Manager 工具 | `looper_leads_search`、`Tool.audience`、`Tool.audit_result`、契约一节、追加的查询行、群聊兜底、进程签名；渠道配置 `operator_sender_id` 的校验（形状取账本 RFC 第 4.3 节，L2 先合入就复用） | 渠道配置字段（PR5 用） | F | 是：对话评测，含「别查消息」 |
-| **PR5** 线索界面 | 消息流页的「线索」标签与整理范围；Settings 的「消息线索」开关；Schedules 新建订阅的两个预设；渠道设置里的「我的 ID」 | — | F；PR2、PR3、PR4 的 JSON | 否 |
-| **PR6** 意图类型与配置 | `intent_types.*`（版本、历史、回退、按项目的模板）、`intent_bindings.*`、`intent_alert_senders.*`、`intents.stats`、`intents.settings_*` | v1 JSON（PR8 用） | F | 否（类型说明经 PR3 进入 processor） |
-| **PR7** 意图的推送与处理 | `db.intents.transition`、意图视图、`intents.list/get/update/build/reject`；推送服务（推送、新进展、过期、最终状态与兜底）；`ChannelRegistry.edit`；Manager 里的回复路由；建任务 | v1 JSON（PR8 用） | F | 否（代码在模型之前处理） |
-| **PR8** 意图页 | 意图、类型与历史、会话绑定、告警机器人、采纳率；Settings 的「意图识别」开关；导航入口 | — | F；PR6、PR7 的 JSON | 否 |
+| **a**（PR2）线索的命令行与操作接口 | `looper leads search\|mark\|delete`；v1 `leads.search`、`leads.mark`、`leads.delete`、`leads.settings_get`、`leads.settings_put`、`leads.chats`、`leads.set_chat`；关闭线索时停用线索订阅；客户端 skill 一句话 | v1 JSON（e 用） | F | 否 |
+| **b**（PR3）抽取运行 | `processor.run(contract=)`；`output_kind` 的 `leads`、`intents` 和预设；抽取窗口、渲染、解析、入库、补跑；启用确认；`looper msgflow leads-backfill`（默认 dry-run）；v1 `schedule_admin.subscription_preset` | 写入的 `message_leads`、`intents` 行；预设 JSON（e 用） | F | 是：processor 评测 |
+| **c**（PR4）Manager 工具 | `looper_leads_search`、`Tool.audience`、`Tool.audit_result`、契约一节、追加的查询行、群聊兜底、进程签名；渠道配置 `operator_sender_id` 的校验（形状取账本 RFC 第 4.3 节，L2 先合入就复用） | 渠道配置字段（e 用） | F | 是：对话评测，含「别查消息」 |
+| **d**（PR6 + PR7）意图的类型、配置、推送与处理 | 类型（版本、历史、回退、按项目的模板）、会话绑定、告警机器人白名单、采纳率、意图开关；`db.intents.transition`、意图视图、`intents.list/get/update/build/reject`；推送服务（推送、新进展、过期、最终状态与兜底）；`ChannelRegistry.edit`；Manager 里的回复路由；建任务 | v1 JSON（e 用） | F；读 b 写的 `intents` 行（测试里用合成行） | 否（代码在模型之前处理） |
+| **e**（PR5 + PR8）界面 | 消息流页的「线索」标签与整理范围；意图页（意图、类型与历史、会话绑定、告警机器人、采纳率）；Settings 的两个开关；Schedules 新建订阅的两个预设；渠道设置里的「我的 ID」 | — | F；a、b、c、d 的 JSON（先按冻结的形状写测试，接口合入后做真实路径截图） | 否 |
 
-**并行：** F 合入后（或者以 `codex/leads-foundation` 为基线），PR2、PR3、PR4、PR6、PR7 可以同时开工；PR5、PR8 先按冻结的 JSON 写组件和测试，接口合入后做真实路径截图。每张任务卡写清了文件、函数签名、JSON 形状、测试、真实路径（各用自己的端口和一次性数据库）和分支基线。PR3 合入后，协调者先跑回填的 dry-run 报给维护者。
+**并行：** F 合入后（或者以 `codex/leads-foundation` 为基线），a、b、c、d 同时开工；e 先按冻结的 JSON 写组件和测试，接口合入后做真实路径截图。每张任务卡写清了文件、函数签名、JSON 形状、测试、真实路径（各用自己的端口和一次性数据库）和分支基线。b 合入后，协调者先跑回填的 dry-run 报给维护者。
 
-**需要核实：** 飞书和 Telegram 机器人编辑自己消息的时限（PR7）；飞书消息级链接的格式（v0 先给会话链接）；来源的 `user_open_id` 和机器人的操作者 ID 是否同一个 open_id（按应用区分，分开存）；Sonnet 在 500 条窗口上的 JSON 丢弃率和每条的实际花费（PR3）。
+**需要核实：** 飞书和 Telegram 机器人编辑自己消息的时限（d）；飞书消息级链接的格式（v0 先给会话链接）；来源的 `user_open_id` 和机器人的操作者 ID 是否同一个 open_id（按应用区分，分开存）；Sonnet 在 500 条窗口上的 JSON 丢弃率和每条的实际花费（b）。
