@@ -250,6 +250,12 @@ class RestrictedTool(Tool):
     audience: Audience = Audience.ANY
     # What ``manager_actions.result`` keeps of a successful call's answer; None: what a plain tool's call keeps.
     audit_result: Callable[[Any], Any] | None = None
+    # What a call from a turn outside ``audience`` is told (the ``forbidden`` message): required unless it is ANY.
+    refusal: str = ""
+
+    def __post_init__(self) -> None:
+        if self.audience is not Audience.ANY and not self.refusal.strip():
+            raise ValueError(f"{self.name} runs only in some turns: it must say what the others are told (refusal)")
 
 
 _TYPES: dict[str, tuple[type, ...]] = {"string": (str,), "boolean": (bool,), "object": (dict,), "array": (list,)}
