@@ -289,7 +289,8 @@ def test_the_processor_upgrade_widens_the_role_and_capability_checks_and_keeps_e
             # The released checks and capabilities, a layer and a Claude Code runtime the operator registered.
             await old.execute("""
                 UPDATE agent_runtimes SET capabilities =
-                    array_remove(array_remove(capabilities, 'no_tools'), 'headless_compaction');
+                    array_remove(array_remove(array_remove(capabilities, 'no_tools'), 'headless_compaction'),
+                                 'mid_turn_input');
                 ALTER TABLE agent_runtimes DROP CONSTRAINT agent_runtimes_capabilities_check,
                     ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY['run',
                     'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp', 'add_dirs',
