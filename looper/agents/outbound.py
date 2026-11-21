@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_settings import AgentSettings, AgentType, load_agent_settings
-from .model_call import CallFailure, ChildCall, call
+from .model_call import CallFailed, CallFailure, ChildCall, call
 from .spawn import ChildRun, SpawnKind, SpawnParent
 
 logger = logging.getLogger(__name__)
@@ -426,18 +426,17 @@ async def _classify(action: Action, asker: Asker, origin: Origin, context: Seque
     run.record_id, run.cost_usd = done.record_id, done.cost_usd
     if done.execution.models:
         run.model = done.execution.models[0]
-    if done.failure is not None:
-        if done.parse_error is not None:
-            if not isinstance(done.parse_error, VerdictError):
-                raise done.parse_error
-            logger.info("outbound review %s gave no verdict: %s", done.record_id, done.parse_error)
+    if isinstance(done, CallFailed):
+        if done.error is not None:
+            if not isinstance(done.error, VerdictError):
+                raise done.error
+            logger.info("outbound review %s gave no verdict: %s", done.record_id, done.error)
             return _blocked(Failure.PARSE)
         failure = _FAILURES[done.failure]
         logger.info("outbound review %s of %s by %s gave no verdict: %s (%s)", done.record_id, action.tool,
                     origin.agent_id, done.failure.value, done.reason)
         return _blocked(failure)
     verdict = done.value
-    assert verdict is not None
     return verdict.decision, verdict.reason, verdict.signals, None
 
 

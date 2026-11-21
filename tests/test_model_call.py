@@ -37,6 +37,72 @@ class _Backend:
         return self.execution
 
 
+def test_a_success_can_contain_none_without_becoming_a_failure(tmp_path: Path) -> None:
+    done = asyncio.run(model_call.call(_request(tmp_path), parse=lambda _: None,
+                                      backend=_Backend(model_call.Execution("null"))))
+    assert isinstance(done, model_call.CallOk) and done.value is None
+
+
+@pytest.mark.parametrize("caller", ["outbound", "advisor", "judge", "leads_check"])
+@pytest.mark.parametrize("failure", list(model_call.CallFailure))
+def test_every_caller_handles_every_call_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caller: str, failure: model_call.CallFailure,
+) -> None:
+    from looper.agents import advisor, extraction, leads_check, outbound
+    from looper.agents.advice import AdviceKind, AdviceRequest
+    from looper.agents.serve import seed_role_configs
+    from looper.db import agent_spawns
+    from looper.db.agent_spawns import SpawnState
+
+    async def run(self: Any, request: Any) -> model_call.Execution:
+        return model_call.Execution(None, failure=failure, reason="recorded reason")
+
+    monkeypatch.setattr(model_call.SubscriptionBackend, "run", run)
+
+    async def test(pool: Any) -> None:
+        runtime = {"runtime_root": tmp_path, "claude_bin": "unused-model-cli"}
+        if caller == "outbound":
+            result = await outbound.review(
+                outbound.Action("looper_lark", outbound.ActionLevel.EXTERNAL, "chat", "Build status",
+                                "Send build status", action="send", content="The build is green."),
+                outbound.Asker(outbound.Who.OPERATOR, "lark", "Post the build status."),
+                outbound.Origin("manager", outbound.Source.TOOL), **runtime)
+            assert result.decision is outbound.Decision.BLOCK and result.failure.value == failure.value
+            row = await pool.fetchrow("SELECT failure FROM outbound_reviews WHERE id = $1", result.review_id)
+            assert row["failure"] == failure.value
+        elif caller == "leads_check":
+            result = await leads_check.check(
+                "leads", [], messages={}, participants=extraction.Participants({}, "ou_synthetic"),
+                zone_name="UTC", text_max_chars=500, types={}, owner="failure-check", reference={},
+                budget_usd=0.5, timeout_s=20, **runtime)
+            expected = {"unavailable": "refused", "refused": "refused", "timeout": "timeout", "budget": "budget"}
+            assert result.checked is None and result.counts["check_failed"] == 1
+            assert result.detail == f"{expected.get(failure.value, 'failed')}: recorded reason"
+        else:
+            await pool.execute("INSERT INTO projects (id, name) VALUES ('project-failure', 'Failure checks')")
+            await pool.execute("INSERT INTO tasks (id, project_id, requirement, status) "
+                               "VALUES ('task-failure', 'project-failure', 'Improve reads.', 'running')")
+            brief = advisor.Brief("task-failure", None, 1, advisor.Source.OPTIONAL)
+            row = await agent_spawns.create(
+                kind="advisor", task_id=brief.task_id, step_id=None, parent_record_id=None, brief=brief.row(),
+                inputs={}, budget_usd=1.0, state=SpawnState.ASKING if caller == "advisor" else SpawnState.LINTING)
+            request = AdviceRequest(AdviceKind.DIAGNOSE, {"problem": "Slow reads"})
+            if caller == "advisor":
+                result = await advisor._ask(row, brief, request, timeout_s=20, **runtime)
+                expected = failure.value
+            else:
+                result = await advisor._judge(row, brief, request, **runtime)
+                expected = "rate_limited" if failure is model_call.CallFailure.RATE_LIMITED else "judge"
+            assert isinstance(result, advisor.Ended) and result.failure == expected
+            assert result.state is (SpawnState.OVER_BUDGET if failure is model_call.CallFailure.BUDGET
+                                    else SpawnState.FAILED)
+            saved = await agent_spawns.get(row["id"])
+            entry = saved["result"]["rounds" if caller == "advisor" else "judges"][-1]
+            assert entry["failure"] == failure.value
+
+    run_db(test, monkeypatch, setup=seed_role_configs)
+
+
 def test_a_call_parses_once_after_execution_and_cost_booking(tmp_path: Path) -> None:
     order: list[str] = []
     execution = model_call.Execution('{"answer":42}', record_id=7, cost_usd=0.02,
@@ -54,7 +120,7 @@ def test_a_call_parses_once_after_execution_and_cost_booking(tmp_path: Path) -> 
     backend = _Backend(execution)
     done = asyncio.run(model_call.call(request, parse=parse, backend=backend))
     assert backend.requests == [request] and order == ["booked", "parsed"]
-    assert (done.value, done.failure, done.reason, done.parse_error) == (42, None, "", None)
+    assert isinstance(done, model_call.CallOk) and done.value == 42
     assert done.execution is execution
     assert (done.record_id, done.cost_usd, done.model) == (7, 0.02, "chosen-model")
     assert done.latency_ms >= 0
@@ -78,7 +144,8 @@ def test_every_execution_failure_keeps_its_evidence_and_never_parses(
 
     done = asyncio.run(model_call.call(_request(tmp_path, on_result=book), parse=parse,
                                       backend=_Backend(execution)))
-    assert (done.value, done.failure, done.reason) == (None, failure, "the recorded reason")
+    assert isinstance(done, model_call.CallFailed)
+    assert (done.failure, done.reason, done.error) == (failure, "the recorded reason", None)
     assert booked == [execution] and done.execution is execution
     assert (done.record_id, done.cost_usd) == (9, 0.01)
     assert done.execution.round()["failure"] == failure.value
@@ -94,8 +161,8 @@ def test_parse_errors_keep_the_completed_runs_cost_and_original_exception(
         raise error
 
     done = asyncio.run(model_call.call(_request(tmp_path), parse=parse, backend=_Backend(execution)))
-    assert done.failure is model_call.CallFailure.PARSE and done.value is None
-    assert done.parse_error is error and done.reason == str(error)
+    assert isinstance(done, model_call.CallFailed) and done.failure is model_call.CallFailure.PARSE
+    assert done.error is error and done.reason == str(error)
     assert (done.record_id, done.cost_usd) == (11, 0.03)
     assert done.execution.failure is None and done.execution.round()["failure"] is None
 
@@ -145,9 +212,12 @@ def test_a_processor_recipe_keeps_its_private_record_inputs_and_maps_only_its_fa
                   contract="JSON only", role=AgentType.LEADS_CHECK)
     done = asyncio.run(model_call.call(model_call.ProcessorCall(**kwargs), parse=int))
     assert seen == [kwargs] and done.execution.profile is profile
-    assert (done.failure.value if done.failure is not None else None) == expected
+    assert (done.failure.value if isinstance(done, model_call.CallFailed) else None) == expected
     assert (done.record_id, done.cost_usd, done.model) == (13, 0.04, "chosen-model")
-    assert (done.value, done.reason) == ((42, "") if failure is None else (None, "original reason"))
+    if failure is None:
+        assert isinstance(done, model_call.CallOk) and done.value == 42
+    else:
+        assert isinstance(done, model_call.CallFailed) and done.reason == "original reason"
 
 
 _CLAUDE = r'''
@@ -183,15 +253,16 @@ def test_the_subscription_backend_maps_real_one_shot_results(
 
     async def test(pool: Any) -> None:
         done = await model_call.call(_request(tmp_path, claude_bin=executable), parse=json.loads)
-        assert (done.failure.value if done.failure is not None else None) == failure
+        assert (done.failure.value if isinstance(done, model_call.CallFailed) else None) == failure
         assert done.record_id is not None and done.cost_usd is not None
         assert seen.exists() and json.loads(seen.read_text())["message"]["content"] == "What is six times seven?"
         row = await pool.fetchrow("SELECT status, cost_usd FROM llm_records WHERE id = $1", done.record_id)
         assert row is not None and float(row["cost_usd"]) == done.cost_usd
         if failure is None:
-            assert done.value == {"answer": 42} and row["status"] == "completed"
+            assert isinstance(done, model_call.CallOk) and done.value == {"answer": 42}
+            assert row["status"] == "completed"
         else:
-            assert done.value is None and done.reason
+            assert isinstance(done, model_call.CallFailed) and done.reason
 
     run_db(test, monkeypatch)
 
@@ -208,7 +279,7 @@ def test_a_call_that_cannot_start_writes_no_run_or_process_input(
         request = (replace(request, cap_usd=0.05) if mode == "under_minimum"
                    else replace(request, settings=replace(request.settings, error="settings unavailable")))
         done = await model_call.call(request, parse=json.loads)
-        assert done.failure.value == failure and done.record_id is None and done.value is None
+        assert isinstance(done, model_call.CallFailed) and done.failure.value == failure and done.record_id is None
         assert not seen.exists()
         assert await pool.fetchval("SELECT count(*) FROM llm_records") == 0
 
@@ -225,7 +296,7 @@ def test_the_deadline_ends_a_run_while_its_reply_is_being_read(
         request = _request(tmp_path, claude_bin=executable)
         request = replace(request, child=replace(request.child, timeout_s=2))
         done = await model_call.call(request, parse=json.loads)
-        assert done.failure is model_call.CallFailure.TIMEOUT and done.value is None
+        assert isinstance(done, model_call.CallFailed) and done.failure is model_call.CallFailure.TIMEOUT
         assert done.record_id is not None and seen.exists()
         events = await pool.fetch("SELECT event FROM llm_record_events WHERE record_id = $1", done.record_id)
         assert any(json.loads(row["event"]).get("subtype") == "init" for row in events)

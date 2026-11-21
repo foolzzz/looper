@@ -308,7 +308,7 @@ async def check(kind: str, items: list[dict[str, Any]], *, messages: Mapping[int
     """Check ``items`` in place (the module's notes) within ``budget_usd`` and ``timeout_s``; with nothing left of
     either, no check runs and it counts as failed."""
     from .agent_settings import AgentType
-    from .model_call import CallFailure, ProcessorCall, call
+    from .model_call import CallFailed, CallFailure, CallOk, ProcessorCall, call
     from .processor import ProcessorFailure
     from .subscriptions import digest
 
@@ -323,14 +323,16 @@ async def check(kind: str, items: list[dict[str, Any]], *, messages: Mapping[int
         budget_usd=budget_usd, timeout_s=timeout_s, runtime_root=runtime_root, claude_bin=claude_bin,
         contract=CONTRACT, role=AgentType.LEADS_CHECK,
         metadata={"leads_check": {**ref, "render_sha256": digest(text)}}), parse=lambda reply: parse(reply, refs))
-    if called.parse_error is not None:
-        raise called.parse_error  # the existing parser returns a typed rejection; unexpected errors still propagate
+    if isinstance(called, CallFailed) and called.error is not None:
+        raise called.error  # the existing parser returns a typed rejection; unexpected errors still propagate
     result = called.execution
-    checked = called.value if result.failure is None and result.output is not None else None
+    checked = called.value if isinstance(called, CallOk) else None
     if checked is not None:
         apply(items, checked, record_id=result.record_id)
     failures = {CallFailure.UNAVAILABLE: ProcessorFailure.REFUSED, CallFailure.TIMEOUT: ProcessorFailure.TIMEOUT,
-                CallFailure.BUDGET: ProcessorFailure.BUDGET, CallFailure.RUNTIME: ProcessorFailure.FAILED}
-    detail = (f"{failures[result.failure].value}: {result.reason}" if result.failure is not None
+                CallFailure.BUDGET: ProcessorFailure.BUDGET, CallFailure.RUNTIME: ProcessorFailure.FAILED,
+                CallFailure.PARSE: ProcessorFailure.FAILED, CallFailure.RATE_LIMITED: ProcessorFailure.FAILED,
+                CallFailure.REFUSED: ProcessorFailure.REFUSED}
+    detail = (f"{failures[called.failure].value}: {called.reason}" if isinstance(called, CallFailed)
               else checked.reason if checked is not None and checked.state != "checked" else "")
     return Outcome(counts(checked, cost_usd=result.cost_usd), result.profile, result.record_id, checked, detail)

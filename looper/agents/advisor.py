@@ -42,7 +42,7 @@ from .advice import (
 )
 from .advice_lint import describe, lint
 from .agent_settings import AgentSettings, AgentType, load_agent_settings
-from .model_call import CallFailure, CallResult, ChildCall, Execution, call
+from .model_call import CallFailed, CallFailure, CallResult, ChildCall, Execution, call
 from .spawn import MIN_RUN_USD, ChildRun, SpawnKind, SpawnParent
 
 logger = logging.getLogger(__name__)
@@ -185,7 +185,8 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
                                 on_record=started, on_result=booked), parse=parse)
     spent = done.cost_usd or 0.0
     left = _time_left(deadline)
-    if done.failure is CallFailure.RUNTIME and round(cap_usd - spent, 6) >= MIN_RUN_USD and (left is None or left >= 1):
+    if (isinstance(done, CallFailed) and done.failure is CallFailure.RUNTIME
+            and round(cap_usd - spent, 6) >= MIN_RUN_USD and (left is None or left >= 1)):
         logger.info("%s run %s ended in error (%s); running it once more", child.record_kind, done.record_id,
                     done.reason)
         again = replace(child, run_id=uuid.uuid4().hex[:12],
@@ -298,22 +299,22 @@ async def _judge(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *
                                runtime_root=runtime_root, claude_bin=claude_bin, parse=parse_verdict, deadline=deadline)
     done = called.execution
     judged = {"record_id": done.record_id, "cost_usd": spent, "round": row["rounds"] + 1}
-    if done.failure is not None:
-        return await _end(row, _failure_state(done.failure),
-                          failure="rate_limited" if done.failure is CallFailure.RATE_LIMITED else "judge",
-                          detail=f"the judge could not judge the request: {done.reason}",
-                          append={"judges": {**judged, "failure": done.failure.value}})
-    if isinstance(called.parse_error, AdviceError):
-        return await _end(row, SpawnState.FAILED, failure="judge", detail=str(called.parse_error),
-                          append={"judges": {**judged, "failure": "parse"}})
-    if (exc := called.parse_error) is not None:  # the run's spend is already booked
+    if isinstance(called, CallFailed):
+        if called.error is None:
+            return await _end(row, _failure_state(called.failure),
+                              failure="rate_limited" if called.failure is CallFailure.RATE_LIMITED else "judge",
+                              detail=f"the judge could not judge the request: {called.reason}",
+                              append={"judges": {**judged, "failure": called.failure.value}})
+        if isinstance(called.error, AdviceError):
+            return await _end(row, SpawnState.FAILED, failure="judge", detail=str(called.error),
+                              append={"judges": {**judged, "failure": "parse"}})
+        exc = called.error  # the run's spend is already booked
         logger.warning("cannot read the judge's verdict of consult %s", row["id"],
                        exc_info=(type(exc), exc, exc.__traceback__))
         return await _end(row, SpawnState.FAILED, failure="judge",
                           detail="the judge's reply could not be read",
                           append={"judges": {**judged, "failure": "parse"}})
     verdict = called.value
-    assert verdict is not None
     return verdict, spent, {**judged, **verdict.view(), "passed": verdict.passed}
 
 
@@ -338,19 +339,19 @@ async def _ask(row: Mapping[str, Any], brief: Brief, request: AdviceRequest, *, 
                                parse=lambda text: parse_response(text, request), deadline=deadline)
     done = called.execution
     rounds = {"rounds": {**done.round(), "cost_usd": spent}}
-    if done.failure is not None:
-        return await _end(row, _failure_state(done.failure), child=done,
-                          failure=done.failure.value, detail=done.reason, append=rounds)
-    if isinstance(called.parse_error, AdviceError):
-        return await _end(row, SpawnState.FAILED, child=done, failure="parse",
-                          detail=f"the advisor's answer does not fit AdviceResponse v1: {called.parse_error}", append=rounds)
-    if (exc := called.parse_error) is not None:  # the run's spend is already booked
+    if isinstance(called, CallFailed):
+        if called.error is None:
+            return await _end(row, _failure_state(called.failure), child=done,
+                              failure=called.failure.value, detail=called.reason, append=rounds)
+        if isinstance(called.error, AdviceError):
+            return await _end(row, SpawnState.FAILED, child=done, failure="parse",
+                              detail=f"the advisor's answer does not fit AdviceResponse v1: {called.error}", append=rounds)
+        exc = called.error  # the run's spend is already booked
         logger.warning("cannot read the advisor's answer of consult %s", row["id"],
                        exc_info=(type(exc), exc, exc.__traceback__))
         return await _end(row, SpawnState.FAILED, child=done, failure="parse",
                           detail="the advisor's answer could not be read", append=rounds)
     response = called.value
-    assert response is not None
     if response.status is AdviceStatus.NEEDS_INFO:
         if row["rounds"] >= ROUNDS_MAX:
             return await _end(row, SpawnState.FAILED, child=done,

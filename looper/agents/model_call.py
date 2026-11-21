@@ -27,7 +27,6 @@ class CallFailure(str, Enum):
     RATE_LIMITED = "rate_limited"
     UNAVAILABLE = "unavailable"
     BUDGET = "budget"
-    TOO_LONG = "too_long"
     REFUSED = "refused"
 
 
@@ -84,6 +83,8 @@ Request = ChildCall | ProcessorCall
 
 
 class Backend(Protocol):
+    """Execution seam retained for a future direct-API backend alongside the subscription CLI backend."""
+
     async def run(self, request: Request) -> Execution: ...
 
 
@@ -115,13 +116,9 @@ class SubscriptionBackend:
                          failures[done.failure] if done.failure is not None else None, done.detail, profile=done.profile)
 
 
-@dataclass(frozen=True)
-class CallResult(Generic[T]):
+@dataclass(frozen=True, kw_only=True)
+class _CallMetadata:
     execution: Execution
-    value: T | None = None
-    failure: CallFailure | None = None
-    reason: str = ""
-    parse_error: Exception | None = None
     latency_ms: int = 0
     model: str | None = None
 
@@ -132,6 +129,25 @@ class CallResult(Generic[T]):
     @property
     def cost_usd(self) -> float | None:
         return self.execution.cost_usd
+
+
+@dataclass(frozen=True)
+class CallOk(_CallMetadata, Generic[T]):
+    """A completed execution and its parsed reply."""
+
+    value: T
+
+
+@dataclass(frozen=True)
+class CallFailed(_CallMetadata):
+    """An execution or parse failure; a parser's original exception is retained in ``error``."""
+
+    failure: CallFailure
+    reason: str
+    error: Exception | None = None
+
+
+CallResult = CallOk[T] | CallFailed
 
 
 async def call(request: Request, *, parse: Callable[[str], T], backend: Backend | None = None) -> CallResult[T]:
@@ -148,10 +164,10 @@ async def call(request: Request, *, parse: Callable[[str], T], backend: Backend 
     if isinstance(request, ChildCall) and request.on_result is not None:
         await request.on_result(done)
     if done.failure is not None:
-        return CallResult(done, failure=done.failure, reason=done.reason, latency_ms=latency_ms, model=model)
+        return CallFailed(execution=done, failure=done.failure, reason=done.reason, latency_ms=latency_ms, model=model)
     try:
         value = parse(done.output or "")
     except Exception as exc:
-        return CallResult(done, failure=CallFailure.PARSE, reason=str(exc), parse_error=exc,
+        return CallFailed(execution=done, failure=CallFailure.PARSE, reason=str(exc), error=exc,
                           latency_ms=latency_ms, model=model)
-    return CallResult(done, value, latency_ms=latency_ms, model=model)
+    return CallOk(execution=done, value=value, latency_ms=latency_ms, model=model)
