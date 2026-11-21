@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import pkgutil
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -87,13 +88,13 @@ def test_a_read_action_is_inside_and_a_tool_with_no_level_is_unknown() -> None:
     ("looper_schedules", {"action": "list"}, INSIDE),
     ("looper_schedules", {"action": "create", "fields": {"kind": "agent", "cron": "0 9 * * *"}}, INSIDE),
     ("looper_schedules", {"action": "create", "fields": {"kind": "command", "command": "make backup"}}, MACHINE),
-    ("looper_schedules", {"action": "update", "fields": {"gate_command": "test -f ready"}}, MACHINE),
-    ("looper_schedules", {"action": "update", "fields": {"notify_target": None}}, OPERATOR),
-    ("looper_schedules", {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": "oc_team"}}},
+    ("looper_schedules", {"action": "create", "fields": {"gate_command": "test -f ready"}}, MACHINE),
+    ("looper_schedules", {"action": "create", "fields": {"notify_target": None}}, OPERATOR),
+    ("looper_schedules", {"action": "create", "fields": {"notify_target": {"channel": "lark", "chat": "oc_team"}}},
      ORIGIN),
-    ("looper_schedules", {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": "oc_other"}}},
+    ("looper_schedules", {"action": "create", "fields": {"notify_target": {"channel": "lark", "chat": "oc_other"}}},
      EXTERNAL),
-    ("looper_schedules", {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": ""}}}, UNKNOWN),
+    ("looper_schedules", {"action": "create", "fields": {"notify_target": {"channel": "lark", "chat": ""}}}, UNKNOWN),
     ("looper_schedules", {"action": "create", "fields": {
         "kind": "command", "command": "make", "notify_target": {"channel": "lark", "chat": "oc_other"}}}, EXTERNAL),
 ])
@@ -118,12 +119,12 @@ def test_a_push_to_the_operators_own_chat_is_operator_and_to_the_asking_direct_c
         return "ou_operator"
 
     monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
-    update = {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": "ou_operator"}}}
+    update = {"action": "create", "fields": {"notify_target": {"channel": "lark", "chat": "ou_operator"}}}
     assert _level("looper_schedules", update) is OPERATOR
     direct = _turn(chat="oc_dm", group=False, sender="ou_friend")
-    to_sender = {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": "ou_friend"}}}
+    to_sender = {"action": "create", "fields": {"notify_target": {"channel": "lark", "chat": "ou_friend"}}}
     assert _level("looper_schedules", to_sender, direct) is ORIGIN
-    to_telegram = {"action": "update", "fields": {"notify_target": {"channel": "telegram", "chat": "ou_friend"}}}
+    to_telegram = {"action": "create", "fields": {"notify_target": {"channel": "telegram", "chat": "ou_friend"}}}
     assert _level("looper_schedules", to_telegram, direct) is EXTERNAL
 
 
@@ -151,7 +152,8 @@ def test_every_operation_is_inside_but_the_ones_that_bind_or_push_to_a_chat() ->
     operations = _operations()
     computed = {name for name, op in operations.items() if op.level_of is not None}
     fixed = {name: op.level for name, op in operations.items() if op.level is not INSIDE}
-    assert computed == {"schedule_admin.create", "schedule_admin.update", "schedule_admin.confirm_target"}
+    assert computed == {"schedule_admin.create", "schedule_admin.update", "schedule_admin.run",
+                        "schedule_admin.confirm_target"}
     assert fixed == {name: level for name, level in DECIDED_OPERATIONS.items() if level is not INSIDE}
     for name, level in DECIDED_OPERATIONS.items():
         assert operations[name].level is level and operations[name].level_of is None, name
@@ -171,8 +173,8 @@ def test_a_schedule_operations_level_follows_its_fields(monkeypatch: pytest.Monk
         return None
 
     monkeypatch.setattr(operator_identity, "operator_sender_id", nobody)
-    op = _operations()["schedule_admin.update"]
-    assert asyncio.run(op.level_of({"schedule_id": "s-1", "fields": fields})) is level
+    op = _operations()["schedule_admin.create"]  # a stored one's: tests/test_tool_levels_db.py
+    assert asyncio.run(op.level_of({"project_id": "p-1", "fields": fields})) is level
 
 
 def test_the_openapi_document_is_what_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,3 +191,43 @@ def test_the_openapi_document_is_what_it_was(monkeypatch: pytest.MonkeyPatch) ->
             dataclasses.replace(op, level=INSIDE, level_of=None) for op in module.OPERATIONS))
     reset = json.dumps(api_v1._document(api_v1.operations()), sort_keys=True)
     assert reset == declared and '"level_of"' not in declared
+
+
+def test_in_a_group_turn_a_push_to_the_speakers_direct_chat_is_external(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a direct-chat turn's sender is that turn's chat: in a group, the speaker's own chat is someone else's."""
+    from looper.agents import operator_identity
+
+    async def nobody(channel_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(operator_identity, "operator_sender_id", nobody)
+    to_speaker = {"action": "create", "fields": {"notify_target": {"channel": "lark", "chat": "ou_me"}}}
+    assert _level("looper_schedules", to_speaker, _turn(group=True)) is EXTERNAL
+    assert _level("looper_schedules", to_speaker, _turn(group=False, chat="oc_dm")) is ORIGIN
+
+
+# Every /api/v1 operation and its level: "args" where its arguments (or what it acts on) decide it.
+MANIFEST = Path(__file__).with_name("operation_levels.json")
+
+
+def _declared(operations: Any) -> dict[str, str]:
+    return {op.operation_id: "args" if op.level_of is not None else op.level.value for op in operations}
+
+
+def test_every_operation_declares_the_level_its_manifest_lists() -> None:
+    import json
+
+    from looper.agents import api_v1
+
+    assert _declared(api_v1.operations()) == json.loads(MANIFEST.read_text())
+
+
+def test_a_new_operation_is_not_in_the_manifest_until_it_is_listed() -> None:
+    import dataclasses
+    import json
+
+    from looper.agents import api_v1
+
+    some = next(iter(api_v1.operations()))
+    added = dataclasses.replace(some, operation_id="outbound_review.added_later")
+    assert _declared([*api_v1.operations(), added]) != json.loads(MANIFEST.read_text())

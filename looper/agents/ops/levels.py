@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from ..action_levels import ActionLevel, highest, target_level
+from ..action_levels import ActionLevel, schedule_level, schedule_reach
 from . import Tool, Turn
 
 LevelOf = Callable[[Mapping[str, Any], Turn], Awaitable[ActionLevel]]
@@ -32,15 +32,21 @@ async def _settings(arguments: Mapping[str, Any], turn: Turn) -> ActionLevel:
 
 
 async def _schedules(arguments: Mapping[str, Any], turn: Turn) -> ActionLevel:
-    """A command schedule runs a shell command unattended (``machine``); a notify target is where its runs' messages
-    go (``action_levels.target_level``)."""
+    """Where a schedule reaches (``action_levels.schedule_level``): a new one by its fields; enabling or running one
+    by what it has stored, changing one by that with the change; one Looper cannot find is ``unknown``."""
+    from .schedules import _schedule
+
+    action = arguments.get("action")
     fields = arguments.get("fields") if isinstance(arguments.get("fields"), Mapping) else {}
-    levels = [MACHINE] if fields.get("kind") == "command" or fields.get("command") or fields.get("gate_command") \
-        else []
-    if "notify_target" in fields:
-        levels.append(await target_level(fields["notify_target"], channel=turn.channel, chat=turn.chat,
-                                         sender=turn.sender))
-    return highest(*levels)
+    if action in ("update", "enable", "run"):
+        try:
+            row = await _schedule(arguments)
+        except Exception:
+            return ActionLevel.UNKNOWN
+        fields = {**schedule_reach(row), **(fields if action == "update" else {})}
+    elif action != "create":
+        return INSIDE  # disable, delete, reset_planner_session
+    return await schedule_level(fields, channel=turn.channel, chat=turn.chat, sender=turn.sender, group=turn.group)
 
 
 async def _gates(arguments: Mapping[str, Any], turn: Turn) -> ActionLevel:
