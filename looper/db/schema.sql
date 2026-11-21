@@ -2289,7 +2289,8 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (cre
 
 -- The buttons of a card a chat got (assistant card actions RFC): one row per card, keyed by the opaque token that is
 -- all its buttons carry; what they act on (a Manager's confirmation, a user gate), a digest of the parameters they are
--- bound to, who may press them and until when, and what became of them. A confirmation typed in the chat and its
+-- bound to, the chat and the channel message it was sent as, who may press them and until when, and what became of
+-- them. A confirmation typed in the chat and its
 -- button resolve the same row (handled_via). Written only while cards.actions.enabled is on. connection.py applies
 -- this block to databases that predate it, so keep it between the markers and idempotent.
 -- card actions begin
@@ -2302,6 +2303,7 @@ CREATE TABLE IF NOT EXISTS card_actions (
     manager_id  TEXT,
     channel_id  TEXT,
     chat        TEXT,
+    message_id  TEXT,
     allowed     TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ NOT NULL,

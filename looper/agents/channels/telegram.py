@@ -353,6 +353,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         except Exception as exc:
             logger.warning("telegram: a card post to %s failed: %s", target.id, type(exc).__name__)
             return PostReceipt(False, error=redact(str(exc)), outcome=_post_outcome(exc))
+        await card_actions.bind(card, str(message.message_id))
         return PostReceipt(True, external_ids=(str(message.message_id),))
 
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
@@ -674,7 +675,9 @@ class TelegramChannelAdapter(ChannelAdapter):
                                                       reply_markup=card_actions.telegram_markup(card))
 
         answer = await card_actions.respond(
-            card_actions.Press(self.channel_id, str(update.effective_user.id), str(query.data or "")), update_card)
+            card_actions.Press(self.channel_id, str(update.effective_user.id), str(query.data or ""),
+                               chat="" if chat is None else str(chat),
+                               message_id=str(message.message_id) if message is not None else ""), update_card)
         await self._answer_press(query, answer)
         if answer.card is not None:
             try:

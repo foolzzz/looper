@@ -94,8 +94,8 @@ def test_lark_a_reply_sends_its_card_after_its_text_and_a_press_is_answered_then
                 assert answers["card-2"]["toast"] == {"type": "success", "content": "已确认，正在执行"}
                 assert answers["card-2"]["card"]["data"]["body"]["elements"] == [
                     {"tag": "markdown", "content": f"{BLOCK}\n\n⏳ 已确认，正在执行…"}]
-                assert [(p.channel_id, p.presser, p.value) for p in presses] == [
-                    ("channel-lark_bot", ASKER, "tok:confirm")]
+                assert [(p.channel_id, p.presser, p.value, p.chat, p.message_id) for p in presses] == [
+                    ("channel-lark_bot", ASKER, "tok:confirm", "oc_chat", card["message_id"])]
                 async with asyncio.timeout(2):
                     while not any(sent["kind"] == "update" for sent in fake.sent):
                         await asyncio.sleep(0.01)
@@ -157,7 +157,8 @@ def test_telegram_a_press_is_answered_and_its_card_edited(tmp_path: Path, monkey
         assert presses == [] and query.answer.await_args.kwargs == {"text": "只有发起人能确认"}
         bot.edit_message_text.assert_not_awaited()
         return
-    assert [(p.channel_id, p.presser, p.value) for p in presses] == [("channel-telegram", "7", "tok:confirm")]
+    assert [(p.channel_id, p.presser, p.value, p.chat, p.message_id) for p in presses] == [
+        ("channel-telegram", "7", "tok:confirm", "99", "55")]
     assert query.answer.await_args.kwargs == {"text": "已确认，正在执行"}
     # The action ended within the answer's time: the card is edited once, to what it came to.
     assert [(call.kwargs["text"], call.kwargs["reply_markup"]) for call in bot.edit_message_text.await_args_list] == [
@@ -198,11 +199,15 @@ def test_lark_bot_a_confirmation_card_pressed_on_the_long_connection_runs_it_onc
                 buttons = [column["elements"][0] for column in card["content"]["body"]["elements"][1]["columns"]]
                 confirm = buttons[0]["behaviors"][0]["value"]["looper"]
                 assert buttons[0]["text"]["content"] == "确认" and confirm.endswith(":confirm")
+                await fake.push_card_action(confirm, operator=ASKER, chat_id="oc_dm", message_id="om_forwarded",
+                                            event_id="ev-press-0", frame_id="press-0")  # a forwarded copy
+                await fake.wait_acks(1, timeout=5)
                 for number in (1, 2):
-                    await fake.push_card_action(confirm, operator=ASKER, message_id=card["message_id"],
+                    await fake.push_card_action(confirm, operator=ASKER, chat_id="oc_dm", message_id=card["message_id"],
                                                 event_id=f"ev-press-{number}", frame_id=f"press-{number}")
-                    await fake.wait_acks(number, timeout=5)
+                    await fake.wait_acks(number + 1, timeout=5)
                 answers = {frame: json.loads(base64.b64decode(ack["data"])) for frame, ack in fake.acks}
+                assert answers["press-0"]["toast"]["content"] == "这张卡片只能在发出它的会话里操作"
                 first = answers["press-1"]
                 assert first["toast"]["type"] == "success"
                 assert first["card"]["data"]["body"]["elements"][0]["content"].endswith("✅ 已执行。")

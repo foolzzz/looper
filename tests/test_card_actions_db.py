@@ -68,7 +68,7 @@ def _presser(monkeypatch: pytest.MonkeyPatch, ops: ManagerOps) -> Any:
     monkeypatch.setitem(card_actions._handlers, "confirmation", ops.press)
 
     async def press(value: str, presser: str = ASKER) -> card_actions.Answer:
-        return await card_actions.press(card_actions.Press(BOT, presser, value))
+        return await card_actions.press(card_actions.Press(BOT, presser, value, chat="oc_dm"))
 
     return press
 
@@ -251,9 +251,14 @@ def test_a_gate_card_takes_an_option_once_from_the_requester_and_goes_stale_when
         monkeypatch.setitem(card_actions._handlers, "gate",
                             functools.partial(card_actions.press_gate, bus=bus, has_planner=lambda task_id: True))
 
-        async def press(value: str, presser: str = LARK_USER) -> card_actions.Answer:
-            return await card_actions.press(card_actions.Press(BOT, presser, value))
+        # Sent to the user's open_id, its press names the direct chat: it is matched by the message it was sent as.
+        await card_actions.bind(card, "om_101")  # what the channel notes once it sent it (``_Poster``'s first id)
 
+        async def press(value: str, presser: str = LARK_USER, message_id: str = "om_101") -> card_actions.Answer:
+            return await card_actions.press(card_actions.Press(BOT, presser, value, chat="oc_p2p",
+                                                               message_id=message_id))
+
+        assert (await press(card.buttons[0].value, message_id="")).toast == "这张卡片只能在发出它的会话里操作"
         assert (await press(card.buttons[0].value, OTHER)).toast == "只有发起人能回答"
         answer = await press(card.buttons[0].value)
         assert (answer.level, answer.card.text.rsplit("\n\n", 1)[1]) == (
@@ -268,10 +273,11 @@ def test_a_gate_card_takes_an_option_once_from_the_requester_and_goes_stale_when
         await courier.run_once()
         reminder = cards.posts[-1]
         assert reminder["reply_to"] == "om_101" and reminder["text"].buttons
+        await card_actions.bind(reminder["text"], "om_102")
         await _say("task-a", "step-g1", "updated", "only managed ones", state="discussing", agenda=[
             {"id": "q1", "question": "Which database?", "options": ["Aurora", "Cloud SQL"], "status": "open",
              "answer": ""}])
-        assert (await press(reminder["text"].buttons[0].value)).toast == "已失效，请看最新的消息"
+        assert (await press(reminder["text"].buttons[0].value, message_id="om_102")).toast == "已失效，请看最新的消息"
         assert len([m for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"]) == 1
 
     run_db(test, monkeypatch, timeout=30)
@@ -331,7 +337,7 @@ def test_a_typed_confirmation_and_a_press_that_race_run_the_call_exactly_once(
             return await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]})
 
         async def pressed() -> card_actions.Answer:
-            answer = await card_actions.press(card_actions.Press(BOT, ASKER, _value(turn)))
+            answer = await card_actions.press(card_actions.Press(BOT, ASKER, _value(turn), chat="oc_dm"))
             if answer.later is not None:
                 await answer.later
             return answer
@@ -344,5 +350,62 @@ def test_a_typed_confirmation_and_a_press_that_race_run_the_call_exactly_once(
         assert typed_answer.get("status") == ("ok" if winner == "typed" else "error")
         assert press_answer.toast == ("已确认，正在执行" if winner == "button" else "已处理")
         assert (await _card_row(pool))[1:] == (winner, "confirm", "ok")
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize(("channel", "channel_id", "chat", "other"), [
+    ("lark_bot", BOT, "oc_dm", "oc_team"), ("telegram", "channel-telegram", "4242", "-1004242")])
+def test_a_card_acts_only_where_it_was_sent(monkeypatch: pytest.MonkeyPatch, channel: str, channel_id: str,
+                                            chat: str, other: str) -> None:
+    """The asker's own token pressed from another chat, or from a copy of the card's message, claims nothing; from
+    the card's chat (before its message is noted) and from its message, it runs."""
+    async def test(pool: Any) -> None:
+        project = await _sample(pool)
+        await _switch(pool)
+        ops = _ops()
+        monkeypatch.setitem(card_actions._handlers, "confirmation", ops.press)
+        turn = Turn(channel=channel, chat=chat, message_id="m-ask", sender=ASKER, channel_id=channel_id)
+        ops.begin_turn(turn)
+        await ops.call("looper_projects", DELETE)
+        ops.end_turn(turn)
+
+        async def press(where: str, message_id: str = "") -> card_actions.Answer:
+            return await card_actions.press(card_actions.Press(channel_id, ASKER, _value(turn), chat=where,
+                                                               message_id=message_id))
+
+        elsewhere = await press(other)
+        assert (elsewhere.toast, elsewhere.level, elsewhere.later) == ("这张卡片只能在发出它的会话里操作", "error", None)
+        assert await pool.fetchval("SELECT handled_at FROM card_actions") is None and await _exists(pool, project)
+        await card_actions.bind(card_actions.Card.from_dict(turn.cards[0]), "m-card")
+        assert (await press(chat, "m-copy")).toast == "这张卡片只能在发出它的会话里操作"
+        assert await pool.fetchval("SELECT handled_at FROM card_actions") is None
+        answer = await press(chat, "m-card")
+        await answer.later
+        assert not await _exists(pool, project)
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_a_claim_that_waited_for_the_rows_lock_past_the_expiry_does_not_handle_it(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import timedelta
+
+    from looper.db import card_actions as db_cards
+
+    async def test(pool: Any) -> None:
+        await db_cards.create(token="tok", kind="gate", subject="step", digest="d", payload={}, manager_id=None,
+                              channel_id=BOT, chat="oc_dm", allowed=[], ttl=timedelta(milliseconds=600), pool=pool)
+        async with pool.acquire() as holder:
+            transaction = holder.transaction()
+            await transaction.start()
+            await holder.execute("SELECT 1 FROM card_actions WHERE token = 'tok' FOR UPDATE")
+            claim = asyncio.create_task(db_cards.claim("tok", by=ASKER, via="button", choice="end",
+                                                       outcome="answered", pool=pool))
+            await asyncio.sleep(1.0)  # the claim waits for the lock while the card expires
+            assert not claim.done()
+            await transaction.rollback()
+            assert await claim is False
+        assert await pool.fetchval("SELECT handled_at FROM card_actions WHERE token = 'tok'") is None
 
     run_db(test, monkeypatch, timeout=30)

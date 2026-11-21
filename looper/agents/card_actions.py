@@ -52,6 +52,7 @@ OPTION_LABEL_CHARS = 30
 HANDLED = "已处理"
 STALE = "已失效，请看最新的消息"
 NOT_ALLOWED = {"confirmation": "只有发起人能确认", "gate": "只有发起人能回答"}
+ELSEWHERE = "这张卡片只能在发出它的会话里操作"
 TURNED_OFF = "按钮已关闭，请打字回复"
 RECEIVED = "已收到，正在处理"
 
@@ -81,6 +82,11 @@ class Card:
                                                                                                     or "default"))
                                                        for b in data.get("buttons") or ()), data.get("mention"))
 
+    @property
+    def token(self) -> str:
+        """The token its buttons carry ('' without buttons)."""
+        return self.buttons[0].value.partition(":")[0] if self.buttons else ""
+
     def settled(self, line: str) -> Card:
         """The card once handled: its text, what became of it, no buttons."""
         return Card(f"{self.text}\n\n{line}", (), self.mention)
@@ -88,11 +94,14 @@ class Card:
 
 @dataclass(frozen=True)
 class Press:
-    """Someone pressed a button: the channel (bot) it came through, who, and the button's value."""
+    """Someone pressed a button: the channel (bot) it came through, who, the button's value, and the chat and the
+    channel message the button was in."""
 
     channel_id: str
     presser: str
     value: str
+    chat: str = ""
+    message_id: str = ""
 
 
 @dataclass
@@ -150,6 +159,8 @@ async def press(event: Press) -> Answer:
     card = Card.from_dict(row["payload"].get("card") or {})
     if choice not in {button.value.partition(":")[2] for button in card.buttons}:
         return Answer(HANDLED)
+    if not _where_sent(row, event):
+        return Answer(ELSEWHERE, "error")
     if row["allowed"] and event.presser not in row["allowed"]:
         return Answer(NOT_ALLOWED.get(row["kind"], NOT_ALLOWED["confirmation"]), "error")
     if row["handled_at"] is not None or row["expired"]:
@@ -159,6 +170,26 @@ async def press(event: Press) -> Answer:
         logger.warning("no handler for a %s card's press", row["kind"])
         return Answer(HANDLED)
     return await handler(row, event, choice)
+
+
+def _where_sent(row: Mapping[str, Any], event: Press) -> bool:
+    """Whether the press came from the card as it was sent: the channel message it became (``bind``), so a copy
+    forwarded elsewhere does nothing; a card whose message was not noted, from the chat it was sent to. A Lark card
+    sent to a user (their open_id) is only ever matched by its message, as its press names the chat."""
+    if row.get("message_id"):
+        return event.message_id == row["message_id"]
+    return bool(event.chat) and event.chat == row.get("chat")
+
+
+async def bind(card: Card, message_id: str | None) -> None:
+    """Note the channel message ``card`` was sent as (the channels call it after sending); a failure only logs, and
+    the card is then matched by its chat."""
+    if not card.token or not message_id:
+        return
+    try:
+        await db_cards.bind(card.token, message_id)
+    except Exception:
+        logger.warning("could not note the message of a card", exc_info=True)
 
 
 async def respond(event: Press, update: Callable[[Card], Awaitable[None]], *,

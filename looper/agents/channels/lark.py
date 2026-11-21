@@ -412,14 +412,15 @@ class LarkChannelAdapter(ChannelAdapter):
         message_id = self._group_message.get(correlation_id)
         try:
             if message_id is not None:
-                await self._cards.reply(message_id, content, reply_in_thread=message_id in self._thread_messages)
+                sent = await self._cards.reply(message_id, content, reply_in_thread=message_id in self._thread_messages)
             else:
-                await self._cards.send(content, chat_id=chat_id)
+                sent = await self._cards.send(content, chat_id=chat_id)
         except LarkCliError as exc:
             logger.warning("%s: a card failed, sending its text: %s", self.channel_id, exc)
             if message_id is not None:
                 return await self._send_reply(correlation_id, card.text)
             return await self._send_message(chat_id, card.text)
+        await card_actions.bind(card, sent)
         return DeliveryReceipt(channel=self.channel_type, success=True)
 
     def _admits(self, sender: object, decision: RouteDecision | None, *, group: bool,
@@ -455,8 +456,8 @@ class LarkChannelAdapter(ChannelAdapter):
             if message_id and cards is not None:
                 await cards.update(message_id, card_actions.lark_card(card))
 
-        answer = await card_actions.respond(card_actions.Press(self.channel_id, presser, str(event.get("value") or "")),
-                                            update)
+        answer = await card_actions.respond(card_actions.Press(self.channel_id, presser, str(event.get("value") or ""),
+                                                               chat=chat, message_id=message_id), update)
         card_actions.follow(answer, update)  # sent after this answer's card unless the action outlasts its 3 s
         return card_actions.lark_answer(answer)
 
@@ -480,6 +481,7 @@ class LarkChannelAdapter(ChannelAdapter):
                            f" (code {exc.code})" if exc.code is not None else "")
             return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
                                outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
+        await card_actions.bind(card, message_id)
         return PostReceipt(True, external_ids=(message_id,) if message_id else ())
 
     async def _send_target(self, target: NotifyTarget, text: str, *,

@@ -15,8 +15,8 @@ import asyncpg
 
 from .connection import get_pool
 
-_COLUMNS = ("token, kind, subject, digest, payload, manager_id, channel_id, chat, allowed, created_at, expires_at, "
-            "handled_at, handled_by, handled_via, choice, outcome")
+_COLUMNS = ("token, kind, subject, digest, payload, manager_id, channel_id, chat, message_id, allowed, created_at, "
+            "expires_at, handled_at, handled_by, handled_via, choice, outcome")
 
 
 def _row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -48,12 +48,25 @@ async def get(token: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any]
 
 async def claim(token: str, *, by: str | None, via: str, choice: str | None, outcome: str,
                 pool: asyncpg.Pool | None = None) -> bool:
-    """Handle the card ``token`` if nothing did yet and it has not expired; whether this call did."""
+    """Handle the card ``token`` if nothing did yet and it has not expired; whether this call did. The row is locked
+    first and its expiry read by the clock after the lock: a claim that waited for another one's lock is not let
+    through by the time it started at."""
     pool = pool or get_pool()
-    return await pool.fetchval(
-        "UPDATE card_actions SET handled_at = now(), handled_by = $2, handled_via = $3, choice = $4, outcome = $5 "
-        "WHERE token = $1 AND handled_at IS NULL AND expires_at > now() RETURNING true",
-        token, by, via, choice, outcome) is True
+    async with pool.acquire() as conn, conn.transaction():
+        # Its own statement: a locking SELECT computes its columns before it waits for the lock.
+        if await conn.fetchval("SELECT true FROM card_actions WHERE token = $1 FOR UPDATE", token) is None:
+            return False
+        return await conn.fetchval(
+            "UPDATE card_actions SET handled_at = clock_timestamp(), handled_by = $2, handled_via = $3, choice = $4, "
+            "outcome = $5 WHERE token = $1 AND handled_at IS NULL AND expires_at > clock_timestamp() RETURNING true",
+            token, by, via, choice, outcome) is True
+
+
+async def bind(token: str, message_id: str, *, pool: asyncpg.Pool | None = None) -> None:
+    """The channel message the card ``token`` was sent as; set once (a later send of the same card keeps it)."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE card_actions SET message_id = $2 WHERE token = $1 AND message_id IS NULL", token,
+                       message_id)
 
 
 async def finish(token: str, outcome: str, *, pool: asyncpg.Pool | None = None) -> None:
