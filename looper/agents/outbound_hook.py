@@ -70,15 +70,30 @@ WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
 def level_of(tool_name: str) -> ActionLevel:
-    """Where a call of ``tool_name`` reaches, by its type (never by what its arguments say), before the operator's
-    declarations: another MCP server's tool is ``unknown`` here (``resolve_level``)."""
-    from .ops.service import SERVER_NAME
-
-    if tool_name.startswith(f"mcp__{SERVER_NAME}__"):
-        return ActionLevel.INSIDE  # reviewed, by its own level, where ManagerOps.call runs it
+    """Where a call of a built-in tool ``tool_name`` reaches, by its type (never by what its arguments say); every
+    MCP tool is ``unknown`` here, placed by the servers the run loaded (``resolve_level``)."""
     if tool_name.startswith("mcp__"):
         return ActionLevel.UNKNOWN
     return BUILTIN_LEVELS.get(tool_name, ActionLevel.UNKNOWN)
+
+
+@dataclass(frozen=True)
+class Trusted:
+    """What a run's MCP tool names can stand for: the servers its MCP config loaded (Looper's own, ``looper``,
+    among them; a catalog server of that name is replaced by it), and Looper's own tools on it."""
+
+    servers: frozenset[str]
+    looper_tools: frozenset[str]
+
+    @classmethod
+    def of(cls, library: Any, looper_tools: Any) -> Trusted:
+        """A run's, from its library (``AgentLibrary``: its MCP items, and Looper's own server) and the names of
+        Looper's tools it has."""
+        from .library import ItemKind
+        from .ops.service import SERVER_NAME
+
+        servers = {item.name for item in getattr(library, "items", ()) if item.kind is ItemKind.MCP}
+        return cls(frozenset({*servers, SERVER_NAME}), frozenset(looper_tools))
 
 
 def mcp_tool(tool_name: str) -> list[tuple[str, str]]:
@@ -93,22 +108,32 @@ def mcp_tool(tool_name: str) -> list[tuple[str, str]]:
     return pairs
 
 
-async def resolve_level(tool_name: str) -> ActionLevel:
-    """``level_of``, with an MCP server's tool ``inside`` when the operator declared it so for that server."""
+async def resolve_level(tool_name: str, trusted: Trusted) -> ActionLevel:
+    """``level_of``, and an MCP tool's: its name must stand for exactly one tool of a server the run loaded, else it
+    is ``unknown``; then one of Looper's own tools is ``inside`` (``ManagerOps.call`` runs it), and another server's
+    tool is ``inside`` only when the operator declared that tool so for that server."""
     from ..db import mcp_tool_levels
+    from .ops.service import SERVER_NAME
 
-    level = level_of(tool_name)
-    if level is ActionLevel.UNKNOWN and (pairs := mcp_tool(tool_name)) and await mcp_tool_levels.declared_inside(pairs):
-        return ActionLevel.INSIDE
-    return level
+    if not tool_name.startswith("mcp__"):
+        return level_of(tool_name)
+    placed = [(server, tool) for server, tool in mcp_tool(tool_name) if server in trusted.servers]
+    if len(placed) != 1:
+        return ActionLevel.UNKNOWN  # no loaded server's, or several could be meant
+    server, tool = placed[0]
+    if server == SERVER_NAME:
+        return ActionLevel.INSIDE if tool in trusted.looper_tools else ActionLevel.UNKNOWN
+    return ActionLevel.INSIDE if await mcp_tool_levels.declared_inside([(server, tool)]) else ActionLevel.UNKNOWN
 
 
 # --- The switch ---
 
 
 # The switch as this server last read or set it, for the checks that cannot wait for the database (a Manager's turn
-# right before it reaches its process).
+# right before it reaches its process); ``_version`` counts its changes, so a read that began before one does not
+# overwrite it.
 _known = False
+_version = 0
 
 
 async def enabled(db: Any = None) -> bool:
@@ -116,8 +141,11 @@ async def enabled(db: Any = None) -> bool:
     from ..db import system_settings
 
     global _known
-    _known = (await system_settings.get_settings([ENABLED_KEY], pool=db)).get(ENABLED_KEY) == "true"
-    return _known
+    began = _version
+    value = (await system_settings.get_settings([ENABLED_KEY], pool=db)).get(ENABLED_KEY) == "true"
+    if _version == began:  # no change was made while it read
+        _known = value
+    return value
 
 
 def known_enabled() -> bool:
@@ -159,12 +187,13 @@ async def set_enabled(value: bool) -> dict[str, Any]:
         names = "; ".join(f"{m['name']} ({m['runtime']})" for m in missing)
         raise HookUnavailable(f"the outbound review needs every enabled Manager on a runtime with a tool hook "
                               f"(Claude Code); these have none: {names}. Change their Agent Profile first.")
-    global _known
+    global _known, _version
     await get_pool().execute(
         "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
         ENABLED_KEY, "true" if value else "false")
-    _known = value
+    # Right after the write, with nothing awaited between: a read that began before it no longer overwrites it.
+    _known, _version = value, _version + 1
     return await settings()
 
 
@@ -273,7 +302,8 @@ NO_ONES = Placed(Who.AUTONOMOUS)
 
 
 async def answer(payload: Any, *, agent_id: str, place: Callable[[], Awaitable[Placed]], writes: Sequence[Write],
-                 runtime_root: Path, claude_bin: str, task_id: str | None = None) -> tuple[dict[str, Any], Any]:
+                 runtime_root: Path, claude_bin: str, trusted: Trusted,
+                 task_id: str | None = None) -> tuple[dict[str, Any], Any]:
     """The hook's answer for ``payload`` (Claude Code's PreToolUse input), and the review it took (None when none was
     needed): ``{"decision": "allow"}``, or ``block`` with the ``message`` for the model. ``place`` finds the call's
     turn, only for a call that is reviewed."""
@@ -282,7 +312,7 @@ async def answer(payload: Any, *, agent_id: str, place: Callable[[], Awaitable[P
     data = payload if isinstance(payload, Mapping) else {}
     tool_name = data.get("tool_name") if isinstance(data.get("tool_name"), str) else ""
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
-    level = await resolve_level(tool_name)
+    level = await resolve_level(tool_name, trusted)
     origin = outbound.Origin(agent_id, outbound.Source.HOOK, task_id=task_id)
     if tool_name in WRITE_TOOLS:
         path = tool_input.get("file_path") or tool_input.get("notebook_path")

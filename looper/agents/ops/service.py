@@ -235,10 +235,11 @@ class ManagerOps:
         self._executing = 0
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
         # later shell command may run one), and the turns already told the operator of a block.
-        from ..outbound_hook import CONTENT_TOOLS_KEPT
+        from ..outbound_hook import CONTENT_TOOLS_KEPT, Trusted
 
         self._review_root: Path | None = None
         self._review_bin = "claude"
+        self._trusted = Trusted.of(None, ())  # until a hook is written: only Looper's own server, none of its tools
         self._writes: deque[Any] = deque(maxlen=CONTENT_TOOLS_KEPT)
         self._notified: OrderedDict[tuple[str | None, str | None, str | None], None] = OrderedDict()
         # Each tool_use a turn's stream showed, by its id: the binding of the turn it belongs to (a subagent's call,
@@ -797,12 +798,14 @@ class ManagerOps:
 
     # --- The outbound review's hook ---
 
-    def tool_hook(self, runtime_root: Path, claude_bin: str) -> Any:
+    def tool_hook(self, runtime_root: Path, claude_bin: str, library: Any = None) -> Any:
         """The PreToolUse hook (``outbound_hook.ToolHook``) for this Manager's Claude Code, its config written; the
-        reviews it asks for run under ``runtime_root`` with ``claude_bin``."""
+        reviews it asks for run under ``runtime_root`` with ``claude_bin``, and its MCP tool names stand for the
+        servers ``library`` loads (``outbound_hook.Trusted``)."""
         from .. import outbound_hook
 
         self._review_root, self._review_bin = runtime_root, claude_bin
+        self._trusted = outbound_hook.Trusted.of(library, (*self._scope.tools, CONFIRM_TOOL))
         return outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token)
 
     async def check_outbound(self, payload: Any) -> dict[str, Any]:
@@ -831,7 +834,7 @@ class ManagerOps:
             answer, review = await outbound_hook.answer(
                 payload, agent_id=self._scope.manager_id, place=place, writes=list(self._writes),
                 runtime_root=self._review_root or self._platform.runtime_root or Path.cwd(),
-                claude_bin=self._review_bin)
+                claude_bin=self._review_bin, trusted=self._trusted)
         except Exception:
             logger.exception("the outbound check of a call of %s failed", self._scope.manager_id)
             return {"decision": "block", "message": outbound_hook.BLOCKED_MESSAGE.format(
