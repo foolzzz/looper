@@ -6253,8 +6253,13 @@ writes what it wrote before, byte for byte.
   whose names the sender chose, go in an `attachment` block (the files' contents are read in the runtime, unfenced).
   `looper_leads_search` fences each lead's summary (`lead`, with its first source's chat, sender and time) and
   adds the lead line to its notice; the group backstop still compares the lead's own words.
-- **Not yet fenced** (the RFC's other entries): intents, gate messages, supplements, GitHub waits, the vault's
-  untrusted folders and the processor's input.
+- **A task's entries:** the task an intent builds (`intents.build`) carries its background and sources in one
+  `intent` block after the notes that say what they are (the switch is read before the build takes its
+  connection). In the Planner's [WAIT] turn a GitHub check's output (`gh pr view`: other people's comments and
+  reviews) is a `github` block naming the pull request; a command check's output, the operator's own command,
+  is not fenced.
+- **Not yet fenced** (the RFC's other entries): gate messages, supplements, the vault's untrusted folders and
+  the processor's input.
 
 ### Turns Claude runs on its own
 
