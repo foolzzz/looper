@@ -2286,3 +2286,11 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_created ON outbound_reviews (cre
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_id) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
 -- outbound reviews end
+
+-- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
+-- only those rows, never the tables' history. A database that predates them builds them online
+-- (connection.py ``_ONLINE_STEPS``).
+CREATE INDEX IF NOT EXISTS idx_subscription_deliveries_uncertain ON subscription_deliveries (updated_at)
+    WHERE state = 'uncertain';
+CREATE INDEX IF NOT EXISTS idx_intent_posts_uncertain ON intent_posts (updated_at) WHERE state = 'uncertain';
+CREATE INDEX IF NOT EXISTS idx_manager_events_uncertain ON manager_events (created_at) WHERE delivery = 'uncertain';

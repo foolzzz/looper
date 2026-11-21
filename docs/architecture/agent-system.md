@@ -4257,7 +4257,9 @@ has `looper_vault_search` and `looper_vault_read`, and `VAULT_CONTRACT` follows 
 - never quote the notes in a group chat.
 
 The tools are `RestrictedTool`s with `audience` `operator`, exactly like the leads search: they are listed and run
-only in the user's own turns, and a call is judged by the turn its binding names. Every text they return is
+only in the user's own turns, and a call is judged by the turn its binding names. A call from another turn is told
+「the user's knowledge vault is searched and read only in their own direct chat or on the dashboard」 (their
+`refusal`). Every text they return is
 remembered for the group backstop below, keyed `vault:<path>`. The tasks' vault tools (`ops.vault.TOOLS`) are
 unchanged, so an upgrade still reads them. Off, the tool list, the prompt and the signature are what they were before.
 
@@ -4285,7 +4287,9 @@ when it is the web chat without an API client, or a direct chat whose sender is 
   process it runs in.
 - **Calls.** `ManagerOps.call` judges a call of the tool by the turn its binding names, whatever `chat.stop_enabled`
   says. A call with no binding or an unknown one counts as Claude's own turn. A call from another turn is refused
-  with `forbidden`, a completion turn's too; a turn that ended answers `expired`. Each refusal is recorded like any
+  with `forbidden`, a completion turn's too, and told the tool's own `refusal`: every `RestrictedTool` whose
+  `audience` is not `any` must declare one (its construction fails otherwise); for this tool it is 「message leads are
+  searched only in the user's own direct chat or on the dashboard」. A turn that ended answers `expired`. Each refusal is recorded like any
   other. Turned off since, a call is told the Manager no longer has the tool; one already admitted answers
   `conflict`.
 - **Group backstop.** The Manager's session is shared by its chats. Every text Looper sends to a group chat goes
@@ -5518,6 +5522,49 @@ writes nothing.
   API client and the operator) answer `conflict` while the ledger is off.
 - **Not yet:** the To-do page, the ledger contract in the Manager's system
   prompt (the tool descriptions are all it has), HTTP writes.
+
+### What needs you
+
+One read-only summary of what waits for the operator
+([RFC](rfcs/assistant-needs-you-v0.zh-CN.md), `looper/agents/attention.py`),
+gathered by code from what Looper already keeps: no model call, nothing
+stored. It is off until the system setting `attention.enabled` is `true`
+(there is no dashboard switch). Off, `attention.summary` answers `conflict`,
+the dashboard lists no page for it, `/todo` is an ordinary message for the
+Manager's model and Telegram drops the command as before; no prompt, tool
+list or command line changes either way.
+
+- **Sections**, in order: `gates` (user gates waiting for the operator,
+  `gate_service.list_gates` with `waiting_on=user`), `confirmations` (each
+  Manager's operation waiting for the operator's word,
+  `ManagerOps.waiting_confirmations`, read from memory, so a restart drops
+  them), `schedules` (`db.schedules.failing`, the Schedules card's list),
+  `logins` (the Claude Code CLI or login, or a runtime login an Agent
+  Profile uses, failing in the checks `system/status` reads; the HTTP server
+  registers that reader with `attention.use_status_checks` while it runs),
+  `intents`
+  (pending, only while intents are on), `ledger` (own open items that wait
+  for the user: a to-do, an unconfirmed relayed decision, anything overdue;
+  only while the ledger is on) and `deliveries` (`uncertain` subscription
+  pushes, intent messages and task-end messages of the last 72 hours; each
+  table has a partial index of its `uncertain` rows, built online for an
+  existing database by the `uncertain_deliveries` migration). A
+  section is `ok`, `error` (its source could not be read, with the reason;
+  never shown as empty) or `unknown` (this caller cannot read it); a
+  feature that is off leaves its section out. Each lists up to 20 items and
+  counts them all. The page and `/todo` say nothing waits only when every
+  section was read and is empty.
+- **API:** `POST /api/v1/attention/summary`, read-only and operator-only:
+  `{read_at, total, sections: [{kind, state, count, items, error}]}`, each
+  item `{key, title, context, since, href, ref, facts}`.
+- **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
+  only while the summary answers. Failing logins that were read are left to
+  the startup-check banner every page shows; a confirmation asked in the
+  dashboard chat links to that conversation.
+- **Chat:** `/todo` (and Telegram's `/todo@bot`) is answered by code next to
+  `/new` and `/gates`, only in the operator's own turns
+  (`operator_identity.is_operator`); a group, another sender and an API
+  client get a refusal.
 
 ### User gates
 
