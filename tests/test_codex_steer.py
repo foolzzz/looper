@@ -645,6 +645,8 @@ def test_worker_bus_input_uses_detected_steering_capability(agent_db: Any, app_s
             async with asyncio.timeout(5):
                 while not pool.accepts_input("w1"):
                     await asyncio.sleep(0.01)
+                if steer:
+                    await pool._inputs["w1"].wait_input_ready()
             ack = await bus.request(MessageEnvelope.create(
                 source=planner_address("t1"), target=worker_address("w1"), message_type=MessageType.WORKER_INPUT,
                 payload={"text": "include HERON"},

@@ -74,3 +74,13 @@ dashboard, independently of failure-typing settings.
 
 The disabled-byte fixture was independently checked against main commit
 `2b77afb16`: prompts, tools, command lines and recorded-event hashes match.
+
+Related Python coverage passed with `-n 2` against disposable PostgreSQL:
+356 non-steering tests and all 82 Codex steering tests. Two existing steering
+tests initially failed on both this branch and unchanged main because they
+sent input before initialization completed; they now explicitly wait for
+channel readiness within the existing test timeout. The final readiness wait
+was rechecked with all three bus-delivery variants. Production timeouts were
+unchanged. Both touched web test files passed (69 tests), as did the production
+build. No real-model evaluation was needed because model-visible content did
+not change.
