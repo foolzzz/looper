@@ -13,12 +13,15 @@ before it asks the user (``research_order``; off by default).
 ``channels.outbound.enabled``: the operator's shared write gateway and durable channel outbox
 (``outbound_enabled``; off by default). Lark is wired first; Telegram follows separately.
 
+``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
+The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
+
 ``ledger.enabled``: whether the ledger records what waits for the user, what was decided and who does what
 (off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
 second copy. Turning it on names the enabled bots that have no operator id.
 
-Stop, completion events, outbound writes and the Manager's prompt check their settings from synchronous code,
-so they are kept in memory: ``load`` reads them at startup and ``update`` refreshes them. Until loaded, they are off.
+Stop, completion turns, research order, delivery guard and outbound writes are kept in memory: ``load`` reads
+them at startup and updates refresh them. Until loaded, all are off.
 """
 
 from __future__ import annotations
@@ -36,6 +39,8 @@ DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
 RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
+DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
+DEFAULT_DELIVERY_GUARD_ENABLED = False
 OUTBOUND_ENABLED_KEY = "channels.outbound.enabled"
 DEFAULT_OUTBOUND_ENABLED = False
 OUTBOUND_DEFAULTS = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
@@ -60,6 +65,7 @@ _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
 _outbound_enabled = DEFAULT_OUTBOUND_ENABLED
 _outbound_limits = dict(OUTBOUND_DEFAULTS)
+_delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
 
 
 def stop_enabled() -> bool:
@@ -110,14 +116,41 @@ def outbound_view() -> dict[str, Any]:
     return {"outbound_enabled": outbound_enabled(), **outbound_limits()}
 
 
+def delivery_guard_enabled() -> bool:
+    return _delivery_guard_enabled
+
+
+def set_delivery_guard_enabled(value: bool) -> None:
+    """Apply the delivery setting in memory; Manager wiring is a separate change."""
+    global _delivery_guard_enabled
+    _delivery_guard_enabled = value
+
+
+def delivery_guard_view() -> dict[str, bool]:
+    return {"enabled": _delivery_guard_enabled}
+
+
+async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
+    """Persist an operator's choice; null restores the disabled default.
+
+    Separate from ``update`` so existing chat settings exposed to clients stay unchanged.
+    """
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({DELIVERY_GUARD_KEY: None if value is None else ("true" if value else "false")})
+    set_delivery_guard_enabled(DEFAULT_DELIVERY_GUARD_ENABLED if value is None else value)
+    return delivery_guard_view()
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
     stored = await db_settings.get_settings(
-        [STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, OUTBOUND_ENABLED_KEY,
+        [STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY, OUTBOUND_ENABLED_KEY,
          *("channels.outbound." + key for key in OUTBOUND_DEFAULTS)])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
+    set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
     set_outbound_enabled(stored.get(OUTBOUND_ENABLED_KEY) == "true")
     limits = {}
     for key, default in OUTBOUND_DEFAULTS.items():

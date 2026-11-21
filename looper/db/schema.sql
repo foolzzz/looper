@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     capabilities  TEXT[] NOT NULL DEFAULT '{}'
         CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
                                      'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
-                                     'read_tools', 'steer', 'no_tools', 'headless_compaction']),
+                                     'read_tools', 'steer', 'no_tools', 'headless_compaction', 'mid_turn_input']),
     probed_at     TIMESTAMPTZ,
     probe_error   TEXT,
     builtin       BOOLEAN NOT NULL DEFAULT false,
