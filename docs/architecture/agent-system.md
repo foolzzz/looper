@@ -5541,11 +5541,15 @@ when the channel has one.
 - **The table** (`card_actions`; migration `card_actions`): one row per card,
   keyed by the opaque token that is all a button carries (`<token>:<choice>`),
   with its `kind` (`confirmation`, `gate`), `subject`, the `digest` of the
-  parameters it is bound to, who may press (`allowed`), `expires_at` (10
-  minutes for a confirmation, 7 days for a gate) and what became of it
-  (`handled_at`, `handled_by`, `handled_via` `button`, `typed` or `lapsed`,
-  `choice`, `outcome`). A row is claimed once, by one statement.
-- **A press** is answered by code: a sender the bot would not admit a message
+  parameters it is bound to, the `chat` it was sent to and the channel
+  `message_id` it became (noted by the channel once sent), who may press
+  (`allowed`), `expires_at` (10 minutes for a confirmation, 7 days for a gate)
+  and what became of it (`handled_at`, `handled_by`, `handled_via` `button`,
+  `typed` or `lapsed`, `choice`, `outcome`). A row is claimed once: locked
+  first, then handled only if it has not expired by the clock after the lock.
+- **A press** is answered by code: one from another message than the card's
+  (a forwarded copy) or, before its message is noted, from another chat is
+  told 「这张卡片只能在发出它的会话里操作」 and claims nothing; a sender the bot would not admit a message
   from in that chat (its allowlist, the binding's extra senders, or anyone in
   a group bound with `sender_policy` `chat`), or one not in `allowed`, is told
   「只有发起人能确认」; a card handled or expired
@@ -6428,7 +6432,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and the typed delivery of its message: `delivery` (`pending`, `sending`, `sent`, `failed`, `uncertain`), `delivery_attempts`, `delivery_at` (sending since, or tried again from) and `delivery_error`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
-| `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
+| `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `message_id`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
