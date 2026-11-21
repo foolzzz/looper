@@ -65,7 +65,8 @@ from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from . import reminders as reminder_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
-from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
+from .leads import TOOL as LEADS_SEARCH, leads_on
+from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
 from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool, task_workflow_tool
@@ -143,11 +144,13 @@ TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if
                                     *SCHEDULE_TOOLS, CONFIRM)
 READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Every tool a Manager may have had: a call of one it no longer has is told so. The leads search is the default
-# Manager's while leads are on (``ManagerOps._with_leads``).
-_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH)}
+# Manager's while leads are on, the vault's reads while it lets the Manager read it, the reminder tools while
+# reminders are on (``ManagerOps._with_operator_tools``).
+_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS,
+                                                    *reminder_tools.TOOLS)}
+# The default Manager's tools that only the user's own turns run, each behind its own switch.
+_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, *reminder_tools.TOOLS)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
-# The default Manager's while reminders are on (``ManagerOps._with_reminders``).
-_REMINDER_TOOLS = {tool.name: tool for tool in reminder_tools.TOOLS}
 
 
 @dataclass(frozen=True)
@@ -291,9 +294,8 @@ class ManagerOps:
                 task_workflow_tool(tool, keys) if tool.name == "looper_task_create" else tool
                 for tool in scope.tools.values()]))
             self._scope = scope
-        scope = await self._with_reminders(scope)
         scope = await self._with_ledger_tools(scope)
-        scope = await self._with_leads(scope)
+        scope = await self._with_operator_tools(scope)
         if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
             return scope
         try:
@@ -316,20 +318,6 @@ class ManagerOps:
             self.set_scope(current)
         return current
 
-    async def _with_reminders(self, scope: OpsScope) -> OpsScope:
-        """``scope`` with the reminder tools exactly while ``reminders.enabled`` is on, for the default Manager; any
-        other Manager's as it is. Off, the default Manager's is what it was before reminders existed."""
-        if scope.manager_id != DEFAULT_MANAGER_ID:
-            return scope
-        wanted = await reminders_on()
-        if wanted == (reminder_tools.CREATE in scope.tools):
-            return scope
-        kept = [tool for tool in scope.tools.values() if tool.name not in _REMINDER_TOOLS]
-        adjusted = replace(scope, tools=_tool_map([*kept, *(reminder_tools.TOOLS if wanted else ())]))
-        if self._scope is scope:
-            self._scope = adjusted
-        return adjusted
-
     async def _with_ledger_tools(self, scope: OpsScope) -> OpsScope:
         """The default Manager has the ledger's two tools exactly while ``ledger.enabled`` is on; no other Manager
         does. Off, the scope is returned as it is, so its tool list is what it was before the ledger existed."""
@@ -348,16 +336,20 @@ class ManagerOps:
             self._scope = adjusted
         return adjusted
 
-    async def _with_leads(self, scope: OpsScope) -> OpsScope:
-        """``scope`` with ``looper_leads_search`` exactly while ``leads.enabled`` is on, for the default Manager; any
-        other Manager's as it is. Off, the default Manager's is what it was before leads existed."""
+    async def _with_operator_tools(self, scope: OpsScope) -> OpsScope:
+        """``scope`` with the default Manager's operator-only tools exactly while their switches are on:
+        ``looper_leads_search`` while ``leads.enabled`` is, the vault's reads while the vault setting holds and says
+        ``manager_read``, the reminder tools while ``reminders.enabled`` is. Any other Manager's as it is; off, the
+        default Manager's is what it was before them."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
             return scope
-        wanted = await leads_on()
-        if wanted == (LEADS_TOOL in scope.tools):
+        wanted = [*((LEADS_SEARCH,) if await leads_on() else ()),
+                  *(VAULT_READ_TOOLS if await manager_vault() is not None else ()),
+                  *(reminder_tools.TOOLS if await reminders_on() else ())]
+        if [tool.name for tool in wanted] == [name for name in scope.tools if name in _OPERATOR_TOOLS]:
             return scope
-        kept = [tool for tool in scope.tools.values() if tool.name != LEADS_TOOL]
-        adjusted = replace(scope, tools=_tool_map([*kept, LEADS_SEARCH] if wanted else kept))
+        kept = [tool for tool in scope.tools.values() if tool.name not in _OPERATOR_TOOLS]
+        adjusted = replace(scope, tools=_tool_map([*kept, *wanted]))
         if self._scope is scope:
             self._scope = adjusted
         return adjusted
@@ -382,7 +374,7 @@ class ManagerOps:
         a bounded Manager acts only on a task its filter admits. Returns the tool to run."""
         tool = scope.tools.get(name)
         if tool is None:
-            if name in _MANAGER_TOOL_NAMES or name in _REMINDER_TOOLS:
+            if name in _MANAGER_TOOL_NAMES:
                 raise OpError(ErrorCode.FORBIDDEN, f"this Manager no longer has {name}")
             raise OpError(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(scope.tools)}")
         if name in scope.read_only and tool.risk_of(arguments) is not Risk.READ:
@@ -452,8 +444,7 @@ class ManagerOps:
         runtime's write call runs only when it matches a tool_use of that turn's stream. Off (the default), the
         binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
         and each disagreement is logged and counted (``binding_report``), never refused."""
-        tool = (self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
-                or _REMINDER_TOOLS.get(name))
+        tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
 
@@ -479,9 +470,10 @@ class ManagerOps:
             if tool.name != CONFIRM_TOOL:
                 tool = await self._authorize(scope, name, arguments)
             if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
-                raise OpError(ErrorCode.FORBIDDEN, "message leads are searched only in the user's own direct chat "
-                                                   "or on the dashboard" if tool.name == LEADS_TOOL else
-                              f"{tool.name} runs only in the user's own direct chat or on the dashboard")
+                raise OpError(ErrorCode.FORBIDDEN,
+                              f"{tool.name} runs only in the user's own direct chat or on the dashboard"
+                              if tool.name in reminder_tools.TOOL_NAMES else
+                              "message leads are searched only in the user's own direct chat or on the dashboard")
             _check_answering(turn)
             matched_turn = turn if enforced else bound
             if (matched_turn is not None and matched_turn.require_match and binding

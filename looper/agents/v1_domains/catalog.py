@@ -89,7 +89,9 @@ RESULTS = {
 def _op(name, request, result, *, risk="read", credential=False):
     description = f"{name.replace('_', ' ').replace('.', ': ')}."
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), description, description,
-                     request, result, risk=risk, confirms=risk == "high",
+                     request, result, risk=risk,
+                     # an MCP server's install, or enabling one again, asks an API client first (``impact``)
+                     confirms=risk == "high" or name in ("installs.create", "installs.update"),
                      operator_only=credential, credential_write=credential)
 
 
@@ -121,9 +123,10 @@ async def _deletable(item_id):
     return item
 
 
-async def _answer(request, *, credential=False, public=False):
+async def _answer(request, *, credential=False, public=False, plain=True):
     try:
-        return _plain(await request)
+        result = await request
+        return _plain(result) if plain else result
     except (catalog.CatalogNotFound, catalog.CatalogConflict, catalog.CatalogError,
             project_skills.ProjectSkillError) as exc:
         code = (ErrorCode.NOT_FOUND if isinstance(exc, catalog.CatalogNotFound) else
@@ -134,7 +137,18 @@ async def _answer(request, *, credential=False, public=False):
         raise (PublicOpError if public else OpError)(code, str(exc)) from None
 
 
-async def impact(server, operation, arguments, principal, headers):
+async def impact(server, operation, arguments, principal, headers, confirmation=None):
+    # An MCP server runs on this machine in every run of its roles: an API client's install, or its enabling an
+    # install again, is confirmed first (the operator's dashboard runs it at once), bound to the configuration shown.
+    if operation.operation_id in ("installs.create", "installs.update"):
+        change = {key: value for key, value in arguments.items() if key != "install_id"}
+        asked = await _answer(catalog.mcp_install_impact(arguments) if operation.operation_id == "installs.create"
+                              else catalog.mcp_enable_impact(arguments["install_id"], change), plain=False)
+        if asked is None:
+            return None
+        if confirmation is not None:
+            confirmation.update(asked.binding())
+        return asked.text
     if operation.operation_id != "catalog_items.delete":
         return None
     item = await _answer(_deletable(arguments["item_id"]))
@@ -145,8 +159,9 @@ async def impact(server, operation, arguments, principal, headers):
             "Its stored files and installations will be removed; other catalog items are unchanged.")
 
 
-async def run(server, operation, arguments, principal, headers):
+async def run(server, operation, arguments, principal, headers, confirmation=None):
     name = operation.operation_id
+    expected = (confirmation or {}).get("item_sha256")  # a confirmed MCP install or enabling
     if name == "catalog_items.list":
         return await _answer(catalog.catalog_view())
     if name == "catalog_items.get":
@@ -163,10 +178,11 @@ async def run(server, operation, arguments, principal, headers):
         await _answer(_deletable(arguments["item_id"]))
         return await _answer(catalog.delete_item(arguments["item_id"]))
     if name == "installs.create":
-        return await _answer(catalog.install(arguments))
+        return await _answer(catalog.install(arguments, expected_sha256=expected))
     if name == "installs.update":
         return await _answer(catalog.update_install(arguments["install_id"],
-                            {key: value for key, value in arguments.items() if key != "install_id"}))
+                            {key: value for key, value in arguments.items() if key != "install_id"},
+                            expected_sha256=expected))
     if name == "installs.delete":
         return await _answer(catalog.uninstall(arguments["install_id"]))
     return await _answer(catalog.project_view(arguments["project_id"]))

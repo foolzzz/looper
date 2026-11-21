@@ -15,8 +15,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
   session (the `agent_sessions` row whose id is its id), runs
-  (`llm_records.agent_id`), turn binding file and `ManagerOps`.
-  `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  (`llm_records.agent_id`), turn binding file and `ManagerOps`. What belongs
+  to its conversation (the resident runtime, the saved session, the turn lock
+  and the turn holding it, what the next turn is told) is one
+  `ManagerSession` (`looper/agents/tiers/manager_session.py`), `main`, the
+  only one so far. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
@@ -86,6 +89,19 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
   A scenario Manager never gets the section. Off, the prompt, the tool list and the process signature are what they
   were before. The section is composed per turn, so the prompt preview only notes it
+- **Delivery guard policy** (`delivery_guard.py`, `manager.delivery_guard.enabled`, default off):
+  the pure policy defines a user's delivery debt (`owed`, then `paid` on non-empty top-level text),
+  exempts completion and autonomous turns, and permits at most two hidden follow-ups after a successful
+  empty reply. A failed follow-up selects the fixed failure notice; a stop retains normal stop behavior.
+  Initial errors, process exits, spend caps, unavailable tools and refused tokens never start follow-ups.
+  Six consecutive top-level tool calls select a same-turn reminder, at most twice per turn, only when
+  the runtime declares `MID_TURN_INPUT`. Only Claude Code declares this verified capability. Reminders
+  are model input, with no separate interim channel message.
+  The operator-only v1 operations `delivery_guard.get` and `delivery_guard.update` read or store the
+  switch (`enabled`, null restores off); existing chat settings responses and Manager tools stay unchanged.
+  **Manager wiring is pending:** storing the switch currently changes no replies, prompts, records or
+  channel calls. The policy, turn debt field and capability declaration are groundwork for that wiring;
+  dashboard controls, follow-up records/metrics and runtime reminder injection come with it.
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
@@ -2664,14 +2680,17 @@ The tools are Looper's MCP tools, the same on every runtime.
   it from `/`, and the vault itself readable and searchable, which is
   checked when the setting is saved), `writable`
   (folders inside it, each an existing directory, neither a link nor below
-  one, so a link is refused when the setting is saved; empty: read only) and `rules_file` (a file inside it, optional).
+  one, so a link is refused when the setting is saved; empty: read only), `rules_file` (a file inside it, optional)
+  and `manager_read` (true: the default Manager reads it in the user's own turns; stored only when true).
   It is checked again whenever it is read: a vault that no longer holds (its
   directory removed, a folder turned into a link out of it) is `problem`, and
   every tool refuses with it. It is a local path, so the configuration export
   leaves it out; the project's `vault` goes with the project.
 - **Who gets the tools.** A task's Planner, Workers and Reviewers, when the
-  task's project has `vault` on and the setting holds; the Manager has only
-  the setting. A Worker's or Reviewer's run gets its run token when its project
+  task's project has `vault` on and the setting holds. The default Manager gets
+  `looper_vault_search` and `looper_vault_read`, never a write, when the
+  setting holds and says `manager_read` (off by default; see The Manager's
+  platform tools); otherwise a Manager has only the setting. A Worker's or Reviewer's run gets its run token when its project
   has the room or the vault on (the token knows which); the Planner uses its
   own. The list is fixed when a run starts (each Planner turn, each Worker or
   Reviewer run); every call checks the project and the setting again, and is
@@ -4219,16 +4238,29 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_concurrency` | Change one task's (`task_id`) own `worker` and `reviewer` limits, `limits` per role (1–64, `null` clears one to the default), in any task but a completed one; `planner` is refused. There are no project limits: the description tells the Manager to say so, and a call naming `project` is refused (`invalid`, an unknown argument) and changes nothing. Then the WorkerPool checks again. The answer gives each role's limit before and after with its source, the task's own and the default, and says that lowering stops nothing that runs | write |
 | `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`); a `work_dir` change that moves enabled or queued command schedules without their own `work_dir` asks first, listing each one's name, state, command and old → new directory, and is refused (`conflict`) when they or the directory changed before the answer, or, for a scoped Manager, when one belongs to another Manager; `delete` one with its tasks and schedules, stopping its running tasks first (the user confirms first). Template use and another Manager's tasks or schedules are refused before confirmation. The confirmation lists schedule, running-task and task counts; settings, allowed list, installs, knowledge and own skills go with it, while result branches and the project directory's files stay | list and get read; write; delete, and such a `work_dir` change, are high |
 | `looper_agent_profiles` | `list`, `create`, `update`, `delete`; create selects `runtime` and `model` (model id or exact `{provider, name, protocol}`), plus `name`, `effort`, `agent_teams`, `web_search`, `custom_prompt`; no profile system-prompt mode. Returns derived account/model information; selected profiles cannot be deleted | list reads; write; delete is high |
-| `looper_providers` | `list` accounts and vendor suggestions; `register` an API-key account with `name`, `vendor_type`, `endpoints`, `env`, `max_concurrency`, without a key. The user enters the key in Settings | list reads; write |
+| `looper_providers` | `list` accounts and vendor suggestions; `register` an API-key account with `name`, `vendor_type`, `endpoints`, `env`, `max_concurrency`, without a key. The user enters the key in Settings. An `update` that gives `endpoints` or `env` sends every later run of the account's Agent Profiles elsewhere, so the user confirms it first, seeing the new endpoints and the variables' names (never their values). The change is made and checked, then rolled back, before asking (`profile_registry.preview_provider_update`), so one that would fail, such as removing an endpoint that still serves models, is refused before asking | list reads; write; endpoints or env update confirms |
 | `looper_models` | `list` (optional provider/runtime filter), `create` an exact provider/name/protocol entry, `update` its settings, `delete` an unused model; no key arguments | list reads; write; delete is high |
-| `looper_catalog` | `list` the items (kind, qualified name, description, `manager_install_count`) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
+| `looper_catalog` | `list` the items (kind, qualified name, description, `manager_install_count`) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`). Installing an MCP server, or enabling an install of one again, is confirmed first (`catalog.mcp_install_impact`, `mcp_enable_impact`: it runs on this machine in every run of its roles; the command and its variables' names are shown, or the URL without its userinfo and query values and the headers' names). What the install itself would refuse is refused before asking. The confirmed call is bound to the item, its configuration as shown (`library_items.sha256`, rechecked in the install's transaction: changed, it is a conflict and the user is asked again) and the project by id; the same holds for an API client's `installs.create` and `installs.update` | list reads; write; MCP install confirms |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
 | `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, kind, enabled, user gates, next fire, last run (kind and exit code included), failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits for agent schedules; kind, command in a verbatim code fence, timeout, env keys only, env file, success deadline and alert thresholds for command schedules) and 「要启用吗？回复「启用」就启用」 to the reply (in a group chat only 「要启用吗？@我回复「启用」就启用…」), and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (commands in verbatim code fences, and the next 3 fires for a new rule or zone); every command schedule update also says it uses no agent or model spend; in a group chat it adds one line naming the settings that changed and whether the schedule is enabled, without their values; `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: a command schedule shows its exact command in a code fence, directory, timeout and env keys only (plus env file when set); enabling also shows its success deadline and alert thresholds, and both confirmations say it runs without an agent or model spend. An agent schedule keeps its task and spending confirmation. In a group chat these confirmations, and those of a raised cap or an enabled command's edit, are one question each, without the requirement, command, directory, environment or budgets. The call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one (the user confirms first for a running command schedule, including after a refused delete); `delete` one (`schedules.delete_schedule`; a command schedule with a running run is refused (`conflict`) before anything is asked, saying it can be deleted once the command finishes, that disabling stops new fires, and that a queued run still starts after the running one even when the schedule is disabled); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (for an agent schedule a running task goes on and ends normally, a queued or gating run starts no task, and its tasks stay; for a command schedule a queued run does not execute and it has no tasks) and that its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, a disable of a running command schedule, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
+| `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat. `manager_actions.result` keeps no note text | read; only in the user's own turns |
 | `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
 | `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
+
+**The user's knowledge vault** (`ops/manager_vault.py`). With the vault setting's `manager_read` on, the default Manager
+has `looper_vault_search` and `looper_vault_read`, and `VAULT_CONTRACT` follows its contract
+(`TOOLS_CONTRACT+VAULT_CONTRACT`, after `LEADS_CONTRACT` when both are on). The contract says:
+- search the vault before asking the user about something they may have written down;
+- read the note that answers it, and name the note;
+- never quote the notes in a group chat.
+
+The tools are `RestrictedTool`s with `audience` `operator`, exactly like the leads search: they are listed and run
+only in the user's own turns, and a call is judged by the turn its binding names. Every text they return is
+remembered for the group backstop below, keyed `vault:<path>`. The tasks' vault tools (`ops.vault.TOOLS`) are
+unchanged, so an upgrade still reads them. Off, the tool list, the prompt and the signature are what they were before.
 
 **Message leads** ([message leads RFC](rfcs/message-leads-intents-v0.zh-CN.md), section 5). With
 `leads.enabled` on, `current_scope` adds `looper_leads_search` to the default Manager's tools. Another Manager never
@@ -5437,8 +5469,18 @@ are delivered separately; CLI callers use the same operator API operations.
 The ledger lists what waits for the user (`pending`), what was decided
 (`decision`) and who does what (`work_item`) ([Completion and ledger
 RFC](rfcs/manager-completion-ledger-v0.zh-CN.md), section 4). It is off until
-the system setting `ledger.enabled` is `true`; the dashboard has no switch yet.
-Off, no prompt, tool list or command line mentions it.
+the system setting `ledger.enabled` is `true`. Settings → Chat and
+`chat_settings.update` turn it on and off; null removes the row and the ledger
+stays off. Turning it on returns `missing_operator_ids`: every enabled Lark or
+Telegram bot (`telegram`, `lark`, `lark_bot`) whose configuration has no
+`operator_sender_id` (`channels.operator_ids.missing`). A bot with no display
+name is listed by its channel id. In those bots' direct chats a decision is
+recorded as relayed until Settings → Channels has "My ID". Only the operator
+can set `ledger_enabled`; any other principal gets 403, and the other fields
+of `chat_settings.update` stay available.
+The ledger reads the row from the database; there is no second copy in memory.
+Off, no prompt, tool list or command line mentions it, and reading the setting
+writes nothing.
 
 - **Tables** (`ledger_items`, `ledger_events`; migration `ledger`): an own item
   (a decision, a hand-made to-do) keeps its `status` (`open`, `done`,
@@ -5490,9 +5532,8 @@ Off, no prompt, tool list or command line mentions it.
   database unusable.
 - **Reads:** `ledger.list` and `ledger.get` (`/api/v1`, read-only, open to an
   API client and the operator) answer `conflict` while the ledger is off.
-- **Not yet:** the To-do page and the dashboard switch, the ledger contract in
-  the Manager's system prompt (the tool descriptions are all it has), HTTP
-  writes.
+- **Not yet:** the To-do page, the ledger contract in the Manager's system
+  prompt (the tool descriptions are all it has), HTTP writes.
 
 ### User gates
 
@@ -6078,6 +6119,34 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   Settings → Roles lists the Advisor and Advice check roles, and a project's settings its `advisor` switch, limits,
   fallback profile and internal domains.
 
+### Reviews of outbound actions
+
+Before an agent does something that may leave the operator's machine, `outbound.review` (`looper/agents/outbound.py`,
+the outbound-review RFC) asks a tool-less run whether the operator asked for it, to that target. No tool calls it
+yet; its callers come with the `outbound_review.enabled` switch.
+
+- **The action** is typed: its tool and action, its `ActionLevel` (`inside`, `operator`, `origin`, `machine`,
+  `external`, `unknown`; only `external` and `unknown` are reviewed), its target and a summary code wrote, and the
+  text it would send. Whose turn led to it (`Who`) is code's, never the model's: in a turn that is not the
+  operator's, code blocks the action (`not_operator`) without a run.
+- **The run.** The `outbound_check` role has no tools and no harness (like `advice_check`; `ROLE_CAPABILITIES`
+  `run` and `no_tools`). Its role layer chooses its Agent Profile; with none it runs its built-in
+  `claude-code/sonnet-5-5`. Its system prompt is the role prompt (`role_configs`) and `outbound.OUTBOUND_CONTRACT`.
+  Its one turn holds the action, the operator's turn and the outside content in data blocks the content cannot
+  close or open, with keys and tokens masked (paths stay). The text an action would send is shown whole: one
+  longer than 12,000 characters is blocked (`too_long`) without a run. One turn, the role's timeout (30 s, at
+  most), a 0.10 USD cap (`spawn.MIN_RUN_USD`), never run again.
+- **The verdict** must be the contract's one JSON object (`outbound.parse_verdict`): `decision` `allow` or `block`,
+  a `reason` of at most 300 characters and known `signals`. Anything else, a timeout, a run that ends in error or
+  cannot be prepared or started, a rate limit, a refusal (or another model answering), a turned-off role or a
+  missing profile blocks the action, with `failure` saying why. A review returns within
+  `outbound.CALLER_TIMEOUT_SEC` (the run, then at most 5 s for its audit row): a caller that bounds it waits
+  longer.
+- **Records.** Each review is an `outbound_reviews` row, written before the action may go ahead: an action whose
+  row cannot be written in time is blocked. Its free text (the target, the summary, the model's reason) is stored
+  masked. The run's record has `run_kind` `outbound_check` and the asking run as its
+  `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
+
 ### Turns Claude runs on its own
 
 A resident Claude (Manager, Planner) also runs turns that answer no message.
@@ -6121,6 +6190,59 @@ has marked a user turn (the first events of a process, a stand-in that writes
 no markers) the waiting message's turn starts with the next event, as before.
 A turn of Claude's own still running when the process stops is recorded
 without a result.
+
+### Decision snapshots
+
+A task's dispatch passes and its Planner's step decisions can be recorded with
+what they read, so that a change to how a task moves on can be checked against
+history offline ([Decision snapshot RFC](rfcs/decision-snapshot-v0.zh-CN.md)).
+It is off until the system setting `decision_snapshots.enabled` is `true`
+(read before every dispatch pass and every applied decision; the dashboard has
+no switch yet). Off, nothing is written; on or off, no prompt, tool list or
+command line changes: snapshots read what the Planner already holds and feed
+nothing back, and a failure to read the switch or to write is logged and never
+fails the decision. Each snapshot's database work (the switch, the turn's
+record, the write, connection waits included) has 1 second in all
+(`decisions.TIMEOUT_SECONDS`); past it the snapshot is dropped with a warning,
+so a locked table holds a dispatch pass, which keeps the project's dispatch
+lock, for at most that long.
+
+- **Dispatch** (`kind` `dispatch`): one row per `_dispatch_ready_impl` pass,
+  written before its work steps start. The inputs are every step as readiness
+  reads it (`id`, `key`, `kind`, `status`, `depends_on`, `ready_when`,
+  `reviews`, the `status` and `passed` of its result, its gate's `state`, its
+  wait's `state` and `outcome`), `isolate_steps`, and with step workspaces the
+  round's `in_flight` and `ready` flags and the task directory's kind (`repo`,
+  `unusable`, `outside_git`) as `plan_round` was called; the decision is the
+  ready steps with their kinds, the round's `start` and `isolate`, and the work
+  steps that start. A pass whose inputs and decision equal the task's last one
+  is not written again.
+- **Step decision** (`kind` `step_decision`): one row when `_apply_decision`
+  applies the Planner's `accept`, `review`, `retry`, `replan` or `fail` (not
+  `advise` or a checkpoint's `proceed`), with the step and the turn's run record
+  (`record_id`). The inputs are the step's attempt, every `DecisionContext`
+  field, whether the turn was offered an adjudicated accept
+  (`adjudicated_accept`: downgrading a panel's blocking findings would let it
+  accept) and a digest of the run record (profile id and runtime type, model and
+  effort, `system_prompt_sha256`, each prompt layer's sha256 fields, the
+  `--tools`, `--allowedTools` and `--disallowedTools` values, `read_only`, the
+  library hash, the message's length and the token counts); the decision is the
+  decisions the turn was offered (`DecisionContext.offered`), the chosen one, its reason (the retry's feedback for
+  a retry; 500 characters, as the activity line keeps it), the gate and wait
+  changes and a replan's step ids. No prompt, requirement or message text is
+  kept.
+- **Replay** (`looper decisions replay <task_id> [--json]`, reading the
+  database directly, also with the service stopped): a dispatch runs
+  `TaskPlan.ready_steps` on steps rebuilt from its inputs, and `plan_round` on
+  the recorded round, and is the same when the ready steps, the round and the
+  started steps all are; a step decision recomputes `DecisionContext.offered()`
+  with the recorded `adjudicated_accept` and is the same when the offered decisions are and the chosen one is among
+  them (the model's choice is not run again). Exit codes: 0 all the same, 1
+  none recorded, 3 some differ, 6 database unusable.
+- **Retention:** rows go with their task, and while the switch is on the
+  hourly housekeeping deletes those older than 30 days
+  (`decision_snapshots_deleted` in its log line); off, it leaves the table
+  alone.
 
 ## Message Bus
 
@@ -6273,10 +6395,12 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and the typed delivery of its message: `delivery` (`pending`, `sending`, `sent`, `failed`, `uncertain`), `delivery_attempts`, `delivery_at` (sending since, or tried again from) and `delivery_error`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
+| `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
+| `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
