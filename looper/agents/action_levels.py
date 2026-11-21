@@ -23,6 +23,23 @@ class ActionLevel(str, Enum):
 
 
 REVIEWED = frozenset({ActionLevel.EXTERNAL, ActionLevel.UNKNOWN})
+
+
+def schedule_reach(row: Any) -> dict[str, Any]:
+    """What a stored schedule (its ``schedules`` row) does that reaches outside, as a schedule's fields say it."""
+    target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_chat") else None
+    return {"kind": row.get("kind"), "command": row.get("command"), "gate_command": row.get("gate_command"),
+            "notify_target": target}
+
+
+async def schedule_level(fields: Mapping[str, Any], **turn: Any) -> ActionLevel:
+    """Where a schedule with ``fields`` reaches: a command it runs unattended is ``machine``; its notify target's
+    level (``target_level``, ``turn`` the asking turn's chat); the highest."""
+    levels = [ActionLevel.MACHINE] if fields.get("kind") == "command" or fields.get("command") \
+        or fields.get("gate_command") else []
+    if "notify_target" in fields:
+        levels.append(await target_level(fields["notify_target"], **turn))
+    return highest(*levels)
 # From the least to the most reviewed: a call made of several effects is at its highest one's level.
 _ORDER = (ActionLevel.INSIDE, ActionLevel.OPERATOR, ActionLevel.ORIGIN, ActionLevel.MACHINE, ActionLevel.EXTERNAL,
           ActionLevel.UNKNOWN)
@@ -34,11 +51,11 @@ def highest(*levels: ActionLevel) -> ActionLevel:
 
 
 async def target_level(target: Any, *, channel: str | None = None, chat: str | None = None,
-                       sender: str | None = None) -> ActionLevel:
+                       sender: str | None = None, group: bool = True) -> ActionLevel:
     """The level of pushing to ``target`` (``{channel, chat}``; None: the dashboard only): ``operator`` for the
     dashboard or the operator's own direct chat (``operator_identity``), ``origin`` for the chat of the turn that asks
-    (``channel``, ``chat`` and, in a direct chat, its ``sender``), else ``external``; one that names no chat is
-    ``unknown``."""
+    (``channel`` and ``chat``; in a direct chat, not a ``group``, its ``sender`` too), else ``external``; one that
+    names no chat is ``unknown``."""
     from .message import builtin_channel_id
     from .operator_identity import operator_sender_id
 
@@ -54,6 +71,7 @@ async def target_level(target: Any, *, channel: str | None = None, chat: str | N
         operator = None
     if operator is not None and to_chat == operator:
         return ActionLevel.OPERATOR
-    if channel is not None and to_channel == channel and to_chat in {c for c in (chat, sender) if c}:
+    asking = {chat, *(() if group else (sender,))} - {None, ""}
+    if channel is not None and to_channel == channel and to_chat in asking:
         return ActionLevel.ORIGIN
     return ActionLevel.EXTERNAL
