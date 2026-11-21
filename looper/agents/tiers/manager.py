@@ -441,6 +441,7 @@ class Prepared:
     quoted: lark_quote.QuoteRead | None = None
     # With manager.stable_context on: the sections as they read now, which ``turn_text`` leaves out.
     state: tuple[str, ...] | None = None
+    session: ManagerSession | None = None  # the session the model turn runs on, set by ``_prepare_turn``
 
 
 def api_handoff_prompt(reason: str, max_chars: int) -> str:
@@ -1420,7 +1421,6 @@ class ManagerAgent:
         comes back as an ``action``), stored, the tools probed, then the Manager's role, session, agent settings,
         library, prompt and the message Claude is sent. With ``ask`` (the resume retry, or a caller without a chat
         message) only the second half runs."""
-        session = self._session_now()
         if ask is None:
             text = envelope.payload.get("text", "")
             if is_new_session_command(text):
@@ -1546,6 +1546,7 @@ class ManagerAgent:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
+        session = self._session_now()
         switch = session_switch.profile_switch(session.session_id, session.session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider,
                                                command=list(signature[0]), label=self.agent_id)
@@ -1591,7 +1592,7 @@ class ManagerAgent:
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
-            quoted=ask.quoted, state=tuple(state) if state is not None else None)
+            quoted=ask.quoted, state=tuple(state) if state is not None else None, session=session)
 
     @contextmanager
     def _runtime_start_budget(self, launch: Launch) -> Iterator[float]:
@@ -1620,7 +1621,7 @@ class ManagerAgent:
     async def _start_turn(self, token: TurnToken, prepared: Prepared) -> None:
         """The prepared turn gets its process: the session switch, the runtime swap and the stale process's stop,
         the resume brief, the record and Claude's start. ``prepared.run`` holds what the run needs afterwards."""
-        session = self._session_now()
+        session = prepared.session
         run, launch, signature = prepared.run, prepared.launch, prepared.signature
         envelope = prepared.envelope
         token.restart() if prepared.retried else token.advance(TurnPhase.STARTING)
@@ -2278,7 +2279,7 @@ class ManagerAgent:
         """Send the prepared message to the started Claude, follow its events and end the turn's record."""
         from ..runtimes.runner.session import RunnerSession
 
-        session = self._session_now()
+        session = prepared.session
         message, context_envelope, ops_turn, note = prepared.message, prepared.envelope, prepared.turn, prepared.note
         retried, launch, run = prepared.retried, prepared.launch, prepared.run
         recorder, command, brief, resuming = run.recorder, run.command, run.brief, run.resuming

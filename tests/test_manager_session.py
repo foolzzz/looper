@@ -3,9 +3,14 @@ session the context sets, else main."""
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
+import json
+import sys
 from dataclasses import fields
 from pathlib import Path
+
+import pytest
 
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import CLAUDE_CODE
@@ -56,3 +61,22 @@ def test_the_old_names_read_and_write_the_session_the_context_sets(tmp_path: Pat
     for field in fields(ManagerSession):
         if hasattr(ManagerAgent, f"_{field.name}"):
             assert getattr(manager, f"_{field.name}") is getattr(main, field.name), field.name
+
+
+def test_the_main_sessions_binding_file_and_bridge_env_are_as_before(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.library import AgentLibrary
+    from looper.agents.ops.service import ManagerOps, Platform
+
+    monkeypatch.delenv("LOOPER_MCP_TRACE", raising=False)
+    manager = _manager(tmp_path)
+    turn_file = tmp_path / ".local" / "manager-turn.json"  # where the fleet puts it (``ManagerFleet._build``)
+    manager.ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="tok",
+                             turn_file=turn_file)
+    manager._publish_binding(None)
+    assert turn_file.read_bytes() == b'{"epoch": 1, "turn": null}'
+    library = asyncio.run(manager._library_with_server(AgentLibrary()))
+    entry = json.loads(Path(library.mcp_config).read_text(encoding="utf-8"))["mcpServers"]["looper"]
+    assert entry == {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"],
+                     "env": {"LOOPER_AGENT_URL": "http://127.0.0.1:9", "LOOPER_AGENT_TOKEN": "tok",
+                             "LOOPER_AGENT_TURN_FILE": str(turn_file)}}
