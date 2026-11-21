@@ -106,7 +106,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   section 5.4): `decide` takes a turn's context and cost and keeps the session, compacts it (a runtime with
   `HEADLESS_COMPACTION`) or rotates it. It uses #1473's `schedule_session.session_bound` and the threshold
   `scheduler.session_context_max_tokens` that schedule Planners use. A turn with an unknown context is kept, and
-  so is every turn while the budget is unset. `after_compaction` rotates when the `/compact` failed, had no
+  so is every turn while the budget is unset. Unlike #1473, an unknown turn cost skips the cost rule; context
+  alone can still compact or rotate. `after_compaction` rotates when the `/compact` failed, had no
   `compact_boundary` or left the context over the threshold. `turn_cap` caps a turn at the budget when its model
   has a price (`no_price` otherwise), and `over_cap_reply` is the fixed reply to a turn stopped there. The
   operator-only v1 operations `session_budget.get` and `session_budget.update` read or store the budget (a
