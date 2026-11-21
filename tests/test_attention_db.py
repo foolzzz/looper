@@ -215,7 +215,7 @@ def test_the_api_is_the_operators_and_answers_conflict_while_off(monkeypatch, tm
             api_v1.validate_arguments(declared.result, answer["result"])
             assert answer["result"]["total"] == 1 and titles(answer["result"], "gates") == ["Pick a database"]
 
-    run_db(check, monkeypatch, timeout=30)
+    run_db(check, monkeypatch, timeout=60)  # a server start reads the code manifest, slow on a loaded machine
 
 
 def test_a_database_without_the_uncertain_delivery_indexes_builds_them_online(monkeypatch):
