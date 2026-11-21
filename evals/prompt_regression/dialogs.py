@@ -2990,13 +2990,26 @@ DIALOGS: tuple[Dialog, ...] = (
 )
 
 
+def _runnable(dialog: Dialog) -> bool:
+    """Whether the dialog's feature can take effect on this checkout: the session search waits for group chats to
+    run in sessions of their own (``ops.session_search.group_sessions``)."""
+    from looper.agents.ops import session_search
+
+    return not dialog.sessions or session_search.group_sessions() is session_search.GroupSessions.OWN
+
+
 def select(ids: list[str] | None) -> tuple[Dialog, ...]:
+    """The dialogs ``ids`` names, or every one this checkout can run; ``ValueError`` for an unknown id or one that
+    cannot run here."""
     if not ids:
-        return DIALOGS
+        return tuple(dialog for dialog in DIALOGS if _runnable(dialog))
     known = {dialog.id for dialog in DIALOGS}
     unknown = sorted(set(ids) - known)
     if unknown:
         raise ValueError(f"unknown dialog id(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
+    if waiting := sorted(dialog.id for dialog in DIALOGS if dialog.id in ids and not _runnable(dialog)):
+        raise ValueError(f"{', '.join(waiting)}: the session search takes effect only once group chats run in "
+                         "sessions of their own (session routing); these dialogs cannot run before")
     return tuple(dialog for dialog in DIALOGS if dialog.id in ids)
 
 

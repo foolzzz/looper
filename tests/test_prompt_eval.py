@@ -2820,6 +2820,10 @@ def test_refused_model_configuration_allows_login_probe_progress_only(monkeypatc
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("dialog", MANAGER_DIALOGS, ids=lambda dialog: dialog.id)
 def test_the_managers_dialog_passes_in_fake_mode(tmp_path: Path, dialog: Any) -> None:
+    from evals.prompt_regression import dialogs
+
+    if not dialogs._runnable(dialog):
+        pytest.skip(f"{dialog.id} waits for group chats to run in sessions of their own")
     cases = (_isolated(dialog),)
     if dialog.id == "create_start_stop":
         # The preceding dialog created a task. The next server must contain only its own task.
