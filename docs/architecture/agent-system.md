@@ -120,10 +120,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   access to private tools still follows the existing operator-turn check. `ManagerOps.call` refuses escalating
   operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
   and drops a refused confirmation. A turn with no speaker keeps the existing behavior.
-  Settings → Chat and the v1 `chat_settings` operations store `manager.turn_context.enabled`
+  Settings → Chat uses the operator-only v1 `turn_context_settings.get` and `turn_context_settings.update`
+  operations to store `manager.turn_context.enabled`
   (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`
-  (`zh-CN` or `en`, default `zh-CN`). Only writes to these new fields require operator identity; reads and
-  writes to existing fields retain their access rules. Enabling returns the enabled bots with no operator id;
+  (`zh-CN` or `en`, default `zh-CN`). The read includes `server_timezone`; updates validate and write only named
+  fields, are high risk and declare confirmation, and null restores each default. Existing `chat_settings` views,
+  writes and access rules stay unchanged. Enabling returns the enabled bots with no operator id;
   nobody on those bots can count as the operator. Settings are cached at startup and refreshed after updates.
   The renderer provides a `[Turn context]` block with local time, speaker, chat and reply language, and its
   matching contract. Sender display names pass through `untrusted_text.display_name` once during classification:

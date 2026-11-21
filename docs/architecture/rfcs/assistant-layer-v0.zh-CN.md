@@ -268,7 +268,7 @@ GROUP BY 1 ORDER BY total_usd DESC NULLS LAST;
 
 ### 5.1 1.1 每轮上下文
 
-**开关：** `manager.turn_context.enabled`（默认关）。**设置：** `user.timezone`（IANA 时区名，默认取服务器时区）、`user.reply_language`（`zh-CN` 或 `en`，默认 `zh-CN`）。三个都只能由操作者改（Settings → Chat 和 `loopercli`，v1 操作 `operator_only`），管家的 `looper_settings` 不列它们。打开开关时，如果有启用的飞书、Telegram 机器人没填 `operator_sender_id`，确认框逐个列出（同账本），说明在那些机器人上「你本人」认不出来，需要你授权的动作会被拒绝（第 5.1.4 节）。
+**开关：** `manager.turn_context.enabled`（默认关）。**设置：** `user.timezone`（IANA 时区名，默认取服务器时区）、`user.reply_language`（`zh-CN` 或 `en`，默认 `zh-CN`）。三个都只能由操作者改（Settings → Chat 和 `loopercli`，v1 操作 `turn_context_settings.get/update` 均为 `operator_only`，update 为高风险并声明确认；不扩展 `chat_settings`），管家的 `looper_settings` 不列它们。打开开关时，如果有启用的飞书、Telegram 机器人没填 `operator_sender_id`，确认框逐个列出（同账本），说明在那些机器人上「你本人」认不出来，需要你授权的动作会被拒绝（第 5.1.4 节）。
 
 #### 5.1.1 类型
 

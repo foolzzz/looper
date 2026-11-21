@@ -65,12 +65,30 @@ tests cover the structural guarantee: one speaker line, one turn-context header,
 unchanged typed identity. Real Manager turns, cross-chat confidentiality and actual tool authorization
 remain outside this renderer-only comparison and require Manager integration.
 
-## Settings merge check
+## Operator-only settings follow-up
 
-The merged Settings → Chat component passed its nine Vitest cases, TypeScript checking and the
-production build. Chromium checked widths of 1280, 768 and 390 px with synthetic intercepted APIs:
-ledger and turn context remained independently writable, language and timezone saved, both missing-
-operator notices appeared, and no page error, console error or horizontal overflow was observed.
-This used a temporary Vite component harness, not a `looper serve` process.
+The turn-context fields now use `turn_context_settings.get` and `turn_context_settings.update`.
+Both are operator-only; update is high risk and declares confirmation. The chat settings view,
+validation and writes match main, and the chat-controls domain is unchanged from main.
+NFKC display-name normalization and per-field operator writes are retained.
 
-![Merged Chat settings at 390 px](turn-context-chat-settings.png)
+The default-off delivery-guard regression first reproduced the four extra response fields.
+The new boundary regressions also failed before the operations were separated; three UI tests
+failed when their fixtures stopped mixing the two settings views. After the fix, 467 Python
+cases passed across the 11 relevant files, including delivery-guard settings, API documentation,
+turn context, authorization, operator IDs and chat settings. Tests used `-n 2` and a disposable
+PostgreSQL database; none were skipped. All nine Chat settings Vitest cases, TypeScript checking,
+the production build, Ruff and whitespace checks passed. The existing large-chunk warning remains.
+
+A fresh `looper serve` instance with a disposable runtime root and database served the built
+dashboard on a separate loopback port. Chromium exercised real settings reads and writes,
+independent ledger/context state, timezone/language persistence after page reload, null reset,
+and rejection of an invalid timezone without changing the saved value. A synthetic 503 on the
+new read operation verified that legacy controls remain usable and retry restores the context
+controls. Only that failure case intercepted the API. Widths of 1280, 768 and 390 px had no
+horizontal overflow or page errors; the successful page is shown below. No model-visible content
+changed in this follow-up, so the renderer evaluations above were not rerun. No live channels or
+operator service were used.
+
+![Chat settings at 1280 px](turn-context-settings-1280.png)
+![Chat settings at 390 px](turn-context-settings-390.png)
