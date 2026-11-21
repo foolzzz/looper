@@ -102,6 +102,18 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   **Manager wiring is pending:** storing the switch currently changes no replies, prompts, records or
   channel calls. The policy, turn debt field and capability declaration are groundwork for that wiring;
   dashboard controls, follow-up records/metrics and runtime reminder injection come with it.
+- **Session budget rules** (`session_budget.py`, `manager.turn_budget_usd`, default off; assistant-layer RFC
+  section 5.4): `decide` takes a turn's context and cost and keeps the session, compacts it (a runtime with
+  `HEADLESS_COMPACTION`) or rotates it. It uses #1473's `schedule_session.session_bound` and the threshold
+  `scheduler.session_context_max_tokens` that schedule Planners use. A turn with an unknown context is kept, and
+  so is every turn while the budget is unset. Unlike #1473, an unknown turn cost skips the cost rule; context
+  alone can still compact or rotate. `after_compaction` rotates when the `/compact` failed, had no
+  `compact_boundary` or left the context over the threshold. `turn_cap` caps a turn at the budget when its model
+  has a price (`no_price` otherwise), and `over_cap_reply` is the fixed reply to a turn stopped there. The
+  operator-only v1 operations `session_budget.get` and `session_budget.update` read or store the budget (a
+  positive number of US dollars, null for off; the recommended value is $4.00) and report a stored value that is
+  not a budget. **Manager wiring is pending:** storing the budget changes no turn, prompt, record or command line
+  yet.
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
