@@ -891,7 +891,7 @@ async def _run_agent_system_watched(
             # It notes the user gates that have waited for the user for their project's reminder interval; the courier
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()
-            gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url)
+            gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url, post_card=registry.post_card)
             task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                                      on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
             wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
