@@ -197,12 +197,12 @@ def test_rejected_first_prompt_keeps_handoff_until_accepted(tmp_path, monkeypatc
                 agent = manager_module.ManagerAgent(
                     config=manager_module.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
                 agent._session_loaded = True
-                agent._session_runtime = launch.runtime.type
+                agent._sessions["main"].session_runtime = launch.runtime.type
                 agent._bus = bus
                 async def exchange(first):
                     return await agent._run_turn("Continue", _web("Continue"))
                 def session_id():
-                    return agent._session_id
+                    return agent._sessions["main"].session_id
             else:
                 agent = planner_module.PlannerAgent(task_id="handoff-task", runtime_root=tmp_path)
                 agent._plan = planner_module.TaskPlan("plan", "goal", "Continue", str(tmp_path), steps=[
