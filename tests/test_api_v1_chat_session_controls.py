@@ -182,14 +182,16 @@ def test_turn_keeps_working_when_the_setting_is_off(monkeypatch: pytest.MonkeyPa
 
 
 def test_the_dashboard_reads_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def ledger_off() -> bool:
+        return False
+
+    monkeypatch.setattr("looper.db.ledger.enabled", ledger_off)
     monkeypatch.setattr(chat_settings, "_stop_enabled", False)
     assert _call(_Manager(), "POST", "/api/v1/chat_settings/get") == (
-        200, {"stop_enabled": False, "completion_turns": "off", "research_order": False, **{key: chat_settings.settings_view()[key] for key in
-                    ("turn_context_enabled", "timezone", "server_timezone", "reply_language")}})
+        200, {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False, **{key: asyncio.run(chat_settings.settings_view())[key] for key in ("turn_context_enabled", "timezone", "server_timezone", "reply_language")}})
     monkeypatch.setattr(chat_settings, "_stop_enabled", True)
     assert _call(_Manager(), "POST", "/api/v1/chat_settings/get") == (
-        200, {"stop_enabled": True, "completion_turns": "off", "research_order": False, **{key: chat_settings.settings_view()[key] for key in
-                    ("turn_context_enabled", "timezone", "server_timezone", "reply_language")}})
+        200, {"stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False, **{key: asyncio.run(chat_settings.settings_view())[key] for key in ("turn_context_enabled", "timezone", "server_timezone", "reply_language")}})
 
 
 @pytest.mark.parametrize("body", [b"{}", b'{"stop_enabled": "yes"}', b'{"stop_enabled": 1}', b'{"other": true}'])

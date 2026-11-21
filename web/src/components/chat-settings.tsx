@@ -6,12 +6,14 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
-  type CompletionTurns, type ChatSettingsUpdate,
+  type CompletionTurns, type ChatSettingsUpdate, type MissingOperatorBot,
 } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
 
 const SELECT = "mt-1 w-full max-w-sm rounded-md border border-input bg-transparent px-3 py-1.5 text-sm text-foreground "
   + "pointer-coarse:h-11 pointer-coarse:text-base focus:outline-none focus:ring-2 focus:ring-primary/50";
+
+const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转述，直到你在 Settings → Channels 填上『我的 ID』";
 
 /** Why a completion turn's events got the code notice instead, in words (``manager_events.reason``). */
 const FALLBACK_REASONS: Record<string, string> = {
@@ -39,6 +41,7 @@ export function ChatSettingsSection() {
   const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [timezone, setTimezone] = useState("");
+  const [missingBots, setMissingBots] = useState<MissingOperatorBot[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -62,7 +65,11 @@ export function ChatSettingsSection() {
     setSaving(true);
     setError("");
     try {
-      setSettings(await updateChatSettings(body));
+      const next = await updateChatSettings(body);
+      setSettings(next);
+      if ("ledger_enabled" in body) {
+        setMissingBots(body.ledger_enabled && next.missing_operator_ids?.length ? next.missing_operator_ids : []);
+      }
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -112,6 +119,18 @@ export function ChatSettingsSection() {
               minutes.
             </p>
             <CompletionCounts summary={summary} error={summaryError} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-ledger`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-ledger`} type="checkbox" checked={settings.ledger_enabled} disabled={saving}
+                     aria-describedby={`${id}-ledger-help`}
+                     onChange={(event) => void save({ ledger_enabled: event.target.checked })} />
+              账本：登记等你确认的事、决定和谁在做什么
+            </label>
+            <p id={`${id}-ledger-help`} className="text-xs text-muted-foreground">
+              默认关闭。打开后开始登记，默认管家得到账本工具；关掉后不再登记，已经记下的还在。
+            </p>
+            {missingBots.length > 0 && <LedgerNotice bots={missingBots} />}
           </div>
           <div className="space-y-1.5">
             <label htmlFor={`${id}-context`} className="flex items-center gap-2 text-sm font-medium">
@@ -165,6 +184,22 @@ export function ChatSettingsSection() {
         </div>
       )}
     </Card>
+  );
+}
+
+function LedgerNotice({ bots }: { bots: MissingOperatorBot[] }) {
+  const [before, after] = LEDGER_NOTICE.split("Settings → Channels");
+  return (
+    <div role="status" className="space-y-1 rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-sm text-foreground">
+      <p>
+        {before}
+        <a href="#settings/channels" className="underline underline-offset-2">Settings → Channels</a>
+        {after}
+      </p>
+      <ul className="list-disc pl-5">
+        {bots.map((bot) => <li key={bot.channel_id}>{bot.name.trim() || bot.channel_id}</li>)}
+      </ul>
+    </div>
   );
 }
 

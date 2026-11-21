@@ -25,9 +25,10 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from ..message import AgentAddress, MessageEnvelope, manager_address
-from ..turn_context import SpeakerKind
 
 if TYPE_CHECKING:
+    from ..turn_context import SpeakerKind
+    from ..delivery_guard import DeliveryDebt
     from .service import OpsScope
 
 
@@ -156,6 +157,8 @@ class Turn:
     # Unset until per-turn context is wired; None preserves the existing authorization behavior.
     speaker: SpeakerKind | None = None
     operator_id_missing: bool = False
+    # Initialized explicitly by delivery-guard wiring; absent when disabled.
+    debt: DeliveryDebt | None = None
 
     def __post_init__(self) -> None:
         if self.origin is None:

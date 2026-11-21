@@ -550,22 +550,33 @@ export async function stopChatReply(messageId: string): Promise<{ state: string;
 /** Who tells a direct chat or the dashboard chat that its task ended: the code notice, or the Manager. */
 export type CompletionTurns = "off" | "dm_only";
 
+/** One enabled Lark or Telegram bot whose configuration has no operator id. */
+export interface MissingOperatorBot {
+  channel_id: string;
+  channel_type: string;
+  name: string;
+}
+
 /** The chat's system settings (Settings → Chat). */
 export interface ChatSettings {
   /** Whether a reply can be stopped (Esc, the Stop button, /stop). Experimental; off by default. */
   stop_enabled: boolean;
   /** Whether the Manager tells direct chats and the dashboard chat of a task's end (off by default). */
   completion_turns: CompletionTurns;
+  /** Whether the ledger records what waits, what was decided and who does what. Off by default. */
+  ledger_enabled: boolean;
   turn_context_enabled: boolean;
   timezone: string | null;
   server_timezone: string;
   reply_language: "zh-CN" | "en";
-  missing_operator_ids?: { channel_id: string; channel_type: string; name: string }[];
+  /** Bots with no operator id, returned when ledger or turn-context settings need them. */
+  missing_operator_ids?: MissingOperatorBot[];
 }
 
 export interface ChatSettingsUpdate {
   stop_enabled?: boolean | null;
   completion_turns?: CompletionTurns | null;
+  ledger_enabled?: boolean | null;
   turn_context_enabled?: boolean | null;
   timezone?: string | null;
   reply_language?: "zh-CN" | "en" | null;

@@ -12,16 +12,20 @@ const SUMMARY = {
   oldest_pending_seconds: null, failing: false,
 };
 
+const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转述，直到你在 Settings → Channels 填上『我的 ID』";
+
 describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
   let stored: Record<string, unknown>;
+  let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
 
   beforeEach(() => {
-    stored = { stop_enabled: false, completion_turns: "off", turn_context_enabled: false,
+    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false, turn_context_enabled: false,
       timezone: null, server_timezone: "America/Los_Angeles", reply_language: "zh-CN", missing_operator_ids: [] };
+    missing = [];
     summary = SUMMARY;
     puts = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -36,12 +40,14 @@ describe("Chat settings", () => {
       if (!["/api/v1/chat_settings/get", "/api/v1/chat_settings/update"].includes(path)) {
         throw new Error(`Unexpected request: ${input}`);
       }
+      let body: { ledger_enabled?: boolean } | null = null;
       if (path === "/api/v1/chat_settings/update") {
-        const body = JSON.parse(String(init?.body));
+        body = JSON.parse(String(init?.body));
         puts.push(body);
         stored = { ...stored, ...body };
       }
-      return Response.json({ status: "ok", result: stored });
+      const result = { ...stored, ...(body?.ledger_enabled === true ? { missing_operator_ids: missing } : {}) };
+      return Response.json({ status: "ok", result });
     }));
     container = document.createElement("div");
     document.body.append(container);
@@ -124,5 +130,47 @@ describe("Chat settings", () => {
     await act(async () => root.render(<ChatSettingsSection />));
     expect(container.textContent).toContain("Task-end counts are unavailable");
     expect((container.querySelector("select") as HTMLSelectElement).value).toBe("off");
+  });
+
+  it("turns the ledger on and names the bots that have no operator id", async () => {
+    missing = [{ channel_id: "channel-lark", channel_type: "lark", name: "Example Lark" }];
+    await act(async () => root.render(<ChatSettingsSection />));
+    const ledger = container.querySelector("input[aria-describedby$='-ledger-help']") as HTMLInputElement;
+    expect(ledger.checked).toBe(false);
+    await act(async () => ledger.click());
+    expect(puts).toEqual([{ ledger_enabled: true }]);
+    const notice = container.querySelector("[role=status]") as HTMLElement;
+    expect(notice.textContent).toContain(LEDGER_NOTICE);
+    expect(notice.querySelector("a")?.getAttribute("href")).toBe("#settings/channels");
+    expect(notice.querySelector("li")?.textContent).toBe("Example Lark");
+    expect(notice.textContent).not.toContain("channel-lark");
+  });
+
+  it("saves turn context independently while keeping the ledger enabled", async () => {
+    stored.ledger_enabled = true;
+    await act(async () => root.render(<ChatSettingsSection />));
+    const context = container.querySelector("input[aria-label='每轮上下文']") as HTMLInputElement;
+    await act(async () => context.click());
+    expect(puts).toEqual([{ turn_context_enabled: true }]);
+    expect((container.querySelector("input[aria-describedby$='-ledger-help']") as HTMLInputElement).checked).toBe(true);
+    expect(context.checked).toBe(true);
+  });
+
+  it("lists a bot by its channel id when the display name is empty", async () => {
+    missing = [{ channel_id: "channel-lark", channel_type: "lark", name: "" }];
+    await act(async () => root.render(<ChatSettingsSection />));
+    const ledger = container.querySelector("input[aria-describedby$='-ledger-help']") as HTMLInputElement;
+    await act(async () => ledger.click());
+    const item = container.querySelector("[role=status] li");
+    expect(item?.textContent).toBe("channel-lark");
+  });
+
+  it("shows no notice when turning the ledger on lists no bots", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const ledger = container.querySelector("input[aria-describedby$='-ledger-help']") as HTMLInputElement;
+    await act(async () => ledger.click());
+    expect(puts).toEqual([{ ledger_enabled: true }]);
+    expect(container.querySelector("[role=status]")).toBeNull();
+    expect(container.textContent).not.toContain(LEDGER_NOTICE);
   });
 });

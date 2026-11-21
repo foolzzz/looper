@@ -53,6 +53,13 @@ _SECRETS = re.compile(
     # looks like (a long identifier in code rarely mixes all three).
     r"|(?<![A-Za-z0-9+/_-])(?=[A-Za-z0-9+/_-]*\d)(?=[A-Za-z0-9+/_-]*[a-z])(?=[A-Za-z0-9+/_-]*[A-Z])"
     r"[A-Za-z0-9+/_-]{40,}={0,2}")
+
+
+def mask_secrets(text: str) -> str:
+    """``text`` with every key or token these checks find masked."""
+    return _SECRETS.sub("***", text)
+
+
 _PATHS = re.compile(
     # any absolute path of two or more segments, whatever its root and case; a home path; a Windows drive or
     # network path
