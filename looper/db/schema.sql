@@ -1139,6 +1139,13 @@ CREATE TABLE IF NOT EXISTS schedules (
     consecutive_overlaps INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_overlaps >= 0),
     deadline_alert_at TIMESTAMPTZ,
     overlap_alert_at TIMESTAMPTZ,
+    -- Throttle fields (proactive delivery RFC section 5, agents/schedule_throttle.py): the hours a firing may happen
+    -- in, in the schedule's timezone (NULL: all day; it may cross midnight), and whether a firing waits for its
+    -- Manager not to be answering (skipped_busy).
+    active_hours TEXT CONSTRAINT schedules_active_hours_check CHECK (
+        active_hours ~ '^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$'
+        AND split_part(active_hours, '-', 1) <> split_part(active_hours, '-', 2)),
+    idle_only BOOLEAN NOT NULL DEFAULT false,
     CONSTRAINT schedules_template_fkey FOREIGN KEY (manager_id, template_key)
         REFERENCES manager_task_templates(manager_id, key) ON DELETE RESTRICT,
     CONSTRAINT schedules_notify_target_check CHECK ((notify_channel IS NULL) = (notify_chat IS NULL)),
@@ -1182,7 +1189,7 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     status        TEXT NOT NULL CHECK (status IN (
                       'queued', 'gating', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
                       'gate_failed', 'skipped_overlap', 'skipped_missed', 'skipped_gate', 'skipped_budget',
-                      'succeeded', 'interrupted')),
+                      'succeeded', 'interrupted', 'skipped_busy')),
     task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     summary       TEXT,
     cost_usd      DOUBLE PRECISION,

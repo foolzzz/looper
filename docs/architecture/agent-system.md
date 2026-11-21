@@ -3162,6 +3162,20 @@ evaluation is required before the original schedule requirement is complete.
   `next_fire_at` the next one after now. Enabling a schedule, or changing the
   rule of an enabled one, sets `next_fire_at` from now: nothing missed before
   runs.
+- **Throttle fields** (`schedule_throttle`, default off). `active_hours`
+  (`HH:MM-HH:MM` in the schedule's timezone, may cross midnight; null all
+  day): a scheduled or catch-up firing whose fire time or now is outside it
+  does not happen at all (no run, `last_fired_at` unchanged, `next_fire_at`
+  the next one), as if the rule had not fired. `idle_only`: a firing while the
+  schedule's Manager answers a message (`ManagerAgent.busy`) is recorded
+  `skipped_busy` and the next firing tries again. "Run now" is never throttled.
+  The schedule's view has them as `throttle` with the two the schedule already
+  had: `allows_silence` (a subscription's quiet word; else `notify` other than
+  `always`) and `pre_check` (`gate_command` for an agent schedule with a gate,
+  `window` for a subscription, else `none`). API, generated CLI and config
+  export carry `active_hours` and `idle_only` (the export only when set); the
+  dashboard form does not edit them yet, and the Manager's `looper_schedules`
+  does not list them.
 - **A firing** while one of the schedule's tasks is still active (running,
   or created and about to start) is recorded `skipped_overlap`, or,
   with `overlap` `queue`, waits as the one `queued` run, which starts when that
@@ -3321,7 +3335,7 @@ evaluation is required before the original schedule requirement is complete.
   that stopped is `gate_failed` at the next start. A gate never runs twice at
   once: a firing while the schedule's run is `gating` is `skipped_overlap`.
 - **Repeated skips are counted, not stored.** A skipped firing (`skipped_gate`,
-  `skipped_overlap`, `skipped_missed`, `skipped_budget`) whose schedule's latest
+  `skipped_overlap`, `skipped_missed`, `skipped_budget`, `skipped_busy`) whose schedule's latest
   run is a skip for the same reason recorded the same day (the scheduler's day)
   is counted on that run (`schedule_runs.firings` one more, `finished_at` the
   latest firing), and a gate that found nothing leaves no row of its own
@@ -6430,7 +6444,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_mode` (`inherit`, `seconds` or `none`) and `run_timeout_seconds` (with `seconds`), `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `user_gates` (`off` by default, or `on` to opt its tasks into user gates), `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
-| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
+| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`, `skipped_busy`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`, `manager_event_id` (the completion event that told a run's message: the Manager's reply or its fallback; NULL otherwise; a partial index, built online on an existing database); going with its schedule |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report and the scheduler's `scheduler.min_interval_seconds` and `scheduler.run_timeout_seconds` |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
