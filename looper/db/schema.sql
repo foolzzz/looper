@@ -2354,6 +2354,10 @@ $$;
 -- (connection.py ``_ONLINE_STEPS``).
 CREATE INDEX IF NOT EXISTS idx_chat_messages_search ON chat_messages
     USING gin (array_to_tsvector(looper_search_tokens(content))) WHERE role IN ('user', 'assistant');
+-- The leads full-text search's candidates (db/message_leads.py; with pg_trgm, connection.py adds a trigram index on
+-- the same text). A database that predates it builds it online.
+CREATE INDEX IF NOT EXISTS idx_message_leads_search ON message_leads
+    USING gin (array_to_tsvector(looper_search_tokens(summary || ' ' || detail)));
 
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online

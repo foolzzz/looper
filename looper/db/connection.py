@@ -185,6 +185,28 @@ _SEARCH_INDEXES = (
     ("idx_chat_messages_search",
      "ON chat_messages USING gin (array_to_tsvector(looper_search_tokens(content))) WHERE role IN ('user', 'assistant')"),
 )
+_LEADS_TRIGRAM = "leads_trigram"
+_LEADS_SEARCH = "leads_search"
+# The leads full-text search's token index, as schema.sql creates it after the session search's.
+_LEADS_SEARCH_INDEXES = (
+    ("idx_message_leads_search",
+     "ON message_leads USING gin (array_to_tsvector(looper_search_tokens(summary || ' ' || detail)))"),
+)
+# Its trigram index, made wherever pg_trgm is installed (``_leads_trigram_index_pending``): leads are few, so it is
+# built in the schema transaction.
+_LEADS_TRIGRAM_INDEX = "idx_message_leads_trigram"
+# pg_trgm for the leads' full-text search (assistant search RFC, section 4), in the schema public whatever schema
+# Looper's tables are in, so every schema of the database shares one: created when the database lets this user
+# create it (a trusted extension needs CREATE on the database and on public), else skipped; the search finds it
+# wherever it is installed and works without it.
+_LEADS_TRIGRAM_DDL = """
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public;
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'pg_trgm is not available (%): the leads full-text search matches without it', SQLERRM;
+END $$;
+"""
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -415,6 +437,7 @@ _ONLINE_STEPS = (
     _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
     # chat_messages can be large: the session search's index is built without blocking writes.
     _OnlineStep(_SEARCH_TOKENS, "search_tokens_online", indexes=_SEARCH_INDEXES),
+    _OnlineStep(_LEADS_SEARCH, "leads_search_online", indexes=_LEADS_SEARCH_INDEXES),
 )
 
 
@@ -1118,6 +1141,32 @@ async def _chat_direct_threads_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('chat_direct_threads') IS NOT NULL")
 
 
+async def _leads_search_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEADS_SEARCH):
+        return False
+    return await conn.fetchval("SELECT to_regclass('message_leads') IS NOT NULL "
+                               "AND to_regclass('idx_message_leads_search') IS NULL")
+
+
+async def _trigram_schema(conn: asyncpg.Connection) -> str | None:
+    """The schema pg_trgm is installed in, quoted; None when it is not."""
+    return await conn.fetchval("SELECT quote_ident(n.nspname) FROM pg_extension e "
+                               "JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'")
+
+
+async def _leads_trigram_index_pending(conn: asyncpg.Connection) -> bool:
+    """pg_trgm is installed and the leads have no trigram index yet."""
+    return (await _trigram_schema(conn) is not None and await conn.fetchval(
+        "SELECT to_regclass('message_leads') IS NOT NULL AND to_regclass($1) IS NULL", _LEADS_TRIGRAM_INDEX))
+
+
+async def _leads_trigram_pending(conn: asyncpg.Connection) -> bool:
+    """pg_trgm has not been tried on this database: it is not installed and no start recorded trying it."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEADS_TRIGRAM):
+        return False
+    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')")
+
+
 async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_EVENTS):
         return False
@@ -1743,6 +1792,16 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _search_tokens_pending(conn):
             await conn.execute(_search_tokens_ddl())  # its index is built online, after this commits
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SEARCH_TOKENS)
+        if await _leads_trigram_pending(conn):
+            await conn.execute(_LEADS_TRIGRAM_DDL)
+            if state != "empty":  # a fresh database records only its baseline; it is tried again next start
+                await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEADS_TRIGRAM)
+        if await _leads_trigram_index_pending(conn):
+            await conn.execute(f"CREATE INDEX IF NOT EXISTS {_LEADS_TRIGRAM_INDEX} ON message_leads USING gin "
+                               f"(lower(summary || ' ' || detail) {await _trigram_schema(conn)}.gin_trgm_ops)")
+        if await _leads_search_pending(conn):
+            # The search tokens block above made its function; its index is built online, after this commits.
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEADS_SEARCH)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1812,4 +1871,6 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
             or await _mid_turn_input_pending(conn)
-            or await _chat_direct_threads_pending(conn) or await _search_tokens_pending(conn)))
+            or await _chat_direct_threads_pending(conn) or await _search_tokens_pending(conn)
+            or await _leads_trigram_pending(conn) or await _leads_trigram_index_pending(conn)
+            or await _leads_search_pending(conn)))
