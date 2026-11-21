@@ -2286,3 +2286,225 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_created ON outbound_reviews (cre
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_id) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
 -- outbound reviews end
+
+-- memory candidates begin
+-- What Looper may remember (memory-write-path RFC, section 4; memory-tiers RFC, section 4.1). A 'vault' row is staged
+-- until the operator confirms its exact content, then written to the knowledge vault; a 'looper' row is a lesson that
+-- takes effect in this database only (the tiers RFC; nothing writes one yet). Code owns the transitions
+-- (agents/memory_model.TRANSITIONS); these constraints keep what each state needs.
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,           -- shown as M-0042
+    kind               TEXT NOT NULL CHECK (kind IN ('preference', 'feedback', 'decision', 'lesson', 'fact',
+                                                     'commitment', 'person', 'project')),
+    source_kind        TEXT NOT NULL CHECK (source_kind IN ('manager_turn', 'task', 'lead')),   -- its first source
+    -- The least trusted class among its sources (operator > system > agent > external), set by code.
+    source_class       TEXT NOT NULL CHECK (source_class IN ('operator', 'agent', 'external', 'system')),
+    destination        TEXT NOT NULL DEFAULT 'vault' CHECK (destination IN ('vault', 'looper')),
+    state              TEXT NOT NULL DEFAULT 'drafting' CHECK (state IN (
+                           'drafting', 'pending', 'confirmed', 'writing', 'written', 'rejected', 'expired',
+                           'conflict', 'blocked', 'dropped',
+                           'held', 'in_effect', 'revoked', 'superseded')),   -- the last four: 'looper' only
+    reason             TEXT CHECK (reason IN (
+                           'duplicate', 'rejected_before', 'same_as', 'invalid', 'secret', 'draft_failed',
+                           'base_changed', 'anchor_missing', 'target_changed',
+                           'vault_problem', 'not_git', 'detached_head', 'branch_mismatch', 'operation_in_progress',
+                           'dirty_target', 'hook_rejected', 'git_failed', 'git_timeout', 'commit_mismatch',
+                           'worktree_failed', 'interrupted',
+                           'overwrite_gate', 'external_source', 'shadow', 'project_cap', 'flagged_wrong')),
+    statement          TEXT NOT NULL CHECK (char_length(statement) <= 300),
+    why                TEXT NOT NULL DEFAULT '' CHECK (char_length(why) <= 300),
+    keywords           TEXT[] NOT NULL DEFAULT '{}' CHECK (cardinality(keywords) <= 6),
+    fingerprint        TEXT NOT NULL CHECK (fingerprint ~ '^[0-9a-f]{64}$'),   -- kind + normalized statement
+    project_id         TEXT REFERENCES projects(id) ON DELETE SET NULL,   -- a 'looper' row's goes with its project
+    supersedes         BIGINT REFERENCES memory_candidates(id) ON DELETE SET NULL,
+    valid_until        TIMESTAMPTZ,                      -- 'looper' only
+    manager_id         TEXT REFERENCES managers(id) ON DELETE SET NULL,   -- the Manager that proposed it
+    untrusted          BOOLEAN NOT NULL DEFAULT false,   -- its seed's text came from messages (a lead)
+    flagged            BOOLEAN NOT NULL DEFAULT false,   -- its drafting listed instructions_seen
+    hard_rule          BOOLEAN NOT NULL DEFAULT false,
+    revision           INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),   -- the current revision; 0: none yet
+    title              TEXT CHECK (char_length(title) <= 60),
+    note_path          TEXT,                             -- the note it creates or replaces, vault-relative
+    content_hash       TEXT CHECK (content_hash ~ '^[0-9a-f]{64}$'),   -- the current revision's
+    confirmed_event_id BIGINT,
+    confirmed_actor    TEXT CHECK (confirmed_actor = 'user'),
+    confirmed_hash     TEXT,
+    merged_into        BIGINT REFERENCES memory_candidates(id) ON DELETE SET NULL,
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),   -- writes of the current confirmation
+    commit_sha         TEXT CHECK (commit_sha ~ '^[0-9a-f]{40,64}$'),
+    expires_at         TIMESTAMPTZ,                      -- pending only
+    purged_at          TIMESTAMPTZ,                      -- a source was deleted after it was written
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    written_at         TIMESTAMPTZ,
+    CONSTRAINT memory_candidates_text CHECK (purged_at IS NOT NULL OR btrim(statement) <> ''),
+    CONSTRAINT memory_candidates_content CHECK (destination = 'looper' OR state IN ('drafting', 'dropped')
+                                                OR (revision >= 1 AND content_hash IS NOT NULL)),
+    -- Two lifecycles, never mixed: a 'looper' row is a project's lesson with a validity, and has no revision,
+    -- confirmation, note or commit.
+    CONSTRAINT memory_candidates_tier CHECK (CASE destination
+        WHEN 'vault' THEN state NOT IN ('held', 'in_effect', 'revoked', 'superseded') AND valid_until IS NULL
+        ELSE state IN ('held', 'in_effect', 'revoked', 'superseded', 'expired', 'rejected')
+             AND kind = 'lesson' AND project_id IS NOT NULL AND valid_until IS NOT NULL
+             AND revision = 0 AND note_path IS NULL END),
+    -- Nothing from outside or from the system takes effect on its own.
+    CONSTRAINT memory_candidates_effect CHECK (state <> 'in_effect' OR source_class = 'agent'),
+    CONSTRAINT memory_candidates_supersedes CHECK (supersedes IS NULL OR supersedes <> id),
+    -- Confirmed exactly while a confirmation of the current content holds; the foreign key below makes it the
+    -- operator's (MATCH SIMPLE, so the three columns go together).
+    CONSTRAINT memory_candidates_confirmed CHECK (
+        (confirmed_event_id IS NULL) = (confirmed_actor IS NULL)
+        AND (confirmed_event_id IS NULL) = (confirmed_hash IS NULL)
+        AND (state IN ('confirmed', 'writing', 'written', 'blocked')) = (confirmed_event_id IS NOT NULL)
+        AND (confirmed_hash IS NULL OR confirmed_hash = content_hash)),
+    CONSTRAINT memory_candidates_written CHECK ((state = 'written') = (commit_sha IS NOT NULL)
+                                                AND (state = 'written') = (written_at IS NOT NULL)),
+    CONSTRAINT memory_candidates_reason CHECK ((state IN ('dropped', 'conflict', 'blocked', 'held')) = (reason IS NOT NULL)),
+    CONSTRAINT memory_candidates_merged CHECK (merged_into IS NULL OR (state = 'dropped' AND reason = 'same_as')),
+    CONSTRAINT memory_candidates_expiry CHECK ((state = 'pending') = (expires_at IS NOT NULL)),
+    CONSTRAINT memory_candidates_purged CHECK (purged_at IS NULL OR state = 'written')
+);
+
+-- One per change of content: the typed changes, with the paths and base sha256s code resolved.
+CREATE TABLE IF NOT EXISTS memory_candidate_revisions (
+    candidate_id  BIGINT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
+    revision      INTEGER NOT NULL CHECK (revision >= 1),
+    made_by       TEXT NOT NULL CHECK (made_by IN ('draft', 'redraft', 'operator')),
+    changes       JSONB NOT NULL CHECK (jsonb_typeof(changes) = 'array'),   -- '[]' once purged
+    content_hash  TEXT NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+    title         TEXT NOT NULL CHECK (btrim(title) <> '' AND char_length(title) <= 60),
+    diff_stats    JSONB NOT NULL CHECK (jsonb_typeof(diff_stats) = 'object'),   -- per path: added, removed lines
+    large_removal BOOLEAN NOT NULL DEFAULT false,
+    record_id     BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,    -- its drafting run
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (candidate_id, revision)
+);
+
+-- Only ever added. A confirmation is one of these, by the operator, naming the hash it confirmed.
+CREATE TABLE IF NOT EXISTS memory_candidate_events (
+    id            BIGSERIAL PRIMARY KEY,
+    candidate_id  BIGINT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
+    action        TEXT NOT NULL CHECK (action IN (
+                      'propose', 'draft', 'edit', 'push', 'confirm', 'reject', 'expire', 'revive', 'claim', 'write',
+                      'conflict', 'block', 'retry', 'recover', 'redraft', 'drop', 'merge',
+                      'activate', 'hold', 'revoke', 'renew', 'reinforce', 'supersede', 'promote')),
+    actor_kind    TEXT NOT NULL CHECK (actor_kind IN ('user', 'manager', 'planner', 'system')),
+    via           TEXT NOT NULL CHECK (via IN ('dashboard', 'lark', 'telegram', 'cli', 'system')),
+    revision      INTEGER,
+    content_hash  TEXT CHECK (content_hash ~ '^[0-9a-f]{64}$'),   -- confirm, edit: confirmed or written; push: shown
+    post_id       BIGINT,               -- a confirmation from a DM reply: the push it answered
+    channel_id    TEXT,
+    chat          TEXT,
+    message_id    TEXT,                 -- a DM reply: the message that said it
+    note          TEXT CHECK (char_length(note) <= 300),   -- a reject reason; a fixed failure text
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (id, actor_kind, content_hash),
+    CONSTRAINT memory_events_user CHECK (action NOT IN ('confirm', 'reject', 'edit', 'revive', 'retry', 'revoke',
+                                                        'renew', 'promote') OR actor_kind = 'user'),
+    CONSTRAINT memory_events_confirm CHECK (action <> 'confirm'
+                                            OR (content_hash IS NOT NULL AND via IN ('dashboard', 'lark', 'telegram'))),
+    CONSTRAINT memory_events_activate CHECK (action <> 'activate' OR actor_kind = 'system'
+                                             OR (actor_kind = 'user' AND via IN ('dashboard', 'lark', 'telegram'))),
+    CONSTRAINT memory_events_system CHECK (action NOT IN ('hold', 'recover') OR actor_kind = 'system')
+);
+
+-- The evidence of a candidate: one row per source it was made or merged from.
+CREATE TABLE IF NOT EXISTS memory_candidate_sources (
+    id                 BIGSERIAL PRIMARY KEY,
+    candidate_id       BIGINT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
+    kind               TEXT NOT NULL CHECK (kind IN ('manager_turn', 'journal', 'lead')),
+    source_class       TEXT GENERATED ALWAYS AS (CASE kind WHEN 'manager_turn' THEN 'operator'
+                           WHEN 'journal' THEN 'agent' WHEN 'lead' THEN 'external' END) STORED,
+    manager_action_id  BIGINT REFERENCES manager_actions(id) ON DELETE CASCADE,   -- the propose call
+    journal_id         BIGINT REFERENCES task_journal(id) ON DELETE CASCADE,
+    lead_id            BIGINT REFERENCES message_leads(id) ON DELETE CASCADE,
+    quote              TEXT CHECK (char_length(quote) <= 500),                    -- manager_turn: checked by code
+    CONSTRAINT memory_sources_ref CHECK (
+        (kind = 'manager_turn') = (manager_action_id IS NOT NULL)
+        AND (kind = 'journal') = (journal_id IS NOT NULL)
+        AND (kind = 'lead') = (lead_id IS NOT NULL)
+        AND (quote IS NULL OR kind = 'manager_turn'))
+);
+
+-- One message Looper sent about a candidate, claimed before the channel is asked (as intent_posts).
+CREATE TABLE IF NOT EXISTS memory_posts (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    candidate_id  BIGINT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL CHECK (kind IN ('push', 'final')),
+    revision      INTEGER NOT NULL,
+    content_hash  TEXT NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),   -- the revision it showed
+    complete      BOOLEAN NOT NULL,     -- it showed every changed line: a DM「记」may confirm it
+    channel_id    TEXT NOT NULL,
+    chat          TEXT NOT NULL,
+    text          TEXT NOT NULL,        -- '' once purged
+    state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    external_id   TEXT,
+    edited_at     TIMESTAMPTZ,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    error         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- What is left after the operator deletes a candidate: no text, no source.
+CREATE TABLE IF NOT EXISTS memory_tombstones (
+    fingerprint  TEXT PRIMARY KEY CHECK (fingerprint ~ '^[0-9a-f]{64}$'),
+    kind         TEXT NOT NULL,
+    destination  TEXT NOT NULL CHECK (destination IN ('vault', 'looper')),
+    deleted_via  TEXT NOT NULL CHECK (deleted_via IN ('dashboard', 'cli')),
+    deleted_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_open ON memory_candidates (state, updated_at DESC)
+    WHERE state NOT IN ('written', 'rejected', 'dropped');
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_expiry ON memory_candidates (expires_at) WHERE state = 'pending';
+-- One open candidate per note: a second seed for it revises the first.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_candidates_note ON memory_candidates (note_path)
+    WHERE note_path IS NOT NULL AND state IN ('pending', 'confirmed', 'writing', 'conflict', 'blocked');
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_drafting ON memory_candidates (id) WHERE state = 'drafting';
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_fingerprint ON memory_candidates (fingerprint);
+CREATE INDEX IF NOT EXISTS idx_memory_events_candidate ON memory_candidate_events (candidate_id, id);
+CREATE INDEX IF NOT EXISTS idx_memory_sources_candidate ON memory_candidate_sources (candidate_id);
+CREATE INDEX IF NOT EXISTS idx_memory_sources_action ON memory_candidate_sources (manager_action_id)
+    WHERE manager_action_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memory_sources_journal ON memory_candidate_sources (journal_id)
+    WHERE journal_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memory_sources_lead ON memory_candidate_sources (lead_id) WHERE lead_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memory_posts_candidate ON memory_posts (candidate_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_posts_external ON memory_posts (channel_id, external_id)
+    WHERE external_id IS NOT NULL;
+
+DO $memory$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'memory_candidates'::regclass
+                      AND conname = 'memory_candidates_confirm_fk') THEN
+        ALTER TABLE memory_candidates ADD CONSTRAINT memory_candidates_confirm_fk
+            FOREIGN KEY (confirmed_event_id, confirmed_actor, confirmed_hash)
+            REFERENCES memory_candidate_events (id, actor_kind, content_hash);
+    END IF;
+END $memory$;
+
+-- A deleted source takes a candidate that was not written yet (its text may restate the source); a written one keeps
+-- only its paths, hashes, commit and times. A candidate deleted itself takes its sources, and this finds no row.
+CREATE OR REPLACE FUNCTION memory_candidates_source_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM memory_candidates WHERE id = OLD.candidate_id AND state <> 'written';
+    UPDATE memory_candidates SET statement = '', why = '', keywords = '{}', purged_at = now(), updated_at = now()
+        WHERE id = OLD.candidate_id AND purged_at IS NULL;
+    UPDATE memory_candidate_revisions SET changes = '[]' WHERE candidate_id = OLD.candidate_id;
+    UPDATE memory_posts SET text = '', updated_at = now() WHERE candidate_id = OLD.candidate_id;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS memory_candidate_sources_drop ON memory_candidate_sources;
+CREATE TRIGGER memory_candidate_sources_drop AFTER DELETE ON memory_candidate_sources
+    FOR EACH ROW EXECUTE FUNCTION memory_candidates_source_deleted();
+
+-- A 'looper' row must have its project: a deleted project takes its lessons (a 'vault' row only loses the link).
+CREATE OR REPLACE FUNCTION memory_candidates_project_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM memory_candidates WHERE project_id = OLD.id AND destination = 'looper';
+    RETURN OLD;
+END $$;
+DROP TRIGGER IF EXISTS projects_memory_lessons_drop ON projects;
+CREATE TRIGGER projects_memory_lessons_drop BEFORE DELETE ON projects
+    FOR EACH ROW EXECUTE FUNCTION memory_candidates_project_deleted();
+-- memory candidates end

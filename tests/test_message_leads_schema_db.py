@@ -9,6 +9,7 @@ import pytest
 from looper.agents import leads, leads_model
 from looper.db import connection
 from tests import leads_support as sup
+from tests import memory_support as memory
 from tests import subscription_support as stream
 from tests.db_support import DSN, run_db
 
@@ -119,6 +120,7 @@ def test_the_extraction_switch_the_output_kinds_and_the_builtin_types(monkeypatc
 def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
     async def check(pool):
         await pool.execute(
+            memory.DROP_MEMORY +  # memory candidates point at leads: a database without leads predates them too
             "DROP TABLE intent_posts, intent_sources, intents, intent_alert_senders, message_chat_projects, "
             "intent_type_projects, intent_type_versions, intent_types, message_lead_people, message_lead_sources, "
             "message_leads; ALTER TABLE source_chats DROP CONSTRAINT source_chats_extraction_check, "
@@ -135,6 +137,7 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
         await connection.ensure_schema(pool)  # and a second upgrade changes nothing
         assert await pool.fetchval("SELECT count(*) FROM message_leads") == 1
         assert await pool.fetchval("SELECT count(*) FROM intent_type_versions") == 3
+        assert await pool.fetchval("SELECT to_regclass('memory_candidate_sources') IS NOT NULL")
 
     run_db(check, monkeypatch, timeout=30)
 
