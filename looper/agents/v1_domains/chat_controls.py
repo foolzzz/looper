@@ -31,8 +31,10 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
                      "stopping": _BOOL, "can_interrupt": _BOOL})
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
 _MISSING_BOT = _object({"channel_id": _STR, "channel_type": _STR, "name": _STR}, closed=True)
+_MAX_RESIDENT = {"type": "integer", "minimum": chat_settings.session_routing.MAX_RESIDENT_RANGE[0],
+                 "maximum": chat_settings.session_routing.MAX_RESIDENT_RANGE[1]}
 CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL,
-                         "ledger_enabled": _BOOL})
+                         "ledger_enabled": _BOOL, "session_routing_enabled": _BOOL, "max_resident": _MAX_RESIDENT})
 CHAT_SETTINGS_UPDATED = _object({**CHAT_SETTINGS["properties"], "missing_operator_ids": _array(_MISSING_BOT)},
                                 required=CHAT_SETTINGS["required"])
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
@@ -59,15 +61,17 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read the chat settings: reply stopping, completion turns, research order and whether "
-        "the ledger is on.",
+    _op("chat_settings.get", "Read the chat settings: reply stopping, completion turns, research order, the ledger "
+        "and session routing.",
         _object({}, closed=True), CHAT_SETTINGS),
-    _op("chat_settings.update", "Change the named chat settings; null restores a default. Turning the ledger on "
-        "lists enabled bots with no operator id.",
+    _op("chat_settings.update", "Change chat settings; null restores a default. Turning the ledger or session "
+        "routing on lists bots with no operator id.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
                  "research_order": {"type": ["boolean", "null"]},
-                 "ledger_enabled": {"type": ["boolean", "null"]}},
+                 "ledger_enabled": {"type": ["boolean", "null"]},
+                 "session_routing_enabled": {"type": ["boolean", "null"]},
+                 "max_resident": {**_MAX_RESIDENT, "type": ["integer", "null"]}},
                 [], closed=True), CHAT_SETTINGS_UPDATED, "high"),
 )
 
@@ -79,8 +83,7 @@ async def impact(server, operation, arguments, principal, headers):
         values = chat_settings.checked(arguments)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
-    if "ledger_enabled" in values and principal.kind != "operator":
-        raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
+    _check_operator(values, principal)
     changes = []
     if "stop_enabled" in values:
         value = values["stop_enabled"]
@@ -121,7 +124,36 @@ async def impact(server, operation, arguments, principal, headers):
         else:
             changes.append(f"Set ledger.enabled to false{' (built-in default)' if value is None else ''}? "
                            "New items stop being recorded. Items already recorded stay.")
+    if "session_routing_enabled" in values:
+        value = values["session_routing_enabled"]
+        if value:
+            from ..channels.operator_ids import missing
+
+            names = [bot.name for bot in await missing()]
+            listed = ("" if not names else
+                      " These bots have no My ID, so their direct chats stay in the main session until Settings → "
+                      "Channels has one: " + ", ".join(names) + ".")
+            changes.append("Set manager.session_routing.enabled to true? From the next message, each group and each "
+                           "other sender's direct chat of the default Manager runs in a session of its own, in "
+                           "parallel with the main one." + listed)
+        else:
+            changes.append(f"Set manager.session_routing.enabled to false"
+                           f"{' (built-in default)' if value is None else ''}? New messages go to the main session "
+                           "again; replies under way finish, and the other sessions stop once idle.")
+    if "max_resident" in values:
+        value = values["max_resident"]
+        count = chat_settings.session_routing.DEFAULT_MAX_RESIDENT if value is None else value
+        changes.append(f"Set manager.sessions.max_resident to {count}{' (built-in default)' if value is None else ''}? "
+                       "At most this many sessions keep a process running; an idle one beyond it is stopped and "
+                       "resumes on its next message.")
     return " ".join(changes)
+
+
+def _check_operator(values, principal):
+    """The ledger and session routing settings are the operator's: a client that names one is refused whole."""
+    for field in chat_settings.OPERATOR_FIELDS:
+        if field in values and principal.kind != "operator":
+            raise OpError(ErrorCode.FORBIDDEN, f"{field} requires operator identity")
 
 
 def _manager(server, manager_id):
@@ -148,8 +180,7 @@ async def run(server, operation, arguments, principal, headers):
     if name == "chat_settings.get":
         return await chat_settings.settings_view()
     if name == "chat_settings.update":
-        if "ledger_enabled" in arguments and principal.kind != "operator":
-            raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
+        _check_operator(arguments, principal)
         try:
             return await chat_settings.update(arguments)
         except ValueError as exc:

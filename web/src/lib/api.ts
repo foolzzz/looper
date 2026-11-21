@@ -565,7 +565,11 @@ export interface ChatSettings {
   completion_turns: CompletionTurns;
   /** Whether the ledger records what waits, what was decided and who does what. Off by default. */
   ledger_enabled: boolean;
-  /** Present when an update turns the ledger on: bots with no operator id. Empty when every bot has one. */
+  /** Whether the default Manager gives each group and each other sender's direct chat a session of its own. Off by default. */
+  session_routing_enabled: boolean;
+  /** How many sessions keep a process running (1..16, default 2). */
+  max_resident: number;
+  /** Present when an update turns the ledger or session routing on: bots with no operator id. Empty when every bot has one. */
   missing_operator_ids?: MissingOperatorBot[];
 }
 
@@ -595,7 +599,10 @@ export async function fetchChatSettings(): Promise<ChatSettings> {
 }
 
 export async function updateChatSettings(
-  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; ledger_enabled?: boolean | null },
+  body: {
+    stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; ledger_enabled?: boolean | null;
+    session_routing_enabled?: boolean | null; max_resident?: number | null;
+  },
 ): Promise<ChatSettings> {
   const result = await callV1<ChatSettings>("/api/v1/chat_settings/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);

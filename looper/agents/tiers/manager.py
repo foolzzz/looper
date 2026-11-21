@@ -95,6 +95,8 @@ from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered
 from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_field
+from .manager_routing import SessionRouter
+from .. import session_routing
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
@@ -134,6 +136,7 @@ from ...db import tasks as db_tasks
 from ...db import manager_events as db_manager_events
 from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
+from ...db import manager_sessions as db_manager_sessions
 from ...db import api_sessions as db_api_sessions
 from ...db import llm_records as db_llm_records
 from ...db.llm_records import RecordStatus
@@ -141,6 +144,7 @@ from ...db import projects as db_projects
 from ...db import user_gates as db_user_gates
 
 TURNED_OFF_REPLY = "This Manager was turned off; your message was not handled."
+PROFILE_NOT_HERE_REPLY = "群和他人的私聊使用管家的设置，不能单独选 Profile。"
 
 SCOPE_HEADING = "## This Manager's scope"
 SCOPE_TOOLS = {
@@ -391,7 +395,7 @@ NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
-    "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
+    "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
 
@@ -863,6 +867,7 @@ class ManagerAgent:
             key=MAIN_SESSION, claude=CLAUDE_CODE.resident_session(self.agent_id), claude_runtime=CLAUDE_CODE,
             last_activity=clock())}
         self._clock = clock
+        self._router = SessionRouter(self)  # the sessions' workers while session routing is on
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
@@ -907,14 +912,20 @@ class ManagerAgent:
         session = self._current.get()
         return self._sessions[MAIN_SESSION] if session is None else session
 
+    def _resident_label(self) -> str:
+        """The label of the resident runtime of the session the code runs on: main's is the Manager's id."""
+        return session_routing.resident_label(self.agent_id, self._session_now().route)
+
     async def _load_session_state(self, session: ManagerSession | None = None) -> None:
         """Read the session a previous run saved, once; without a readable one the next turn starts a new one.
         ``session`` (default: the one the code runs on) is main's: the saved session is ``agent_sessions``'."""
         session = self._session_now() if session is None else session
         session.session_loaded = True
         try:
-            saved = await db_agent_sessions.get_session(self.agent_id)
+            saved = (await db_agent_sessions.get_session(self.agent_id) if session.key == MAIN_SESSION
+                     else await db_manager_sessions.get(self.agent_id, session.key))
         except Exception:
+            # Another session starts new rather than read main's: that would bring a group into your context.
             logger.warning("%s: cannot read its saved session; starting a new one", self._log, exc_info=True)
             return
         if saved:
@@ -939,12 +950,21 @@ class ManagerAgent:
                 and await db_api_sessions.last_turn(session.session_id, pool=pool) is not None:
             # API init can precede a failed request: only committed history owns the brief safely.
             handoff = None
-        await db_agent_sessions.save_session(self.agent_id, session.session_id, session.session_totals.to_dict(),
-                                             runtime_type=session.session_runtime,
-                                             provider_id=session.session_provider,
-                                             profile_id=session.session_profile, clean_start=session.clean_start,
-                                             pending_handoff=handoff,
-                                             pool=pool)
+        if session.key != MAIN_SESSION:
+            route = session.route
+            await db_manager_sessions.save({
+                "manager_id": self.agent_id, "session_key": session.key, "kind": route.kind.value,
+                "channel_id": route.channel_id, "chat": route.chat, "session_id": session.session_id,
+                "session_totals": session.session_totals.to_dict(), "runtime_type": session.session_runtime,
+                "profile_id": session.session_profile, "provider_id": session.session_provider,
+                "clean_start": session.clean_start, "pending_handoff": handoff}, pool=pool)
+        else:
+            await db_agent_sessions.save_session(self.agent_id, session.session_id, session.session_totals.to_dict(),
+                                                 runtime_type=session.session_runtime,
+                                                 provider_id=session.session_provider,
+                                                 profile_id=session.session_profile, clean_start=session.clean_start,
+                                                 pending_handoff=handoff,
+                                                 pool=pool)
         if not session.clean_start and session.pending_handoff and handoff is None:
             session.pending_switch = session.pending_handoff = None
 
@@ -1086,8 +1106,8 @@ class ManagerAgent:
         for session in self._sessions.values():  # every session's
             if session.running_token is not None:
                 tokens.append(session.running_token)  # settled while its record finishes, but still answering the chat
-        pending = ([(self._handling, "")] if self._handling is not None else []) + [
-            (t.envelope, t.partial) for t in tokens if t.envelope is not None]
+        handling = ([self._handling] if self._handling is not None else []) + self._router.handling()
+        pending = [(e, "") for e in handling] + [(t.envelope, t.partial) for t in tokens if t.envelope is not None]
         self.stopped_in_flight = tuple({e.message_id: (e, partial) for e, partial in pending}.values())
         if self._bus is not None:
             self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._receive)
@@ -1100,6 +1120,12 @@ class ManagerAgent:
                 logger.warning("%s: turn drain did not finish within %.1f s; proceeding with shutdown",
                                self._log, STOP_DRAIN_SEC)
             self._task = None
+        try:
+            async with asyncio.timeout(STOP_DRAIN_SEC):
+                await self._router.stop()  # the sessions' workers, with session routing on
+        except TimeoutError:
+            logger.warning("%s: the sessions' turns did not end within %.1f s; proceeding with shutdown",
+                           self._log, STOP_DRAIN_SEC)
         for token in self._turns.live():
             token.settle(ReplyOutcome.STOPPED)
         self._turns.clear()
@@ -1123,7 +1149,7 @@ class ManagerAgent:
                 closing.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
 
     def _idle_blocked(self) -> bool:
-        return bool(self.busy or self._handling is not None
+        return bool(self.busy or self._handling is not None or self._router.pending()
                     or any(session.running_token is not None for session in self._sessions.values())  # any session's
                     or self._turns.live() or (self._bus and self._bus.pending_count(self.agent_id)))
 
@@ -1138,6 +1164,7 @@ class ManagerAgent:
     async def try_suspend_idle(self, now: float) -> bool:
         """Close only a provably idle resident, retaining the enabled agent and its complete session state."""
         main = self._sessions[MAIN_SESSION]  # main's: the resident the idle timeout closes
+        await self._router.sweep()  # session routing switched off: the other sessions' idle processes stop
         timeout = self._definition.idle_timeout_seconds
         if self.agent_id == DEFAULT_MANAGER_ID or not timeout or not self._running or self._turned_off:
             return False
@@ -1187,13 +1214,16 @@ class ManagerAgent:
                 await self._config.http_ready.wait()
             if self._tools_ready is not None:
                 await self._tools_ready.wait()
-            async for envelope in self._bus.subscribe(self.agent_id):
+            async for envelope in self._bus.subscribe(self.agent_id, settle=False):
                 if not self._running:
                     break
                 # Before persisting chat, emitting status, commands, or taking _turn_lock.
-                # subscribe() acknowledges only after this handler returns; restart replays held messages.
+                # A message is settled only after its handler returns; restart replays held messages.
                 if self._drain is not None:
                     await self._drain.wait_serving()
+                if (session := await self._router.target(envelope)) is not None:
+                    self._router.dispatch(session, envelope)  # its session's worker handles and settles it
+                    continue
                 self._handling = envelope
                 try:
                     await self._handle(envelope)
@@ -1205,6 +1235,7 @@ class ManagerAgent:
                 # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
                 if not self._running:
                     break
+                self._bus.settle_handled(envelope)
         except asyncio.CancelledError:
             pass
 
@@ -1558,7 +1589,7 @@ class ManagerAgent:
             # A server restart left no resident object; reopen the old chat for its handoff. Cursor keeps
             # its old instruction copy until a replacement starts, even though this command names the new one.
             await token.keep("claude_stop", self._claude.stop(), 10)
-            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
             await token.keep("claude_start", self._claude.start(
                 command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
@@ -1568,7 +1599,7 @@ class ManagerAgent:
                 and (self._claude_runtime is not launch.runtime or not self._claude.started):
             # Restore the API session's saved context before deciding whether it needs a handoff.
             await token.keep("claude_stop", self._claude.stop(), 10)
-            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
             with self._runtime_start_budget(launch) as seconds:
                 await token.keep("claude_start", self._claude.start(
@@ -1639,9 +1670,12 @@ class ManagerAgent:
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await token.keep("claude_stop", self._stop_replaced_session(), 30)
-            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
         if self._claude.stale(signature):
             await token.keep("claude_stop", self._stop_replaced_session(), 30)
+        if not self._claude.started and session_routing.routes(self.agent_id):
+            # Room under the resident cap, or a wait for it (``SessionRouter.admit``).
+            await token.step("resident_admission", self._router.admit(session, envelope))
         command = self._claude.command if self._claude.started else await token.step("claude_command", asyncio.to_thread(
             self._claude_command, prepared.prompt_file, launch))
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
@@ -2098,7 +2132,7 @@ class ManagerAgent:
         if self._running_token is token:
             self._running_token = None
         self._publish_binding(None)
-        late, self._claude = self._claude, self._claude_runtime.resident_session(self.agent_id)
+        late, self._claude = self._claude, self._claude_runtime.resident_session(self._resident_label())
         self._process = None
         stopping = asyncio.create_task(late.stop(kill=True))
         self._late_turns.add(stopping)
@@ -2207,7 +2241,9 @@ class ManagerAgent:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
         cannot be read (the built-in defaults before any). Without ``fallback`` the read error stays, so a turn
         never runs on a profile the user did not choose."""
-        agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id, wait=wait)
+        # The profile chosen for the session (``select_session_profile``) is main's: the others follow the settings.
+        own = {} if self._session_now().key == MAIN_SESSION else {"manager_session": False}
+        agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id, wait=wait, **own)
         if agent_settings.error is not None:
             return (self._agent_settings or agent_settings) if fallback else agent_settings
         self._agent_settings = agent_settings
@@ -2614,7 +2650,8 @@ class ManagerAgent:
         first. Tasks and their Planners are not touched."""
         session = self._session_now()
         origin = _message_origin(envelope)
-        chosen = envelope.payload.get("new_session_profile_id") or None
+        main = session.key == MAIN_SESSION
+        chosen = (envelope.payload.get("new_session_profile_id") or None) if main else None
         async with self._turn_lock, self._lifecycle_gate:
             name = None
             if chosen is not None:
@@ -2634,7 +2671,8 @@ class ManagerAgent:
             try:
                 async with db_connection.transaction() as conn:
                     await self._write_session_state(conn)
-                    await db_agent_sessions.select_profile(self.agent_id, chosen, pool=conn)
+                    if main:  # the profile chosen for the session is main's
+                        await db_agent_sessions.select_profile(self.agent_id, chosen, pool=conn)
             except Exception as exc:
                 # Nothing is dropped: the next message resumes the saved session in a new process.
                 session.session_id, self._session_totals, self._clean_start = previous
@@ -2643,9 +2681,10 @@ class ManagerAgent:
                 return
             self._pending_switch = self._pending_handoff = None
             self._stopped_notes = []
-            if self.ops is not None:
-                self.ops.forget_confirmations()
-            ops_leads.forget(self.agent_id)
+            if main:  # another session's /new leaves main's confirmations and remembered leads alone
+                if self.ops is not None:
+                    self.ops.forget_confirmations()
+                ops_leads.forget(self.agent_id)
             await self._record_new_session(envelope, origin, previous[0], chosen)
         logger.info("%s: a new session on /new from %s (sender %s); the previous one was %s", self._log,
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
@@ -2679,6 +2718,9 @@ class ManagerAgent:
 
     async def _handle_profile_command(self, envelope: MessageEnvelope, command: Any) -> None:
         """``/profile``: list the choices, or choose the session's profile; Claude is never asked."""
+        if self._session_now().key != MAIN_SESSION:
+            await self._send_reply(envelope, PROFILE_NOT_HERE_REPLY)
+            return
         if not self._session_loaded:
             await self._load_session_state()
         try:
