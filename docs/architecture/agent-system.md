@@ -6144,6 +6144,22 @@ off; `outbound_review.get` and `outbound_review.update`).
   operator's, and for every API client (never the operator), code blocks it. The operator's own calls on the
   dashboard and with the operator token are not reviewed. `looper_confirm` runs a call reviewed when it asked, so it
   is not reviewed again. A task's Planner has no `external` tool, so its entry has no check.
+- **Tasks outside content went into** (`tasks.untrusted_inputs`).
+  - **How a task gets marked:**
+    - When a Manager's leads search finds leads, its session is marked (`agent_sessions.leads_session_id`).
+    - In that session, the tasks it creates or writes into get `leads`: `looper_task_create`,
+      `looper_task_instruct`, `looper_task_gate_reply`, and `looper_task_update` with a new requirement, confirmed
+      ones too. A new session drops the mark.
+    - A task an intent builds gets `intent`. Marks are only added.
+  - **While the review is on,** each Worker and Reviewer run of a marked task carries the hook with its run's token
+    (`RoomOps.tool_hook`; the token's grant has no room tools when the room is off). Its calls are checked as its
+    task's (`outbound_hook.task_placed`):
+    - the operator's for a schedule, the dashboard, or the operator's own direct chat; else a group's or another
+      person's, which code blocks;
+    - the message the review sees is the task's original request, and the requirement is its outside content.
+  - **A run on a runtime without a hook** does not start: its attempt fails with `review_unsupported_runtime` and the
+    Planner decides, while the operator is told. The run's hook config goes when the run ends. A run adopted after a
+    restart has no review state, so its checked calls are blocked.
 - **The Managers' hook** (`looper/agents/outbound_hook.py`). While the review is on, each Manager's Claude Code
   carries a PreToolUse hook in its `--settings` (matcher `*`) and reads no settings file (`--setting-sources ""`),
   so nothing it writes in its working directory turns the hook off. Turning the review on or off changes the
