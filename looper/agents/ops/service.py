@@ -59,6 +59,7 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
+from .. import session_routing
 from ..tiers.manager_session import MAIN_SESSION
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
@@ -435,7 +436,8 @@ class ManagerOps:
                     call_id: str | None = None) -> dict[str, Any]:
         """Run one tool call; the protocol's answer.
 
-        With stop enabled (``chat.stop_enabled``) the binding is enforced: the call runs in the turn its
+        With stop enabled (``chat.stop_enabled``), or session routing on for this Manager (its sessions run in
+        parallel: ``session_routing.routes``), the binding is enforced: the call runs in the turn its
         ``binding`` names (no binding, or one unknown, is Claude's own turn: it only reads), and a resident
         runtime's write call runs only when it matches a tool_use of that turn's stream. Off (the default), the
         binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
@@ -448,7 +450,8 @@ class ManagerOps:
                 return _error(ErrorCode.FORBIDDEN, f"{name} is a tool of a task's Planner, for its own task; the "
                                                    f"Manager's tools are: {', '.join(self._scope.tools)}")
             return _error(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(self._scope.tools)}")
-        enforced = chat_settings.stop_enabled()
+        # With session routing on, sessions run in parallel: a call belongs only to the turn its binding names.
+        enforced = chat_settings.stop_enabled() or session_routing.routes(self._scope.manager_id)
         bound = self._bindings.get(binding) if binding else None
         self._observe_turn(name, binding, bound, enforced=enforced)
         turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
@@ -685,10 +688,14 @@ class ManagerOps:
 
     def turn_file_for(self, session_key: str) -> Path | None:
         """The binding file of the Manager session ``session_key``: what the MCP bridge of that session's runtime
-        reads at each call. Only main has one (``turn_file``)."""
-        if session_key != MAIN_SESSION:
-            raise ValueError(f"the Manager has no session {session_key!r}")
-        return self._turn_file
+        reads at each call. Main's is the one given (``turn_file``, ``<manager id>-turn.json``); another session's is
+        beside it, named by a digest of its key (``<manager id>-turn-<digest>.json``). None without a ``turn_file``."""
+        if not session_key:
+            raise ValueError("a Manager session needs a key")
+        if session_key == MAIN_SESSION or self._turn_file is None:
+            return self._turn_file
+        path = self._turn_file
+        return path.with_name(f"{path.stem}-{session_routing.key_digest(session_key)}{path.suffix}")
 
     def publish_binding(self, binding: str | None, *, session_key: str = MAIN_SESSION) -> None:
         """Write the binding file of ``session_key`` (``turn_file_for``) the MCP bridge reads at each call

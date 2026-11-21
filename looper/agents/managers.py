@@ -211,7 +211,8 @@ class ManagerFleet:
 
     def drain_waiting(self) -> dict[str, Any]:
         return {"manager_turns": [agent.agent_id for agent in self.agents()
-                                  if agent.busy or agent._handling is not None or agent._stop_tasks]}
+                                  if agent.busy or agent._handling is not None or agent._stop_tasks
+                                  or agent._router.pending()]}
 
     def agents(self) -> list[ManagerAgent]:
         return [self._agents[i] for i in sorted(self._agents, key=lambda i: (i != DEFAULT_MANAGER_ID, i))]
