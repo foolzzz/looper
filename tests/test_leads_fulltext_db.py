@@ -166,20 +166,22 @@ def test_pg_trgm_is_created_in_public_on_upgrade_and_a_database_without_it_still
 ) -> None:
     async def test(pool: Any) -> None:
         try:
-            await pool.execute("DROP EXTENSION IF EXISTS pg_trgm")
+            await pool.execute("DROP EXTENSION IF EXISTS pg_trgm CASCADE")  # with the leads' trigram index
             await pool.execute("DELETE FROM schema_migrations WHERE name = 'leads_trigram'")
             async with pool.acquire() as conn:
                 assert await connection.schema_change_pending(conn)
             await connection.ensure_schema(pool)
             assert await message_leads.trigram_schema(pool) == "public"
             assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'leads_trigram'") == 1
+            assert await pool.fetchval("SELECT to_regclass('idx_message_leads_trigram') IS NOT NULL")
             # Where the extension cannot be created, the start goes on, records the try and searches without it.
-            await pool.execute("DROP EXTENSION pg_trgm")
+            await pool.execute("DROP EXTENSION pg_trgm CASCADE")
             await pool.execute("DELETE FROM schema_migrations WHERE name = 'leads_trigram'")
             monkeypatch.setattr(connection, "_LEADS_TRIGRAM_DDL",
                                 connection._LEADS_TRIGRAM_DDL.replace("pg_trgm", "pg_trgm_not_available"))
             await connection.ensure_schema(pool)
             assert await message_leads.trigram_schema(pool) is None
+            assert await pool.fetchval("SELECT to_regclass('idx_message_leads_trigram') IS NULL")
             assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'leads_trigram'") == 1
             async with pool.acquire() as conn:
                 assert not await connection.schema_change_pending(conn)
@@ -188,5 +190,53 @@ def test_pg_trgm_is_created_in_public_on_upgrade_and_a_database_without_it_still
             assert await _found(pool, "告警阈值") == ["Orion 的 CPU 报警阈值定为 85%"]
         finally:  # the other tests of this database share the extension
             await pool.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public")
+
+    run_db(test, monkeypatch, timeout=60)
+
+
+def test_the_candidates_come_from_the_indexes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db.text_search import terms
+
+    async def test(pool: Any) -> None:
+        await _leads(pool, "Orion 的 CPU 报警阈值定为 85%")
+        trigram = await message_leads.trigram_schema(pool)
+        found = await terms(["告警阈值", "deploying"], pool)
+        sql, args = message_leads.fulltext_query(found, trigram, now=NOW)
+        async with pool.acquire() as conn, conn.transaction():
+            # A handful of leads is cheaper to scan: the plan without scans shows that every lead set is indexable.
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            plan = "\n".join(row[0] for row in await conn.fetch("EXPLAIN " + sql, *args))
+        assert plan.count("Bitmap Index Scan on idx_message_leads_search") == 2, plan
+        if trigram is not None:
+            assert "Bitmap Index Scan on idx_message_leads_trigram" in plan, plan
+        assert "Seq Scan on message_leads" not in plan, plan
+        assert await _found(pool, "告警阈值") == []  # words mode: nothing; the plan above is the fulltext query
+
+    run_db(test, monkeypatch, timeout=60)
+
+
+def test_a_database_without_the_token_index_builds_it_online(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await pool.execute("DROP INDEX idx_message_leads_search")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval("SELECT indisvalid FROM pg_index "
+                                   "WHERE indexrelid = to_regclass('idx_message_leads_search')") is True
+        assert {row["name"] for row in await pool.fetch("SELECT name FROM schema_migrations")} >= {
+            "leads_search", "leads_search_online"}
+
+    run_db(test, monkeypatch, timeout=60)
+
+
+def test_each_candidate_set_brings_its_newest_so_a_common_word_cannot_hide_a_rare_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        monkeypatch.setattr(message_leads, "CANDIDATES_PER_SET", 3)
+        await _leads(pool, "Orion 的回滚由 Carol 负责", *[f"我们明天再说 {i}" for i in range(8)])
+        await _mode(pool, "fulltext")
+        assert (await _found(pool, "我们 Carol"))[0] == "Orion 的回滚由 Carol 负责"
+        assert len(await _found(pool, "我们")) == 3  # the newest three a set brings
 
     run_db(test, monkeypatch, timeout=60)
