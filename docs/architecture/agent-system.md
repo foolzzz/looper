@@ -5517,17 +5517,21 @@ list or command line changes either way.
   (pending, only while intents are on), `ledger` (own open items that wait
   for the user: a to-do, an unconfirmed relayed decision, anything overdue;
   only while the ledger is on) and `deliveries` (`uncertain` subscription
-  pushes, intent messages and task-end messages of the last 72 hours). A
+  pushes, intent messages and task-end messages of the last 72 hours; each
+  table has a partial index of its `uncertain` rows, built online for an
+  existing database by the `uncertain_deliveries` migration). A
   section is `ok`, `error` (its source could not be read, with the reason;
   never shown as empty) or `unknown` (this caller cannot read it); a
   feature that is off leaves its section out. Each lists up to 20 items and
-  counts them all.
+  counts them all. The page and `/todo` say nothing waits only when every
+  section was read and is empty.
 - **API:** `POST /api/v1/attention/summary`, read-only and operator-only:
   `{read_at, total, sections: [{kind, state, count, items, error}]}`, each
   item `{key, title, context, since, href, ref, facts}`.
 - **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
-  only while the summary answers. Failing logins are left to the startup
-  check banner every page shows.
+  only while the summary answers. Failing logins that were read are left to
+  the startup-check banner every page shows; a confirmation asked in the
+  dashboard chat links to that conversation.
 - **Chat:** `/todo` (and Telegram's `/todo@bot`) is answered by code next to
   `/new` and `/gates`, only in the operator's own turns
   (`operator_identity.is_operator`); a group, another sender and an API
