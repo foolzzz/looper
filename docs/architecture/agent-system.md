@@ -4311,13 +4311,18 @@ goes back to it (the bot and the user's sender id there); one set on the dashboa
 the first enabled bot of the default Manager that names an `operator_sender_id`, and is refused (`conflict`) when there
 is none. The table `reminders` (migration `reminders`) keeps each one with its target and status: `pending`,
 `sending`, `delivered`, `failed`, `uncertain`, `missed` or `cancelled`. `ReminderService` (started by `looper serve`,
-idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock; a stop lets a send under way finish (up to 15 seconds) and starts no other. It settles a
+idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock. A stop starts no
+other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick settles a
 `sending` row left by a stopped sender as `uncertain`, then sends the due ones in code-written words
 (「⏰ 你在 <when asked> 让我提醒你：<text>」) through `ChannelRegistry.post` with the idempotency key
-`looper-reminder-<id>`, after checking that the bot still names that user as its operator. A reminder up to 10 minutes
-late is sent as any. Of a chat's later ones, only the latest one due within 36 hours is sent, with a line saying when it
-was due, and the others become `missed`. A refused send is tried at the next tick, three times in all; an unknown
-outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge window.
+`looper-reminder-<id>`, after checking that the bot still names that user as its operator. While the service runs,
+what came due since its previous tick is sent, however many at once, and so is a refused send being retried. Its
+first tick after it starts, after the switch was off or after the server drained is a recovery: every reminder that
+came due meanwhile is overdue, and of each chat's overdue ones only the newest one due within 36 hours is sent, with a
+line saying when it was due; the others become `missed`. A refused send is tried at the next tick, three times in all;
+an unknown outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge
+window. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
+the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
 not one of these tools yet; nor are a project's execution settings, a role's
