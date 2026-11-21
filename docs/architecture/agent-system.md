@@ -5541,15 +5541,19 @@ when the channel has one.
 - **The table** (`card_actions`; migration `card_actions`): one row per card,
   keyed by the opaque token that is all a button carries (`<token>:<choice>`),
   with its `kind` (`confirmation`, `gate`), `subject`, the `digest` of the
-  parameters it is bound to, the `chat` it was sent to and the channel
-  `message_id` it became (noted by the channel once sent), who may press
+  parameters it is bound to, the `chat` it is in and the channel
+  `message_id` it became (both noted from the send's answer: a Lark card sent
+  to an open_id gets its direct chat's id), who may press
   (`allowed`), `expires_at` (10 minutes for a confirmation, 7 days for a gate)
   and what became of it (`handled_at`, `handled_by`, `handled_via` `button`,
   `typed` or `lapsed`, `choice`, `outcome`). A row is claimed once: locked
   first, then handled only if it has not expired by the clock after the lock.
-- **A press** is answered by code: one from another message than the card's
-  (a forwarded copy) or, before its message is noted, from another chat is
-  told 「这张卡片只能在发出它的会话里操作」 and claims nothing; a sender the bot would not admit a message
+- **A press** is answered by code: one from another chat, or from another
+  message than the card's (a forwarded copy; a Telegram message id is unique
+  only within its chat, so both are compared), is told
+  「这张卡片只能在发出它的会话里操作」 and claims nothing (a Lark card sent to an
+  open_id whose chat was not noted is pressed from a chat the platform says is
+  direct, by that user); a sender the bot would not admit a message
   from in that chat (its allowlist, the binding's extra senders, or anyone in
   a group bound with `sender_policy` `chat`), or one not in `allowed`, is told
   「只有发起人能确认」; a card handled or expired
