@@ -13,20 +13,22 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 def test_metrics_switch_is_operator_only_and_reloadable(monkeypatch, tmp_path):
     async def check(pool):
         async with v1_api(tmp_path, pool) as call:
-            previous = chat_settings.settings_view()
+            previous = await chat_settings.settings_view()
             for arguments in ({"metrics_enabled": True}, {"stop_enabled": True, "metrics_enabled": None}):
                 status, body = await call("chat_settings.update", arguments, client=True)
                 assert status == 403 and body["error"]["code"] == "forbidden"
-                assert chat_settings.settings_view() == previous
+                assert await chat_settings.settings_view() == previous
                 assert await pool.fetchval("SELECT count(*) FROM system_settings") == 0
-            status, body = await call("chat_settings.update", {"metrics_enabled": True})
+            status, body = await call("chat_settings.update", {"metrics_enabled": True, "ledger_enabled": True})
             assert status == 200 and body["result"]["metrics_enabled"] is True
+            assert body["result"]["ledger_enabled"] is True
             chat_settings.set_metrics_enabled(False)
             await chat_settings.load()
             assert chat_settings.metrics_enabled() is True
             assert (await call("chat_settings.update", {"metrics_enabled": "yes"}))[0] == 400
             await call("chat_settings.update", {"metrics_enabled": None})
             assert chat_settings.metrics_enabled() is False
+            assert (await chat_settings.settings_view())["ledger_enabled"] is True
     run_db(check, monkeypatch)
 
 
