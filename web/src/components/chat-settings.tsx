@@ -3,9 +3,10 @@ import { useEffect, useId, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
-  type CompletionTurns,
+  type CompletionTurns, type ChatSettingsUpdate,
 } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
 
@@ -37,11 +38,15 @@ export function ChatSettingsSection() {
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [timezone, setTimezone] = useState("");
 
   useEffect(() => {
     let alive = true;
     fetchChatSettings().then((value) => {
-      if (alive) setSettings(value);
+      if (alive) {
+        setSettings(value);
+        setTimezone(value.timezone ?? "");
+      }
     }).catch((err: unknown) => {
       if (alive) setError(errorText(err));
     });
@@ -53,7 +58,7 @@ export function ChatSettingsSection() {
     return () => { alive = false; };
   }, [attempt]);
 
-  const save = async (body: { stop_enabled?: boolean; completion_turns?: CompletionTurns }) => {
+  const save = async (body: ChatSettingsUpdate) => {
     setSaving(true);
     setError("");
     try {
@@ -107,6 +112,54 @@ export function ChatSettingsSection() {
               minutes.
             </p>
             <CompletionCounts summary={summary} error={summaryError} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-context`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-context`} type="checkbox" aria-label="每轮上下文"
+                     checked={settings.turn_context_enabled} disabled={saving}
+                     aria-describedby={`${id}-context-help`}
+                     onChange={(event) => void save({ turn_context_enabled: event.target.checked })} />
+              每轮上下文
+            </label>
+            <p id={`${id}-context-help`} className="text-xs text-muted-foreground">
+              默认关闭。设置会保存；每轮上下文功能接入后，管家才会获得本地时间、说话人、聊天来源和回复语言，并检查授权。
+            </p>
+            {settings.turn_context_enabled && (settings.missing_operator_ids?.length ?? 0) > 0 && (
+              <div role="alert" className="space-y-1 text-sm text-muted-foreground">
+                <p>以下机器人没有设置「我的 ID」，无法识别操作者；需要操作者授权的动作会被拒绝：</p>
+                <ul className="list-disc space-y-1 pl-5">
+                  {settings.missing_operator_ids!.map((bot) => (
+                    <li key={bot.channel_id} className="break-words">{bot.name} ({bot.channel_type})</li>
+                  ))}
+                </ul>
+                <a href="#settings/channels" className="text-primary hover:underline">前往渠道设置</a>
+              </div>
+            )}
+          </div>
+          <form className="space-y-1.5" onSubmit={(event) => {
+            event.preventDefault();
+            void save({ timezone: timezone.trim() || null });
+          }}>
+            <label htmlFor={`${id}-timezone`} className="block text-sm font-medium">时区</label>
+            <div className="flex max-w-sm items-center gap-2">
+              <Input id={`${id}-timezone`} aria-label="时区" value={timezone} disabled={saving}
+                     placeholder={settings.server_timezone} aria-describedby={`${id}-timezone-help`}
+                     onChange={(event) => setTimezone(event.target.value)} />
+              <Button type="submit" variant="outline" disabled={saving}>保存</Button>
+            </div>
+            <p id={`${id}-timezone-help`} className="text-xs text-muted-foreground">
+              填写 IANA 时区名（如 Asia/Shanghai）；留空恢复服务器时区。现有定时任务的时区不变。
+            </p>
+          </form>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-language`} className="block text-sm font-medium">回复语言</label>
+            <select id={`${id}-language`} aria-label="回复语言" value={settings.reply_language} disabled={saving}
+                    className={SELECT} onChange={(event) => void save({
+                      reply_language: event.target.value as "zh-CN" | "en",
+                    })}>
+              <option value="zh-CN">中文</option>
+              <option value="en">English</option>
+            </select>
           </div>
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>

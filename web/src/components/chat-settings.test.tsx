@@ -15,12 +15,13 @@ const SUMMARY = {
 describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let stored: { stop_enabled: boolean; completion_turns: string };
+  let stored: Record<string, unknown>;
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
 
   beforeEach(() => {
-    stored = { stop_enabled: false, completion_turns: "off" };
+    stored = { stop_enabled: false, completion_turns: "off", turn_context_enabled: false,
+      timezone: null, server_timezone: "America/Los_Angeles", reply_language: "zh-CN", missing_operator_ids: [] };
     summary = SUMMARY;
     puts = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -78,6 +79,39 @@ describe("Chat settings", () => {
     });
     expect(puts).toEqual([{ completion_turns: "dm_only" }]);
     expect((container.querySelector("select") as HTMLSelectElement).value).toBe("dm_only");
+  });
+
+  it("enables turn context alone and lists bots that cannot identify the operator", async () => {
+    stored.missing_operator_ids = [{ channel_id: "channel-example", name: "Example bot", channel_type: "lark" }];
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[aria-label='每轮上下文']") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    await act(async () => box.click());
+    expect(puts).toEqual([{ turn_context_enabled: true }]);
+    expect(container.textContent).toContain("Example bot");
+    expect(container.textContent).toContain("需要操作者授权的动作会被拒绝");
+  });
+
+  it("saves the time zone, clears it to the server default, and saves the reply language alone", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const zone = container.querySelector("input[aria-label='时区']") as HTMLInputElement;
+    expect(zone.placeholder).toBe("America/Los_Angeles");
+    const setInput = (value: string) => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(zone, value);
+      zone.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    await act(async () => setInput("Asia/Shanghai"));
+    await act(async () => (container.querySelector("button[type=submit]") as HTMLButtonElement).click());
+    expect(puts).toEqual([{ timezone: "Asia/Shanghai" }]);
+    await act(async () => setInput(""));
+    await act(async () => (container.querySelector("button[type=submit]") as HTMLButtonElement).click());
+    expect(puts.at(-1)).toEqual({ timezone: null });
+    const language = container.querySelector("select[aria-label='回复语言']") as HTMLSelectElement;
+    await act(async () => {
+      language.value = "en";
+      language.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(puts.at(-1)).toEqual({ reply_language: "en" });
   });
 
   it("warns when the last turns all fell back, and says when the counts cannot be read", async () => {

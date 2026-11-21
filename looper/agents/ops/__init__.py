@@ -25,6 +25,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from ..message import AgentAddress, MessageEnvelope, manager_address
+from ..turn_context import SpeakerKind
 
 if TYPE_CHECKING:
     from .service import OpsScope
@@ -152,6 +153,9 @@ class Turn:
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
     # Why the turn runs; by default a user's when it answers a message, else Claude's own.
     origin: TurnOrigin | None = None
+    # Unset until per-turn context is wired; None preserves the existing authorization behavior.
+    speaker: SpeakerKind | None = None
+    operator_id_missing: bool = False
 
     def __post_init__(self) -> None:
         if self.origin is None:

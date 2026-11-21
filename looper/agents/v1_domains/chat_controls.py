@@ -30,7 +30,13 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
                      "started_at": _STR, "state": _STR, "method": _NULL_STR,
                      "stopping": _BOOL, "can_interrupt": _BOOL})
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
-CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL})
+BOT_REF = _object({"channel_id": _STR, "channel_type": _STR, "name": _STR})
+CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL,
+                         "turn_context_enabled": _BOOL, "timezone": _NULL_STR, "server_timezone": _STR,
+                         "reply_language": {"type": "string", "enum": ["zh-CN", "en"]},
+                         "missing_operator_ids": _array(BOT_REF)},
+                        required=["stop_enabled", "completion_turns", "research_order", "turn_context_enabled",
+                                  "timezone", "server_timezone", "reply_language"])
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -57,12 +63,15 @@ OPERATIONS = (
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
     _op("chat_settings.get", "Read the chat settings: stopping a reply, the Manager's completion turns, and its "
         "research order.",
-        _object({}, closed=True), CHAT_SETTINGS),
+        _object({}, closed=True), CHAT_SETTINGS, operator_only=True),
     _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
-                 "research_order": {"type": ["boolean", "null"]}},
-                [], closed=True), CHAT_SETTINGS, "high"),
+                 "research_order": {"type": ["boolean", "null"]},
+                 "turn_context_enabled": {"type": ["boolean", "null"]},
+                 "timezone": _NULL_STR,
+                 "reply_language": {"type": ["string", "null"], "enum": ["zh-CN", "en", None]}},
+                [], closed=True), CHAT_SETTINGS, "high", operator_only=True),
 )
 
 
@@ -98,6 +107,21 @@ async def impact(server, operation, arguments, principal, headers):
                           "order, before it asks the user; its process starts again to read them." if enabled else
                           "From its next turn, the default Manager's instructions no longer say where to look things "
                           "up; its process starts again."))
+    if "turn_context_enabled" in values:
+        enabled = values["turn_context_enabled"] is True
+        changes.append(f"Set manager.turn_context.enabled to {str(enabled).lower()}? "
+                       "The turn context and speaker authorization are awaiting Manager integration.")
+        if enabled:
+            from ..channels import operator_ids
+
+            missing = await operator_ids.missing()
+            if missing:
+                changes.append("These bots have no operator id: " + ", ".join(bot.name for bot in missing) +
+                               ". Nobody counts as the operator there; actions needing operator authorization "
+                               "will be refused when turn context is active.")
+    for field in ("timezone", "reply_language"):
+        if field in values:
+            changes.append(f"Set user.{field} to {values[field] or 'the default'}? Applies to turn context only.")
     return " ".join(changes)
 
 

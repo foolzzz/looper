@@ -17,8 +17,10 @@ at startup and ``update`` refreshes them. Until loaded, both are off.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import asdict
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..db import system_settings as db_settings
 
@@ -27,7 +29,26 @@ DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
 RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
-FIELDS = ("stop_enabled", "completion_turns", "research_order")
+TURN_CONTEXT_KEY = "manager.turn_context.enabled"
+TIMEZONE_KEY = "user.timezone"
+REPLY_LANGUAGE_KEY = "user.reply_language"
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "turn_context_enabled", "timezone", "reply_language")
+_turn_context_enabled = False
+_timezone: str | None = None
+_reply_language = "zh-CN"
+
+
+def turn_context_enabled() -> bool:
+    return _turn_context_enabled
+
+
+def timezone() -> str | None:
+    return _timezone
+
+
+def reply_language() -> str:
+    return _reply_language
+
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -79,7 +100,14 @@ def set_research_order(value: bool) -> None:
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY])
+    global _turn_context_enabled, _timezone, _reply_language
+    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY,
+                                             TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY])
+    _turn_context_enabled = stored.get(TURN_CONTEXT_KEY) == "true"
+    _timezone = stored.get(TIMEZONE_KEY)
+    _reply_language = stored.get(REPLY_LANGUAGE_KEY, "zh-CN")
+    if _reply_language not in ("zh-CN", "en"):
+        _reply_language = "zh-CN"
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     try:
@@ -91,7 +119,11 @@ async def load() -> bool:
 
 
 def settings_view() -> dict[str, Any]:
-    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value, "research_order": _research_order}
+    from .turn_context import server_zone
+
+    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value, "research_order": _research_order,
+            "turn_context_enabled": _turn_context_enabled, "timezone": _timezone,
+            "server_timezone": str(server_zone()), "reply_language": _reply_language}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -116,6 +148,26 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("research_order must be true, false or null")
         values["research_order"] = value
+    if "turn_context_enabled" in body:
+        value = body["turn_context_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("turn_context_enabled must be true, false or null")
+        values["turn_context_enabled"] = value
+    if "timezone" in body:
+        value = body["timezone"]
+        if value is not None:
+            try:
+                if not isinstance(value, str) or not value:
+                    raise ValueError()
+                ZoneInfo(value)
+            except (ValueError, ZoneInfoNotFoundError):
+                raise ValueError("timezone must be a valid IANA timezone name or null") from None
+        values["timezone"] = value
+    if "reply_language" in body:
+        value = body["reply_language"]
+        if value is not None and value not in ("zh-CN", "en"):
+            raise ValueError("reply_language must be zh-CN, en or null")
+        values["reply_language"] = value
     return values
 
 
@@ -132,6 +184,21 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if "research_order" in values:
         value = values["research_order"]
         stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
+    if "turn_context_enabled" in values:
+        value = values["turn_context_enabled"]
+        stored[TURN_CONTEXT_KEY] = None if value is None else ("true" if value else "false")
+    for field, key in (("timezone", TIMEZONE_KEY), ("reply_language", REPLY_LANGUAGE_KEY)):
+        if field in values:
+            stored[key] = values[field]
+    # Resolve the warning before storing: a failed bot lookup must not silently enable the switch.
+    missing = None
+    if values.get("turn_context_enabled") is True:
+        from .channels import operator_ids
+
+        missing = await operator_ids.missing()
     await db_settings.put_settings(stored)
     await load()
-    return settings_view()
+    view = settings_view()
+    if missing is not None:
+        view["missing_operator_ids"] = [asdict(bot) for bot in missing]
+    return view
