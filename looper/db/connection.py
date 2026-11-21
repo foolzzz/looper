@@ -177,6 +177,12 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
 _CHAT_DIRECT_THREADS = "chat_direct_threads"
+_SEARCH_TOKENS = "search_tokens"
+# The session search's index, as schema.sql creates it after the search tokens block.
+_SEARCH_INDEXES = (
+    ("idx_chat_messages_search",
+     "ON chat_messages USING gin (array_to_tsvector(looper_search_tokens(content))) WHERE role IN ('user', 'assistant')"),
+)
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -401,6 +407,8 @@ _ONLINE_STEPS = (
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
     # The delivery tables can be large: their partial indexes are built without blocking writes.
     _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
+    # chat_messages can be large: the session search's index is built without blocking writes.
+    _OnlineStep(_SEARCH_TOKENS, "search_tokens_online", indexes=_SEARCH_INDEXES),
 )
 
 
@@ -512,6 +520,17 @@ def _leads_check_ddl() -> str:
 
 
 _CHAT_DIRECT_THREADS_BLOCK = re.compile(r"-- chat direct threads begin\n(.*?)-- chat direct threads end", re.S)
+
+
+_SEARCH_TOKENS_BLOCK = re.compile(r"-- search tokens begin\n(.*?)-- search tokens end", re.S)
+
+
+def _search_tokens_ddl() -> str:
+    """The search tokens function, as schema.sql defines it."""
+    found = _SEARCH_TOKENS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its search tokens block")
+    return found.group(1)
 
 
 def _chat_direct_threads_ddl() -> str:
@@ -1039,6 +1058,12 @@ async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_LEADS):
         return False
     return not await conn.fetchval("SELECT to_regclass('message_leads') IS NOT NULL")
+
+
+async def _search_tokens_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SEARCH_TOKENS):
+        return False
+    return not await conn.fetchval("SELECT to_regprocedure('looper_search_tokens(text)') IS NOT NULL")
 
 
 async def _chat_direct_threads_pending(conn: asyncpg.Connection) -> bool:
@@ -1657,6 +1682,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _chat_direct_threads_pending(conn):
             await conn.execute(_chat_direct_threads_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_DIRECT_THREADS)
+        if await _search_tokens_pending(conn):
+            await conn.execute(_search_tokens_ddl())  # its index is built online, after this commits
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SEARCH_TOKENS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1725,4 +1753,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
             or await _mid_turn_input_pending(conn)
-            or await _chat_direct_threads_pending(conn)))
+            or await _chat_direct_threads_pending(conn) or await _search_tokens_pending(conn)))
