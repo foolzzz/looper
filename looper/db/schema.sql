@@ -2248,6 +2248,39 @@ ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
 
+-- channel outbox begin
+CREATE TABLE IF NOT EXISTS channel_outbox (
+    id              BIGSERIAL PRIMARY KEY,
+    channel_id      TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL CHECK (char_length(idempotency_key) BETWEEN 1 AND 50),
+    kind            TEXT NOT NULL CHECK (kind IN ('send', 'reply')),
+    chat            TEXT NOT NULL,
+    reply_to        TEXT,
+    body            JSONB NOT NULL CHECK (jsonb_typeof(body) = 'object'),  -- {"text": ...} or {"markdown": ...}
+    source          TEXT NOT NULL CHECK (source IN ('answer', 'notice', 'progress', 'post', 'notify')),
+    state           TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    error_class     TEXT CHECK (error_class IN ('rate_limited', 'rejected', 'transient', 'unknown')),
+    error           TEXT CHECK (char_length(error) <= 500),
+    external_id     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at         TIMESTAMPTZ,
+    first_possible_at TIMESTAMPTZ,
+    claim_token     UUID,
+    UNIQUE (channel_id, idempotency_key),
+    CONSTRAINT channel_outbox_sent CHECK ((state = 'sent') = (sent_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_channel_outbox_due
+    ON channel_outbox (channel_id, chat, id) WHERE state IN ('pending', 'sending');
+CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created_at);
+ALTER TABLE channel_outbox ADD COLUMN IF NOT EXISTS first_possible_at TIMESTAMPTZ;
+ALTER TABLE channel_outbox ADD COLUMN IF NOT EXISTS claim_token UUID;
+-- Earlier versions did not record attempts separately from claims. Be conservative.
+UPDATE channel_outbox SET first_possible_at=created_at WHERE attempts>0 AND first_possible_at IS NULL;
+-- channel outbox end
+
 -- One review of an outbound action (the outbound-review RFC, section 9): who asked for it and where, the action as
 -- code describes it (its tool, level and target, a redacted summary), the verdict and why, and the classifier's run
 -- (record_id; none when code blocked it without one), model, cost and latency. A row is written before the action

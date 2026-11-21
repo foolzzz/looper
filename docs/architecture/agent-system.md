@@ -7463,7 +7463,40 @@ implementation supplies it and is retested.
   markers into the same notation before the shared adapter reads them. All outgoing Lark, Telegram and dashboard chat text redacts stored
   attachment paths, including filenames with spaces and Unicode. Dashboard
   turns with attachments show the final answer without streaming text deltas,
-  so a path split across chunks cannot escape redaction. It sends with `lark-cli im
+  so a path split across chunks cannot escape redaction. With `channels.outbound.enabled` off (the default),
+  both Lark transports retain their original calls and write no outbox rows. Settings → Chat reads and updates
+  `outbound_enabled` through the separate operator-only `outbound_gateway.get/update` operations; the existing
+  `chat_settings` response fields, accepted writes and Manager tools remain unchanged. Gateway updates are
+  high-risk operations with confirmation for callers that require it; null restores each field's default.
+  On, `GatedLarkTransport` routes every write through
+  one gateway per channel, sharing its in-flight cap and both send/reply and total-write token buckets
+  by the verified app id across CLI/Bot channels (defaults 5/s and 15/s),
+  at most four platform calls in flight, classified errors, up to five retries with jitter and
+  `retry_after` (valid delays capped at 60 seconds; non-finite, negative and over-one-day hints ignored),
+  a 15-minute total delivery deadline, a 60-second circuit breaker after five consecutive failures in 30 seconds, and coalesced
+  edits at least one second apart. The same `outbound_gateway.get/update` operations also expose
+  `send_qps`, `write_qps`, `edit_interval_seconds` and `max_in_flight` (integer 1–32). Rate and edit
+  defaults remain **to verify** against the real platform. The Settings switch uses its own request and error
+  state, so an unavailable gateway API does not block other chat controls. Numeric tuning is available through
+  the operator v1 API and its generated CLI; Telegram/Lark chat commands and Manager tools do not configure
+  the gateway. Answers, progress, notices, notifications and posts first enter
+  `channel_outbox`, ordered per chat and concurrent across chats. Caller keys win; otherwise envelope ids
+  and part numbers derive stable keys. The first possibly delivered attempt is saved before platform I/O.
+  Every retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
+  persistence; expired possibly delivered rows become `uncertain` and are never resent. Older rows without
+  an attempt timestamp conservatively use their creation time on upgrade. A delivery past its total deadline
+  becomes `uncertain` if attempted, otherwise `failed`, releasing the chat head even if a saved retry is far
+  in the future. A successful send retries its state write independently without another platform call; claim
+  tokens make a lost claim acknowledgement safe to retry. Restart recovery reuses the same key within the window. Callers wait at most 30 seconds for a receipt,
+  while queued work continues, including after the switch is turned off. Startup also recovers unfinished
+  rows with the switch off under a strict 100 ms probe/recovery deadline; unavailability adds no warning
+  and cannot block legacy startup, receiving or catch-up. An empty disabled outbox performs no recovery writes. Waiters share in-process
+  completion futures; the scanner sleeps until the earliest unblocked retry or new work. Notifications can
+  carry a caller-supplied event key to deduplicate retries. An insert failure logs a warning and falls back to the gateway. Status
+  lines and reactions use the gateway alone. Housekeeping retains sent rows for seven days and other rows
+  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Telegram wiring
+  and dashboard metrics follow separately; the standalone probe remains independent.
+  The CLI transport sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
   user (`--user-id`); a failed send carries lark-cli's reason. A body that

@@ -21,14 +21,27 @@ describe("Chat settings", () => {
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
+  let outbound: boolean;
+  let outboundError: boolean;
 
   beforeEach(() => {
     stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false };
     missing = [];
     summary = SUMMARY;
     puts = [];
+    outbound = false;
+    outboundError = false;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path.startsWith("/api/v1/outbound_gateway/")) {
+        if (outboundError) return Response.json({ status: "error", error: { code: "unavailable", message: "gateway unavailable" } }, { status: 503 });
+        if (path.endsWith("/update")) {
+          const body = JSON.parse(String(init?.body));
+          puts.push({ operation: "outbound_gateway.update", ...body });
+          outbound = body.outbound_enabled;
+        }
+        return Response.json({ status: "ok", result: { outbound_enabled: outbound, send_qps: 5, write_qps: 15, edit_interval_seconds: 1, max_in_flight: 4 } });
+      }
       if (path === "/api/v1/manager_events/summary") {
         if (summary === null) {
           return Response.json({ status: "error", error: { code: "forbidden", message: "operator only" } },
@@ -69,6 +82,37 @@ describe("Chat settings", () => {
     expect((container.querySelector("input[type=checkbox]") as HTMLInputElement).checked).toBe(true);
   });
 
+  it("enables outbound retries without changing the other chat settings", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$=-outbound]") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(container.textContent).toContain("出站统一限流和重试（飞书、Telegram）");
+    await act(async () => box.click());
+    expect(puts).toEqual([{ operation: "outbound_gateway.update", outbound_enabled: true }]);
+    expect(stored).not.toHaveProperty("outbound_enabled");
+    expect(box.checked).toBe(true);
+  });
+
+  it("keeps chat settings usable when the outbound gateway is unavailable", async () => {
+    outboundError = true;
+    await act(async () => root.render(<ChatSettingsSection />));
+    expect(container.textContent).toContain("gateway unavailable");
+    expect(container.querySelector("input[id$=-outbound]")).toBeNull();
+    const box = container.querySelector("input[id$=-stop]") as HTMLInputElement;
+    await act(async () => box.click());
+    expect(puts).toEqual([{ stop_enabled: true }]);
+  });
+
+  it("retains the outbound value after an update fails", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    outboundError = true;
+    const box = container.querySelector("input[id$=-outbound]") as HTMLInputElement;
+    await act(async () => box.click());
+    expect(box.checked).toBe(false);
+    expect(container.textContent).toContain("gateway unavailable");
+    expect(puts).toEqual([]);
+  });
+
   it("switches the Manager's completion turns on alone, and shows the day's counts", async () => {
     await act(async () => root.render(<ChatSettingsSection />));
     const select = container.querySelector("select") as HTMLSelectElement;
@@ -101,7 +145,7 @@ describe("Chat settings", () => {
   it("turns the ledger on and names the bots that have no operator id", async () => {
     missing = [{ channel_id: "channel-lark", channel_type: "lark", name: "Example Lark" }];
     await act(async () => root.render(<ChatSettingsSection />));
-    const ledger = container.querySelectorAll("input[type=checkbox]")[1] as HTMLInputElement;
+    const ledger = container.querySelector("input[id$=-ledger]") as HTMLInputElement;
     expect(ledger.checked).toBe(false);
     await act(async () => ledger.click());
     expect(puts).toEqual([{ ledger_enabled: true }]);
@@ -115,7 +159,7 @@ describe("Chat settings", () => {
   it("lists a bot by its channel id when the display name is empty", async () => {
     missing = [{ channel_id: "channel-lark", channel_type: "lark", name: "" }];
     await act(async () => root.render(<ChatSettingsSection />));
-    const ledger = container.querySelectorAll("input[type=checkbox]")[1] as HTMLInputElement;
+    const ledger = container.querySelector("input[id$=-ledger]") as HTMLInputElement;
     await act(async () => ledger.click());
     const item = container.querySelector("[role=status] li");
     expect(item?.textContent).toBe("channel-lark");
@@ -123,7 +167,7 @@ describe("Chat settings", () => {
 
   it("shows no notice when turning the ledger on lists no bots", async () => {
     await act(async () => root.render(<ChatSettingsSection />));
-    const ledger = container.querySelectorAll("input[type=checkbox]")[1] as HTMLInputElement;
+    const ledger = container.querySelector("input[id$=-ledger]") as HTMLInputElement;
     await act(async () => ledger.click());
     expect(puts).toEqual([{ ledger_enabled: true }]);
     expect(container.querySelector("[role=status]")).toBeNull();
