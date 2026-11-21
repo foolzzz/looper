@@ -19,7 +19,8 @@ RESULTS = {}
 OPERATIONS = (
     Operation("manager_metrics.get", "POST", "/api/v1/manager_metrics/get",
         "Read Manager turn and proactive delivery metrics.",
-        "Read Manager latency percentiles, delivery counts and proactive reply rates over 1–30 days.",
+        "Read Manager turn and proactive delivery metrics. "
+        "Includes latency percentiles, delivery counts and proactive reply rates over 1–30 days.",
         _object({"days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}}, [], closed=True),
         SUMMARY, risk="read", operator_only=True),
 )

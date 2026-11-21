@@ -503,7 +503,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 message_id = await self._send_target(target, text, idempotency_key=idempotency_key, return_id=True)
         except LarkCliError as exc:
             # The error's text (lark-cli's own words, and whatever it printed) is in the receipt, not in the log.
-            logger.warning("%s: a post to %s failed: %s%s", self.channel_id, target.id, type(exc).__name__,
+            # Receipt parsing has a distinct type for metrics; keep the existing failed-post log classification.
+            error_type = LarkCliError.__name__ if isinstance(exc, LarkCliOutputError) else type(exc).__name__
+            logger.warning("%s: a post to %s failed: %s%s", self.channel_id, target.id, error_type,
                            f" (code {exc.code})" if exc.code is not None else "")
             return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
                                outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
