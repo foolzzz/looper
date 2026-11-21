@@ -126,7 +126,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "channels",
+SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "channels",
             "catalog", "installs", "workflows",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
@@ -430,6 +430,17 @@ async def stored_scheduler_settings(conn: Any) -> dict[str, int]:
     return {name: int(stored[key]) for name, key in keys.items() if key in stored}
 
 
+async def stored_chat_settings(conn: Any) -> dict[str, bool]:
+    from ..db import system_settings as db_settings
+    from . import chat_settings
+
+    if not await conn.fetchval("SELECT to_regclass('system_settings') IS NOT NULL"):
+        return {}
+    stored = await db_settings.get_settings([chat_settings.METRICS_ENABLED_KEY], pool=conn)
+    value = stored.get(chat_settings.METRICS_ENABLED_KEY)
+    return {"metrics_enabled": value == "true"} if value in ("true", "false") else {}
+
+
 def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> dict[str, Any]:
     """A schedule as the file holds it: no enabled flag, runs or counters, and no directory (``repoint`` when it had
     one of its own)."""
@@ -545,11 +556,13 @@ async def export_chunks(
         summary.counts["manager.installs"] = len(manager_installs)
     if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
         head["settings"]["scheduler"] = scheduler
+    if chat := await stored_chat_settings(conn):
+        head["settings"]["chat"] = chat
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
                            "models": len(head["models"]), "profiles": len(head["profiles"]),
                            "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]),
-                           "settings.scheduler": len(scheduler), "channels": len(channels),
+                           "settings.scheduler": len(scheduler), "settings.chat": len(chat), "channels": len(channels),
                            "installs": len(head["installs"])})
     summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
@@ -693,6 +706,8 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
             raise ConfigFileError(f"settings.{section} must be a JSON list")
     if not isinstance(data.get("settings", {}).get("scheduler", {}), dict):
         raise ConfigFileError("settings.scheduler must be a JSON object")
+    if not isinstance(data.get("settings", {}).get("chat", {}), dict):
+        raise ConfigFileError("settings.chat must be a JSON object")
     _check_retired_fields(data.get("settings", {}).get("layers", []), "settings.layers", ("model", "effort"))
     _check_retired_fields(data.get("providers", []), "providers", ("protocols", "base_url", "models"))
     for index, project in enumerate(data.get("projects", [])):
@@ -1610,6 +1625,27 @@ class _Importer:
                 await scheduler_settings.store(name, value, conn=self.conn)
         for name in sorted(set(entry) - set(scheduler_settings.FIELDS)):
             self.record("settings.scheduler", name, Action.SKIPPED, reason="unknown scheduler setting")
+
+    async def chat(self, entry: Any) -> None:
+        from . import chat_settings
+
+        current = await stored_chat_settings(self.conn)
+        for name, value in entry.items():
+            try:
+                if name != "metrics_enabled":
+                    raise ValueError("unknown portable chat setting")
+                value = chat_settings.checked({name: value})[name]
+                if value is None:
+                    raise ValueError("metrics_enabled must be a boolean")
+            except ValueError as exc:
+                self.record("settings.chat", name, Action.SKIPPED, reason=str(exc))
+                continue
+            action = self.outcome("settings.chat", name, current.get(name),
+                                  (name,) if current.get(name) != value else ())
+            if self.apply and action in (Action.ADDED, Action.CHANGED):
+                await self.conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+                    "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
+                    chat_settings.METRICS_ENABLED_KEY, "true" if value else "false")
 
     async def channel(self, entry: Any) -> None:
         from .channels.allowlist import AllowlistError, normalized_config
@@ -2649,6 +2685,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         await importer.role(entry)
     if "scheduler" in settings:
         await importer.scheduler(settings["scheduler"])
+    if "chat" in settings:
+        await importer.chat(settings["chat"])
     for entry in data.get("catalog", []):
         await importer.item(entry, None)
 

@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..db import activity as db_activity, tasks as db_tasks, user_gates as db_user_gates
+from . import turn_metrics
 from .channels.base import PostReceipt
 from .gate_service import GateChat, _offered, dashboard_target, gate_chat
 from .task_notice import NAME_CHARS, task_link_line
@@ -220,11 +221,15 @@ class GateCourier:
             return True
         reply_to = await self._reply_to(row, chat)
         key = f"gate-{row['id']}"
-        receipt = await self._post(chat.channel_id, chat.target, text, reply_to=reply_to, idempotency_key=key)
+        proactive = turn_metrics.proactive_kwargs(
+            turn_metrics.ProactiveSource.GATE_REMINDER if MessageKind(row["kind"]) is MessageKind.REMINDER
+            else turn_metrics.ProactiveSource.GATE, row["step_id"], row.get("manager_id"), dedupe_key=key)
+        receipt = await self._post(chat.channel_id, chat.target, text, reply_to=reply_to, idempotency_key=key,
+                                   **proactive)
         if receipt.parent_gone:
             # The message it replies to was recalled (or deleted, which Lark counts as recalled): post it on its own.
             receipt = await self._post(chat.channel_id, chat.target, text, reply_to=None,
-                                       idempotency_key=f"{key}-own")
+                                       idempotency_key=f"{key}-own", **proactive)
         attempt = int(row.get("post_attempts") or 0) + 1
         if not receipt.success and not receipt.external_ids and attempt < POST_ATTEMPTS:
             await db_user_gates.record_retry(row["id"], receipt.error or "not sent", datetime.now(timezone.utc)

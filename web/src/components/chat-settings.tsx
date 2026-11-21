@@ -56,7 +56,9 @@ export function ChatSettingsSection() {
     return () => { alive = false; };
   }, [attempt]);
 
-  const save = async (body: { stop_enabled?: boolean; completion_turns?: CompletionTurns; ledger_enabled?: boolean }) => {
+  const save = async (body: {
+    stop_enabled?: boolean; completion_turns?: CompletionTurns; ledger_enabled?: boolean; metrics_enabled?: boolean;
+  }) => {
     setSaving(true);
     setError("");
     try {
@@ -126,6 +128,17 @@ export function ChatSettingsSection() {
               默认关闭。打开后开始登记，默认管家得到账本工具；关掉后不再登记，已经记下的还在。
             </p>
             {missingBots.length > 0 && <LedgerNotice bots={missingBots} />}
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-metrics`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-metrics`} type="checkbox" checked={settings.metrics_enabled} disabled={saving}
+                     aria-describedby={`${id}-metrics-help`}
+                     onChange={(event) => void save({ metrics_enabled: event.target.checked })} />
+              记录管家体验指标
+            </label>
+            <p id={`${id}-metrics-help`} className="text-xs text-muted-foreground">
+              每轮记下回执、首条回复、工具调用次数和是否交付；主动消息记一行。只记录，不改变管家的行为。
+            </p>
           </div>
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>

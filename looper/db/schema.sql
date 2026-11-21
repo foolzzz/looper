@@ -2248,6 +2248,55 @@ ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
 
+-- One row per proactive message. Metrics write the receipt directly; the delivery
+-- layer will own the single decision point. Its policy fields stay unset until
+-- that layer is connected. Keep this block as the one named migration.
+-- proactive deliveries begin
+CREATE TABLE IF NOT EXISTS proactive_deliveries (
+    id          BIGSERIAL PRIMARY KEY,
+    source      TEXT NOT NULL CHECK (source IN ('task_notice', 'completion', 'progress', 'gate', 'gate_reminder',
+                                                'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous',
+                                                'user_reminder')),
+    source_ref  TEXT,                 -- 任务、关卡、订阅运行、意图或定时任务运行的 id；管家自己说的话为空
+    manager_id  TEXT,
+    channel_id  TEXT NOT NULL,        -- 'web' 或机器人的渠道 id
+    chat        TEXT NOT NULL,        -- 飞书、Telegram 的会话 id；控制台的会话 id
+    external_id TEXT,                 -- 发送方知道时：平台消息 id
+    outcome     TEXT CHECK (outcome IN ('sent', 'rejected', 'unknown')),
+    dedupe_key  TEXT,
+    urgency     TEXT CHECK (urgency IN ('normal', 'blocking', 'user_set')),
+    chat_kind   TEXT NOT NULL CHECK (chat_kind IN ('direct', 'group')),
+    task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id     TEXT,
+    schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL,
+    decision    TEXT CHECK (decision IN ('send', 'merge', 'defer', 'digest', 'drop')),
+    reason      TEXT CHECK (reason IN ('silent', 'urgent', 'outside_active_hours', 'recent_reply',
+                                      'quiet_hours', 'daily_cap', 'within_limits', 'off')),
+    counted     BOOLEAN,
+    local_date  DATE,
+    digest_date DATE,
+    decided_at  TIMESTAMPTZ,
+    sent_at     TIMESTAMPTZ,
+    replied_at  TIMESTAMPTZ,
+    reply_match TEXT CHECK (reply_match IN ('quoted', 'next_message')),
+    CONSTRAINT proactive_deliveries_receipt CHECK ((sent_at IS NULL) = (outcome IS NULL)),
+    CONSTRAINT proactive_deliveries_reply CHECK ((replied_at IS NULL) = (reply_match IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_open
+    ON proactive_deliveries (channel_id, chat, sent_at DESC) WHERE replied_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_sent ON proactive_deliveries (sent_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proactive_deliveries_dedupe
+    ON proactive_deliveries (dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_counted
+    ON proactive_deliveries (channel_id, chat, local_date) WHERE counted;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_digest
+    ON proactive_deliveries (digest_date) WHERE decision = 'digest';
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_task ON proactive_deliveries (task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_schedule
+    ON proactive_deliveries (schedule_id) WHERE schedule_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_decided ON proactive_deliveries (decided_at);
+-- proactive deliveries end
+
 -- One review of an outbound action (the outbound-review RFC, section 9): who asked for it and where, the action as
 -- code describes it (its tool, level and target, a redacted summary), the verdict and why, and the classifier's run
 -- (record_id; none when code blocked it without one), model, cost and latency. A row is written before the action

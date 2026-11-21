@@ -32,7 +32,7 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
 _MISSING_BOT = _object({"channel_id": _STR, "channel_type": _STR, "name": _STR}, closed=True)
 CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL,
-                         "ledger_enabled": _BOOL})
+                         "ledger_enabled": _BOOL, "metrics_enabled": _BOOL})
 CHAT_SETTINGS_UPDATED = _object({**CHAT_SETTINGS["properties"], "missing_operator_ids": _array(_MISSING_BOT)},
                                 required=CHAT_SETTINGS["required"])
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
@@ -67,6 +67,7 @@ OPERATIONS = (
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
                  "research_order": {"type": ["boolean", "null"]},
+                 "metrics_enabled": {"type": ["boolean", "null"]},
                  "ledger_enabled": {"type": ["boolean", "null"]}},
                 [], closed=True), CHAT_SETTINGS_UPDATED, "high"),
 )
@@ -79,6 +80,8 @@ async def impact(server, operation, arguments, principal, headers):
         values = chat_settings.checked(arguments)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
+    if "metrics_enabled" in values and principal.kind != "operator":
+        raise OpError(ErrorCode.FORBIDDEN, "metrics_enabled requires operator identity")
     if "ledger_enabled" in values and principal.kind != "operator":
         raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
     changes = []
@@ -106,6 +109,10 @@ async def impact(server, operation, arguments, principal, headers):
                           "order, before it asks the user; its process starts again to read them." if enabled else
                           "From its next turn, the default Manager's instructions no longer say where to look things "
                           "up; its process starts again."))
+    if "metrics_enabled" in values:
+        enabled = bool(values["metrics_enabled"])
+        changes.append(f"Set manager.metrics.enabled to {str(enabled).lower()}? "
+                       "This records Manager turn latency and proactive delivery metrics without changing delivery.")
     if "ledger_enabled" in values:
         value = values["ledger_enabled"]
         enabled = False if value is None else value
@@ -148,6 +155,8 @@ async def run(server, operation, arguments, principal, headers):
     if name == "chat_settings.get":
         return await chat_settings.settings_view()
     if name == "chat_settings.update":
+        if "metrics_enabled" in arguments and principal.kind != "operator":
+            raise OpError(ErrorCode.FORBIDDEN, "metrics_enabled requires operator identity")
         if "ledger_enabled" in arguments and principal.kind != "operator":
             raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
         try:
