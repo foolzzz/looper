@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
-from . import live_runs, proc_tree
+from . import failures, live_runs, proc_tree
 from .live_runs import LiveRun
 from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
 from .system_prompt_mode import SystemPromptMode
@@ -1502,6 +1502,9 @@ class ClaudeRunRecorder:
         self._context_tokens: int | None = None  # the prompt of the run's latest main-loop request
         self._compactions: list[dict[str, Any]] = []
         self._streamed = Usage()  # the tokens of the run's model requests so far, from its usage events
+        # What its stream said about how it may fail, and what its close classifies (``failures``).
+        self._evidence = failures.Evidence()
+        self._failure_basis: tuple[dict[str, Any] | None, str | None, failures.Failure | None] | None = None
         self._result_only_usage = False  # side requests whose full usage is absent from the request stream
         self._compacting = False  # an unresolved attempt may have made a hidden summary request
         self._started = _clock()
@@ -1608,6 +1611,7 @@ class ClaudeRunRecorder:
         """What ``event`` tells the run (its usage, so its cap, its model and session), at once; ``persist`` writes
         it to the record, which may wait on the database. A ``replayed`` event (a resumed run's output read again)
         rebuilds the run's usage but is not new: its tokens are not counted in the run's TPM again."""
+        self._evidence.observe(event)
         self._model_reported = self._runtime().reported_model(event) or self._model_reported
         if event.get("type") == "system" and event.get("subtype") == "status":
             if event.get("status") == "compacting":
@@ -1782,13 +1786,16 @@ class ClaudeRunRecorder:
         usage: Usage | None = None,
         outcome: str | None = None,
         status: RecordStatus | None = None,
+        failure: failures.Failure | None = None,
     ) -> None:
         """Close with the run's own ``usage``, or its result totals for a fresh process.
         A whole process inheriting a Claude session uses only its streamed request usage, leaving cost unknown
         when side requests make that stream incomplete.
         ``outcome`` is how a Worker's report or a Reviewer's verdict read (``worker.RunOutcome``); ``status``,
         when given, replaces the one its result gives (``ended_by``, for a run that was stopped). The tool calls
-        the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``.
+        the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``. ``failure`` is
+        why it failed when Looper itself knows (it could not start, it timed out); with failure typing on, a failed
+        run's close records its class (``failures.classify``).
 
         Claude reports the running totals of its session, so a run that is
         one turn of a longer-lived session passes its own share
@@ -1801,6 +1808,7 @@ class ClaudeRunRecorder:
         if self._detached:
             return
         await self._after_run()
+        self._failure_basis = result_event, outcome, failure
         result = result_event or {}
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
         if self._inherited_session:
@@ -1876,6 +1884,12 @@ class ClaudeRunRecorder:
         if self._record_id is None or self._closed:
             return
         self._closed = True
+        from ..db.llm_records import RecordStatus
+
+        # A run that failed, or whose own report says its step failed, gets a failure class; one Looper stopped
+        # does not.
+        basis = (self._failure_basis or (self._result, outcome, None)) \
+            if status is RecordStatus.FAILED or outcome in failures.REPORT_OUTCOMES else None
         if not self._keep_output:
             output_text = None
         from .llmrec.control import release
@@ -1910,7 +1924,7 @@ class ClaudeRunRecorder:
                 "outcome": outcome,
                 **({"metadata": metadata} if metadata else {}),
             }
-            write = asyncio.ensure_future(asyncio.wait_for(self._write_end(fields), CLOSE_TIMEOUT_SEC))
+            write = asyncio.ensure_future(asyncio.wait_for(self._write_end(fields, basis), CLOSE_TIMEOUT_SEC))
         except Exception:  # recording never fails the run; the next start ends the record
             logger.warning("could not close llm record for %s", self._agent_id, exc_info=True)
             return
@@ -1921,11 +1935,20 @@ class ClaudeRunRecorder:
         if not done:
             logger.warning("timed out closing llm record for %s", self._agent_id)
 
-    async def _write_end(self, fields: dict[str, Any]) -> None:
-        """``finish_record``, tried once more after a database error."""
+    async def _write_end(self, fields: dict[str, Any],
+                         basis: tuple[dict[str, Any] | None, str | None, failures.Failure | None] | None = None) -> None:
+        """``finish_record``, tried once more after a database error; a failed run's ``basis`` (its result, outcome
+        and what Looper knows) gives the failure class to record with it, while failure typing is on."""
         from ..db import llm_records
         from .llmrec import LlmrecRoute, RouteKind
         from .llmrec.control import controller
+
+        if basis is not None:
+            result_event, outcome, given = basis
+            found = await failures.recorded(self._runtime(), result_event, self._evidence, outcome=outcome, given=given)
+            if found is not None:
+                fields.update(failure_class=found.cls.value, failure_cause=found.cause.value,
+                              metadata={**(fields.get("metadata") or {}), "failure": found.metadata()})
 
         route = self._launch.llmrec if self._launch is not None else None
         owner = controller()

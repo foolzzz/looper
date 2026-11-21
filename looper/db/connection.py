@@ -178,6 +178,7 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_intent_posts_uncertain", "ON intent_posts (updated_at) WHERE state = 'uncertain'"),
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
+_FAILURE_TYPING = "failure_typing"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -355,6 +356,18 @@ def _run_tree_ddl() -> tuple[str, ...]:
     )
 
 
+def _failure_typing_ddl() -> tuple[str, ...]:
+    """The failure columns of llm_records, as schema.sql defines them, added without a scan or a rewrite (as the run
+    tree's are): every older row is NULL, so the check holds; it comes NOT VALID and is validated, and the index
+    built, in ``_ONLINE_STEPS``."""
+    from ..agents.failures import check_sql
+
+    return (
+        "ALTER TABLE llm_records ADD COLUMN failure_class TEXT, ADD COLUMN failure_cause TEXT",
+        f"ALTER TABLE llm_records ADD CONSTRAINT llm_records_failure_check CHECK ({check_sql()}) NOT VALID",
+    )
+
+
 @dataclass(frozen=True)
 class _OnlineStep:
     """What a migration finishes after the schema transaction commits, taking no lock that stops reads or writes: it
@@ -406,6 +419,9 @@ _ONLINE_STEPS = (
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
     # The delivery tables can be large: their partial indexes are built without blocking writes.
     _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
+    _OnlineStep(_FAILURE_TYPING, "failure_typing_online",
+                validate=(("llm_records", "llm_records_failure_check"),),
+                indexes=(("idx_llm_records_failures", "ON llm_records (created_at) WHERE failure_class IS NOT NULL"),)),
 )
 
 
@@ -898,6 +914,10 @@ async def _column_pending(conn: asyncpg.Connection, marker: str, table: str, col
 
 async def _run_tree_pending(conn: asyncpg.Connection) -> bool:
     return await _column_pending(conn, _RUN_TREE, "llm_records", "run_kind")
+
+
+async def _failure_typing_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _FAILURE_TYPING, "llm_records", "failure_class")
 
 
 async def _step_difficulty_pending(conn: asyncpg.Connection) -> bool:
@@ -1694,6 +1714,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
         if await _uncertain_deliveries_pending(conn):
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
+        if await _failure_typing_pending(conn):
+            for ddl in _failure_typing_ddl():
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _FAILURE_TYPING)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1748,6 +1772,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn)
             or await _uncertain_deliveries_pending(conn)
+            or await _failure_typing_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _decision_snapshots_pending(conn)

@@ -3848,6 +3848,46 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
+### Why a run failed (failure classes)
+
+While the system setting `engine.failure_typing` is `record` (`off` by default; [engine reliability
+RFC](rfcs/engine-reliability-v0.zh-CN.md), section 4), the close of a failed run records why it failed as a type
+(`looper/agents/failures.py`): `llm_records.failure_class` (`quota`, `transient`, `environment` or `judgment`),
+`failure_cause` (each cause has one class, and a check constraint holds the pair: `usage_limit`, `rate_limit`;
+`connection_failed`, `provider_overloaded`, `start_timeout`; `runtime_missing`, `login`, `tls`, `profile`; `timeout`,
+`context`, `budget`, `report`, `unknown`), and `metadata.failure` (`signal`: `typed` or `text`, and `resets_at` for a
+used-up window). This step only records: what happens to a failed run, its step and its task is unchanged.
+
+- **Which runs.** A record that ends `failed`, and a Worker's or Reviewer's run whose own report says the step failed
+  (`metadata.outcome` `reported_failed`, `contract` or `files_mismatch`: `judgment`, `report`). A Reviewer's
+  `not_passed` is a verdict, not a failure; an `interrupted` record (Looper stopped the run) has no class.
+- **How.** Looper's own reason comes first: a keeper that did not open its control socket in time is `start_timeout`
+  (`RunStartTimeout`), a missing executable or directory `runtime_missing`, a launch the runtime cannot take
+  `profile`, a run over its time limit `timeout`. Then the runtime adapter's `failure_signal`, then the run's own
+  report, then its spend cap; anything else is `unknown`. The recorder gathers the evidence from every event it
+  accounts, before a record's keep filter, so a processor run (whose record keeps only system and result events) is
+  classified the same way.
+  - Claude Code: the result's `api_error` (`usage_limit_reached`, `connection_failed`), `api_error_status` and
+    `api_error_type`, the stream's rejected `rate_limit_event` (with its `resetsAt`) and the synthetic assistant
+    message's `error`. Text only where an older Claude Code gives none of these.
+  - Codex: the app-server's `codexErrorInfo`, which its `codex_error` events and failed result now carry as
+    `codex_error_info` (with `will_retry`; a retried error is not the run's failure), only when Codex sends one. Codex
+    exec reports messages only, matched against codex-cli 0.169.0's texts for a used-up limit, a rate limit, a model
+    at capacity and a broken stream (`signal: text`).
+  - The API runtime: its loop's error kind, which a failed result now carries (`error_kind`, `error_status`).
+  - Other runtimes give no signal yet: their failures are `unknown`.
+- **Settings.** `engine_settings.get` and `engine_settings.update` (`{"failure_typing": "off" | "record" | null}`,
+  null for the built-in `off`; operator only; `act`, failure handling, is refused until it exists), and the generated
+  `loopercli engine-settings` commands. Not a Manager tool: nothing changes for the Manager, Telegram or Lark.
+- **Counts.** `runs.failures` (`{"days"}`, 1 to 90, 7 when omitted): the classified runs by UTC day, run kind,
+  runtime, class and cause, the total by class, and `steps`: of the Workers' and Reviewers' classified runs, how
+  many were not a judgment (the failures that reach a Planner without needing one).
+- **Dashboard.** A run card shows its class and cause beside its status, and in its body what the class means, when
+  the used-up window resets and whether the runtime's error text told it.
+- **Off.** No class and no `metadata.failure`: a record's close writes exactly what it wrote before. The migration
+  `failure_typing` adds the two columns without a rewrite; its check is validated and its index
+  (`idx_llm_records_failures`) built online.
+
 ### Translated models (local gateway)
 
 Claude Code can run an `openai-chat` model through Looper's local gateway.
