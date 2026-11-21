@@ -151,6 +151,7 @@ class AgentType(str, Enum):
     ADVISOR = "advisor"
     ADVICE_CHECK = "advice_check"
     LEADS_CHECK = "leads_check"
+    OUTBOUND_CHECK = "outbound_check"
 
 
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
@@ -159,7 +160,8 @@ TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 # its execution settings), each has a built-in profile of its own (``profile_registry.BUILTIN_ROLE_PROFILES``), and
 # their system prompt always replaces the runtime's, with no harness. The leads check is one too: an extraction run
 # starts it over what it found (``processor.run`` with its role).
-SPAWN_ROLES = (AgentType.ADVISOR, AgentType.ADVICE_CHECK, AgentType.LEADS_CHECK)
+SPAWN_ROLES = (AgentType.ADVISOR, AgentType.ADVICE_CHECK, AgentType.LEADS_CHECK,
+               AgentType.OUTBOUND_CHECK)
 # The roles with no harness and a replaced system prompt: the processor and the spawned roles.
 NO_HARNESS_ROLES = (AgentType.PROCESSOR, *SPAWN_ROLES)
 # The roles a project's layers apply to: its tasks' and the processor of its schedules.
@@ -183,6 +185,7 @@ BUILTIN_SYSTEM_PROMPT_MODE = {
     AgentType.PROCESSOR: SystemPromptMode.REPLACE,
     AgentType.ADVISOR: SystemPromptMode.REPLACE, AgentType.ADVICE_CHECK: SystemPromptMode.REPLACE,
     AgentType.LEADS_CHECK: SystemPromptMode.REPLACE,
+    AgentType.OUTBOUND_CHECK: SystemPromptMode.REPLACE,
 }
 
 
@@ -946,7 +949,7 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
 class Access(str, Enum):
     """What a run may do (the advisor RFC, section 6). ``full``: every tool; ``read_only``: no change to files (a
     Planner's); ``consult``: only the reading tools, in a resumed fork of a seat's session (an agent room consult);
-    ``advisor``: no tool at all, its system prompt replaced (an advisor's or a judge's run)."""
+    ``advisor``: no tool at all, its system prompt replaced (an advisor's, a judge's or an outbound review's run)."""
 
     FULL = "full"
     READ_ONLY = "read_only"

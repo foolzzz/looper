@@ -152,6 +152,7 @@ _MANAGER_EVENT_REASONS = ("off", "group_chat", "manager_off", "turn_failed", "tu
                           "empty_reply", "send_failed", "queue_deadline", "restart", "no_chat", "target_changed")
 _RUN_TREE = "run_tree"
 _AGENT_SPAWNS = "agent_spawns"
+_DECISION_SNAPSHOTS = "decision_snapshots"
 _STEP_DIFFICULTY = "step_difficulty"
 _ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ADVISOR = "project_advisor"
@@ -168,6 +169,7 @@ _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
+_OUTBOUND_REVIEWS = "outbound_reviews"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -259,6 +261,7 @@ _SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
+_DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
 
 
 def _message_stream_ddl() -> str:
@@ -283,6 +286,48 @@ def _agent_spawns_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its agent spawns block")
     return found.group(1)
+
+
+def _decision_snapshots_ddl() -> str:
+    """The decision snapshot table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _DECISION_SNAPSHOTS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its decision snapshots block")
+    return found.group(1)
+_OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
+
+
+# The checks that list the classifier: (table, constraint).
+_OUTBOUND_CHECKS = (("llm_records", "llm_records_run_kind_check"),
+                    ("agent_setting_layers", "agent_setting_layers_role_check"))
+
+
+async def _lacks_outbound_check(conn: asyncpg.Connection, table: str, constraint: str) -> bool:
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass($1) AND conname = $2 "
+        "AND strpos(pg_get_constraintdef(oid), $3) = 0)", table, constraint, "'outbound_check'")
+
+
+async def _outbound_reviews_ddl(conn: asyncpg.Connection) -> list[str]:
+    """The review table as schema.sql defines it (idempotent), and the classifier in each check that lists roles or
+    run kinds without it. Each check comes back NOT VALID, so nothing is scanned while the schema transaction holds
+    their tables' locks, and is validated in ``_ONLINE_STEPS``."""
+    from .llm_records import RUN_KINDS
+
+    found = _OUTBOUND_REVIEWS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its outbound reviews block")
+    kinds = ", ".join(f"'{kind}'" for kind in RUN_KINDS)
+    widen = {
+        "llm_records_run_kind_check": "ALTER TABLE llm_records DROP CONSTRAINT llm_records_run_kind_check, "
+        f"ADD CONSTRAINT llm_records_run_kind_check CHECK (run_kind IN ({kinds})) NOT VALID",
+        "agent_setting_layers_role_check": "ALTER TABLE agent_setting_layers DROP CONSTRAINT "
+        "agent_setting_layers_role_check, ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', "
+        "'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check', 'outbound_check')) "
+        "NOT VALID",
+    }
+    return [found.group(1)] + [widen[constraint] for table, constraint in _OUTBOUND_CHECKS
+                               if await _lacks_outbound_check(conn, table, constraint)]
 
 
 def _run_tree_ddl() -> tuple[str, ...]:
@@ -347,6 +392,7 @@ _ONLINE_STEPS = (
                           ("schedule_notifications", "schedule_notifications_kind_check"))),
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
+    _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
 )
 
 
@@ -789,6 +835,24 @@ async def _agent_spawns_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _AGENT_SPAWNS):
         return False
     return not await conn.fetchval("SELECT to_regclass('agent_spawns') IS NOT NULL")
+
+
+async def _decision_snapshots_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _DECISION_SNAPSHOTS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('decision_snapshots') IS NOT NULL")
+
+
+async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _OUTBOUND_REVIEWS):
+        return False
+    # Fresh baselines have the table and the widened checks; an older migration may have rewritten a check since.
+    if not await conn.fetchval("SELECT to_regclass('outbound_reviews') IS NOT NULL"):
+        return True
+    for table, constraint in _OUTBOUND_CHECKS:
+        if await _lacks_outbound_check(conn, table, constraint):
+            return True
+    return False
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -1421,6 +1485,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _agent_spawns_pending(conn):
             await conn.execute(_agent_spawns_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _AGENT_SPAWNS)
+        if await _decision_snapshots_pending(conn):
+            await conn.execute(_decision_snapshots_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _DECISION_SNAPSHOTS)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -1545,6 +1612,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                   ADD COLUMN failure_kind TEXT CHECK (failure_kind IN ('task_budget'));
             """)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_SESSION_BOUNDS)
+        if await _outbound_reviews_pending(conn):
+            for ddl in await _outbound_reviews_ddl(conn):
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1597,8 +1668,10 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)
+            or await _outbound_reviews_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
+            or await _decision_snapshots_pending(conn)
             or await _project_advisor_pending(conn)
             or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)

@@ -202,7 +202,7 @@ from ..message import (
     planner_address,
     worker_address,
 )
-from . import journal
+from . import decisions, journal
 from .plan_view import PLAN_FULL_EVERY_TURNS, PlanItem, PlanShown, render as render_plan_view
 from .conditions import State, StepOutcome, evaluate, leaves, parse as parse_condition, render, to_json
 from .journal import JournalEntry, JournalKind, LearningScope
@@ -1385,8 +1385,9 @@ class PlannerAgent:
             await self._checkpoints(plan)
             if plan.status not in _LIVE:
                 return
+        snapshot = await decisions.enabled()  # read before the lock: with snapshots off, the pass waits for nothing new
         async with project_dispatch(plan.project_id):
-            await self._dispatch_ready_impl(plan)
+            await self._dispatch_ready_impl(plan, snapshot=snapshot)
 
     # --- The advisor (the advisor RFC, sections 11 and 12): only with the project's advisor on ---
     #
@@ -1865,11 +1866,13 @@ class PlannerAgent:
             logger.warning("task %s: cannot record whether step %s's advice unlocked it", self._task_id, step.label,
                            exc_info=True)
 
-    async def _dispatch_ready_impl(self, plan: TaskPlan) -> None:
+    async def _dispatch_ready_impl(self, plan: TaskPlan, *, snapshot: bool = False) -> None:
         # Every ready gate and wait opens; every ready work step starts, and the worker pool runs the work
         # within its project's Worker limit. Gates announce their opening. A wait takes no Worker and joins no
         # workspace round; its progress is reported once the work is in flight so it does not report waiting first.
+        # With ``snapshot`` (decision snapshots on), what the pass read and decided is recorded before work starts.
         ready = plan.ready_steps(isolate_steps=self._execution.isolate_steps)
+        record = decisions.Dispatch(plan, isolate_steps=self._execution.isolate_steps) if snapshot else None
         opened_wait = False
         for step in [s for s in ready if s.gate is not None or s.wait is not None]:
             if plan.status not in _LIVE:
@@ -1885,7 +1888,11 @@ class PlannerAgent:
         work = [step for step in ready if step.gate is None and step.wait is None and not step.reviews]
         base: _RoundBase | None = None
         if work and self._execution.isolate_steps:
-            work, base = await self._plan_round(plan, work)
+            # Only a recorded pass hands the round its record; otherwise the call is as it always was.
+            work, base = await (self._plan_round(plan, work) if record is None
+                                else self._plan_round(plan, work, record))
+        if record is not None:
+            await record.save(self._task_id, ready, work)
         for step in work:
             if plan.status not in _LIVE:
                 break  # the task stopped at its spend cap
@@ -2600,14 +2607,15 @@ class PlannerAgent:
 
     # --- Step workspaces (a project with step_workspaces = worktree) ---
 
-    async def _plan_round(self, plan: TaskPlan, ready: list[PlanStep]) -> tuple[list[PlanStep], _RoundBase | None]:
+    async def _plan_round(self, plan: TaskPlan, ready: list[PlanStep], record: decisions.Dispatch | None = None,
+                          ) -> tuple[list[PlanStep], _RoundBase | None]:
         """Which of the ready steps start now (``workspaces.plan_round``), and where the new worktrees among them
-        start (None: none of them needs one)."""
+        start (None: none of them needs one); ``record`` gets what decided it."""
         repo = await self._task_repo(plan)
-        decided = workspaces.plan_round(in_flight=[
-            s.isolated
-            for s in plan.steps if s.status in _IN_FLIGHT],
-                                        ready=[s.isolated for s in ready], repo=repo)
+        in_flight, isolated = [s.isolated for s in plan.steps if s.status in _IN_FLIGHT], [s.isolated for s in ready]
+        decided = workspaces.plan_round(in_flight=in_flight, ready=isolated, repo=repo)
+        if record is not None:
+            record.round(in_flight, isolated, repo, decided)
         if decided.note and decided.note != self._round_note:
             await self._activity("phase", decided.note[:500])
         self._round_note = decided.note
@@ -3247,7 +3255,8 @@ class PlannerAgent:
         except PlannerTurnError as exc:
             await self._undecided(plan, step, context, exc)
             return
-        await self._apply_decision(plan, step, context, reply)
+        await self._apply_decision(plan, step, context, reply,
+                                   adjudicated_accept=self._offers_adjudicated_accept(plan, step, context))
 
     async def _undecided(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, exc: Exception) -> None:
         """No valid decision on ``step``'s result came: a mandatory review still runs, else the step's own verdict
@@ -3278,9 +3287,13 @@ class PlannerAgent:
                                                   "failed it.")
 
     async def _apply_decision(
-        self, plan: TaskPlan, step: PlanStep, context: DecisionContext, reply: DecisionReply,
+        self, plan: TaskPlan, step: PlanStep, context: DecisionContext, reply: DecisionReply, *,
+        adjudicated_accept: bool = False,
     ) -> None:
-        """Do what a DECISION reply decided: its changes to gates and waits first, then the decision on ``step``."""
+        """Do what a DECISION reply decided: its changes to gates and waits first, then the decision on ``step``
+        (``adjudicated_accept``: its turn was offered an accept that downgrades blocking findings)."""
+        await decisions.step_decision(self._task_id, step, context, reply, self._last_record_id,
+                                      adjudicated_accept=adjudicated_accept)
         at = f"the decision on step {step.label}"
         gates_cancelled = await self._apply_gate_changes(plan, reply.gates, at)
         waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
@@ -5443,7 +5456,7 @@ class PlannerAgent:
         from .review_adjudication import required_downgrades
         who = "Reviewer" if context.result is ResultKind.REVIEW else "Worker"
         adjudicated_accept = self._offers_adjudicated_accept(plan, step, context)
-        choices = replace(context, succeeded=True).allowed() if adjudicated_accept else context.allowed()
+        choices = context.offered(adjudicated_accept)
         allowed = []
         for decision in choices:
             if decision is Decision.RETRY:

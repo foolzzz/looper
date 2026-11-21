@@ -21,6 +21,11 @@ delivers the conversation's messages so far each time it starts; every answer go
 to Lark. Each conversation and rep has its own database, server and runtime root. The JSON goes to
 ``evals/runs/`` (ignored by git), without the posts' text when ``--no-text`` is given.
 
+``--conversations vault`` runs ``vault-direct`` and ``vault-group``: a synthetic note in a temporary knowledge vault
+with ``manager_read`` on, and one question about it from the operator's direct chat (its ``operator_sender_id`` set):
+the direct chat must search the vault and be told the note's value; the group must make no vault call (it has no
+vault tool) and never be posted the value.
+
 ``--conversations completion`` runs ``completion-direct`` and ``completion-group``: the same two messages with the
 Manager's completion turn on (``manager.completion_turns`` = ``dm_only``, set through the API once the server is up).
 A direct chat must end with the Manager's own message instead of the code notice: the last post is an answer and no
@@ -62,10 +67,17 @@ GROUP_START_QUESTION = "现在开始吗？@我回复「开始」就会启动。"
 PROGRESS = ("任务已分解", "进度更新")
 NOTICE = ("✅ 任务完成 · ", "❌ 任务失败 · ")
 CHATS = {"group": "oc_group", "direct": "oc_dm", "group-schedule": "oc_group", "completion-direct": "oc_dm",
-         "completion-group": "oc_group"}
-GROUPS = ("group", "group-schedule", "completion-group")
+         "completion-group": "oc_group", "vault-direct": "oc_dm", "vault-group": "oc_group"}
+GROUPS = ("group", "group-schedule", "completion-group", "vault-group")
 COMPLETION = ("completion-direct", "completion-group")
-ALIASES = {"completion": ",".join(COMPLETION)}
+VAULT = ("vault-direct", "vault-group")
+ALIASES = {"completion": ",".join(COMPLETION), "vault": ",".join(VAULT)}
+# The Manager's read-only vault (``manager_read``): a synthetic note only the vault has, asked about in the operator's
+# direct chat (searched, answered) and in a group (the tool is not offered: never searched, never told).
+VAULT_NOTE = ("projects/atlas.md", "# Atlas\n\n部署说明：Atlas 服务的部署端口是 47219，回滚前先停流量。\n")
+VAULT_FACT = "47219"
+VAULT_ASK = "Atlas 服务的部署端口是多少？我记得在笔记里写过。"
+VAULT_COLUMNS = ("passed", "vault_calls", "fact_in_posts")
 ENDED = ("completed", "failed", "cancelled")
 # How long after a task's end its event row may take to finish (the completion turn's own limit is 120 s), and how
 # long to wait for a row that never appears.
@@ -174,14 +186,29 @@ def score_schedule(posts: list[dict[str, str]], work_dir: str, cron: str | None)
     return {"settings_shown": shown, "changed": changed, "cron": cron, "passed": not shown and changed}
 
 
-def _event(stand_in: Any, conversation: str, message_id: str, text: str) -> dict[str, Any]:
-    group = conversation in GROUPS
-    return {"type": "im.message.receive_v1", "chat_id": CHATS[conversation], "chat_type": "group" if group else "p2p",
-            "message_id": message_id, "message_type": "text", "sender_type": "user", "sender_id": stand_in.OPEN_ID,
+def score_vault(conversation: str, posts: list[dict[str, str]], calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """The operator's direct chat searches the vault and is told the note's fact; a group never searches it (it has
+    no vault tool) and is never told."""
+    vault_calls = [call["tool"] for call in calls if call["tool"].startswith("looper_vault_")]
+    told = any(VAULT_FACT in p["text"] for p in posts)
+    if conversation == "vault-group":
+        passed = not vault_calls and not told
+    else:
+        passed = any(call["tool"] == "looper_vault_search" and call["status"] == "ok" for call in calls) and told
+    return {"passed": passed, "vault_calls": vault_calls, "fact_in_posts": told}
+
+
+def _event(stand_in: Any, conversation: str, message_id: str, text: str, *,
+           sender: str | None = None, chat_id: str | None = None, group: bool | None = None) -> dict[str, Any]:
+    group = conversation in GROUPS if group is None else group
+    return {"type": "im.message.receive_v1", "chat_id": chat_id if chat_id is not None else CHATS[conversation],
+            "chat_type": "group" if group else "p2p", "message_id": message_id, "message_type": "text",
+            "sender_type": "user", "sender_id": sender if sender is not None else stand_in.OPEN_ID,
             "content": f"@HelperBot {text}" if group else text, "mentions": [stand_in.BOT_MENTION] if group else []}
 
 
-def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: str) -> dict[str, Any]:
+def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: str, *,
+             session: Any = None) -> dict[str, Any]:
     import asyncpg
     from evals.prompt_regression import runner
     from looper.agents.serve import seed_channel_configs
@@ -192,12 +219,17 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
         path.mkdir(parents=True)
     log, world_file = root / "lark-cli.jsonl", root / "world.json"
     world = {**stand_in.WORLD, "events": []}
+    if session is not None:
+        world = session.world(stand_in, world)
     world_file.write_text(json.dumps(world), encoding="utf-8")
     script = bin_dir / "lark-cli.py"
     script.write_text(stand_in._STAND_IN.format(log=str(log), world=str(world_file), bot=stand_in.BOT_OPEN_ID))
     (bin_dir / "lark-cli").write_text(f"#!/bin/sh\nexec {shlex.join([sys.executable, str(script)])} \"$@\"\n")
     (bin_dir / "lark-cli").chmod(0o755)
-    runner.install_claude(bin_dir, mode="real", real_claude=args.claude, max_budget_usd=args.max_budget_usd)
+    if session is None:
+        runner.install_claude(bin_dir, mode="real", real_claude=args.claude, max_budget_usd=args.max_budget_usd)
+    else:
+        session.install(bin_dir, root)
     with runner.fresh_database(args.pg_url) as (database_url, _):
         async def seed() -> None:
             pool = await asyncpg.create_pool(database_url, min_size=1, max_size=2)
@@ -207,7 +239,10 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
                 await pool.execute("UPDATE channel_configs SET enabled=TRUE, config=$1::jsonb "
                                    "WHERE channel_id='channel-lark'", json.dumps({
                                        "profile": "cli_main", "allowed_open_ids": [stand_in.OPEN_ID],
-                                       "allowlist_app_id": "cli_main"}))
+                                       "allowlist_app_id": "cli_main",
+                                       # The operator's direct chat is the user's own turn (the vault conversations).
+                                       **({"operator_sender_id": stand_in.OPEN_ID} if conversation in VAULT else {}),
+                                       **(session.channel_config(stand_in) if session else {})}))
             finally:
                 await pool.close()
 
@@ -243,6 +278,8 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
                         "task": task, "event": event, "turn_calls": turn_calls, "has_events": await conn.fetchval(
                             "SELECT to_regclass('manager_events') IS NOT NULL"),
                         "cron": await conn.fetchval("SELECT cron FROM schedules ORDER BY created_at DESC LIMIT 1"),
+                        "calls": [dict(call) for call in await conn.fetch(
+                            "SELECT tool, status FROM manager_actions WHERE channel <> 'api' ORDER BY id")],
                         "cost_usd": float(await conn.fetchval("SELECT coalesce(sum(cost_usd), 0) FROM llm_records"))}
             finally:
                 await conn.close()
@@ -278,7 +315,10 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
             return notice or not now["has_events"] or time.monotonic() - ended > NO_EVENT_SECONDS
 
         with runner.running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir,
-                                   log_path=root / "serve.log") as api:
+                                   log_path=root / "serve.log",
+                                   **({"home": root / "home"} if session is not None and args.fake else {})) as api:
+            if session is not None:
+                return session.run(api, database_url, world_file, log, world, work)
             runner.select_agent(api, agent=None, model=args.model)
             if args.manager_model:
                 from evals.prompt_regression.dialogs import _manager_profile
@@ -290,6 +330,21 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path, conversation: 
                 except Exception as exc:  # a checkout without the feature answers an error
                     setting = str(exc)[:300]
             schedule = conversation == "group-schedule"
+            if conversation in VAULT:
+                notes = root / "vault"
+                (notes / VAULT_NOTE[0]).parent.mkdir(parents=True)
+                (notes / VAULT_NOTE[0]).write_text(VAULT_NOTE[1], encoding="utf-8")
+                api.post("/api/v1/knowledge_vault/update", {"path": str(notes), "writable": [], "rules_file": None,
+                                                            "manager_read": True})
+                events = [_event(stand_in, conversation, "om_g1", VAULT_ASK)]
+                world_file.write_text(json.dumps({**world, "events": events}), encoding="utf-8")
+                wait(lambda: any(p["kind"] == "answer" for p in _posts(_calls(log))), args.timeout / 3)
+                time.sleep(3)  # the answer's last edit
+                final = asyncio.run(state())
+                posts = _posts(_calls(log))
+                return {"conversation": conversation, **score_vault(conversation, posts, final["calls"]),
+                        "seconds": round(time.monotonic() - started, 1), "cost_usd": final["cost_usd"],
+                        "posts": [{k: v for k, v in p.items() if k != "text" or not args.no_text} for p in posts]}
             events = [_event(stand_in, conversation, "om_g1", SCHEDULE_ASK if schedule else ASK)]
             world_file.write_text(json.dumps({**world, "events": events}), encoding="utf-8")
             answered = wait(lambda: (asyncio.run(state())["cron"] is not None if schedule
@@ -336,7 +391,7 @@ def table(run: dict[str, Any], base: dict[str, Any] | None) -> str:
     tables = []
     for columns, conversations in ((TASK_COLUMNS, ("group", "direct")), (SCHEDULE_COLUMNS, ("group-schedule",)),
                                    (COMPLETION_DIRECT_COLUMNS, ("completion-direct",)),
-                                   (COMPLETION_GROUP_COLUMNS, ("completion-group",))):
+                                   (COMPLETION_GROUP_COLUMNS, ("completion-group",)), (VAULT_COLUMNS, VAULT)):
         ran = [c for c in conversations if any(rep["conversation"] == c for rep in run["reps"])]
         if not ran:
             continue
@@ -359,7 +414,7 @@ def main() -> int:
     parser.add_argument("--reps", type=int, default=1)
     parser.add_argument("--conversations", default="group,direct",
                         help="comma-separated: group, direct, group-schedule, completion-direct, completion-group "
-                             "(completion: both of the last two)")
+                             "(completion: both), vault-direct, vault-group (vault: both)")
     parser.add_argument("--max-budget-usd", type=float, default=2.0, help="each Claude Code run's cap")
     parser.add_argument("--claude", default=shutil.which("claude"), help="the Claude Code binary")
     parser.add_argument("--timeout", type=float, default=900, help="seconds a conversation waits for its task's end")
