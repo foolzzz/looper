@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 import re
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -27,7 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from .agent_settings import AgentSettings, AgentType, load_agent_settings
-from .spawn import ChildFailure, ChildRun, SpawnKind, SpawnParent, run_child
+from .model_call import CallFailure, ChildCall, call
+from .spawn import ChildRun, SpawnKind, SpawnParent
 
 logger = logging.getLogger(__name__)
 
@@ -338,10 +338,10 @@ def _system_prompt(settings: AgentSettings, config: _Role) -> Any:
                                             contract=OUTBOUND_CONTRACT, custom_prompt=custom))
 
 
-_FAILURES: Mapping[ChildFailure, Failure] = {
-    ChildFailure.TIMEOUT: Failure.TIMEOUT, ChildFailure.RATE_LIMITED: Failure.RATE_LIMITED,
-    ChildFailure.BUDGET: Failure.BUDGET, ChildFailure.UNAVAILABLE: Failure.UNAVAILABLE,
-    ChildFailure.REFUSED: Failure.REFUSED, ChildFailure.RUNTIME: Failure.RUNTIME,
+_FAILURES: Mapping[CallFailure, Failure] = {
+    CallFailure.TIMEOUT: Failure.TIMEOUT, CallFailure.RATE_LIMITED: Failure.RATE_LIMITED,
+    CallFailure.BUDGET: Failure.BUDGET, CallFailure.UNAVAILABLE: Failure.UNAVAILABLE,
+    CallFailure.REFUSED: Failure.REFUSED, CallFailure.RUNTIME: Failure.RUNTIME, CallFailure.PARSE: Failure.PARSE,
 }
 _FAILURE_REASONS: Mapping[Failure, str] = {
     Failure.NOT_OPERATOR: "Looper does outbound actions only in the operator's own turn",
@@ -420,24 +420,24 @@ async def _classify(action: Action, asker: Asker, origin: Origin, context: Seque
     child = ChildRun(SpawnKind.OUTBOUND, _system_prompt(settings, config), review_turn(action, asker, context),
                      timeout_s=min(REVIEW_TIMEOUT_SEC, config.timeout_seconds or REVIEW_TIMEOUT_SEC), max_turns=1,
                      role=AgentType.OUTBOUND_CHECK)
-    started = time.monotonic()
-    done = await run_child(child, parent=SpawnParent(origin.task_id, origin.step_id, origin.parent_record_id),
-                           settings=settings, cap_usd=REVIEW_BUDGET_USD, runtime_root=runtime_root,
-                           claude_bin=claude_bin)
-    run.latency_ms = int((time.monotonic() - started) * 1000)
+    done = await call(ChildCall(child, SpawnParent(origin.task_id, origin.step_id, origin.parent_record_id),
+                                settings, REVIEW_BUDGET_USD, runtime_root, claude_bin), parse=parse_verdict)
+    run.latency_ms = done.latency_ms
     run.record_id, run.cost_usd = done.record_id, done.cost_usd
-    if done.models:
-        run.model = done.models[0]
+    if done.execution.models:
+        run.model = done.execution.models[0]
     if done.failure is not None:
+        if done.parse_error is not None:
+            if not isinstance(done.parse_error, VerdictError):
+                raise done.parse_error
+            logger.info("outbound review %s gave no verdict: %s", done.record_id, done.parse_error)
+            return _blocked(Failure.PARSE)
         failure = _FAILURES[done.failure]
         logger.info("outbound review %s of %s by %s gave no verdict: %s (%s)", done.record_id, action.tool,
-                    origin.agent_id, done.failure.value, done.detail)
+                    origin.agent_id, done.failure.value, done.reason)
         return _blocked(failure)
-    try:
-        verdict = parse_verdict(done.output or "")
-    except VerdictError as exc:
-        logger.info("outbound review %s gave no verdict: %s", done.record_id, exc)
-        return _blocked(Failure.PARSE)
+    verdict = done.value
+    assert verdict is not None
     return verdict.decision, verdict.reason, verdict.signals, None
 
 
