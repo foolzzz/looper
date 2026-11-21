@@ -133,6 +133,7 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from .. import untrusted
 from .. import scheduler_settings
 from ..schedule_session import SessionBound, session_bound
 from ..llmrec import LlmrecRoute, control as llmrec
@@ -2245,7 +2246,8 @@ class PlannerAgent:
         context = WaitContext(step.label, trigger, last_open=not others)
         view = self._checked(plan.view())
         try:
-            reply = await self._ask(TurnKind.WAIT, self._wait_message(plan, step, row, context),
+            reply = await self._ask(TurnKind.WAIT, self._wait_message(plan, step, row, context,
+                                                                      fence=await untrusted.enabled()),
                                     lambda text: parse_wait(text, context, view))
         except PlannerTurnError as exc:
             wait.failures += 1
@@ -2327,8 +2329,11 @@ class PlannerAgent:
             await self._apply_chat(plan, reply.chat, None, at=f"wait {step.label}")
         await self._settle_plan(plan)
 
-    def _wait_message(self, plan: TaskPlan, step: PlanStep, row: Mapping[str, Any], context: WaitContext) -> str:
-        """A [WAIT] turn's message. Its shape is in the message; the standing reply contract does not gain it."""
+    def _wait_message(self, plan: TaskPlan, step: PlanStep, row: Mapping[str, Any], context: WaitContext, *,
+                      fence: bool = False) -> str:
+        """A [WAIT] turn's message. Its shape is in the message; the standing reply contract does not gain it.
+        With ``fence`` (the untrusted fence is on), a GitHub check's output, which holds other people's comments
+        and reviews, is a ``github`` block."""
         wait = step.wait
         assert wait is not None
         spec = wait.spec
@@ -2340,7 +2345,11 @@ class PlannerAgent:
         if spec.check is not None:
             lines.append(self._check_line(spec, row))
         output = row.get("last_output")
-        if isinstance(output, str) and output:
+        if isinstance(output, str) and output and fence and isinstance(spec.check, waits.GithubPrCheck):
+            lines += [untrusted.LEAD_LINE, "Last output (capped):", untrusted.fence(
+                _tail_text(output, waits.OUTPUT_MAX_BYTES), source=untrusted.Source.GITHUB,
+                provenance={"ref": f"{spec.check.repo}#{spec.check.number}"})]
+        elif isinstance(output, str) and output:
             lines.append("Last output (capped): " + _tail_text(output, waits.OUTPUT_MAX_BYTES))
         error = row.get("last_error")
         if isinstance(error, str) and error:
