@@ -63,7 +63,7 @@ from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Tu
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
-from .leads import TOOL as LEADS_SEARCH, leads_on
+from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
@@ -78,6 +78,7 @@ TOKEN_ENV = "LOOPER_AGENT_TOKEN"
 TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"
 TRACE_ENV = "LOOPER_MCP_TRACE"  # the bridge's trace of each call's ``_meta`` keys (``mcp_server._trace_meta``)
 BINDINGS_KEPT = 64
+CALLS_KEPT = 4096  # the tool_use ids the hook can place in their turn
 CONFIRMATION_SECONDS = 600
 # How long a write call waits for the tool_use of its turn's stream that it matches (the event may trail the call).
 MATCH_WAIT_SEC = 2.0
@@ -240,6 +241,10 @@ class ManagerOps:
         self._review_bin = "claude"
         self._writes: deque[Any] = deque(maxlen=CONTENT_TOOLS_KEPT)
         self._notified: OrderedDict[tuple[str | None, str | None, str | None], None] = OrderedDict()
+        # Each tool_use a turn's stream showed, by its id: the binding of the turn it belongs to (a subagent's call,
+        # its parent call's turn), which places the hook's call in its own turn.
+        self._call_turns: OrderedDict[str, str] = OrderedDict()
+        self._call_seen = asyncio.Event()
 
     @property
     def executing(self) -> bool:
@@ -605,12 +610,41 @@ class ManagerOps:
             self._expected.pop(old, None)
             self._expected_event.pop(old, None)
 
-    def expect(self, binding: str, tool: str, arguments: Mapping[str, Any], *, call_id: str | None = None) -> None:
-        """The turn of ``binding`` streamed a tool_use of ``tool``: one call with these arguments may match it."""
+    def expect(self, binding: str, tool: str, arguments: Mapping[str, Any], *, call_id: str | None = None,
+               parent_call_id: str | None = None) -> None:
+        """The turn of ``binding`` streamed a tool_use of ``tool``: one call with these arguments may match it. A
+        subagent's (``parent_call_id``, the call that started it) belongs to its parent call's turn, for the hook."""
         self._expected.setdefault(binding, []).append((call_id or None, tool, _canonical(arguments)))
         event = self._expected_event.get(binding)
         if event is not None:
             event.set()
+        if call_id:
+            owner = self._call_turns.get(parent_call_id) if parent_call_id else binding
+            if owner is not None:  # a subagent whose start Looper did not see belongs to no turn
+                self._call_turns[call_id] = owner
+                while len(self._call_turns) > CALLS_KEPT:
+                    self._call_turns.popitem(last=False)
+                self._call_seen.set()
+
+    async def _turn_of_call(self, call_id: Any) -> Turn | None:
+        """The turn whose stream showed the tool_use ``call_id``, waiting up to ``PLACE_WAIT_SEC`` for it; None when
+        none did, or that turn is over (its call is no one's)."""
+        from ..outbound_hook import PLACE_WAIT_SEC
+
+        if not isinstance(call_id, str) or not call_id:
+            return None
+        deadline = self._clock() + PLACE_WAIT_SEC
+        while (binding := self._call_turns.get(call_id)) is None:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return None
+            self._call_seen.clear()
+            try:
+                await asyncio.wait_for(self._call_seen.wait(), remaining)
+            except asyncio.TimeoutError:
+                pass
+        turn = self._bindings.get(binding)
+        return turn if turn is not None and turn.state is TurnState.ANSWERING else None
 
     def _take(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None) -> bool:
         entries = self._expected.get(binding, [])
@@ -769,28 +803,33 @@ class ManagerOps:
         from .. import outbound_hook
 
         self._review_root, self._review_bin = runtime_root, claude_bin
-        return outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token,
-                                        turn_file=self._turn_file)
+        return outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token)
 
-    async def check_outbound(self, payload: Any, *, binding: str | None) -> dict[str, Any]:
-        """The hook's answer for one tool call of this Manager (``outbound_hook.answer``), in the turn it belongs to;
-        anything that goes wrong blocks the call."""
+    async def check_outbound(self, payload: Any) -> dict[str, Any]:
+        """The hook's answer for one tool call of this Manager (``outbound_hook.answer``), in the turn it belongs to:
+        the one whose stream showed its tool_use, never the turn that runs when it comes; anything that goes wrong
+        blocks the call."""
         from .. import outbound_hook
         from ..outbound import Who
 
-        try:
-            turn = (self._bindings.get(binding) if binding else None) or self._turn
+        data = payload if isinstance(payload, Mapping) else {}
+        turn: Turn | None = None
+
+        async def place() -> Any:
+            nonlocal turn
+            turn = await self._turn_of_call(data.get("tool_use_id"))
             if turn is None or turn.autonomous:
-                who = Who.AUTONOMOUS
-            elif await _operator_turn(turn):
+                return outbound_hook.NO_ONES
+            if await _operator_turn(turn):
                 who = Who.OPERATOR
             else:
                 who = Who.GROUP_MEMBER if turn.group else Who.ALLOWLISTED_PERSON
-            message = str((turn.envelope.payload.get("text") if turn and turn.envelope else "") or "")
+            message = str((turn.envelope.payload.get("text") if turn.envelope else "") or "")
+            return outbound_hook.Placed(who, message, turn.channel or "", turn.chat, tuple(turn.outside))
+
+        try:
             answer, review = await outbound_hook.answer(
-                payload, agent_id=self._scope.manager_id, who=who, message=message,
-                channel=(turn.channel if turn else None) or "", chat=turn.chat if turn else None,
-                context=list(turn.outside) if turn else [], writes=list(self._writes),
+                payload, agent_id=self._scope.manager_id, place=place, writes=list(self._writes),
                 runtime_root=self._review_root or self._platform.runtime_root or Path.cwd(),
                 claude_bin=self._review_bin)
         except Exception:
@@ -801,12 +840,11 @@ class ManagerOps:
             if (write := outbound_hook.write_of(payload)) is not None:
                 self._writes.append(write)
         elif review is not None:
-            key = (turn.channel, turn.chat, turn.message_id) if turn else (None, None, None)
+            key = (turn.channel, turn.chat, turn.message_id) if turn is not None else (None, None, None)
             if key not in self._notified:  # once a turn
                 self._notified[key] = None
                 while len(self._notified) > BINDINGS_KEPT:
                     self._notified.popitem(last=False)
-                data = payload if isinstance(payload, Mapping) else {}
                 tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
                 await outbound_hook.notify_blocked(
                     self._scope.manager_id, str(data.get("tool_name") or ""),

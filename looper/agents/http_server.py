@@ -1072,8 +1072,7 @@ class AgentHTTPServer:
                 payload = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 payload = None
-            writer.write(_json_response(HTTP_200, await ops.check_outbound(payload,
-                                                                           binding=headers.get("x-looper-turn"))))
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(payload)))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}

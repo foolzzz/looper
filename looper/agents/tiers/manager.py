@@ -731,6 +731,9 @@ class _CompletionNotTaken(Exception):
     """The Manager was turned off before its completion turn ran."""
 
 
+OUTBOUND_UNHOOKED_REPLY = "对外动作审查刚刚打开，这次没有执行。请再发一次，管家会带着审查重新开始。"
+
+
 class TurnFailed(RuntimeError):
     """The turn failed with what the user is told, as written (the runtime cannot start); ``error`` is why, for the
     chat's status line. Raised, not returned: the turn is answered as failed, so a queue staged behind it is not
@@ -1616,6 +1619,14 @@ class ManagerAgent:
                 cause = (pi_runner if kind == "pi" else dsh_runner)._opt_out(cause)
             raise OSError(cause) from None
 
+    async def require_tool_hook(self) -> None:
+        """The outbound review was turned on: a process of this Manager started without its hook stops now (a turn it
+        runs ends failed), and the next turn starts one with it."""
+        async with self._lifecycle_gate:
+            if self._claude.started and (self._process is None or self._process.launch.tool_hook is None):
+                logger.warning("%s: stopping its process, which has no outbound review hook", self._log)
+                await self._stop_replaced_session()
+
     async def _stop_replaced_session(self) -> None:
         if isinstance(self._claude, ResidentClaude):
             await self._claude.stop(kill=True, wait_tree=False)
@@ -1729,10 +1740,13 @@ class ManagerAgent:
         try:
             async with self._lifecycle_gate:
                 previous = self._process
+                # A process without the outbound review's hook is never kept for a launch with it: the stale
+                # process stops below.
                 if previous is not None and prepared.switch is None and self._claude.started \
                         and self._claude.pid is not None \
                         and prepared.launch.runtime is self._claude_runtime \
-                        and previous.launch.library.sha256 != prepared.launch.library.sha256:
+                        and previous.launch.library.sha256 != prepared.launch.library.sha256 \
+                        and (previous.launch.tool_hook is None) == (prepared.launch.tool_hook is None):
                     close = getattr(self._claude, "try_stop_if_idle", None)
                     if close is None or not await token.keep("library_idle_close", close(), 10):
                         # A user result may leave background/autonomous work running. Keep the actual
@@ -2319,7 +2333,8 @@ class ManagerAgent:
                     # Every tool call of the turn may come to the bridge, a subagent's too: each is expected,
                     # though only the Manager's own blocks are shown.
                     bare, arguments = _looper_call(block.get("name"), block.get("input"))
-                    self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
+                    self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"),
+                                    parent_call_id=payload.get("parent_tool_use_id"))
 
         async def on_event(payload: dict[str, Any]) -> None:
             if payload.get("type") == "system" and payload.get("subtype") == "transport" and not token.abandoned:
@@ -2430,6 +2445,10 @@ class ManagerAgent:
             if token.cancel.requested:
                 await self._finish_stopped_early(token, recorder, ops_turn)
                 raise TurnStopped()
+            if outbound_hook.known_enabled() and (self._process is None or self._process.launch.tool_hook is None):
+                # Turned on after this turn was prepared: its process has no hook, and the next turn starts one that has.
+                raise TurnFailed(OUTBOUND_UNHOOKED_REPLY, "the outbound review is on and the Manager's process has no "
+                                 "tool hook")
             if self._claude.shares_bridge:
                 self._publish_binding(token)  # on disk before the runtime gets the prompt
             token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
@@ -2812,7 +2831,9 @@ class ManagerAgent:
         api_history = (self._session_runtime == "api" and self._session_id is not None
                        and await db_api_sessions.last_turn(self._session_id) is not None)
         # A failed first API request has no committed conversation to summarize.
+        # A process without the outbound review's hook writes no handoff while the review is on.
         if self._claude.started and process is not None and not self._claude.stale(process.signature) \
+                and not (outbound_hook.known_enabled() and process.launch.tool_hook is None) \
                 and (self._session_runtime != "api" or api_history):
             # The handoff's prompt is not the user's message: it gets a cancel of its own, requested with the turn's, so
             # that writing it does not make the turn "running" or its message "seen".

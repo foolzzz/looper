@@ -4,15 +4,19 @@ answers it here.
 
 - **Where a call reaches** is the tool's typed level (``level_of``): Claude Code's built-in tools have one each
   (``BUILTIN_LEVELS``; a tool not listed is ``unknown``); Looper's own tools are ``inside`` here, as
-  ``ManagerOps.call`` sees them; another MCP server's tools are ``inside`` until their level is declared.
+  ``ManagerOps.call`` sees them; another MCP server's tools are ``unknown`` unless the operator declared that tool
+  ``inside`` (``mcp_tool_levels``).
+- **Whose turn:** the call's own (the turn whose stream showed its ``tool_use``, a subagent's by its parent's), never
+  the turn running when it came; one Looper cannot place, or whose turn is over, is no one's (``autonomous``).
 - **What is reviewed:** an ``external`` or ``unknown`` call (a shell command), by ``outbound.review``; any other call
   runs at once. A write to Looper's own files (its settings, this hook) is refused by code first.
 - **Fail closed:** the hook is ``outbound_hook_client.py`` behind a shell that prints a ``deny`` when it cannot run
-  or prints nothing, and it waits for Looper less long than Claude Code waits for it (Claude Code runs a call whose
-  hook timed out or failed). The Manager then reads no settings file (``--setting-sources ""``), so the model cannot
-  turn the hook off from its working directory.
+  or prints nothing; an alarm set before anything else ends it with a ``deny`` at ``DEADLINE_SEC``, well before
+  Claude Code's wait for it (Claude Code runs a call whose hook timed out or failed). The Manager then reads no
+  settings file (``--setting-sources ""``), so the model cannot turn the hook off from its working directory.
 - **Without a hook:** the review cannot be turned on while an enabled Manager's runtime has none
-  (``RuntimeAdapter.tool_hook``), and such a Manager does not start a turn while it is on.
+  (``RuntimeAdapter.tool_hook``); while it is on, no turn of a Manager runs in a process without the hook (it is
+  checked before each turn and handoff, and turning the review on stops such processes).
 
 Turning it on changes the Manager's command (its settings carry the hook), so a running Manager restarts on its next
 turn; off, nothing here runs and the command is what it was before.
@@ -35,10 +39,14 @@ from .outbound import CALLER_TIMEOUT_SEC, REVIEWED, Action, ActionLevel, Who
 logger = logging.getLogger(__name__)
 
 ENABLED_KEY = "outbound_review.enabled"
-# Claude Code's wait for the hook, past which it runs the call: longer than the client's wait for Looper, which is
-# longer than a review takes (``outbound.CALLER_TIMEOUT_SEC``).
+# The hook's waits: a review takes at most ``outbound.CALLER_TIMEOUT_SEC``; the client waits for Looper's answer
+# ``CHECK_TIMEOUT_SEC``, and its alarm ends it with a deny at ``DEADLINE_SEC``, whatever it waits for; Claude Code,
+# which runs the call past its own wait, waits ``HOOK_TIMEOUT_SEC``.
 CHECK_TIMEOUT_SEC = CALLER_TIMEOUT_SEC + 10
-HOOK_TIMEOUT_SEC = CHECK_TIMEOUT_SEC + 30
+DEADLINE_SEC = CHECK_TIMEOUT_SEC + 15
+HOOK_TIMEOUT_SEC = DEADLINE_SEC + 15
+# How long a call waits for the Manager's stream to show its tool_use, which places it in its turn.
+PLACE_WAIT_SEC = 5.0
 CLIENT = Path(__file__).with_name("outbound_hook_client.py")
 CONTENT_TOOLS_KEPT = 5  # the last writes of a session the review of a shell command sees (``sh s.sh`` after a Write)
 WRITE_EXCERPT_CHARS = 1_000
@@ -53,8 +61,8 @@ BUILTIN_LEVELS: Mapping[str, ActionLevel] = {
                     ActionLevel.MACHINE),
     **dict.fromkeys(("Read", "Glob", "Grep", "LS", "NotebookRead", "Task", "Agent", "Skill", "ToolSearch", "TaskStop",
                      "TodoWrite", "ListAgents", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "Workflow",
-                     "ReportFindings", "ExitPlanMode", "AskUserQuestion", "BashOutput", "KillShell", "KillBash",
-                     "ListMcpResourcesTool", "ReadMcpResourceTool"), ActionLevel.INSIDE),
+                     "ReportFindings", "ExitPlanMode", "AskUserQuestion", "BashOutput", "KillShell", "KillBash"),
+                    ActionLevel.INSIDE),
 }
 # The built-in tools that write a file (``file_path`` or ``notebook_path``): one that would change Looper's own files
 # is refused by code.
@@ -62,24 +70,59 @@ WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
 def level_of(tool_name: str) -> ActionLevel:
-    """Where a call of ``tool_name`` reaches, by its type (never by what its arguments say)."""
+    """Where a call of ``tool_name`` reaches, by its type (never by what its arguments say), before the operator's
+    declarations: another MCP server's tool is ``unknown`` here (``resolve_level``)."""
     from .ops.service import SERVER_NAME
 
     if tool_name.startswith(f"mcp__{SERVER_NAME}__"):
         return ActionLevel.INSIDE  # reviewed, by its own level, where ManagerOps.call runs it
     if tool_name.startswith("mcp__"):
-        return ActionLevel.INSIDE  # another MCP server's: inside until the operator declares its level
+        return ActionLevel.UNKNOWN
     return BUILTIN_LEVELS.get(tool_name, ActionLevel.UNKNOWN)
 
 
+def mcp_tool(tool_name: str) -> list[tuple[str, str]]:
+    """The (server, tool) pairs an MCP tool's name ``mcp__<server>__<tool>`` may stand for (a server's name may
+    hold ``__`` too)."""
+    rest = tool_name.removeprefix("mcp__") if tool_name.startswith("mcp__") else ""
+    pairs, at = [], rest.find("__")
+    while at > 0:
+        if rest[at + 2:]:
+            pairs.append((rest[:at], rest[at + 2:]))
+        at = rest.find("__", at + 1)
+    return pairs
+
+
+async def resolve_level(tool_name: str) -> ActionLevel:
+    """``level_of``, with an MCP server's tool ``inside`` when the operator declared it so for that server."""
+    from ..db import mcp_tool_levels
+
+    level = level_of(tool_name)
+    if level is ActionLevel.UNKNOWN and (pairs := mcp_tool(tool_name)) and await mcp_tool_levels.declared_inside(pairs):
+        return ActionLevel.INSIDE
+    return level
+
+
 # --- The switch ---
+
+
+# The switch as this server last read or set it, for the checks that cannot wait for the database (a Manager's turn
+# right before it reaches its process).
+_known = False
 
 
 async def enabled(db: Any = None) -> bool:
     """Whether the review is on (``outbound_review.enabled`` is ``true``; no row is off)."""
     from ..db import system_settings
 
-    return (await system_settings.get_settings([ENABLED_KEY], pool=db)).get(ENABLED_KEY) == "true"
+    global _known
+    _known = (await system_settings.get_settings([ENABLED_KEY], pool=db)).get(ENABLED_KEY) == "true"
+    return _known
+
+
+def known_enabled() -> bool:
+    """The switch as this server last read or set it."""
+    return _known
 
 
 async def managers_without_hook() -> list[dict[str, str]]:
@@ -116,10 +159,12 @@ async def set_enabled(value: bool) -> dict[str, Any]:
         names = "; ".join(f"{m['name']} ({m['runtime']})" for m in missing)
         raise HookUnavailable(f"the outbound review needs every enabled Manager on a runtime with a tool hook "
                               f"(Claude Code); these have none: {names}. Change their Agent Profile first.")
+    global _known
     await get_pool().execute(
         "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
         ENABLED_KEY, "true" if value else "false")
+    _known = value
     return await settings()
 
 
@@ -152,14 +197,13 @@ def hook_command(config: Path, *, python: str = sys.executable, client: Path = C
     return f'out=$({run} 2>/dev/null) && [ -n "$out" ] && printf "%s" "$out" || printf "%s" {deny}'
 
 
-def write_hook(runtime_root: Path, manager_id: str, *, url: str, token: str, turn_file: Path | None) -> ToolHook:
-    """Write the hook's config (where Looper is, the Manager's token, its turn file) readable by the operator only,
-    and the hook that reads it."""
+def write_hook(runtime_root: Path, manager_id: str, *, url: str, token: str) -> ToolHook:
+    """Write the hook's config (where Looper is, the Manager's token, its waits) readable by the operator only, and
+    the hook that reads it. A call is placed in its turn by Looper (its ``tool_use_id``), never by the client."""
     directory = (runtime_root / ".local" / "outbound-hook").absolute()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = directory / f"{manager_id}.json"
-    content = json.dumps({"url": url, "token": token, "turn_file": str(turn_file) if turn_file else None,
-                          "timeout": CHECK_TIMEOUT_SEC})
+    content = json.dumps({"url": url, "token": token, "timeout": CHECK_TIMEOUT_SEC, "deadline": DEADLINE_SEC})
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -214,29 +258,46 @@ BLOCKED_MESSAGE = ("Looper's outbound review blocked this action: {reason}. It d
 Notify = Callable[[str], Awaitable[None]]
 
 
-async def answer(payload: Any, *, agent_id: str, who: Who, message: str, channel: str, chat: str | None,
-                 context: Sequence[tuple[str, str]], writes: Sequence[Write], runtime_root: Path, claude_bin: str,
-                 task_id: str | None = None) -> tuple[dict[str, Any], Any]:
-    """The hook's answer for ``payload`` (Claude Code's PreToolUse input) in a turn of ``who``, and the review it took
-    (None when none was needed): ``{"decision": "allow"}``, or ``block`` with the ``message`` for the model."""
+@dataclass(frozen=True)
+class Placed:
+    """The turn a call belongs to, as its review reads it: whose it is, its message, chat and outside content."""
+
+    who: Who
+    message: str = ""
+    channel: str = ""
+    chat: str | None = None
+    context: tuple[tuple[str, str], ...] = ()
+
+
+NO_ONES = Placed(Who.AUTONOMOUS)
+
+
+async def answer(payload: Any, *, agent_id: str, place: Callable[[], Awaitable[Placed]], writes: Sequence[Write],
+                 runtime_root: Path, claude_bin: str, task_id: str | None = None) -> tuple[dict[str, Any], Any]:
+    """The hook's answer for ``payload`` (Claude Code's PreToolUse input), and the review it took (None when none was
+    needed): ``{"decision": "allow"}``, or ``block`` with the ``message`` for the model. ``place`` finds the call's
+    turn, only for a call that is reviewed."""
     from . import outbound
 
     data = payload if isinstance(payload, Mapping) else {}
     tool_name = data.get("tool_name") if isinstance(data.get("tool_name"), str) else ""
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
-    level = level_of(tool_name)
-    origin = outbound.Origin(agent_id, outbound.Source.HOOK, task_id=task_id, channel=channel or None, chat=chat)
+    level = await resolve_level(tool_name)
+    origin = outbound.Origin(agent_id, outbound.Source.HOOK, task_id=task_id)
     if tool_name in WRITE_TOOLS:
         path = tool_input.get("file_path") or tool_input.get("notebook_path")
         if protected(path, cwd=data.get("cwd"), runtime_root=runtime_root):
             review = await outbound.refuse(Action(tool_name, level, "file", str(path),
                                                   f"Write the file {path}"), origin, outbound.Failure.PROTECTED)
             return _blocked(review), review
-    if not tool_name or level not in REVIEWED:
+    if tool_name and level not in REVIEWED:
         return {"decision": "allow"}, None
-    shown = [*context, *((f"an earlier write to {w.path}", w.excerpt) for w in writes)]
-    review = await outbound.review(action_of(tool_name, tool_input, level),
-                                   outbound.Asker(who, channel, message), origin, context=shown,
+    turn = await place()
+    origin = outbound.Origin(agent_id, outbound.Source.HOOK, task_id=task_id, channel=turn.channel or None,
+                             chat=turn.chat)
+    shown = [*turn.context, *((f"an earlier write to {w.path}", w.excerpt) for w in writes)]
+    review = await outbound.review(action_of(tool_name or "(unnamed)", tool_input, level),
+                                   outbound.Asker(turn.who, turn.channel, turn.message), origin, context=shown,
                                    runtime_root=runtime_root, claude_bin=claude_bin)
     return ({"decision": "allow"} if review.allowed else _blocked(review)), review
 

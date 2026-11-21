@@ -24,14 +24,27 @@ DENY = "deny"
     ("Bash", ActionLevel.UNKNOWN), ("Monitor", ActionLevel.UNKNOWN), ("WebSearch", ActionLevel.EXTERNAL),
     ("WebFetch", ActionLevel.EXTERNAL), ("Write", ActionLevel.MACHINE), ("Read", ActionLevel.INSIDE),
     ("Task", ActionLevel.INSIDE), ("mcp__looper__looper_tasks", ActionLevel.INSIDE),
-    ("mcp__search__query", ActionLevel.INSIDE), ("SomeToolAddedLater", ActionLevel.UNKNOWN),
+    # another MCP server's tool is reviewed unless the operator declared it inside (outbound_hook.resolve_level)
+    ("mcp__search__query", ActionLevel.UNKNOWN), ("ReadMcpResourceTool", ActionLevel.UNKNOWN),
+    ("SomeToolAddedLater", ActionLevel.UNKNOWN), ("", ActionLevel.UNKNOWN),
 ])
 def test_a_calls_level_is_its_tools_type(tool: str, level: ActionLevel) -> None:
     assert outbound_hook.level_of(tool) is level
 
 
+def test_an_mcp_tools_name_is_read_as_each_server_and_tool_it_may_stand_for() -> None:
+    assert outbound_hook.mcp_tool("mcp__search__query") == [("search", "query")]
+    assert outbound_hook.mcp_tool("mcp__a__b__c") == [("a", "b__c"), ("a__b", "c")]
+    assert outbound_hook.mcp_tool("Bash") == [] and outbound_hook.mcp_tool("mcp__x__") == []
+
+
 def test_the_hook_waits_less_than_claude_code_and_more_than_a_review() -> None:
-    assert CALLER_TIMEOUT_SEC < outbound_hook.CHECK_TIMEOUT_SEC < outbound_hook.HOOK_TIMEOUT_SEC
+    assert (CALLER_TIMEOUT_SEC < outbound_hook.CHECK_TIMEOUT_SEC < outbound_hook.DEADLINE_SEC
+            < outbound_hook.HOOK_TIMEOUT_SEC)
+    from looper.agents import outbound_hook_client
+
+    assert outbound_hook_client.DEADLINE_SEC == outbound_hook.DEADLINE_SEC
+    assert _decision(json.loads(outbound_hook_client.DENY)) == DENY
 
 
 class _Looper(BaseHTTPRequestHandler):
@@ -76,9 +89,7 @@ def _decision(answer: dict[str, Any]) -> str:
 
 
 def _hook(tmp_path: Path, url: str, **kwargs: Any) -> str:
-    turn_file = tmp_path / "turn.json"
-    turn_file.write_text(json.dumps({"epoch": 3, "turn": "b-7"}))
-    hook = outbound_hook.write_hook(tmp_path / "rt", "manager", url=url, token="tok-1", turn_file=turn_file)
+    hook = outbound_hook.write_hook(tmp_path / "rt", "manager", url=url, token="tok-1")
     if not kwargs:
         return hook.command
     config = tmp_path / "rt" / ".local" / "outbound-hook" / "manager.json"
@@ -90,7 +101,8 @@ def test_the_hook_runs_a_call_looper_allows_and_denies_one_it_blocks(tmp_path: P
     call = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": "s", "transcript_path": "/x"}
     assert _run(command, call) == {}
     (seen,) = _Looper.seen
-    assert (seen["path"], seen["auth"], seen["turn"]) == ("/api/agent/v1/outbound/check", "Bearer tok-1", "b-7")
+    # Looper places the call by its tool_use id: the client sends no turn of its own
+    assert (seen["path"], seen["auth"], seen["turn"]) == ("/api/agent/v1/outbound/check", "Bearer tok-1", None)
     assert seen["body"] == {"tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": "s"}
     _Looper.answer = {"decision": "block", "message": "Looper's outbound review blocked this action: no."}
     try:
@@ -119,6 +131,34 @@ def test_the_hook_denies_whenever_it_cannot_get_an_answer(tmp_path: Path, broken
         command = _hook(tmp_path, url, client=failing)
     answer = _run(command, {"tool_name": "Bash", "tool_input": {"command": "curl example.net"}})
     assert _decision(answer) == DENY
+
+
+class _Silent(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802 - the handler's name
+        import time
+
+        time.sleep(30)  # accepts the call and never answers
+
+    def log_message(self, *args: Any) -> None:
+        pass
+
+
+def test_a_hook_that_waits_past_its_deadline_denies(tmp_path: Path) -> None:
+    """Whatever the client waits for, its alarm denies at its deadline, long before Claude Code would run the call."""
+    import time
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Silent)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        command = _hook(tmp_path, f"http://127.0.0.1:{server.server_port}")
+        config = tmp_path / "rt" / ".local" / "outbound-hook" / "manager.json"
+        config.write_text(json.dumps({**json.loads(config.read_text()), "deadline": 3, "timeout": 600}))
+        started = time.monotonic()
+        answer = _run(command, {"tool_name": "Bash", "tool_input": {"command": "curl example.net"}})
+        assert _decision(answer) == DENY and time.monotonic() - started < 15
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_the_settings_carry_the_hook_and_then_read_no_settings_file(tmp_path: Path) -> None:
