@@ -4315,11 +4315,11 @@ idle while the switch is off or the server drains) ticks every 10 seconds under 
 other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick settles a
 `sending` row left by a stopped sender as `uncertain`, then sends the due ones in code-written words
 (「⏰ 你在 <when asked> 让我提醒你：<text>」) through `ChannelRegistry.post` with the idempotency key
-`looper-reminder-<id>`, after checking that the bot still names that user as its operator. While the service runs,
-what came due since its previous tick is sent, however many at once, and so is a refused send being retried. Its
-first tick after it starts, after the switch was off or after the server drained is a recovery: every reminder that
-came due meanwhile is overdue, and of each chat's overdue ones only the newest one due within 36 hours is sent, with a
-line saying when it was due; the others become `missed`. A refused send is tried at the next tick, three times in all;
+`looper-reminder-<id>`, after checking that the bot still names that user as its operator. The rule keeps no state:
+every reminder due at most 2 minutes ago is sent, however many at once; one due longer ago was missed (Looper was
+down, asleep, stalled, switched off or draining), and of each chat's missed ones only the newest one due within 36
+hours is sent, with a line saying when it was due, unless a reminder on time goes to that chat in the same tick; the
+others become `missed`. A start, a sleep and two servers taking turns in an upgrade are judged alike. A refused send is tried at the next tick, three times in all;
 an unknown outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge
 window. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
 the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
