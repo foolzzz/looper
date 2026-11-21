@@ -37,11 +37,11 @@ def _switch_forgotten() -> Any:
     outbound_hook._known = False
 
 
-def _ops(tmp_path: Path) -> ManagerOps:
+def _ops(tmp_path: Path, library: Any = None) -> ManagerOps:
     router = SimpleNamespace(has_planner=lambda task_id: False, forget_task=lambda task_id: None)
     ops = ManagerOps(Platform(bus=MessageBus(runtime_root=tmp_path), task_router=router, runtime_root=tmp_path),
                      url="http://127.0.0.1:9", token="tok")
-    ops.tool_hook(tmp_path / "rt", fake_claude(tmp_path / "claude", _STAND_IN))
+    ops.tool_hook(tmp_path / "rt", fake_claude(tmp_path / "claude", _STAND_IN), library)
     return ops
 
 
@@ -49,8 +49,8 @@ class _Manager:
     """A Manager's side of the hook: its turns, and each call streamed in its turn (``expect``) before the hook asks
     about it, as the Manager's Claude Code does."""
 
-    def __init__(self, tmp_path: Path) -> None:
-        self.ops = _ops(tmp_path)
+    def __init__(self, tmp_path: Path, library: Any = None) -> None:
+        self.ops = _ops(tmp_path, library)
         self.binding: str | None = None
         self.calls = 0
 
@@ -133,11 +133,12 @@ def test_a_subagents_call_in_the_running_turn_is_that_turns(monkeypatch: pytest.
 def test_an_mcp_servers_tool_is_reviewed_unless_the_operator_declared_it_inside(monkeypatch: pytest.MonkeyPatch,
                                                                                tmp_path: Path) -> None:
     from looper.agents import mcp
+    from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
     from looper.db import mcp_tool_levels
 
     async def test(pool: Any) -> None:
         server = (await mcp.create({"name": "search", "transport": "stdio", "command": "python3"}))["item"]
-        manager = _Manager(tmp_path)
+        manager = _Manager(tmp_path, AgentLibrary(items=(LoadedItem(ItemKind.MCP, "search", "0" * 64, ""),)))
         manager.turn("搜一下")
         assert (await manager.call("mcp__search__query", q="cache"))[0] == {"decision": "allow"}
         assert len(_seen(tmp_path)) == 1  # reviewed
@@ -444,3 +445,79 @@ def test_a_database_from_before_the_mcp_tool_declarations_gets_them() -> None:
             assert not await connection.schema_change_pending(conn)
 
     asyncio.run(main())
+
+
+def test_a_read_of_the_switch_that_started_before_it_was_turned_on_does_not_turn_it_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from looper.agents import outbound_hook
+    from looper.db import system_settings
+
+    read = system_settings.get_settings
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(keys: Any, **kwargs: Any) -> Any:
+        found = await read(keys, **kwargs)  # off, as it was when the read began
+        started.set()
+        await release.wait()
+        return found
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setattr(system_settings, "get_settings", slow)
+        reading = asyncio.create_task(outbound_hook.enabled())
+        await started.wait()
+        monkeypatch.setattr(system_settings, "get_settings", read)
+        await outbound_hook.set_enabled(True)
+        release.set()
+        assert await reading is False  # what it read
+        assert outbound_hook.known_enabled()  # not what it overwrote
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
+def test_turning_the_review_on_stops_a_process_without_the_hook_whatever_holds_its_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Enabling does not wait for a turn's start to let go of the process, and it ends the process's whole tree (its
+    background children too), and a handoff the process would write is not sent."""
+    import asyncio
+
+    from manager_mcp_stand_in import manager_endpoint, mcp_manager_claude
+    from looper.agents import outbound_hook
+    from looper.agents.runtimes.cancel import TurnCancel
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from tests.db_support import run_with_channel_configs
+
+    async def test(pool: Any) -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(claude_bin=mcp_manager_claude(tmp_path, [[], []]),
+                                                    work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        async with manager_endpoint(manager, bus, SimpleNamespace(has_planner=lambda task_id: False), tmp_path,
+                                    turn_file=tmp_path / "turn.json"):
+            await manager._handle(_hello(0))
+            process = manager._process
+            assert manager._claude.started and process.launch.tool_hook is None
+            outbound_hook._known = True  # turned on after the process started
+            handoff = await manager._handoff(SimpleNamespace(describe=lambda: "a new profile"), process, TurnCancel())
+            assert handoff is None
+            record = await pool.fetchrow("SELECT error FROM llm_records WHERE input_text LIKE '[HANDOFF]%'")
+            assert "no tool hook" in record["error"]
+            stops: list[dict[str, Any]] = []
+            stop = manager._claude.stop
+
+            async def watched(**kwargs: Any) -> None:
+                stops.append(kwargs)
+                await stop(**kwargs)
+
+            monkeypatch.setattr(manager._claude, "stop", watched)
+            async with manager._lifecycle_gate:  # a turn's start holds it
+                await asyncio.wait_for(manager.require_tool_hook(), 10)
+            assert not manager._claude.started
+            assert stops and all(call.get("wait_tree", True) for call in stops)  # the whole tree
+            await manager.stop()
+        await bus.shutdown()
+
+    run_with_channel_configs(test, monkeypatch)

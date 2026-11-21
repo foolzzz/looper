@@ -73,7 +73,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook
 from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
@@ -389,7 +389,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
@@ -1434,6 +1434,11 @@ class ManagerAgent:
                 await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, chat_commands.help_text()))
+            # /todo while the "needs you" summary is on: answered by code, never by the model (off: a message).
+            if attention.is_command(text) and await token.step("attention_enabled", attention.enabled()):
+                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                self._acting(token)
+                return Prepared(action=lambda: self._answer_todo(envelope))
             # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
             if self._bus is not None and self.ops is not None and gate_commands.is_command(text):
                 self._acting(token)
@@ -1526,7 +1531,8 @@ class ManagerAgent:
                     f"the outbound review is on, and this Manager's Agent Profile runs on {launch.runtime.label}, "
                     "which has no tool hook: choose a Claude Code profile, or turn the review off",
                     agent_settings.profile_source)
-            launch = replace(launch, tool_hook=self.ops.tool_hook(self._runtime_root, self._config.claude_bin))
+            launch = replace(launch, tool_hook=self.ops.tool_hook(self._runtime_root, self._config.claude_bin,
+                                                                   launch.library))
         launch = await token.step("llmrec_attach", llmrec.attach(
             launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
         if ask.turn is not None:
@@ -1623,15 +1629,17 @@ class ManagerAgent:
             raise OSError(cause) from None
 
     async def require_tool_hook(self) -> None:
-        """The outbound review was turned on: a process of this Manager started without its hook stops now (a turn it
-        runs ends failed), and the next turn starts one with it."""
-        async with self._lifecycle_gate:
-            if self._claude.started and (self._process is None or self._process.launch.tool_hook is None):
-                logger.warning("%s: stopping its process, which has no outbound review hook", self._log)
-                await self._stop_replaced_session()
+        """The outbound review was turned on: a process of this Manager started without its hook stops now, whatever
+        holds its lifecycle (a turn or a handoff it runs ends failed), with its whole tree and the cleanup of the
+        processes it replaced before; the next turn starts one with the hook."""
+        if self._claude.started and (self._process is None or self._process.launch.tool_hook is None):
+            logger.warning("%s: stopping its process, which has no outbound review hook", self._log)
+        elif self._claude.started:
+            return
+        await self._claude.stop(kill=True)  # waits for the tree, and joins the earlier stops' cleanup
 
-    async def _stop_replaced_session(self) -> None:
-        if isinstance(self._claude, ResidentClaude):
+    async def _stop_replaced_session(self, *, whole_tree: bool = False) -> None:
+        if isinstance(self._claude, ResidentClaude) and not whole_tree:
             await self._claude.stop(kill=True, wait_tree=False)
         else:
             await self._claude.stop(kill=True)
@@ -1649,12 +1657,14 @@ class ManagerAgent:
             # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
             await token.keep("switch_session", self._switch_session(prepared.switch, token.cancel),
                              HANDOFF_TIMEOUT_SEC + 30)
+        # A process without the outbound review's hook, replaced by one with it, ends with its whole tree.
+        unhooked = launch.tool_hook is not None and (self._process is None or self._process.launch.tool_hook is None)
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
-            await token.keep("claude_stop", self._stop_replaced_session(), 30)
+            await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
         if self._claude.stale(signature):
-            await token.keep("claude_stop", self._stop_replaced_session(), 30)
+            await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
         command = self._claude.command if self._claude.started else await token.step("claude_command", asyncio.to_thread(
             self._claude_command, prepared.prompt_file, launch))
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
@@ -2904,6 +2914,10 @@ class ManagerAgent:
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=self._runner_limits)
                 options = {"stop": lambda: recorder.cap_stop} if isinstance(self._claude, RunnerSession) else {}
+                if outbound_hook.known_enabled() and process.launch.tool_hook is None:
+                    # Turned on since the switch was decided: with nothing awaited between this and the send, a
+                    # process without the hook writes no handoff.
+                    raise RuntimeError("the outbound review is on, and this process has no tool hook")
                 turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, cancel=cancel, **options),
                                               HANDOFF_TIMEOUT_SEC)
             except TurnCancelled as exc:
@@ -3354,6 +3368,10 @@ class ManagerAgent:
         except Exception as exc:
             logger.exception("%s: the gate command %r failed", self._log, text[:40])
             return f"关卡命令出错：{exc}"
+
+    async def _answer_todo(self, envelope: MessageEnvelope) -> None:
+        managers = self.ops.platform.managers if self.ops is not None else None
+        await self._send_reply(envelope, await attention.command_reply(envelope, managers=managers))
 
     async def _answer_intent(self, envelope: MessageEnvelope, intent) -> None:
         reply = await intent.action() if intent.action is not None else intent.reply
