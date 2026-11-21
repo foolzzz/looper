@@ -698,7 +698,7 @@ CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (pro
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
     role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor',
-                                         'advice_check', 'leads_check')),
+                                         'advice_check', 'leads_check', 'outbound_check')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
     profile_id      TEXT REFERENCES agent_profiles(id),
@@ -1266,7 +1266,7 @@ CREATE TABLE IF NOT EXISTS llm_records (
     -- of run it is (llm_records.RUN_KINDS; NULL on rows from before it, whose readers take it from their agent id).
     parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     run_kind TEXT CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'consult', 'advisor',
-                                      'advice_check'))
+                                      'advice_check', 'outbound_check'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
@@ -1938,6 +1938,30 @@ CREATE INDEX IF NOT EXISTS idx_advisor_advice_task ON advisor_advice (task_id);
 CREATE INDEX IF NOT EXISTS idx_advisor_advice_step ON advisor_advice (step_id, attempt) WHERE step_id IS NOT NULL;
 -- agent spawns end
 
+-- decision snapshots begin
+-- What a task's engine saw when it decided (the decision snapshot RFC), written only while the system setting
+-- decision_snapshots.enabled is true: a dispatch pass (kind dispatch: the steps as readiness reads them, the step
+-- workspace round's inputs, which steps were ready and which started) or the Planner's decision on a step's result
+-- (kind step_decision: what code computed for the turn, the turn's run record in digest, the decision and its
+-- reason as the activity line keeps it). No message text. record_id is the turn's llm_records row, without a foreign
+-- key: the snapshot keeps the digest it needs. Going with its task; housekeeping deletes rows after 30 days.
+-- connection.py applies this block to databases that predate it, so keep it between the markers.
+CREATE TABLE IF NOT EXISTS decision_snapshots (
+    id            BIGSERIAL PRIMARY KEY,
+    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL CHECK (kind IN ('dispatch', 'step_decision')),
+    step_id       TEXT,
+    record_id     BIGINT,
+    inputs        JSONB NOT NULL CHECK (jsonb_typeof(inputs) = 'object'),
+    inputs_sha256 TEXT NOT NULL,
+    decision      JSONB NOT NULL CHECK (jsonb_typeof(decision) = 'object'),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT decision_snapshots_step CHECK ((kind = 'step_decision') = (step_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_decision_snapshots_task ON decision_snapshots (task_id, kind, id);
+CREATE INDEX IF NOT EXISTS idx_decision_snapshots_created ON decision_snapshots (created_at);
+-- decision snapshots end
+
 -- Message leads and intents (message-leads-intents RFC, section 6): sourced notes and typed intents the processor
 -- extracts from source_events, the per-chat extraction switch, intent types with their append-only history, chat →
 -- project bindings, the alert-bot allowlist and the messages Looper sent about intents. Default off: no rows, no
@@ -2189,8 +2213,8 @@ ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_reason TEXT;
 ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_record_id BIGINT;
 ALTER TABLE agent_setting_layers DROP CONSTRAINT IF EXISTS agent_setting_layers_role_check;
 ALTER TABLE agent_setting_layers ADD CONSTRAINT agent_setting_layers_role_check
-    CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check'))
-    NOT VALID;
+    CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check',
+                    'outbound_check')) NOT VALID;
 ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_check_status_check;
 ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_check_status_check
     CHECK (check_status IN ('skipped', 'checked', 'failed')) NOT VALID;
@@ -2223,6 +2247,45 @@ ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_dropped;
 ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
+
+-- One review of an outbound action (the outbound-review RFC, section 9): who asked for it and where, the action as
+-- code describes it (its tool, level and target, a redacted summary), the verdict and why, and the classifier's run
+-- (record_id; none when code blocked it without one), model, cost and latency. A row is written before the action
+-- is allowed; failure says why a review blocked without a verdict. Rows go with their task. connection.py applies
+-- this block to databases that predate it, so keep it between the markers and idempotent.
+-- outbound reviews begin
+CREATE TABLE IF NOT EXISTS outbound_reviews (
+    id                BIGSERIAL PRIMARY KEY,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    agent_id          TEXT NOT NULL,
+    parent_record_id  BIGINT,
+    record_id         BIGINT,
+    task_id           TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    manager_action_id BIGINT,
+    channel           TEXT,
+    chat              TEXT,
+    source            TEXT NOT NULL CHECK (source IN ('tool', 'hook', 'post')),
+    tool              TEXT NOT NULL,
+    action            TEXT,
+    level             TEXT NOT NULL CHECK (level IN ('inside', 'operator', 'origin', 'machine', 'external', 'unknown')),
+    target_kind       TEXT NOT NULL,
+    target            TEXT NOT NULL,
+    summary           TEXT NOT NULL CHECK (length(summary) <= 500),
+    verdict           TEXT NOT NULL CHECK (verdict IN ('allow', 'block')),
+    failure           TEXT CHECK (failure IN ('not_operator', 'timeout', 'parse', 'runtime', 'rate_limited',
+                                              'unavailable', 'budget', 'too_long', 'refused', 'protected')),
+    reason            TEXT NOT NULL CHECK (length(reason) <= 300),
+    signals           TEXT[] NOT NULL DEFAULT '{}',
+    profile_id        TEXT,
+    model             TEXT,
+    cost_usd          NUMERIC(10, 6),
+    latency_ms        INTEGER,
+    CONSTRAINT outbound_reviews_failure_blocks CHECK (failure IS NULL OR verdict = 'block')
+);
+CREATE INDEX IF NOT EXISTS idx_outbound_reviews_created ON outbound_reviews (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
+-- outbound reviews end
 
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online

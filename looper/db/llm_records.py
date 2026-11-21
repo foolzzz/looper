@@ -105,7 +105,8 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
 # run's (an advisor's or a judge's, which names its kind) takes its kind from these. Records from before the run tree
 # have no run_kind (its migration rewrites no row), and readers take theirs from these too (``RUN_KIND``). An agent
 # id none of them matches has no kind.
-RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check")
+RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check",
+             "outbound_check")
 _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     # (kind, exact ids, id prefixes)
     ("manager", ("manager",), ("manager-",)),
@@ -386,9 +387,10 @@ _ROLE_FILTERS = {
 # A task's step runs: its Workers' and its Reviewers'.
 _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
 # The agents that work on one task, whose runs make up its cost; the Manager is not one of them. The runs the Planner's
-# consults of the advisor start (the advisor's and its judge's) are the Planner's.
+# consults of the advisor start (the advisor's and its judge's) and the reviews of a task's outbound actions are the
+# Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
-_PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check')"
+_PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check', 'outbound_check')"
 _TASK_ROLE = (
     f"CASE WHEN {_PLANNER_SPAWNS} THEN 'planner' "
     + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
