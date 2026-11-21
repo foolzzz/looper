@@ -177,10 +177,11 @@ class ApiSession:
         if cancel.requested:
             return stopped_before_request()
 
-        def failed(message, *, session_started=True):
+        def failed(message, *, session_started=True, typed=None):
             return claude_cli.ResidentTurn(
                 {"type": "result", "subtype": "error_during_execution", "is_error": True,
-                 "errors": [message], "num_turns": 0},
+                 "errors": [message], "num_turns": 0,
+                 **({"error_kind": typed.error_kind.value, "error_status": typed.error_status} if typed else {})},
                 session_started=session_started, usage=Usage(), prompt_sent=False)
 
         if self._tools is None:
@@ -276,7 +277,7 @@ class ApiSession:
             if result.first_request_failed and not initialized:
                 # Only retry before any output is visible; streamed text must not be shown twice.
                 self._session = sid
-                return failed(_error_message(result, model), session_started=False)
+                return failed(_error_message(result, model), session_started=False, typed=result)
         if not cancel.requested:
             await init()
         complete = all(r.usage.complete for r in result.requests)
