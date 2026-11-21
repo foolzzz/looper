@@ -86,6 +86,19 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
   A scenario Manager never gets the section. Off, the prompt, the tool list and the process signature are what they
   were before. The section is composed per turn, so the prompt preview only notes it
+- **Delivery guard policy** (`delivery_guard.py`, `manager.delivery_guard.enabled`, default off):
+  the pure policy defines a user's delivery debt (`owed`, then `paid` on non-empty top-level text),
+  exempts completion and autonomous turns, and permits at most two hidden follow-ups after a successful
+  empty reply. A failed follow-up selects the fixed failure notice; a stop retains normal stop behavior.
+  Initial errors, process exits, spend caps, unavailable tools and refused tokens never start follow-ups.
+  Six consecutive top-level tool calls select a same-turn reminder, at most twice per turn, only when
+  the runtime declares `MID_TURN_INPUT`. Only Claude Code declares this verified capability. Reminders
+  are model input, with no separate interim channel message.
+  The operator-only v1 operations `delivery_guard.get` and `delivery_guard.update` read or store the
+  switch (`enabled`, null restores off); existing chat settings responses and Manager tools stay unchanged.
+  **Manager wiring is pending:** storing the switch currently changes no replies, prompts, records or
+  channel calls. The policy, turn debt field and capability declaration are groundwork for that wiring;
+  dashboard controls, follow-up records/metrics and runtime reminder injection come with it.
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
