@@ -183,7 +183,13 @@ _LOGIN_VENDORS = {
 
 
 class Capability(str, Enum):
-    """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs."""
+    """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs.
+
+    MID_TURN_INPUT is verified only for the non-hosted ResidentClaude stream-json
+    session: queued input joins the running turn after its current tool returns.
+    Wiring must check the session kind as well as this capability; keeper- and
+    runner-hosted sessions are unverified.
+    """
 
     RUN = "run"  # one run of a prompt, which takes more user turns while it runs (a Worker, a Reviewer)
     STEER = "steer"  # a Worker or Reviewer run takes the Planner's messages while it works, through the runtime's own protocol (RunChannel)

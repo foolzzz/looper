@@ -152,6 +152,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # was verified with 2.1.329: a manual compact_boundary and a later turn recalling the summary.
     # MID_TURN_INPUT verified on 2026-11-20 with stream-json and --replay-user-messages:
     # queued user input joins the same turn after its current tool returns, with one result.
+    # Only non-hosted ResidentClaude was verified; wiring must check the session kind.
+    # Keeper- and runner-hosted sessions are unverified.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
     # Verified against Claude Code 2.1.329: /compact and an automatic compaction in the resident stream-json session
     # each write a compact_boundary event before the turn's result.
