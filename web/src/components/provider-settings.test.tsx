@@ -592,3 +592,16 @@ it("offers on-demand model fetching only for API-key providers", async () => {
   await click("Done");
   expect(container.querySelector('button[aria-label="Fetch the models of provider Saved account"]')?.getAttribute("aria-expanded")).toBe("false");
 });
+
+it("reads quota only when the provider's quota block is expanded", async () => {
+  data.providers = [account()]; await render(false);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json({ status: "ok", result: { enabled: false, providers: [] } }));
+  await click("Quota for provider Saved account");
+  expect(fetch).toHaveBeenLastCalledWith("/api/v1/providers/limits", expect.objectContaining({
+    method: "POST", body: JSON.stringify({ provider_id: "account-1" }),
+  }));
+  expect(container.textContent).toContain("Collection is off");
+  await click("Quota for provider Saved account");
+  expect(container.querySelector('section[aria-label="Quota"]')).toBeNull();
+});

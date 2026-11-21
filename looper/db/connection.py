@@ -169,6 +169,7 @@ _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
+_PROVIDER_LIMIT_WINDOWS = "provider_limit_windows"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -390,6 +391,9 @@ _ONLINE_STEPS = (
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
+    _OnlineStep(_PROVIDER_LIMIT_WINDOWS, "provider_limit_windows_online",
+                indexes=(("idx_llm_records_provider_day",
+                          "ON llm_records ((metadata->'profile'->'provider'->>'id'), created_at)"),)),
 )
 
 
@@ -846,6 +850,20 @@ async def _decision_snapshots_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _DECISION_SNAPSHOTS):
         return False
     return not await conn.fetchval("SELECT to_regclass('decision_snapshots') IS NOT NULL")
+
+
+async def _provider_limit_windows_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", _PROVIDER_LIMIT_WINDOWS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('provider_limit_windows') IS NOT NULL")
+
+
+def _provider_limit_windows_ddl() -> str:
+    found = re.search(r"-- provider limit windows begin\n(.*?)-- provider limit windows end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its provider limit windows block")
+    return found.group(1)
 
 
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
@@ -1581,6 +1599,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in await _outbound_reviews_ddl(conn):
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
+        if await _provider_limit_windows_pending(conn):
+            await conn.execute(_provider_limit_windows_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_LIMIT_WINDOWS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1632,7 +1653,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
-            or await _outbound_reviews_pending(conn)
+            or await _outbound_reviews_pending(conn) or await _provider_limit_windows_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _decision_snapshots_pending(conn)

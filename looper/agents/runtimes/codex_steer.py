@@ -185,6 +185,11 @@ class CodexChannel:
                         events.put_nowait({"type": "system", "subtype": "codex_server_request", "method": method})
                         continue
                     params = params or {}
+                    if method == "account/rateLimits/updated":
+                        from ..limit_signals import codex_notification
+
+                        if signal := await codex_notification(params):
+                            events.put_nowait(signal)
                     if method == "thread/tokenUsage/updated":
                         token_usage = params.get("tokenUsage")
                         total = token_usage.get("total") if isinstance(token_usage, dict) else None

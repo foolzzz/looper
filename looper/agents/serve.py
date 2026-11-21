@@ -1160,7 +1160,7 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
 async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: self_check.Check, *,
                                    claude_bin: str, lark_enabled: bool, projects_root: str) -> None:
     """Publish each probe as it finishes; keep display and final log order stable. Never stop serving."""
-    groups = _pending_advisory_checks()
+    groups = [*_pending_advisory_checks(), []]
 
     async def record(index: int, probe: Awaitable[self_check.Check | list[self_check.Check]]) -> None:
         try:
@@ -1185,6 +1185,7 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_lark_cli, lark_enabled),
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),
+            self_check.provider_limit_checks(),
         )
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])
