@@ -161,10 +161,10 @@ def test_a_token_refused_during_a_turn_replaces_claudes_reply(
                 real = ops.server_config
                 real_inject = ops.library_with_server
 
-                async def inject(library: Any, root: Path) -> Any:
-                    monkeypatch.setattr(ops, "server_config", lambda: _broken(real(), "wrong-token"))
+                async def inject(library: Any, root: Path, **kw: Any) -> Any:
+                    monkeypatch.setattr(ops, "server_config", lambda **kw: _broken(real(**kw), "wrong-token"))
                     try:
-                        return await real_inject(library, root)
+                        return await real_inject(library, root, **kw)
                     finally:
                         monkeypatch.setattr(ops, "server_config", real)
 

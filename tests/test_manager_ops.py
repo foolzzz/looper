@@ -887,6 +887,18 @@ def test_publish_binding_writes_atomically_with_mode_0600(tmp_path: Path) -> Non
     bare.publish_binding("b1")  # no file configured: nothing to write
 
 
+def test_the_binding_file_is_the_main_sessions_and_another_session_has_none(tmp_path: Path) -> None:
+    path = tmp_path / ".local" / "manager-turn.json"
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok", turn_file=path)
+    assert ops.turn_file_for("main") == path
+    assert ops.server_config(session_key="main") == ops.server_config()
+    for call in (lambda: ops.publish_binding("b1", session_key="group:lark:chat-1"),
+                 lambda: ops.server_config(session_key="group:lark:chat-1")):
+        with pytest.raises(ValueError, match="no session"):
+            call()
+    assert not path.exists()
+
+
 def test_a_token_of_no_fleet_manager_leaves_the_default_managers_turn_alone() -> None:
     from types import SimpleNamespace
 

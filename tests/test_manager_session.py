@@ -41,8 +41,8 @@ def test_the_old_names_read_and_write_the_session_the_context_sets(tmp_path: Pat
 
     def turn(session: ManagerSession, session_id: str, shown: StateShown) -> tuple[object, ...]:
         manager._current.set(session)
-        manager._session_id, manager._state_shown = session_id, shown
-        return manager._session_now(), manager._session_id, manager._turn_lock, manager._state_shown
+        manager._session_now().session_id, manager._state_shown = session_id, shown
+        return manager._session_now(), manager._session_now().session_id, manager._turn_lock, manager._state_shown
 
     assert contextvars.copy_context().run(turn, group, "s-group", shown_group) == (
         group, "s-group", group.turn_lock, shown_group)
@@ -51,8 +51,8 @@ def test_the_old_names_read_and_write_the_session_the_context_sets(tmp_path: Pat
     assert (group.session_id, group.state_shown) == ("s-group", shown_group)
     assert main.turn_lock is not group.turn_lock
 
-    # Nothing set here: every old name is main's field.
+    # Nothing set here: every old name still kept is main's field.
     assert manager._current.get() is None and manager._session_now() is main
     for field in fields(ManagerSession):
-        if field.name != "key":
+        if hasattr(ManagerAgent, f"_{field.name}"):
             assert getattr(manager, f"_{field.name}") is getattr(main, field.name), field.name
