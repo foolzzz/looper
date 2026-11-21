@@ -11,7 +11,8 @@ ledger RFC section 3.7).
 before it asks the user (``research_order``; off by default).
 
 ``channels.outbound.enabled``: the operator's shared write gateway and durable channel outbox
-(``outbound_enabled``; off by default). Lark is wired first; Telegram follows separately.
+(``outbound_enabled``; off by default), configured only through ``outbound_gateway.get/update``.
+Lark is wired first; Telegram follows separately.
 
 ``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
 The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
@@ -46,7 +47,7 @@ DEFAULT_OUTBOUND_ENABLED = False
 OUTBOUND_DEFAULTS = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
 # Rate and edit defaults are conservative platform assumptions, to verify (RFC section 7).
 OUTBOUND_FIELDS = ("outbound_enabled", *OUTBOUND_DEFAULTS)
-FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled", *OUTBOUND_FIELDS)
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -103,7 +104,7 @@ def outbound_enabled() -> bool:
 
 
 def set_outbound_enabled(value: bool) -> None:
-    """Apply the operator's outbound control in memory; persistent updates go through ``update``."""
+    """Apply the operator's outbound control in memory; persistent updates go through ``update_outbound``."""
     global _outbound_enabled
     _outbound_enabled = value
 
@@ -159,7 +160,7 @@ async def load() -> bool:
             value = float(raw) if raw is not None else default
             if key == "max_in_flight" and value == int(value):
                 value = int(value)
-            checked({key: value})
+            checked_outbound({key: value})
         except (ValueError, TypeError, OverflowError):
             value = default
         limits[key] = value
@@ -176,8 +177,7 @@ async def load() -> bool:
 async def settings_view() -> dict[str, Any]:
     """The settings in effect. ``ledger_enabled`` is the stored row (``db.ledger.enabled``), not a copy in memory."""
     return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value,
-            "research_order": _research_order, "outbound_enabled": _outbound_enabled,
-            "ledger_enabled": await db_ledger.enabled()}
+            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled()}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -202,22 +202,6 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("research_order must be true, false or null")
         values["research_order"] = value
-    if "outbound_enabled" in body:
-        value = body["outbound_enabled"]
-        if value is not None and not isinstance(value, bool):
-            raise ValueError("outbound_enabled must be true, false or null")
-        values["outbound_enabled"] = value
-    for key in OUTBOUND_DEFAULTS:
-        if key not in body:
-            continue
-        value = body[key]
-        if value is not None:
-            if key == "max_in_flight":
-                if type(value) is not int or not 1 <= value <= 32:
-                    raise ValueError("max_in_flight must be an integer from 1 to 32 or null")
-            elif type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{key} must be a finite positive number or null")
-        values[key] = value
     if "ledger_enabled" in body:
         value = body["ledger_enabled"]
         if value is not None and not isinstance(value, bool):
@@ -239,12 +223,6 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if "research_order" in values:
         value = values["research_order"]
         stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
-    if "outbound_enabled" in values:
-        value = values["outbound_enabled"]
-        stored[OUTBOUND_ENABLED_KEY] = None if value is None else ("true" if value else "false")
-    for key in OUTBOUND_DEFAULTS:
-        if key in values:
-            stored["channels.outbound." + key] = None if values[key] is None else str(values[key])
     if "ledger_enabled" in values:
         value = values["ledger_enabled"]
         stored[db_ledger.ENABLED_KEY] = None if value is None else ("true" if value else "false")
@@ -258,3 +236,44 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
             {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
             for bot in await missing()]
     return view
+
+
+def checked_outbound(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate operator-only gateway controls without extending the chat settings contract."""
+    if unknown := [key for key in body if key not in OUTBOUND_FIELDS]:
+        raise ValueError(f"unknown outbound setting {unknown[0]!r}")
+    if not body:
+        raise ValueError(f"give at least one of {', '.join(OUTBOUND_FIELDS)} (null: the default)")
+    values: dict[str, Any] = {}
+    if "outbound_enabled" in body:
+        value = body["outbound_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("outbound_enabled must be true, false or null")
+        values["outbound_enabled"] = value
+    for key in OUTBOUND_DEFAULTS:
+        if key not in body:
+            continue
+        value = body[key]
+        if value is not None:
+            if key == "max_in_flight":
+                if type(value) is not int or not 1 <= value <= 32:
+                    raise ValueError("max_in_flight must be an integer from 1 to 32 or null")
+            elif type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{key} must be a finite positive number or null")
+        values[key] = value
+    return values
+
+
+async def update_outbound(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist and refresh gateway controls; null restores each disabled or conservative default."""
+    values = checked_outbound(body)
+    stored: dict[str, str | None] = {}
+    if "outbound_enabled" in values:
+        value = values["outbound_enabled"]
+        stored[OUTBOUND_ENABLED_KEY] = None if value is None else ("true" if value else "false")
+    for key in OUTBOUND_DEFAULTS:
+        if key in values:
+            stored["channels.outbound." + key] = None if values[key] is None else str(values[key])
+    await db_settings.put_settings(stored)
+    await load()
+    return outbound_view()

@@ -17,18 +17,31 @@ const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转
 describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let stored: { stop_enabled: boolean; completion_turns: string; ledger_enabled: boolean; outbound_enabled: boolean };
+  let stored: { stop_enabled: boolean; completion_turns: string; ledger_enabled: boolean };
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
+  let outbound: boolean;
+  let outboundError: boolean;
 
   beforeEach(() => {
-    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false, outbound_enabled: false };
+    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false };
     missing = [];
     summary = SUMMARY;
     puts = [];
+    outbound = false;
+    outboundError = false;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path.startsWith("/api/v1/outbound_gateway/")) {
+        if (outboundError) return Response.json({ status: "error", error: { code: "unavailable", message: "gateway unavailable" } }, { status: 503 });
+        if (path.endsWith("/update")) {
+          const body = JSON.parse(String(init?.body));
+          puts.push({ operation: "outbound_gateway.update", ...body });
+          outbound = body.outbound_enabled;
+        }
+        return Response.json({ status: "ok", result: { outbound_enabled: outbound, send_qps: 5, write_qps: 15, edit_interval_seconds: 1, max_in_flight: 4 } });
+      }
       if (path === "/api/v1/manager_events/summary") {
         if (summary === null) {
           return Response.json({ status: "error", error: { code: "forbidden", message: "operator only" } },
@@ -75,8 +88,29 @@ describe("Chat settings", () => {
     expect(box.checked).toBe(false);
     expect(container.textContent).toContain("出站统一限流和重试（飞书、Telegram）");
     await act(async () => box.click());
-    expect(puts).toEqual([{ outbound_enabled: true }]);
+    expect(puts).toEqual([{ operation: "outbound_gateway.update", outbound_enabled: true }]);
+    expect(stored).not.toHaveProperty("outbound_enabled");
     expect(box.checked).toBe(true);
+  });
+
+  it("keeps chat settings usable when the outbound gateway is unavailable", async () => {
+    outboundError = true;
+    await act(async () => root.render(<ChatSettingsSection />));
+    expect(container.textContent).toContain("gateway unavailable");
+    expect(container.querySelector("input[id$=-outbound]")).toBeNull();
+    const box = container.querySelector("input[id$=-stop]") as HTMLInputElement;
+    await act(async () => box.click());
+    expect(puts).toEqual([{ stop_enabled: true }]);
+  });
+
+  it("retains the outbound value after an update fails", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    outboundError = true;
+    const box = container.querySelector("input[id$=-outbound]") as HTMLInputElement;
+    await act(async () => box.click());
+    expect(box.checked).toBe(false);
+    expect(container.textContent).toContain("gateway unavailable");
+    expect(puts).toEqual([]);
   });
 
   it("switches the Manager's completion turns on alone, and shows the day's counts", async () => {

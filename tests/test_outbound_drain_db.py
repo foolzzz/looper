@@ -78,13 +78,26 @@ def test_waiters_and_idle_scanner_do_not_poll(monkeypatch):
         monkeypatch.setattr(db, 'get', get)
         monkeypatch.setattr(db, 'next_due', scan)
         outbox = Outbox('app', transport, Gateway('app'))
+        idle = asyncio.Event()
+        wait = outbox._wake.wait
+        async def wait_for_work():
+            if not outbox._workers and not outbox._wake.is_set():
+                idle.set()
+            await wait()
+        monkeypatch.setattr(outbox._wake, 'wait', wait_for_work)
         try:
             receipts = await asyncio.gather(*(outbox.send('send', 'chat', {'text': 'hello'}, None,
                                                          'later', 'answer') for _ in range(20)))
             assert all(r.success for r in receipts)
-            await asyncio.sleep(.3)
             assert get.call_count <= 21
-            assert scan.call_count <= 5
+            # Concurrent registrations may wake scans while work is arriving. Once idle,
+            # the scanner must sleep until new work arrives, regardless of database timing.
+            idle.clear()
+            outbox._wake.set()
+            await asyncio.wait_for(idle.wait(), 2)
+            scans = scan.call_count
+            await asyncio.sleep(.3)
+            assert scan.call_count == scans
         finally:
             await outbox.stop()
     run_db(check, monkeypatch)

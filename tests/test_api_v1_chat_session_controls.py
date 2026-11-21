@@ -188,10 +188,10 @@ def test_the_dashboard_reads_the_setting(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr("looper.db.ledger.enabled", ledger_off)
     monkeypatch.setattr(chat_settings, "_stop_enabled", False)
     assert _call(_Manager(), "POST", "/api/v1/chat_settings/get") == (
-        200, {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "outbound_enabled": False})
+        200, {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False})
     monkeypatch.setattr(chat_settings, "_stop_enabled", True)
     assert _call(_Manager(), "POST", "/api/v1/chat_settings/get") == (
-        200, {"stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "outbound_enabled": False})
+        200, {"stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False})
 
 
 @pytest.mark.parametrize("body", [b"{}", b'{"stop_enabled": "yes"}', b'{"stop_enabled": 1}', b'{"other": true}'])

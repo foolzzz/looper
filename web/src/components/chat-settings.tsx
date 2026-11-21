@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
   fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
+  fetchOutboundGateway, updateOutboundGateway, type OutboundGatewaySettings,
   type CompletionTurns, type MissingOperatorBot,
 } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
@@ -34,6 +35,8 @@ const FALLBACK_REASONS: Record<string, string> = {
 export function ChatSettingsSection() {
   const id = useId();
   const [settings, setSettings] = useState<ChatSettings | null>(null);
+  const [outbound, setOutbound] = useState<OutboundGatewaySettings | null>(null);
+  const [outboundError, setOutboundError] = useState("");
   const [summary, setSummary] = useState<CompletionSummary | null>(null);
   const [summaryError, setSummaryError] = useState("");
   const [error, setError] = useState("");
@@ -48,6 +51,11 @@ export function ChatSettingsSection() {
     }).catch((err: unknown) => {
       if (alive) setError(errorText(err));
     });
+    fetchOutboundGateway().then((value) => {
+      if (alive) { setOutbound(value); setOutboundError(""); }
+    }).catch((err: unknown) => {
+      if (alive) setOutboundError(errorText(err));
+    });
     fetchCompletionSummary().then((value) => {
       if (alive) setSummary(value);
     }).catch((err: unknown) => {
@@ -56,7 +64,7 @@ export function ChatSettingsSection() {
     return () => { alive = false; };
   }, [attempt]);
 
-  const save = async (body: { stop_enabled?: boolean; completion_turns?: CompletionTurns; ledger_enabled?: boolean; outbound_enabled?: boolean }) => {
+  const save = async (body: { stop_enabled?: boolean; completion_turns?: CompletionTurns; ledger_enabled?: boolean }) => {
     setSaving(true);
     setError("");
     try {
@@ -67,6 +75,18 @@ export function ChatSettingsSection() {
       }
     } catch (err) {
       setError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveOutbound = async (enabled: boolean) => {
+    setSaving(true);
+    setOutboundError("");
+    try {
+      setOutbound(await updateOutboundGateway({ outbound_enabled: enabled }));
+    } catch (err) {
+      setOutboundError(errorText(err));
     } finally {
       setSaving(false);
     }
@@ -127,17 +147,21 @@ export function ChatSettingsSection() {
             </p>
             {missingBots.length > 0 && <LedgerNotice bots={missingBots} />}
           </div>
-          <div className="space-y-1.5">
+          {outbound && <div className="space-y-1.5">
             <label htmlFor={`${id}-outbound`} className="flex items-center gap-2 text-sm font-medium">
-              <input id={`${id}-outbound`} type="checkbox" checked={settings.outbound_enabled} disabled={saving}
+              <input id={`${id}-outbound`} type="checkbox" checked={outbound.outbound_enabled} disabled={saving}
                      aria-describedby={`${id}-outbound-help`}
-                     onChange={(event) => void save({ outbound_enabled: event.target.checked })} />
+                     onChange={(event) => void saveOutbound(event.target.checked)} />
               出站统一限流和重试（飞书、Telegram）
             </label>
             <p id={`${id}-outbound-help`} className="text-xs text-muted-foreground">
               默认关闭。当前接入飞书，发送前保存，遇到超时会按幂等键重试；Telegram 将在后续接入。
             </p>
-          </div>
+          </div>}
+          {outboundError && <div className="space-y-3">
+            <p role="alert" className="break-words text-sm text-destructive">出站设置不可用：{outboundError}</p>
+            <Button variant="outline" disabled={saving} onClick={() => setAttempt((n) => n + 1)}>重试出站设置</Button>
+          </div>}
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>
       )}

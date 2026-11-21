@@ -23,13 +23,13 @@ def test_the_stop_setting_is_stored_and_loaded(monkeypatch: pytest.MonkeyPatch, 
     async def test(pool: Any) -> None:
         async with _api(tmp_path, pool, None) as (call, _):
             assert await chat_settings.load() is False
-            assert (await call("chat_settings.get"))[1]["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "outbound_enabled": False}
+            assert (await call("chat_settings.get"))[1]["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             assert (await call("chat_settings.update", {"stop_enabled": True}))[1]["result"] == {
-                "stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "outbound_enabled": False}
+                "stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             chat_settings.set_stop_enabled(False)  # a restart
             assert await chat_settings.load() is True
             assert (await call("chat_settings.update", {"stop_enabled": None}))[1]["result"] == {
-                "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "outbound_enabled": False}
+                "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             assert await chat_settings.load() is False
 
     run_db(test, monkeypatch, timeout=30)
@@ -43,7 +43,7 @@ def test_the_completion_turns_setting_is_stored_alone_and_loaded(monkeypatch: py
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
             await call("chat_settings.update", {"stop_enabled": True})
             status, answer = await call("chat_settings.update", {"completion_turns": "dm_only", "research_order": False, "ledger_enabled": False})
-            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "dm_only", "research_order": False, "ledger_enabled": False, "outbound_enabled": False}
+            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "dm_only", "research_order": False, "ledger_enabled": False}
             chat_settings.set_completion_turns(chat_settings.CompletionTurns.OFF)  # a restart
             await chat_settings.load()
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.DM_ONLY
@@ -92,23 +92,22 @@ def test_outbound_is_operator_controlled_and_survives_restart(monkeypatch: pytes
         async with _api(tmp_path, pool, None) as (call, _):
             await chat_settings.load()
             assert chat_settings.outbound_enabled() is False
-            for operation in ("outbound_settings.update", "chat_settings.update"):
-                status, answer = await call(operation, {"outbound_enabled": True}, client=True)
-                assert status == 403 and answer["error"]["code"] == "forbidden"
-            status, answer = await call("outbound_settings.update", {"outbound_enabled": True})
+            status, answer = await call("outbound_gateway.update", {"outbound_enabled": True}, client=True)
+            assert status == 403 and answer["error"]["code"] == "forbidden"
+            status, answer = await call("outbound_gateway.update", {"outbound_enabled": True})
             assert status == 200 and answer["result"] == {"outbound_enabled": True, **chat_settings.OUTBOUND_DEFAULTS}
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1",
                                        chat_settings.OUTBOUND_ENABLED_KEY) == "true"
             status, answer = await call("chat_settings.update", {"ledger_enabled": True})
             assert status == 200 and answer["result"]["ledger_enabled"] is True
-            assert answer["result"]["outbound_enabled"] is True
+            assert "outbound_enabled" not in answer["result"]
             chat_settings.set_outbound_enabled(False)
             await chat_settings.load()
             assert chat_settings.outbound_enabled() is True
-            status, answer = await call("outbound_settings.update", {"outbound_enabled": None})
+            status, answer = await call("outbound_gateway.update", {"outbound_enabled": None})
             assert status == 200 and answer["result"] == {"outbound_enabled": False, **chat_settings.OUTBOUND_DEFAULTS}
             view = await chat_settings.settings_view()
-            assert view["ledger_enabled"] is True and view["outbound_enabled"] is False
+            assert view["ledger_enabled"] is True and "outbound_enabled" not in view
             assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key=$1",
                                        chat_settings.OUTBOUND_ENABLED_KEY) == 0
 

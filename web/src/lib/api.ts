@@ -563,7 +563,6 @@ export interface ChatSettings {
   stop_enabled: boolean;
   /** Whether the Manager tells direct chats and the dashboard chat of a task's end (off by default). */
   completion_turns: CompletionTurns;
-  outbound_enabled: boolean;
   /** Whether the ledger records what waits, what was decided and who does what. Off by default. */
   ledger_enabled: boolean;
   /** Present when an update turns the ledger on: bots with no operator id. Empty when every bot has one. */
@@ -596,9 +595,32 @@ export async function fetchChatSettings(): Promise<ChatSettings> {
 }
 
 export async function updateChatSettings(
-  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; ledger_enabled?: boolean | null; outbound_enabled?: boolean | null },
+  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; ledger_enabled?: boolean | null },
 ): Promise<ChatSettings> {
   const result = await callV1<ChatSettings>("/api/v1/chat_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Operator-only shared outbound gateway controls; separate from chat settings. */
+export interface OutboundGatewaySettings {
+  outbound_enabled: boolean;
+  send_qps: number;
+  write_qps: number;
+  edit_interval_seconds: number;
+  max_in_flight: number;
+}
+
+export async function fetchOutboundGateway(): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateOutboundGateway(
+  body: { [K in keyof OutboundGatewaySettings]?: OutboundGatewaySettings[K] | null },
+): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }

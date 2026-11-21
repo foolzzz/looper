@@ -26,31 +26,29 @@ def test_outbound_setting_load_update_reset_and_validation(monkeypatch):
     async def run():
         await chat_settings.load()
         assert chat_settings.outbound_enabled() is False
-        assert (await chat_settings.update({'outbound_enabled': True}))['outbound_enabled'] is True
+        assert (await chat_settings.update_outbound({'outbound_enabled': True}))['outbound_enabled'] is True
         assert stored == {'channels.outbound.enabled': 'true'}
         chat_settings.set_outbound_enabled(False)
         await chat_settings.load()
         assert chat_settings.outbound_enabled() is True
         with pytest.raises(ValueError, match='outbound_enabled must be'):
-            await chat_settings.update({'outbound_enabled': 'true'})
+            await chat_settings.update_outbound({'outbound_enabled': 'true'})
         assert chat_settings.outbound_enabled() is True
-        assert (await chat_settings.update({'outbound_enabled': None}))['outbound_enabled'] is False
+        assert (await chat_settings.update_outbound({'outbound_enabled': None}))['outbound_enabled'] is False
         assert not stored
 
     asyncio.run(run())
 
 
-def test_outbound_settings_are_operator_only():
+def test_outbound_gateway_are_operator_only():
     for name in ('get', 'update'):
-        assert api_v1.find('POST', '/api/v1/outbound_settings/' + name).operator_only
+        assert api_v1.find('POST', '/api/v1/outbound_gateway/' + name).operator_only
 
 
 @pytest.mark.parametrize('operation,body', [
-    ('outbound_settings.get', {}),
-    ('outbound_settings.update', {'outbound_enabled': True}),
-    ('chat_settings.update', {'outbound_enabled': True}),
-    ('outbound_settings.update', {'send_qps': 2}),
-    ('chat_settings.update', {'max_in_flight': 2}),
+    ('outbound_gateway.get', {}),
+    ('outbound_gateway.update', {'outbound_enabled': True}),
+    ('outbound_gateway.update', {'send_qps': 2}),
 ])
 @pytest.mark.parametrize('principal_kind', ['client', 'agent'])
 def test_nonoperator_principal_cannot_change_outbound_control(operation, body, tmp_path, principal_kind):
@@ -117,9 +115,8 @@ def test_http_agent_client_token_is_forbidden_and_settings_tool_omits_outbound(t
                 # Positive control: this is an authenticated API client, not an invalid token.
                 response = await client.get("/api/v1/whoami")
                 assert response.status_code == 200 and response.json()["result"]["principal"] == "client"
-                for operation, body in (("outbound_settings/get", {}),
-                                        ("outbound_settings/update", {"outbound_enabled": True}),
-                                        ("chat_settings/update", {"outbound_enabled": True})):
+                for operation, body in (("outbound_gateway/get", {}),
+                                        ("outbound_gateway/update", {"outbound_enabled": True})):
                     response = await client.post("/api/v1/" + operation, json=body)
                     assert response.status_code == 403
                     assert response.json()["error"]["code"] == "forbidden"
@@ -130,7 +127,7 @@ def test_http_agent_client_token_is_forbidden_and_settings_tool_omits_outbound(t
 
 
 def test_outbound_limits_defaults_update_reload_reset_and_schema(monkeypatch):
-    from looper.agents.v1_domains import chat_controls
+    from looper.agents.v1_domains import outbound_gateway
     stored = {}
     async def put(values):
         for key, value in values.items():
@@ -146,15 +143,15 @@ def test_outbound_limits_defaults_update_reload_reset_and_schema(monkeypatch):
         await chat_settings.load()
         defaults = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
         assert chat_settings.outbound_limits() == defaults
-        operation = api_v1.find('POST', '/api/v1/outbound_settings/update')
+        operation = api_v1.find('POST', '/api/v1/outbound_gateway/update')
         values = dict(send_qps=2.5, write_qps=7, edit_interval_seconds=.25, max_in_flight=2)
         assert set(values) <= operation.request['properties'].keys()
-        await chat_controls.run(None, operation, values, api_v1.Principal('operator'), {})
+        await outbound_gateway.run(None, operation, values, api_v1.Principal('operator'), {})
         assert chat_settings.outbound_limits() == values
         assert stored == {'channels.outbound.' + k: str(v) for k, v in values.items()}
         await chat_settings.load()
         assert chat_settings.outbound_limits() == values
-        await chat_settings.update(dict.fromkeys(defaults))
+        await chat_settings.update_outbound(dict.fromkeys(defaults))
         assert chat_settings.outbound_limits() == defaults and not stored
     asyncio.run(run())
 
@@ -166,4 +163,41 @@ def test_outbound_limits_defaults_update_reload_reset_and_schema(monkeypatch):
 ])
 def test_outbound_limits_reject_invalid_values(field, value):
     with pytest.raises(ValueError, match=field + " must be"):
-        chat_settings.checked({field: value})
+        chat_settings.checked_outbound({field: value})
+
+
+def test_outbound_controls_do_not_extend_chat_settings(monkeypatch):
+    writes = AsyncMock()
+    monkeypatch.setattr(chat_settings.db_settings, "put_settings", writes)
+    fields = {"stop_enabled", "completion_turns", "research_order", "ledger_enabled"}
+    for action in ("get", "update"):
+        operation = api_v1.find("POST", "/api/v1/chat_settings/" + action)
+        assert set(operation.result["properties"]) == fields | ({"missing_operator_ids"} if action == "update" else set())
+        if action == "update":
+            assert set(operation.request["properties"]) == fields
+
+    async def run():
+        for key in chat_settings.OUTBOUND_FIELDS:
+            with pytest.raises(ValueError, match="unknown setting"):
+                await chat_settings.update({"stop_enabled": True, key: True})
+        with pytest.raises(ValueError, match="unknown outbound setting"):
+            await chat_settings.update_outbound({"outbound_enabled": True, "ledger_enabled": True})
+        with pytest.raises(ValueError, match="at least one"):
+            await chat_settings.update_outbound({})
+        writes.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_outbound_update_requires_confirmation_without_writing(monkeypatch):
+    operation = api_v1.find("POST", "/api/v1/outbound_gateway/update")
+    assert operation.risk == "high" and operation.confirms and operation.tool is None
+    writes = AsyncMock()
+    monkeypatch.setattr(chat_settings.db_settings, "put_settings", writes)
+
+    async def run():
+        impact = await api_v1.domain_for(operation).impact(
+            None, operation, {"outbound_enabled": True, "send_qps": None}, api_v1.OPERATOR, {})
+        assert "channels.outbound.enabled to true" in impact
+        assert "channels.outbound.send_qps to 5" in impact
+        writes.assert_not_awaited()
+    asyncio.run(run())
