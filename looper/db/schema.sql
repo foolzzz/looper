@@ -2304,3 +2304,11 @@ CREATE TABLE IF NOT EXISTS mcp_tool_levels (
     PRIMARY KEY (item_id, tool)
 );
 -- mcp tool levels end
+
+-- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
+-- only those rows, never the tables' history. A database that predates them builds them online
+-- (connection.py ``_ONLINE_STEPS``).
+CREATE INDEX IF NOT EXISTS idx_subscription_deliveries_uncertain ON subscription_deliveries (updated_at)
+    WHERE state = 'uncertain';
+CREATE INDEX IF NOT EXISTS idx_intent_posts_uncertain ON intent_posts (updated_at) WHERE state = 'uncertain';
+CREATE INDEX IF NOT EXISTS idx_manager_events_uncertain ON manager_events (created_at) WHERE delivery = 'uncertain';

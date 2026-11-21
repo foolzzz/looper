@@ -134,6 +134,7 @@ class _Pending:
     at: float
     confirmation: dict[str, Any]
     answer_turn: str | None = None  # the message of the turn that may confirm it, once it started
+    impact: str = ""  # what it does, as the block says it
 
 
 # The Manager's tools (a task's Planner has its own, ``ops.planner``).
@@ -239,10 +240,11 @@ class ManagerOps:
         self._executing = 0
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
         # later shell command may run one), and the turns already told the operator of a block.
-        from ..outbound_hook import CONTENT_TOOLS_KEPT
+        from ..outbound_hook import CONTENT_TOOLS_KEPT, Trusted
 
         self._review_root: Path | None = None
         self._review_bin = "claude"
+        self._trusted = Trusted.of(None, ())  # until a hook is written: only Looper's own server, none of its tools
         self._writes: deque[Any] = deque(maxlen=CONTENT_TOOLS_KEPT)
         self._notified: OrderedDict[tuple[str | None, str | None, str | None], None] = OrderedDict()
         # Each tool_use a turn's stream showed, by its id: the binding of the turn it belongs to (a subagent's call,
@@ -587,7 +589,8 @@ class ManagerOps:
             turn.blocks.remove(earlier.block)  # asked in this turn too: only the newest stands
         block = f"需要你确认：\n{impact}\n回复「确认」就执行；回复别的就不执行。"
         pending = _Pending(id=f"c-{uuid.uuid4().hex[:12]}", tool=tool, arguments=arguments, block=block,
-                           asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation))
+                           asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation),
+                           impact=impact)
         self._pending[turn.chat_key] = pending
         while len(self._pending) > CONFIRMATION_CHATS:
             self._pending.pop(next(iter(self._pending)))
@@ -804,6 +807,18 @@ class ManagerOps:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())
 
+    def waiting_confirmations(self) -> list[dict[str, Any]]:
+        """The operations that wait for the user's word now, oldest first: asked, no turn answering them yet, and
+        within ``CONFIRMATION_SECONDS``. Read only (the "needs you" summary, ``agents.attention``)."""
+        now = self._clock()
+        waiting = sorted(((key, pending) for key, pending in self._pending.items()
+                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS),
+                         key=lambda item: item[1].at)
+        return [{"confirmation_id": pending.id, "tool": pending.tool.name, "impact": pending.impact,
+                 "channel": channel, "channel_id": channel_id, "chat": chat, "waited_seconds": int(now - pending.at),
+                 "expires_in_seconds": max(0, int(CONFIRMATION_SECONDS - (now - pending.at)))}
+                for (channel, channel_id, chat), pending in waiting]
+
     def forget_confirmations(self) -> None:
         """Drop every waiting confirmation (the Manager's session was reset)."""
         self._pending.clear()
@@ -842,12 +857,14 @@ class ManagerOps:
 
     # --- The outbound review's hook ---
 
-    def tool_hook(self, runtime_root: Path, claude_bin: str) -> Any:
+    def tool_hook(self, runtime_root: Path, claude_bin: str, library: Any = None) -> Any:
         """The PreToolUse hook (``outbound_hook.ToolHook``) for this Manager's Claude Code, its config written; the
-        reviews it asks for run under ``runtime_root`` with ``claude_bin``."""
+        reviews it asks for run under ``runtime_root`` with ``claude_bin``, and its MCP tool names stand for the
+        servers ``library`` loads (``outbound_hook.Trusted``)."""
         from .. import outbound_hook
 
         self._review_root, self._review_bin = runtime_root, claude_bin
+        self._trusted = outbound_hook.Trusted.of(library, (*self._scope.tools, CONFIRM_TOOL))
         return outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token)
 
     async def check_outbound(self, payload: Any) -> dict[str, Any]:
@@ -871,7 +888,7 @@ class ManagerOps:
             answer, review = await outbound_hook.answer(
                 payload, agent_id=self._scope.manager_id, place=place, writes=list(self._writes),
                 runtime_root=self._review_root or self._platform.runtime_root or Path.cwd(),
-                claude_bin=self._review_bin)
+                claude_bin=self._review_bin, trusted=self._trusted)
         except Exception:
             logger.exception("the outbound check of a call of %s failed", self._scope.manager_id)
             return {"decision": "block", "message": outbound_hook.BLOCKED_MESSAGE.format(

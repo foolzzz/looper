@@ -6,7 +6,7 @@ from ...db import connection as db_connection, projects as db_projects, schedule
 from ...db import subscriptions as db_subs
 from .. import schedules, subscriptions
 from ..agent_settings import BUDGET_MAX_USD, CONCURRENCY_MAX
-from ..action_levels import ActionLevel, highest, target_level
+from ..action_levels import ActionLevel, schedule_level, schedule_reach
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
@@ -92,23 +92,16 @@ RESULTS = {
 
 
 async def _level(arguments):
-    """A command schedule runs a shell command unattended (``machine``); its runs' messages go to its notify target
-    (``action_levels.target_level``: the operator, or anyone else)."""
+    """Where the schedule reaches (``action_levels.schedule_level``; an API client's call has no chat of its own): a
+    new one by its fields, a stored one by what it has with the change merged; one that is not there is
+    ``unknown``."""
     fields = arguments.get("fields") if isinstance(arguments.get("fields"), dict) else {}
-    levels = [ActionLevel.MACHINE] if fields.get("kind") == "command" or fields.get("command") \
-        or fields.get("gate_command") else []
-    if "notify_target" in fields:
-        levels.append(await target_level(fields["notify_target"]))
-    return highest(*levels)
-
-
-async def _confirmed_level(arguments):
-    """Confirming a subscription's push target lets its runs go there: the stored target's level."""
-    row = await db_schedules.get_schedule(arguments["schedule_id"])
-    if row is None:
-        return ActionLevel.UNKNOWN
-    target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_chat") else None
-    return await target_level(target)
+    if "schedule_id" in arguments:
+        row = await db_schedules.get_schedule(arguments["schedule_id"])
+        if row is None:
+            return ActionLevel.UNKNOWN
+        fields = {**schedule_reach(row), **fields}
+    return await schedule_level(fields)
 
 
 def _op(action, fields, result, *, risk="write", required=None):
@@ -116,7 +109,8 @@ def _op(action, fields, result, *, risk="write", required=None):
     return Operation(f"schedule_admin.{action}", "POST", f"/api/v1/schedule_admin/{action}",
                      description, description, _object(fields, required, closed=True), result,
                      risk=risk, confirms=action != "create",
-                     level_of={"create": _level, "update": _level, "confirm_target": _confirmed_level}.get(action))
+                     # running a schedule, or confirming its push target, reaches where it does (``_level``)
+                     level_of={"create": _level, "update": _level, "run": _level, "confirm_target": _level}.get(action))
 
 
 _ID = {"schedule_id": _STR}

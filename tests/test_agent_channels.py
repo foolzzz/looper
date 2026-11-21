@@ -597,6 +597,18 @@ class TestTelegramAllowlist:
         (message,) = self._run(tmp_path, "_cmd_new", update, "7")
         assert message.payload["channel_context"] == {"chat_id": 99, "user_id": 7, "username": "someone"}
 
+    @pytest.mark.parametrize("on", [True, False])
+    def test_todo_forwards_only_while_the_needs_you_summary_is_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, on: bool,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from looper.agents import attention
+
+        monkeypatch.setattr(attention, "enabled", AsyncMock(return_value=on))
+        messages = self._run(tmp_path, "_cmd_todo", _tg_update(7, "/todo"), "7")
+        assert [message.payload["text"] for message in messages] == (["/todo"] if on else [])
+
     def test_stop_forwards_for_a_listed_sender_only(self, tmp_path: Path) -> None:
         (message,) = self._run(tmp_path, "_cmd_stop", _tg_update(7, "/stop"), "7")
         assert message.payload["text"] == "/stop"

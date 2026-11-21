@@ -43,16 +43,28 @@ def deny(reason):
                                    "permissionDecisionReason": reason}}
 
 
-def answer(config_path, stdin, started):
-    """Claude Code's answer for the hook's input ``stdin``: ``{}`` (run it) only when Looper said ``allow``."""
+def _config(config_path, started):
+    """The hook's config, its deadline (no later than ``DEADLINE_SEC``) set as the alarm before anything waits on
+    stdin; None when it cannot be read or the deadline has passed."""
     try:
         with open(config_path, encoding="utf-8") as handle:
             config = json.load(handle)
-        deadline = min(float(config.get("deadline", DEADLINE_SEC)), DEADLINE_SEC)
-        left = deadline - (time.monotonic() - started)
+        config["deadline"] = min(float(config.get("deadline", DEADLINE_SEC)), DEADLINE_SEC)
+    except Exception:
+        return None
+    left = config["deadline"] - (time.monotonic() - started)
+    if left <= 1:
+        return None
+    signal.alarm(int(left))
+    return config
+
+
+def answer(config, stdin, started):
+    """Claude Code's answer for the hook's input ``stdin``: ``{}`` (run it) only when Looper said ``allow``."""
+    try:
+        left = config["deadline"] - (time.monotonic() - started)
         if left <= 1:
             return deny(UNANSWERED)
-        signal.alarm(int(left))
         payload = json.loads(stdin or "{}")
         body = {key: payload.get(key) for key in _FIELDS if key in payload}
         headers = {"Authorization": "Bearer " + config["token"], "Content-Type": "application/json",
@@ -74,11 +86,15 @@ def answer(config_path, stdin, started):
 
 def main(argv):
     started = time.monotonic()
-    try:
-        stdin = sys.stdin.read()
-    except Exception:
-        stdin = ""
-    out = answer(argv[1], stdin, started) if len(argv) > 1 else deny(UNANSWERED)
+    config = _config(argv[1], started) if len(argv) > 1 else None  # its deadline holds while stdin is read
+    if config is None:
+        out = deny(UNANSWERED)
+    else:
+        try:
+            stdin = sys.stdin.read()
+        except Exception:
+            stdin = ""
+        out = answer(config, stdin, started)
     signal.alarm(0)
     os.write(1, json.dumps(out, ensure_ascii=False).encode("utf-8"))
     return 0

@@ -5519,6 +5519,49 @@ writes nothing.
 - **Not yet:** the To-do page, the ledger contract in the Manager's system
   prompt (the tool descriptions are all it has), HTTP writes.
 
+### What needs you
+
+One read-only summary of what waits for the operator
+([RFC](rfcs/assistant-needs-you-v0.zh-CN.md), `looper/agents/attention.py`),
+gathered by code from what Looper already keeps: no model call, nothing
+stored. It is off until the system setting `attention.enabled` is `true`
+(there is no dashboard switch). Off, `attention.summary` answers `conflict`,
+the dashboard lists no page for it, `/todo` is an ordinary message for the
+Manager's model and Telegram drops the command as before; no prompt, tool
+list or command line changes either way.
+
+- **Sections**, in order: `gates` (user gates waiting for the operator,
+  `gate_service.list_gates` with `waiting_on=user`), `confirmations` (each
+  Manager's operation waiting for the operator's word,
+  `ManagerOps.waiting_confirmations`, read from memory, so a restart drops
+  them), `schedules` (`db.schedules.failing`, the Schedules card's list),
+  `logins` (the Claude Code CLI or login, or a runtime login an Agent
+  Profile uses, failing in the checks `system/status` reads; the HTTP server
+  registers that reader with `attention.use_status_checks` while it runs),
+  `intents`
+  (pending, only while intents are on), `ledger` (own open items that wait
+  for the user: a to-do, an unconfirmed relayed decision, anything overdue;
+  only while the ledger is on) and `deliveries` (`uncertain` subscription
+  pushes, intent messages and task-end messages of the last 72 hours; each
+  table has a partial index of its `uncertain` rows, built online for an
+  existing database by the `uncertain_deliveries` migration). A
+  section is `ok`, `error` (its source could not be read, with the reason;
+  never shown as empty) or `unknown` (this caller cannot read it); a
+  feature that is off leaves its section out. Each lists up to 20 items and
+  counts them all. The page and `/todo` say nothing waits only when every
+  section was read and is empty.
+- **API:** `POST /api/v1/attention/summary`, read-only and operator-only:
+  `{read_at, total, sections: [{kind, state, count, items, error}]}`, each
+  item `{key, title, context, since, href, ref, facts}`.
+- **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
+  only while the summary answers. Failing logins that were read are left to
+  the startup-check banner every page shows; a confirmation asked in the
+  dashboard chat links to that conversation.
+- **Chat:** `/todo` (and Telegram's `/todo@bot`) is answered by code next to
+  `/new` and `/gates`, only in the operator's own turns
+  (`operator_identity.is_operator`); a group, another sender and an API
+  client get a refusal.
+
 ### User gates
 
 In a project with `user_gates` `on`, also when unset (the default), a task's
@@ -6167,17 +6210,20 @@ off; `outbound_review.get` and `outbound_review.update`).
   such a process while it is on (checked right before the prompt reaches the process). The hook is
   `outbound_hook_client.py`, run by path with `python -I`, behind a shell that prints a `deny` whenever the client
   cannot run or prints nothing. The client sets an alarm before anything else that ends it with a `deny` at
-  `DEADLINE_SEC` (75 s), asks `POST /api/agent/v1/outbound/check` with the Manager's token, waits for the answer at
-  most `CHECK_TIMEOUT_SEC` (60 s), and denies when it gets none; Claude Code waits for the hook `HOOK_TIMEOUT_SEC`
-  (90 s), since it runs a call whose hook failed or timed out. Its config (the URL, the token, the waits) is
+  `DEADLINE_SEC` (75 s) and moves it to its config's `deadline` before it reads its input; it asks
+  `POST /api/agent/v1/outbound/check` with the Manager's token, waits for the answer at most `CHECK_TIMEOUT_SEC`
+  (60 s), and denies when it gets none; Claude Code waits for the hook `HOOK_TIMEOUT_SEC` (90 s), since it runs a
+  call whose hook failed or timed out. Its config (the URL, the token, the waits) is
   `<runtime root>/.local/outbound-hook/<manager>.json`, readable by the operator only.
   - **What runs at once** is decided by the tool's type (`outbound_hook.level_of`): Claude Code's built-in tools have
     a level each (`BUILTIN_LEVELS`: `Bash` and `Monitor` are `unknown`; `WebSearch`, `WebFetch`, `RemoteTrigger` and
     `SendMessage` `external`); a tool not listed is `unknown`. Looper's own tools are `inside` here (`ManagerOps.call`
     runs them). Another MCP server's tools are `unknown`, except the ones the operator declared `inside` for that
-    server (`mcp_tool_levels`, `mcp_tool_levels.get` and `mcp_tool_levels.put`). An undeclared tool of a read-only
-    MCP server is therefore reviewed in the operator's turns (a few seconds and about 0.003 USD a call) and
-    blocked in every other turn.
+    server (`mcp_tool_levels`, `mcp_tool_levels.get` and `mcp_tool_levels.put`). A name is read only against the
+    servers the Manager's process loaded (`outbound_hook.Trusted`: its library's MCP items and Looper's own), with
+    the full tool name; one that no loaded server or more than one could stand for is `unknown`. An undeclared
+    tool of a read-only MCP server is therefore reviewed in the operator's turns (a few seconds and about 0.003 USD
+    a call) and blocked in every other turn.
   - **Whose turn:** the call's own, never the turn that runs when it comes. That is the turn whose stream showed
     its `tool_use` (`ManagerOps.expect`); a subagent's call belongs to the turn of the call that started it
     (`parent_tool_use_id`). A call Looper cannot place within `PLACE_WAIT_SEC`, or whose turn is over, is no one's.

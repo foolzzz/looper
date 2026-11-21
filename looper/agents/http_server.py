@@ -31,7 +31,7 @@ from ..db.timing import ApiTiming, current_api_timing
 from .loop_watch import LoopWatch
 from ..ops_config import OpsConfig
 from . import (
-    api_v1, config_imports, config_transfer, keeper, kept_dirs, knowledge,
+    api_v1, attention, config_imports, config_transfer, keeper, kept_dirs, knowledge,
     operator_auth, overview, projects, request_guard,
     self_check,
 )
@@ -290,6 +290,7 @@ class AgentHTTPServer:
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port
         )
+        attention.use_status_checks(self._checks_now)  # the "needs you" logins, as system/status reads them
         if self._port == 0:
             self._port = self._server.sockets[0].getsockname()[1]
         from .. import _PROCESS_STARTED_AT
@@ -345,6 +346,7 @@ class AgentHTTPServer:
             self._server.close()
 
     async def stop(self) -> None:
+        attention.use_status_checks(None, owner=self._checks_now)
         if self._summary_task is not None:
             self._summary_task.cancel()
             await asyncio.gather(self._summary_task, return_exceptions=True)
