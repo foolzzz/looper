@@ -70,7 +70,7 @@ class _Stale(_Session):
 def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any) -> _Session:
     """The state in which a turn reaches the step ``name``."""
     match name:
-        case "tool_listing":
+        case "tool_listing" | "outbound_review":  # a Manager without ops reads neither
             _with_ops(manager)
         case "switch_session":
             manager._session_loaded = True

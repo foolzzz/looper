@@ -2287,6 +2287,20 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_i
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
 -- outbound reviews end
 
+-- The operator's declarations of an MCP server's tools (the outbound-review RFC, section 6.2): a tool declared
+-- 'inside' acts only inside Looper and this machine, and the review lets its calls run unchecked; every other tool of
+-- a server other than Looper's own is reviewed. Declarations go with their server. connection.py applies this block
+-- to databases that predate it, so keep it between the markers and idempotent.
+-- mcp tool levels begin
+CREATE TABLE IF NOT EXISTS mcp_tool_levels (
+    item_id    TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+    tool       TEXT NOT NULL CHECK (tool ~ '^[A-Za-z0-9_.-]{1,128}$'),
+    level      TEXT NOT NULL CHECK (level IN ('inside')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (item_id, tool)
+);
+-- mcp tool levels end
+
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online
 -- (connection.py ``_ONLINE_STEPS``).

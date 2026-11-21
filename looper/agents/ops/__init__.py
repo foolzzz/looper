@@ -155,6 +155,8 @@ class Turn:
     origin: TurnOrigin | None = None
     # Initialized explicitly by delivery-guard wiring; absent when disabled.
     debt: DeliveryDebt | None = None
+    # The outside content its calls brought in (source, text), as the outbound review reads it: the leads it found.
+    outside: list[tuple[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.origin is None:
