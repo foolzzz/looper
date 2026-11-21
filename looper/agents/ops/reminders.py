@@ -76,12 +76,16 @@ async def _create(call: Call) -> dict[str, Any]:
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc), field="at") from None
     channel_id, chat, where = await _target(call.turn)
-    stored = await store.create(text=arguments["text"].strip(), due_at=due, timezone=zone_name,
+    stored = await store.create(text=arguments["text"].strip(), due_at=due.at, timezone=zone_name,
                                 channel_id=channel_id, chat=chat, created_channel=call.turn.channel or "web",
                                 created_message_id=call.turn.message_id)
     call.turn.blocks.append(f"已记下提醒 #{stored['id']}：{when(stored['due_at'], zone_name, now=now)}"
-                            f"（{zone_name}），到时发到{where}：{stored['text']}")
-    return {"reminder": _view(stored), "shown_to_user": _SHOWN}
+                            f"（{zone_name}），到时发到{where}：{stored['text']}"
+                            + (f"\n注意：{due.note}。" if due.note else ""))
+    answer: dict[str, Any] = {"reminder": _view(stored), "shown_to_user": _SHOWN}
+    if due.note:  # a clock change moved or chose the time: the line after the reply says so too
+        answer["clock_change"] = due.note
+    return answer
 
 
 async def _list(call: Call) -> dict[str, Any]:

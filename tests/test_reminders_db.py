@@ -219,6 +219,29 @@ def test_a_reminder_set_in_the_users_direct_chat_is_read_back_and_goes_back_ther
     run_with_channel_configs(test, monkeypatch)
 
 
+@pytest.mark.parametrize(("now", "at", "due", "note"), [
+    (datetime(2026, 11, 1, 8, 45, tzinfo=UTC), "01:30", datetime(2026, 11, 1, 9, 30, tzinfo=UTC),
+     "11-01 01:30 在 America/Los_Angeles 有两次（夏令时结束），记的是第二次（PST）"),
+    (datetime(2027, 3, 14, 9, 0, tzinfo=UTC), "02:30", datetime(2027, 3, 14, 10, 0, tzinfo=UTC),
+     "03-14 02:30 在 America/Los_Angeles 不存在（夏令时开始），改为 03-14 03:00"),
+])
+def test_a_clock_change_that_chose_or_moved_the_time_is_told_in_the_confirmation(
+    monkeypatch: pytest.MonkeyPatch, now: datetime, at: str, due: datetime, note: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool)
+        await _switch(pool)
+        monkeypatch.setattr(ops_reminders, "_now", lambda: now)
+        turn = _dm()
+        answer = await _call(_ops(), turn, ops_reminders.CREATE, {"text": "看 PR", "at": at, "timezone": ZONE})
+        assert answer["status"] == "ok", answer
+        assert answer["result"]["clock_change"] == note
+        assert await pool.fetchval("SELECT due_at FROM reminders") == due
+        assert turn.blocks[0].endswith(f"到时发到这个私聊：看 PR\n注意：{note}。")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def test_a_reminder_set_on_the_dashboard_goes_to_the_users_direct_chat_with_a_bot_that_names_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -317,6 +340,51 @@ def test_after_downtime_only_the_latest_reminder_missed_within_36_hours_is_sent(
     run_with_channel_configs(test, monkeypatch)
 
 
+def test_on_recovery_a_chat_gets_only_its_newest_overdue_reminder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The review's case: reminders 60, 9 and 1 minutes overdue in one direct chat when Looper comes back."""
+
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+        ids = [await _stored(text, now - timedelta(minutes=minutes))
+               for text, minutes in (("sixty", 60), ("nine", 9), ("one", 1))]
+        channel = _Channel()
+        await reminders.ReminderService(channel, clock=_Clock(now)).run_once()
+        assert [post["text"].split("：", 1)[1] for post in channel.posts] == ["one"]  # 1 minute late: no late line
+        assert await _statuses(pool) == {ids[0]: ("missed", 0, reminders.MISSED_LATER),
+                                         ids[1]: ("missed", 0, reminders.MISSED_LATER),
+                                         ids[2]: ("delivered", 1, None)}
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_while_running_reminders_due_together_are_all_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        both = [await _stored(text, now) for text in ("first", "second")]
+        channel, clock = _Channel(), _Clock(now - timedelta(seconds=10))
+        service = reminders.ReminderService(channel, clock=clock)
+        await service.run_once()  # a tick before they are due
+        clock.now = now + timedelta(seconds=1)
+        await service.run_once()
+        assert sorted(post["text"].split("：", 1)[1] for post in channel.posts) == ["first", "second"]
+        assert [status for status, _, _ in (await _statuses(pool)).values()] == ["delivered"] * len(both)
+        # Switched off and on again, the next tick is a recovery: of what came due meanwhile, only the newest.
+        later = [await _stored(text, now + timedelta(minutes=minutes)) for text, minutes in (("a", 5), ("b", 6))]
+        await _switch(pool, on=False)
+        clock.now = now + timedelta(minutes=7)
+        await service.run_once()
+        await _switch(pool)
+        await service.run_once()
+        statuses = await _statuses(pool)
+        assert (statuses[later[0]][0], statuses[later[1]][0]) == ("missed", "delivered")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def test_a_send_cut_off_by_a_stop_is_never_sent_again(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _operator(pool, enabled=True)
@@ -340,9 +408,11 @@ def test_a_stop_lets_the_send_under_way_finish_and_starts_no_other(monkeypatch: 
         await _switch(pool)
         now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
         first, second = await _stored("first", now), await _stored("second", now)
-        channel = _Channel(delay=1.0)
-        service = reminders.ReminderService(channel, clock=_Clock(now), interval=0.05)
+        channel, clock = _Channel(delay=1.0), _Clock(now - timedelta(seconds=1))
+        service = reminders.ReminderService(channel, clock=clock, interval=0.05)
         await service.start()
+        await asyncio.sleep(0.3)  # a tick before they are due: the service is running, not recovering
+        clock.now = now
         for _ in range(200):
             if channel.posts:
                 break
@@ -351,6 +421,40 @@ def test_a_stop_lets_the_send_under_way_finish_and_starts_no_other(monkeypatch: 
         assert [post["text"].rsplit("：", 1)[1] for post in channel.posts] == ["first"]
         statuses = await _statuses(pool)
         assert (statuses[first][0], statuses[second][0]) == ("delivered", "pending")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_stop_takes_at_most_its_grace_even_when_the_send_will_not_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Stuck(_Channel):
+        async def post(self, *args: Any, **kwargs: Any) -> PostReceipt:
+            self.posts.append(args)
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(30)  # and its clean-up is slow too
+                raise
+            raise AssertionError
+
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        reminder_id = await _stored("看 PR", now)
+        monkeypatch.setattr(reminders, "STOP_GRACE_SECONDS", 0.4)
+        channel = Stuck()
+        service = reminders.ReminderService(channel, clock=_Clock(now), interval=0.05)
+        await service.start()
+        for _ in range(200):
+            if channel.posts:
+                break
+            await asyncio.sleep(0.05)
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await service.stop()
+        assert loop.time() - began < 1.0
+        # The send never answered: it stays claimed, and the next start settles it uncertain, never sending it again.
+        assert (await _statuses(pool))[reminder_id][0] == "sending"
 
     run_with_channel_configs(test, monkeypatch)
 

@@ -6,11 +6,12 @@ chat with the bot it names, in words code writes (「你在 X 让我提醒你：
 the user asked for it.
 
 Each tick, under one advisory lock (so two servers never send the same reminder), the service settles as
-``uncertain`` what a sender stopped in the middle of, then sends what is due (``plan``). A reminder up to
-``ON_TIME`` past its time is sent as any; of the later ones of a chat (Looper was down, draining or switched off when
-they came due), only the latest one due within ``CATCH_UP`` is sent, saying when it was due, and the others are
-settled ``missed``. A send the channel refused is tried again at the next tick, up to ``ATTEMPTS`` times; one whose
-answer was lost is ``uncertain`` and never sent again.
+``uncertain`` what a sender stopped in the middle of, then sends what is due (``plan``). While it runs, a reminder
+that came due since its previous tick is sent as any. The first tick after it starts, or after it was switched off or
+the server drained, is a recovery: every reminder that came due meanwhile is overdue, and of each chat's overdue
+ones only the newest one due within ``CATCH_UP`` is sent, saying when it was due; the others are settled
+``missed``. A send the channel refused is tried again at the next tick, up to ``ATTEMPTS`` times; one whose answer
+was lost is ``uncertain`` and never sent again.
 """
 
 from __future__ import annotations
@@ -32,11 +33,11 @@ logger = logging.getLogger(__name__)
 
 ENABLED_KEY = "reminders.enabled"
 TICK_SECONDS = 10.0
-ON_TIME = timedelta(minutes=10)  # sent within this of its time, a reminder is not a missed one (a restart, a slow tick)
-CATCH_UP = timedelta(hours=36)  # past ON_TIME, only a chat's latest reminder due within this is sent
+CATCH_UP = timedelta(hours=36)  # on recovery, only a chat's newest overdue reminder due within this is sent
 LATE_NOTE = timedelta(minutes=2)  # sent this late or later, the message says when it was due
 ATTEMPTS = 3  # sends the channel refused before the reminder is failed
-STOP_GRACE_SECONDS = 15.0  # how long a stop waits for a send under way, so a restart does not leave it uncertain
+STOP_GRACE_SECONDS = 15.0  # how long a stop takes at most: the send under way, then cancelling it
+_CANCEL_SHARE = 0.25  # of STOP_GRACE_SECONDS, kept for cancelling a send that did not finish
 MAX_AHEAD = timedelta(days=366)
 TEXT_MAX = 500
 _LOCK = (741925, 1)  # (namespace, key) of the session advisory lock a tick holds
@@ -62,37 +63,69 @@ def default_timezone() -> str:
     return cron.local_zone_name()
 
 
-def resolve_due(*, at: str | None, in_minutes: int | None, timezone: str, now: datetime) -> datetime:
-    """The moment a reminder is due, from exactly one of ``at`` (``HH:MM``: the next such time in ``timezone``, today
-    or tomorrow; or ``YYYY-MM-DD HH:MM`` there) and ``in_minutes`` (from ``now``). Raises ``ValueError`` saying what
-    to change: a time that has passed, is more than a year ahead, or does not exist in the zone (a clock change)."""
+@dataclass(frozen=True)
+class Due:
+    """When a reminder is due, and what the user is told about a clock change that moved or chose the time."""
+
+    at: datetime
+    note: str | None = None
+
+
+def _instants(wall: datetime, timezone: str) -> list[Due]:
+    """The instants a wall-clock time names in ``timezone``: one; two when the clocks go back (each with a note
+    saying which it is); or, when the clocks skip it, the first valid minute after it, with a note."""
+    tz = cron.zone(timezone)
+    found: list[datetime] = []
+    for fold in (0, 1):
+        moment = wall.replace(tzinfo=tz, fold=fold).astimezone(dt_timezone.utc)
+        if moment.astimezone(tz).replace(tzinfo=None) == wall and moment not in found:
+            found.append(moment)
+    if len(found) == 2:
+        return [Due(moment, f"{wall:%m-%d %H:%M} 在 {timezone} 有两次（夏令时结束），记的是{which}"
+                            f"（{moment.astimezone(tz):%Z}）")
+                for moment, which in zip(sorted(found), ("第一次", "第二次"))]
+    if found:
+        return [Due(found[0])]
+    after = wall
+    for _ in range(2 * 24 * 60):  # a gap is an hour or so; a skipped day is the longest there has been
+        after += timedelta(minutes=1)
+        moment = after.replace(tzinfo=tz).astimezone(dt_timezone.utc)
+        if moment.astimezone(tz).replace(tzinfo=None) == after:
+            return [Due(moment, f"{wall:%m-%d %H:%M} 在 {timezone} 不存在（夏令时开始），改为 {after:%m-%d %H:%M}")]
+    raise ValueError(f"{wall:%Y-%m-%d %H:%M} does not exist in {timezone}; pick another time")
+
+
+def resolve_due(*, at: str | None, in_minutes: int | None, timezone: str, now: datetime) -> Due:
+    """When a reminder is due, from exactly one of ``at`` (``HH:MM``: the next such time in ``timezone``; or
+    ``YYYY-MM-DD HH:MM`` there) and ``in_minutes`` (from ``now``): the nearest future instant the wall time names.
+    When the clocks go back it is the first of the two that is still ahead; when they skip it, the first valid minute
+    after it; ``Due.note`` says so. Raises ``ValueError`` saying what to change: a time that has passed or is more
+    than a year ahead, or a malformed one."""
     if (at is None) == (in_minutes is None):
         raise ValueError("give exactly one of at and in_minutes")
     tz = cron.zone(timezone)
     if in_minutes is not None:
-        due = now + timedelta(minutes=in_minutes)
+        due = Due(now + timedelta(minutes=in_minutes))
     else:
         text = " ".join(at.replace("T", " ").split())
-        local_now = now.astimezone(tz)
         try:
             if len(text) <= 5:
                 clock = datetime.strptime(text, "%H:%M")
-                wall = local_now.replace(hour=clock.hour, minute=clock.minute, second=0, microsecond=0,
-                                         tzinfo=None)
-                if wall.replace(tzinfo=tz) <= now:
-                    wall += timedelta(days=1)
+                today = now.astimezone(tz).replace(hour=clock.hour, minute=clock.minute, second=0, microsecond=0,
+                                                   tzinfo=None, fold=0)
+                walls = [today + timedelta(days=days) for days in range(3)]
             else:
-                wall = datetime.strptime(text, "%Y-%m-%d %H:%M")
+                walls = [datetime.strptime(text, "%Y-%m-%d %H:%M")]
         except ValueError:
             raise ValueError("at is HH:MM (the next such time) or YYYY-MM-DD HH:MM, in timezone") from None
-        due = wall.replace(tzinfo=tz)
-        if due.astimezone(dt_timezone.utc).astimezone(tz).replace(tzinfo=None) != wall:
-            raise ValueError(f"{wall:%Y-%m-%d %H:%M} does not exist in {timezone} (the clocks change then); "
-                             "pick another time")
-    if due <= now:
-        raise ValueError(f"{due.astimezone(tz):%Y-%m-%d %H:%M} has passed: it is {now.astimezone(tz):%Y-%m-%d %H:%M}"
-                         f" in {timezone} now")
-    if due - now > MAX_AHEAD:
+        ahead = [due for wall in walls for due in _instants(wall, timezone) if due.at > now]
+        if not ahead:
+            raise ValueError(f"{walls[0]:%Y-%m-%d %H:%M} has passed: it is {now.astimezone(tz):%Y-%m-%d %H:%M} in "
+                             f"{timezone} now")
+        due = min(ahead, key=lambda candidate: candidate.at)
+    if due.at <= now:
+        raise ValueError("in_minutes is at least 1")
+    if due.at - now > MAX_AHEAD:
         raise ValueError("a reminder is at most a year ahead")
     return due
 
@@ -128,27 +161,29 @@ class Plan:
 
 
 MISSED_OLD = "Looper was not sending reminders when it was due, more than 36 hours ago"
-MISSED_LATER = "Looper was not sending reminders when it was due; only the latest such reminder was sent"
+MISSED_LATER = "Looper was not sending reminders when it was due; only the newest such reminder was sent"
 
 
-def plan(due: Iterable[Mapping[str, Any]], now: datetime) -> Plan:
-    """Of the pending reminders due by ``now``: each one at most ``ON_TIME`` late is sent; of a chat's later ones,
-    the latest one due within ``CATCH_UP`` is sent and the others are missed."""
+def plan(due: Iterable[Mapping[str, Any]], now: datetime, *, since: datetime | None) -> Plan:
+    """Of the pending reminders due by ``now``, given the previous tick's time ``since`` (None: this tick is a
+    recovery): one that came due after ``since``, or that a refused send is being retried for, is sent; every other
+    one is overdue, and of each chat's overdue ones only the newest due within ``CATCH_UP`` is sent, the others
+    missed."""
     send: list[int] = []
     missed: dict[int, str] = {}
     chats: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
     for reminder in due:
-        if now - reminder["due_at"] <= ON_TIME:
+        if reminder["attempts"] > 0 or (since is not None and reminder["due_at"] > since):
             send.append(reminder["id"])
         else:
             chats.setdefault((reminder["channel_id"], reminder["chat"]), []).append(reminder)
-    for late in chats.values():
-        late.sort(key=lambda reminder: (reminder["due_at"], reminder["id"]), reverse=True)
-        latest = late[0] if now - late[0]["due_at"] <= CATCH_UP else None
-        if latest is not None:
-            send.append(latest["id"])
-        for reminder in late:
-            if reminder is not latest:
+    for overdue in chats.values():
+        overdue.sort(key=lambda reminder: (reminder["due_at"], reminder["id"]), reverse=True)
+        newest = overdue[0] if now - overdue[0]["due_at"] <= CATCH_UP else None
+        if newest is not None:
+            send.append(newest["id"])
+        for reminder in overdue:
+            if reminder is not newest:
                 missed[reminder["id"]] = MISSED_OLD if now - reminder["due_at"] > CATCH_UP else MISSED_LATER
     return Plan(send=tuple(send), missed=missed)
 
@@ -164,8 +199,8 @@ def _clip(text: str | None) -> str | None:
 
 class ReminderService:
     """Sends the due reminders every ``interval`` seconds while ``reminders.enabled`` is on (one setting read per
-    tick while it is off), and not while the server drains. A stop lets a send under way finish (up to
-    ``STOP_GRACE_SECONDS``) and starts no other."""
+    tick while it is off), and not while the server drains. A stop starts no other send and takes at most
+    ``STOP_GRACE_SECONDS``: the send under way may finish in most of it, and is cancelled in the rest."""
 
     def __init__(self, registry: Any, *, drain: Any = None, clock: Callable[[], datetime] | None = None,
                  interval: float = TICK_SECONDS) -> None:
@@ -175,20 +210,25 @@ class ReminderService:
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
+        self._since: datetime | None = None  # the time of this service's previous complete tick; None: recovery
 
     async def start(self) -> None:
         self._stopping.clear()
         self._task = asyncio.create_task(self._loop(), name="reminders")
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._stopping.set()
-            try:
-                await asyncio.wait_for(asyncio.shield(self._task), STOP_GRACE_SECONDS)
-            except (asyncio.TimeoutError, Exception):
-                self._task.cancel()
-                await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
+        task, self._task = self._task, None
+        if task is None:
+            return
+        self._stopping.set()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + STOP_GRACE_SECONDS
+        done, _ = await asyncio.wait({task}, timeout=STOP_GRACE_SECONDS * (1 - _CANCEL_SHARE))
+        if not done:
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - loop.time()))
+        if not done:
+            logger.warning("reminder delivery did not stop within %s s; left to the event loop", STOP_GRACE_SECONDS)
 
     async def _loop(self) -> None:
         while not self._stopping.is_set():
@@ -203,6 +243,7 @@ class ReminderService:
 
     async def run_once(self) -> None:
         if (self._drain is not None and self._drain.draining) or not await enabled():
+            self._since = None  # what comes due meanwhile is overdue: the next tick is a recovery
             return
         async with connection.get_pool().acquire() as conn:
             if not await conn.fetchval("SELECT pg_try_advisory_lock($1::int, $2::int)", *_LOCK):
@@ -217,7 +258,7 @@ class ReminderService:
         if orphans := await store.orphans_uncertain(conn, now):
             logger.warning("%d reminder(s) were being sent when their sender stopped: settled uncertain", orphans)
         due = await store.due(conn, now)
-        decided = plan(due, now)
+        decided = plan(due, now, since=self._since)
         for reminder_id, why in decided.missed.items():
             await store.settle(conn, reminder_id, "missed", now=now, detail=why, from_status="pending")
             logger.info("reminder %s missed: %s", reminder_id, why)
@@ -226,6 +267,7 @@ class ReminderService:
             if self._stopping.is_set() or (self._drain is not None and self._drain.draining):
                 return
             await self._send(conn, by_id[reminder_id])
+        self._since = now
 
     async def _send(self, conn: Any, reminder: Mapping[str, Any]) -> None:
         reminder_id, channel_id, chat = reminder["id"], reminder["channel_id"], reminder["chat"]
