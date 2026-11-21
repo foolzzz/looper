@@ -19,14 +19,58 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   to its conversation (the resident runtime and its lifecycle lock, the saved
   session, the turn lock and the turn holding it, the turn's research sources,
   what the next turn is told) is one `ManagerSession`
-  (`looper/agents/tiers/manager_session.py`), `main`, the only one so far: a
-  group chat's turns run in the operator's session, which
-  `session_routing.group_isolation` reports as `shared` for a feature that
-  must not reach a group through it. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  (`looper/agents/tiers/manager_session.py`). Every Manager has `main`; by
+  default it is the only one, and a group chat's turns run in the operator's
+  session. [Session routing](#manager-session-routing) gives the default
+  Manager more. `session_routing.group_isolation` tells a feature that must
+  not reach a group through the operator's context how far a group's turns
+  are kept apart: `shared`, `routed` or `isolated`. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
   otherwise
+- <a id="manager-session-routing"></a>**Session routing**
+  (`manager.session_routing.enabled`, off by default; Settings → Chat;
+  operator-only, like `manager.sessions.max_resident`): the default Manager
+  runs each conversation in the session its key names
+  (`session_routing.session_key_for`). The dashboard chat (with or without an
+  API client) and the operator's own direct chats are `main`. A Lark or
+  Telegram group (its topics included) is `group:<channel id>:<chat>`, and
+  another allowed sender's direct chat is `dm:<channel id>:<chat>`. A bot
+  with no operator id cannot tell its operator apart, so its direct chats stay
+  in `main`; turning routing on lists such bots.
+  - Sessions run in parallel; inside one, messages run in order. The message
+    loop hands each user message, and each completion wake-up (by the chat its
+    oldest pending event tells), to its session's worker
+    (`tiers/manager_routing.py`). The worker runs it on that session and only
+    then settles it on the bus (`subscribe(settle=False)`), so a message cut
+    off replays at restart. Messages that run no model turn stay in the loop.
+  - `main` stays in `agent_sessions`; the others are rows of
+    `manager_sessions`. A read or write there that fails gives the turn a new
+    session, never `main`'s.
+  - Each session's resident has its own label (`manager.<kind>.<digest>`,
+    for its logs and session directory) and its own binding file
+    (`ManagerOps.turn_file_for`: `.local/<manager id>-turn-<digest>.json`
+    beside main's), named in its MCP entry. With routing on, a call runs only
+    in the turn its binding names, whatever `chat.stop_enabled` says.
+  - At most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
+    process. A session other than main that would start one at the cap stops
+    the least recently active idle one other than main; its session id stays
+    saved and resumes on its next message. When none is idle, the message
+    waits, with the status 「排队中：其他会话正忙」, until a turn ends. Main
+    never waits and is never stopped for another. With a cap of 1, a session
+    other than main still runs its turn when only main holds a process, and
+    stops it once the turn is over.
+  - `/new` resets only the session it was sent in. In a group or dm session
+    it leaves main's pending confirmations and remembered leads alone. The
+    profile chosen for the session (`/profile`, `select_session_profile`) is
+    main's: another session follows the settings and refuses `/profile`.
+  - Switched off, new messages go to `main` again. Turns under way finish,
+    what main's worker holds keeps its order, and the other sessions'
+    processes stop once idle (the fleet's idle sweep). Their rows stay.
+  - What a new group or dm session's first turn sees is not trimmed yet: its
+    resume brief still carries every chat's recent messages, so routing is
+    not for production use before that lands.
 - Acts on Looper only through its platform tools
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells
@@ -130,7 +174,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   characters). `db.tasks.task_name` is what lists, headings, the Chat page and
   the end notice show: the title, else the goal id, else the requirement's
   first line, else the task id (a task from before titles)
-- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads), so
+- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads; with [session routing](#manager-session-routing) on, groups and other senders' direct chats have their own), so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
   direct message`, `Channel: a Lark group chat, from <sender>` (the name the
@@ -6475,6 +6519,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; its chats (kind, name, inclusion, `bridge_*` file state); thread cursors and people names (not used yet); one row per ingest run with its counts; and the events, each unique per source by `external_id`, with its `seq`, send time, `text`, raw `body` and `origin` |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
+| `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)` (`session_key` = `kind:channel_id:chat`): the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), and `last_active_at`. `main` stays in `agent_sessions` |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
