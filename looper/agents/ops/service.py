@@ -51,7 +51,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from ... import child_env
 from .. import chat_settings
@@ -479,8 +479,7 @@ class ManagerOps:
             if tool.name != CONFIRM_TOOL:
                 tool = await self._authorize(scope, name, arguments)
             if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
-                raise OpError(ErrorCode.FORBIDDEN, "message leads are searched only in the user's own direct chat "
-                                                   "or on the dashboard")
+                raise OpError(ErrorCode.FORBIDDEN, cast(RestrictedTool, tool).refusal)
             _check_answering(turn)
             matched_turn = turn if enforced else bound
             if (matched_turn is not None and matched_turn.require_match and binding
