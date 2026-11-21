@@ -5989,6 +5989,17 @@ before.
   its counts. The Manager reads a room with `looper_tasks` action `room`; it
   never posts in this phase, nor does the user.
 
+### Tool-less calls with typed replies
+
+`model_call.call` (`looper/agents/model_call.py`) is the typed, tool-less call used by outbound reviews, advisor
+rounds and their judge, and leads checks. It returns `CallOk` with the parsed reply or `CallFailed` with a
+`CallFailure` and the original parse exception when present, retaining the run's record, cost, latency and model.
+Its `Backend` protocol is retained for a future direct-API backend. Its one implementation, `SubscriptionBackend`,
+uses the existing Agent Profile CLI paths through `spawn.run_child` or `processor.run`, preserving their launch,
+deadlines, spend checks and record formats. Advisor lifecycle callbacks
+book each run before parsing; retry and consult state remain the advisor's. There is no direct-API backend or new
+setting, and the processor's subscription and extraction calls are unchanged.
+
 ### The processor: runs with no tools
 
 The processor (`AgentType.PROCESSOR`, `looper/agents/processor.py`; [message
