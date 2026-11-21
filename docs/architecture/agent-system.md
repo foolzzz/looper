@@ -4257,7 +4257,9 @@ has `looper_vault_search` and `looper_vault_read`, and `VAULT_CONTRACT` follows 
 - never quote the notes in a group chat.
 
 The tools are `RestrictedTool`s with `audience` `operator`, exactly like the leads search: they are listed and run
-only in the user's own turns, and a call is judged by the turn its binding names. Every text they return is
+only in the user's own turns, and a call is judged by the turn its binding names. A call from another turn is told
+「the user's knowledge vault is searched and read only in their own direct chat or on the dashboard」 (their
+`refusal`). Every text they return is
 remembered for the group backstop below, keyed `vault:<path>`. The tasks' vault tools (`ops.vault.TOOLS`) are
 unchanged, so an upgrade still reads them. Off, the tool list, the prompt and the signature are what they were before.
 
@@ -4285,7 +4287,9 @@ when it is the web chat without an API client, or a direct chat whose sender is 
   process it runs in.
 - **Calls.** `ManagerOps.call` judges a call of the tool by the turn its binding names, whatever `chat.stop_enabled`
   says. A call with no binding or an unknown one counts as Claude's own turn. A call from another turn is refused
-  with `forbidden`, a completion turn's too; a turn that ended answers `expired`. Each refusal is recorded like any
+  with `forbidden`, a completion turn's too, and told the tool's own `refusal`: every `RestrictedTool` whose
+  `audience` is not `any` must declare one (its construction fails otherwise); for this tool it is 「message leads are
+  searched only in the user's own direct chat or on the dashboard」. A turn that ended answers `expired`. Each refusal is recorded like any
   other. Turned off since, a call is told the Manager no longer has the tool; one already admitted answers
   `conflict`.
 - **Group backstop.** The Manager's session is shared by its chats. Every text Looper sends to a group chat goes
