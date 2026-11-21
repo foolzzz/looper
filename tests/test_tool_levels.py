@@ -1,0 +1,180 @@
+"""Where every Looper tool and ``/api/v1`` operation reaches (``ops/levels.py``, ``Operation.level``; the
+outbound-review RFC, section 4): each tool of every agent declares a level, the table is the RFC's, and the levels
+that depend on a call's arguments follow them. Nothing here changes what runs: the review reads them (PR4)."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import pkgutil
+from typing import Any
+
+import pytest
+
+from looper.agents.action_levels import ActionLevel, highest
+from looper.agents.ops import Tool, Turn
+from looper.agents.ops import levels as tool_levels
+
+INSIDE, OPERATOR, ORIGIN, MACHINE, EXTERNAL, UNKNOWN = (ActionLevel.INSIDE, ActionLevel.OPERATOR, ActionLevel.ORIGIN,
+                                                        ActionLevel.MACHINE, ActionLevel.EXTERNAL, ActionLevel.UNKNOWN)
+# The RFC's table (section 4.2): a fixed level, or "args" where the call's arguments decide it.
+RFC_TABLE: dict[str, ActionLevel | str] = {
+    "looper_overview": INSIDE, "looper_tasks": INSIDE, "looper_costs": INSIDE, "looper_config_export": INSIDE,
+    "looper_task_create": INSIDE, "looper_task_control": INSIDE, "looper_task_instruct": INSIDE,
+    "looper_task_update": INSIDE, "looper_concurrency": INSIDE, "looper_task_gate_reply": ORIGIN,
+    "looper_projects": "args", "looper_agent_profiles": INSIDE, "looper_models": INSIDE, "looper_providers": MACHINE,
+    "looper_catalog": MACHINE, "looper_settings": "args", "looper_schedules": "args", "looper_confirm": INSIDE,
+    "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
+    "looper_task_pipeline": INSIDE, "looper_gates": "args",
+    "looper_task_profiles": INSIDE, "looper_task_roles": INSIDE, "looper_task_profile_set": INSIDE,
+    "looper_task_role_set": INSIDE, "looper_task_concurrency": ORIGIN,
+    "looper_room_roster": INSIDE, "looper_room_post": INSIDE, "looper_room_inbox": INSIDE, "looper_room_read": INSIDE,
+    "looper_room_watch": INSIDE,
+    "looper_vault_search": INSIDE, "looper_vault_read": INSIDE, "looper_vault_write": MACHINE,
+}
+
+
+def _every_tool() -> dict[str, Tool]:
+    """Every tool any agent of Looper is given: each ``Tool`` the ops modules hold, alone or in a tuple."""
+    import looper.agents.ops as ops
+
+    found: dict[str, Tool] = {}
+    for info in pkgutil.iter_modules(ops.__path__):
+        module = importlib.import_module(f"{ops.__name__}.{info.name}")
+        for value in vars(module).values():
+            for tool in value if isinstance(value, (tuple, list)) else (value,):
+                if isinstance(tool, Tool):
+                    found.setdefault(tool.name, tool)
+    return found
+
+
+def test_every_tool_of_every_agent_declares_its_level_and_the_table_is_the_rfcs() -> None:
+    tools = _every_tool()
+    assert set(tools) == set(tool_levels.TOOL_LEVELS), "a tool without a level, or a level of no tool"
+    assert set(tools) == set(RFC_TABLE)
+    for name, level in tool_levels.TOOL_LEVELS.items():
+        expected = RFC_TABLE[name]
+        assert (level if isinstance(level, ActionLevel) else "args") == expected, name
+
+
+def _turn(**fields: Any) -> Turn:
+    return Turn(**{"channel": "lark", "chat": "oc_team", "message_id": "m-1", "sender": "ou_me", "group": True,
+                   **fields})
+
+
+def _level(name: str, arguments: dict[str, Any], turn: Turn | None = None) -> ActionLevel:
+    return asyncio.run(tool_levels.level_of(_every_tool()[name], arguments, turn or _turn()))
+
+
+def test_a_read_action_is_inside_and_a_tool_with_no_level_is_unknown() -> None:
+    assert _level("looper_providers", {"action": "list"}) is INSIDE
+    assert _level("looper_providers", {"action": "update"}) is MACHINE
+    assert _level("looper_catalog", {"action": "list"}) is INSIDE
+    stray = Tool(name="looper_added_later", description="", schema={}, risk=_every_tool()["looper_tasks"].risk,
+                 run=_every_tool()["looper_tasks"].run)
+    assert asyncio.run(tool_levels.level_of(stray, {}, _turn())) is UNKNOWN
+
+
+@pytest.mark.parametrize(("name", "arguments", "level"), [
+    ("looper_projects", {"action": "move", "project": "calc", "to": "/srv/calc"}, MACHINE),
+    ("looper_projects", {"action": "update", "project": "calc", "name": "calc-2"}, INSIDE),
+    ("looper_settings", {"action": "gateway"}, MACHINE),
+    ("looper_settings", {"action": "knowledge_vault"}, MACHINE),
+    ("looper_settings", {"action": "scheduler"}, INSIDE),
+    ("looper_gates", {"action": "reply", "gate": 1}, ORIGIN),
+    ("looper_gates", {"action": "end", "gate": 1}, ORIGIN),
+    ("looper_gates", {"action": "messages", "gate": 1}, INSIDE),
+    ("looper_schedules", {"action": "list"}, INSIDE),
+    ("looper_schedules", {"action": "create", "fields": {"kind": "agent", "cron": "0 9 * * *"}}, INSIDE),
+    ("looper_schedules", {"action": "create", "fields": {"kind": "command", "command": "make backup"}}, MACHINE),
+    ("looper_schedules", {"action": "update", "fields": {"gate_command": "test -f ready"}}, MACHINE),
+    ("looper_schedules", {"action": "update", "fields": {"notify_target": None}}, OPERATOR),
+    ("looper_schedules", {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": "oc_team"}}},
+     ORIGIN),
+    ("looper_schedules", {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": "oc_other"}}},
+     EXTERNAL),
+    ("looper_schedules", {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": ""}}}, UNKNOWN),
+    ("looper_schedules", {"action": "create", "fields": {
+        "kind": "command", "command": "make", "notify_target": {"channel": "lark", "chat": "oc_other"}}}, EXTERNAL),
+])
+def test_a_level_that_depends_on_the_call_follows_its_arguments(monkeypatch: pytest.MonkeyPatch, name: str,
+                                                                arguments: dict[str, Any], level: ActionLevel) -> None:
+    from looper.agents import operator_identity
+
+    async def nobody(channel_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(operator_identity, "operator_sender_id", nobody)
+    assert _level(name, arguments) is level
+
+
+def test_a_push_to_the_operators_own_chat_is_operator_and_to_the_asking_direct_chat_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import operator_identity
+
+    async def operator(channel_id: str) -> str:
+        assert channel_id == "channel-lark"
+        return "ou_operator"
+
+    monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
+    update = {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": "ou_operator"}}}
+    assert _level("looper_schedules", update) is OPERATOR
+    direct = _turn(chat="oc_dm", group=False, sender="ou_friend")
+    to_sender = {"action": "update", "fields": {"notify_target": {"channel": "lark", "chat": "ou_friend"}}}
+    assert _level("looper_schedules", to_sender, direct) is ORIGIN
+    to_telegram = {"action": "update", "fields": {"notify_target": {"channel": "telegram", "chat": "ou_friend"}}}
+    assert _level("looper_schedules", to_telegram, direct) is EXTERNAL
+
+
+def test_a_call_with_several_effects_is_at_its_highest_level() -> None:
+    assert highest() is INSIDE and highest(MACHINE, ORIGIN) is MACHINE and highest(MACHINE, EXTERNAL) is EXTERNAL
+    assert highest(EXTERNAL, UNKNOWN) is UNKNOWN
+
+
+def _operations() -> dict[str, Any]:
+    from looper.agents.v1_domains import _DOMAINS
+
+    return {op.operation_id: op for module in _DOMAINS for op in module.OPERATIONS}
+
+
+def test_every_operation_is_inside_but_the_ones_that_bind_or_push_to_a_chat() -> None:
+    operations = _operations()
+    computed = {name for name, op in operations.items() if op.level_of is not None}
+    fixed = {name: op.level for name, op in operations.items() if op.level is not INSIDE}
+    assert computed == {"schedule_admin.create", "schedule_admin.update", "schedule_admin.confirm_target"}
+    assert fixed == {"manager_chat_bindings.put": EXTERNAL}
+
+
+@pytest.mark.parametrize(("fields", "level"), [
+    ({"kind": "agent", "cron": "0 9 * * *"}, INSIDE),
+    ({"kind": "command", "command": "make"}, MACHINE),
+    ({"notify_target": None}, OPERATOR),
+    ({"notify_target": {"channel": "lark", "chat": "oc_team"}}, EXTERNAL),  # an API client's call has no chat
+])
+def test_a_schedule_operations_level_follows_its_fields(monkeypatch: pytest.MonkeyPatch, fields: dict[str, Any],
+                                                        level: ActionLevel) -> None:
+    from looper.agents import operator_identity
+
+    async def nobody(channel_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(operator_identity, "operator_sender_id", nobody)
+    op = _operations()["schedule_admin.update"]
+    assert asyncio.run(op.level_of({"schedule_id": "s-1", "fields": fields})) is level
+
+
+def test_the_openapi_document_is_what_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The levels are Looper's own: the document an API client reads is the same with every level reset."""
+    import dataclasses
+    import json
+
+    from looper.agents import api_v1
+    from looper.agents.v1_domains import _DOMAINS
+
+    declared = json.dumps(api_v1._document(api_v1.operations()), sort_keys=True)
+    for module in _DOMAINS:
+        monkeypatch.setattr(module, "OPERATIONS", tuple(
+            dataclasses.replace(op, level=INSIDE, level_of=None) for op in module.OPERATIONS))
+    reset = json.dumps(api_v1._document(api_v1.operations()), sort_keys=True)
+    assert reset == declared and '"level_of"' not in declared

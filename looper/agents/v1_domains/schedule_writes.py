@@ -6,6 +6,7 @@ from ...db import connection as db_connection, projects as db_projects, schedule
 from ...db import subscriptions as db_subs
 from .. import schedules, subscriptions
 from ..agent_settings import BUDGET_MAX_USD, CONCURRENCY_MAX
+from ..action_levels import ActionLevel, highest, target_level
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
@@ -90,11 +91,32 @@ RESULTS = {
 }
 
 
+async def _level(arguments):
+    """A command schedule runs a shell command unattended (``machine``); its runs' messages go to its notify target
+    (``action_levels.target_level``: the operator, or anyone else)."""
+    fields = arguments.get("fields") if isinstance(arguments.get("fields"), dict) else {}
+    levels = [ActionLevel.MACHINE] if fields.get("kind") == "command" or fields.get("command") \
+        or fields.get("gate_command") else []
+    if "notify_target" in fields:
+        levels.append(await target_level(fields["notify_target"]))
+    return highest(*levels)
+
+
+async def _confirmed_level(arguments):
+    """Confirming a subscription's push target lets its runs go there: the stored target's level."""
+    row = await db_schedules.get_schedule(arguments["schedule_id"])
+    if row is None:
+        return ActionLevel.UNKNOWN
+    target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_chat") else None
+    return await target_level(target)
+
+
 def _op(action, fields, result, *, risk="write", required=None):
     description = f"Change schedules: {action.replace('_', ' ')}."
     return Operation(f"schedule_admin.{action}", "POST", f"/api/v1/schedule_admin/{action}",
                      description, description, _object(fields, required, closed=True), result,
-                     risk=risk, confirms=action != "create")
+                     risk=risk, confirms=action != "create",
+                     level_of={"create": _level, "update": _level, "confirm_target": _confirmed_level}.get(action))
 
 
 _ID = {"schedule_id": _STR}
