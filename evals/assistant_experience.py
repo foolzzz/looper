@@ -354,6 +354,8 @@ class Session:
             from evals.prompt_regression.dialogs import _manager_profile
             _manager_profile(api, self.args.manager_model, self.args.manager_effort)
         api.post('/api/v1/project_admin/create', {'name': PROJECT, 'work_dir': str(work)})
+        if getattr(self.args, 'session_routing', False):
+            api.post('/api/v1/chat_settings/update', {'session_routing_enabled': True})
         supported = True
         if self.case.id == 'address_user':
             try:
@@ -476,6 +478,8 @@ def main() -> int:
     parser.add_argument('--total-cap-usd', type=float)
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--timeout', type=float, default=180)
+    parser.add_argument('--session-routing', action='store_true',
+                        help="turn the default Manager's session routing on (manager.session_routing.enabled)")
     args = parser.parse_args()
     if not args.fake and not args.claude:
         parser.error('real mode requires --claude pointing to a real Claude Code binary')
@@ -545,7 +549,8 @@ def main() -> int:
                 'skipped': len(members) - len(measured)}
     run = {'schema': SCHEMA, 'commit': runner._git()['commit'], 'date': datetime.now().astimezone().isoformat(),
            'mode': 'fake' if args.fake else 'real', 'model': args.model, 'manager_model': args.manager_model,
-           'manager_effort': args.manager_effort, 'reps': args.reps, 'cases': grouped, 'categories': categories_out,
+           'manager_effort': args.manager_effort, 'reps': args.reps, 'session_routing': args.session_routing,
+           'cases': grouped, 'categories': categories_out,
            'total_cost_usd': sum(r.get('cost_usd', 0) for r in rows), 'stopped_by_cap': stopped}
     out = args.out_dir / time.strftime(f'%Y%m%d-%H%M%S-assistant-{run["mode"]}.json')
     out.write_text(json.dumps(run, ensure_ascii=False, indent=2))

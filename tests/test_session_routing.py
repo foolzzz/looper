@@ -38,10 +38,10 @@ def test_a_key_names_a_chat_exactly_when_it_is_not_main() -> None:
             SessionKey(kind, channel_id, chat)
 
 
-def test_only_the_default_managers_group_turns_are_routed_while_routing_is_on(monkeypatch) -> None:
+def test_only_the_default_managers_group_turns_are_isolated_while_routing_is_on(monkeypatch) -> None:
     assert session_routing.group_isolation("manager") is GroupIsolation.SHARED
     monkeypatch.setattr(session_routing, "_routing_enabled", True)
-    assert session_routing.group_isolation("manager") is GroupIsolation.ROUTED
+    assert session_routing.group_isolation("manager") is GroupIsolation.ISOLATED
     assert session_routing.group_isolation("manager-review") is GroupIsolation.SHARED
 
 

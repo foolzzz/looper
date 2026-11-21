@@ -96,6 +96,7 @@ from . import state_view
 from .state_view import Rendered
 from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_field
 from .manager_routing import SessionRouter
+from . import group_session
 from .. import session_routing
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
@@ -2978,6 +2979,10 @@ class ManagerAgent:
             if not self._pending_handoff:
                 return ""
         switch, handoff = self._pending_switch, self._pending_handoff
+        if session.key != MAIN_SESSION:  # a group's or another sender's chat: only its own (``group_session``)
+            lines = await group_session.excerpt(_session_key(envelope), message)
+            return group_session.brief(session.route.kind, _message_origin(envelope)["channel"], lines,
+                                       switch=switch, handoff=handoff, new=session.session_id is None)
         conversations = await self._recent_conversations(envelope, message)
         if switch is None and not handoff and not conversations:
             return ""
@@ -3368,8 +3373,11 @@ class ManagerAgent:
     def _group_safe(self, original: MessageEnvelope, text: str) -> str:
         """``text``, or ``WITHHELD_REPLY`` when it answers a group chat's message and quotes a message lead this
         Manager's session searched in the last day (RFC R-2: the session is shared by the user's chats and the
-        groups). A task's end notice and a gate's post are checked where the channel sends them."""
-        return ops_leads.for_group(text, manager_id=self.agent_id) if _message_origin(original)["group"] else text
+        groups), or a reply out of another sender's direct-chat session. A task's end notice and a gate's post are
+        checked where the channel sends them."""
+        other = self._session_now().route.kind is session_routing.SessionKind.DM
+        return ops_leads.for_group(text, manager_id=self.agent_id) if _message_origin(original)["group"] or other \
+            else text
 
     async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
         """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""
