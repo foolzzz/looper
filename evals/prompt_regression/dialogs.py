@@ -540,7 +540,8 @@ def _leads_used_with_sources(look: Look) -> str | None:
     for wanted, label in ((LEADS_CHAT, "chat"), ("Alice", "sender")):
         if wanted not in look.reply:
             return f"the reply does not name the lead's {label}"
-    return None if any(day in look.reply for day in _sent_dates()) else "the reply does not give the lead's date"
+    spaced = "".join(look.reply.split())  # 「11 月 19 日」 is 「11月19日」
+    return None if any(day in spaced for day in _sent_dates()) else "the reply does not give the lead's date"
 
 
 def _no_search(look: Look) -> str | None:
