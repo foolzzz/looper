@@ -265,3 +265,23 @@ def test_an_index_a_stopped_build_left_invalid_is_built_again(monkeypatch):
                                    "AND schemaname = current_schema()") == fresh
 
     run_db(check, monkeypatch, timeout=60)
+
+
+def test_a_valid_index_of_another_definition_is_built_again_and_a_matching_one_kept(monkeypatch):
+    async def index(pool, name):
+        return await pool.fetchrow("SELECT c.oid, pg_get_indexdef(c.oid) AS definition FROM pg_class c "
+                                   "WHERE c.oid = to_regclass($1)", name)
+
+    async def check(pool):
+        fresh = await index(pool, "idx_manager_events_uncertain")
+        kept = await index(pool, "idx_subscription_deliveries_uncertain")
+        # An older definition under the step's name, valid; and one index missing, so the migration runs.
+        await pool.execute("DROP INDEX idx_manager_events_uncertain; DROP INDEX idx_intent_posts_uncertain; "
+                           "CREATE INDEX idx_manager_events_uncertain ON manager_events (task_id)")
+        await connection.ensure_schema(pool)
+        rebuilt = await index(pool, "idx_manager_events_uncertain")
+        assert rebuilt["definition"].split(" USING ", 1)[1] == fresh["definition"].split(" USING ", 1)[1]
+        assert await index(pool, "idx_subscription_deliveries_uncertain") == kept  # same oid: not rebuilt
+        assert await pool.fetchval("SELECT to_regclass('idx_intent_posts_uncertain') IS NOT NULL")
+
+    run_db(check, monkeypatch, timeout=60)

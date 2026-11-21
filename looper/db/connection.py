@@ -357,7 +357,8 @@ def _run_tree_ddl() -> tuple[str, ...]:
 class _OnlineStep:
     """What a migration finishes after the schema transaction commits, taking no lock that stops reads or writes: it
     validates its NOT VALID constraints (SHARE UPDATE EXCLUSIVE) and builds its indexes concurrently (an index a
-    stopped build left INVALID is dropped and built again; a valid one is kept). It runs once ``migration``'s marker is there and until its own
+    stopped build left INVALID, or one of an older definition under the same name, is dropped and built again; a
+    valid one that is what the step builds is kept). It runs once ``migration``'s marker is there and until its own
     ``marker`` is: a start stopped halfway resumes it, and a finished one never runs it again."""
 
     migration: str
@@ -402,6 +403,36 @@ _ONLINE_STEPS = (
 )
 
 
+_INDEX_PROBE = "looper_index_probe"
+
+
+async def _index_kept(conn: asyncpg.Connection, name: str, definition: str) -> bool:
+    """Whether the index ``name`` is there, valid and the same as ``definition`` (``ON <table> ...``) would build.
+    The comparison is PostgreSQL's own text of each (``pg_get_indexdef`` from ``USING`` on, uniqueness too): the
+    definition is built on an empty copy of its table in a transaction that is rolled back, so nothing is scanned
+    and no lock blocks the table's writers."""
+    existing = await conn.fetchrow("SELECT indisvalid, pg_get_indexdef(indexrelid) AS definition FROM pg_index "
+                                   "WHERE indexrelid = to_regclass($1)", name)
+    if existing is None or not existing["indisvalid"]:
+        return False
+    table = re.match(r"ON\s+(\w+)\s", definition)
+    if table is None:
+        raise ValueError(f"an online index definition starts with ON <table>: {definition!r}")
+    probe = conn.transaction()
+    await probe.start()
+    try:
+        await conn.execute(f"CREATE TEMP TABLE {_INDEX_PROBE} (LIKE {table.group(1)})")
+        await conn.execute(f"CREATE INDEX {_INDEX_PROBE}_index ON {_INDEX_PROBE} {definition[table.end():]}")
+        wanted = await conn.fetchval("SELECT pg_get_indexdef(to_regclass($1))", f"{_INDEX_PROBE}_index")
+    finally:
+        await probe.rollback()
+
+    def shape(text: str) -> tuple[bool, str]:
+        return text.startswith("CREATE UNIQUE INDEX"), text.split(" USING ", 1)[1]
+
+    return shape(existing["definition"]) == shape(wanted)
+
+
 async def _finish_online(conn: asyncpg.Connection) -> None:
     """Serialize online DDL without holding a transaction while waiting.
 
@@ -432,9 +463,11 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
             for table, constraint in step.validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
             for name, definition in step.indexes:
-                # A build that was stopped leaves its index INVALID: dropped and built again. A valid one stays.
-                if await conn.fetchval("SELECT NOT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)", name):
-                    await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+                # Kept only when it is valid and is the index the step builds: one a stopped build left INVALID,
+                # or an older definition under the same name, is dropped and built again.
+                if await _index_kept(conn, name, definition):
+                    continue
+                await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
                 await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
     finally:
