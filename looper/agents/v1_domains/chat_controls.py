@@ -59,11 +59,11 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read the chat settings: stopping a reply, the Manager's completion turns, and its "
-        "research order. It also says whether the ledger is on.",
+    _op("chat_settings.get", "Read the chat settings: reply stopping, completion turns, research order and whether "
+        "the ledger is on.",
         _object({}, closed=True), CHAT_SETTINGS),
-    _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default. "
-        "Turning the ledger on also lists enabled bots with no operator id.",
+    _op("chat_settings.update", "Change the named chat settings; null restores a default. Turning the ledger on "
+        "lists enabled bots with no operator id.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
                  "research_order": {"type": ["boolean", "null"]},
