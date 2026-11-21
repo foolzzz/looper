@@ -6,7 +6,7 @@ INSERT INTO managers (id, name, tools, task_scope, idle_timeout_seconds)
 -- Login endpoints use the CLI's own connection; no token or URL is copied.
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
 VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
-        ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'headless_compaction', 'mcp',
+        ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'headless_compaction', 'mcp', 'mid_turn_input',
               'no_tools', 'resident_session', 'resume', 'run'], true)
 ON CONFLICT DO NOTHING;
 INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)
@@ -88,8 +88,8 @@ INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams
 SELECT 'agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', id, true, true
 FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'opus' AND protocol = 'anthropic-messages'
 ON CONFLICT DO NOTHING;
--- The built-in profiles of the advisor and its judge (profile_registry.BUILTIN_ROLE_PROFILES): each role runs its own
--- when its role layer chooses none.
+-- The built-in profiles of the advisor, its judge and the outbound check (profile_registry.BUILTIN_ROLE_PROFILES): each
+-- role runs its own when its role layer chooses none.
 INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, builtin, agent_teams)
 SELECT 'agent-claude-code-fable-5-2', 'claude-code/fable-5-2', 'rt-claude-code', id, 'high', true, false
 FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'claude-fable-5-2' AND protocol = 'anthropic-messages'
