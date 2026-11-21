@@ -18,6 +18,29 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.23] - 2026-11-20
+
+### Added
+
+- **Manager stable context, off by default.** ([#1471](https://github.com/foolzzz/looper/pull/1471)) `manager.stable_context` must be `true`. Absent, or any other value, leaves it off. While it is on, the resident sections are one block, resent whole on a new session, a new process, a reported compaction, a turn the session ran on its own, a turn that did not go through, and every turn of a runtime that does not declare `resident_compaction_events` (only Claude Code does). There is no dashboard switch.
+- **Research order, off by default.** ([#1468](https://github.com/foolzzz/looper/pull/1468)) `chat_settings.update` `research_order` must be true. While it is on, only the default Manager gains a `## Looking things up` section naming the sources that turn really has. This release's Settings → Chat page does not save the field.
+- **Manager vault reads, off by default.** ([#1477](https://github.com/foolzzz/looper/pull/1477)) `manager_read` is stored only when true. While the vault setting holds and says so, the default Manager lists `looper_vault_search` and `looper_vault_read` on the operator's own turns only, and never a write. There is no dashboard switch.
+- **Leads check, off per subscription.** ([#1472](https://github.com/foolzzz/looper/pull/1472)) `check_items` defaults false, including the presets, and a push subscription cannot set it. While it is on, the tool-less `leads_check` role (built-in profile `claude-code/haiku-5-5`) can keep, fix or drop each item before it is stored. A drop is state `dropped`. Consecutive failed checks raise `check_alert`, then `check_recovered`. `looper leads eval-export` writes JSONL outside a git work tree.
+- **Decision snapshots, off by default.** ([#1484](https://github.com/foolzzz/looper/pull/1484)) `decision_snapshots.enabled` must be `true`. While it is on, a dispatch pass and an applied Planner step decision are recorded, and `looper decisions replay` reads them back. Nothing is shown to the model. There is no dashboard switch.
+- **Completion window, switch still off.** ([#1463](https://github.com/foolzzz/looper/pull/1463)) `manager.completion_turns` stays `off`. With `dm_only`, ends in one chat during a 60-second window are one completion turn, delivered as `pending`, `sending`, `sent`, `failed` or `uncertain`. Settings → Chat shows "When a task ends".
+
+### Changed
+
+- **A persistent Planner session is bounded before resume.** ([#1473](https://github.com/foolzzz/looper/pull/1473)) This is the default for a schedule that already keeps one (`skip` or `queue`). Context strictly above `scheduler.session_context_max_tokens` (default 100,000), or cost strictly above half the effective task budget once context is at least half that threshold, compacts (Claude Code, when it can) or rotates. Schedules without a stored session, parallel runs and ordinary tasks keep their prompts, tools and launch commands.
+- **Changing where a provider connects, and installing an MCP server, waits for confirmation.** ([#1478](https://github.com/foolzzz/looper/pull/1478)) A Manager or API client call that sets a provider's `endpoints` or `env`, or that installs an MCP server or enables that install again, returns a confirmation (HTTP 202) and does not write until it is confirmed. A rename, `max_concurrency`, `enabled`, a skill or plugin install, and every dashboard operator call still apply at once. Environment values are not shown.
+- **The `outbound_check` role is seeded and nothing calls it.** ([#1479](https://github.com/foolzzz/looper/pull/1479)) Settings and configuration transfer accept the role. `outbound.review()` is not wired to a tool, a hook or an HTTP route. `outbound_review.enabled` is not in this release. Prompts, tool lists and command lines are unchanged.
+- **Settings → Chat can turn the ledger on, still off by default.** ([#1492](https://github.com/foolzzz/looper/pull/1492)) The checkbox, and the operator's `chat_settings.update` field `ledger_enabled`, store `ledger.enabled`. Only the string `true` turns the ledger on. A client token that includes the field gets 403, and nothing in that body is stored. Turning it on names enabled Telegram and Lark bots that have no My ID. No schema change. The To-do page, the ledger contract in the Manager's system prompt, and HTTP writes of ledger items are not in this release.
+- **Assistant-experience eval, invoked only.** ([#1490](https://github.com/foolzzz/looper/pull/1490)) Running it is the only new entry. The dashboard, Telegram, Lark, prompts, tool lists and command lines are unchanged.
+
+### Documentation
+
+- Outbound-review RFC ([#1469](https://github.com/foolzzz/looper/pull/1469)), memory-write-path RFC ([#1476](https://github.com/foolzzz/looper/pull/1476)), assistant-layer RFC ([#1481](https://github.com/foolzzz/looper/pull/1481), [#1494](https://github.com/foolzzz/looper/pull/1494)), memory-tiers RFC ([#1480](https://github.com/foolzzz/looper/pull/1480)) and engine-reliability RFC ([#1483](https://github.com/foolzzz/looper/pull/1483)). None of these is implemented. The repository ignores a root `references/` checkout ([#1474](https://github.com/foolzzz/looper/pull/1474)). The four agent-system CI jobs allow 20 minutes ([#1475](https://github.com/foolzzz/looper/pull/1475)).
+
 ## [2.15.22] - 2026-11-20
 
 ### Added
