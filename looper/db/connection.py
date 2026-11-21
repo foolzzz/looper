@@ -153,6 +153,7 @@ _MANAGER_EVENT_REASONS = ("off", "group_chat", "manager_off", "turn_failed", "tu
                           "empty_reply", "send_failed", "queue_deadline", "restart", "no_chat", "target_changed")
 _RUN_TREE = "run_tree"
 _AGENT_SPAWNS = "agent_spawns"
+_DECISION_SNAPSHOTS = "decision_snapshots"
 _STEP_DIFFICULTY = "step_difficulty"
 _ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ADVISOR = "project_advisor"
@@ -259,6 +260,7 @@ _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscription
 _PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
+_DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
 
 
 def _message_stream_ddl() -> str:
@@ -282,6 +284,14 @@ def _agent_spawns_ddl() -> str:
     found = _AGENT_SPAWNS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its agent spawns block")
+    return found.group(1)
+
+
+def _decision_snapshots_ddl() -> str:
+    """The decision snapshot table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _DECISION_SNAPSHOTS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its decision snapshots block")
     return found.group(1)
 
 
@@ -783,6 +793,12 @@ async def _agent_spawns_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _AGENT_SPAWNS):
         return False
     return not await conn.fetchval("SELECT to_regclass('agent_spawns') IS NOT NULL")
+
+
+async def _decision_snapshots_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _DECISION_SNAPSHOTS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('decision_snapshots') IS NOT NULL")
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -1354,9 +1370,6 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _ledger_pending(conn):
             await conn.execute(_ledger_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
-        if await _proactive_deliveries_pending(conn):
-            await conn.execute(_proactive_deliveries_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
         if await _manager_events_pending(conn):
             await conn.execute(_manager_events_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
@@ -1393,6 +1406,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _agent_spawns_pending(conn):
             await conn.execute(_agent_spawns_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _AGENT_SPAWNS)
+        if await _decision_snapshots_pending(conn):
+            await conn.execute(_decision_snapshots_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _DECISION_SNAPSHOTS)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -1505,6 +1521,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                   ADD COLUMN failure_kind TEXT CHECK (failure_kind IN ('task_budget'));
             """)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_SESSION_BOUNDS)
+        if await _proactive_deliveries_pending(conn):
+            await conn.execute(_proactive_deliveries_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1559,6 +1578,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
+            or await _decision_snapshots_pending(conn)
             or await _project_advisor_pending(conn)
             or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
