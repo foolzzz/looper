@@ -120,13 +120,18 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   access to private tools still follows the existing operator-turn check. `ManagerOps.call` refuses escalating
   operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
   and drops a refused confirmation. A turn with no speaker keeps the existing behavior.
-  Settings → Chat and the operator-only v1 `chat_settings` operations store `manager.turn_context.enabled`
+  Settings → Chat and the v1 `chat_settings` operations store `manager.turn_context.enabled`
   (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`
-  (`zh-CN` or `en`, default `zh-CN`). Enabling returns the enabled bots with no operator id; nobody on those
-  bots can count as the operator. Settings are cached at startup and refreshed after updates.
+  (`zh-CN` or `en`, default `zh-CN`). Only writes to these new fields require operator identity; reads and
+  writes to existing fields retain their access rules. Enabling returns the enabled bots with no operator id;
+  nobody on those bots can count as the operator. Settings are cached at startup and refreshed after updates.
   The renderer provides a `[Turn context]` block with local time, speaker, chat and reply language, and its
-  matching contract. **Manager integration is pending:** saving these settings does not yet replace the
-  `Channel:` line, inject the contract or set a turn's speaker. The dashboard, Lark, Telegram and API-client
+  matching contract. Sender display names pass through `untrusted_text.display_name` once during classification:
+  control characters and structural punctuation are removed, whitespace is collapsed, and names are capped at
+  40 characters. The typed speaker category comes first; the name is labelled as sender-set text. Future
+  model-visible sender names in group openers, cards and summaries must use the same helper. Unknown channel
+  types are rejected, and member wording follows the chat kind. **Manager integration is pending:** saving these
+  settings does not yet replace the `Channel:` line, inject the contract or set a turn's speaker. The dashboard, Lark, Telegram and API-client
   turns therefore retain their current prompt and authorization behavior until that integration lands.
 - The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads), so
   every message ends with a code-written line saying where it came from, just
