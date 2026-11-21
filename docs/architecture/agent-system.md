@@ -2739,6 +2739,60 @@ The tools are Looper's MCP tools, the same on every runtime.
   directly (the tools are the supported way, not an enforced boundary); Looper
   gives no isolation between processes of the same user.
 
+### Memory candidates: what Looper may write to the vault once confirmed
+
+What is worth remembering becomes a memory candidate, staged in PostgreSQL;
+only the operator's confirmation of its exact content lets Looper write it
+into the vault's memory folder
+([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
+PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
+part is the foundation: the tables, the vocabulary, the setting and the
+reads. Nothing proposes, drafts, confirms or writes a candidate yet.
+
+- **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
+  `M-0042`; its kind, state and reason, the least trusted class of its
+  sources, a fingerprint, the current revision's content hash, the
+  confirmation), `memory_candidate_revisions` (the typed changes:
+  `create_note`, `replace_note`, `append_line`, `replace_line`),
+  `memory_candidate_events` (only added), `memory_candidate_sources` (a
+  Manager's propose call, a task's journal entry or a lead; the class is a
+  generated column), `memory_posts` and `memory_tombstones`. The schema keeps
+  what each state needs: a confirmed candidate points, by a composite foreign
+  key, at the operator's confirmation event of its current content hash, from
+  the dashboard or a direct chat; a new revision drops it. A `looper` row
+  (a project's lesson) has its own states and never takes effect from an
+  outside or system source. A deleted source takes a candidate not written
+  yet; a written one keeps only its paths, hashes and commit. A deleted
+  project takes its lessons.
+- **Code** (`looper/agents/memory_model.py`, `looper/db/memory.py`): the
+  kinds and the source classes each accepts (`ALLOWED_CLASSES`: preferences
+  and corrections only from the operator; a lead never becomes one; a task
+  proposes lessons and project facts), the transitions of a `vault` row
+  (`TRANSITIONS`), `content_hash()` (the candidate, its commit subject and
+  its changes, a note's text by its sha256, as canonical JSON) and
+  `fingerprint()` (the kind and the statement without case, spaces or
+  punctuation). `db.memory` makes a candidate from a seed, stores a
+  revision, moves a candidate (a confirmation must name the current hash)
+  and deletes one, leaving a tombstone that stops the same seed from any
+  source but the operator.
+- **The setting** (`system_settings` key `memory_write`, absent: off;
+  `looper/agents/memory_settings.py`): the memory folder inside the
+  knowledge vault (it may not overlap a writable folder), the rules files,
+  each kind's folders and index or pages, the required frontmatter, the
+  sources, the push bot, the pending days and the drafting budgets. Saving
+  it records the main checkout's branch and the commit prefix, and refuses a
+  vault outside git, a detached HEAD, a memory folder whose new notes git
+  ignores, a worktree folder inside the repository and a push bot without
+  the operator's id. It is checked again whenever it is read. It is a local
+  path, so the configuration export leaves it out.
+- **Reads:** `/api/v1/memory/list`, `get`, `settings_get`, `settings_put` and
+  `check` (the read-only preflight: the setting, git, the branch, no merge or
+  rebase under way, no ignored path, the worktree folder, the push bot), all
+  operator-only and none a tool; `looper memory list | show | check`, reading
+  the database directly, refused inside an agent run (exit codes: 0, 1 none
+  found or a check failed, 2 usage, 3 not configured, 4 refused, 5 no such
+  candidate, 6 database unusable).
+
 ### Project skills: skills a project writes
 
 A project can write its own Claude Code skills (`looper/agents/project_skills.py`,
