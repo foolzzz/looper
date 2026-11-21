@@ -917,7 +917,8 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 ```
 
 Options: `--dialogs status,ask_project`, `--model`, `--agent`, `--stable-context` (the Manager's state block on in
-every dialog's database),
+every dialog's database), `--untrusted-fence` (`untrusted_fence.enabled` on in every dialog's database: outside
+content in `<untrusted>` blocks; compare with the same dialogs without it),
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
 does not establish a cap for the current 74 dialogs; give it
@@ -1047,6 +1048,8 @@ uv run --extra test python -m evals.lark_quote --mode real --model sonnet --reps
 ```
 
 `--mode fake` plays the Manager with a stand-in that saves each turn (the JSON's `turns`), for the path alone.
+`--untrusted-fence` turns `untrusted_fence.enabled` on in each rep's database: the group and direct messages and
+their quotes reach the Manager in `<untrusted>` blocks; compare with a run without it (`--baseline`).
 `--manager-model opus --manager-effort xhigh` puts the Manager alone on opus at xhigh. `--model` (default
 `sonnet`) is the Claude Code model of every role in real mode; `--agent NAME` or `--register-agent SPEC.json`
 (as for `prompt_regression run`) puts every role on another registered agent instead, and then the `claude` CLI
