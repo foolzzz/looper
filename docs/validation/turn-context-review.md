@@ -74,7 +74,7 @@ NFKC display-name normalization and per-field operator writes are retained.
 
 The default-off delivery-guard regression first reproduced the four extra response fields.
 The new boundary regressions also failed before the operations were separated; three UI tests
-failed when their fixtures stopped mixing the two settings views. After the fix, 467 Python
+failed when their fixtures stopped mixing the two settings views. After the fix and a second merge of main, 469 Python
 cases passed across the 11 relevant files, including delivery-guard settings, API documentation,
 turn context, authorization, operator IDs and chat settings. Tests used `-n 2` and a disposable
 PostgreSQL database; none were skipped. All nine Chat settings Vitest cases, TypeScript checking,
