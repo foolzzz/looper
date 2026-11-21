@@ -4972,7 +4972,8 @@ Manager's `looper_schedules` cannot create or change one.
   (the run fails, the cursor stays). A window a prompt hook blocks
   (`ProcessorFailure.BLOCKED`) is `skipped` (`skip_reason` `blocked_by_hook`):
   the run is `completed`, nothing is pushed and the cursor moves past it, since
-  the same window is blocked every time it is sent.
+  the same window is blocked every time it is sent; runs that keep skipping are
+  alerted as an extraction's are (`skip_alert`, `skip_recovered`).
 - **The push** goes through the channel's `post` as the bot, to the target the
   run started with (`subscription_runs.target_channel`, `target_chat`, pinned
   only when the target was confirmed for the configuration then in force:
@@ -5256,14 +5257,23 @@ here pushes: the intent push service polls `intents`.
   `contract=`): `NONE`, or one JSON object (`{"leads": [...]}` or
   `{"intents": [...]}`, with `instructions_seen`). `extraction.parse` reads it:
   the whole reply, or else the one object with the kind's key among prose or
-  code fences (two different ones are unreadable). An unreadable reply is asked
-  for once more with `extraction.REFORMAT_REMINDER` added to the instructions,
-  within what is left of the run's cap and deadline; still unreadable, the
-  window is `skipped` (`skip_reason` `invalid_reply`). A window a prompt hook
-  blocks is `skipped` at once (`blocked_by_hook`). A skipped run is
+  code fences (two different ones, or a reply with more than 200 places an
+  object could start, are unreadable). An unreadable reply is asked for once
+  more with `extraction.REFORMAT_REMINDER` added to the instructions, within
+  what is left of the run's cap and deadline (with nothing left of either, the
+  run fails `budget` or `timeout` and the window is kept); still unreadable,
+  the window is `skipped` (`skip_reason` `invalid_reply`). A window a prompt
+  hook blocks is `skipped` at once (`blocked_by_hook`). A skipped run is
   `completed`, stores nothing, counts what every ask cost and moves the cursor
-  past the window (`extraction.ask`); any other processor failure fails the run
-  and the cursor stays. Each item
+  past the window (`extraction.ask`), after the same check of the confirmation
+  as storing (a run whose confirmation no longer holds is `cancelled` and keeps
+  the cursor); any other processor failure fails the run and the cursor stays.
+  When as many completed runs in a row as the schedule's failure alert waits
+  for (3 by default) were skipped, runs that did not complete neither ending nor
+  adding to the streak, the subscription's notices get one `skip_alert` per
+  streak (`subscriptions.skip_alert_at`, with the last reason and no message
+  text), and the next completed run that used its window a `skip_recovered`.
+  Each item
   is checked for its kind or enabled type, confidence, summary and lengths, refs
   that exist in the input with the right letter, at least one `m` source, not
   both `supersedes` and `same_as`, a valid date, and, for an intent whose
@@ -5952,7 +5962,8 @@ will.
   `blocked` is a prompt hook of the machine's Claude Code refusing the input
   (its `system/informational` notice, `claude_cli.prompt_block`): no model turn
   runs, the result Claude Code still calls a success echoes the prompt, and
-  neither the reply nor the record's output keeps it. A model at
+  only its typed fields are recorded or given back (`single_run`): no reply,
+  output or event keeps the echo. A model at
   provider prices without a full price is refused (no cap would hold), and so
   is one that needs the local gateway (its requests would be recorded). The
   role's switch in Settings → Roles turns every processor run off.
