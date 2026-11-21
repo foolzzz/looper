@@ -235,7 +235,7 @@ class RoomOps:
         self._files: dict[str, set[str]] = {}  # a run -> the MCP configuration files that carry its token
         # A run whose calls the outbound review's hook checks -> where its reviews run, the files it wrote last, and
         # whether the operator was told of a block (once a run).
-        self._reviews: dict[str, tuple[Path, str]] = {}
+        self._reviews: dict[str, tuple[Path, str, Any]] = {}
         self._writes: dict[str, list[Any]] = {}
         self._notified: set[str] = set()
 
@@ -398,15 +398,19 @@ class RoomOps:
 
     # --- The outbound review's hook in a step's run of a task outside content went into (RFC section 6.3) ---
 
-    def tool_hook(self, token: str, run: str, runtime_root: Path, claude_bin: str) -> Any:
+    def tool_hook(self, token: str, run: str, runtime_root: Path, claude_bin: str, library: Any = None) -> Any:
         """The PreToolUse hook (``outbound_hook.ToolHook``) for the run holding ``token``; its config goes when the
-        run ends. Its reviews run under ``runtime_root`` with ``claude_bin``."""
+        run ends. Its reviews run under ``runtime_root`` with ``claude_bin``, and its MCP tool names stand for the
+        servers ``library`` loads and the tools of its grant (``outbound_hook.Trusted``)."""
         from .. import outbound_hook
 
         hook = outbound_hook.write_hook(runtime_root, f"run-{run}", url=self._url, token=token)
         self._files.setdefault(run, set()).add(str(runtime_root.absolute() / ".local" / "outbound-hook" /
                                                    f"run-{run}.json"))
-        self._reviews[run] = (runtime_root, claude_bin)
+        grant = self._grants.get(_digest(token))
+        tools = (*(tools_for(grant.seat.kind) if grant.room else ()), *grant.vault_tools) if grant else ()
+        self._reviews[run] = (runtime_root, claude_bin,
+                              outbound_hook.Trusted.of(library, [tool.name for tool in tools]))
         return hook
 
     async def check_outbound(self, header: str | None, payload: Any) -> dict[str, Any]:
@@ -419,7 +423,7 @@ class RoomOps:
             return {"decision": "block", "message": outbound_hook.BLOCKED_MESSAGE.format(
                 reason="this run's token no longer works")}
         run, task_id = grant.seat.run, grant.task_id
-        runtime_root, claude_bin = self._reviews[run]
+        runtime_root, claude_bin, trusted = self._reviews[run]
         writes = self._writes.setdefault(run, [])
 
         async def place() -> Any:
@@ -429,7 +433,7 @@ class RoomOps:
             answer, review = await outbound_hook.answer(payload, agent_id=f"run-{run}", place=place,
                                                         writes=list(writes[-outbound_hook.CONTENT_TOOLS_KEPT:]),
                                                         runtime_root=runtime_root, claude_bin=claude_bin,
-                                                        task_id=task_id)
+                                                        trusted=trusted, task_id=task_id)
         except Exception:
             logger.exception("the outbound check of a call of run %s failed", run)
             return {"decision": "block", "message": outbound_hook.BLOCKED_MESSAGE.format(

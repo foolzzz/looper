@@ -150,7 +150,7 @@ def test_a_task_is_its_operators_unless_a_group_another_person_or_a_client_asked
 
 def test_a_runs_hook_checks_its_calls_as_its_tasks_and_stops_with_the_run(monkeypatch: pytest.MonkeyPatch,
                                                                           tmp_path: Path) -> None:
-    from looper.agents.ops.room import RoomOps
+    from looper.agents.ops.room import RoomOps, tools_for
     from looper.agents.room import MemberKind, RoomService, Seat
 
     async def test(pool: Any) -> None:
@@ -162,13 +162,16 @@ def test_a_runs_hook_checks_its_calls_as_its_tasks_and_stops_with_the_run(monkey
         tokens = {}
         for task_id in ("t-web", "t-group"):
             seat = Seat(key=f"rd@{task_id}", role="rd", kind=MemberKind.WORK, run=f"worker-{task_id}")
-            tokens[task_id] = token = room.issue(task_id, seat, room=False)
+            tokens[task_id] = token = room.issue(task_id, seat, room=task_id == "t-web")
             hook = room.tool_hook(token, f"worker-{task_id}", tmp_path / "rt", claude)
             assert "outbound_hook_client.py" in hook.command
         bearer = {task_id: f"Bearer {token}" for task_id, token in tokens.items()}
         call = {"tool_name": "Bash", "tool_input": {"command": "gh pr comment 1 --body done"}}
         assert await room.check_outbound(bearer["t-web"], {"tool_name": "Read", "tool_input": {}}) == {
             "decision": "allow"}
+        own = {"tool_name": f"mcp__looper__{tools_for(MemberKind.WORK)[0].name}", "tool_input": {}}
+        assert await room.check_outbound(bearer["t-web"], own) == {"decision": "allow"}
+        assert _seen(tmp_path) == []  # a tool of its own grant, on Looper's server: no review
         assert await room.check_outbound(bearer["t-web"], call) == {"decision": "allow"}  # the stand-in allows
         (seen,) = _seen(tmp_path)
         assert '"who": "operator"' in seen["turn"] and "Post the summary to the partners." in seen["turn"]
@@ -177,6 +180,10 @@ def test_a_runs_hook_checks_its_calls_as_its_tasks_and_stops_with_the_run(monkey
         rows = await pool.fetch("SELECT agent_id, task_id, source, verdict, failure FROM outbound_reviews ORDER BY id")
         assert [tuple(r) for r in rows] == [("run-worker-t-web", "t-web", "hook", "allow", None),
                                             ("run-worker-t-group", "t-group", "hook", "block", "not_operator")]
+        for name in ("mcp__looper__looper_tasks", "mcp__looper__evil__send"):  # not its grant's; no server it loaded
+            assert await room.check_outbound(bearer["t-web"], {"tool_name": name, "tool_input": {}}) == {
+                "decision": "allow"}  # reviewed, and the stand-in allows
+        assert len(_seen(tmp_path)) == 3
         config = tmp_path / "rt" / ".local" / "outbound-hook" / "run-worker-t-web.json"
         assert config.exists()
         room.revoke_run("worker-t-web")

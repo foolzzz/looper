@@ -2182,7 +2182,7 @@ class WorkerPool:
                 token = self.room_ops.issue(parent_task_id, run_seat(payload, is_verify=is_verify, run=worker_id),
                                             room=False, kept=kept)
             launch = replace(launch, tool_hook=self.room_ops.tool_hook(token, worker_id, self._runtime_root,
-                                                                       self._config.claude_bin))
+                                                                       self._config.claude_bin, launch.library))
         background = str((project or {}).get("background") or "")
         if task_role is None:
             system_prompt = build_system_prompt(
