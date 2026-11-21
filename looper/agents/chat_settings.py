@@ -10,8 +10,11 @@ ledger RFC section 3.7).
 ``manager.research_order``: whether the default Manager's contract says where to look things up, and in what order,
 before it asks the user (``research_order``; off by default).
 
+``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
+The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
+
 Stop, the completion events and the Manager's prompt check them from synchronous code, so they are kept in memory: ``load`` reads them
-at startup and ``update`` refreshes them. Until loaded, both are off.
+at startup and updates refresh them. Until loaded, all are off.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
 RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
+DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
+DEFAULT_DELIVERY_GUARD_ENABLED = False
 FIELDS = ("stop_enabled", "completion_turns", "research_order")
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
@@ -44,6 +49,7 @@ DEFAULT_COMPLETION_TURNS = CompletionTurns.OFF
 _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
+_delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
 
 
 def stop_enabled() -> bool:
@@ -76,12 +82,39 @@ def set_research_order(value: bool) -> None:
     _research_order = value
 
 
+def delivery_guard_enabled() -> bool:
+    return _delivery_guard_enabled
+
+
+def set_delivery_guard_enabled(value: bool) -> None:
+    """Apply the delivery setting in memory; Manager wiring is a separate change."""
+    global _delivery_guard_enabled
+    _delivery_guard_enabled = value
+
+
+def delivery_guard_view() -> dict[str, bool]:
+    return {"enabled": _delivery_guard_enabled}
+
+
+async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
+    """Persist an operator's choice; null restores the disabled default.
+
+    Separate from ``update`` so existing chat settings exposed to clients stay unchanged.
+    """
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({DELIVERY_GUARD_KEY: None if value is None else ("true" if value else "false")})
+    set_delivery_guard_enabled(DEFAULT_DELIVERY_GUARD_ENABLED if value is None else value)
+    return delivery_guard_view()
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY])
+    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
+    set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
     try:
         turns = CompletionTurns(stored.get(COMPLETION_TURNS_KEY, DEFAULT_COMPLETION_TURNS.value))
     except ValueError:

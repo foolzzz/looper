@@ -194,6 +194,7 @@ class Capability(str, Enum):
     MCP = "mcp"  # it loads the MCP servers Looper gives it
     ADD_DIRS = "add_dirs"  # it reads extra directories (project knowledge)
     COMPACTION_EVENTS = "compaction_events"  # it reports context compactions
+    MID_TURN_INPUT = "mid_turn_input"  # queued input joins the running resident turn after its current tool returns
     HEADLESS_COMPACTION = "headless_compaction"  # /compact on a resumed resident session reports compact_boundary
     AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so
     READ_TOOLS = "read_tools"  # it can run with only the tools that read (OMP's --tools), keeping its MCP tools
