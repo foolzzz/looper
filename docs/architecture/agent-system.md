@@ -99,6 +99,19 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   characters). `db.tasks.task_name` is what lists, headings, the Chat page and
   the end notice show: the title, else the goal id, else the requirement's
   first line, else the task id (a task from before titles)
+- **Turn context foundation** (`turn_context.py`): typed speaker classification distinguishes the operator,
+  an API client, an allowlisted sender and a member. An operator in a group may authorize operations, while
+  access to private tools still follows the existing operator-turn check. `ManagerOps.call` refuses escalating
+  operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
+  and drops a refused confirmation. A turn with no speaker keeps the existing behavior.
+  Settings → Chat and the operator-only v1 `chat_settings` operations store `manager.turn_context.enabled`
+  (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`
+  (`zh-CN` or `en`, default `zh-CN`). Enabling returns the enabled bots with no operator id; nobody on those
+  bots can count as the operator. Settings are cached at startup and refreshed after updates.
+  The renderer provides a `[Turn context]` block with local time, speaker, chat and reply language, and its
+  matching contract. **Manager integration is pending:** saving these settings does not yet replace the
+  `Channel:` line, inject the contract or set a turn's speaker. The dashboard, Lark, Telegram and API-client
+  turns therefore retain their current prompt and authorization behavior until that integration lands.
 - The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads), so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark

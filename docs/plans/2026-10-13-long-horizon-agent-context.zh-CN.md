@@ -931,6 +931,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **助理每轮上下文接线**：类型化分类、渲染、操作者设置入口和 ops 说话人授权检查已实现；Manager 接线尚未完成，开关默认关，暂不注入上下文或契约。接线后补回合 prompt 关闭基准、渠道真实链路与时间/身份评测（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
+
 - **流程预设的后续入口**：任务模板引用流程、定时任务选择流程；当前模板和定时任务仍不采用项目默认流程。
 
 - **DSH SDK runner 的后续**（[RFC §10.6、§16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#106-实现进展与验证缺口)）：全角色与咨询的单 runner opt-in 已实现，installed 隔离 serve 验证及真实 DeepSeek smoke、CLI/runner 对照已准备，真实结果待 lead。Worker/Reviewer 的办公台消息已接 runner steer：仅匹配 `steer_applied` 才确认，`steer_dropped` 后本轮不再推进累计游标；无超时确认，丢弃消息不进入 Planner `missed_input`。真实 `room_interface` 各两次对照：PULL 1/2（一次 runner 初始化超时）、PUSHED 2/2；已验证 4 次真实 applied 回执及已读游标。inbox 调用均值从 2 降至 0.5，但基线含初始化失败，不能据此归因效率变化。尚余按 provider binding 分运行器、容量数字及完整 composition 长期内存/exit hook 验证、运行时卡；完成门禁后切换默认值并删除 DSH CLI 路径；补齐 state root 中保留的 run sessions 的保留期限与回收，以及 runner 的 web fetch 和 skills。
