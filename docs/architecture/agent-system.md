@@ -6138,17 +6138,20 @@ off; `outbound_review.get` and `outbound_review.update`).
   such a process while it is on (checked right before the prompt reaches the process). The hook is
   `outbound_hook_client.py`, run by path with `python -I`, behind a shell that prints a `deny` whenever the client
   cannot run or prints nothing. The client sets an alarm before anything else that ends it with a `deny` at
-  `DEADLINE_SEC` (75 s), asks `POST /api/agent/v1/outbound/check` with the Manager's token, waits for the answer at
-  most `CHECK_TIMEOUT_SEC` (60 s), and denies when it gets none; Claude Code waits for the hook `HOOK_TIMEOUT_SEC`
-  (90 s), since it runs a call whose hook failed or timed out. Its config (the URL, the token, the waits) is
+  `DEADLINE_SEC` (75 s) and moves it to its config's `deadline` before it reads its input; it asks
+  `POST /api/agent/v1/outbound/check` with the Manager's token, waits for the answer at most `CHECK_TIMEOUT_SEC`
+  (60 s), and denies when it gets none; Claude Code waits for the hook `HOOK_TIMEOUT_SEC` (90 s), since it runs a
+  call whose hook failed or timed out. Its config (the URL, the token, the waits) is
   `<runtime root>/.local/outbound-hook/<manager>.json`, readable by the operator only.
   - **What runs at once** is decided by the tool's type (`outbound_hook.level_of`): Claude Code's built-in tools have
     a level each (`BUILTIN_LEVELS`: `Bash` and `Monitor` are `unknown`; `WebSearch`, `WebFetch`, `RemoteTrigger` and
     `SendMessage` `external`); a tool not listed is `unknown`. Looper's own tools are `inside` here (`ManagerOps.call`
     runs them). Another MCP server's tools are `unknown`, except the ones the operator declared `inside` for that
-    server (`mcp_tool_levels`, `mcp_tool_levels.get` and `mcp_tool_levels.put`). An undeclared tool of a read-only
-    MCP server is therefore reviewed in the operator's turns (a few seconds and about 0.003 USD a call) and
-    blocked in every other turn.
+    server (`mcp_tool_levels`, `mcp_tool_levels.get` and `mcp_tool_levels.put`). A name is read only against the
+    servers the Manager's process loaded (`outbound_hook.Trusted`: its library's MCP items and Looper's own), with
+    the full tool name; one that no loaded server or more than one could stand for is `unknown`. An undeclared
+    tool of a read-only MCP server is therefore reviewed in the operator's turns (a few seconds and about 0.003 USD
+    a call) and blocked in every other turn.
   - **Whose turn:** the call's own, never the turn that runs when it comes. That is the turn whose stream showed
     its `tool_use` (`ManagerOps.expect`); a subagent's call belongs to the turn of the call that started it
     (`parent_tool_use_id`). A call Looper cannot place within `PLACE_WAIT_SEC`, or whose turn is over, is no one's.
