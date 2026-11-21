@@ -299,12 +299,15 @@ async def finish_record(
     cost_source: str | None = None,
     outcome: str | None = None,
     metadata: dict[str, Any] | None = None,
+    failure_class: str | None = None,
+    failure_cause: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
     """Close a record with the run's outcome, its own usage and cost (and where the cost comes from), its final
     context and its compactions; a Worker's or Reviewer's run also keeps how its report or verdict read
     (``metadata.outcome``, ``worker.RunOutcome``), and ``metadata``'s keys are added to the record's (a run's
-    refused tool calls, ``permission_denials``)."""
+    refused tool calls, ``permission_denials``). A failed run's class and cause (``failures``) are NULL while
+    failure typing is off."""
     pool = pool or get_pool()
     await pool.execute(
         """
@@ -330,14 +333,16 @@ async def finish_record(
                                          ELSE jsonb_build_object('outcome', $17::text) END
                                  || COALESCE($18::jsonb, '{}'::jsonb) END,
             finished_at = now(),
-            last_output_at = COALESCE(last_output_at, now())
+            last_output_at = COALESCE(last_output_at, now()),
+            failure_class = $19,
+            failure_cause = $20
         WHERE id = $1
         """,
         record_id, status, output_text, output_text[:500] if output_text else None,
         session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
         cache_read_tokens, cache_creation_tokens, context_tokens,
         json.dumps(compactions) if compactions is not None else None, cost_source, outcome,
-        json.dumps(metadata, ensure_ascii=False) if metadata else None,
+        json.dumps(metadata, ensure_ascii=False) if metadata else None, failure_class, failure_cause,
     )
 
 

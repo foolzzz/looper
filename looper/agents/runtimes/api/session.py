@@ -292,7 +292,10 @@ class ApiSession:
             event.update(subtype="error_max_turns", is_error=True, errors=[
                 "the turn made 30 model requests, the most a turn may make; it stopped there, and what its tool calls did was not undone"])
         elif result.outcome is Outcome.FAILED:
-            event.update(subtype="error_during_execution", is_error=True, errors=[_error_message(result, model)])
+            # The typed error kind and status, for the failure's class (``failures.api``).
+            event.update(subtype="error_during_execution", is_error=True, errors=[_error_message(result, model)],
+                         error_kind=result.error_kind.value if result.error_kind is not None else None,
+                         error_status=result.error_status)
         elif result.outcome is Outcome.CAPPED:
             cap = stop()
             event.update(cap.result_event)

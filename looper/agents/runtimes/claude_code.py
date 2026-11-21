@@ -84,6 +84,7 @@ from .instructions import InstructionFile
 if TYPE_CHECKING:
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
+    from ..failures import Evidence, Failure
     from ..run_usage import Usage
 
 _PROBE_TIMEOUT_SEC = 10.0
@@ -505,6 +506,11 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         # Redact the complete diagnostic before whitespace normalization and clipping.
         detail = safe_error(detail, secrets=(launch.profile.provider.api_key or "",), limit=None)
         return " ".join(detail.split())[:300] or None
+
+    def failure_signal(self, result_event: dict[str, Any] | None, evidence: Evidence) -> Failure | None:
+        from .. import failures
+
+        return failures.claude_code(result_event, evidence)
 
     def managed_hooks(self) -> ManagedHooks | None:
         """The hook events of the first managed settings file that sets any (``MANAGED_SETTINGS``); one that cannot
