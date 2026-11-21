@@ -10,11 +10,19 @@ ledger RFC section 3.7).
 ``manager.research_order``: whether the default Manager's contract says where to look things up, and in what order,
 before it asks the user (``research_order``; off by default).
 
-``delivery.enabled``: whether proactive messages pass the delivery layer (``proactive_delivery``) before they go
-out (``delivery_enabled``; off by default, proactive delivery RFC section 2).
+``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
+The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
 
-Stop, the completion events, the Manager's prompt and the send points check them from synchronous code, so they are
-kept in memory: ``load`` reads them at startup and ``update`` refreshes them. Until loaded, all are off.
+``ledger.enabled``: whether the ledger records what waits for the user, what was decided and who does what
+(off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
+second copy. Turning it on names the enabled bots that have no operator id.
+
+``delivery.enabled``: whether proactive messages pass the delivery layer (``proactive_delivery``) before they go
+out; off by default (proactive delivery RFC section 2). Operator-only, through ``proactive_delivery.get`` and
+``proactive_delivery.update``, like the delivery guard.
+
+Stop, completion turns, research order, delivery guard and the delivery layer are kept in memory: ``load`` reads
+them at startup and updates refresh them. Until loaded, all are off.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
+from ..db import ledger as db_ledger
 from ..db import system_settings as db_settings
 from .proactive_delivery import ENABLED_KEY as DELIVERY_ENABLED_KEY
 
@@ -31,11 +40,10 @@ DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
 RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
+DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
+DEFAULT_DELIVERY_GUARD_ENABLED = False
 DEFAULT_DELIVERY_ENABLED = False
-FIELDS = ("stop_enabled", "completion_turns", "research_order", "delivery_enabled")
-# The settings that are true or false, and their keys.
-_FLAGS = {"stop_enabled": STOP_ENABLED_KEY, "research_order": RESEARCH_ORDER_KEY,
-          "delivery_enabled": DELIVERY_ENABLED_KEY}
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -52,6 +60,7 @@ DEFAULT_COMPLETION_TURNS = CompletionTurns.OFF
 _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
+_delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
 _delivery_enabled = DEFAULT_DELIVERY_ENABLED
 
 
@@ -85,22 +94,63 @@ def set_research_order(value: bool) -> None:
     _research_order = value
 
 
+def delivery_guard_enabled() -> bool:
+    return _delivery_guard_enabled
+
+
+def set_delivery_guard_enabled(value: bool) -> None:
+    """Apply the delivery setting in memory; Manager wiring is a separate change."""
+    global _delivery_guard_enabled
+    _delivery_guard_enabled = value
+
+
+def delivery_guard_view() -> dict[str, bool]:
+    return {"enabled": _delivery_guard_enabled}
+
+
+async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
+    """Persist an operator's choice; null restores the disabled default.
+
+    Separate from ``update`` so existing chat settings exposed to clients stay unchanged.
+    """
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({DELIVERY_GUARD_KEY: None if value is None else ("true" if value else "false")})
+    set_delivery_guard_enabled(DEFAULT_DELIVERY_GUARD_ENABLED if value is None else value)
+    return delivery_guard_view()
+
+
 def delivery_enabled() -> bool:
     return _delivery_enabled
 
 
 def set_delivery_enabled(value: bool) -> None:
-    """Apply a value in memory only (``load`` and ``update`` store it; tests use this directly)."""
+    """Apply a value in memory only (``load`` and ``update_delivery`` store it; tests use this directly)."""
     global _delivery_enabled
     _delivery_enabled = value
+
+
+def delivery_view() -> dict[str, bool]:
+    return {"enabled": _delivery_enabled}
+
+
+async def update_delivery(value: bool | None) -> dict[str, bool]:
+    """Persist the operator's choice; null restores the default, off."""
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({DELIVERY_ENABLED_KEY: None if value is None else ("true" if value else "false")})
+    set_delivery_enabled(DEFAULT_DELIVERY_ENABLED if value is None else value)
+    return delivery_view()
 
 
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([*_FLAGS.values(), COMPLETION_TURNS_KEY])
+    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY,
+                                             DELIVERY_ENABLED_KEY])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
+    set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
     set_delivery_enabled(stored.get(DELIVERY_ENABLED_KEY) == "true")
     try:
         turns = CompletionTurns(stored.get(COMPLETION_TURNS_KEY, DEFAULT_COMPLETION_TURNS.value))
@@ -110,9 +160,10 @@ async def load() -> bool:
     return _stop_enabled
 
 
-def settings_view() -> dict[str, Any]:
-    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value, "research_order": _research_order,
-            "delivery_enabled": _delivery_enabled}
+async def settings_view() -> dict[str, Any]:
+    """The settings in effect. ``ledger_enabled`` is the stored row (``db.ledger.enabled``), not a copy in memory."""
+    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value,
+            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled()}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -122,17 +173,26 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
     if not body:
         raise ValueError(f"give at least one of {', '.join(FIELDS)} (null: the default)")
     values: dict[str, Any] = {}
-    for name in _FLAGS:
-        if name in body:
-            value = body[name]
-            if value is not None and not isinstance(value, bool):
-                raise ValueError(f"{name} must be true, false or null")
-            values[name] = value
+    if "stop_enabled" in body:
+        value = body["stop_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("stop_enabled must be true, false or null")
+        values["stop_enabled"] = value
     if "completion_turns" in body:
         value = body["completion_turns"]
         if value is not None and value not in {turns.value for turns in CompletionTurns}:
             raise ValueError("completion_turns must be " + ", ".join(t.value for t in CompletionTurns) + " or null")
         values["completion_turns"] = value
+    if "research_order" in body:
+        value = body["research_order"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("research_order must be true, false or null")
+        values["research_order"] = value
+    if "ledger_enabled" in body:
+        value = body["ledger_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("ledger_enabled must be true, false or null")
+        values["ledger_enabled"] = value
     return values
 
 
@@ -141,12 +201,24 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     leaves out keeps its value."""
     values = checked(body)
     stored: dict[str, str | None] = {}
-    for name, key in _FLAGS.items():
-        if name in values:
-            value = values[name]
-            stored[key] = None if value is None else ("true" if value else "false")
+    if "stop_enabled" in values:
+        value = values["stop_enabled"]
+        stored[STOP_ENABLED_KEY] = None if value is None else ("true" if value else "false")
     if "completion_turns" in values:
         stored[COMPLETION_TURNS_KEY] = values["completion_turns"]
+    if "research_order" in values:
+        value = values["research_order"]
+        stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
+    if "ledger_enabled" in values:
+        value = values["ledger_enabled"]
+        stored[db_ledger.ENABLED_KEY] = None if value is None else ("true" if value else "false")
     await db_settings.put_settings(stored)
     await load()
-    return settings_view()
+    view = await settings_view()
+    if values.get("ledger_enabled") is True:
+        from .channels.operator_ids import missing
+
+        view["missing_operator_ids"] = [
+            {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
+            for bot in await missing()]
+    return view

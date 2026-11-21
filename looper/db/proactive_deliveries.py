@@ -33,11 +33,14 @@ async def counted_on(conn: asyncpg.Connection, channel_id: str, chat: str, local
                                "AND local_date = $3 AND counted", channel_id, chat, local_date)
 
 
-async def insert(conn: asyncpg.Connection, row: Mapping[str, Any]) -> None:
-    await conn.execute(
+async def insert(conn: asyncpg.Connection, row: Mapping[str, Any]) -> dict[str, Any]:
+    """Write the decision; the row already there when another decision on the same message got in first."""
+    added = await conn.fetchrow(
         f"INSERT INTO proactive_deliveries ({', '.join(_COLUMNS)}) "
-        f"VALUES ({', '.join(f'${n}' for n in range(1, len(_COLUMNS) + 1))})",
+        f"VALUES ({', '.join(f'${n}' for n in range(1, len(_COLUMNS) + 1))}) "
+        "ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING *",
         *(row[name] for name in _COLUMNS))
+    return dict(added) if added is not None else await get(conn, row["dedupe_key"])
 
 
 async def mark_sent(dedupe_key: str, *, pool: asyncpg.Pool | None = None) -> None:

@@ -16,7 +16,7 @@
 
 | 输入 | 字段 |
 |---|---|
-| `Delivery`（这条消息） | `kind`（发送点：`gate_reminder`、`task_notice`、`subscription`、`intent`、`completion_turn`、`user_reminder`）；`urgency`（`normal`、`blocking`：关卡在等用户、卡着它的任务，`user_set`：用户自己设的提醒）；`chat`（`direct` 私聊和控制台聊天，`group` 群）；`source`（来自定时任务或订阅时，它的节制字段：生效时段和它的时区）；`silent`（来源说这次没什么要说） |
+| `Delivery`（这条消息） | `kind`（发送点：`gate_reminder`、`task_notice`、`subscription`、`intent`、`completion`（收尾回合）、`user_reminder`）；`urgency`（`normal`、`blocking`：关卡在等用户、卡着它的任务，`user_set`：用户自己设的提醒）；`chat`（`direct` 私聊和控制台聊天，`group` 群）；`source`（来自定时任务或订阅时，它的节制字段：生效时段和它的时区）；`silent`（来源说这次没什么要说） |
 | `DeliveryPolicy`（操作者的规则） | `timezone`（`user.timezone`）、`quiet_hours`（`DailyWindow`，可为空）、`dm_daily_cap`、`recent_reply` |
 | `DeliveryState`（这个会话此刻） | `now`、`sent_today`（今天按本地日期已计数的条数）、`last_user_message_at` |
 
@@ -53,7 +53,7 @@
 
 ## 2. 开关；关闭时什么不变
 
-- 系统设置 `delivery.enabled`（`chat_settings.update` 的 `delivery_enabled`，默认 `false`，`loopercli chat-settings update --delivery-enabled true`；客户端调用要确认）。关闭时没有任何发送点调用 `deliver`，发出的每条消息和现在一样，也不写 `proactive_deliveries`（测试比对）。
+- 系统设置 `delivery.enabled`（默认 `false`）：只有操作者能读写，经 `proactive_delivery.get` 和 `proactive_delivery.update`（`loopercli proactive-delivery update --enabled true`，高风险，要确认），和投递守卫（`delivery_guard`）一样不放进客户端看得到的 `chat_settings`。关闭时没有任何发送点调用 `deliver`，发出的每条消息和现在一样，也不写 `proactive_deliveries`（测试比对）。
 - 时区读系统设置 `user.timezone`（IANA 名称）；没有或不认识时用服务器时区。v0 只读，编辑入口随每轮上下文那一项加入。
 - 免打扰时段、上限和时区在 v0 不开放修改：第一个发送点（关卡提醒）都是紧急类，不受它们影响；接入第一个会产生「进摘要」的发送点时，再加它们的设置。
 
@@ -76,13 +76,13 @@
 | `kind`、`urgency`、`chat_kind` | 第 1.1 节的输入 |
 | `channel_id`、`chat` | 目标会话 |
 | `task_id`、`step_id`、`schedule_id` | 关联的任务、关卡和定时任务（任务删除时一起删） |
-| `outcome`、`reason`、`counted`、`digest_date` | 判断结果；约束保证只有 `digest` 有 `digest_date`、只有 `send` 能计数。`reason = off` 不是判断：开关关闭时发出、只记一行（度量埋点用），必须是 `send`、不计数 |
+| `outcome`、`reason`、`counted`、`digest_date` | 判断结果；约束保证只有 `digest` 有 `digest_date`、只有 `send` 能计数 |
 | `local_date` | 判断时在 `policy.timezone` 的本地日期，每日上限按它计 |
 | `decided_at`、`sent_at` | 判断（或只记）的时间；渠道接收的时间（发送失败则为空） |
 | `replied_at` | 发出后用户在这个会话里的第一条消息的时间，由度量埋点回填（「30 分钟内有没有回复」由它算）；没发出的不能有 |
 
 - **一次一个：** `decide` 在一个事务里对这个会话加咨询锁，读当天计数、判断、写入，所以两个发送点不会同时拿到当天最后一个额度。
-- **和第 0 期度量的关系：** 这张表由本 PR 建，第 0 期的度量埋点复用它，不另建表、不改列：它让各发送点在开关关闭时也写一行（`reason = off`，只记不拦），回填 `replied_at`，再加指标页。
+- **和第 0 期度量的关系：** 这张表由本 PR 建，第 0 期的度量埋点复用它，不另建表、不改列：它在发送后记回执、回填 `replied_at`，再加指标页；开关关闭时送达层一行都不写。
 - **保留：** v0 只有关卡提醒写入，量很小；接入任务通知时按 30 天加入清理（同 `manager_events`）。
 
 ## 5. 定时任务和订阅的节制字段

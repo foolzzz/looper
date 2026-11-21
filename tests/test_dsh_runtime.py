@@ -51,7 +51,7 @@ def test_dsh_only_server_health_tracks_the_listener_not_claude(tmp_path, monkeyp
         if role == "manager":
             agent = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
 
-            async def no_database():
+            async def no_database(*_args):
                 pass
 
             monkeypatch.setattr(agent, "_load_db_config", no_database)

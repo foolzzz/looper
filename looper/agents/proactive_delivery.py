@@ -25,9 +25,11 @@ message.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
+from typing import Any
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -48,7 +50,7 @@ class DeliveryKind(StrEnum):
     TASK_NOTICE = "task_notice"
     SUBSCRIPTION = "subscription"
     INTENT = "intent"
-    COMPLETION_TURN = "completion_turn"
+    COMPLETION = "completion"  # a completion turn
     USER_REMINDER = "user_reminder"
 
 
@@ -86,8 +88,6 @@ class Reason(StrEnum):
     QUIET_HOURS = "quiet_hours"
     DAILY_CAP = "daily_cap"
     WITHIN_LIMITS = "within_limits"
-    # Never ``deliver``'s: a message sent with the layer off and only recorded (the proactive-message metrics).
-    OFF = "off"
 
 
 @dataclass(frozen=True)
@@ -214,7 +214,9 @@ def deliver(delivery: Delivery, policy: DeliveryPolicy, state: DeliveryState) ->
             not source.active_hours.contains(state.now.astimezone(source.timezone).time()):
         return _later(Reason.OUTSIDE_ACTIVE_HOURS, policy, state)
     spoke = state.last_user_message_at
-    if spoke is not None and state.now - spoke <= policy.recent_reply:  # a later one: clocks apart, still recent
+    # In UTC: two times of one ZoneInfo subtract as wall clocks, an hour off across a DST change. A later one (clocks
+    # apart) is still recent.
+    if spoke is not None and state.now.astimezone(timezone.utc) - spoke.astimezone(timezone.utc) <= policy.recent_reply:
         return Decision(Outcome.SEND, Reason.RECENT_REPLY)
     if policy.quiet_hours is not None and policy.quiet_hours.contains(state.now.astimezone(policy.timezone).time()):
         return _later(Reason.QUIET_HOURS, policy, state)
@@ -258,15 +260,19 @@ async def decide(delivery: Delivery, *, dedupe_key: str, channel_id: str, chat: 
     async with connection.get_pool().acquire() as conn, conn.transaction():
         await db.lock_chat(conn, channel_id, chat)
         if (row := await db.get(conn, dedupe_key)) is not None:
-            return Decision(Outcome(row["outcome"]), Reason(row["reason"]), row["counted"], row["digest_date"])
+            return _decision(row)
         now = now or datetime.now(timezone.utc)
         local_date = now.astimezone(policy.timezone).date()
         state = DeliveryState(now, await db.counted_on(conn, channel_id, chat, local_date), last_user_message_at)
         decision = deliver(delivery, policy, state)
-        await db.insert(conn, {
+        row = await db.insert(conn, {
             "dedupe_key": dedupe_key, "kind": delivery.kind.value, "urgency": delivery.urgency.value,
             "channel_id": channel_id, "chat": chat, "chat_kind": delivery.chat.value, "task_id": task_id,
             "step_id": step_id, "schedule_id": schedule_id, "outcome": decision.outcome.value,
             "reason": decision.reason.value, "counted": decision.counted, "local_date": local_date,
             "digest_date": decision.digest_date, "decided_at": now})
-    return decision
+    return _decision(row)
+
+
+def _decision(row: Mapping[str, Any]) -> Decision:
+    return Decision(Outcome(row["outcome"]), Reason(row["reason"]), row["counted"], row["digest_date"])

@@ -550,12 +550,23 @@ export async function stopChatReply(messageId: string): Promise<{ state: string;
 /** Who tells a direct chat or the dashboard chat that its task ended: the code notice, or the Manager. */
 export type CompletionTurns = "off" | "dm_only";
 
+/** One enabled Lark or Telegram bot whose configuration has no operator id. */
+export interface MissingOperatorBot {
+  channel_id: string;
+  channel_type: string;
+  name: string;
+}
+
 /** The chat's system settings (Settings → Chat). */
 export interface ChatSettings {
   /** Whether a reply can be stopped (Esc, the Stop button, /stop). Experimental; off by default. */
   stop_enabled: boolean;
   /** Whether the Manager tells direct chats and the dashboard chat of a task's end (off by default). */
   completion_turns: CompletionTurns;
+  /** Whether the ledger records what waits, what was decided and who does what. Off by default. */
+  ledger_enabled: boolean;
+  /** Present when an update turns the ledger on: bots with no operator id. Empty when every bot has one. */
+  missing_operator_ids?: MissingOperatorBot[];
 }
 
 /** The task ends of the last 24 hours, by how they were told (``manager_events.summary``). */
@@ -584,7 +595,7 @@ export async function fetchChatSettings(): Promise<ChatSettings> {
 }
 
 export async function updateChatSettings(
-  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null },
+  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; ledger_enabled?: boolean | null },
 ): Promise<ChatSettings> {
   const result = await callV1<ChatSettings>("/api/v1/chat_settings/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
