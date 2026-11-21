@@ -59,6 +59,7 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
+from ..turn_context import SpeakerKind
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
@@ -477,6 +478,9 @@ class ManagerOps:
                     raise OpError(ErrorCode.NOT_THIS_TURN, "this call was not made in the running turn; it did not run")
                 _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
+                if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+                    self._pending.pop(turn.chat_key, None)
+                    raise _OperatorOnly(turn)
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
                 raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn that answers a user's "
@@ -486,6 +490,8 @@ class ManagerOps:
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
                 risk = Risk.HIGH
+                if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+                    raise _OperatorOnly(turn)
                 pending = self._ask(tool, arguments, impact, turn, confirmation=call.confirmation)
                 action_id = await self._record(turn, tool, arguments, risk, "needs_confirmation",
                                                confirmation_id=pending.id)
@@ -502,7 +508,8 @@ class ManagerOps:
             return _error(exc.code, str(exc))
         except OpError as exc:
             await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
-                               result={"message": str(exc)})
+                               result={"reason": "operator_only"} if isinstance(exc, _OperatorOnly)
+                               else {"message": str(exc)})
             return _error(exc.code, str(exc))
         except Exception as exc:
             logger.exception("the Manager's call of %s failed", name)
@@ -816,6 +823,17 @@ class _Recorded(OpError):
 
     def __init__(self, error: OpError) -> None:
         super().__init__(error.code, str(error))
+
+
+class _OperatorOnly(OpError):
+    """A speaker refusal with a typed audit reason, without changing other forbidden errors."""
+
+    def __init__(self, turn: Turn) -> None:
+        message = ("only the operator can authorize this: it was not run and nothing waits for confirmation; "
+                   "tell the speaker that the operator has to ask for it themselves")
+        if turn.operator_id_missing:
+            message += " (this bot has no operator id set)"
+        super().__init__(ErrorCode.FORBIDDEN, message)
 
 
 def _audience(tool: Tool) -> Audience:

@@ -17,15 +17,20 @@ The Manager behavior is wired separately; its v1 operations are ``delivery_guard
 (off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
 second copy. Turning it on names the enabled bots that have no operator id.
 
-Stop, completion turns, research order and delivery guard are kept in memory: ``load`` reads them
+Turn context, timezone and reply language have separate operator-only
+``turn_context_settings.get/update`` operations; they are not client chat settings.
+
+Stop, completion turns, research order, delivery guard and turn context are kept in memory: ``load`` reads them
 at startup and updates refresh them. Until loaded, all are off.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import asdict
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..db import ledger as db_ledger
 from ..db import system_settings as db_settings
@@ -38,6 +43,26 @@ DEFAULT_RESEARCH_ORDER = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
+
+TURN_CONTEXT_KEY = "manager.turn_context.enabled"
+TIMEZONE_KEY = "user.timezone"
+REPLY_LANGUAGE_KEY = "user.reply_language"
+_turn_context_enabled = False
+_timezone: str | None = None
+_reply_language = "zh-CN"
+
+
+def turn_context_enabled() -> bool:
+    return _turn_context_enabled
+
+
+def timezone() -> str | None:
+    return _timezone
+
+
+def reply_language() -> str:
+    return _reply_language
+
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -116,7 +141,14 @@ async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY])
+    global _turn_context_enabled, _timezone, _reply_language
+    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY,
+                                             DELIVERY_GUARD_KEY, TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY])
+    _turn_context_enabled = stored.get(TURN_CONTEXT_KEY) == "true"
+    _timezone = stored.get(TIMEZONE_KEY)
+    _reply_language = stored.get(REPLY_LANGUAGE_KEY, "zh-CN")
+    if _reply_language not in ("zh-CN", "en"):
+        _reply_language = "zh-CN"
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
@@ -189,4 +221,69 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
         view["missing_operator_ids"] = [
             {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
             for bot in await missing()]
+    return view
+
+
+TURN_CONTEXT_FIELDS = ("turn_context_enabled", "timezone", "reply_language")
+
+
+def turn_context_view() -> dict[str, Any]:
+    """Operator-only settings, kept out of the existing client chat view."""
+    from .turn_context import server_zone
+
+    return {"turn_context_enabled": _turn_context_enabled, "timezone": _timezone,
+            "server_timezone": str(server_zone()), "reply_language": _reply_language}
+
+
+def checked_turn_context(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate all named fields before any setting is stored."""
+    if unknown := [key for key in body if key not in TURN_CONTEXT_FIELDS]:
+        raise ValueError(f"unknown turn context setting {unknown[0]!r}")
+    if not body:
+        raise ValueError(f"give at least one of {', '.join(TURN_CONTEXT_FIELDS)} (null: the default)")
+    values: dict[str, Any] = {}
+    if "turn_context_enabled" in body:
+        value = body["turn_context_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("turn_context_enabled must be true, false or null")
+        values["turn_context_enabled"] = value
+    if "timezone" in body:
+        value = body["timezone"]
+        if value is not None:
+            try:
+                if not isinstance(value, str) or not value:
+                    raise ValueError()
+                ZoneInfo(value)
+            except (ValueError, ZoneInfoNotFoundError):
+                raise ValueError("timezone must be a valid IANA timezone name or null") from None
+        values["timezone"] = value
+    if "reply_language" in body:
+        value = body["reply_language"]
+        if value is not None and value not in ("zh-CN", "en"):
+            raise ValueError("reply_language must be zh-CN, en or null")
+        values["reply_language"] = value
+    return values
+
+
+async def update_turn_context(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Store only named fields; null restores the default. A refused body writes nothing."""
+    values = checked_turn_context(body)
+    stored: dict[str, str | None] = {}
+    if "turn_context_enabled" in values:
+        value = values["turn_context_enabled"]
+        stored[TURN_CONTEXT_KEY] = None if value is None else ("true" if value else "false")
+    for field, key in (("timezone", TIMEZONE_KEY), ("reply_language", REPLY_LANGUAGE_KEY)):
+        if field in values:
+            stored[key] = values[field]
+    missing_bots = None
+    if values.get("turn_context_enabled") is True:
+        from .channels.operator_ids import missing
+
+        # A failed lookup must not silently enable the switch.
+        missing_bots = await missing()
+    await db_settings.put_settings(stored)
+    await load()
+    view = turn_context_view()
+    if missing_bots is not None:
+        view["missing_operator_ids"] = [asdict(bot) for bot in missing_bots]
     return view
