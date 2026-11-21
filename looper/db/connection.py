@@ -176,6 +176,7 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_intent_posts_uncertain", "ON intent_posts (updated_at) WHERE state = 'uncertain'"),
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
+_REMINDERS = "reminders"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -531,6 +532,17 @@ def _manager_events_ddl() -> str:
     found = _MANAGER_EVENTS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its manager events block")
+    return found.group(1)
+
+
+_REMINDERS_BLOCK = re.compile(r"-- reminders begin\n(.*?)-- reminders end", re.S)
+
+
+def _reminders_ddl() -> str:
+    """The reminders table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _REMINDERS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its reminders block")
     return found.group(1)
 
 
@@ -973,6 +985,12 @@ async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
     return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
+
+
+async def _reminders_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _REMINDERS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('reminders') IS NOT NULL")
 
 
 async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
@@ -1636,6 +1654,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
         if await _uncertain_deliveries_pending(conn):
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
+        if await _reminders_pending(conn):
+            await conn.execute(_reminders_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REMINDERS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1703,4 +1724,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
-            or await _mid_turn_input_pending(conn)))
+            or await _mid_turn_input_pending(conn)
+            or await _reminders_pending(conn)))
