@@ -39,7 +39,8 @@ def _targets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
     monkeypatch.setattr(service, "operator_sender_id", operator)
     monkeypatch.setattr(schedules, "notify_targets", offered)
-    outbound_hook._known = False
+    # Off at each start, and back as it was at each end: a test that turns it on leaves it on for no other test.
+    monkeypatch.setattr(outbound_hook, "_known", False)
 
 
 def _chat(tmp_path: Path, **kwargs: Any) -> _Chat:
