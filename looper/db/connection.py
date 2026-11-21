@@ -356,7 +356,7 @@ def _run_tree_ddl() -> tuple[str, ...]:
 class _OnlineStep:
     """What a migration finishes after the schema transaction commits, taking no lock that stops reads or writes: it
     validates its NOT VALID constraints (SHARE UPDATE EXCLUSIVE) and builds its indexes concurrently (an index a
-    stopped build left invalid is dropped first). It runs once ``migration``'s marker is there and until its own
+    stopped build left INVALID is dropped and built again; a valid one is kept). It runs once ``migration``'s marker is there and until its own
     ``marker`` is: a start stopped halfway resumes it, and a finished one never runs it again."""
 
     migration: str
@@ -429,8 +429,10 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
             for table, constraint in step.validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
             for name, definition in step.indexes:
-                await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-                await conn.execute(f"CREATE INDEX CONCURRENTLY {name} {definition}")
+                # A build that was stopped leaves its index INVALID: dropped and built again. A valid one stays.
+                if await conn.fetchval("SELECT NOT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)", name):
+                    await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+                await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _ONLINE_LOCK)

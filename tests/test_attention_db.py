@@ -4,6 +4,7 @@ that cannot be read, and the API that serves it."""
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import asyncpg
 import pytest
 
 from looper.agents import api_v1, attention
@@ -238,3 +239,29 @@ def test_a_database_without_the_uncertain_delivery_indexes_builds_them_online(mo
         assert await definitions(pool) == fresh  # built online, as a new database has them
 
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_an_index_a_stopped_build_left_invalid_is_built_again(monkeypatch):
+    async def check(pool):
+        await sup.seed(pool)
+        fresh = await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_manager_events_uncertain' "
+                                    "AND schemaname = current_schema()")
+        await pool.execute("; ".join(f"DROP INDEX {name}" for name, _ in connection._UNCERTAIN_DELIVERY_INDEXES))
+        for key in ("end-1", "end-2"):
+            await pool.execute(
+                "INSERT INTO manager_events (manager_id, kind, task_id, origin, target_kind, channel_id, chat, "
+                "dedupe_key, payload, fallback, state, batch, delivery) VALUES ('manager', 'task_end', 'task-1', "
+                "'chat', 'dm', 'channel-lark', 'ou_me', $1, '{}', '[]', 'delivered', gen_random_uuid(), 'uncertain')",
+                key)
+        # A concurrent build that fails leaves its index behind, INVALID, under the name the step builds.
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await pool.execute("CREATE UNIQUE INDEX CONCURRENTLY idx_manager_events_uncertain "
+                               "ON manager_events (channel_id) WHERE delivery = 'uncertain'")
+        valid = "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('idx_manager_events_uncertain')"
+        assert await pool.fetchval(valid) is False
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval(valid) is True
+        assert await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_manager_events_uncertain' "
+                                   "AND schemaname = current_schema()") == fresh
+
+    run_db(check, monkeypatch, timeout=60)
