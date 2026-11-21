@@ -111,27 +111,36 @@ describe("Dashboard waiting gates", () => {
   });
 
   const metricsSection = () => container.querySelector('section[aria-label="Manager"]')!;
+  /** The browser-local date `back` days before now, as the group names days. */
+  const day = (back: number) => {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - back);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
 
   it("shows the Manager's metrics with a dash for what was not measured, and refetches for 24 hours", async () => {
     vi.mocked(fetchManagerMetrics).mockResolvedValue({
       ...METRICS_OFF, enabled: true, turns: { by_delivery: { reply: 38, empty: 2 } },
       ack: { p50_ms: 1234, p95_ms: 3400, by_chat: {} }, empty: { count: 2, ratio: 0.05 },
       proactive: {
-        per_day: [{ date: "2026-11-19", by_source: { task_notice: 3 } },
-                  { date: "2026-11-20", by_source: { task_notice: 2, gate: 2 } }],
+        per_day: [{ date: day(1), by_source: { task_notice: 3 } },
+                  { date: day(0), by_source: { task_notice: 2, gate: 2 } }],
         reply_rate: { all: 0.5, by_source: { task_notice: 0.6, gate: null } },
       },
     });
     await show();
     const text = metricsSection().textContent!;
-    for (const part of ["1.2 s", "P95 3.4 s", "2 · 5%", "of 40 turns", "1.0 / day", "reply rate 50%",
+    for (const part of ["1.2 s", "P95 3.4 s", "2 · 5%", "turns that delivered no reply, of 40", "1.0 / day", "reply rate 50%",
                         "task notices 2 · gates 2", "task notices 60% · gates —"]) expect(text).toContain(part);
     // The first reply was not measured: a dash, never 0.
     const tiles = [...metricsSection().querySelectorAll("p")].map((p) => p.textContent);
     expect(tiles.slice(tiles.indexOf("First reply (P50)") + 1, tiles.indexOf("First reply (P50)") + 3))
       .toEqual(["—", "P95 —"]);
-    expect([...metricsSection().querySelectorAll("tbody tr")].map((r) => r.firstElementChild!.textContent))
-      .toEqual(["2026-11-20", "2026-11-19"]);
+    // Every local day of the 7-day window, today and 7 back, a day without messages too.
+    const rows = [...metricsSection().querySelectorAll("tbody tr")].map((r) => [...r.children].map((c) => c.textContent));
+    expect(rows.map((r) => r[0])).toEqual([0, 1, 2, 3, 4, 5, 6, 7].map(day));
+    expect(rows[1]).toEqual([day(1), "task notices 3", "3"]);
+    expect(rows[2]).toEqual([day(2), "—", "0"]);
     expect(vi.mocked(fetchManagerMetrics).mock.calls.at(-1)![0]).toBe(7);
     await act(async () => (metricsSection().querySelector('button[aria-pressed="false"]') as HTMLButtonElement).click());
     expect(vi.mocked(fetchManagerMetrics).mock.calls.at(-1)![0]).toBe(1);
@@ -140,7 +149,7 @@ describe("Dashboard waiting gates", () => {
 
   it("says the metrics are off, with the way to Settings → Chat, and shows no figures", async () => {
     await show();
-    expect(metricsSection().textContent).toContain("度量未打开");
+    expect(metricsSection().textContent).toContain("Metrics are off");
     expect(metricsSection().querySelector('a[href="#settings/chat"]')).not.toBeNull();
     expect(metricsSection().textContent).not.toContain("Ack");
     expect(metricsSection().querySelector('[aria-label="Metrics window"]')).toBeNull();  // nothing to window

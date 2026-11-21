@@ -455,12 +455,30 @@ function Stat({ label, value, detail }: { label: string; value: string; detail?:
 }
 
 
+/** A date as YYYY-MM-DD in the browser's zone (the server's, on the machine that serves the dashboard). */
+function localDate(when: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`;
+}
+
+/** Every local day the window touches, newest first: a window of N days spans N + 1 dates (today and N back), and
+ * a day the answer names that falls outside them is kept too, so nothing it counted is dropped. */
+function windowDays(windowDays: number, named: string[], now = new Date()): string[] {
+  const days = new Set(named);
+  for (let back = 0; back <= windowDays; back++) {
+    days.add(localDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - back)));
+  }
+  return [...days].sort().reverse();
+}
+
 function MetricFigures({ metrics }: { metrics: Metrics }) {
   const turns = Object.values(metrics.turns.by_delivery).reduce((sum, n) => sum + n, 0);
   const days = metrics.proactive.per_day;
   const sent = days.reduce((sum, day) => sum + Object.values(day.by_source).reduce((a, n) => a + n, 0), 0);
   const perDay = sent / metrics.window_days;
-  const rows = [...days].reverse().slice(0, 7);
+  const bySource = new Map(days.map((day) => [day.date, day.by_source]));
+  const rows = windowDays(metrics.window_days, days.map((day) => day.date))
+    .map((date) => ({ date, by_source: bySource.get(date) ?? {} }));
   const rates = Object.entries(metrics.proactive.reply_rate.by_source);
   return (
     <div className="space-y-4">
@@ -469,35 +487,33 @@ function MetricFigures({ metrics }: { metrics: Metrics }) {
         <Stat label="First reply (P50)" value={seconds(metrics.first_reply.p50_ms)}
           detail={`P95 ${seconds(metrics.first_reply.p95_ms)}`} />
         <Stat label="Empty deliveries" value={metrics.empty.ratio === null ? "—" : `${metrics.empty.count} · ${percent(metrics.empty.ratio)}`}
-          detail={turns > 0 ? `of ${turns} ${turns === 1 ? "turn" : "turns"}` : "no turn measured"} />
+          detail={turns > 0 ? `turns that delivered no reply, of ${turns}` : "no turn measured"} />
         <Stat label="Proactive messages" value={`${perDay.toFixed(1)} / day`}
           detail={`reply rate ${percent(metrics.proactive.reply_rate.all)}`} />
       </div>
-      {rows.length > 0 && (
-        <table className="w-full text-sm">
-          <caption className="sr-only">Proactive messages by day</caption>
-          <thead>
-            <tr className="border-b border-border text-left text-xs text-muted-foreground">
-              <th scope="col" className="py-1.5 pr-3 font-normal">Day</th>
-              <th scope="col" className="py-1.5 pr-3 font-normal">By source</th>
-              <th scope="col" className="py-1.5 text-right font-normal">Messages</th>
+      <table className="w-full text-sm">
+        <caption className="sr-only">Proactive messages by day</caption>
+        <thead>
+          <tr className="border-b border-border text-left text-xs text-muted-foreground">
+            <th scope="col" className="py-1.5 pr-3 font-normal">Day</th>
+            <th scope="col" className="py-1.5 pr-3 font-normal">By source</th>
+            <th scope="col" className="py-1.5 text-right font-normal">Messages</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border">
+          {rows.map((day) => (
+            <tr key={day.date}>
+              <td className="whitespace-nowrap py-1.5 pr-3 tabular-nums">{day.date}</td>
+              <td className="py-1.5 pr-3 text-muted-foreground">
+                {Object.entries(day.by_source).map(([source, n]) => `${sourceLabel(source)} ${n}`).join(" · ") || "—"}
+              </td>
+              <td className="py-1.5 text-right tabular-nums">
+                {Object.values(day.by_source).reduce((a, n) => a + n, 0)}
+              </td>
             </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {rows.map((day) => (
-              <tr key={day.date}>
-                <td className="whitespace-nowrap py-1.5 pr-3 tabular-nums">{day.date}</td>
-                <td className="py-1.5 pr-3 text-muted-foreground">
-                  {Object.entries(day.by_source).map(([source, n]) => `${sourceLabel(source)} ${n}`).join(" · ")}
-                </td>
-                <td className="py-1.5 text-right tabular-nums">
-                  {Object.values(day.by_source).reduce((a, n) => a + n, 0)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+          ))}
+        </tbody>
+      </table>
       {rates.length > 0 && (
         <p className="text-xs text-muted-foreground">
           Replied within 30 minutes: {rates.map(([source, rate]) => `${sourceLabel(source)} ${percent(rate)}`).join(" · ")}
@@ -558,7 +574,8 @@ function ManagerMetricsSection() {
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : !metrics.enabled ? (
         <p className="text-sm text-muted-foreground">
-          度量未打开：在 <a href="#settings/chat" className={cn("text-primary", linkClass)}>Settings → Chat</a> 打开『记录管家体验指标』后开始记录。
+          Metrics are off. Turn on “记录管家体验指标” in{" "}
+          <a href="#settings/chat" className={cn("text-primary", linkClass)}>Settings → Chat</a> to start recording.
         </p>
       ) : (
         <MetricFigures metrics={metrics} />
