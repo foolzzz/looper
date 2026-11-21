@@ -563,6 +563,39 @@ def test_an_unreadable_reply_with_nothing_left_of_the_cap_fails_the_run_and_keep
     scenario(check, monkeypatch, tmp_path)
 
 
+def test_runs_that_keep_skipping_their_window_are_alerted_once_and_recover_on_one_that_does_not(
+        monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+
+        async def firing(n, outcome):
+            await add(env.pool, f"message {n}", sent_at=minutes_ago(env, 1))
+            fake.outcomes = [outcome]
+            run = await fire(env, sid)
+            return run["status"], run["stream"]["outcome"]
+
+        async def notices():
+            return [dict(row) for row in await env.pool.fetch(
+                "SELECT kind, text FROM schedule_notifications WHERE schedule_id = $1 AND kind LIKE 'skip_%' "
+                "ORDER BY created_at, id", sid)]
+
+        blocked = (None, processor.ProcessorFailure.BLOCKED)
+        assert [await firing(1, blocked), await firing(2, blocked)] == [("completed", "skipped")] * 2
+        # A failed run neither ends nor adds to the streak.
+        assert await firing(3, (None, processor.ProcessorFailure.TIMEOUT)) == ("timed_out", "failed")
+        assert await notices() == []
+        assert await firing(4, blocked) == ("completed", "skipped")
+        [alert] = await notices()
+        assert alert["kind"] == "skip_alert" and "已连续 3 次跳过" in alert["text"] and "hook" in alert["text"]
+        assert "message" not in alert["text"]  # what the messages say is never in it
+        assert await firing(5, blocked) == ("completed", "skipped")
+        assert [n["kind"] for n in await notices()] == ["skip_alert"]  # once per streak
+        assert await firing(6, ("NONE", None)) == ("completed", "quiet")
+        assert [n["kind"] for n in await notices()] == ["skip_alert", "skip_recovered"]
+
+    scenario(check, monkeypatch, tmp_path)
+
+
 def test_a_chat_excluded_while_the_processor_runs_gets_nothing_written_from_it(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await extractor(env)

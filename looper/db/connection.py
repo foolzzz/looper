@@ -342,8 +342,9 @@ _ONLINE_STEPS = (
                             for name in ("state_check", "check_verdict_check", "check_reason_check",
                                          "check_record_id_fkey", "dropped")))),
     _OnlineStep(_RUN_SKIPS, _RUN_SKIPS_ONLINE,
-                validate=tuple(("subscription_runs", f"subscription_runs_{name}")
-                               for name in ("outcome_check", "skip_reason_check", "skipped"))),
+                validate=(*(("subscription_runs", f"subscription_runs_{name}")
+                            for name in ("outcome_check", "skip_reason_check", "skipped")),
+                          ("schedule_notifications", "schedule_notifications_kind_check"))),
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
 )
@@ -901,18 +902,22 @@ async def _leads_check_unvalidated(conn: asyncpg.Connection) -> bool:
 
 
 async def _run_skips_pending(conn: asyncpg.Connection) -> bool:
-    """Whether the subscription runs lack the skip's reason, its constraints, or ``skipped`` among their outcomes.
-    Judged by the catalog: a database that already has them is left alone."""
+    """Whether the subscription runs lack the skip's reason, its constraints, or ``skipped`` among their outcomes, the
+    subscriptions their skip alert, or the notifications its kinds. Judged by the catalog: a database that already
+    has them is left alone (one whose leads check block ran again since, without the kinds, is not)."""
     if not await conn.fetchval("SELECT to_regclass('subscription_runs') IS NOT NULL"):
         return False
     return not await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'subscription_runs'::regclass "
-        "AND attname = 'skip_reason' AND NOT attisdropped) "
+        "SELECT (SELECT count(*) FROM pg_attribute WHERE attnum > 0 AND NOT attisdropped AND "
+        "((attrelid = 'subscription_runs'::regclass AND attname = 'skip_reason') "
+        "OR (attrelid = 'subscriptions'::regclass AND attname = 'skip_alert_at'))) = 2 "
         "AND (SELECT count(*) FROM pg_constraint WHERE conrelid = 'subscription_runs'::regclass "
         "AND conname IN ('subscription_runs_skip_reason_check', 'subscription_runs_skipped')) = 2 "
         "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'subscription_runs'::regclass "
-        "AND conname = 'subscription_runs_outcome_check' AND strpos(pg_get_constraintdef(oid), $1) > 0)",
-        "'skipped'")
+        "AND conname = 'subscription_runs_outcome_check' AND strpos(pg_get_constraintdef(oid), $1) > 0) "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'schedule_notifications'::regclass "
+        "AND conname = 'schedule_notifications_kind_check' AND strpos(pg_get_constraintdef(oid), $2) > 0)",
+        "'skipped'", "'skip_recovered'")
 
 
 def _online_step(migration: str) -> _OnlineStep:

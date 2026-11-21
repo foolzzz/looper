@@ -393,6 +393,23 @@ async def set_check_alert(conn: Db, schedule_id: str, at: datetime | None) -> bo
                               schedule_id, at) == "UPDATE 1"
 
 
+async def skip_streak(conn: Db, schedule_id: str, *, limit: int) -> int:
+    """How many of the subscription's latest completed runs skipped their window in a row, counting at most
+    ``limit``; a run that did not complete neither ends nor adds to it."""
+    rows = await conn.fetch(
+        "SELECT sr.outcome FROM subscription_runs sr JOIN schedule_runs r ON r.id = sr.run_id "
+        "WHERE r.schedule_id = $1 AND r.status = 'completed' ORDER BY r.created_at DESC, r.id DESC LIMIT $2",
+        schedule_id, limit)
+    return next((index for index, row in enumerate(rows) if row["outcome"] != "skipped"), len(rows))
+
+
+async def set_skip_alert(conn: Db, schedule_id: str, at: datetime | None) -> bool:
+    """Start (``at``) or end (None) the subscription's skipped-window alert, once: False when it already was so."""
+    condition = "skip_alert_at IS NULL" if at is not None else "skip_alert_at IS NOT NULL"
+    return await conn.execute(f"UPDATE subscriptions SET skip_alert_at = $2 WHERE schedule_id = $1 AND {condition}",
+                              schedule_id, at) == "UPDATE 1"
+
+
 async def update_run(conn: Db, run_id: str, **fields: Any) -> None:
     unknown = sorted(set(fields) - set(_RUN_FIELDS))
     if unknown:

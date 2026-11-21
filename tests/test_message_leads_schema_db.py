@@ -226,9 +226,14 @@ _RUN_SKIPS_UNDONE = (
     "DROP CONSTRAINT subscription_runs_outcome_check, ADD CONSTRAINT subscription_runs_outcome_check "
     "CHECK (outcome IN ('pending', 'delivering', 'delivered', 'uncertain', 'quiet', 'dashboard_only', "
     "'output_invalid', 'failed', 'extracted')); "
+    "ALTER TABLE subscriptions DROP COLUMN skip_alert_at; "
+    "ALTER TABLE schedule_notifications DROP CONSTRAINT schedule_notifications_kind_check, ADD CONSTRAINT "
+    "schedule_notifications_kind_check CHECK (kind IN ('run', 'failures_alert', 'failures_recovered', 'stale_alert', "
+    "'stale_recovered', 'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered', 'check_alert', "
+    "'check_recovered')); "
     "DELETE FROM schema_migrations WHERE name IN ('run_skips', 'run_skips_online')")
 _RUN_SKIPS_CONSTRAINTS = ["subscription_runs_outcome_check", "subscription_runs_skip_reason_check",
-                          "subscription_runs_skipped"]
+                          "subscription_runs_skipped", "schedule_notifications_kind_check"]
 
 
 async def _skips_validated(pool):
