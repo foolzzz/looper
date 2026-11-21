@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import {
   fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
   type CompletionTurns, type MissingOperatorBot,
+  fetchManagerMetricsSettings, updateManagerMetricsSettings, type ManagerMetricsSettings,
 } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
 
@@ -39,6 +40,9 @@ export function ChatSettingsSection() {
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [metrics, setMetrics] = useState<ManagerMetricsSettings | null>(null);
+  const [metricsError, setMetricsError] = useState("");
+  const [metricsSaving, setMetricsSaving] = useState(false);
   const [missingBots, setMissingBots] = useState<MissingOperatorBot[]>([]);
 
   useEffect(() => {
@@ -48,6 +52,11 @@ export function ChatSettingsSection() {
     }).catch((err: unknown) => {
       if (alive) setError(errorText(err));
     });
+    fetchManagerMetricsSettings().then((value) => {
+      if (alive) setMetrics(value);
+    }).catch((err: unknown) => {
+      if (alive) setMetricsError(errorText(err));
+    });
     fetchCompletionSummary().then((value) => {
       if (alive) setSummary(value);
     }).catch((err: unknown) => {
@@ -56,9 +65,7 @@ export function ChatSettingsSection() {
     return () => { alive = false; };
   }, [attempt]);
 
-  const save = async (body: {
-    stop_enabled?: boolean; completion_turns?: CompletionTurns; ledger_enabled?: boolean; metrics_enabled?: boolean;
-  }) => {
+  const save = async (body: { stop_enabled?: boolean; completion_turns?: CompletionTurns; ledger_enabled?: boolean }) => {
     setSaving(true);
     setError("");
     try {
@@ -71,6 +78,19 @@ export function ChatSettingsSection() {
       setError(errorText(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveMetrics = async (enabled: boolean) => {
+    if (!confirm(enabled ? "开启管家度量？这会记录回合延迟和主动消息的送达与回复。" : "关闭管家度量？这会停止采集，已有记录保留。")) return;
+    setMetricsSaving(true);
+    setMetricsError("");
+    try {
+      setMetrics(await updateManagerMetricsSettings({ enabled }));
+    } catch (err) {
+      setMetricsError(errorText(err));
+    } finally {
+      setMetricsSaving(false);
     }
   };
 
@@ -131,14 +151,15 @@ export function ChatSettingsSection() {
           </div>
           <div className="space-y-1.5">
             <label htmlFor={`${id}-metrics`} className="flex items-center gap-2 text-sm font-medium">
-              <input id={`${id}-metrics`} type="checkbox" checked={settings.metrics_enabled} disabled={saving}
-                     aria-describedby={`${id}-metrics-help`}
-                     onChange={(event) => void save({ metrics_enabled: event.target.checked })} />
+              <input id={`${id}-metrics`} type="checkbox" checked={metrics?.enabled ?? false}
+                     disabled={!metrics || metricsSaving} aria-describedby={`${id}-metrics-help`}
+                     onChange={(event) => void saveMetrics(event.target.checked)} />
               记录管家体验指标
             </label>
             <p id={`${id}-metrics-help`} className="text-xs text-muted-foreground">
               每轮记下回执、首条回复、工具调用次数和是否交付；主动消息记一行。只记录，不改变管家的行为。
             </p>
+            {metricsError && <p role="alert" className="break-words text-sm text-destructive">{metricsError}</p>}
           </div>
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>

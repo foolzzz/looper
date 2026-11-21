@@ -80,7 +80,7 @@ D1–D6 是批准产品设计时定的；D7–D16 是维护者对本文第 16 �
 
 ### 4.1 0.1 度量埋点
 
-**开关：** `manager.metrics.enabled`（系统设置，`'true'` 为开，默认关）。关时回合记录的 `metadata` 和原来一致，`proactive_deliveries` 不写任何行，不多一次数据库写。
+**开关：** 通过仅操作者可用的 `manager_metrics_settings.get`（`{}`）和 `manager_metrics_settings.update`（`{"enabled": true}`，也接受 `false` 或 `null`，高风险、需要确认）读写；两者返回 `{"enabled": boolean}`，`null` 恢复默认关闭。Settings → Chat 使用该独立操作，`chat_settings` 的视图和写入保持不变。`manager.metrics.enabled`（系统设置，`'true'` 为开，默认关）。关时回合记录的 `metadata` 和原来一致，`proactive_deliveries` 不写任何行，不多一次数据库写。
 
 #### 4.1.1 每轮的四个数
 

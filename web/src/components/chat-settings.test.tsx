@@ -17,18 +17,33 @@ const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转
 describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let stored: { stop_enabled: boolean; completion_turns: string; ledger_enabled: boolean; metrics_enabled: boolean };
+  let stored: { stop_enabled: boolean; completion_turns: string; ledger_enabled: boolean };
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
+  let metrics = false;
+  let metricsError = false;
+  let metricsPuts: unknown[];
 
   beforeEach(() => {
-    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false, metrics_enabled: false };
+    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false };
     missing = [];
     summary = SUMMARY;
     puts = [];
+    metrics = false;
+    metricsError = false;
+    metricsPuts = [];
+    vi.stubGlobal("confirm", vi.fn(() => true));
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path.startsWith("/api/v1/manager_metrics_settings/")) {
+        if (path.endsWith("/update")) {
+          metricsPuts.push(JSON.parse(String(init?.body)));
+          if (metricsError) return Response.json({ status: "error", error: { code: "unavailable", message: "Save failed" } }, { status: 503 });
+          metrics = JSON.parse(String(init?.body)).enabled;
+        }
+        return Response.json({ status: "ok", result: { enabled: metrics } });
+      }
       if (path === "/api/v1/manager_events/summary") {
         if (summary === null) {
           return Response.json({ status: "error", error: { code: "forbidden", message: "operator only" } },
@@ -59,6 +74,40 @@ describe("Chat settings", () => {
     vi.unstubAllGlobals();
   });
 
+  it("saves metrics through its own operator setting and preserves it across chat writes", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$='-metrics']") as HTMLInputElement;
+    expect(box).not.toBeNull();
+    expect(box.checked).toBe(false);
+    await act(async () => box.click());
+    expect(metricsPuts).toEqual([{ enabled: true }]);
+    expect(puts).toEqual([]);
+    await act(async () => (container.querySelector("input[id$='-stop']") as HTMLInputElement).click());
+    expect(puts).toEqual([{ stop_enabled: true }]);
+    expect(box.checked).toBe(true);
+  });
+
+  it("names the metrics switch the way the dashboard's off line points to it", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$='-metrics']") as HTMLInputElement;
+    expect(box.closest("label")!.textContent).toBe("记录管家体验指标");
+  });
+
+  it("keeps the metrics value when a change is cancelled or fails", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$='-metrics']") as HTMLInputElement;
+    expect(box).not.toBeNull();
+    vi.mocked(confirm).mockReturnValue(false);
+    await act(async () => box.click());
+    expect(metricsPuts).toEqual([]);
+    expect(box.checked).toBe(false);
+    vi.mocked(confirm).mockReturnValue(true);
+    metricsError = true;
+    await act(async () => box.click());
+    expect(box.checked).toBe(false);
+    expect(container.querySelector("[role=alert]")?.textContent).toContain("Save failed");
+  });
+
   it("shows Stop off with an experimental note, and turns it on", async () => {
     await act(async () => root.render(<ChatSettingsSection />));
     const box = container.querySelector("input[type=checkbox]") as HTMLInputElement;
@@ -67,17 +116,6 @@ describe("Chat settings", () => {
     await act(async () => box.click());
     expect(puts).toEqual([{ stop_enabled: true }]);
     expect((container.querySelector("input[type=checkbox]") as HTMLInputElement).checked).toBe(true);
-  });
-
-  it("turns the Manager's metrics on alone", async () => {
-    await act(async () => root.render(<ChatSettingsSection />));
-    const label = [...container.querySelectorAll("label")].find((l) => l.textContent?.includes("记录管家体验指标"))!;
-    const box = label.querySelector("input") as HTMLInputElement;
-    expect(box.checked).toBe(false);
-    expect(container.textContent).toContain("只记录，不改变管家的行为");
-    await act(async () => box.click());
-    expect(puts).toEqual([{ metrics_enabled: true }]);
-    expect(box.checked).toBe(true);
   });
 
   it("switches the Manager's completion turns on alone, and shows the day's counts", async () => {

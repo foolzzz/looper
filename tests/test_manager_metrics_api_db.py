@@ -4,31 +4,52 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from looper.agents import chat_settings
+from looper.agents import api_v1, chat_settings
 from tests.db_support import DSN, run_db, v1_api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+def test_metrics_setting_is_high_risk_and_separate_from_manager_tools():
+    from looper.agents.ops.service import MANAGER_TOOLS
+
+    for action in ("get", "update"):
+        operation = api_v1.find("POST", f"/api/v1/manager_metrics_settings/{action}")
+        assert operation.operator_only and operation.tool is None
+    assert operation.risk == "high" and operation.confirms
+    assert all(chat_settings.METRICS_ENABLED_KEY not in json.dumps(tool.schema) for tool in MANAGER_TOOLS)
+    import asyncio
+
+    for value in (True, False, None):
+        impact = asyncio.run(api_v1.domain_for(operation).impact(
+            None, operation, {"enabled": value}, api_v1.OPERATOR, {}))
+        assert f"manager.metrics.enabled to {str(bool(value)).lower()}" in impact
 
 
 def test_metrics_switch_is_operator_only_and_reloadable(monkeypatch, tmp_path):
     async def check(pool):
         async with v1_api(tmp_path, pool) as call:
             previous = await chat_settings.settings_view()
-            for arguments in ({"metrics_enabled": True}, {"stop_enabled": True, "metrics_enabled": None}):
-                status, body = await call("chat_settings.update", arguments, client=True)
+            for action in ("get", "update"):
+                status, body = await call(f"manager_metrics_settings.{action}",
+                                          {"enabled": True} if action == "update" else {}, client=True)
                 assert status == 403 and body["error"]["code"] == "forbidden"
-                assert await chat_settings.settings_view() == previous
                 assert await pool.fetchval("SELECT count(*) FROM system_settings") == 0
-            status, body = await call("chat_settings.update", {"metrics_enabled": True, "ledger_enabled": True})
-            assert status == 200 and body["result"]["metrics_enabled"] is True
-            assert body["result"]["ledger_enabled"] is True
-            chat_settings.set_metrics_enabled(False)
-            await chat_settings.load()
-            assert chat_settings.metrics_enabled() is True
-            assert (await call("chat_settings.update", {"metrics_enabled": "yes"}))[0] == 400
-            await call("chat_settings.update", {"metrics_enabled": None})
-            assert chat_settings.metrics_enabled() is False
-            assert (await chat_settings.settings_view())["ledger_enabled"] is True
+            assert (await call("manager_metrics_settings.get"))[1]["result"] == {"enabled": False}
+            for value in (True, False, None):
+                status, body = await call("manager_metrics_settings.update", {"enabled": value})
+                assert status == 200 and body["result"] == {"enabled": bool(value)}
+                chat_settings.set_metrics_enabled(not bool(value))
+                await chat_settings.load()
+                assert chat_settings.metrics_enabled() is bool(value)
+                assert await chat_settings.settings_view() == previous
+            for arguments in ({}, {"enabled": "yes"}, {"enabled": 1}, {"metrics_enabled": True}):
+                assert (await call("manager_metrics_settings.update", arguments))[0] == 400
+            assert await pool.fetchval("SELECT count(*) FROM system_settings") == 0
+            status, body = await call("chat_settings.update", {"stop_enabled": True, "metrics_enabled": True})
+            assert status == 400
+            assert await chat_settings.settings_view() == previous
+            assert await pool.fetchval("SELECT count(*) FROM system_settings") == 0
     run_db(check, monkeypatch)
 
 
@@ -77,12 +98,12 @@ def test_metrics_configuration_round_trip_requires_operator(monkeypatch):
     async def check(pool):
         from looper.agents import config_imports, config_transfer
         from looper.agents.ops import OpError
-        await chat_settings.update({"metrics_enabled": True})
+        await chat_settings.update_metrics(True)
         async with pool.acquire() as conn:
             document = json.loads("".join([part async for part in config_transfer.export_chunks(
                 conn, include_projects=False, include_secrets=False)]))
             assert document["settings"]["chat"] == {"metrics_enabled": True}
-            await chat_settings.update({"metrics_enabled": False})
+            await chat_settings.update_metrics(False)
             with pytest.raises(OpError):
                 await config_imports.authorize(document, "client")
             await config_imports.authorize(document, "operator")

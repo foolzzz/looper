@@ -23,13 +23,13 @@ def test_the_stop_setting_is_stored_and_loaded(monkeypatch: pytest.MonkeyPatch, 
     async def test(pool: Any) -> None:
         async with _api(tmp_path, pool, None) as (call, _):
             assert await chat_settings.load() is False
-            assert (await call("chat_settings.get"))[1]["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "metrics_enabled": False}
+            assert (await call("chat_settings.get"))[1]["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             assert (await call("chat_settings.update", {"stop_enabled": True}))[1]["result"] == {
-                "stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "metrics_enabled": False}
+                "stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             chat_settings.set_stop_enabled(False)  # a restart
             assert await chat_settings.load() is True
             assert (await call("chat_settings.update", {"stop_enabled": None}))[1]["result"] == {
-                "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "metrics_enabled": False}
+                "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             assert await chat_settings.load() is False
 
     run_db(test, monkeypatch, timeout=30)
@@ -43,7 +43,7 @@ def test_the_completion_turns_setting_is_stored_alone_and_loaded(monkeypatch: py
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
             await call("chat_settings.update", {"stop_enabled": True})
             status, answer = await call("chat_settings.update", {"completion_turns": "dm_only", "research_order": False, "ledger_enabled": False})
-            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "dm_only", "research_order": False, "ledger_enabled": False, "metrics_enabled": False}
+            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "dm_only", "research_order": False, "ledger_enabled": False}
             chat_settings.set_completion_turns(chat_settings.CompletionTurns.OFF)  # a restart
             await chat_settings.load()
             assert chat_settings.completion_turns() is chat_settings.CompletionTurns.DM_ONLY

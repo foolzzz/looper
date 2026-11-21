@@ -30,9 +30,14 @@ only the receipt, preserving the first decision. Nullable `decision`, `reason`,
 cap and digest fields are reserved for the delivery layer's future `decide()`
 write point.
 Off, turns have no metrics key and sends add no writes.
-Only `metrics_enabled` in `chat_settings.update` requires operator identity;
-existing stop, completion and research controls retain their client access.
-The dashboard presentation is a separate change.
+The operator-only operations `manager_metrics_settings.get` (body `{}`) and
+`manager_metrics_settings.update` (body `{"enabled": true}`, `false` or `null`)
+read and store the switch; null restores off. Update is high risk and declares
+confirmation; Settings → Chat confirms the change before saving it. Both return
+`{"enabled": boolean}`. `manager_metrics.get` remains the read of measurements.
+Existing `chat_settings` views, schemas and writes stay unchanged for clients.
+The generated CLI exposes the same operations; Lark and Telegram need no new
+control because configuration is operator-only. Dashboard metric widgets are separate.
 
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
