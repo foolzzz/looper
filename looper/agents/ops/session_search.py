@@ -218,8 +218,9 @@ def _audit(result: Any) -> dict[str, Any]:
     return {"message_ids": ids, "count": len(ids)}
 
 
+REFUSAL = "the user's earlier conversations are searched only in their own direct chat or on the dashboard"
 TOOL = RestrictedTool(
-    name=TOOL_NAME, risk=Risk.READ, audience=Audience.OPERATOR, audit_result=_audit, run=_run,
+    name=TOOL_NAME, risk=Risk.READ, audience=Audience.OPERATOR, audit_result=_audit, run=_run, refusal=REFUSAL,
     description="Search the user's earlier conversations with you (the dashboard chat, their own direct chats with "
                 "you, and their dashboard chats with tasks' Planners) for the words of query, in Chinese or English: "
                 "a message matches a word it holds, or most of the word's characters. Best matches first, up to "

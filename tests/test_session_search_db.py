@@ -162,7 +162,7 @@ def test_only_the_users_own_turns_of_the_default_manager_have_it(monkeypatch: py
             assert TOOL not in _names(await ops.current_listing(turn)), turn
             answer = await _search(ops, turn)
             assert answer["status"] == "error" and answer["error"]["code"] == "forbidden", (turn, answer)
-            assert "looper_session_search runs only in the user's own direct chat" in answer["error"]["message"]
+            assert answer["error"]["message"] == session_search.REFUSAL
         scenario = ManagerDefinition(
             id="manager-desk", name="Desk", description="", system_prompt="p", profile_id=None,
             tools=ManagerTools.ALL, task_scope=TaskScope.ALL, task_policy=TaskPolicy.FREE, enabled=True,
