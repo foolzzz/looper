@@ -17,8 +17,13 @@ The Manager behavior is wired separately; its v1 operations are ``delivery_guard
 (off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
 second copy. Turning it on names the enabled bots that have no operator id.
 
-Stop, completion turns, research order and delivery guard are kept in memory: ``load`` reads them
-at startup and updates refresh them. Until loaded, all are off.
+``manager.session_routing.enabled`` and ``manager.sessions.max_resident``: whether the default Manager gives each
+group and each other sender's direct chat a session of its own, and how many sessions keep a process resident
+(``session_routing``; off, and 2). Operator-only. Turning routing on names the enabled bots that have no operator
+id: their direct chats stay in the main session.
+
+Stop, completion turns, research order, delivery guard and the session routing settings are kept in memory: ``load``
+reads them at startup and updates refresh them. Until loaded, all are off.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
+from . import session_routing
 from ..db import ledger as db_ledger
 from ..db import system_settings as db_settings
 
@@ -37,7 +43,9 @@ RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
-FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled", "session_routing_enabled",
+          "max_resident")
+OPERATOR_FIELDS = ("ledger_enabled", "session_routing_enabled", "max_resident")  # only the operator sets them
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -116,7 +124,9 @@ async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY])
+    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY,
+                                             session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY])
+    session_routing.apply_stored(stored)
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
@@ -131,7 +141,9 @@ async def load() -> bool:
 async def settings_view() -> dict[str, Any]:
     """The settings in effect. ``ledger_enabled`` is the stored row (``db.ledger.enabled``), not a copy in memory."""
     return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value,
-            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled()}
+            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled(),
+            "session_routing_enabled": session_routing.routing_enabled(),
+            "max_resident": session_routing.max_resident()}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -161,6 +173,14 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("ledger_enabled must be true, false or null")
         values["ledger_enabled"] = value
+    if "session_routing_enabled" in body:
+        value = body["session_routing_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("session_routing_enabled must be true, false or null")
+        values["session_routing_enabled"] = value
+    if "max_resident" in body:
+        value = body["max_resident"]
+        values["max_resident"] = None if value is None else session_routing.checked_max_resident(value)
     return values
 
 
@@ -180,10 +200,16 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if "ledger_enabled" in values:
         value = values["ledger_enabled"]
         stored[db_ledger.ENABLED_KEY] = None if value is None else ("true" if value else "false")
+    if "session_routing_enabled" in values:
+        value = values["session_routing_enabled"]
+        stored[session_routing.ROUTING_KEY] = None if value is None else ("true" if value else "false")
+    if "max_resident" in values:
+        value = values["max_resident"]
+        stored[session_routing.MAX_RESIDENT_KEY] = None if value is None else str(value)
     await db_settings.put_settings(stored)
     await load()
     view = await settings_view()
-    if values.get("ledger_enabled") is True:
+    if values.get("ledger_enabled") is True or values.get("session_routing_enabled") is True:
         from .channels.operator_ids import missing
 
         view["missing_operator_ids"] = [
