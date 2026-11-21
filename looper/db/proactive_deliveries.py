@@ -58,5 +58,5 @@ async def summary(days: int) -> dict[str, Any]:
 async def purge(before: datetime) -> int:
     result = await get_pool().execute(
         "DELETE FROM proactive_deliveries WHERE id IN "
-        "(SELECT id FROM proactive_deliveries WHERE sent_at < $1 LIMIT 5000)", before)
+        "(SELECT id FROM proactive_deliveries WHERE COALESCE(sent_at, decided_at) < $1 LIMIT 5000)", before)
     return int(result.split()[-1])

@@ -1,5 +1,6 @@
 """Proactive posts and bus notices reach PostgreSQL after delivery through the Lark stand-in."""
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,35 @@ from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType,
 from looper.agents.task_notice import Notice, NotifyChannel, NotifyTarget, TargetKind
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+def test_channel_receipt_updates_the_existing_gate_reminder_decision(monkeypatch, tmp_path, lark_cli_stand_in):
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+
+    async def check(pool):
+        now = datetime.now(timezone.utc)
+        decision = dict(await pool.fetchrow(
+            "INSERT INTO proactive_deliveries (source, source_ref, channel_id, chat, chat_kind, dedupe_key, "
+            "decision, reason, counted, local_date, decided_at, urgency, step_id) "
+            "VALUES ('gate_reminder', 'synthetic-gate', 'channel-lark', $1, 'direct', 'gate_message:17', "
+            "'send', 'urgent', false, $2, $3, 'blocking', 'synthetic-gate') RETURNING *", OPEN_ID, now.date(), now))
+        assert decision["outcome"] is None and decision["sent_at"] is None
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+        registry = ChannelRegistry(SimpleNamespace())
+        registry._channels[adapter.channel_id] = adapter
+        receipt = await registry.post(adapter.channel_id, NotifyTarget(TargetKind.USER, OPEN_ID), "A reminder",
+            idempotency_key="gate-17", **turn_metrics.proactive_kwargs(
+                turn_metrics.ProactiveSource.GATE_REMINDER, "synthetic-gate", dedupe_key="gate_message:17"))
+        assert receipt.success and receipt.external_ids
+        await asyncio.gather(*turn_metrics._pending)
+        rows = await pool.fetch("SELECT * FROM proactive_deliveries")
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert now <= row["sent_at"] <= datetime.now(timezone.utc)
+        assert row == {**decision, "outcome": "sent", "external_id": receipt.external_ids[0], "sent_at": row["sent_at"]}
+
+    run_db(check, monkeypatch)
 
 
 def test_registry_and_bus_notice_record_their_typed_sources(monkeypatch, tmp_path, lark_cli_stand_in):

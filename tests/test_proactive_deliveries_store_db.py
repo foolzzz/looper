@@ -52,6 +52,9 @@ def test_delivery_table_has_nullable_decision_columns_and_one_migration(upgrade,
         expected.update(counted="boolean", local_date="date", digest_date="date", decided_at="timestamp with time zone")
         assert {row["column_name"]: row["data_type"] for row in columns if row["column_name"] in expected} == expected
         assert all(row["is_nullable"] == "YES" for row in columns if row["column_name"] in expected)
+        counted_index = await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() "
+                                            "AND indexname='idx_proactive_deliveries_counted'")
+        assert counted_index.endswith("(channel_id, chat, local_date) WHERE counted")
         from looper.db import proactive_deliveries as store
         row = {"source": "gate", "channel_id": "synthetic-channel", "chat": "synthetic-chat",
                "chat_kind": "group", "outcome": "sent"}
@@ -89,6 +92,28 @@ def test_housekeeping_retains_ninety_days_and_drains_batches_only_when_enabled(m
         assert report.proactive_deliveries == 5001 and not report.failed_steps
         assert await pool.fetchval("SELECT array_agg(sent_at ORDER BY sent_at) FROM proactive_deliveries") == [cutoff, now]
         assert (await housekeeping.run_once(tmp_path, now, current_runner=None, commands=None)).proactive_deliveries == 0
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("decision", ["digest", "drop"])
+def test_purge_unsent_decisions_uses_decided_at_and_preserves_the_cutoff(decision, monkeypatch):
+    async def check(pool):
+        from looper.db import proactive_deliveries as store
+        now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        cutoff = now - timedelta(days=store.RETENTION_DAYS)
+        for ref, decided in (("expired", cutoff - timedelta(seconds=1)), ("boundary", cutoff), ("recent", now)):
+            await pool.execute("INSERT INTO proactive_deliveries (source, source_ref, channel_id, chat, chat_kind, "
+                               "decision, decided_at) VALUES ('subscription', $1, 'synthetic-channel', "
+                               "'synthetic-chat', 'direct', $2, $3)", ref, decision, decided)
+        # A recent receipt takes precedence over the older policy decision.
+        await pool.execute("INSERT INTO proactive_deliveries (source, source_ref, channel_id, chat, chat_kind, "
+                           "decision, decided_at, outcome, sent_at) VALUES ('gate_reminder', 'sent', "
+                           "'synthetic-channel', 'synthetic-chat', 'direct', 'send', $1, 'sent', $2)",
+                           cutoff - timedelta(seconds=1), now)
+        assert await store.purge(cutoff) == 1
+        assert await pool.fetchval("SELECT array_agg(source_ref ORDER BY id) FROM proactive_deliveries") == [
+            "boundary", "recent", "sent"]
+        assert await store.purge(cutoff) == 0
     run_db(check, monkeypatch)
 
 
