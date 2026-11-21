@@ -395,7 +395,7 @@ NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
-    "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
+    "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
 
@@ -1673,8 +1673,8 @@ class ManagerAgent:
             self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
         if self._claude.stale(signature):
             await token.keep("claude_stop", self._stop_replaced_session(), 30)
-        if not self._claude.started:
-            # With session routing on: room under the resident cap, or a wait for it (``SessionRouter.admit``).
+        if not self._claude.started and session_routing.routes(self.agent_id):
+            # Room under the resident cap, or a wait for it (``SessionRouter.admit``).
             await token.step("resident_admission", self._router.admit(session, envelope))
         command = self._claude.command if self._claude.started else await token.step("claude_command", asyncio.to_thread(
             self._claude_command, prepared.prompt_file, launch))
