@@ -169,7 +169,20 @@ _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
+_UNCERTAIN_DELIVERIES = "uncertain_deliveries"
+# The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
+_UNCERTAIN_DELIVERY_INDEXES = (
+    ("idx_subscription_deliveries_uncertain", "ON subscription_deliveries (updated_at) WHERE state = 'uncertain'"),
+    ("idx_intent_posts_uncertain", "ON intent_posts (updated_at) WHERE state = 'uncertain'"),
+    ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
+)
 _CHAT_DIRECT_THREADS = "chat_direct_threads"
+_SEARCH_TOKENS = "search_tokens"
+# The session search's index, as schema.sql creates it after the search tokens block.
+_SEARCH_INDEXES = (
+    ("idx_chat_messages_search",
+     "ON chat_messages USING gin (array_to_tsvector(looper_search_tokens(content))) WHERE role IN ('user', 'assistant')"),
+)
 _LEADS_TRIGRAM = "leads_trigram"
 # pg_trgm for the leads' full-text search (assistant search RFC, section 4), in the schema public whatever schema
 # Looper's tables are in, so every schema of the database shares one: created when the database lets this user
@@ -364,7 +377,8 @@ def _run_tree_ddl() -> tuple[str, ...]:
 class _OnlineStep:
     """What a migration finishes after the schema transaction commits, taking no lock that stops reads or writes: it
     validates its NOT VALID constraints (SHARE UPDATE EXCLUSIVE) and builds its indexes concurrently (an index a
-    stopped build left invalid is dropped first). It runs once ``migration``'s marker is there and until its own
+    stopped build left INVALID, or one of an older definition under the same name, is dropped and built again; a
+    valid one that is what the step builds is kept). It runs once ``migration``'s marker is there and until its own
     ``marker`` is: a start stopped halfway resumes it, and a finished one never runs it again."""
 
     migration: str
@@ -404,7 +418,41 @@ _ONLINE_STEPS = (
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
+    # The delivery tables can be large: their partial indexes are built without blocking writes.
+    _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
+    # chat_messages can be large: the session search's index is built without blocking writes.
+    _OnlineStep(_SEARCH_TOKENS, "search_tokens_online", indexes=_SEARCH_INDEXES),
 )
+
+
+_INDEX_PROBE = "looper_index_probe"
+
+
+async def _index_kept(conn: asyncpg.Connection, name: str, definition: str) -> bool:
+    """Whether the index ``name`` is there, valid and the same as ``definition`` (``ON <table> ...``) would build.
+    The comparison is PostgreSQL's own text of each (``pg_get_indexdef`` from ``USING`` on, uniqueness too): the
+    definition is built on an empty copy of its table in a transaction that is rolled back, so nothing is scanned
+    and no lock blocks the table's writers."""
+    existing = await conn.fetchrow("SELECT indisvalid, pg_get_indexdef(indexrelid) AS definition FROM pg_index "
+                                   "WHERE indexrelid = to_regclass($1)", name)
+    if existing is None or not existing["indisvalid"]:
+        return False
+    table = re.match(r"ON\s+(\w+)\s", definition)
+    if table is None:
+        raise ValueError(f"an online index definition starts with ON <table>: {definition!r}")
+    probe = conn.transaction()
+    await probe.start()
+    try:
+        await conn.execute(f"CREATE TEMP TABLE {_INDEX_PROBE} (LIKE {table.group(1)})")
+        await conn.execute(f"CREATE INDEX {_INDEX_PROBE}_index ON {_INDEX_PROBE} {definition[table.end():]}")
+        wanted = await conn.fetchval("SELECT pg_get_indexdef(to_regclass($1))", f"{_INDEX_PROBE}_index")
+    finally:
+        await probe.rollback()
+
+    def shape(text: str) -> tuple[bool, str]:
+        return text.startswith("CREATE UNIQUE INDEX"), text.split(" USING ", 1)[1]
+
+    return shape(existing["definition"]) == shape(wanted)
 
 
 async def _finish_online(conn: asyncpg.Connection) -> None:
@@ -437,8 +485,12 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
             for table, constraint in step.validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
             for name, definition in step.indexes:
+                # Kept only when it is valid and is the index the step builds: one a stopped build left INVALID,
+                # or an older definition under the same name, is dropped and built again.
+                if await _index_kept(conn, name, definition):
+                    continue
                 await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-                await conn.execute(f"CREATE INDEX CONCURRENTLY {name} {definition}")
+                await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _ONLINE_LOCK)
@@ -481,6 +533,17 @@ def _leads_check_ddl() -> str:
 
 
 _CHAT_DIRECT_THREADS_BLOCK = re.compile(r"-- chat direct threads begin\n(.*?)-- chat direct threads end", re.S)
+
+
+_SEARCH_TOKENS_BLOCK = re.compile(r"-- search tokens begin\n(.*?)-- search tokens end", re.S)
+
+
+def _search_tokens_ddl() -> str:
+    """The search tokens function, as schema.sql defines it."""
+    found = _SEARCH_TOKENS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its search tokens block")
+    return found.group(1)
 
 
 def _chat_direct_threads_ddl() -> str:
@@ -651,6 +714,15 @@ async def _processor_role_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_setting_layers') "
         "AND conname = 'agent_setting_layers_role_check' "
         "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'processor'")
+
+
+async def _uncertain_deliveries_pending(conn: asyncpg.Connection) -> bool:
+    """A database without the partial indexes of uncertain deliveries: the migration only records itself, and its
+    online step builds them after the commit (a new database has them from schema.sql)."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _UNCERTAIN_DELIVERIES):
+        return False
+    return not await conn.fetchval("SELECT bool_and(to_regclass(name) IS NOT NULL) FROM unnest($1::text[]) AS name",
+                                   [name for name, _ in _UNCERTAIN_DELIVERY_INDEXES])
 
 
 async def _headless_compaction_pending(conn: asyncpg.Connection) -> bool:
@@ -999,6 +1071,12 @@ async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MESSAGE_LEADS):
         return False
     return not await conn.fetchval("SELECT to_regclass('message_leads') IS NOT NULL")
+
+
+async def _search_tokens_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SEARCH_TOKENS):
+        return False
+    return not await conn.fetchval("SELECT to_regprocedure('looper_search_tokens(text)') IS NOT NULL")
 
 
 async def _chat_direct_threads_pending(conn: asyncpg.Connection) -> bool:
@@ -1619,9 +1697,14 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in await _outbound_reviews_ddl(conn):
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
+        if await _uncertain_deliveries_pending(conn):
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
         if await _chat_direct_threads_pending(conn):
             await conn.execute(_chat_direct_threads_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_DIRECT_THREADS)
+        if await _search_tokens_pending(conn):
+            await conn.execute(_search_tokens_ddl())  # its index is built online, after this commits
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SEARCH_TOKENS)
         if await _leads_trigram_pending(conn):
             await conn.execute(_LEADS_TRIGRAM_DDL)
             if state != "empty":  # a fresh database records only its baseline; it is tried again next start
@@ -1678,6 +1761,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _outbound_reviews_pending(conn)
+            or await _uncertain_deliveries_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _decision_snapshots_pending(conn)
@@ -1693,4 +1777,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
             or await _mid_turn_input_pending(conn)
-            or await _chat_direct_threads_pending(conn) or await _leads_trigram_pending(conn)))
+            or await _chat_direct_threads_pending(conn) or await _search_tokens_pending(conn)
+            or await _leads_trigram_pending(conn)))
