@@ -1,0 +1,96 @@
+"""One Manager conversation's state (``ManagerSession``), apart from the Manager that runs it.
+
+``ManagerAgent`` keeps its sessions by key, only ``MAIN_SESSION`` for now. Its turn code reads and writes the
+session it runs on through properties under the attributes' old names (``session_field``): the session a context
+sets (``ManagerAgent._current``), else main.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Any
+
+from ..run_usage import Usage
+
+if TYPE_CHECKING:
+    from ..agent_settings import Launch
+    from ..runtimes import ResidentSession, RuntimeAdapter
+    from ..session_switch import SessionSwitch
+    from ..system_prompt import SystemPrompt
+    from .state_view import StateShown
+    from .turn_token import TurnToken
+
+MAIN_SESSION = "main"
+
+
+@dataclass(frozen=True)
+class _Process:
+    """What the resident Claude was started with; a turn on it is recorded with these."""
+
+    command: list[str]
+    signature: Any
+    system_prompt: SystemPrompt
+    launch: Launch
+
+
+@dataclass(eq=False, kw_only=True)
+class ManagerSession:
+    """Everything that belongs to one Manager conversation: its resident runtime, its saved session, its turn lock
+    and the turn holding it, and what the next turn is told."""
+
+    key: str
+    # The resident Claude: started on the first chat message, then fed one
+    # user turn per message; restarted when its system prompt changes.
+    claude: ResidentSession
+    claude_runtime: RuntimeAdapter  # the runtime type whose session claude is
+    session_id: str | None = None
+    # The session's running totals (cost and tokens) at its last result. A process that resumes the
+    # session starts from them, so its first turn records only its own share.
+    session_totals: Usage = field(default_factory=Usage)
+    # The runtime type and the provider the session belongs to and the Agent Profile that ran it last (None:
+    # a session saved before they were recorded).
+    session_runtime: str | None = None
+    session_profile: str | None = None
+    session_provider: str | None = None
+    turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    process: _Process | None = None  # what the running Claude was started with
+    # Why the session was last dropped and the handoff its old session wrote, until the new session's first
+    # turn has its resume brief.
+    pending_switch: SessionSwitch | None = None
+    pending_handoff: str | None = None
+    # The user dropped the session (/new): the next one starts without a resume brief. Saved with the session,
+    # so a restart before the next message keeps it; cleared once the new session has started.
+    clean_start: bool = False
+    session_loaded: bool = False  # whether the saved session was read (at start, else before the first turn)
+    # The last whole "Looper state" block the session got (``state_view``); in memory only, so the first turn
+    # after a restart sends it whole. None: none a turn may refer to, for ``state_lost``'s reason.
+    state_shown: StateShown | None = None
+    state_lost: str = "no whole block yet"
+    # Moves on when the session's context may have lost what earlier turns showed: a compaction it reported, a
+    # turn it runs on its own (whose stream is not read for one). A turn rendered before it moved starts whole
+    # and leaves no block behind.
+    state_generation: int = 0
+    # Told to the next user turn: the user stopped or withdrew the ones before.
+    stopped_notes: list[str] = field(default_factory=list)
+    lock_owner: TurnToken | None = None  # the turn that holds ``turn_lock`` from its preparation
+    running_token: TurnToken | None = None  # the token of the user turn being answered
+    last_activity: float
+
+
+_FIELDS = frozenset(f.name for f in fields(ManagerSession))
+
+
+def session_field(name: str) -> Any:
+    """A ``ManagerAgent`` property under the old name of one of its session attributes: it reads and writes field
+    ``name`` of the session the code runs on (``ManagerAgent._session_now``)."""
+    if name not in _FIELDS:
+        raise AttributeError(f"ManagerSession has no field {name!r}")
+
+    def get(agent: Any) -> Any:
+        return getattr(agent._session_now(), name)
+
+    def set_(agent: Any, value: Any) -> None:
+        setattr(agent._session_now(), name, value)
+
+    return property(get, set_, doc=f"``ManagerSession.{name}`` of the session the code runs on.")
