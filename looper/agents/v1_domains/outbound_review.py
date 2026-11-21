@@ -3,7 +3,7 @@ checked before it runs, and which enabled Managers run on a runtime the review c
 declarations of the MCP tools that act only inside (``mcp_tool_levels``), which run without a review."""
 
 from .. import outbound_hook
-from ..api_v1 import Operation, _array, _object, _BOOL, _STR
+from ..api_v1 import Operation, _array, _object, _summary, _BOOL, _STR
 from ..ops import ErrorCode, OpError
 
 _MANAGER = _object({"manager_id": _STR, "name": _STR, "runtime": _STR}, closed=True)
@@ -14,22 +14,22 @@ RESULTS = {}
 
 
 def _op(name, description, request, result, risk="read"):
-    return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), description, description,
+    return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), _summary(description), description,
                      request, result, risk=risk, confirms=risk == "high", operator_only=True)
 
 
 OPERATIONS = (
-    _op("outbound_review.get", "Read whether the outbound review is on, and the enabled Managers whose runtime has "
-                               "no tool hook (the review cannot be turned on while there are any).",
+    _op("outbound_review.get", "Read whether the outbound review is on, and the enabled Managers it cannot hook. "
+                               "The review cannot be turned on while an enabled Manager's runtime has no tool hook.",
         _object({}, closed=True), SETTINGS),
     _op("outbound_review.update", "Turn the outbound review on or off. On, each tool call of a Manager that may "
                                   "leave this machine is checked by the outbound_check role first.",
         _object({"enabled": _BOOL}, ["enabled"], closed=True), SETTINGS, "high"),
-    _op("mcp_tool_levels.get", "Read the tools of an MCP server declared inside: their calls run without the "
+    _op("mcp_tool_levels.get", "Read the tools of an MCP server declared inside. Their calls run without the "
                                "outbound review; every other tool of the server is reviewed.",
         _object({"item_id": _STR}, ["item_id"], closed=True), DECLARED),
-    _op("mcp_tool_levels.put", "Declare exactly these tools of an MCP server inside (they act only inside Looper and "
-                               "this machine): their calls run without the outbound review.",
+    _op("mcp_tool_levels.put", "Declare exactly these tools of an MCP server inside, acting only on this machine. "
+                               "Their calls run without the outbound review.",
         _object({"item_id": _STR, "inside_tools": {**_array(_STR), "maxItems": 200}}, ["item_id", "inside_tools"],
                 closed=True), DECLARED, "high"),
 )
