@@ -11,11 +11,12 @@ import copy
 import functools
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import looper
+from .action_levels import ActionLevel
 
 from .ops import ErrorCode, ErrorDetails, OpError, Tool
 
@@ -32,6 +33,7 @@ STATUS: dict[ErrorCode, str] = {
     ErrorCode.INVALID: "400 Bad Request",
     ErrorCode.UNAUTHORIZED: "401 Unauthorized",
     ErrorCode.FORBIDDEN: "403 Forbidden",
+    ErrorCode.BLOCKED: "403 Forbidden",
     ErrorCode.NOT_FOUND: "404 Not Found",
     ErrorCode.CONFLICT: "409 Conflict",
     ErrorCode.EXPIRED: "410 Gone",
@@ -108,6 +110,10 @@ class Operation:
     stream_description: str | None = None
     stream_events: Mapping[str, Any] | None = None
     audit_operator: bool = True  # dashboard operations may opt out of the Manager/client action trail
+    # Where a call reaches (the outbound-review RFC, section 4): ``level``, or ``level_of`` its arguments when they
+    # decide it. Not in the OpenAPI document.
+    level: ActionLevel = ActionLevel.INSIDE
+    level_of: Callable[[Mapping[str, Any]], Awaitable[ActionLevel]] | None = None
 
 
 def _summary(description: str) -> str:

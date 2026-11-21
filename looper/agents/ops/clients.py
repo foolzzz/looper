@@ -15,9 +15,10 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...db import manager_actions as db_actions, projects as db_projects, tasks as db_tasks, user_gates as db_user_gates
@@ -197,8 +198,11 @@ class ClientOps:
 
     async def call(self, principal: Principal, session: str, name: str, raw: Any, *,
                    tool: Tool | None = None, validator: Callable[[Mapping[str, Any], Any], dict[str, Any]] = check_arguments,
-                   require_confirmation: bool = True) -> dict[str, Any]:
-        """Run one operation for ``principal``; the protocol's answer (``ok``, ``needs_confirmation`` or ``error``)."""
+                   require_confirmation: bool = True,
+                   level_of: Callable[[Mapping[str, Any]], Awaitable[Any]] | None = None) -> dict[str, Any]:
+        """Run one operation for ``principal``; the protocol's answer (``ok``, ``needs_confirmation`` or ``error``).
+        ``level_of`` is where an ``/api/v1`` operation's call reaches (``Operation.level``); a client tool's is its
+        own (``ops.levels``)."""
         if not SESSION.fullmatch(session):
             return _error(ErrorCode.INVALID, "X-Looper-Session: 1–64 of letters, digits, '.', '_', ':' or '-'")
         tool = tool or self.tools.get(name)
@@ -213,6 +217,9 @@ class ClientOps:
         try:
             arguments = validator(tool.schema, raw)
             risk = tool.risk_of(arguments)
+            if principal.kind != "operator" and risk is not Risk.READ \
+                    and (blocked := await self._outbound_check(principal, turn, tool, arguments, risk, level_of)):
+                return blocked
             call = Call(arguments, turn, self._platform)
             impact = await tool.escalate(call) if tool.escalate is not None else None
             if impact is not None:
@@ -275,6 +282,34 @@ class ClientOps:
                                                  "the operation again later")
         await self._record(turn, tool, arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
         return _ok(result, turn)
+
+    async def _outbound_check(self, principal: Principal, turn: Turn, tool: Tool, arguments: Mapping[str, Any],
+                              risk: Risk, level_of: Callable[[Mapping[str, Any]], Awaitable[Any]] | None
+                              ) -> dict[str, Any] | None:
+        """The ``blocked`` answer when the outbound review stops an API client's call (``ops.review``): a client is
+        never the operator, so code blocks every ``external`` call it makes (RFC D17); None while the review is off or
+        for any other call. The operator's own calls are not reviewed (RFC section 6.1)."""
+        from .. import outbound, outbound_hook
+        from . import levels, review as layer_one
+
+        if not outbound_hook.known_enabled():  # read at startup, set by its switch
+            return None
+        level = await level_of(arguments) if level_of is not None else await levels.level_of(tool, arguments, turn)
+        if level not in outbound.REVIEWED:
+            return None
+        action = layer_one.action_of(tool.name, arguments, level)
+        checked = await outbound.review(
+            action, outbound.Asker(outbound.Who.ALLOWLISTED_PERSON, API_CHANNEL),
+            outbound.Origin(f"client:{principal.client_id}", outbound.Source.TOOL, channel=API_CHANNEL,
+                            chat=turn.chat), runtime_root=self._platform.runtime_root or Path.cwd())
+        if checked.allowed:
+            return None
+        message = outbound_hook.BLOCKED_MESSAGE.format(reason=checked.reason.rstrip("."))
+        await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.BLOCKED.value,
+                           result={"message": message})
+        await outbound_hook.notify_blocked(f"client {principal.client_name or principal.client_id}", tool.name,
+                                           action.target, checked.reason, checked.review_id)
+        return _error(ErrorCode.BLOCKED, message)
 
     @staticmethod
     async def _run(tool: Tool, call: Call) -> Any:

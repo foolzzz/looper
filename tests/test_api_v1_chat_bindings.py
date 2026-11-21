@@ -157,7 +157,7 @@ def test_operator_request_crosses_transport_to_domain(tmp_path, monkeypatch, ope
     async def run():
         async with _serving(tmp_path) as server:
             # Use the ordinary operation callback, without requiring a database audit fixture.
-            async def call(principal, session, name, data, *, tool, validator):
+            async def call(principal, session, name, data, *, tool, validator, level_of=None):
                 return {"status": "ok", "result": await tool.run(SimpleNamespace(arguments=validator(tool.schema, data), confirmation={}))}
 
             server._client_ops = SimpleNamespace()

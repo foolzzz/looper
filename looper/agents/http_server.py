@@ -768,8 +768,12 @@ class AgentHTTPServer:
             tool = Tool(name=operation.operation_id, description=operation.description, schema=operation.request or {},
                         risk=Risk(operation.risk), run=run,
                         escalate=impact if callable(getattr(domain, "impact", None)) else None)
+            async def level(arguments: Mapping[str, Any]) -> Any:
+                # where the operation's call reaches, for the outbound review (``Operation.level``)
+                return await operation.level_of(arguments) if operation.level_of is not None else operation.level
+
             answer = await self._call_v1(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
-                                         tool.name, data, tool=tool,
+                                         tool.name, data, tool=tool, level_of=level,
                                          validator=getattr(domain, "validate_arguments", api_v1.validate_arguments))
             if answer.get("status") == "error":
                 log_refusal(logger, operation, principal, answer["error"]["code"])
@@ -1068,6 +1072,13 @@ class AgentHTTPServer:
                 writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing()}))
             except OpError as exc:
                 writer.write(_json_response(HTTP_503, {"error": str(exc)}))
+        elif path == f"{AGENT_API}outbound/check" and method == "POST":
+            # The outbound review's hook in the Manager's Claude Code (outbound_hook): its answer for one tool call.
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(payload)))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
@@ -1093,6 +1104,13 @@ class AgentHTTPServer:
             writer.write(_json_response(
                 HTTP_503, {"error": "this run is being adopted after a restart; retry shortly"},
                 headers={"Retry-After": "2"}))
+        elif path == f"{AGENT_API}outbound/check" and method == "POST":
+            # The outbound review's hook in a step's run of a task outside content went into (RFC section 6.3).
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(header, payload)))
         elif path == f"{AGENT_API}tools" and method == "GET":
             answer = {"tools": ops.listing(header)}
             if (retry_safety := ops.retry_safety(header)) is not None:
