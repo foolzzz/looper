@@ -3,6 +3,7 @@ input against a frozen synthetic sample, and every rule of parsing a reply. Pure
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -166,6 +167,29 @@ def test_anything_else_than_none_or_an_object_with_the_list_is_invalid(reply):
 def test_the_object_is_found_inside_prose_or_among_several_fences(wrap):
     found = parsed_leads(wrap.format(leads(lead())))
     assert found.state == "items" and len(found.items) == 1 and found.items[0]["sources"] == [101]
+
+
+def test_a_reply_too_long_to_search_whole_is_unreadable_even_with_one_object_found():
+    reply = '{"leads": []} ' + "{} " * 199 + leads(lead())
+    found = parsed_leads(reply)
+    assert found.state == "invalid" and found.reason
+
+
+@pytest.mark.parametrize("cost, timeout_s, failure", [(0.6, 60.0, "budget"), (0.01, 0.5, "timeout")])
+def test_an_unreadable_reply_with_no_cap_or_time_left_to_ask_again_is_that_failure_not_a_skip(cost, timeout_s,
+                                                                                               failure):
+    from looper.agents import processor
+
+    asks: list[str] = []
+
+    async def run(reminder: str, budget_usd: float, left_s: float) -> processor.ProcessorRun:
+        asks.append(reminder)
+        return processor.ProcessorRun("Sure, here you go.", 7, cost)
+
+    asked = asyncio.run(extraction.ask(run, parsed_leads, budget_usd=0.6, timeout_s=timeout_s))
+    assert asks == [""] and (asked.skipped, asked.parsed) == (None, None)
+    assert asked.result.failure.value == failure and "could not be read" in asked.result.detail
+    assert (asked.result.record_id, asked.cost_usd) == (7, cost)
 
 
 def test_a_fenced_object_is_read_and_unknown_fields_are_ignored_at_every_level():

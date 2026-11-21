@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from .claude_cli import ClaudeRunRecorder
 
 TREE_WATCH_SEC = 0.2  # how often a running process's tree is read
+# What is kept of the result of a turn a prompt hook blocked, whose text echoes the prompt: its typed fields only.
+BLOCKED_RESULT_FIELDS = ("type", "subtype", "is_error", "duration_ms", "duration_api_ms", "num_turns", "session_id",
+                         "total_cost_usd", "usage", "modelUsage", "stop_reason", "uuid")
 STDERR_TAIL_CHARS = 2000
 
 
@@ -50,7 +53,7 @@ class Finished(NamedTuple):
     started: bool  # whether it began a session (Claude Code names it in its init event)
     timed_out: bool  # whether it ran over the deadline
     # Why a Claude Code prompt hook refused the turn (``claude_cli.prompt_block``), when one did: no model turn ran,
-    # and the result's text is the hook's notice and the prompt echoed back, never an answer.
+    # and its result, whose text echoes the prompt, is recorded and given with its typed fields only.
     blocked: str | None = None
 
 
@@ -99,6 +102,8 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
         async for event in runtime.parse_process(process, model=launch.model, launch=launch):
             if (refused := prompt_block(event, cwd)) is not None:
                 blocked = refused.reason
+            if blocked is not None and event.get("type") == "result":
+                event = {key: event[key] for key in BLOCKED_RESULT_FIELDS if key in event}
             if event.get("type") == "result":
                 # Read before the record is awaited, which a stop may cut short.
                 known.update(await asyncio.to_thread(proc_tree.tree_of, process))
@@ -144,8 +149,7 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
                 if not background.done():
                     background.cancel()
             await asyncio.gather(draining, watching, return_exceptions=True)
-            # A blocked turn's result echoes the prompt: it is not the run's output.
-            output = None if blocked is not None else str((result or {}).get("result") or "") or None
+            output = str((result or {}).get("result") or "") or None
             if quiet:
                 output = output if result is not None and unsuccessful(result) is None else None
             elif error and stderr_tail:

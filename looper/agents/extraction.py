@@ -34,7 +34,7 @@ import re
 import time as time_
 from collections import Counter
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
 from enum import Enum
 from typing import Any
@@ -413,6 +413,8 @@ def _reply_object(kind: str, text: str) -> tuple[Any, str]:
         if isinstance(value, dict) and kind in value and value not in found:
             found.append(value)
         at = text.find("{", end)
+    if at != -1:  # what was not searched may hold another answer
+        return None, f"the reply has more than {_OBJECT_TRIES} places a JSON object could start"
     if len(found) == 1:
         return found[0], ""
     if found:  # which one it meant is a guess: asked again instead
@@ -875,7 +877,9 @@ async def ask(run: Callable[[str, float, float], Awaitable[processor.ProcessorRu
     """Ask the processor over one window, ``run(reminder, budget_usd, timeout_s)``, and read its reply with ``read``
     (the module's notes, step 3). A window a prompt hook blocks is skipped at once. A reply that cannot be read is
     asked for once more with ``REFORMAT_REMINDER``, within what is left of ``budget_usd`` and ``timeout_s``; still
-    unreadable, the window is skipped. Any other failure is the last run's, for the caller."""
+    unreadable, the window is skipped. With nothing left of either to ask again, the run fails as over its cap
+    (``BUDGET``) or its deadline (``TIMEOUT``), so the window is kept. Any other failure is the last run's, for the
+    caller."""
     started = time_.monotonic()
     result, cost, reminded = await run("", budget_usd, timeout_s), None, False
     while True:
@@ -887,9 +891,16 @@ async def ask(run: Callable[[str, float, float], Awaitable[processor.ProcessorRu
         parsed = read(result.reply or "")
         if parsed.state != "invalid":
             return Asked(result, parsed, cost)
-        left_usd, left_s = budget_usd - (cost or 0.0), timeout_s - (time_.monotonic() - started)
-        if reminded or left_usd <= 0 or left_s < 1:
+        if reminded:
             return Asked(result, parsed, cost, SkipReason.INVALID_REPLY)
+        left_usd, left_s = budget_usd - (cost or 0.0), timeout_s - (time_.monotonic() - started)
+        if left_usd <= 0 or left_s < 1:
+            failure, left = ((processor.ProcessorFailure.BUDGET, f"nothing is left of its cap of {budget_usd:g} USD")
+                             if left_usd <= 0 else
+                             (processor.ProcessorFailure.TIMEOUT, f"less than a second is left of its {timeout_s:g} s"))
+            return Asked(replace(result, reply=None, failure=failure,
+                                 detail=f"its reply could not be read ({parsed.reason}) and {left} to ask again"),
+                         None, cost)
         logger.info("the processor's reply could not be read (%s): asking once more", parsed.reason)
         result, reminded = await run(REFORMAT_REMINDER, round(left_usd, 6), left_s), True
 
@@ -907,7 +918,7 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
     run skipped its window (``skip_reason``) and, when
     ``advance_to`` is given, the cursor. An ``extracted`` run that stored nothing is ``quiet``. With ``held`` (the run's snapshot and the Profile it launched with), the schedule's row is locked first
     (a change or a confirmation waits, or has committed) and the confirmation checked again: when it no longer holds
-    nothing is stored, the run is ``cancelled`` and the cursor stays."""
+    nothing is stored or skipped, the run is ``cancelled`` and the cursor stays."""
     from .subscriptions import digest
 
     now = runs._clock()
@@ -917,11 +928,12 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
             stream = await db_subs.get_run(run_id, db=conn)
             if run is None or stream is None or run["status"] != db_schedules.RUNNING:
                 raise _Finished
-            if store is not None and held is not None:
+            if held is not None:
                 await conn.execute("SELECT 1 FROM schedules WHERE id = $1 FOR NO KEY UPDATE", run["schedule_id"])
                 if problem := await confirmation_problem(conn, run["schedule_id"], held["snapshot"],
                                                          profile=held.get("profile"), checker=held.get("checker")):
                     store, advance_to, summary, status, outcome = None, None, None, "cancelled", "failed"
+                    skip_reason = None
                     error = f"nothing was stored: {problem}; the next confirmed run reads its window again"
             counts = dict(await store(conn)) if store is not None else None
             line = count_line(kind, counts) if counts is not None else None
@@ -1007,8 +1019,11 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                       budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout))
     result, parsed = asked.result, asked.parsed
     if asked.skipped is not None:
+        # Moving past the window is checked against the confirmation as storing is: a scope widened meanwhile has
+        # more in it.
         await end(status="completed", outcome="skipped", skip_reason=asked.skipped, cost=asked.cost_usd,
-                  advance_to=found.last_seq, summary=SKIPPED_SUMMARY[asked.skipped])
+                  advance_to=found.last_seq, summary=SKIPPED_SUMMARY[asked.skipped],
+                  held={"snapshot": snapshot, "profile": result.profile})
         return found.more
     if parsed is None:
         assert result.failure is not None

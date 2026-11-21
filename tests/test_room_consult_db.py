@@ -659,6 +659,16 @@ def test_a_question_no_consult_can_answer_goes_to_the_planner_with_why(
         notice = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'notice'")
         assert notice["audience"] == ["fe_rd@s2"]
         assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 0
+        if mode == "blocked":  # the echo is in no record: neither its output nor its events
+            assert "a Claude Code hook blocked its prompt: blocked by policy" in consult["detail"]
+            assert not await pool.fetchval("SELECT count(*) FROM llm_record_events WHERE strpos(event::text, $1) > 0",
+                                           "Original prompt:")
+            assert not await pool.fetchval("SELECT count(*) FROM llm_records WHERE strpos(output_text, $1) > 0",
+                                           "Original prompt:")
+            # Its result is recorded with its typed fields only.
+            blocked = ("SELECT count(*) FROM llm_record_events WHERE event->>'type' = 'result' "
+                       "AND event->>'num_turns' = '0'")
+            assert await pool.fetchval(blocked) == 1 and not await pool.fetchval(blocked + " AND event ? 'result'")
 
     run_db(test, monkeypatch)
 

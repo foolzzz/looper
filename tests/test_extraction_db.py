@@ -524,6 +524,45 @@ def test_a_scope_changed_while_the_processor_runs_stores_nothing_and_keeps_the_c
     scenario(check, monkeypatch, tmp_path)
 
 
+@pytest.mark.parametrize("outcomes", [[(None, "blocked")], [("prose", None), ("prose again", None)]])
+def test_a_window_skipped_under_a_scope_changed_meanwhile_is_cancelled_and_keeps_the_cursor(
+        monkeypatch, tmp_path, outcomes):
+    async def check(env, poster, fake):
+        sid = await extractor(env, subscription={"include_chats": ["oc_allowed"]})
+        await _two_chats(env, sid)
+        before = await cursor(env, sid)
+
+        async def widen():
+            fake.during = None
+            await env.ok("POST", "/api/v1/schedule_admin/update",
+                         {"schedule_id": sid, "fields": {"subscription": {"include_chats": []}}})
+
+        fake.during = widen
+        fake.outcomes = [(reply, processor.ProcessorFailure(failure) if failure else None)
+                         for reply, failure in outcomes]
+        run = await fire(env, sid)
+        # The widened scope's window was never read: moving past it would skip what it now takes in.
+        assert (run["status"], run["stream"]["outcome"], run["stream"]["skip_reason"]) == ("cancelled", "failed", None)
+        assert "nothing was stored" in run["error"] and await cursor(env, sid) == before
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_an_unreadable_reply_with_nothing_left_of_the_cap_fails_the_run_and_keeps_the_window(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+        before = await cursor(env, sid)
+        await add(env.pool, "something", sent_at=minutes_ago(env, 5))
+        fake.cost = 0.6  # the preset's whole cap: nothing is left to ask again with
+        fake.outcomes = [("Here are the leads: none really.", None)]
+        run = await fire(env, sid)
+        assert (run["status"], run["stream"]["outcome"], run["stream"]["skip_reason"]) == ("failed", "failed", None)
+        assert "(budget)" in run["error"] and len(fake.calls) == 1 and await cursor(env, sid) == before
+        assert run["cost_usd"] == pytest.approx(0.6)
+
+    scenario(check, monkeypatch, tmp_path)
+
+
 def test_a_chat_excluded_while_the_processor_runs_gets_nothing_written_from_it(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await extractor(env)
