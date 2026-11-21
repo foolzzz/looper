@@ -6,7 +6,7 @@ Manager will, after each turn, apply ``decide`` to that turn's context and cost,
 the decision says, cap each turn's spend at the budget (``turn_cap``) and answer a turn stopped there with
 ``over_cap_reply``. The context limit is the one setting resident sessions share with schedule Planners
 (``scheduler.session_context_max_tokens``), and the bound is #1473's ``schedule_session.session_bound``: one
-threshold and one cost rule.
+threshold and one cost rule, except that an unknown turn cost does not trigger the Manager's cost rule.
 
 Everything here is a pure function of typed inputs, except the setting's read and write. The setting is the
 operator's alone: the v1 operations ``session_budget.get`` and ``session_budget.update`` are operator-only, and no
@@ -22,6 +22,7 @@ from enum import Enum
 from typing import Any
 
 from ..db import system_settings as db_settings
+from .project_execution import format_usd
 from .schedule_session import BoundReason, session_bound
 
 TURN_BUDGET_KEY = "manager.turn_budget_usd"
@@ -82,11 +83,14 @@ def decide(context_tokens: int | None, last_turn_cost_usd: float | None, *, budg
     - Context unknown: keep. The Manager measures every turn, so one turn its runtime did not measure is no reason
       to rotate (unlike a schedule's Planner, which runs rarely).
     - Over ``max_tokens``: compact when the runtime can compact a resident session headlessly, else rotate.
-    - At least half of ``max_tokens`` and the turn cost more than half the budget (or an unknown cost): rotate.
+    - At least half of ``max_tokens`` and the known turn cost more than half the budget: rotate.
+      Unlike #1473, an unknown cost skips the cost rule; context alone can still compact or rotate.
     """
     if budget_usd is None or context_tokens is None:
         return KEEP
-    bound = session_bound(context_tokens, last_turn_cost_usd, budget_usd, max_tokens, reports_context=False)
+    bound = session_bound(context_tokens, last_turn_cost_usd,
+                          budget_usd if last_turn_cost_usd is not None else None,
+                          max_tokens, reports_context=False)
     if bound is None:
         return KEEP
     if bound.reason is BoundReason.CONTEXT and can_compact:
@@ -123,7 +127,7 @@ def turn_cap(budget_usd: float | None, *, priced: bool) -> TurnCap:
 
 def over_cap_reply(budget_usd: float) -> str:
     """The fixed reply to a turn its spend stopped at the budget (RFC 5.4)."""
-    return (f"这一轮的花费到了单轮上限 ${budget_usd:.2f}，已经停下。已经做了的工具调用没有撤销。"
+    return (f"这一轮的花费到了单轮上限 ${format_usd(budget_usd)}，已经停下。已经做了的工具调用没有撤销。"
             "可以换个问法再问，或发 /new。")
 
 

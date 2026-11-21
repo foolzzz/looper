@@ -20,7 +20,12 @@ MAX = 100_000
     (MAX + 1, 0.1, 4.0, False, Decision(Action.ROTATE, BoundReason.CONTEXT, MAX + 1)),
     (MAX // 2, 2.01, 4.0, True, Decision(Action.ROTATE, BoundReason.COST, MAX // 2)),
     (MAX // 2, 2.0, 4.0, True, budget.KEEP),  # half the budget is not over it
-    (MAX // 2, None, 4.0, True, Decision(Action.ROTATE, BoundReason.COST, MAX // 2)),  # #1473's rule
+    (MAX // 2 - 1, None, 4.0, True, budget.KEEP),
+    (MAX // 2, None, 4.0, True, budget.KEEP),
+    (60_000, None, 4.0, True, budget.KEEP),
+    (MAX, None, 4.0, True, budget.KEEP),
+    (MAX + 1, None, 4.0, True, Decision(Action.COMPACT, BoundReason.CONTEXT, MAX + 1)),
+    (MAX + 1, None, 4.0, False, Decision(Action.ROTATE, BoundReason.CONTEXT, MAX + 1)),
     (MAX // 2 - 1, 9.0, 4.0, True, budget.KEEP),  # a small context with a high cost
 ])
 def test_what_a_turn_decides(context, cost, budget_usd, can_compact, expected):
@@ -53,8 +58,9 @@ def test_the_per_turn_cap(budget_usd, priced, expected):
     assert budget.turn_cap(budget_usd, priced=priced) is expected
 
 
-def test_the_over_cap_reply_is_the_rfc_text_with_the_budget():
-    assert budget.over_cap_reply(4.0) == ("这一轮的花费到了单轮上限 $4.00，已经停下。已经做了的工具调用没有撤销。"
+@pytest.mark.parametrize("budget_usd,amount", [(4.0, "4"), (0.004, "0.004")])
+def test_the_over_cap_reply_is_the_rfc_text_with_the_budget(budget_usd, amount):
+    assert budget.over_cap_reply(budget_usd) == (f"这一轮的花费到了单轮上限 ${amount}，已经停下。已经做了的工具调用没有撤销。"
                                           "可以换个问法再问，或发 /new。")
 
 
