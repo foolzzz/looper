@@ -68,6 +68,9 @@ class Kind(str, Enum):
     # An extraction subscription's second check (``check_items``) failing run after run, and done again.
     CHECK_ALERT = "check_alert"
     CHECK_RECOVERED = "check_recovered"
+    # A subscription's runs skipping their window (``skip_reason``) run after run, and one using its window again.
+    SKIP_ALERT = "skip_alert"
+    SKIP_RECOVERED = "skip_recovered"
 
 
 @dataclass(frozen=True)
@@ -280,6 +283,22 @@ def check_recovered_text(schedule: Mapping[str, Any], project_name: str, run: Ma
             f"{schedule_link(base, schedule)}")
 
 
+SKIP_WORDS = {"blocked_by_hook": "提示词被本机 Claude Code 的 hook 拦下", "invalid_reply": "处理器的回复两次都读不了"}
+
+
+def skip_alert_text(schedule: Mapping[str, Any], project_name: str, skips: int, reason: str, *,
+                    base: str = "") -> str:
+    return (f"告警：订阅「{schedule['name']}」（项目 {project_name}）已连续 {skips} 次跳过了它的消息窗口"
+            f"（最近一次：{SKIP_WORDS.get(reason, reason)}），这些消息没有整理。\n{schedule_link(base, schedule)}")
+
+
+def skip_recovered_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], *,
+                        base: str = "") -> str:
+    when = _local(run.get("finished_at") or run["scheduled_for"], schedule["timezone"])
+    return (f"恢复：订阅「{schedule['name']}」（项目 {project_name}）又整理了它的消息窗口（{when}）。\n"
+            f"{schedule_link(base, schedule)}")
+
+
 def stale_alert_text(schedule: Mapping[str, Any], project_name: str, deadline: datetime, *, base: str = "") -> str:
     since = (f"上次成功：{_local(schedule['last_ok_at'], schedule['timezone'])}" if schedule.get("last_ok_at")
              else "还没有成功过")
@@ -349,6 +368,29 @@ class Notifier:
                                 run_id=run_id)
         if schedule["kind"] == "subscription":
             await self._check_streak(schedule, project_name, run, now)
+            await self._skip_streak(schedule, project_name, run, now)
+
+    async def _skip_streak(self, schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any],
+                           now: datetime) -> None:
+        """A subscription's runs that skipped their window: after as many in a row as the schedule's failure alert
+        waits for (3 by default; a run that did not complete neither ends nor adds to them), alert once; the next
+        completed run that did not skip recovers."""
+        from ..db import subscriptions as db_subs
+
+        pool = db_connection.get_pool()
+        stream = await db_subs.get_run(run["id"], db=pool)
+        if stream is None or run["status"] != "completed":
+            return
+        if stream["outcome"] == "skipped":
+            threshold = alert_policy(schedule).failures_after
+            skips = await db_subs.skip_streak(pool, schedule["id"], limit=threshold)
+            if skips >= threshold and await db_subs.set_skip_alert(pool, schedule["id"], now):
+                await self._deliver(schedule, Kind.SKIP_ALERT,
+                                    skip_alert_text(schedule, project_name, skips, stream["skip_reason"],
+                                                    base=self._base), run_id=run["id"])
+        elif await db_subs.set_skip_alert(pool, schedule["id"], None):
+            await self._deliver(schedule, Kind.SKIP_RECOVERED,
+                                skip_recovered_text(schedule, project_name, run, base=self._base), run_id=run["id"])
 
     async def _check_streak(self, schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any],
                             now: datetime) -> None:

@@ -887,6 +887,21 @@ describe("subscription schedules", () => {
     expect(container.querySelector("details pre")?.textContent).toBe("- gossip");
   });
 
+  it("says why a run skipped its window", async () => {
+    const run = {
+      run_id: "run-2", status: "completed", trigger: "scheduled", firings: 1, scheduled_for: "2026-11-19T10:05:00Z",
+      subscription: { from_seq: 10, to_seq: 31, events_in_window: 21, events_selected: 21, events_too_old: 0, events_over_cap: 0,
+        record_id: null, outcome: "skipped", skip_reason: "blocked_by_hook", output_text: null, notification_id: null },
+    } as unknown as ScheduleRunInfo;
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
+      if (url === "/api/v1/schedule_admin/runs") return Response.json({ status: "ok", result: { runs: [run], next_before: null,
+        routine_skips: { skipped_gate: 0, skipped_overlap: 0 } } });
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    await act(async () => root.render(<RunHistory schedule={subscription(null)} open version={0} />));
+    expect(container.textContent).toContain("Skipped (a prompt hook blocked it)");
+  });
+
   it("offers the subscription type for a new schedule and sends its stream with the create", async () => {
     const writes: Record<string, unknown>[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
