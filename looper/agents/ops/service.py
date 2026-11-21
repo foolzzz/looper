@@ -51,7 +51,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from ... import child_env
 from .. import chat_settings
@@ -129,6 +129,7 @@ class _Pending:
     at: float
     confirmation: dict[str, Any]
     answer_turn: str | None = None  # the message of the turn that may confirm it, once it started
+    impact: str = ""  # what it does, as the block says it
 
 
 # The Manager's tools (a task's Planner has its own, ``ops.planner``).
@@ -464,8 +465,7 @@ class ManagerOps:
             if tool.name != CONFIRM_TOOL:
                 tool = await self._authorize(scope, name, arguments)
             if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
-                raise OpError(ErrorCode.FORBIDDEN, "message leads are searched only in the user's own direct chat "
-                                                   "or on the dashboard")
+                raise OpError(ErrorCode.FORBIDDEN, cast(RestrictedTool, tool).refusal)
             _check_answering(turn)
             matched_turn = turn if enforced else bound
             if (matched_turn is not None and matched_turn.require_match and binding
@@ -558,7 +558,8 @@ class ManagerOps:
             turn.blocks.remove(earlier.block)  # asked in this turn too: only the newest stands
         block = f"需要你确认：\n{impact}\n回复「确认」就执行；回复别的就不执行。"
         pending = _Pending(id=f"c-{uuid.uuid4().hex[:12]}", tool=tool, arguments=arguments, block=block,
-                           asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation))
+                           asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation),
+                           impact=impact)
         self._pending[turn.chat_key] = pending
         while len(self._pending) > CONFIRMATION_CHATS:
             self._pending.pop(next(iter(self._pending)))
@@ -745,6 +746,18 @@ class ManagerOps:
     def asks_in(self, message_id: str) -> bool:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())
+
+    def waiting_confirmations(self) -> list[dict[str, Any]]:
+        """The operations that wait for the user's word now, oldest first: asked, no turn answering them yet, and
+        within ``CONFIRMATION_SECONDS``. Read only (the "needs you" summary, ``agents.attention``)."""
+        now = self._clock()
+        waiting = sorted(((key, pending) for key, pending in self._pending.items()
+                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS),
+                         key=lambda item: item[1].at)
+        return [{"confirmation_id": pending.id, "tool": pending.tool.name, "impact": pending.impact,
+                 "channel": channel, "channel_id": channel_id, "chat": chat, "waited_seconds": int(now - pending.at),
+                 "expires_in_seconds": max(0, int(CONFIRMATION_SECONDS - (now - pending.at)))}
+                for (channel, channel_id, chat), pending in waiting]
 
     def forget_confirmations(self) -> None:
         """Drop every waiting confirmation (the Manager's session was reset)."""
