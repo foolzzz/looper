@@ -5511,8 +5511,11 @@ A Manager's confirmation and a user gate can be answered with one press of a
 card's button ([Card buttons RFC](rfcs/assistant-card-actions-v0.zh-CN.md);
 `looper/agents/card_actions.py`). It is off until the system setting
 `cards.actions.enabled` is `true`; the dashboard has no switch yet. Off,
-nothing is stored, replies carry no cards and gate messages go as text; on or
-off, what the model sees of a confirmation is the same.
+nothing is stored, replies carry no cards, gate messages go as text, a Lark
+press gets the plain acknowledgement and a Telegram press no answer, as before;
+on or off, what the model sees of a confirmation is the same. Lark card writes
+go through one object, `lark.CardWrites`, which takes the outbound gateway
+when the channel has one.
 
 - **Where.** The bot-token Lark channel (`lark_bot`: card JSON 2.0, its
   presses as `card.action.trigger` events on its long connection, answered in
@@ -5526,8 +5529,10 @@ off, what the model sees of a confirmation is the same.
   minutes for a confirmation, 7 days for a gate) and what became of it
   (`handled_at`, `handled_by`, `handled_via` `button`, `typed` or `lapsed`,
   `choice`, `outcome`). A row is claimed once, by one statement.
-- **A press** is answered by code: a sender the bot does not admit there, or
-  one not in `allowed`, is told 「只有发起人能确认」; a card handled or expired
+- **A press** is answered by code: a sender the bot would not admit a message
+  from in that chat (its allowlist, the binding's extra senders, or anyone in
+  a group bound with `sender_policy` `chat`), or one not in `allowed`, is told
+  「只有发起人能确认」; a card handled or expired
   「已处理」, one whose parameters changed 「已失效，请看最新的消息」. Else the
   row is claimed and acted on, the answer (a toast and the card as it is now)
   comes within 2.5 s, and a card whose action takes longer is updated when it
