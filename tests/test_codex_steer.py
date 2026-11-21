@@ -80,6 +80,8 @@ def response(request, result):
     emit({"id": request["id"], "result": result})
 
 def finish(text):
+    if mode == "limits":
+        notify("account/rateLimits/updated", rateLimits={"primary": {"usedPercent": 91, "windowDurationMins": 300}})
     notify("item/completed", item={"id": "command-1", "type": "commandExecution", "command": "sleep 1",
                                   "aggregatedOutput": "done\n", "exitCode": 0, "status": "completed"})
     notify("item/completed", item={"id": "answer-1", "type": "agentMessage", "text": text,
@@ -1062,3 +1064,27 @@ def test_room_steer_after_last_tool_keeps_report_even_with_queued_output(blocked
             await iterator.aclose()
 
     asyncio.run(asyncio.wait_for(run(), 3))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_rate_limit_notification_is_forwarded_only_when_enabled(app_server, tmp_path, monkeypatch, enabled):
+    from looper.agents import limit_signals
+    from looper.db import system_settings
+    executable, _ = app_server
+    monkeypatch.setenv("FAKE_CODEX_MODE", "limits")
+    monkeypatch.setattr(system_settings, "get_settings", AsyncMock(
+        return_value={limit_signals.KEY: "true"} if enabled else {}))
+
+    async def run():
+        async with _channel(executable, tmp_path) as (channel, process):
+            await channel.start("synthetic")
+            events = await asyncio.wait_for(_collect(channel), 5)
+            await process.wait()
+            return events
+
+    events = asyncio.run(run())
+    signals = [event for event in events if event["type"] == limit_signals.CODEX_EVENT]
+    assert len(signals) == int(enabled)
+    if enabled:
+        assert signals[0]["rateLimits"]["primary"]["usedPercent"] == 91
+    assert events[-1]["type"] == "result" and not events[-1]["is_error"]

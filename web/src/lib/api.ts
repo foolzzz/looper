@@ -45,6 +45,51 @@ export interface SelfCheck {
   fix: string;
 }
 
+export interface ProviderLimitWindow {
+  window_name: string;
+  status: "allowed" | "warning" | "rejected";
+  utilization: number | null;
+  resets_at: string | null;
+  window_minutes: number | null;
+  source: string;
+  record_id: number | null;
+  observed_at: string;
+}
+
+export interface ProviderDailyUsage {
+  day: string;
+  runs: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  cache_creation_input_tokens: number | null;
+  cost_usd: number | null;
+  quota_failures: number | null;
+}
+
+export interface ProviderLimits {
+  enabled: boolean;
+  providers: {
+    provider_id: string;
+    name: string;
+    cost_basis: "api_equivalent" | "reported";
+    windows: ProviderLimitWindow[];
+    usage: ProviderDailyUsage[];
+    admission: null;
+  }[];
+}
+
+export async function fetchProviderLimits(providerId: string, signal?: AbortSignal): Promise<ProviderLimits> {
+  const result = await callV1<ProviderLimits>("/api/v1/providers/limits", { provider_id: providerId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export function updateLimitSignalsSettings(enabled: boolean, confirmation?: V1PendingConfirmation) {
+  return confirmation ? confirmV1<{ enabled: boolean }>(confirmation.confirmation_id, confirmation.session)
+    : callV1<{ enabled: boolean }>("/api/v1/limit_signals_settings/update", { enabled });
+}
+
 /** A ready task's status: created (from the dashboard or by the Manager) and never started. */
 export const READY_STATUS = "init";
 export const READY_LABEL = "Ready — not started";
