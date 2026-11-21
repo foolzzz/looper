@@ -7421,14 +7421,20 @@ implementation supplies it and is retested.
   attachment paths, including filenames with spaces and Unicode. Dashboard
   turns with attachments show the final answer without streaming text deltas,
   so a path split across chunks cannot escape redaction. With `channels.outbound.enabled` off (the default),
-  both Lark transports retain their original calls and write no outbox rows. Settings → Chat exposes
-  `outbound_enabled`; only the operator can change it. On, `GatedLarkTransport` routes every write through
+  both Lark transports retain their original calls and write no outbox rows. Settings → Chat reads and updates
+  `outbound_enabled` through the separate operator-only `outbound_gateway.get/update` operations; the existing
+  `chat_settings` response fields, accepted writes and Manager tools remain unchanged. Gateway updates are
+  high-risk operations with confirmation for callers that require it; null restores each field's default.
+  On, `GatedLarkTransport` routes every write through
   one gateway per channel: separate send/reply and total-write token buckets (defaults 5/s and 15/s),
   at most four platform calls in flight, classified errors, up to five retries with jitter and
   `retry_after`, a 60-second circuit breaker after five consecutive failures in 30 seconds, and coalesced
-  edits at least one second apart. The operator-only `outbound_settings.get/update` operations expose
+  edits at least one second apart. The same `outbound_gateway.get/update` operations also expose
   `send_qps`, `write_qps`, `edit_interval_seconds` and `max_in_flight` (integer 1–32). Rate and edit
-  defaults remain **to verify** against the real platform. Answers, progress, notices, notifications and posts first enter
+  defaults remain **to verify** against the real platform. The Settings switch uses its own request and error
+  state, so an unavailable gateway API does not block other chat controls. Numeric tuning is available through
+  the operator v1 API and its generated CLI; Telegram/Lark chat commands and Manager tools do not configure
+  the gateway. Answers, progress, notices, notifications and posts first enter
   `channel_outbox`, ordered per chat and concurrent across chats. Caller keys win; otherwise envelope ids
   and part numbers derive stable keys. Keyed timeout retries and restart recovery within one hour use the
   same key; older interrupted sends become `uncertain`. Callers wait at most 30 seconds for a receipt,
