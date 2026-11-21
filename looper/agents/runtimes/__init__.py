@@ -183,7 +183,13 @@ _LOGIN_VENDORS = {
 
 
 class Capability(str, Enum):
-    """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs."""
+    """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs.
+
+    MID_TURN_INPUT is verified only for the non-hosted ResidentClaude stream-json
+    session: queued input joins the running turn after its current tool returns.
+    Wiring must check the session kind as well as this capability; keeper- and
+    runner-hosted sessions are unverified.
+    """
 
     RUN = "run"  # one run of a prompt, which takes more user turns while it runs (a Worker, a Reviewer)
     STEER = "steer"  # a Worker or Reviewer run takes the Planner's messages while it works, through the runtime's own protocol (RunChannel)
@@ -194,6 +200,7 @@ class Capability(str, Enum):
     MCP = "mcp"  # it loads the MCP servers Looper gives it
     ADD_DIRS = "add_dirs"  # it reads extra directories (project knowledge)
     COMPACTION_EVENTS = "compaction_events"  # it reports context compactions
+    MID_TURN_INPUT = "mid_turn_input"  # queued input joins the running resident turn after its current tool returns
     HEADLESS_COMPACTION = "headless_compaction"  # /compact on a resumed resident session reports compact_boundary
     AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so
     READ_TOOLS = "read_tools"  # it can run with only the tools that read (OMP's --tools), keeping its MCP tools
@@ -256,6 +263,8 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
     "advice_check": frozenset({Capability.RUN, Capability.NO_TOOLS}),
     # The leads check runs once with no tools, over what an extraction found and its messages.
     "leads_check": frozenset({Capability.RUN, Capability.NO_TOOLS}),
+    # The outbound review runs once with no tools, over an action another run proposed (the outbound-review RFC).
+    "outbound_check": frozenset({Capability.RUN, Capability.NO_TOOLS}),
 }
 # The roles whose runs have tools: every role but the processor. A profile chosen for all of them at once (the
 # shared defaults) or as another profile's fallback is checked against these; a profile is checked for the processor

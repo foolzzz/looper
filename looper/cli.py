@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_msgflow_parser(commands)
     _add_ledger_parser(commands)
     _add_leads_parser(commands)
+    _add_decisions_parser(commands)
     commands.add_parser(
         "mcp-server",
         allow_abbrev=False,
@@ -206,6 +207,21 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
         _add_location_flags(command)
 
 
+def _add_decisions_parser(commands: argparse._SubParsersAction) -> None:
+    decisions = commands.add_parser(
+        "decisions", allow_abbrev=False, help="Replay a task's decision snapshots.",
+        description="Decision snapshots record what a task's dispatch passes and its Planner's step decisions saw and "
+                    "decided, while the system setting decision_snapshots.enabled is true. This reads them from the "
+                    "database directly, so it works with the service stopped, and writes nothing. Exit codes: 0 every "
+                    "snapshot replays to its recorded decision, 1 none recorded, 3 some differ, 6 database unusable.")
+    sub = decisions.add_subparsers(dest="decisions_command", required=True)
+    replay = sub.add_parser("replay", allow_abbrev=False,
+                            help="Run the decision code again on each snapshot's inputs and compare.")
+    replay.add_argument("task", help="The task's id.")
+    replay.add_argument("--json", action="store_true")
+    _add_location_flags(replay)
+
+
 def _add_location_flags(command: argparse.ArgumentParser) -> None:
     command.add_argument("--runtime-root", help="The state directory (default ~/.looper).")
     command.add_argument("--config", help="The ops file (default <runtime root>/ops/server.toml).")
@@ -319,6 +335,10 @@ def main(argv: list[str] | None = None) -> int:
         from .agents import leads_commands
 
         return leads_commands.run(args, _load_ops)
+    if args.command == "decisions":
+        from .agents import decision_commands
+
+        return decision_commands.run(args, _load_ops)
     if args.command == "mcp-server":
         from .agents import mcp_server
 

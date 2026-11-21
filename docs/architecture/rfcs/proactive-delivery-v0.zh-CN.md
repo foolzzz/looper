@@ -53,7 +53,7 @@
 
 ## 2. 开关；关闭时什么不变
 
-- 系统设置 `delivery.enabled`（`chat_settings.update` 的 `delivery_enabled`，默认 `false`，`loopercli chat-settings update --delivery-enabled true`；客户端调用要确认）。关闭时没有任何发送点调用 `deliver`，发出的每条消息和现在一样，也不写 `proactive_deliveries`（测试比对）。
+- 系统设置 `delivery.enabled`（默认 `false`）：只有操作者能读写，经 `proactive_delivery.get` 和 `proactive_delivery.update`（`loopercli proactive-delivery update --enabled true`，高风险，要确认），和投递守卫（`delivery_guard`）一样不放进客户端看得到的 `chat_settings`。关闭时没有任何发送点调用 `deliver`，发出的每条消息和现在一样，也不写 `proactive_deliveries`（测试比对）。
 - 时区读系统设置 `user.timezone`（IANA 名称）；没有或不认识时用服务器时区。v0 只读，编辑入口随每轮上下文那一项加入。
 - 免打扰时段、上限和时区在 v0 不开放修改：第一个发送点（关卡提醒）都是紧急类，不受它们影响；接入第一个会产生「进摘要」的发送点时，再加它们的设置。
 
