@@ -1,5 +1,6 @@
 """The outbound review's system setting (``outbound_hook.ENABLED_KEY``): whether every tool call of the Managers is
-checked before it runs, and which enabled Managers run on a runtime the review cannot hook."""
+checked before it runs, and which enabled Managers run on a runtime the review cannot hook; and the operator's
+declarations of the MCP tools that act only inside (``mcp_tool_levels``), which run without a review."""
 
 from .. import outbound_hook
 from ..api_v1 import Operation, _array, _object, _BOOL, _STR
@@ -7,7 +8,8 @@ from ..ops import ErrorCode, OpError
 
 _MANAGER = _object({"manager_id": _STR, "name": _STR, "runtime": _STR}, closed=True)
 SETTINGS = _object({"enabled": _BOOL, "managers_without_hook": _array(_MANAGER)}, closed=True)
-SCHEMAS = {"OutboundReviewSettings": SETTINGS}
+DECLARED = _object({"item_id": _STR, "inside_tools": _array(_STR)}, closed=True)
+SCHEMAS = {"OutboundReviewSettings": SETTINGS, "McpToolLevels": DECLARED}
 RESULTS = {}
 
 
@@ -23,10 +25,21 @@ OPERATIONS = (
     _op("outbound_review.update", "Turn the outbound review on or off. On, each tool call of a Manager that may "
                                   "leave this machine is checked by the outbound_check role first.",
         _object({"enabled": _BOOL}, ["enabled"], closed=True), SETTINGS, "high"),
+    _op("mcp_tool_levels.get", "Read the tools of an MCP server declared inside: their calls run without the "
+                               "outbound review; every other tool of the server is reviewed.",
+        _object({"item_id": _STR}, ["item_id"], closed=True), DECLARED),
+    _op("mcp_tool_levels.put", "Declare exactly these tools of an MCP server inside (they act only inside Looper and "
+                               "this machine): their calls run without the outbound review.",
+        _object({"item_id": _STR, "inside_tools": {**_array(_STR), "maxItems": 200}}, ["item_id", "inside_tools"],
+                closed=True), DECLARED, "high"),
 )
 
 
 async def impact(server, operation, arguments, principal, headers):
+    if operation.operation_id == "mcp_tool_levels.put":
+        tools = ", ".join(arguments["inside_tools"]) or "none"
+        return (f"Declare these tools of MCP server {arguments['item_id']!r} inside: {tools}? Their calls run without "
+                "the outbound review; every other tool of the server is reviewed.")
     if operation.operation_id != "outbound_review.update":
         return None
     if arguments["enabled"]:
@@ -38,11 +51,23 @@ async def impact(server, operation, arguments, principal, headers):
 
 
 async def run(server, operation, arguments, principal, headers):
+    from ...db import mcp_tool_levels
+
     if operation.operation_id == "outbound_review.get":
         return await outbound_hook.settings()
     try:
-        return await outbound_hook.set_enabled(arguments["enabled"])
+        if operation.operation_id == "mcp_tool_levels.get":
+            return await mcp_tool_levels.get(arguments["item_id"])
+        if operation.operation_id == "mcp_tool_levels.put":
+            return await mcp_tool_levels.put(arguments["item_id"], arguments["inside_tools"])
+        settings = await outbound_hook.set_enabled(arguments["enabled"])
+        if arguments["enabled"] and getattr(server, "_managers", None) is not None:
+            # A Manager process started without the hook stops now: its next turn starts one with it.
+            await server._managers.require_tool_hooks()
+        return settings
     except outbound_hook.HookUnavailable as exc:
         raise OpError(ErrorCode.CONFLICT, str(exc)) from None
+    except mcp_tool_levels.NoSuchServer as exc:
+        raise OpError(ErrorCode.NOT_FOUND, str(exc)) from None
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None

@@ -167,6 +167,7 @@ _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
+_MCP_TOOL_LEVELS = "mcp_tool_levels"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -281,6 +282,17 @@ def _agent_spawns_ddl() -> str:
     found = _AGENT_SPAWNS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its agent spawns block")
+    return found.group(1)
+
+
+_MCP_TOOL_LEVELS_BLOCK = re.compile(r"-- mcp tool levels begin\n(.*?)-- mcp tool levels end", re.S)
+
+
+def _mcp_tool_levels_ddl() -> str:
+    """The MCP tool declarations as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _MCP_TOOL_LEVELS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its mcp tool levels block")
     return found.group(1)
 
 
@@ -812,6 +824,12 @@ async def _agent_spawns_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _AGENT_SPAWNS):
         return False
     return not await conn.fetchval("SELECT to_regclass('agent_spawns') IS NOT NULL")
+
+
+async def _mcp_tool_levels_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MCP_TOOL_LEVELS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('mcp_tool_levels') IS NOT NULL")
 
 
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
@@ -1541,6 +1559,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in await _outbound_reviews_ddl(conn):
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
+        if await _mcp_tool_levels_pending(conn):
+            await conn.execute(_mcp_tool_levels_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MCP_TOOL_LEVELS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1592,7 +1613,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
-            or await _outbound_reviews_pending(conn)
+            or await _outbound_reviews_pending(conn) or await _mcp_tool_levels_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _project_advisor_pending(conn)
