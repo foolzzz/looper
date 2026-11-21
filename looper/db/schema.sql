@@ -2314,6 +2314,47 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_i
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
 -- outbound reviews end
 
+-- Who a stored Lark or Telegram direct chat (a chat_messages session) is with, recorded when one of their messages
+-- is stored while the Manager's session search is in effect (ops/session_search.py). The search counts the chat as
+-- the user's own while its sender is the bot's operator (channel_configs.config operator_sender_id). connection.py
+-- applies this block to databases that predate it, so keep it between the markers and idempotent.
+-- chat direct threads begin
+CREATE TABLE IF NOT EXISTS chat_direct_threads (
+    session_id  TEXT PRIMARY KEY,
+    channel_id  TEXT NOT NULL REFERENCES channel_configs(channel_id) ON DELETE CASCADE,
+    sender_id   TEXT NOT NULL CHECK (btrim(sender_id) <> ''),
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- chat direct threads end
+
+-- The tokens a search matches on (assistant search RFC, section 3; db/text_search.py): each lower-cased run of ASCII
+-- letters and digits of two characters or more, and each overlapping pair of CJK characters (a lone one on its
+-- own), since PostgreSQL's parser keeps a run of Chinese as one word. Searched tables have a GIN index on
+-- array_to_tsvector(looper_search_tokens(...)); a query's words are split by the same function. Its COST keeps the
+-- planner from calling it row by row where an index can answer. connection.py applies this block to databases that
+-- predate it, so keep it between the markers and idempotent.
+-- search tokens begin
+CREATE OR REPLACE FUNCTION looper_search_tokens(body text) RETURNS text[]
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE COST 10000 AS $$
+SELECT coalesce(array_agg(DISTINCT token ORDER BY token), '{}')
+FROM (SELECT lower(body) AS lowered) AS doc,
+LATERAL (
+    SELECT word AS token
+    FROM regexp_split_to_table(regexp_replace(doc.lowered, '[㐀-䶿一-鿿豈-﫿]+', ' ', 'g'),
+                               '[^a-z0-9]+') AS word
+    WHERE char_length(word) >= 2
+    UNION ALL
+    SELECT substr(run[1], i, 2)
+    FROM regexp_matches(doc.lowered, '[㐀-䶿一-鿿豈-﫿]+', 'g') AS run,
+         generate_series(1, greatest(char_length(run[1]) - 1, 1)) AS i
+) AS tokens
+$$;
+-- search tokens end
+-- The session search's candidates (db/chat_search.py). A database that predates it builds it online
+-- (connection.py ``_ONLINE_STEPS``).
+CREATE INDEX IF NOT EXISTS idx_chat_messages_search ON chat_messages
+    USING gin (array_to_tsvector(looper_search_tokens(content))) WHERE role IN ('user', 'assistant');
+
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online
 -- (connection.py ``_ONLINE_STEPS``).
