@@ -53,12 +53,14 @@ OUTPUT_MAX_CHARS = 20_000
 
 class SpawnKind(str, Enum):
     ADVISOR = "advisor"
+    OUTBOUND = "outbound"  # a review of an outbound action (``outbound.review``); never a row of agent_spawns
 
 
 # Each kind's access level, its runs' kind in llm_records and the directory under the system's temporary directory
 # its runs work in.
 _KINDS: Mapping[SpawnKind, tuple[Access, str, str]] = {
     SpawnKind.ADVISOR: (Access.ADVISOR, "advisor", "looper-advisor"),
+    SpawnKind.OUTBOUND: (Access.ADVISOR, "outbound_check", "looper-outbound"),
 }
 
 
@@ -75,9 +77,10 @@ class ChildFailure(str, Enum):
 
 @dataclass(frozen=True)
 class SpawnParent:
-    """Where a child run belongs: its task, the step it is about and the run (``llm_records.id``) that started it."""
+    """Where a child run belongs: its task (none for a Manager's review), the step it is about and the run
+    (``llm_records.id``) that started it."""
 
-    task_id: str
+    task_id: str | None
     step_id: str | None = None
     record_id: int | None = None
 
