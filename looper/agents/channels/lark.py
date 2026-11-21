@@ -143,16 +143,17 @@ class CardWrites:
         return self._gateway is not None and self._enabled()
 
     async def send(self, card: dict[str, Any], *, chat_id: str | None = None, user_id: str | None = None,
-                   idempotency_key: str | None = None) -> str | None:
-        async def direct() -> str | None:
+                   idempotency_key: str | None = None) -> tuple[str | None, str | None]:
+        """The message the card became and the chat it is in."""
+        async def direct() -> tuple[str | None, str | None]:
             return await self._transport.send_card(card, chat_id=chat_id, user_id=user_id,
                                                    idempotency_key=idempotency_key)
         return await self._gateway.write("send", direct, keyed=idempotency_key is not None) if self._gated() \
             else await direct()
 
     async def reply(self, message_id: str, card: dict[str, Any], *, idempotency_key: str | None = None,
-                    reply_in_thread: bool = False) -> str | None:
-        async def direct() -> str | None:
+                    reply_in_thread: bool = False) -> tuple[str | None, str | None]:
+        async def direct() -> tuple[str | None, str | None]:
             return await self._transport.reply_card(message_id, card, idempotency_key=idempotency_key,
                                                     reply_in_thread=reply_in_thread)
         return await self._gateway.write("reply", direct, keyed=idempotency_key is not None) if self._gated() \
@@ -420,7 +421,7 @@ class LarkChannelAdapter(ChannelAdapter):
             if message_id is not None:
                 return await self._send_reply(correlation_id, card.text)
             return await self._send_message(chat_id, card.text)
-        await card_actions.bind(card, sent)
+        await card_actions.bind(card, *sent)
         return DeliveryReceipt(channel=self.channel_type, success=True)
 
     def _admits(self, sender: object, decision: RouteDecision | None, *, group: bool,
@@ -452,12 +453,24 @@ class LarkChannelAdapter(ChannelAdapter):
         message_id = str(event.get("message_id") or "")
         cards = self._cards
 
+        async def direct() -> bool:
+            # Whether the press's chat is a direct chat (with the presser, then: a press comes from the bot's chats).
+            mode = getattr(self._transport, "chat_mode", None)
+            if mode is None or not chat:
+                return False
+            try:
+                return await mode(chat) == "p2p"
+            except LarkCliError as exc:
+                logger.info("%s: cannot tell the mode of chat %s: %s", self.channel_id, chat, exc)
+                return False
+
         async def update(card: card_actions.Card) -> None:
             if message_id and cards is not None:
                 await cards.update(message_id, card_actions.lark_card(card))
 
         answer = await card_actions.respond(card_actions.Press(self.channel_id, presser, str(event.get("value") or ""),
-                                                               chat=chat, message_id=message_id), update)
+                                                               chat=chat, message_id=message_id, direct=direct),
+                                            update)
         card_actions.follow(answer, update)  # sent after this answer's card unless the action outlasts its 3 s
         return card_actions.lark_answer(answer)
 
@@ -470,18 +483,18 @@ class LarkChannelAdapter(ChannelAdapter):
         content = card_actions.lark_card(replace(card, text=files.redact(card.text, self._runtime_root)))
         try:
             if reply_to:
-                message_id = await self._cards.reply(reply_to, content, idempotency_key=idempotency_key,
-                                                     reply_in_thread=reply_to in self._thread_messages)
+                message_id, chat = await self._cards.reply(reply_to, content, idempotency_key=idempotency_key,
+                                                           reply_in_thread=reply_to in self._thread_messages)
             elif target.kind is TargetKind.USER:
-                message_id = await self._cards.send(content, user_id=target.id, idempotency_key=idempotency_key)
+                message_id, chat = await self._cards.send(content, user_id=target.id, idempotency_key=idempotency_key)
             else:
-                message_id = await self._cards.send(content, chat_id=target.id, idempotency_key=idempotency_key)
+                message_id, chat = await self._cards.send(content, chat_id=target.id, idempotency_key=idempotency_key)
         except LarkCliError as exc:
             logger.warning("%s: a card post to %s failed: %s%s", self.channel_id, target.id, type(exc).__name__,
                            f" (code {exc.code})" if exc.code is not None else "")
             return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
                                outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
-        await card_actions.bind(card, message_id)
+        await card_actions.bind(card, message_id, chat)
         return PostReceipt(True, external_ids=(message_id,) if message_id else ())
 
     async def _send_target(self, target: NotifyTarget, text: str, *,

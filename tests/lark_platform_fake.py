@@ -185,6 +185,9 @@ class FakeLarkPlatform:
             items = self.messages.get(unquote(segments[5]))
             return (200, {"code": 0, "data": {"items": items}}) if items is not None else (
                 400, {"code": 230001, "msg": "the message does not exist"})
+        if method == "GET" and path.startswith("/open-apis/im/v1/chats/"):
+            chat = unquote(segments[5])
+            return 200, {"code": 0, "data": {"chat_mode": "p2p" if chat.startswith("oc_p2p") else "group"}}
         if path.startswith("/open-apis/im/v1/messages"):
             return self._message(method, path, query, body)
         if path == "/open-apis/contact/v3/users/batch":
@@ -232,13 +235,17 @@ class FakeLarkPlatform:
         message_id = parent if kind in {"edit", "update", "reaction"} else f"om_sent_{len(self.sent) + 1}"
         content = json.loads(body["content"]) if "content" in body else body.get("reaction_type")
         receive_type = query.get("receive_id_type", [None])[0]
+        # The chat a sent message is in: a user's direct chat is ``oc_p2p_<open_id>``; a reply is in its parent's.
+        chat_id = (body.get("receive_id") if receive_type == "chat_id" else
+                   f"oc_p2p_{body.get('receive_id')}" if receive_type == "open_id" else
+                   next((sent["chat_id"] for sent in self.sent if sent["message_id"] == parent), "oc_chat"))
         self.sent.append({"kind": kind, "chat": body.get("receive_id") if receive_type == "chat_id" else None,
                           "user": body.get("receive_id") if receive_type == "open_id" else None,
                           "parent": parent, "msg_type": body.get("msg_type"), "content": content,
-                          "uuid": key, "message_id": message_id})
+                          "uuid": key, "message_id": message_id, "chat_id": chat_id})
         if key is not None:
             self._uuids[key] = message_id
-        return 200, {"code": 0, "data": {"message_id": message_id}}
+        return 200, {"code": 0, "data": {"message_id": message_id, "chat_id": chat_id}}
 
     async def _websocket(self, connection: ServerConnection) -> None:
         self.clients.add(connection)

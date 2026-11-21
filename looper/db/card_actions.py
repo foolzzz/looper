@@ -62,11 +62,12 @@ async def claim(token: str, *, by: str | None, via: str, choice: str | None, out
             token, by, via, choice, outcome) is True
 
 
-async def bind(token: str, message_id: str, *, pool: asyncpg.Pool | None = None) -> None:
-    """The channel message the card ``token`` was sent as; set once (a later send of the same card keeps it)."""
+async def bind(token: str, message_id: str, chat: str | None = None, *, pool: asyncpg.Pool | None = None) -> None:
+    """The channel message the card ``token`` was sent as and, when the channel says, the chat it is in; set once
+    (a later send of the same card keeps them)."""
     pool = pool or get_pool()
-    await pool.execute("UPDATE card_actions SET message_id = $2 WHERE token = $1 AND message_id IS NULL", token,
-                       message_id)
+    await pool.execute("UPDATE card_actions SET message_id = $2, chat = COALESCE($3, chat) "
+                       "WHERE token = $1 AND message_id IS NULL", token, message_id, chat)
 
 
 async def finish(token: str, outcome: str, *, pool: asyncpg.Pool | None = None) -> None:

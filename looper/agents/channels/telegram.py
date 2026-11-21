@@ -353,7 +353,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         except Exception as exc:
             logger.warning("telegram: a card post to %s failed: %s", target.id, type(exc).__name__)
             return PostReceipt(False, error=redact(str(exc)), outcome=_post_outcome(exc))
-        await card_actions.bind(card, str(message.message_id))
+        await card_actions.bind(card, str(message.message_id), str(chat))
         return PostReceipt(True, external_ids=(str(message.message_id),))
 
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:

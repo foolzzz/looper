@@ -51,13 +51,16 @@ class BotTransport:
         await self._api.react(message_id)
 
     async def send_card(self, card: dict[str, Any], *, chat_id: str | None = None, user_id: str | None = None,
-                        idempotency_key: str | None = None) -> str | None:
+                        idempotency_key: str | None = None) -> tuple[str | None, str | None]:
         return await self._api.send_card(card, chat_id=chat_id, user_id=user_id, idempotency_key=idempotency_key)
 
     async def reply_card(self, message_id: str, card: dict[str, Any], *, idempotency_key: str | None = None,
-                         reply_in_thread: bool = False) -> str | None:
+                         reply_in_thread: bool = False) -> tuple[str | None, str | None]:
         return await self._api.reply_card(message_id, card, idempotency_key=idempotency_key,
                                           reply_in_thread=reply_in_thread)
+
+    async def chat_mode(self, chat_id: str) -> str | None:
+        return await self._api.chat_mode(chat_id)
 
     async def update_card(self, message_id: str, card: dict[str, Any]) -> None:
         await self._api.update_card(message_id, card)

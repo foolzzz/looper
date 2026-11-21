@@ -102,6 +102,8 @@ class Press:
     value: str
     chat: str = ""
     message_id: str = ""
+    # Whether ``chat`` is a direct chat: asked only for a card sent to a user whose message was not noted.
+    direct: Callable[[], Awaitable[bool]] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -159,7 +161,7 @@ async def press(event: Press) -> Answer:
     card = Card.from_dict(row["payload"].get("card") or {})
     if choice not in {button.value.partition(":")[2] for button in card.buttons}:
         return Answer(HANDLED)
-    if not _where_sent(row, event):
+    if not await _where_sent(row, event):
         return Answer(ELSEWHERE, "error")
     if row["allowed"] and event.presser not in row["allowed"]:
         return Answer(NOT_ALLOWED.get(row["kind"], NOT_ALLOWED["confirmation"]), "error")
@@ -172,22 +174,27 @@ async def press(event: Press) -> Answer:
     return await handler(row, event, choice)
 
 
-def _where_sent(row: Mapping[str, Any], event: Press) -> bool:
-    """Whether the press came from the card as it was sent: the channel message it became (``bind``), so a copy
-    forwarded elsewhere does nothing; a card whose message was not noted, from the chat it was sent to. A Lark card
-    sent to a user (their open_id) is only ever matched by its message, as its press names the chat."""
-    if row.get("message_id"):
-        return event.message_id == row["message_id"]
-    return bool(event.chat) and event.chat == row.get("chat")
+async def _where_sent(row: Mapping[str, Any], event: Press) -> bool:
+    """Whether the press came from the card as it was sent: from the chat it is in, and from the channel message it
+    became once that is noted (``bind``), so a forwarded copy does nothing; a message id is unique only within its
+    chat on Telegram, so both are compared. A Lark card sent to a user (their open_id) whose chat was not noted (the
+    service stopped right after sending it) is pressed from a direct chat by that user: that chat is theirs."""
+    if row.get("message_id") and event.message_id != row["message_id"]:
+        return False
+    if event.chat and event.chat == row.get("chat"):
+        return True
+    return bool(event.presser) and row.get("chat") == event.presser and event.direct is not None \
+        and await event.direct()
 
 
-async def bind(card: Card, message_id: str | None) -> None:
-    """Note the channel message ``card`` was sent as (the channels call it after sending); a failure only logs, and
-    the card is then matched by its chat."""
+async def bind(card: Card, message_id: str | None, chat: str | None = None) -> None:
+    """Note the channel message ``card`` was sent as and the chat it is in (a Lark user's direct chat, for a card
+    sent to their open_id); the channels call it after sending. A failure only logs: the card is then matched by
+    the chat it was sent to."""
     if not card.token or not message_id:
         return
     try:
-        await db_cards.bind(card.token, message_id)
+        await db_cards.bind(card.token, message_id, chat)
     except Exception:
         logger.warning("could not note the message of a card", exc_info=True)
 

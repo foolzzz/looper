@@ -206,6 +206,8 @@ def test_lark_bot_a_confirmation_card_pressed_on_the_long_connection_runs_it_onc
                     await fake.push_card_action(confirm, operator=ASKER, chat_id="oc_dm", message_id=card["message_id"],
                                                 event_id=f"ev-press-{number}", frame_id=f"press-{number}")
                     await fake.wait_acks(number + 1, timeout=5)
+                assert tuple(await pool.fetchrow("SELECT chat, message_id FROM card_actions")) == (
+                    "oc_dm", card["message_id"])  # noted from the send's answer
                 answers = {frame: json.loads(base64.b64decode(ack["data"])) for frame, ack in fake.acks}
                 assert answers["press-0"]["toast"]["content"] == "这张卡片只能在发出它的会话里操作"
                 first = answers["press-1"]
@@ -319,5 +321,57 @@ def test_lark_bot_off_a_press_gets_the_acknowledgement_it_got_before_cards(
         assert [key for key, _ in press.headers] == ["type", "message_id", "trace_id", "sum", "seq", "biz_rt"]
         assert [key for key, _ in press.headers] == [key for key, _ in message.headers]
         assert fake.sent == [] and await pool.fetchval("SELECT count(*) FROM card_actions") == 0
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("noted", [True, False])
+def test_lark_a_card_sent_to_a_user_is_pressed_from_their_direct_chat_only(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, noted: bool) -> None:
+    """A gate card goes to the user's open_id and its press names their direct chat. Noted from the send's answer
+    (``noted``), the card is that chat and message; not noted (the service stopped right after sending), the press
+    is admitted from a chat the platform says is a direct one, by that user, and from no group."""
+    from datetime import timedelta
+
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+    from looper.db import card_actions as db_cards, system_settings
+
+    async def test(pool: Any) -> None:
+        await system_settings.put_settings({card_actions.ENABLED_KEY: "true"}, pool=pool)
+        card = card_actions.Card("测试关卡", (card_actions.Button("按现在的结论结束", "tok:end"),))
+        await db_cards.create(token="tok", kind="gate", subject="step", digest="d", payload={"card": card.to_dict()},
+                              manager_id=None, channel_id="channel-lark_bot", chat=ASKER, allowed=[ASKER],
+                              ttl=timedelta(days=1), pool=pool)
+        pressed: list[card_actions.Press] = []
+
+        async def gate(row: dict[str, Any], event: card_actions.Press, choice: str) -> card_actions.Answer:
+            pressed.append(event)
+            return card_actions.Answer("已交给规划者", "success")
+
+        monkeypatch.setitem(card_actions._handlers, "gate", gate)
+        async with FakeLarkPlatform() as fake:
+            adapter = make_adapter({"app_id": fake.app_id}, "test-secret", runtime_root=tmp_path,
+                                   allowlist=SenderAllowlist("channel-lark_bot", frozenset({ASKER})),
+                                   on_rejected=None, bot_open_id=fake.bot["open_id"], base_url=fake.base_url)
+            try:
+                message = "om_unnoted"
+                if noted:
+                    receipt = await adapter.post_card(NotifyTarget(TargetKind.USER, ASKER), card)
+                    (message,) = receipt.external_ids
+                    assert tuple(await pool.fetchrow("SELECT chat, message_id FROM card_actions")) == (
+                        f"oc_p2p_{ASKER}", message)
+
+                async def press(chat: str) -> str:
+                    answer = await adapter._card_action({"operator_id": ASKER, "chat_id": chat, "message_id": message,
+                                                         "value": "tok:end"})
+                    return answer["toast"]["content"]
+
+                assert await press("oc_team") == "这张卡片只能在发出它的会话里操作"
+                assert pressed == [] and await pool.fetchval("SELECT handled_at FROM card_actions") is None
+                assert await press(f"oc_p2p_{ASKER}") == "已交给规划者"
+                assert [event.chat for event in pressed] == [f"oc_p2p_{ASKER}"]
+            finally:
+                await adapter._transport.aclose()
 
     run_db(test, monkeypatch, timeout=30)

@@ -251,8 +251,8 @@ def test_a_gate_card_takes_an_option_once_from_the_requester_and_goes_stale_when
         monkeypatch.setitem(card_actions._handlers, "gate",
                             functools.partial(card_actions.press_gate, bus=bus, has_planner=lambda task_id: True))
 
-        # Sent to the user's open_id, its press names the direct chat: it is matched by the message it was sent as.
-        await card_actions.bind(card, "om_101")  # what the channel notes once it sent it (``_Poster``'s first id)
+        # Sent to the user's open_id; the channel notes the message it became and its direct chat.
+        await card_actions.bind(card, "om_101", "oc_p2p")  # what the channel notes once sent (``_Poster``'s first id)
 
         async def press(value: str, presser: str = LARK_USER, message_id: str = "om_101") -> card_actions.Answer:
             return await card_actions.press(card_actions.Press(BOT, presser, value, chat="oc_p2p",
@@ -273,7 +273,7 @@ def test_a_gate_card_takes_an_option_once_from_the_requester_and_goes_stale_when
         await courier.run_once()
         reminder = cards.posts[-1]
         assert reminder["reply_to"] == "om_101" and reminder["text"].buttons
-        await card_actions.bind(reminder["text"], "om_102")
+        await card_actions.bind(reminder["text"], "om_102", "oc_p2p")
         await _say("task-a", "step-g1", "updated", "only managed ones", state="discussing", agenda=[
             {"id": "q1", "question": "Which database?", "options": ["Aurora", "Cloud SQL"], "status": "open",
              "answer": ""}])
@@ -358,8 +358,8 @@ def test_a_typed_confirmation_and_a_press_that_race_run_the_call_exactly_once(
     ("lark_bot", BOT, "oc_dm", "oc_team"), ("telegram", "channel-telegram", "4242", "-1004242")])
 def test_a_card_acts_only_where_it_was_sent(monkeypatch: pytest.MonkeyPatch, channel: str, channel_id: str,
                                             chat: str, other: str) -> None:
-    """The asker's own token pressed from another chat, or from a copy of the card's message, claims nothing; from
-    the card's chat (before its message is noted) and from its message, it runs."""
+    """The asker's own token pressed from another chat, from a copy of the card's message, or from a message with
+    the card's id in another chat claims nothing; from the card's chat and message, it runs."""
     async def test(pool: Any) -> None:
         project = await _sample(pool)
         await _switch(pool)
@@ -377,8 +377,10 @@ def test_a_card_acts_only_where_it_was_sent(monkeypatch: pytest.MonkeyPatch, cha
         elsewhere = await press(other)
         assert (elsewhere.toast, elsewhere.level, elsewhere.later) == ("这张卡片只能在发出它的会话里操作", "error", None)
         assert await pool.fetchval("SELECT handled_at FROM card_actions") is None and await _exists(pool, project)
-        await card_actions.bind(card_actions.Card.from_dict(turn.cards[0]), "m-card")
+        await card_actions.bind(card_actions.Card.from_dict(turn.cards[0]), "m-card", chat)
         assert (await press(chat, "m-copy")).toast == "这张卡片只能在发出它的会话里操作"
+        # A Telegram message id is unique only within its chat: the same id in another chat is another message.
+        assert (await press(other, "m-card")).toast == "这张卡片只能在发出它的会话里操作"
         assert await pool.fetchval("SELECT handled_at FROM card_actions") is None
         answer = await press(chat, "m-card")
         await answer.later

@@ -182,24 +182,36 @@ class LarkApi:
             body["uuid"] = key
         return body
 
+    @staticmethod
+    def _sent(answer: dict[str, Any]) -> tuple[str | None, str | None]:
+        """The message a send made and the chat it is in (a user's open_id is sent to in their direct chat)."""
+        data = answer.get("data") if isinstance(answer.get("data"), dict) else {}
+        chat = data.get("chat_id")
+        return sent_message_id(answer), str(chat) if chat else None
+
     async def send_card(self, card: dict[str, Any], *, chat_id: str | None = None, user_id: str | None = None,
-                        idempotency_key: str | None = None) -> str | None:
-        """Send an interactive card (card JSON) to a chat or a user."""
+                        idempotency_key: str | None = None) -> tuple[str | None, str | None]:
+        """Send an interactive card (card JSON) to a chat or a user: the message it became and its chat."""
         if (chat_id is None) == (user_id is None):
             raise ValueError("send to exactly one of a chat and a user")
         body = self._card(card, idempotency_key)
         body["receive_id"] = chat_id if chat_id is not None else user_id
-        return sent_message_id(await self.call("POST", "/open-apis/im/v1/messages",
-                                               params={"receive_id_type": "chat_id" if chat_id is not None else "open_id"},
-                                               body=body))
+        return self._sent(await self.call("POST", "/open-apis/im/v1/messages",
+                                          params={"receive_id_type": "chat_id" if chat_id is not None else "open_id"},
+                                          body=body))
 
     async def reply_card(self, message_id: str, card: dict[str, Any], *, idempotency_key: str | None = None,
-                         reply_in_thread: bool = False) -> str | None:
+                         reply_in_thread: bool = False) -> tuple[str | None, str | None]:
         body = self._card(card, idempotency_key)
         if reply_in_thread:
             body["reply_in_thread"] = True
-        return sent_message_id(await self.call("POST", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
-                                               body=body))
+        return self._sent(await self.call("POST", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
+                                          body=body))
+
+    async def chat_mode(self, chat_id: str) -> str | None:
+        """A chat's mode as the platform says it (``p2p``, ``group``, ``topic``)."""
+        data = (await self.call("GET", f"/open-apis/im/v1/chats/{quote(chat_id, safe='')}")).get("data") or {}
+        return data.get("chat_mode") if isinstance(data, dict) else None
 
     async def update_card(self, message_id: str, card: dict[str, Any]) -> None:
         """Replace a card the bot sent (a shared card: everyone in the chat sees the new one)."""
