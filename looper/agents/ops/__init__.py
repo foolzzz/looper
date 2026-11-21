@@ -70,6 +70,7 @@ class ErrorCode(str, Enum):
     NOT_THIS_TURN = "not_this_turn"  # a write call no tool_use of the running turn's stream matches
     UNAVAILABLE = "unavailable"  # Looper could not do it now (its database); the call may be tried again
     RATE_LIMITED = "rate_limited"  # over a limit of how often or how much (a room's); the message says when
+    BLOCKED = "blocked"  # the outbound review stopped it (``ops.review``): it did not run
 
 
 class ErrorDetails(TypedDict, total=False):
@@ -155,6 +156,8 @@ class Turn:
     origin: TurnOrigin | None = None
     # Initialized explicitly by delivery-guard wiring; absent when disabled.
     debt: DeliveryDebt | None = None
+    # The outside content its calls brought in (source, text), as the outbound review reads it: the leads it found.
+    outside: list[tuple[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.origin is None:
