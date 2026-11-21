@@ -6,12 +6,12 @@ chat with the bot it names, in words code writes (「你在 X 让我提醒你：
 the user asked for it.
 
 Each tick, under one advisory lock (so two servers never send the same reminder), the service settles as
-``uncertain`` what a sender stopped in the middle of, then sends what is due (``plan``). While it runs, a reminder
-that came due since its previous tick is sent as any. The first tick after it starts, or after it was switched off or
-the server drained, is a recovery: every reminder that came due meanwhile is overdue, and of each chat's overdue
-ones only the newest one due within ``CATCH_UP`` is sent, saying when it was due; the others are settled
-``missed``. A send the channel refused is tried again at the next tick, up to ``ATTEMPTS`` times; one whose answer
-was lost is ``uncertain`` and never sent again.
+``uncertain`` what a sender stopped in the middle of, then sends what is due (``plan``). The rule holds no state:
+a reminder due at most ``GRACE`` ago is sent as any; one due longer ago was missed (Looper was down, asleep, stalled,
+switched off or draining), and of each chat's missed ones only the newest due within ``CATCH_UP`` is sent, saying
+when it was due, and only when nothing newer goes to that chat in the same tick; the others are settled ``missed``.
+A send the channel refused is tried again at the next tick, up to ``ATTEMPTS`` times; one whose answer was lost is
+``uncertain`` and never sent again.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 ENABLED_KEY = "reminders.enabled"
 TICK_SECONDS = 10.0
-CATCH_UP = timedelta(hours=36)  # on recovery, only a chat's newest overdue reminder due within this is sent
-LATE_NOTE = timedelta(minutes=2)  # sent this late or later, the message says when it was due
+GRACE = timedelta(minutes=2)  # due at most this long ago, a reminder is on time (12 ticks; a restart, a slow tick)
+CATCH_UP = timedelta(hours=36)  # of a chat's missed reminders, only the newest due within this is sent
 ATTEMPTS = 3  # sends the channel refused before the reminder is failed
 STOP_GRACE_SECONDS = 15.0  # how long a stop takes at most: the send under way, then cancelling it
 _CANCEL_SHARE = 0.25  # of STOP_GRACE_SECONDS, kept for cancelling a send that did not finish
@@ -147,7 +147,7 @@ def message_text(reminder: Mapping[str, Any], *, now: datetime) -> str:
     tz = cron.zone(reminder["timezone"])
     asked = reminder["created_at"].astimezone(tz)
     text = f"⏰ 你在 {asked:%m-%d %H:%M} 让我提醒你：{reminder['text']}"
-    if now - reminder["due_at"] >= LATE_NOTE:
+    if now - reminder["due_at"] > GRACE:
         text += f"\n（原定 {reminder['due_at'].astimezone(tz):%m-%d %H:%M}，Looper 没能按时发出，现在补发。）"
     return text
 
@@ -161,28 +161,31 @@ class Plan:
 
 
 MISSED_OLD = "Looper was not sending reminders when it was due, more than 36 hours ago"
-MISSED_LATER = "Looper was not sending reminders when it was due; only the newest such reminder was sent"
+MISSED_LATER = "Looper was not sending reminders when it was due; only the newest reminder of this chat was sent"
 
 
-def plan(due: Iterable[Mapping[str, Any]], now: datetime, *, since: datetime | None) -> Plan:
-    """Of the pending reminders due by ``now``, given the previous tick's time ``since`` (None: this tick is a
-    recovery): one that came due after ``since``, or that a refused send is being retried for, is sent; every other
-    one is overdue, and of each chat's overdue ones only the newest due within ``CATCH_UP`` is sent, the others
-    missed."""
+def plan(due: Iterable[Mapping[str, Any]], now: datetime) -> Plan:
+    """Of the pending reminders due by ``now``: each one due at most ``GRACE`` ago is sent, however many at once.
+    The others were missed: of a chat's missed ones, the newest due within ``CATCH_UP`` is sent unless something
+    on time goes to that chat in this tick (that one is newer), and the rest are missed. No state: a start, a sleep,
+    a stall and two servers taking turns are judged alike."""
     send: list[int] = []
     missed: dict[int, str] = {}
     chats: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    on_time: set[tuple[str, str]] = set()
     for reminder in due:
-        if reminder["attempts"] > 0 or (since is not None and reminder["due_at"] > since):
+        chat = (reminder["channel_id"], reminder["chat"])
+        if now - reminder["due_at"] <= GRACE:
             send.append(reminder["id"])
+            on_time.add(chat)
         else:
-            chats.setdefault((reminder["channel_id"], reminder["chat"]), []).append(reminder)
-    for overdue in chats.values():
-        overdue.sort(key=lambda reminder: (reminder["due_at"], reminder["id"]), reverse=True)
-        newest = overdue[0] if now - overdue[0]["due_at"] <= CATCH_UP else None
+            chats.setdefault(chat, []).append(reminder)
+    for chat, late in chats.items():
+        late.sort(key=lambda reminder: (reminder["due_at"], reminder["id"]), reverse=True)
+        newest = late[0] if chat not in on_time and now - late[0]["due_at"] <= CATCH_UP else None
         if newest is not None:
             send.append(newest["id"])
-        for reminder in overdue:
+        for reminder in late:
             if reminder is not newest:
                 missed[reminder["id"]] = MISSED_OLD if now - reminder["due_at"] > CATCH_UP else MISSED_LATER
     return Plan(send=tuple(send), missed=missed)
@@ -210,7 +213,6 @@ class ReminderService:
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
-        self._since: datetime | None = None  # the time of this service's previous complete tick; None: recovery
 
     async def start(self) -> None:
         self._stopping.clear()
@@ -243,7 +245,6 @@ class ReminderService:
 
     async def run_once(self) -> None:
         if (self._drain is not None and self._drain.draining) or not await enabled():
-            self._since = None  # what comes due meanwhile is overdue: the next tick is a recovery
             return
         async with connection.get_pool().acquire() as conn:
             if not await conn.fetchval("SELECT pg_try_advisory_lock($1::int, $2::int)", *_LOCK):
@@ -258,7 +259,7 @@ class ReminderService:
         if orphans := await store.orphans_uncertain(conn, now):
             logger.warning("%d reminder(s) were being sent when their sender stopped: settled uncertain", orphans)
         due = await store.due(conn, now)
-        decided = plan(due, now, since=self._since)
+        decided = plan(due, now)
         for reminder_id, why in decided.missed.items():
             await store.settle(conn, reminder_id, "missed", now=now, detail=why, from_status="pending")
             logger.info("reminder %s missed: %s", reminder_id, why)
@@ -267,7 +268,6 @@ class ReminderService:
             if self._stopping.is_set() or (self._drain is not None and self._drain.draining):
                 return
             await self._send(conn, by_id[reminder_id])
-        self._since = now
 
     async def _send(self, conn: Any, reminder: Mapping[str, Any]) -> None:
         reminder_id, channel_id, chat = reminder["id"], reminder["channel_id"], reminder["chat"]

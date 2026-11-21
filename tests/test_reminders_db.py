@@ -340,8 +340,10 @@ def test_after_downtime_only_the_latest_reminder_missed_within_36_hours_is_sent(
     run_with_channel_configs(test, monkeypatch)
 
 
-def test_on_recovery_a_chat_gets_only_its_newest_overdue_reminder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The review's case: reminders 60, 9 and 1 minutes overdue in one direct chat when Looper comes back."""
+@pytest.mark.parametrize("how", ["a restart", "a 61-minute pause of a running service"])
+def test_after_a_gap_a_chat_gets_one_message_for_what_it_missed(monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """The reviews' case: reminders 60, 9 and 1 minutes overdue in one direct chat when the ticks come back, whether
+    the server restarted or a running one slept or stalled for 61 minutes."""
 
     async def test(pool: Any) -> None:
         await _operator(pool, enabled=True)
@@ -349,8 +351,12 @@ def test_on_recovery_a_chat_gets_only_its_newest_overdue_reminder(monkeypatch: p
         now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
         ids = [await _stored(text, now - timedelta(minutes=minutes))
                for text, minutes in (("sixty", 60), ("nine", 9), ("one", 1))]
-        channel = _Channel()
-        await reminders.ReminderService(channel, clock=_Clock(now)).run_once()
+        channel, clock = _Channel(), _Clock(now - timedelta(minutes=61))
+        service = reminders.ReminderService(channel, clock=clock)
+        if how != "a restart":
+            await service.run_once()  # the last tick before the pause: nothing was due
+        clock.now = now
+        await service.run_once()
         assert [post["text"].split("：", 1)[1] for post in channel.posts] == ["one"]  # 1 minute late: no late line
         assert await _statuses(pool) == {ids[0]: ("missed", 0, reminders.MISSED_LATER),
                                          ids[1]: ("missed", 0, reminders.MISSED_LATER),
@@ -372,15 +378,36 @@ def test_while_running_reminders_due_together_are_all_sent(monkeypatch: pytest.M
         await service.run_once()
         assert sorted(post["text"].split("：", 1)[1] for post in channel.posts) == ["first", "second"]
         assert [status for status, _, _ in (await _statuses(pool)).values()] == ["delivered"] * len(both)
-        # Switched off and on again, the next tick is a recovery: of what came due meanwhile, only the newest.
+        # Switched off meanwhile: of what came due more than the grace ago, only the newest.
         later = [await _stored(text, now + timedelta(minutes=minutes)) for text, minutes in (("a", 5), ("b", 6))]
         await _switch(pool, on=False)
-        clock.now = now + timedelta(minutes=7)
+        clock.now = now + timedelta(minutes=20)
         await service.run_once()
         await _switch(pool)
         await service.run_once()
         statuses = await _statuses(pool)
         assert (statuses[later[0]][0], statuses[later[1]][0]) == ("missed", "delivered")
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_two_servers_taking_turns_in_an_upgrade_send_everything_just_due(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The old server ticked; two reminders came due; the new one takes the lock first. Neither is missed."""
+
+    async def test(pool: Any) -> None:
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        start = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
+        both = [await _stored(text, start + timedelta(seconds=seconds)) for text, seconds in (("first", 5), ("second", 6))]
+        channel = _Channel()
+        old, new = (reminders.ReminderService(channel, clock=_Clock(start)),
+                    reminders.ReminderService(channel, clock=_Clock(start + timedelta(seconds=10))))
+        await old.run_once()  # nothing due yet
+        await new.run_once()  # its first tick
+        old._clock = lambda: start + timedelta(seconds=20)
+        await old.run_once()
+        assert sorted(post["text"].split("：", 1)[1] for post in channel.posts) == ["first", "second"]
+        assert [status for status, _, _ in (await _statuses(pool)).values()] == ["delivered"] * len(both)
 
     run_with_channel_configs(test, monkeypatch)
 

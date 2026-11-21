@@ -82,7 +82,7 @@ def test_the_user_reads_the_time_with_its_weekday_and_today_or_tomorrow():
 def _reminder(**fields):
     return {"id": 1, "text": "看 PR", "timezone": LA, "created_at": datetime(2026, 11, 20, 22, 3, tzinfo=UTC),
             "due_at": datetime(2026, 11, 20, 23, 0, tzinfo=UTC), "channel_id": "channel-lark", "chat": "ou_op",
-            "attempts": 0, **fields}
+            **fields}
 
 
 def test_the_message_is_code_written_from_the_users_words_and_says_when_it_is_late():
@@ -92,34 +92,31 @@ def test_the_message_is_code_written_from_the_users_words_and_says_when_it_is_la
         "⏰ 你在 11-20 14:03 让我提醒你：看 PR\n（原定 11-20 15:00，Looper 没能按时发出，现在补发。）")
 
 
-def test_on_recovery_each_chat_gets_only_its_newest_overdue_reminder_within_36_hours():
+def test_a_chat_gets_what_is_on_time_or_else_only_its_newest_missed_reminder_within_36_hours():
     now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
     due = [
-        _reminder(id=1, due_at=now - timedelta(minutes=60)),  # the review's case: 60, 9 and 1 minutes overdue
+        # The review's case, after a 61-minute pause: 60, 9 and 1 minutes overdue. The 1-minute one is on time
+        # and newer than the others, so it is the chat's one message.
+        _reminder(id=1, due_at=now - timedelta(minutes=60)),
         _reminder(id=2, due_at=now - timedelta(minutes=9)),
-        _reminder(id=3, due_at=now - timedelta(minutes=1)),  # the newest: sent
-        _reminder(id=4, due_at=now - timedelta(hours=2), chat="ou_other"),  # another chat's newest: sent
+        _reminder(id=3, due_at=now - timedelta(minutes=1)),
+        # A chat with only missed ones: its newest within 36 hours is sent.
+        _reminder(id=4, due_at=now - timedelta(hours=2), chat="ou_other"),
         _reminder(id=5, due_at=now - timedelta(hours=3), chat="ou_other"),
         _reminder(id=6, due_at=now - timedelta(hours=50), chat="ou_third"),  # its only one, past 36 hours: missed
     ]
-    plan = reminders.plan(due, now, since=None)
+    plan = reminders.plan(due, now)
     assert sorted(plan.send) == [3, 4]
     assert plan.missed == {1: reminders.MISSED_LATER, 2: reminders.MISSED_LATER, 5: reminders.MISSED_LATER,
                            6: reminders.MISSED_OLD}
-    assert reminders.plan([], now, since=None) == reminders.Plan(send=(), missed={})
+    assert reminders.plan([], now) == reminders.Plan(send=(), missed={})
 
 
-def test_while_running_what_came_due_since_the_previous_tick_and_what_is_retried_is_all_sent():
+def test_everything_due_within_the_grace_is_sent_however_many_at_once():
     now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
-    since = now - timedelta(seconds=10)
-    due = [
-        _reminder(id=1, due_at=now - timedelta(seconds=5)),  # two due together in one chat: both sent
-        _reminder(id=2, due_at=now - timedelta(seconds=5)),
-        _reminder(id=3, due_at=now - timedelta(minutes=2), attempts=1),  # a refused send being retried
-        _reminder(id=4, due_at=now - timedelta(minutes=5)),  # due before the previous tick and never tried
-    ]
-    plan = reminders.plan(due, now, since=since)
-    assert sorted(plan.send) == [1, 2, 3, 4] and plan.missed == {}
+    due = [_reminder(id=1, due_at=now - timedelta(seconds=5)), _reminder(id=2, due_at=now - timedelta(seconds=5)),
+           _reminder(id=3, due_at=now - timedelta(seconds=90)), _reminder(id=4, due_at=now - reminders.GRACE)]
+    assert reminders.plan(due, now) == reminders.Plan(send=(1, 2, 3, 4), missed={})
 
 
 def test_a_users_direct_chat_is_their_lark_open_id_or_their_telegram_chat():
