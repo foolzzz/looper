@@ -213,6 +213,15 @@ class ManagerFleet:
         return {"manager_turns": [agent.agent_id for agent in self.agents()
                                   if agent.busy or agent._handling is not None or agent._stop_tasks]}
 
+    async def require_tool_hooks(self) -> None:
+        """The outbound review was turned on: every Manager's process started without its hook stops."""
+        for agent in self.agents():
+            try:
+                await agent.require_tool_hook()
+            except Exception:
+                logger.warning("cannot stop %s's process without the outbound review hook", agent.agent_id,
+                               exc_info=True)
+
     def agents(self) -> list[ManagerAgent]:
         return [self._agents[i] for i in sorted(self._agents, key=lambda i: (i != DEFAULT_MANAGER_ID, i))]
 
