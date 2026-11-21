@@ -3527,6 +3527,7 @@ def run(
     pi_runtime: str = "cli",
     dsh_runtime: str = "cli",
     stable_context: bool = False,
+    untrusted_fence: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a
     database, a server, a working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
@@ -3534,7 +3535,8 @@ def run(
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
     every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only. With
     ``stable_context`` every dialog's database has ``manager.stable_context`` on, and each row lists what the
-    Manager's turns started with (``state_views``)."""
+    Manager's turns started with (``state_views``). With ``untrusted_fence`` every dialog's database has
+    ``untrusted_fence.enabled`` on."""
     if manager_agent is not None and mode != "real":
         raise EvalError("--manager-agent needs --mode real; the api runtime's fake runs are its own tests")
     if reps < 1:
@@ -3604,6 +3606,8 @@ def run(
                     project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
                     if stable_context:
                         _turn_on(database_url, "manager.stable_context")
+                    if untrusted_fence:
+                        _turn_on(database_url, "untrusted_fence.enabled")
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,
@@ -3638,7 +3642,8 @@ def run(
             "manager_model": model_name(manager.get("model")) if mode == "real" else None,
             "started_at": stamp, "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "reps": reps,
-            "stable_context": stable_context, "stopped_by_cap": stopped, "aborted": aborted,
+            "stable_context": stable_context, "untrusted_fence": untrusted_fence, "stopped_by_cap": stopped,
+            "aborted": aborted,
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6), "dialogs": results,
         }, path, roots=(root, raw_root), rows="dialogs")
         if aborted:
@@ -3651,7 +3656,8 @@ def markdown(result: dict[str, Any]) -> str:
     lines = [f"Manager dialogs: {result['mode']}/{result.get('manager_agent') or result['agent']} "
              f"(other roles {result.get('model') or result['agent']}) @ "
              f"{(result['git'].get('commit') or '')[:9]}{'+local changes' if result['git'].get('dirty') else ''}"
-             f"{', manager.stable_context on' if result.get('stable_context') else ''}",
+             f"{', manager.stable_context on' if result.get('stable_context') else ''}"
+             f"{', untrusted_fence on' if result.get('untrusted_fence') else ''}",
              "", "| dialog | rep | outcome | turns | tool calls | cost (USD) |", "|---|---|---|---|---|---|"]
     for dialog in result["dialogs"]:
         rep = dialog.get("rep", 1)
