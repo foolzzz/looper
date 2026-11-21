@@ -800,6 +800,11 @@ class ManagerAgent:
     _claude = session_field("claude")
     _claude_runtime = session_field("claude_runtime")
     _session_id = session_field("session_id")
+
+    @property
+    def current_session_id(self) -> str | None:
+        """The session the Manager's turns run in now (None before its first)."""
+        return self._session_id
     _session_totals = session_field("session_totals")
     _session_runtime = session_field("session_runtime")
     _session_profile = session_field("session_profile")

@@ -311,7 +311,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     client_id TEXT,
     continues_schedule_session BOOLEAN NOT NULL DEFAULT false,
     chat_kind TEXT CHECK (chat_kind IN ('user', 'chat')),
-    chat_group BOOLEAN NOT NULL DEFAULT false
+    chat_group BOOLEAN NOT NULL DEFAULT false,
+    -- What outside content went into the task (the outbound-review RFC, section 6.3): 'leads' when a Manager session
+    -- that had found leads created it or added to it, 'intent' when an intent built it. Only added, never removed.
+    untrusted_inputs TEXT[] NOT NULL DEFAULT '{}' CHECK (untrusted_inputs <@ ARRAY['leads', 'intent']::text[])
 );
 
 CREATE TABLE IF NOT EXISTS activity (
@@ -402,6 +405,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     clean_start BOOLEAN NOT NULL DEFAULT false,
     pending_handoff TEXT,
     selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+    leads_session_id TEXT,  -- the Manager's session in which a leads search found leads (the outbound-review RFC)
     CONSTRAINT agent_sessions_selected_profile_manager
         CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%')
 );
