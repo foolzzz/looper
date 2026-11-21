@@ -10,12 +10,12 @@ RESULTS = {}
 OPERATIONS = (
     Operation("session_search.get", "POST", "/api/v1/session_search/get",
               "Read the session search setting.",
-              "Read the Manager's session search setting: whether it is stored on, whether it can take effect now "
-              "(only once group chats run in a session of their own) and whether it does.",
+              "Read the session search setting. It says whether the Manager's session search is stored on, whether "
+              "it can take effect now (only once group chats run in a session of their own) and whether it does.",
               _object({}, closed=True), VIEW, operator_only=True),
     Operation("session_search.update", "POST", "/api/v1/session_search/update",
               "Set the session search setting.",
-              "Set the Manager's session search setting. Null restores the default (off). Turning it on is refused "
+              "Set the session search setting. Null restores the default (off). Turning it on is refused "
               "(conflict) while group chats share the Manager's session.",
               _object({"enabled": {"type": ["boolean", "null"]}}, ["enabled"], closed=True), VIEW,
               risk="high", confirms=True, operator_only=True),
