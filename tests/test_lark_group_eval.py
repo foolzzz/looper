@@ -84,3 +84,13 @@ def test_group_keeps_the_notice_and_skips_the_event():
 def test_aliases_and_chats():
     assert lg.ALIASES["completion"].split(",") == list(lg.COMPLETION)
     assert set(lg.COMPLETION) <= set(lg.CHATS) and "completion-group" in lg.GROUPS
+
+
+def test_the_vault_is_searched_and_told_in_the_operators_chat_and_never_in_a_group():
+    told = [post("answer", "Atlas 的部署端口是 47219（来自你的笔记 projects/atlas.md）。")]
+    searched = [{"tool": "looper_vault_search", "status": "ok"}]
+    assert lg.score_vault("vault-direct", told, searched)["passed"]
+    assert not lg.score_vault("vault-direct", told, [])["passed"]  # told without searching: not from the vault
+    assert lg.score_vault("vault-group", [post("answer", "我在群里查不了你的笔记，请私聊问我。")], [])["passed"]
+    assert not lg.score_vault("vault-group", told, [])["passed"]
+    assert not lg.score_vault("vault-group", [], [{"tool": "looper_vault_search", "status": "error"}])["passed"]

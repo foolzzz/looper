@@ -18,6 +18,7 @@ SCHEDULER_SETTINGS = _object({
         [*SCHEDULER_SETTING["required"], "gated_value"], closed=True),
     "run_timeout_seconds": SCHEDULER_SETTING,
     "run_retention_days": SCHEDULER_SETTING,
+    "session_context_max_tokens": SCHEDULER_SETTING,
 }, closed=True)
 WAIT_SETTING = _object({
     "value": _INT, "default": _INT, "min": _INT, "max": _INT,
@@ -26,7 +27,7 @@ WAIT_SETTING = _object({
 WAIT_SETTINGS = _object({name: WAIT_SETTING for name in ("max_wait_seconds", "min_check_seconds")}, closed=True)
 VAULT_SETTINGS = _object({
     "configured": _BOOL, "path": _NULL_STR, "writable": _array(_STR), "rules_file": _NULL_STR,
-    "git": _BOOL, "problem": _NULL_STR,
+    "manager_read": _BOOL, "git": _BOOL, "problem": _NULL_STR,
 }, closed=True)
 SCHEMAS = {"SchedulerSetting": SCHEDULER_SETTING, "SchedulerSettings": SCHEDULER_SETTINGS,
            "WaitSetting": WAIT_SETTING, "WaitSettings": WAIT_SETTINGS, "VaultSettings": VAULT_SETTINGS}
@@ -37,7 +38,7 @@ LLMREC_LIMIT = _object({"value": {"type": "number"}, "built_in": {"type": "numbe
 LLMREC_LIMITS = _object({name: LLMREC_LIMIT for name in ("retention_days", "max_total_mb")}, closed=True)
 
 _COMPACT_VAULT = _object({name: schema for name, schema in VAULT_SETTINGS["properties"].items()
-                          if name != "git"}, closed=True)
+                          if name not in ("git", "manager_read")}, closed=True)
 _COMPACT_GATEWAY = _object({name: GATEWAY_SETTINGS["properties"][name] for name in
                            ("enabled", "port", "aliases")}, closed=True)
 RESULTS = {
@@ -70,13 +71,15 @@ _SCHEDULER_UPDATE = _object({
     "min_interval_seconds": _seconds(1),
     "run_timeout_seconds": _seconds(1, scheduler_settings.RUN_TIMEOUT_MAX_SECONDS),
     "run_retention_days": _seconds(1, scheduler_settings.RUN_RETENTION_MAX_DAYS),
+    **{name: _seconds(scheduler_settings.SESSION_CONTEXT_MIN_TOKENS, high)
+       for name, high in scheduler_settings.SESSION_SETTING_LIMITS.items()},
 }, [], closed=True) | {"minProperties": 1}
 _WAIT_UPDATE = _object({
     "max_wait_seconds": _seconds(*waits.MAX_WAIT_RANGE),
     "min_check_seconds": _seconds(*waits.MIN_CHECK_RANGE),
 }, [], closed=True) | {"minProperties": 1}
-_VAULT_UPDATE = _object({"path": _NULL_STR, "writable": _array(_STR), "rules_file": _NULL_STR},
-                        ["path"], closed=True)
+_VAULT_UPDATE = _object({"path": _NULL_STR, "writable": _array(_STR), "rules_file": _NULL_STR,
+                         "manager_read": _BOOL}, ["path"], closed=True)
 
 OPERATIONS = (
     _operation("scheduler_settings.get", "Read scheduler settings and their effective sources.",

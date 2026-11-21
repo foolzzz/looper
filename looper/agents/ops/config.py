@@ -399,6 +399,35 @@ def profile_deletion_impact(row: Mapping[str, Any]) -> str:
             f"{effort}）吗？没有设置层、任务、定时任务或项目的可选列表在用它；删除后不能恢复。")
 
 
+async def _changing_provider_route(call: Call) -> str | None:
+    """What new endpoints or environment for an account do, for the user to confirm: every later run of its Agent
+    Profiles goes there. The variables' names only, never their values; None for every other call."""
+    arguments = call.arguments
+    if arguments["action"] != "update" or not {"endpoints", "env"} & arguments.keys():
+        return None
+    _required(arguments, "update", "provider")
+    if "endpoints" in arguments:
+        if not isinstance(arguments["endpoints"], list):
+            raise OpError(ErrorCode.INVALID, "endpoints must be a list")
+        for endpoint in arguments["endpoints"]:
+            check_arguments(_PROVIDER_ENDPOINT, endpoint)
+    accounts = (await answered(profile_registry.list_providers()))["providers"]
+    account = by_id_or_name(accounts, arguments["provider"], id_key="provider_id", what="provider")
+    # Refused before the user is asked, as the change itself would be (a credential in env, a bad endpoint).
+    fields = {key: value for key, value in arguments.items() if key not in {"action", "provider", "enabled"}}
+    after = await answered(profile_registry.preview_provider_update(account["provider_id"], fields))
+    call.arguments["provider"] = account["provider_id"]  # the confirmed call changes this account, renamed or not
+    lines = [f"要修改账户「{account['name']}」的连接设置吗？用它的 {account['profile_count']} 个 Agent Profile "
+             "之后的每次运行都按新的设置连接模型："]
+    if "endpoints" in arguments:
+        lines.append("- endpoint：" + ("；".join(f"{e['protocol']} → {e.get('base_url') or '运行时默认'}"
+                                               for e in after["endpoints"]) or "全部去掉"))
+    if "env" in arguments:
+        names = [entry["key"] for entry in after["env"]]
+        lines.append("- 环境变量：" + ("、".join(names) + "（值不显示）" if names else "全部去掉"))
+    return "\n".join(lines)
+
+
 async def _providers(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
     if action == "list":
@@ -524,9 +553,36 @@ def _item_listed(view: Mapping[str, Any]) -> dict[str, Any]:
             "manager_install_count": view["manager_install_count"]}
 
 
+async def _catalog_impact(call: Call) -> str | None:
+    """What installing an MCP server, or enabling an install of one again, does, for the user to confirm; None for
+    every other call (a skill or plugin installs at once). The confirmed call is bound to the item, its
+    configuration as shown and the project, by id (``call.confirmation``)."""
+    arguments, action = call.arguments, call.arguments["action"]
+    asked = None
+    if action == "install":
+        _required(arguments, action, "item")
+        project = await project_named(arguments["project"]) if arguments.get("project") is not None else None
+        items = (await answered(catalog.catalog_view()))["items"]
+        item = by_id_or_name(items, arguments["item"], id_key="item_id", what="catalog item",
+                             keys=("qualified_name", "name"))
+        asked = await answered(catalog.mcp_install_impact({
+            "item_id": item["item_id"], "scope": "project" if project else "global",
+            **({"project_id": project["id"]} if project else {}), **_given(arguments, ("roles",))}))
+    elif action == "update" and arguments.get("enabled") is True:
+        _required(arguments, action, "install_id")
+        asked = await answered(catalog.mcp_enable_impact(arguments["install_id"],
+                                                         _given(arguments, ("roles", "enabled"))))
+    if asked is None:
+        return None
+    call.confirmation.update(asked.binding())
+    return asked.text
+
+
 async def _catalog(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
-    project = await project_named(arguments["project"]) if arguments.get("project") is not None else None
+    bound = call.confirmation if call.confirmation.get("item_sha256") else None  # a confirmed MCP install
+    project = (await project_named(arguments["project"]) if arguments.get("project") is not None and bound is None
+               else None)
     if action == "list":
         if project is not None:
             view = await answered(catalog.project_view(project["id"]))
@@ -538,18 +594,22 @@ async def _catalog(call: Call) -> dict[str, Any]:
                           for item in view["items"]]}
     if action == "install":
         _required(arguments, action, "item")
-        items = (await answered(catalog.catalog_view()))["items"]
-        item = by_id_or_name(items, arguments["item"], id_key="item_id", what="catalog item",
-                             keys=("qualified_name", "name"))
-        data = {"item_id": item["item_id"], "scope": "project" if project else "global",
-                **({"project_id": project["id"]} if project else {}), **_given(arguments, ("roles",))}
-        answer = await answered(catalog.install(data))
+        if bound is not None:  # where the user confirmed it, renamed or not
+            item_id, project_id = bound["item_id"], bound["project_id"]
+        else:
+            items = (await answered(catalog.catalog_view()))["items"]
+            item_id = by_id_or_name(items, arguments["item"], id_key="item_id", what="catalog item",
+                                    keys=("qualified_name", "name"))["item_id"]
+            project_id = project["id"] if project else None
+        data = {"item_id": item_id, "scope": "project" if project_id else "global",
+                **({"project_id": project_id} if project_id else {}), **_given(arguments, ("roles",))}
+        answer = await answered(catalog.install(data, expected_sha256=bound["item_sha256"] if bound else None))
         return {"install": _install_listed(answer["install"]), "item": _item_listed(answer["item"]),
                 "note": "it loads from each agent's next run on"}
     _required(arguments, action, "install_id")
     if action == "update":
-        answer = await answered(catalog.update_install(arguments["install_id"],
-                                                       _given(arguments, ("roles", "enabled"))))
+        answer = await answered(catalog.update_install(arguments["install_id"], _given(arguments, ("roles", "enabled")),
+                                                       expected_sha256=bound["item_sha256"] if bound else None))
         return {"install": _install_listed(answer["install"]), "item": _item_listed(answer["item"])}
     answer = await answered(catalog.uninstall(arguments["install_id"]))
     return {"deleted": arguments["install_id"], "item": _item_listed(answer["item"])}
@@ -768,7 +828,7 @@ TOOLS: tuple[Tool, ...] = (
                             "Built-in login accounts take only this."},
             },
         },
-        risk=Risk.WRITE, run=_providers, read_actions=frozenset({"list"}),
+        risk=Risk.WRITE, run=_providers, escalate=_changing_provider_route, read_actions=frozenset({"list"}),
     ),
     Tool(
         name="looper_models",
@@ -806,7 +866,7 @@ TOOLS: tuple[Tool, ...] = (
                 "enabled": {"type": "boolean"},
             },
         },
-        risk=Risk.WRITE, run=_catalog, read_actions=frozenset({"list"}),
+        risk=Risk.WRITE, run=_catalog, escalate=_catalog_impact, read_actions=frozenset({"list"}),
     ),
     Tool(
         name="looper_config_export",
