@@ -5450,8 +5450,18 @@ are delivered separately; CLI callers use the same operator API operations.
 The ledger lists what waits for the user (`pending`), what was decided
 (`decision`) and who does what (`work_item`) ([Completion and ledger
 RFC](rfcs/manager-completion-ledger-v0.zh-CN.md), section 4). It is off until
-the system setting `ledger.enabled` is `true`; the dashboard has no switch yet.
-Off, no prompt, tool list or command line mentions it.
+the system setting `ledger.enabled` is `true`. Settings → Chat and
+`chat_settings.update` turn it on and off; null removes the row and the ledger
+stays off. Turning it on returns `missing_operator_ids`: every enabled Lark or
+Telegram bot (`telegram`, `lark`, `lark_bot`) whose configuration has no
+`operator_sender_id` (`channels.operator_ids.missing`). A bot with no display
+name is listed by its channel id. In those bots' direct chats a decision is
+recorded as relayed until Settings → Channels has "My ID". Only the operator
+can set `ledger_enabled`; any other principal gets 403, and the other fields
+of `chat_settings.update` stay available.
+The ledger reads the row from the database; there is no second copy in memory.
+Off, no prompt, tool list or command line mentions it, and reading the setting
+writes nothing.
 
 - **Tables** (`ledger_items`, `ledger_events`; migration `ledger`): an own item
   (a decision, a hand-made to-do) keeps its `status` (`open`, `done`,
@@ -5503,9 +5513,8 @@ Off, no prompt, tool list or command line mentions it.
   database unusable.
 - **Reads:** `ledger.list` and `ledger.get` (`/api/v1`, read-only, open to an
   API client and the operator) answer `conflict` while the ledger is off.
-- **Not yet:** the To-do page and the dashboard switch, the ledger contract in
-  the Manager's system prompt (the tool descriptions are all it has), HTTP
-  writes.
+- **Not yet:** the To-do page, the ledger contract in the Manager's system
+  prompt (the tool descriptions are all it has), HTTP writes.
 
 ### User gates
 
@@ -6091,6 +6100,34 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
   Settings → Roles lists the Advisor and Advice check roles, and a project's settings its `advisor` switch, limits,
   fallback profile and internal domains.
 
+### Reviews of outbound actions
+
+Before an agent does something that may leave the operator's machine, `outbound.review` (`looper/agents/outbound.py`,
+the outbound-review RFC) asks a tool-less run whether the operator asked for it, to that target. No tool calls it
+yet; its callers come with the `outbound_review.enabled` switch.
+
+- **The action** is typed: its tool and action, its `ActionLevel` (`inside`, `operator`, `origin`, `machine`,
+  `external`, `unknown`; only `external` and `unknown` are reviewed), its target and a summary code wrote, and the
+  text it would send. Whose turn led to it (`Who`) is code's, never the model's: in a turn that is not the
+  operator's, code blocks the action (`not_operator`) without a run.
+- **The run.** The `outbound_check` role has no tools and no harness (like `advice_check`; `ROLE_CAPABILITIES`
+  `run` and `no_tools`). Its role layer chooses its Agent Profile; with none it runs its built-in
+  `claude-code/sonnet-5-5`. Its system prompt is the role prompt (`role_configs`) and `outbound.OUTBOUND_CONTRACT`.
+  Its one turn holds the action, the operator's turn and the outside content in data blocks the content cannot
+  close or open, with keys and tokens masked (paths stay). The text an action would send is shown whole: one
+  longer than 12,000 characters is blocked (`too_long`) without a run. One turn, the role's timeout (30 s, at
+  most), a 0.10 USD cap (`spawn.MIN_RUN_USD`), never run again.
+- **The verdict** must be the contract's one JSON object (`outbound.parse_verdict`): `decision` `allow` or `block`,
+  a `reason` of at most 300 characters and known `signals`. Anything else, a timeout, a run that ends in error or
+  cannot be prepared or started, a rate limit, a refusal (or another model answering), a turned-off role or a
+  missing profile blocks the action, with `failure` saying why. A review returns within
+  `outbound.CALLER_TIMEOUT_SEC` (the run, then at most 5 s for its audit row): a caller that bounds it waits
+  longer.
+- **Records.** Each review is an `outbound_reviews` row, written before the action may go ahead: an action whose
+  row cannot be written in time is blocked. Its free text (the target, the summary, the model's reason) is stored
+  masked. The run's record has `run_kind` `outbound_check` and the asking run as its
+  `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
+
 ### Turns Claude runs on its own
 
 A resident Claude (Manager, Planner) also runs turns that answer no message.
@@ -6340,10 +6377,11 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
+| `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |

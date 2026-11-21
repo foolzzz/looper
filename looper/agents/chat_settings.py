@@ -13,7 +13,11 @@ before it asks the user (``research_order``; off by default).
 ``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
 The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
 
-Stop, the completion events and the Manager's prompt check them from synchronous code, so they are kept in memory: ``load`` reads them
+``ledger.enabled``: whether the ledger records what waits for the user, what was decided and who does what
+(off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
+second copy. Turning it on names the enabled bots that have no operator id.
+
+Stop, completion turns, research order and delivery guard are kept in memory: ``load`` reads them
 at startup and updates refresh them. Until loaded, all are off.
 """
 
@@ -23,6 +27,7 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
+from ..db import ledger as db_ledger
 from ..db import system_settings as db_settings
 
 STOP_ENABLED_KEY = "chat.stop_enabled"
@@ -32,7 +37,7 @@ RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
-FIELDS = ("stop_enabled", "completion_turns", "research_order")
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -123,8 +128,10 @@ async def load() -> bool:
     return _stop_enabled
 
 
-def settings_view() -> dict[str, Any]:
-    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value, "research_order": _research_order}
+async def settings_view() -> dict[str, Any]:
+    """The settings in effect. ``ledger_enabled`` is the stored row (``db.ledger.enabled``), not a copy in memory."""
+    return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value,
+            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled()}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -149,6 +156,11 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("research_order must be true, false or null")
         values["research_order"] = value
+    if "ledger_enabled" in body:
+        value = body["ledger_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("ledger_enabled must be true, false or null")
+        values["ledger_enabled"] = value
     return values
 
 
@@ -165,6 +177,16 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if "research_order" in values:
         value = values["research_order"]
         stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
+    if "ledger_enabled" in values:
+        value = values["ledger_enabled"]
+        stored[db_ledger.ENABLED_KEY] = None if value is None else ("true" if value else "false")
     await db_settings.put_settings(stored)
     await load()
-    return settings_view()
+    view = await settings_view()
+    if values.get("ledger_enabled") is True:
+        from .channels.operator_ids import missing
+
+        view["missing_operator_ids"] = [
+            {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
+            for bot in await missing()]
+    return view
