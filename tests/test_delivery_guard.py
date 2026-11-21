@@ -86,3 +86,25 @@ def test_ops_turn_is_inert_until_explicitly_initialized():
 def test_invalid_followup_count_fails_fast(followups):
     with pytest.raises(ValueError, match="followups"):
         followup_action(Debt.OWED, ending=Ending.EMPTY, followups=followups)
+
+
+@pytest.mark.parametrize("exc,expected", [
+    (None, Ending.REPLY),
+    ("empty", Ending.EMPTY),
+    ("over_cap", Ending.OVER_CAP),
+    ("exit", Ending.EXIT),
+    ("tools_down", Ending.TOOLS_DOWN),
+    ("refused", Ending.REFUSED),
+    ("stopped", Ending.STOP),
+    ("failed", Ending.ERROR),
+    (RuntimeError("NoReply over_cap stopped"), Ending.ERROR),
+])
+def test_exception_endings(exc, expected):
+    from looper.agents.delivery_guard import ending_for, OverCap, TurnExited, ToolsDown, TokenRefused
+    from looper.agents.tiers.manager import NoReply, TurnFailed
+    from looper.agents.tiers.turn_token import TurnStopped
+
+    exceptions = {"empty": NoReply(), "over_cap": OverCap(), "exit": TurnExited(),
+                  "tools_down": ToolsDown(), "refused": TokenRefused(),
+                  "stopped": TurnStopped(), "failed": TurnFailed("failed", "unavailable")}
+    assert ending_for(exceptions.get(exc, exc)) is expected

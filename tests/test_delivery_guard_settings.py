@@ -36,6 +36,7 @@ def settings(monkeypatch):
     monkeypatch.setattr(chat_settings.db_settings, "get_settings", read)
     monkeypatch.setattr(chat_settings.db_settings, "put_settings", write)
     monkeypatch.setattr(chat_settings, "_delivery_guard_enabled", False, raising=False)
+    monkeypatch.setattr(chat_settings.db_ledger, "enabled", AsyncMock(return_value=False))
     return stored, writes
 
 
@@ -76,10 +77,10 @@ def test_invalid_setting_cannot_write_or_change_memory(settings, value):
 def test_default_off_preserves_chat_settings_view_and_writes(settings):
     async def check():
         await chat_settings.load()
-        assert chat_settings.settings_view() == {
-            "stop_enabled": False, "completion_turns": "off", "research_order": False}
+        assert await chat_settings.settings_view() == {
+            "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
         assert await chat_settings.update({"research_order": False}) == {
-            "stop_enabled": False, "completion_turns": "off", "research_order": False}
+            "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
         assert settings[1] == [{"manager.research_order": "false"}]
         with pytest.raises(ValueError, match="unknown setting"):
             chat_settings.checked({"delivery_guard_enabled": True})
@@ -120,4 +121,17 @@ def test_operator_reads_and_updates_through_v1(tmp_path, monkeypatch, settings):
                 status, _, answer = await _send(server, f"POST /api/v1/delivery_guard/{action}",
                                                 _bearer(TOKEN), json.dumps(body))
                 assert status == 200 and answer["result"] == {"enabled": expected}, answer
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("value,expected", [(True, "true"), (False, "false"), (None, "false")])
+def test_update_declares_high_risk_confirmation(settings, value, expected):
+    operation = api_v1.find("POST", "/api/v1/delivery_guard/update")
+    assert operation.risk == "high" and operation.confirms
+
+    async def check():
+        impact = await api_v1.domain_for(operation).impact(
+            None, operation, {"enabled": value}, api_v1.OPERATOR, {})
+        assert f"manager.delivery_guard.enabled to {expected}" in impact
+        assert settings == ({}, [])
     asyncio.run(check())

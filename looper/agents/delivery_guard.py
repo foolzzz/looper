@@ -11,17 +11,18 @@ from collections.abc import Set
 from .ops import TurnOrigin
 from .runtimes import Capability
 
+SILENT_TOOLS = 6
+
 FOLLOWUP_MESSAGE = (
     "[Looper] Your last turn ended without any reply to the user. Reply now with the result, "
     "or with what blocked you and what you need from them. Do not start new work."
 )
 REMINDER_MESSAGE = (
-    "[Looper] You have made 6 tool calls without a word to the user. Tell them in one sentence "
+    f"[Looper] You have made {SILENT_TOOLS} tool calls without a word to the user. Tell them in one sentence "
     "where you are, then finish or say what blocks you."
 )
 FAILURE_NOTICE = "这次没拿到结果：管家连续几次都没有给出回复。可以再问一次；反复出现的话发 /new 换一个新会话。"
 MAX_FOLLOWUPS = 2
-SILENT_TOOLS = 6
 MAX_REMINDERS = 2
 
 
@@ -42,6 +43,43 @@ class TurnEnding(str, Enum):
     OVER_CAP = "over_cap"
     TOOLS_DOWN = "tools_down"
     REFUSED = "refused"
+
+
+class OverCap(RuntimeError):
+    """The turn exceeded its spend cap; wiring must raise this instead of a generic error."""
+
+
+class TurnExited(RuntimeError):
+    """The runtime process exited without a reply."""
+
+
+class ToolsDown(RuntimeError):
+    """The turn could not run because its tools were unavailable."""
+
+
+class TokenRefused(RuntimeError):
+    """The turn's token was refused before it could produce a reply."""
+
+
+def ending_for(exc: Exception | None) -> TurnEnding:
+    """Classify a successful reply (None) or a typed failure, never its message.
+
+    Generic errors remain ERROR, including legacy Manager cap/exit errors until
+    wiring raises the typed exceptions above. NoReply alone permits a follow-up.
+    """
+    # Manager owns these existing exceptions; defer the import so it can use this policy.
+    from .tiers.manager import NoReply, TurnFailed
+    from .tiers.turn_token import TurnStopped
+
+    if exc is None:
+        return TurnEnding.REPLY
+    for kind, ending in ((NoReply, TurnEnding.EMPTY), (OverCap, TurnEnding.OVER_CAP),
+                         (TurnStopped, TurnEnding.STOP), (TurnExited, TurnEnding.EXIT),
+                         (ToolsDown, TurnEnding.TOOLS_DOWN), (TokenRefused, TurnEnding.REFUSED),
+                         (TurnFailed, TurnEnding.ERROR)):
+        if isinstance(exc, kind):
+            return ending
+    return TurnEnding.ERROR
 
 
 class FollowupAction(str, Enum):
