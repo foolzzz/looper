@@ -292,7 +292,7 @@ class ClientOps:
         from .. import outbound, outbound_hook
         from . import levels, review as layer_one
 
-        if not await outbound_hook.enabled():
+        if not outbound_hook.known_enabled():  # read at startup, set by its switch
             return None
         level = await level_of(arguments) if level_of is not None else await levels.level_of(tool, arguments, turn)
         if level not in outbound.REVIEWED:

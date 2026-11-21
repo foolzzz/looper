@@ -862,7 +862,7 @@ class ManagerOps:
         from ...db import outbound_reviews
         from . import levels, review as layer_one
 
-        if not await outbound_hook.enabled():
+        if not outbound_hook.known_enabled():  # read at startup and by each turn, set by its switch
             return None
         level = await levels.level_of(tool, arguments, turn)
         if level not in outbound.REVIEWED:
