@@ -1,25 +1,28 @@
 """Operator settings validation, cache refresh and default-off side effects."""
 import asyncio
+import json
+from types import SimpleNamespace
 from dataclasses import asdict
 from unittest.mock import AsyncMock
 
 import pytest
 
 from looper.agents import api_v1, chat_settings
-from looper.agents.ops import OpError
-from looper.agents.v1_domains import chat_controls
+from looper.agents.ops.clients import ClientOps
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clients as clients
 
 
 @pytest.mark.parametrize('body', [
     {'timezone': 'Missing/Zone'}, {'timezone': ''}, {'timezone': 8},
-    {'reply_language': 'fr'}, {'turn_context_enabled': 1},
+    {'reply_language': 'fr'}, {'turn_context_enabled': 1}, {},
+    {'server_timezone': 'UTC'}, {'stop_enabled': True},
+    {'turn_context_enabled': True, 'timezone': 'Missing/Zone'},
 ])
 def test_bad_context_setting_is_atomic(monkeypatch, body):
     put = AsyncMock()
     monkeypatch.setattr(chat_settings.db_settings, 'put_settings', put)
     with pytest.raises(ValueError):
-        asyncio.run(chat_settings.update(body))
+        asyncio.run(chat_settings.update_turn_context(body))
     put.assert_not_awaited()
 
 
@@ -50,32 +53,60 @@ def test_settings_store_reload_reset_and_off_has_no_channel_reads(monkeypatch):
         await chat_settings.update({'stop_enabled': False})
         assert writes == [{'chat.stop_enabled': 'false'}]
         missing.assert_not_awaited()
-        result = await chat_settings.update({'turn_context_enabled': True, 'timezone': 'Asia/Shanghai', 'reply_language': 'en'})
+        result = await chat_settings.update_turn_context({'turn_context_enabled': True, 'timezone': 'Asia/Shanghai', 'reply_language': 'en'})
         assert result['missing_operator_ids'] == [asdict(missing.return_value[0])]
         assert chat_settings.timezone() == 'Asia/Shanghai' and chat_settings.reply_language() == 'en'
-        await chat_settings.update({'turn_context_enabled': None, 'timezone': None, 'reply_language': None})
+        await chat_settings.update_turn_context({'turn_context_enabled': None, 'timezone': None, 'reply_language': None})
         assert not chat_settings.turn_context_enabled() and chat_settings.timezone() is None
         assert chat_settings.reply_language() == 'zh-CN'
         assert state == {'chat.stop_enabled': 'false'}
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('field,value', [
-    ('turn_context_enabled', True), ('timezone', 'Asia/Shanghai'), ('reply_language', 'en'),
+@pytest.mark.parametrize('action,body', [
+    ('get', {}), ('update', {'turn_context_enabled': True}),
+    ('update', {'timezone': 'Asia/Shanghai'}), ('update', {'reply_language': 'en'}),
 ])
-def test_new_context_settings_are_operator_only(monkeypatch, field, value):
-    update = AsyncMock()
-    monkeypatch.setattr(chat_settings, 'update', update)
-    async def run():
-        operation = api_v1.find('POST', '/api/v1/chat_settings/update')
-        for handler in (chat_controls.impact, chat_controls.run):
-            with pytest.raises(OpError) as refused:
-                await handler(None, operation, {field: value}, api_v1.Principal('client'), {})
-            assert refused.value.code.value == 'forbidden'
-        update.assert_not_awaited()
-    asyncio.run(run())
+def test_new_context_settings_are_operator_only(tmp_path, monkeypatch, clients, action, body):
+    operation = api_v1.find('POST', f'/api/v1/turn_context_settings/{action}')
+    assert operation is not None and operation.operator_only and operation.tool is None
+    run = AsyncMock(side_effect=AssertionError('client reached operator settings'))
+    monkeypatch.setattr(api_v1.domain_for(operation), 'run', run)
+    async def check():
+        async with _serving(tmp_path) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            status, _, answer = await _send(server, f'POST {operation.path}', _bearer(CLIENT_TOKEN), json.dumps(body))
+            assert status == 403 and answer['error']['code'] == 'forbidden'
+            run.assert_not_awaited()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('field,value', [
+    ('turn_context_enabled', True), ('timezone', 'UTC'), ('reply_language', 'en'), ('server_timezone', 'UTC'),
+])
+def test_context_fields_are_not_chat_settings(monkeypatch, field, value):
+    put = AsyncMock()
+    monkeypatch.setattr(chat_settings.db_settings, 'put_settings', put)
+    with pytest.raises(ValueError, match='unknown setting'):
+        asyncio.run(chat_settings.update({field: value, 'stop_enabled': True}))
+    put.assert_not_awaited()
     operation = api_v1.find('POST', '/api/v1/chat_settings/update')
-    assert not operation.operator_only and operation.tool is None
+    assert field not in operation.request['properties']
+    assert field not in api_v1.find('POST', '/api/v1/chat_settings/get').result['properties']
+
+
+def test_context_update_declares_confirmation_and_validates_before_impact():
+    operation = api_v1.find('POST', '/api/v1/turn_context_settings/update')
+    assert operation is not None and operation.risk == 'high' and operation.confirms
+    from looper.agents.ops import OpError
+    async def check():
+        domain = api_v1.domain_for(operation)
+        impact = await domain.impact(None, operation, {'timezone': 'UTC'}, api_v1.OPERATOR, {})
+        assert 'user.timezone' in impact
+        with pytest.raises(OpError) as refused:
+            await domain.impact(None, operation, {'timezone': 'Missing/Zone'}, api_v1.OPERATOR, {})
+        assert refused.value.code.value == 'invalid'
+    asyncio.run(check())
 
 
 def test_clients_keep_read_access_to_chat_settings(tmp_path, monkeypatch, clients):
@@ -86,3 +117,26 @@ def test_clients_keep_read_access_to_chat_settings(tmp_path, monkeypatch, client
             assert status == 200 and answer['result']['stop_enabled'] is False
     asyncio.run(run())
     assert not api_v1.find('POST', '/api/v1/chat_settings/get').operator_only
+
+
+@pytest.mark.parametrize('body,expected', [
+    ({'turn_context_enabled': False}, {'manager.turn_context.enabled': 'false'}),
+    ({'timezone': 'UTC'}, {'user.timezone': 'UTC'}),
+    ({'reply_language': 'en'}, {'user.reply_language': 'en'}),
+])
+def test_context_writes_only_named_fields(monkeypatch, body, expected):
+    put = AsyncMock()
+    monkeypatch.setattr(chat_settings.db_settings, 'put_settings', put)
+    monkeypatch.setattr(chat_settings.db_settings, 'get_settings', AsyncMock(return_value={}))
+    asyncio.run(chat_settings.update_turn_context(body))
+    put.assert_awaited_once_with(expected)
+
+
+def test_bot_lookup_failure_does_not_enable_context(monkeypatch):
+    from looper.agents.channels import operator_ids
+    put = AsyncMock()
+    monkeypatch.setattr(chat_settings.db_settings, 'put_settings', put)
+    monkeypatch.setattr(operator_ids, 'missing', AsyncMock(side_effect=RuntimeError('unavailable')))
+    with pytest.raises(RuntimeError, match='unavailable'):
+        asyncio.run(chat_settings.update_turn_context({'turn_context_enabled': True}))
+    put.assert_not_awaited()

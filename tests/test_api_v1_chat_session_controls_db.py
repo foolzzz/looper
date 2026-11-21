@@ -111,10 +111,10 @@ def test_client_setting_update_waits_for_confirmation_and_null_restores_default(
             status, readback = await call("chat_settings.get", client=True)
             assert status == 200 and readback["result"]["stop_enabled"] is False
             status, answer = await call("confirm", {"confirmation_id": asked["confirmation_id"]}, client=True)
-            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False, **{key: (await chat_settings.settings_view())[key] for key in ("turn_context_enabled", "timezone", "server_timezone", "reply_language")}}
+            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             assert await chat_settings.load() is True
             status, answer = await call("chat_settings.update", {"stop_enabled": None})
-            assert status == 200 and answer["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False, **{key: (await chat_settings.settings_view())[key] for key in ("turn_context_enabled", "timezone", "server_timezone", "reply_language")}}
+            assert status == 200 and answer["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             assert await chat_settings.load() is chat_settings.DEFAULT_STOP_ENABLED
             assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key=$1", chat_settings.STOP_ENABLED_KEY) == 0
     run_db(run, monkeypatch, timeout=30)

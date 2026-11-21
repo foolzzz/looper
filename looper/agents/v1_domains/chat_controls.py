@@ -32,9 +32,7 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
 _MISSING_BOT = _object({"channel_id": _STR, "channel_type": _STR, "name": _STR}, closed=True)
 CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL,
-                         "ledger_enabled": _BOOL, "turn_context_enabled": _BOOL,
-                         "timezone": _NULL_STR, "server_timezone": _STR,
-                         "reply_language": {"type": "string", "enum": ["zh-CN", "en"]}})
+                         "ledger_enabled": _BOOL})
 CHAT_SETTINGS_UPDATED = _object({**CHAT_SETTINGS["properties"], "missing_operator_ids": _array(_MISSING_BOT)},
                                 required=CHAT_SETTINGS["required"])
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
@@ -61,24 +59,17 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read chat settings, including the ledger, turn context, timezone and reply language.",
+    _op("chat_settings.get", "Read the chat settings: reply stopping, completion turns, research order and whether "
+        "the ledger is on.",
         _object({}, closed=True), CHAT_SETTINGS),
-    _op("chat_settings.update", "Change named chat settings; null restores defaults. Enabling ledger or context lists bots without operator IDs.",
+    _op("chat_settings.update", "Change the named chat settings; null restores a default. Turning the ledger on "
+        "lists enabled bots with no operator id.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
                  "research_order": {"type": ["boolean", "null"]},
-                 "ledger_enabled": {"type": ["boolean", "null"]},
-                 "turn_context_enabled": {"type": ["boolean", "null"]},
-                 "timezone": _NULL_STR,
-                 "reply_language": {"type": ["string", "null"], "enum": ["zh-CN", "en", None]}},
+                 "ledger_enabled": {"type": ["boolean", "null"]}},
                 [], closed=True), CHAT_SETTINGS_UPDATED, "high"),
 )
-
-
-def _authorize_settings(values, principal):
-    for field in ("ledger_enabled", "turn_context_enabled", "timezone", "reply_language"):
-        if field in values and principal.kind != "operator":
-            raise OpError(ErrorCode.FORBIDDEN, f"{field} requires operator identity")
 
 
 async def impact(server, operation, arguments, principal, headers):
@@ -88,7 +79,8 @@ async def impact(server, operation, arguments, principal, headers):
         values = chat_settings.checked(arguments)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
-    _authorize_settings(values, principal)
+    if "ledger_enabled" in values and principal.kind != "operator":
+        raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
     changes = []
     if "stop_enabled" in values:
         value = values["stop_enabled"]
@@ -129,21 +121,6 @@ async def impact(server, operation, arguments, principal, headers):
         else:
             changes.append(f"Set ledger.enabled to false{' (built-in default)' if value is None else ''}? "
                            "New items stop being recorded. Items already recorded stay.")
-    if "turn_context_enabled" in values:
-        enabled = values["turn_context_enabled"] is True
-        changes.append(f"Set manager.turn_context.enabled to {str(enabled).lower()}? "
-                       "The turn context and speaker authorization are awaiting Manager integration.")
-        if enabled:
-            from ..channels import operator_ids
-
-            missing = await operator_ids.missing()
-            if missing:
-                changes.append("These bots have no operator id: " + ", ".join(bot.name for bot in missing) +
-                               ". Nobody counts as the operator there; actions needing operator authorization "
-                               "will be refused when turn context is active.")
-    for field in ("timezone", "reply_language"):
-        if field in values:
-            changes.append(f"Set user.{field} to {values[field] or 'the default'}? Applies to turn context only.")
     return " ".join(changes)
 
 
@@ -171,7 +148,8 @@ async def run(server, operation, arguments, principal, headers):
     if name == "chat_settings.get":
         return await chat_settings.settings_view()
     if name == "chat_settings.update":
-        _authorize_settings(arguments, principal)
+        if "ledger_enabled" in arguments and principal.kind != "operator":
+            raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
         try:
             return await chat_settings.update(arguments)
         except ValueError as exc:

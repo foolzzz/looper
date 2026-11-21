@@ -17,7 +17,10 @@ The Manager behavior is wired separately; its v1 operations are ``delivery_guard
 (off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
 second copy. Turning it on names the enabled bots that have no operator id.
 
-Stop, completion turns, research order and delivery guard are kept in memory: ``load`` reads them
+Turn context, timezone and reply language have separate operator-only
+``turn_context_settings.get/update`` operations; they are not client chat settings.
+
+Stop, completion turns, research order, delivery guard and turn context are kept in memory: ``load`` reads them
 at startup and updates refresh them. Until loaded, all are off.
 """
 
@@ -39,8 +42,8 @@ RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
-FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled",
-          "turn_context_enabled", "timezone", "reply_language")
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
+
 TURN_CONTEXT_KEY = "manager.turn_context.enabled"
 TIMEZONE_KEY = "user.timezone"
 REPLY_LANGUAGE_KEY = "user.reply_language"
@@ -159,12 +162,8 @@ async def load() -> bool:
 
 async def settings_view() -> dict[str, Any]:
     """The settings in effect. ``ledger_enabled`` is the stored row (``db.ledger.enabled``), not a copy in memory."""
-    from .turn_context import server_zone
-
     return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value,
-            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled(),
-            "turn_context_enabled": _turn_context_enabled, "timezone": _timezone,
-            "server_timezone": str(server_zone()), "reply_language": _reply_language}
+            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled()}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -194,6 +193,55 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("ledger_enabled must be true, false or null")
         values["ledger_enabled"] = value
+    return values
+
+
+async def update(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Store the settings in ``body`` and apply them at once. A refused body changes nothing; a setting the body
+    leaves out keeps its value."""
+    values = checked(body)
+    stored: dict[str, str | None] = {}
+    if "stop_enabled" in values:
+        value = values["stop_enabled"]
+        stored[STOP_ENABLED_KEY] = None if value is None else ("true" if value else "false")
+    if "completion_turns" in values:
+        stored[COMPLETION_TURNS_KEY] = values["completion_turns"]
+    if "research_order" in values:
+        value = values["research_order"]
+        stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
+    if "ledger_enabled" in values:
+        value = values["ledger_enabled"]
+        stored[db_ledger.ENABLED_KEY] = None if value is None else ("true" if value else "false")
+    await db_settings.put_settings(stored)
+    await load()
+    view = await settings_view()
+    if values.get("ledger_enabled") is True:
+        from .channels.operator_ids import missing
+
+        view["missing_operator_ids"] = [
+            {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
+            for bot in await missing()]
+    return view
+
+
+TURN_CONTEXT_FIELDS = ("turn_context_enabled", "timezone", "reply_language")
+
+
+def turn_context_view() -> dict[str, Any]:
+    """Operator-only settings, kept out of the existing client chat view."""
+    from .turn_context import server_zone
+
+    return {"turn_context_enabled": _turn_context_enabled, "timezone": _timezone,
+            "server_timezone": str(server_zone()), "reply_language": _reply_language}
+
+
+def checked_turn_context(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate all named fields before any setting is stored."""
+    if unknown := [key for key in body if key not in TURN_CONTEXT_FIELDS]:
+        raise ValueError(f"unknown turn context setting {unknown[0]!r}")
+    if not body:
+        raise ValueError(f"give at least one of {', '.join(TURN_CONTEXT_FIELDS)} (null: the default)")
+    values: dict[str, Any] = {}
     if "turn_context_enabled" in body:
         value = body["turn_context_enabled"]
         if value is not None and not isinstance(value, bool):
@@ -217,37 +265,25 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
-async def update(body: Mapping[str, Any]) -> dict[str, Any]:
-    """Store the settings in ``body`` and apply them at once. A refused body changes nothing; a setting the body
-    leaves out keeps its value."""
-    values = checked(body)
+async def update_turn_context(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Store only named fields; null restores the default. A refused body writes nothing."""
+    values = checked_turn_context(body)
     stored: dict[str, str | None] = {}
-    if "stop_enabled" in values:
-        value = values["stop_enabled"]
-        stored[STOP_ENABLED_KEY] = None if value is None else ("true" if value else "false")
-    if "completion_turns" in values:
-        stored[COMPLETION_TURNS_KEY] = values["completion_turns"]
-    if "research_order" in values:
-        value = values["research_order"]
-        stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
-    if "ledger_enabled" in values:
-        value = values["ledger_enabled"]
-        stored[db_ledger.ENABLED_KEY] = None if value is None else ("true" if value else "false")
     if "turn_context_enabled" in values:
         value = values["turn_context_enabled"]
         stored[TURN_CONTEXT_KEY] = None if value is None else ("true" if value else "false")
     for field, key in (("timezone", TIMEZONE_KEY), ("reply_language", REPLY_LANGUAGE_KEY)):
         if field in values:
             stored[key] = values[field]
-    # Resolve the warning before storing: a failed bot lookup must not silently enable the switch.
     missing_bots = None
-    if values.get("turn_context_enabled") is True or values.get("ledger_enabled") is True:
+    if values.get("turn_context_enabled") is True:
         from .channels.operator_ids import missing
 
+        # A failed lookup must not silently enable the switch.
         missing_bots = await missing()
     await db_settings.put_settings(stored)
     await load()
-    view = await settings_view()
+    view = turn_context_view()
     if missing_bots is not None:
         view["missing_operator_ids"] = [asdict(bot) for bot in missing_bots]
     return view

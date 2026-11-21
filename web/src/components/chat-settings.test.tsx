@@ -18,13 +18,15 @@ describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
   let stored: Record<string, unknown>;
+  let context: Record<string, unknown>;
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
 
   beforeEach(() => {
-    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false, turn_context_enabled: false,
-      timezone: null, server_timezone: "America/Los_Angeles", reply_language: "zh-CN", missing_operator_ids: [] };
+    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false };
+    context = { turn_context_enabled: false, timezone: null, server_timezone: "America/Los_Angeles",
+      reply_language: "zh-CN", missing_operator_ids: [] };
     missing = [];
     summary = SUMMARY;
     puts = [];
@@ -37,12 +39,22 @@ describe("Chat settings", () => {
         }
         return Response.json({ status: "ok", result: summary });
       }
+      if (path.startsWith("/api/v1/turn_context_settings/")) {
+        if (path.endsWith("/update")) {
+          const body = JSON.parse(String(init?.body));
+          expect(Object.keys(body).every((key) => ["turn_context_enabled", "timezone", "reply_language"].includes(key))).toBe(true);
+          puts.push(body);
+          context = { ...context, ...body };
+        }
+        return Response.json({ status: "ok", result: context });
+      }
       if (!["/api/v1/chat_settings/get", "/api/v1/chat_settings/update"].includes(path)) {
         throw new Error(`Unexpected request: ${input}`);
       }
       let body: { ledger_enabled?: boolean } | null = null;
       if (path === "/api/v1/chat_settings/update") {
         body = JSON.parse(String(init?.body));
+        expect(Object.keys(body!).every((key) => ["stop_enabled", "completion_turns", "ledger_enabled"].includes(key))).toBe(true);
         puts.push(body);
         stored = { ...stored, ...body };
       }
@@ -88,7 +100,7 @@ describe("Chat settings", () => {
   });
 
   it("enables turn context alone and lists bots that cannot identify the operator", async () => {
-    stored.missing_operator_ids = [{ channel_id: "channel-example", name: "Example bot", channel_type: "lark" }];
+    context.missing_operator_ids = [{ channel_id: "channel-example", name: "Example bot", channel_type: "lark" }];
     await act(async () => root.render(<ChatSettingsSection />));
     const box = container.querySelector("input[aria-label='每轮上下文']") as HTMLInputElement;
     expect(box.checked).toBe(false);
@@ -96,6 +108,18 @@ describe("Chat settings", () => {
     expect(puts).toEqual([{ turn_context_enabled: true }]);
     expect(container.textContent).toContain("Example bot");
     expect(container.textContent).toContain("需要操作者授权的动作会被拒绝");
+    const ledger = container.querySelector("input[aria-describedby$='-ledger-help']") as HTMLInputElement;
+    await act(async () => ledger.click());
+    expect(box.checked).toBe(true);
+    const language = container.querySelector("select[aria-label='回复语言']") as HTMLSelectElement;
+    await act(async () => {
+      language.value = "en";
+      language.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(puts).toEqual([{ turn_context_enabled: true }, { ledger_enabled: true }, { reply_language: "en" }]);
+    expect(box.checked).toBe(true);
+    expect(ledger.checked).toBe(true);
+    expect(container.textContent).toContain("Example bot");
   });
 
   it("saves the time zone, clears it to the server default, and saves the reply language alone", async () => {
