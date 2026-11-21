@@ -140,9 +140,10 @@ def classify(envelope: MessageEnvelope, *, operator_id: str | None, allowlist: f
                 channel = "Telegram"
             case _:
                 raise ValueError(f"unsupported turn context channel: {origin['channel']!r}")
-    if speaker is SpeakerKind.OPERATOR and name is None:
-        name = persona_address
-    return TurnContext(local_time, zone_name, speaker, display_name(name) if name is not None else None,
+    name = display_name(name) if name is not None else None
+    if speaker is SpeakerKind.OPERATOR and not name:
+        name = display_name(persona_address) if persona_address is not None else None
+    return TurnContext(local_time, zone_name, speaker, name or None,
                        chat, channel, language)
 
 
