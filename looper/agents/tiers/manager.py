@@ -73,7 +73,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook
 from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
@@ -389,7 +389,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
@@ -1434,6 +1434,11 @@ class ManagerAgent:
                 await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, chat_commands.help_text()))
+            # /todo while the "needs you" summary is on: answered by code, never by the model (off: a message).
+            if attention.is_command(text) and await token.step("attention_enabled", attention.enabled()):
+                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                self._acting(token)
+                return Prepared(action=lambda: self._answer_todo(envelope))
             # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
             if self._bus is not None and self.ops is not None and gate_commands.is_command(text):
                 self._acting(token)
@@ -3363,6 +3368,10 @@ class ManagerAgent:
         except Exception as exc:
             logger.exception("%s: the gate command %r failed", self._log, text[:40])
             return f"关卡命令出错：{exc}"
+
+    async def _answer_todo(self, envelope: MessageEnvelope) -> None:
+        managers = self.ops.platform.managers if self.ops is not None else None
+        await self._send_reply(envelope, await attention.command_reply(envelope, managers=managers))
 
     async def _answer_intent(self, envelope: MessageEnvelope, intent) -> None:
         reply = await intent.action() if intent.action is not None else intent.reply
