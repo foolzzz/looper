@@ -198,12 +198,13 @@ def hook_command(config: Path, *, python: str = sys.executable, client: Path = C
     return f'out=$({run} 2>/dev/null) && [ -n "$out" ] && printf "%s" "$out" || printf "%s" {deny}'
 
 
-def write_hook(runtime_root: Path, manager_id: str, *, url: str, token: str) -> ToolHook:
-    """Write the hook's config (where Looper is, the Manager's token, its waits) readable by the operator only, and
-    the hook that reads it. A call is placed in its turn by Looper (its ``tool_use_id``), never by the client."""
+def write_hook(runtime_root: Path, owner: str, *, url: str, token: str) -> ToolHook:
+    """Write the hook's config for ``owner`` (a Manager, or a step's run) readable by the operator only: where Looper
+    is, the owner's token and the waits; and the hook that reads it. A Manager's call is placed in its turn by Looper
+    (its ``tool_use_id``), never by the client."""
     directory = (runtime_root / ".local" / "outbound-hook").absolute()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = directory / f"{manager_id}.json"
+    path = directory / f"{owner}.json"
     content = json.dumps({"url": url, "token": token, "timeout": CHECK_TIMEOUT_SEC, "deadline": DEADLINE_SEC})
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -320,6 +321,37 @@ def write_of(payload: Any) -> Write | None:
     return Write(str(path), text[:WRITE_EXCERPT_CHARS]) if isinstance(path, str) and path else None
 
 
+# --- A task's step runs (the outbound-review RFC, section 6.3) ---
+
+
+async def task_placed(task_id: str) -> Placed:
+    """Whose a task is, as the review of its Worker's or Reviewer's call reads it: the operator's for a schedule's,
+    the dashboard's or the operator's own direct chat's; else a group's or another person's. Its own request is the
+    message; the requirement it carries now (written after leads, or built from an intent) is the outside content."""
+    from ..db import tasks as db_tasks
+    from .message import parse_channel_id
+    from .operator_identity import operator_sender_id
+
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        return NO_ONES
+    bot = parse_channel_id(task.get("origin_channel_id") or None)
+    channel = bot.channel_type if bot is not None else ""  # a web or dashboard task names no bot
+    if task.get("client_id"):
+        who = Who.ALLOWLISTED_PERSON
+    elif task.get("schedule_id") or not channel:
+        who = Who.OPERATOR
+    elif task.get("chat_group"):
+        who = Who.GROUP_MEMBER
+    else:
+        operator = await operator_sender_id(task["origin_channel_id"])
+        person = task.get("chat_id") if task.get("chat_kind") == "user" else None
+        who = Who.OPERATOR if operator is not None and person == operator else Who.ALLOWLISTED_PERSON
+    sources = "、".join(task.get("untrusted_inputs") or ()) or "none"
+    return Placed(who, str(task.get("original_user_text") or ""), channel, task.get("chat_id"),
+                  ((f"the task's requirement (outside content went into it: {sources})", str(task["requirement"])),))
+
+
 # --- Telling the operator ---
 
 Sender = Callable[[str, str, str], Awaitable[tuple[bool, str | None]]]
@@ -332,15 +364,27 @@ def configure(sender: Sender | None) -> None:
     _sender = sender
 
 
+async def notify_unsupported(task_id: str, run: str, runtime: str) -> None:
+    """Tell the operator a step's run of ``task_id`` did not start: it runs on ``runtime``, which has no tool hook,
+    while the review is on and outside content went into the task."""
+    await _notify(f"Looper 没有启动任务 {task_id} 的一次运行（{run}）：这个任务用过线索或意图，对外动作审查打开时它的 "
+                  f"Worker 和 Reviewer 要跑在有拦截点的运行时上，而 {runtime} 没有。Planner 会决定换 Profile、改计划或失败。")
+
+
 async def notify_blocked(agent_id: str, tool: str, target: str, reason: str, review_id: int | None) -> None:
     """Tell the operator, in the chat the dashboard's user gates use (never the chat the turn is in), that a call was
     blocked; an error is logged, never raised."""
-    from .gate_service import dashboard_target
     from .outbound import _masked
 
     text = (f"Looper 的对外动作审查拦下了一次调用：{agent_id} 的 {tool}（{_masked(target)[:200]}）。"
             f"理由：{reason}" + (f"（审计记录 #{review_id}）" if review_id is not None else ""))
     logger.warning("outbound review blocked %s's %s (review %s)", agent_id, tool, review_id)
+    await _notify(text)
+
+
+async def _notify(text: str) -> None:
+    from .gate_service import dashboard_target
+
     try:
         chat = await dashboard_target()
         if chat is None or _sender is None:
