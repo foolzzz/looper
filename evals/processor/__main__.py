@@ -365,6 +365,11 @@ EXTRACTION_CASES: dict[str, dict[str, Any]] = {
         "types": {"weekly_notes"},
     },
 }
+# The same windows asked again after an unreadable reply (``extraction.REFORMAT_REMINDER`` after the instructions):
+# the reminder must leave what the reply says as it was.
+EXTRACTION_CASES.update({f"{key}_reminded": {**EXTRACTION_CASES[key], "reminded": True,
+                                             "what": EXTRACTION_CASES[key]["what"] + ", asked again with the reminder"}
+                         for key in ("leads_basic", "leads_quiet", "intents_basic")})
 EXTRACTION_QUIET = "NONE"
 
 
@@ -732,9 +737,11 @@ async def _extract(args: argparse.Namespace, key: str, rep: int, root: Path) -> 
     text, refs = extraction.render(kind, rows, context=context, participants=extraction.Participants(_NAMES, _USER),
                                    known=case.get("known", []), zone_name="Asia/Shanghai", text_max_chars=500)
     started = time.monotonic()
+    instructions = extraction.instructions(
+        kind, extraction.LEADS_INSTRUCTIONS if kind == "leads" else extraction.INTENTS_INSTRUCTIONS, types)
     done = await processor.run(
-        owner=f"eval-{key}", instructions=extraction.instructions(
-            kind, extraction.LEADS_INSTRUCTIONS if kind == "leads" else extraction.INTENTS_INSTRUCTIONS, types),
+        owner=f"eval-{key}",
+        instructions=instructions + (f"\n\n{extraction.REFORMAT_REMINDER}" if case.get("reminded") else ""),
         input_text=text, input_ref={"case": key, "rep": rep, "render": f"{kind}_window"},
         quiet_word=EXTRACTION_QUIET, budget_usd=args.budget_usd, timeout_s=args.timeout, runtime_root=root,
         claude_bin=args.claude or "claude", contract=extraction.CONTRACTS[kind])

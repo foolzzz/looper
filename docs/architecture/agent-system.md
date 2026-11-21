@@ -5005,7 +5005,11 @@ Manager's `looper_schedules` cannot create or change one.
   and the cursor moves. Anything else is the output: its Lark `<at>` markup,
   `@_user_N` keys, `@所有人`, `@all` and `@ou_…` lose their `@`, and the
   `output_header` goes above it. A reply with nothing left is `output_invalid`
-  (the run fails, the cursor stays).
+  (the run fails, the cursor stays). A window a prompt hook blocks
+  (`ProcessorFailure.BLOCKED`) is `skipped` (`skip_reason` `blocked_by_hook`):
+  the run is `completed`, nothing is pushed and the cursor moves past it, since
+  the same window is blocked every time it is sent; runs that keep skipping are
+  alerted as an extraction's are (`skip_alert`, `skip_recovered`).
 - **The push** goes through the channel's `post` as the bot, to the target the
   run started with (`subscription_runs.target_channel`, `target_chat`, pinned
   only when the target was confirmed for the configuration then in force:
@@ -5034,7 +5038,8 @@ Manager's `looper_schedules` cannot create or change one.
   recorded in `schedule_runs` (cost included, so `daily_budget_usd` and the
   alerts count them) and `subscription_runs` (window, counts, the processor's
   record, `outcome`: `delivered`, `uncertain`, `quiet`, `dashboard_only`,
-  `output_invalid`, `failed`, and the output); a successful run sends no message
+  `output_invalid`, `failed`, `skipped` with its `skip_reason`, and the
+  output); a successful run sends no message
   of its own, the output is the message. A failure notice or alert about a subscription reads the schedule afresh when it is sent and goes through the same check (the run's pin, and the target confirmed for the configuration it has now) and says only that the run failed, see the dashboard: no output, no error text. Logs of a push carry error types and ids only (run, message), never an error's text: the raw error is in the delivery row and the receipt, on the dashboard side. A Lark post whose answer is a success (lark-cli `ok: true`, the Bot API's HTTP 200 with `code` 0) is `sent` even without a message id (replies to it cannot be routed). The Manager's `looper_schedules` shows a
   subscription's state and counts only: no run summary or error, no output.
 - **The operator's word on a push target.** A subscription pushes only after
@@ -5287,7 +5292,24 @@ here pushes: the intent push service polls `intents`.
 - **The reply contract** replaces the push contract (`processor.run`
   `contract=`): `NONE`, or one JSON object (`{"leads": [...]}` or
   `{"intents": [...]}`, with `instructions_seen`). `extraction.parse` reads it:
-  anything else is `output_invalid` (the run fails, the cursor stays); each item
+  the whole reply, or else the one object with the kind's key among prose or
+  code fences (two different ones, or a reply with more than 200 places an
+  object could start, are unreadable). An unreadable reply is asked for once
+  more with `extraction.REFORMAT_REMINDER` added to the instructions, within
+  what is left of the run's cap and deadline (with nothing left of either, the
+  run fails `budget` or `timeout` and the window is kept); still unreadable,
+  the window is `skipped` (`skip_reason` `invalid_reply`). A window a prompt
+  hook blocks is `skipped` at once (`blocked_by_hook`). A skipped run is
+  `completed`, stores nothing, counts what every ask cost and moves the cursor
+  past the window (`extraction.ask`), after the same check of the confirmation
+  as storing (a run whose confirmation no longer holds is `cancelled` and keeps
+  the cursor); any other processor failure fails the run and the cursor stays.
+  When as many completed runs in a row as the schedule's failure alert waits
+  for (3 by default) were skipped, runs that did not complete neither ending nor
+  adding to the streak, the subscription's notices get one `skip_alert` per
+  streak (`subscriptions.skip_alert_at`, with the last reason and no message
+  text), and the next completed run that used its window a `skip_recovered`.
+  Each item
   is checked for its kind or enabled type, confidence, summary and lengths, refs
   that exist in the input with the right letter, at least one `m` source, not
   both `supersedes` and `same_as`, a valid date, and, for an intent whose
@@ -5381,7 +5403,11 @@ here pushes: the intent push service polls `intents`.
   marked `backfill`, no run), saves its progress after each window
   (`leads.backfill.<schedule id>`), caps each processor run at what is left of
   the budget (or the subscription's own cap, if lower) and stops before a window
-  would pass it by the running mean; it resumes. One runner per subscription:
+  would pass it by the running mean; it resumes. A window skipped as a live
+  run skips it (`blocked_by_hook`, `invalid_reply`) is listed with the progress
+  (`skipped`: its seqs, events and reason) and in the summary, and the backfill
+  goes on; any other processor failure stops it there, and its cost is counted.
+  One runner per subscription:
   it holds an advisory lock (`looper.leads.backfill:<schedule id>`) from before
   it reads its progress to its end, and a second one exits saying so.
 
@@ -6020,7 +6046,12 @@ will.
   the run (the result's own `total_cost_usd` stands in only when the runtime's
   figure is the run's cost, `CostSource.RUNTIME`), and a run over its cap or of
   unknown cost gives no reply
-  (`ProcessorFailure`: `refused`, `timeout`, `budget`, `failed`). A model at
+  (`ProcessorFailure`: `refused`, `timeout`, `budget`, `failed`, `blocked`).
+  `blocked` is a prompt hook of the machine's Claude Code refusing the input
+  (its `system/informational` notice, `claude_cli.prompt_block`): no model turn
+  runs, the result Claude Code still calls a success echoes the prompt, and
+  only its typed fields are recorded or given back (`single_run`): no reply,
+  output or event keeps the echo. A model at
   provider prices without a full price is refused (no cap would hold), and so
   is one that needs the local gateway (its requests would be recorded). The
   role's switch in Settings → Roles turns every processor run off.
