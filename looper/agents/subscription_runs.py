@@ -5,7 +5,9 @@ the run's window (the events after the cursor up to the source's ``committed_seq
 selected, ends the firing there as ``skipped_gate`` with the cursor moved past it. A run with a window is ``running``
 and ``execute`` (outside the transaction) does the rest:
 
-1. read the window again, render it (``subscriptions.processor_input``) and give it to ``processor.run``;
+1. read the window again, render it (``subscriptions.processor_input``) and give it to ``processor.run``; a window a
+   prompt hook blocks ends the run ``completed`` (outcome ``skipped``, ``blocked_by_hook``), pushes nothing and moves
+   the cursor past it, since it is blocked every time it is sent;
 2. a reply that is the quiet word ends the run ``completed`` (outcome ``quiet``); one that is not goes to the
    target the run started with (``target_channel``/``target_chat``, pinned only when the operator had confirmed it for
    the configuration then in force), and stays on the dashboard (``dashboard_only``) when there was none;
@@ -213,6 +215,12 @@ class SubscriptionRuns:
             schedule_id=schedule["id"],
             metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(text)}})
         await db_subs.update_run(pool, run_id, record_id=result.record_id, events_selected=len(picked["rows"]))
+        if result.failure is processor.ProcessorFailure.BLOCKED:
+            # Blocked every time it is sent: kept, the window would be sent again, and blocked, with every run after.
+            reason = extraction.SkipReason.BLOCKED_BY_HOOK
+            await self._end(run_id, status="completed", outcome="skipped", cost=result.cost_usd, advance=True,
+                            summary=extraction.SKIPPED_SUMMARY[reason], skip_reason=reason)
+            return
         if result.failure is not None:
             status = "timed_out" if result.failure is processor.ProcessorFailure.TIMEOUT else "failed"
             await self._end(run_id, status=status, outcome="failed", cost=result.cost_usd,
@@ -357,9 +365,11 @@ class SubscriptionRuns:
 
     async def _end(self, run_id: str, *, status: str, outcome: str, cost: float | None = None,
                    error: str | None = None, summary: str | None = None, advance: bool = False,
-                   output: str | None = None, pushed: tuple[str, str] | None = None) -> None:
-        """End the run in one transaction: its status, its outcome and output, the push's notification, and, when it
-        succeeded, the cursor. A failed or interrupted attempt with nothing sent or uncertain releases its daily claim."""
+                   output: str | None = None, pushed: tuple[str, str] | None = None,
+                   skip_reason: extraction.SkipReason | None = None) -> None:
+        """End the run in one transaction: its status, its outcome and output (and why a ``skipped`` run skipped its
+        window), the push's notification, and, when it succeeded, the cursor. A failed or interrupted attempt with
+        nothing sent or uncertain releases its daily claim."""
         now = self._clock()
         async with db_connection.transaction() as conn:
             run = await db_schedules.get_run(run_id, pool=conn)
@@ -367,6 +377,8 @@ class SubscriptionRuns:
             if run is None or stream is None or run["status"] != db_schedules.RUNNING:
                 return
             fields: dict[str, Any] = {"outcome": outcome}
+            if skip_reason is not None:
+                fields["skip_reason"] = skip_reason.value
             if output is not None:
                 fields.update(output_text=output, output_sha256=subscriptions.digest(output))
             if pushed is not None:
