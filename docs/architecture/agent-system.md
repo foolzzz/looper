@@ -6109,19 +6109,27 @@ off; `outbound_review.get` and `outbound_review.update`).
 - **The Managers' hook** (`looper/agents/outbound_hook.py`). While the review is on, each Manager's Claude Code
   carries a PreToolUse hook in its `--settings` (matcher `*`) and reads no settings file (`--setting-sources ""`),
   so nothing it writes in its working directory turns the hook off. Turning the review on or off changes the
-  command, so a running Manager restarts on its next turn. The hook is `outbound_hook_client.py`, run by path with
-  `python -I`, behind a shell that prints a `deny` whenever the client cannot run or prints nothing. The client asks
-  `POST /api/agent/v1/outbound/check` with the Manager's token and its turn binding, waits at most
-  `CHECK_TIMEOUT_SEC` (60 s), and denies when it gets no answer; Claude Code waits for the hook `HOOK_TIMEOUT_SEC`
-  (90 s), since it runs a call whose hook failed or timed out. Its config (the URL, the token, the turn file) is
+  command; turning it on also stops each Manager process started without the hook, and no turn or handoff runs in
+  such a process while it is on (checked right before the prompt reaches the process). The hook is
+  `outbound_hook_client.py`, run by path with `python -I`, behind a shell that prints a `deny` whenever the client
+  cannot run or prints nothing. The client sets an alarm before anything else that ends it with a `deny` at
+  `DEADLINE_SEC` (75 s), asks `POST /api/agent/v1/outbound/check` with the Manager's token, waits for the answer at
+  most `CHECK_TIMEOUT_SEC` (60 s), and denies when it gets none; Claude Code waits for the hook `HOOK_TIMEOUT_SEC`
+  (90 s), since it runs a call whose hook failed or timed out. Its config (the URL, the token, the waits) is
   `<runtime root>/.local/outbound-hook/<manager>.json`, readable by the operator only.
   - **What runs at once** is decided by the tool's type (`outbound_hook.level_of`): Claude Code's built-in tools have
     a level each (`BUILTIN_LEVELS`: `Bash` and `Monitor` are `unknown`; `WebSearch`, `WebFetch`, `RemoteTrigger` and
     `SendMessage` `external`); a tool not listed is `unknown`. Looper's own tools are `inside` here (`ManagerOps.call`
-    runs them). Another MCP server's tools are `inside` until their level can be declared.
-  - **What is reviewed:** an `unknown` or `external` call, in the turn its binding names: the operator's own turn
-    (`operator_identity`), or else blocked by code. The review sees the leads this turn's searches found and the
-    files the session wrote last (a later `sh s.sh` runs one).
+    runs them). Another MCP server's tools are `unknown`, except the ones the operator declared `inside` for that
+    server (`mcp_tool_levels`, `mcp_tool_levels.get` and `mcp_tool_levels.put`). An undeclared tool of a read-only
+    MCP server is therefore reviewed in the operator's turns (a few seconds and about 0.003 USD a call) and
+    blocked in every other turn.
+  - **Whose turn:** the call's own, never the turn that runs when it comes. That is the turn whose stream showed
+    its `tool_use` (`ManagerOps.expect`); a subagent's call belongs to the turn of the call that started it
+    (`parent_tool_use_id`). A call Looper cannot place within `PLACE_WAIT_SEC`, or whose turn is over, is no one's.
+  - **What is reviewed:** an `unknown` or `external` call, in the operator's own turn (`operator_identity`); in any
+    other turn, code blocks it. The review sees the leads this turn's searches found and the files the session wrote
+    last (a later `sh s.sh` runs one).
   - **What code refuses:** a `Write`, `Edit`, `MultiEdit` or `NotebookEdit` of Looper's own files: anything under
     `<runtime root>/.local` or `ops`, the operator token, or the hook's client (`outbound.refuse`, `protected`).
   - **A block** is a `deny` whose reason the model reads ("Looper's outbound review blocked this action: <reason>.
@@ -6327,6 +6335,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and the typed delivery of its message: `delivery` (`pending`, `sending`, `sent`, `failed`, `uncertain`), `delivery_attempts`, `delivery_at` (sending since, or tried again from) and `delivery_error`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
+| `mcp_tool_levels` | The operator's declarations of an MCP server's tools for the outbound review ([Reviews of outbound actions](#reviews-of-outbound-actions)): `item_id` (going with its server), `tool`, `level` (`inside`: its calls run unreviewed) |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
