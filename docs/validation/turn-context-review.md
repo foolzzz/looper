@@ -43,6 +43,19 @@ evaluation prompt's taxonomy; the product renderer and contract stayed unchanged
 All 12 CLI calls completed without timeout or model error. Initial comparison cost: $0.0562524;
 diagnostic comparison cost: $0.062216; total: $0.1184684.
 
+## Unicode and empty-name follow-up
+
+Compared `f80843912` with `fc35126cd` using six synthetic cases: curly quotes,
+full-width colons, Unicode brackets, a name cleaned to empty, a whitespace-only
+operator name and a named operator control. The same isolated CLI method and
+explicit taxonomy above were used. Sonnet passed 12/12 category-and-authorization
+judgments per renderer (two repetitions); Opus xhigh passed 6/6 per renderer
+(one repetition). All six calls completed; total cost was $0.0684505.
+Both renderers passed, so this does not establish an improvement in model security.
+Deterministic regressions verify NFKC normalization, punctuation removal, omitted
+empty-name labels and the operator's persona-address fallback. The touched
+turn-context tests and API-document tests passed together: 344 passed with `-n 2`.
+
 ## Limits
 
 The original renderer also passed these authorization judgments. These small, batched classification
