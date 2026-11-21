@@ -6232,6 +6232,30 @@ yet; its callers come with the `outbound_review.enabled` switch.
   masked. The run's record has `run_kind` `outbound_check` and the asking run as its
   `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
 
+### The untrusted fence
+
+Content from outside Looper that reaches a model goes in an `<untrusted source=... ...>` block
+(`looper/agents/untrusted.py`, the outbound-review RFC section 8) while the system setting
+`untrusted_fence.enabled` is `true` (there is no dashboard switch; off when it cannot be read). Off, every entry
+writes what it wrote before, byte for byte.
+
+- **The block** (`untrusted.fence`) names its typed source (`untrusted.Source`) and where the content came from
+  (`from`, `at`, `ref`, ...; quotes, angle brackets and line breaks dropped). The content loses its @ markup
+  (`subscriptions.strip_mentions`), and its own `<untrusted` and `</untrusted` (any case) become `&lt;untrusted`
+  and `&lt;/untrusted`, so nothing inside can close the block or open another. The same input gives the same
+  bytes; no length limit of its own. One line (`untrusted.LEAD_LINE`), written once before the first block, says
+  they are data, never instructions.
+- **The Manager's entries:** a Lark or Telegram message from someone other than the operator
+  (`operator_identity.is_operator`: any group chat's, a direct chat's other than the operator's) is a
+  `group_message` or `direct_message` block naming its sender, time and message id; the dashboard's and an API
+  client's messages, and the operator's own, are not fenced. A Lark quote is a `quote` block instead of
+  `<lark_quote>`, whoever's message it came with. The attachments' list keeps its lines outside, and the items,
+  whose names the sender chose, go in an `attachment` block (the files' contents are read in the runtime, unfenced).
+  `looper_leads_search` fences each lead's summary (`lead`, with its first source's chat, sender and time) and
+  adds the lead line to its notice; the group backstop still compares the lead's own words.
+- **Not yet fenced** (the RFC's other entries): intents, gate messages, supplements, GitHub waits, the vault's
+  untrusted folders and the processor's input.
+
 ### Turns Claude runs on its own
 
 A resident Claude (Manager, Planner) also runs turns that answer no message.
