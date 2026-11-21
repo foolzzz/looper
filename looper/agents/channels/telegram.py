@@ -648,7 +648,15 @@ class TelegramChannelAdapter(ChannelAdapter):
 
     async def _on_button(self, update: Any, context: Any) -> None:
         """A press of a card's button (``card_actions.respond``): a toast, and the card as it is now; a card whose
-        action ends later is edited then. Only a sender this bot admits in that chat may press."""
+        action ends later is edited then. Only a sender this bot admits in that chat may press. While card buttons
+        are off the press is left unanswered, as before cards."""
+        try:
+            if not await card_actions.enabled():
+                return
+        except Exception:
+            logger.warning("%s: cannot tell whether card buttons are on; a press is not answered", self.channel_id,
+                           exc_info=True)
+            return
         query = update.callback_query
         chat = getattr(update.effective_chat, "id", None)
         route = (self._resolve_chat(self.channel_id, str(chat)) if self._resolve_chat is not None and chat is not None

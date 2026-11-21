@@ -129,6 +129,44 @@ def _check_lark_cli_available() -> bool:
     return bool(shutil.which("lark-cli"))
 
 
+class CardWrites:
+    """Every card write of a bot-token channel (send, reply, update) in one place. Given the outbound gateway
+    (``gateway``: ``write(kind, call, keyed=)`` and ``edit(message_id, call)``) and its switch (``enabled``), each
+    write goes through it as the channel's text writes do; without one, straight to the transport."""
+
+    def __init__(self, transport: Any, *, gateway: Any = None, enabled: Callable[[], bool] = lambda: False) -> None:
+        self._transport = transport
+        self._gateway = gateway
+        self._enabled = enabled
+
+    def _gated(self) -> bool:
+        return self._gateway is not None and self._enabled()
+
+    async def send(self, card: dict[str, Any], *, chat_id: str | None = None, user_id: str | None = None,
+                   idempotency_key: str | None = None) -> str | None:
+        async def direct() -> str | None:
+            return await self._transport.send_card(card, chat_id=chat_id, user_id=user_id,
+                                                   idempotency_key=idempotency_key)
+        return await self._gateway.write("send", direct, keyed=idempotency_key is not None) if self._gated() \
+            else await direct()
+
+    async def reply(self, message_id: str, card: dict[str, Any], *, idempotency_key: str | None = None,
+                    reply_in_thread: bool = False) -> str | None:
+        async def direct() -> str | None:
+            return await self._transport.reply_card(message_id, card, idempotency_key=idempotency_key,
+                                                    reply_in_thread=reply_in_thread)
+        return await self._gateway.write("reply", direct, keyed=idempotency_key is not None) if self._gated() \
+            else await direct()
+
+    async def update(self, message_id: str, card: dict[str, Any]) -> None:
+        async def direct() -> None:
+            await self._transport.update_card(message_id, card)
+        if self._gated():
+            await self._gateway.edit(message_id, direct)
+        else:
+            await direct()
+
+
 class LarkChannelAdapter(ChannelAdapter):
     """Bridge a Lark transport and the agent message bus."""
 
@@ -163,6 +201,8 @@ class LarkChannelAdapter(ChannelAdapter):
         self._stop_chat = stop_chat
         self._backoff = backoff
         self._transport = transport if transport is not None else CliTransport(profile)
+        # The bot token's transport sends cards (``card_actions``); the lark-cli one shows their text.
+        self._cards = CardWrites(self._transport) if hasattr(self._transport, "send_card") else None
         self._allowlist = allowlist  # open_ids
         self._profile = profile  # lark-cli's --profile; "" for its active one
         # The bot's own open_id: a group message is handled only when it @-mentions this; none, none is.
@@ -325,7 +365,7 @@ class LarkChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel=self.channel_type, success=True)
 
         cards: list[card_actions.Card] = []
-        if hasattr(self._transport, "send_card") and envelope.metadata.get("cards"):
+        if self._cards is not None and envelope.metadata.get("cards"):
             text, cards = card_actions.shown(text, envelope.metadata["cards"])
         receipt = DeliveryReceipt(channel=self.channel_type, success=True)
         if text and corr_id in self._group_message:
@@ -367,14 +407,14 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _answer_card(self, correlation_id: str, chat_id: str, card: card_actions.Card) -> DeliveryReceipt:
         """Send a card a reply carries where the reply went (under the group message it answers); its text alone
         when the card cannot be sent, so the user can still answer it by typing."""
+        assert self._cards is not None
         content = card_actions.lark_card(replace(card, text=files.redact(card.text, self._runtime_root)))
         message_id = self._group_message.get(correlation_id)
         try:
             if message_id is not None:
-                await self._transport.reply_card(message_id, content,  # type: ignore[attr-defined]
-                                                 reply_in_thread=message_id in self._thread_messages)
+                await self._cards.reply(message_id, content, reply_in_thread=message_id in self._thread_messages)
             else:
-                await self._transport.send_card(content, chat_id=chat_id)  # type: ignore[attr-defined]
+                await self._cards.send(content, chat_id=chat_id)
         except LarkCliError as exc:
             logger.warning("%s: a card failed, sending its text: %s", self.channel_id, exc)
             if message_id is not None:
@@ -382,20 +422,38 @@ class LarkChannelAdapter(ChannelAdapter):
             return await self._send_message(chat_id, card.text)
         return DeliveryReceipt(channel=self.channel_type, success=True)
 
-    async def _card_action(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _admits(self, sender: object, decision: RouteDecision | None, *, group: bool,
+                log_refusal: bool = True) -> bool:
+        """The admission rule of a message: a group bound explicitly with ``sender_policy`` ``chat`` admits everyone
+        in it; else the bot's allowlist or the binding's extra senders."""
+        chat_policy = group and decision is not None and decision.explicit and decision.sender_policy == "chat"
+        return chat_policy or self._allowlist.admits(
+            sender, chat_senders=decision.senders if decision is not None else frozenset(), log_refusal=log_refusal)
+
+    async def _card_action(self, event: dict[str, Any]) -> dict[str, Any] | None:
         """Answer a press of a card's button on the long connection (``card_actions.respond``): a toast and the card
-        as it is now, in time; a card whose action ends later is replaced then. Only a sender this bot admits in
-        that chat may press."""
+        as it is now, in time; a card whose action ends later is replaced then. None (the plain acknowledgement, as
+        before cards) while card buttons are off. A press is admitted as a message in that chat would be (a card
+        is in the chat it was sent to; in a direct chat only the user can press), and the card's own allowed
+        confirmers narrow it further."""
+        try:
+            if not await card_actions.enabled():
+                return None
+        except Exception:
+            logger.warning("%s: cannot tell whether card buttons are on; a press is not answered", self.channel_id,
+                           exc_info=True)
+            return None
         presser, chat = str(event.get("operator_id") or ""), str(event.get("chat_id") or "")
-        route = self._resolve_chat(self.channel_id, chat) if self._resolve_chat is not None and chat else None
-        if presser not in self._allowlist.ids and (route is None or presser not in route.senders):
+        decision = self._resolve_chat(self.channel_id, chat) if self._resolve_chat is not None and chat else None
+        if not self._admits(presser, decision, group=True, log_refusal=False):
             logger.info("%s: a card press by an unlisted sender %s was refused", self.channel_id, presser)
             return card_actions.lark_answer(card_actions.Answer(card_actions.NOT_ALLOWED["confirmation"], "error"))
         message_id = str(event.get("message_id") or "")
+        cards = self._cards
 
         async def update(card: card_actions.Card) -> None:
-            if message_id:
-                await self._transport.update_card(message_id, card_actions.lark_card(card))  # type: ignore[attr-defined]
+            if message_id and cards is not None:
+                await cards.update(message_id, card_actions.lark_card(card))
 
         answer = await card_actions.respond(card_actions.Press(self.channel_id, presser, str(event.get("value") or "")),
                                             update)
@@ -406,19 +464,17 @@ class LarkChannelAdapter(ChannelAdapter):
                         idempotency_key: str | None = None) -> PostReceipt:
         """Post ``card`` with its buttons through the bot token's transport (``post`` otherwise): a reply to
         ``reply_to`` when given, else to the user or the group (the card @-mentions the requester)."""
-        if not hasattr(self._transport, "send_card"):
+        if self._cards is None:
             return await self.post(target, card.text, reply_to=reply_to, idempotency_key=idempotency_key)
         content = card_actions.lark_card(replace(card, text=files.redact(card.text, self._runtime_root)))
         try:
             if reply_to:
-                message_id = await self._transport.reply_card(  # type: ignore[attr-defined]
-                    reply_to, content, idempotency_key=idempotency_key, reply_in_thread=reply_to in self._thread_messages)
+                message_id = await self._cards.reply(reply_to, content, idempotency_key=idempotency_key,
+                                                     reply_in_thread=reply_to in self._thread_messages)
             elif target.kind is TargetKind.USER:
-                message_id = await self._transport.send_card(  # type: ignore[attr-defined]
-                    content, user_id=target.id, idempotency_key=idempotency_key)
+                message_id = await self._cards.send(content, user_id=target.id, idempotency_key=idempotency_key)
             else:
-                message_id = await self._transport.send_card(  # type: ignore[attr-defined]
-                    content, chat_id=target.id, idempotency_key=idempotency_key)
+                message_id = await self._cards.send(content, chat_id=target.id, idempotency_key=idempotency_key)
         except LarkCliError as exc:
             logger.warning("%s: a card post to %s failed: %s%s", self.channel_id, target.id, type(exc).__name__,
                            f" (code {exc.code})" if exc.code is not None else "")
@@ -968,9 +1024,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     if admitted is not False and self._resolve_chat is not None else None)
         if not group and decision is not None:
             decision = replace(decision, sender_policy=SenderPolicy.LISTED)
-        chat_senders = decision.senders if decision is not None else frozenset()
         bot = event.get("sender_type") in {"app", "bot"}
-        chat_policy = group and decision is not None and decision.explicit and decision.sender_policy == "chat"
         log_refusal = True
         if bot:
             now = monotonic()
@@ -980,8 +1034,8 @@ class LarkChannelAdapter(ChannelAdapter):
         if admitted is False and log_refusal:
             logger.warning("%s: dropped a message from sender %r, refused by the stream prefilter",
                            self.channel_id, str(sender_open_id or "<unknown>")[:80])
-        if admitted is False or (admitted is not True and not chat_policy and not self._allowlist.admits(
-                sender_open_id, chat_senders=chat_senders, log_refusal=log_refusal)):
+        if admitted is False or (admitted is not True and not self._admits(sender_open_id, decision, group=group,
+                                                                           log_refusal=log_refusal)):
             if bot:
                 event["_bot_outcome"] = "refused"
                 if log_refusal:

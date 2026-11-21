@@ -541,11 +541,18 @@ class ManagerOps:
             raise OpError(ErrorCode.EXPIRED, f"confirmation {confirmation_id} lapsed: it counts only in the turn "
                                              "answering the user's very next message, within "
                                              f"{CONFIRMATION_SECONDS // 60} minutes; run the tool again to ask again")
-        del self._pending[turn.chat_key]
-        if pending.card is not None and not await db_cards.claim(pending.card, by=turn.sender, via="typed",
-                                                                 choice="confirm", outcome="running"):
-            raise OpError(ErrorCode.CONFLICT, f"the user already answered confirmation {confirmation_id} with its "
-                                              "card's buttons; it does not run again")
+        if pending.card is None:
+            del self._pending[turn.chat_key]
+        else:
+            # Claim its card before it leaves memory: a press meanwhile still finds it waiting, so it loses the claim
+            # instead of taking the confirmation for lapsed (then neither would run it).
+            claimed = await db_cards.claim(pending.card, by=turn.sender, via="typed", choice="confirm",
+                                           outcome="running")
+            if self._pending.get(turn.chat_key) is pending:
+                del self._pending[turn.chat_key]
+            if not claimed:
+                raise OpError(ErrorCode.CONFLICT, f"the user already answered confirmation {confirmation_id} with "
+                                                  "its card's buttons; it does not run again")
         try:
             result = await self._run_confirmed(pending, turn)
         except _Recorded:

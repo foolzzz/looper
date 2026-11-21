@@ -290,3 +290,59 @@ def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch: pytest.Mon
         assert await pool.fetchval("SELECT to_regclass('card_actions') IS NOT NULL")
 
     run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("waiting", ["typed", "button"])
+def test_a_typed_confirmation_and_a_press_that_race_run_the_call_exactly_once(
+        monkeypatch: pytest.MonkeyPatch, waiting: str) -> None:
+    """One side waits between finding the confirmation in memory and claiming its card while the other runs: the
+    other wins the claim and runs the call, the waiting one loses it, and neither takes the confirmation for
+    lapsed (which would run it zero times)."""
+    from looper.db import card_actions as db_cards
+
+    async def test(pool: Any) -> None:
+        project = await _sample(pool)
+        await _switch(pool)
+        ops = _ops()
+        asked, turn = await _ask(ops)
+        following = _turn("om_next")
+        assert asked["confirmation_id"] in ops.begin_turn(following)
+        paused = asyncio.Event()
+        real = db_cards.claim
+
+        async def claim(token: str, *, via: str, **kwargs: Any) -> bool:
+            if via == waiting:
+                paused.set()
+                await asyncio.sleep(0.2)
+            return await real(token, via=via, **kwargs)
+
+        monkeypatch.setattr(db_cards, "claim", claim)
+
+        async def press_handler(row: dict[str, Any], event: card_actions.Press, choice: str) -> card_actions.Answer:
+            if waiting == "typed":
+                await paused.wait()
+            return await ops.press(row, event, choice)
+
+        monkeypatch.setitem(card_actions._handlers, "confirmation", press_handler)
+
+        async def typed() -> dict[str, Any]:
+            if waiting == "button":
+                await paused.wait()
+            return await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]})
+
+        async def pressed() -> card_actions.Answer:
+            answer = await card_actions.press(card_actions.Press(BOT, ASKER, _value(turn)))
+            if answer.later is not None:
+                await answer.later
+            return answer
+
+        typed_answer, press_answer = await asyncio.gather(typed(), pressed())
+        ran = await pool.fetchval("SELECT count(*) FROM manager_actions WHERE tool = 'looper_projects' "
+                                  "AND status = 'ok'")
+        assert ran == 1 and not await _exists(pool, project)
+        winner = "button" if waiting == "typed" else "typed"
+        assert typed_answer.get("status") == ("ok" if winner == "typed" else "error")
+        assert press_answer.toast == ("已确认，正在执行" if winner == "button" else "已处理")
+        assert (await _card_row(pool))[1:] == (winner, "confirm", "ok")
+
+    run_db(test, monkeypatch, timeout=30)

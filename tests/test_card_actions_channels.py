@@ -38,6 +38,14 @@ def _reply(channel_id: str, chat: str, cards: list[dict[str, Any]]) -> MessageEn
                                                                      "cards": cards})
 
 
+def _switch(monkeypatch: pytest.MonkeyPatch, on: bool = True) -> None:
+    """Card buttons on or off without a database (``cards.actions.enabled``)."""
+    async def enabled(db: Any = None) -> bool:
+        return on
+
+    monkeypatch.setattr(card_actions, "enabled", enabled)
+
+
 def _answered(press: Any, seconds: float = 0) -> Any:
     """``card_actions.press`` as a confirmation answers it: at once, with an action that ends after ``seconds``."""
     async def answer(event: card_actions.Press) -> card_actions.Answer:
@@ -54,6 +62,7 @@ def _answered(press: Any, seconds: float = 0) -> Any:
 def test_lark_a_reply_sends_its_card_after_its_text_and_a_press_is_answered_then_updated(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lark, "observe_chat", AsyncMock())
+    _switch(monkeypatch)
     presses: list[card_actions.Press] = []
     monkeypatch.setattr(card_actions, "press", _answered(presses, seconds=0.3))
     monkeypatch.setattr(card_actions, "ANSWER_SECONDS", 0.1)  # the action outlasts the answer
@@ -131,6 +140,7 @@ def test_telegram_a_reply_sends_its_card_with_an_inline_keyboard(tmp_path: Path)
 @pytest.mark.parametrize("presser", [7, 8])
 def test_telegram_a_press_is_answered_and_its_card_edited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                          presser: int) -> None:
+    _switch(monkeypatch)
     presses: list[card_actions.Press] = []
     monkeypatch.setattr(card_actions, "press", _answered(presses))
     adapter, bot = _telegram(tmp_path)
@@ -202,5 +212,107 @@ def test_lark_bot_a_confirmation_card_pressed_on_the_long_connection_runs_it_onc
                 await bus.shutdown()
         assert await projects.get_project(project["id"], pool=pool) is None
         assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE status = 'ok'") == 1
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_telegram_a_press_is_left_unanswered_while_card_buttons_are_off(tmp_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch(monkeypatch, on=False)
+    presses: list[card_actions.Press] = []
+    monkeypatch.setattr(card_actions, "press", _answered(presses))
+    adapter, bot = _telegram(tmp_path)
+    query = SimpleNamespace(data="tok:confirm", answer=AsyncMock(), message=SimpleNamespace(message_id=55))
+    update = SimpleNamespace(update_id=3, callback_query=query, effective_user=SimpleNamespace(id=7),
+                             effective_chat=SimpleNamespace(id=99))
+    asyncio.run(adapter._on_button(update, None))
+    assert presses == [] and not query.answer.await_count and not bot.edit_message_text.await_count
+
+
+@pytest.mark.parametrize(("policy", "senders", "admitted"), [
+    ("listed", frozenset(), False), ("listed", frozenset({"ou_member"}), True), ("chat", frozenset(), True)])
+def test_lark_a_press_is_admitted_as_a_message_in_that_chat_would_be(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str, senders: frozenset[str], admitted: bool) -> None:
+    """A group bound with ``sender_policy`` ``chat`` admits its members' presses, as it admits their messages; the
+    card's own allowed confirmers (``card_actions.press``) narrow it further."""
+    from looper.agents.channels.chat_routing import RouteAction, RouteDecision, SenderPolicy
+
+    _switch(monkeypatch)
+    presses: list[card_actions.Press] = []
+    monkeypatch.setattr(card_actions, "press", _answered(presses))
+    adapter = make_adapter({"app_id": "cli_example"}, "test-secret", runtime_root=tmp_path,
+                           allowlist=SenderAllowlist("channel-lark_bot", frozenset({ASKER})), on_rejected=None,
+                           bot_open_id="ou_bot", base_url="http://127.0.0.1:9",
+                           resolve_chat=lambda *_: RouteDecision(RouteAction.ADMIT, "manager", explicit=True,
+                                                                 senders=senders, sender_policy=SenderPolicy(policy)))
+
+    async def main() -> dict[str, Any] | None:
+        try:
+            return await adapter._card_action({"operator_id": "ou_member", "chat_id": "oc_team",
+                                               "message_id": "", "value": "tok:confirm"})
+        finally:
+            await adapter._transport.aclose()
+
+    answer = asyncio.run(main())
+    assert [p.presser for p in presses] == (["ou_member"] if admitted else [])
+    assert answer["toast"]["content"] == ("已确认，正在执行" if admitted else "只有发起人能确认")
+
+
+class _Gateway:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    async def write(self, kind: str, call: Any, *, keyed: bool = False) -> Any:
+        self.calls.append((kind, keyed))
+        return await call()
+
+    async def edit(self, message_id: str, call: Any) -> Any:
+        self.calls.append(("edit", message_id))
+        return await call()
+
+
+@pytest.mark.parametrize("gated", [False, True])
+def test_lark_card_writes_go_through_the_outbound_gateway_while_it_is_on(gated: bool) -> None:
+    transport = SimpleNamespace(send_card=AsyncMock(return_value="om_1"), reply_card=AsyncMock(return_value="om_2"),
+                                update_card=AsyncMock())
+    gateway = _Gateway()
+    cards = lark.CardWrites(transport, gateway=gateway, enabled=lambda: gated)
+
+    async def main() -> None:
+        assert await cards.send({"c": 1}, chat_id="oc_dm", idempotency_key="gate-1") == "om_1"
+        assert await cards.reply("om_parent", {"c": 2}) == "om_2"
+        await cards.update("om_1", {"c": 3})
+
+    asyncio.run(main())
+    assert gateway.calls == ([("send", True), ("reply", False), ("edit", "om_1")] if gated else [])
+    transport.send_card.assert_awaited_once_with({"c": 1}, chat_id="oc_dm", user_id=None, idempotency_key="gate-1")
+    transport.reply_card.assert_awaited_once_with("om_parent", {"c": 2}, idempotency_key=None, reply_in_thread=False)
+    transport.update_card.assert_awaited_once_with("om_1", {"c": 3})
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_lark_bot_off_a_press_gets_the_acknowledgement_it_got_before_cards(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``cards.actions.enabled`` absent, a press of a Looper card is acknowledged exactly like a message event
+    (``{"code":200}``, the frame's own headers and ``biz_rt``) and nothing is sent."""
+    async def test(pool: Any) -> None:
+        async with FakeLarkPlatform() as fake:
+            bus = MessageBus(runtime_root=tmp_path)
+            adapter = make_adapter({"app_id": fake.app_id}, "test-secret", runtime_root=tmp_path,
+                                   allowlist=SenderAllowlist("channel-lark_bot", frozenset({ASKER})),
+                                   on_rejected=None, bot_open_id=fake.bot["open_id"], base_url=fake.base_url)
+            try:
+                await adapter.start(bus)
+                await fake.push_card_action("tok:confirm", operator=ASKER, frame_id="press-1")
+                await fake.push_message(text="hello", sender="ou_unlisted", message_id="om_text")
+                await fake.wait_acks(2, timeout=5)
+            finally:
+                await adapter.stop()
+                await bus.shutdown()
+        press, message = fake.ack_frames
+        assert press.payload == message.payload == b'{"code":200}'
+        assert [key for key, _ in press.headers] == ["type", "message_id", "trace_id", "sum", "seq", "biz_rt"]
+        assert [key for key, _ in press.headers] == [key for key, _ in message.headers]
+        assert fake.sent == [] and await pool.fetchval("SELECT count(*) FROM card_actions") == 0
 
     run_db(test, monkeypatch, timeout=30)
