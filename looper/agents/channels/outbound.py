@@ -285,8 +285,16 @@ class Outbox:
 
     async def start_if_needed(self):
         # Off only gates new inserts; persisted work keeps its delivery promise.
-        if self.enabled() or await self.db.has_unfinished(self.channel_id):
+        if self.enabled():
             await self.start()
+            return
+        try:
+            if await self.db.has_unfinished(self.channel_id):
+                await self.start()
+        except Exception:
+            # A disabled gateway must not make legacy channel startup depend on
+            # the outbox database. Recovery can be retried on the next startup.
+            logger.warning('%s: disabled outbound recovery unavailable', self.channel_id, exc_info=True)
 
     async def start(self):
         async with self._start_lock:

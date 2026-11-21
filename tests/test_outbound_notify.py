@@ -1,6 +1,8 @@
 import asyncio
 from unittest.mock import AsyncMock
 
+import pytest
+
 from looper.agents.channels.base import DeliveryReceipt
 from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.bus import MessageBus
@@ -58,4 +60,38 @@ def test_lark_start_checks_unfinished_outbox_when_switch_is_off(monkeypatch, tmp
             check.assert_awaited_once_with()
         finally:
             await adapter.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('failure', [RuntimeError('pool unavailable'), OSError('database unavailable')])
+def test_disabled_lark_starts_without_outbox_database(monkeypatch, tmp_path, failure):
+    from types import SimpleNamespace
+    from looper.agents import chat_settings
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.db import channel_outbox
+    from test_lark_transport import StubTransport
+
+    async def run():
+        monkeypatch.setattr(chat_settings, '_outbound_enabled', False)
+        probe = AsyncMock(side_effect=failure)
+        monkeypatch.setattr(channel_outbox, 'has_unfinished', probe)
+        transport = StubTransport()
+        adapter = LarkChannelAdapter(channel_id='channel-lark_bot', channel_type='lark_bot',
+            transport=transport, runtime_root=tmp_path,
+            allowlist=SenderAllowlist('channel-lark_bot', frozenset({'ou_synthetic'})))
+        monkeypatch.setattr(adapter, '_outbound_loop', AsyncMock())
+        monkeypatch.setattr(adapter, '_event_collector_loop', AsyncMock())
+        try:
+            await adapter.start(SimpleNamespace(runtime_root=tmp_path))
+            assert adapter._running
+            assert adapter._channel_outbox._task is None
+            receipt = await adapter.notify('oc_synthetic', 'hello')
+            assert receipt.success
+            assert len(transport.calls) == 1
+            probe.assert_awaited_once_with('channel-lark_bot')
+        finally:
+            await adapter.stop()
+        assert transport.closed
+
     asyncio.run(run())
