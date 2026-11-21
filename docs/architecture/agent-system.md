@@ -5217,9 +5217,12 @@ every word in the lead's summary or detail, or in a chat's or a person's name, a
 word as the session search does (Chinese by overlapping character pairs, English by the start of a word), a chat's
 or a person's name holding it, and, with pg_trgm installed, an ASCII word of four characters or more by its
 likeness (`word_similarity` at least 0.6), ranking the leads by every word's coverage weighted by rarity within
-each state, then confidence and time, and leaving out those scoring under 60 % of the best one. A start tries to
-create pg_trgm in the schema `public` once (`leads_trigram`): when the database does not let it, the start goes on
-with a warning and the search matches without likeness.
+each state, then confidence and time, and leaving out those scoring under 60 % of the best one. Only candidates the
+indexes find are filtered and scored, each set its newest 2,000: a word's tokens (`idx_message_leads_search`, built
+online), with pg_trgm the word as written while its tokens bring fewer and its likeness while they bring none
+(`idx_message_leads_trigram`), and the leads of chats and people whose name holds it. A start tries to create
+pg_trgm in the schema `public` once (`leads_trigram`) and adds the trigram index wherever pg_trgm is installed: when
+the database does not let it, the start goes on with a warning and the search matches without likeness.
 Invalid arguments return exit 2 before reading configuration, connecting or
 checking whether leads are enabled. Marking a promoted lead, or one the leads
 check dropped, is refused (exit 4). A dropped lead (state `dropped`) is out of
