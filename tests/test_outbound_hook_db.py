@@ -27,6 +27,16 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 WEB = "web"
 
 
+@pytest.fixture(autouse=True)
+def _switch_forgotten() -> Any:
+    """The switch as the server last read it is the module's: each test starts from off, as a fresh server does."""
+    from looper.agents import outbound_hook
+
+    outbound_hook._known = False
+    yield
+    outbound_hook._known = False
+
+
 def _ops(tmp_path: Path) -> ManagerOps:
     router = SimpleNamespace(has_planner=lambda task_id: False, forget_task=lambda task_id: None)
     ops = ManagerOps(Platform(bus=MessageBus(runtime_root=tmp_path), task_router=router, runtime_root=tmp_path),
