@@ -5560,7 +5560,11 @@ when the channel has one.
   「已处理」, one whose parameters changed 「已失效，请看最新的消息」. Else the
   row is claimed and acted on, the answer (a toast and the card as it is now)
   comes within 2.5 s, and a card whose action takes longer is updated when it
-  ends.
+  ends. The checks before the claim (the switch, the card, its chat and
+  message, the platform's chat lookup, the presser) must end within 1.5 s of
+  the press reaching the channel; past it, or on an error, the press is
+  refused and nothing is claimed, so only a checked press acts after the
+  answer.
 - **Confirmations.** With the switch on, every `high` call also writes its
   row; where the channel has buttons the reply's confirmation block goes
   after the reply as a card with 确认 and 取消. 确认 runs the call as
