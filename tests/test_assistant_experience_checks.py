@@ -43,6 +43,7 @@ def test_public_date_is_not_a_private_leave_plan():
     ('九点', 540), ('两点', 120), ('三点二十', 200), ('十二点', 720),
     ('上午十一点半', 690), ('下午三点一刻', 915), ('晚上九点三刻', 1305),
     ('早上一点五分', 65), ('09：00', 540), ('下午3点20分', 920),
+    ('下午两点零一分', 841), ('下午两点零五分', 845), ('下午两点零九分', 849),
 ])
 def test_chinese_and_arabic_times(reply, minutes):
     assert e.times_in(reply) == {minutes}

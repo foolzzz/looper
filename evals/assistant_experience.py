@@ -95,6 +95,7 @@ def times_in(text: str) -> set[int]:
     result = {int(h) * 60 + int(m) for h, m in re.findall(r'(?<!\d)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)', text)}
     digits = '零一二三四五六七八九'
     numbers = {char: i for i, char in enumerate(digits)} | {'两': 2}
+    numbers.update({'零' + digits[n]: n for n in range(1, 10)})
     numbers.update({('' if n < 20 else digits[n // 10]) + '十' +
                     (digits[n % 10] if n % 10 else ''): n for n in range(10, 60)})
     numeral = r'[零一二三四五六七八九十两]+'
