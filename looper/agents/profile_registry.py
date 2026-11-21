@@ -205,6 +205,8 @@ BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
     # than the extraction's, the cheapest that met the targets on the checker eval.
     "leads_check": LegacyAgentProfile("agent-claude-code-haiku-5-5", "claude-code/haiku-5-5", BUILTIN_RUNTIME,
                                       BUILTIN_PROVIDER, "claude-haiku-5-5"),
+    "outbound_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
+                                         BUILTIN_PROVIDER, "claude-sonnet-5-5"),
 })
 
 
@@ -1535,8 +1537,17 @@ async def create_provider(data: Any) -> dict[str, Any]:
     return await _provider_answer(provider_id)
 
 
-async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
-    """Change a provider; ``api_key`` ``***`` keeps the stored key, null removes it. Its profiles must still run."""
+class _Preview(Exception):
+    """Rolls a provider change back once every check passed, carrying the columns it would write."""
+
+    def __init__(self, fields: dict[str, Any]) -> None:
+        super().__init__("preview")
+        self.fields = fields
+
+
+async def _change_provider(provider_id: str, data: Any, *, preview: bool) -> dict[str, Any]:
+    """Write a provider change and check it (its endpoints' models, its profiles); the columns written. A preview
+    makes the same writes and checks, then rolls them back."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -1554,10 +1565,26 @@ async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
             await db.update_provider(conn, provider_id, fields, api_key=None if key is ... else key,
                                      keep_key=key is ...)
             await _check_provider_profiles(conn, {**fields, "id": provider_id})
+            if preview:
+                raise _Preview(fields)
+    except _Preview as done:
+        return done.fields
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"a provider named {data.get('name')!r} already exists") from None
     except asyncpg.ForeignKeyViolationError:
         raise RegistryConflict("an endpoint still serves models: remove those models first") from None
+    return fields
+
+
+async def preview_provider_update(provider_id: str, data: Any) -> dict[str, Any]:
+    """The provider's columns ``update_provider`` would write, checked the same way (it runs and rolls back);
+    raises what it would raise. For asking the user before a change of where its runs connect."""
+    return await _change_provider(provider_id, data, preview=True)
+
+
+async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
+    """Change a provider; ``api_key`` ``***`` keeps the stored key, null removes it. Its profiles must still run."""
+    await _change_provider(provider_id, data, preview=False)
     return await _provider_answer(provider_id)
 
 
