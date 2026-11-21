@@ -565,6 +565,8 @@ export interface ChatSettings {
   completion_turns: CompletionTurns;
   /** Whether the ledger records what waits, what was decided and who does what. Off by default. */
   ledger_enabled: boolean;
+  /** Whether Manager turns and proactive messages record observational metrics. Off by default. */
+  metrics_enabled: boolean;
   /** Present when an update turns the ledger on: bots with no operator id. Empty when every bot has one. */
   missing_operator_ids?: MissingOperatorBot[];
 }
@@ -595,7 +597,10 @@ export async function fetchChatSettings(): Promise<ChatSettings> {
 }
 
 export async function updateChatSettings(
-  body: { stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; ledger_enabled?: boolean | null },
+  body: {
+    stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; ledger_enabled?: boolean | null;
+    metrics_enabled?: boolean | null;
+  },
 ): Promise<ChatSettings> {
   const result = await callV1<ChatSettings>("/api/v1/chat_settings/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);

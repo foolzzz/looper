@@ -17,13 +17,13 @@ const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转
 describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let stored: { stop_enabled: boolean; completion_turns: string; ledger_enabled: boolean };
+  let stored: { stop_enabled: boolean; completion_turns: string; ledger_enabled: boolean; metrics_enabled: boolean };
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
 
   beforeEach(() => {
-    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false };
+    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false, metrics_enabled: false };
     missing = [];
     summary = SUMMARY;
     puts = [];
@@ -67,6 +67,17 @@ describe("Chat settings", () => {
     await act(async () => box.click());
     expect(puts).toEqual([{ stop_enabled: true }]);
     expect((container.querySelector("input[type=checkbox]") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("turns the Manager's metrics on alone", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const label = [...container.querySelectorAll("label")].find((l) => l.textContent?.includes("记录管家体验指标"))!;
+    const box = label.querySelector("input") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(container.textContent).toContain("只记录，不改变管家的行为");
+    await act(async () => box.click());
+    expect(puts).toEqual([{ metrics_enabled: true }]);
+    expect(box.checked).toBe(true);
   });
 
   it("switches the Manager's completion turns on alone, and shows the day's counts", async () => {
