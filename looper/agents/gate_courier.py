@@ -14,6 +14,12 @@ end notice; a Planner's reply goes as it wrote it. In a Lark group a reply
 reaches the bot only when it @-mentions it, so what waits for an answer there
 says so.
 
+With the system setting ``delivery.enabled`` on, a reminder passes the delivery layer (``proactive_delivery``)
+before it is posted, and the decision is recorded. A reminder is only due for a gate that waits for the user in a
+task still running (``db.user_gates.due_reminders``), and a waiting gate holds back the steps after it, so it is
+``blocking`` and always sent, at night and over the daily cap too. A decision that cannot be made (the database
+refused it) is logged and the reminder posted as with the layer off: the layer never holds a blocking message back.
+
 A post that sent nothing is tried again, after ``POST_RETRY_SEC``, up to
 ``POST_ATTEMPTS`` in all, and the gate's later messages wait behind it; only
 then is it ``failed``. Each post carries an idempotency key of its message
@@ -31,7 +37,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..db import activity as db_activity, tasks as db_tasks, user_gates as db_user_gates
+from ..db import activity as db_activity, proactive_deliveries as db_deliveries, tasks as db_tasks
+from ..db import user_gates as db_user_gates
+from . import chat_settings, proactive_delivery as delivery
 from .channels.base import PostReceipt
 from .gate_service import GateChat, _offered, dashboard_target, gate_chat
 from .task_notice import NAME_CHARS, task_link_line
@@ -218,6 +226,10 @@ class GateCourier:
         if chat is None or text is None or stale:
             await db_user_gates.record_post(row["id"], row["task_id"], "none")
             return True
+        decided = await self._decide(row, chat)
+        if decided is not None and decided.outcome is not delivery.Outcome.SEND:
+            await db_user_gates.record_post(row["id"], row["task_id"], "none")
+            return True
         reply_to = await self._reply_to(row, chat)
         key = f"gate-{row['id']}"
         receipt = await self._post(chat.channel_id, chat.target, text, reply_to=reply_to, idempotency_key=key)
@@ -234,11 +246,31 @@ class GateCourier:
                                         error=None if receipt.success else receipt.error or "not sent",
                                         channel=chat.channel.value, channel_id=chat.channel_id, chat=chat.target.id,
                                         external_ids=receipt.external_ids)
+        if decided is not None and receipt.success:
+            await db_deliveries.mark_sent(_delivery_key(row))
         if not receipt.success:
             await db_activity.insert_activity(
                 task_id=row["task_id"], worker="planner", kind="error",
                 summary=f"Gate {row['step_key']}: could not send to {chat.label()}: {receipt.error}"[:500])
         return True
+
+    @staticmethod
+    async def _decide(row: Mapping[str, Any], chat: GateChat) -> delivery.Decision | None:
+        """The delivery layer's decision on a reminder, when it is on; None for every other message, or when it is
+        off."""
+        if row["kind"] != MessageKind.REMINDER.value or not chat_settings.delivery_enabled():
+            return None
+        kind = delivery.ChatKind.GROUP if chat.in_group else delivery.ChatKind.DIRECT
+        try:
+            # Blocking: neither the cap nor the grace after the user wrote applies, so no last message is looked up.
+            return await delivery.decide(
+                delivery.Delivery(delivery.DeliveryKind.GATE_REMINDER, delivery.Urgency.BLOCKING, kind),
+                dedupe_key=_delivery_key(row), channel_id=chat.channel_id, chat=chat.target.id,
+                last_user_message_at=None, task_id=row["task_id"], step_id=row["step_id"],
+                schedule_id=row.get("schedule_id"))
+        except Exception:
+            logger.exception("no delivery decision on gate message %s; posting it as with the layer off", row["id"])
+            return None
 
     @staticmethod
     async def _reply_to(row: Mapping[str, Any], chat: GateChat) -> str | None:
@@ -252,6 +284,11 @@ class GateCourier:
             if user and user.get("external_id") and _same_chat(user, chat):
                 return str(user["external_id"])
         return await db_user_gates.first_post(row["step_id"], chat.channel_id, chat.target.id)
+
+
+def _delivery_key(row: Mapping[str, Any]) -> str:
+    """The message's key in ``proactive_deliveries``: one decision however often it is tried."""
+    return f"gate_message:{row['id']}"
 
 
 def _same_chat(message: Mapping[str, Any], chat: GateChat) -> bool:

@@ -17,8 +17,12 @@ The Manager behavior is wired separately; its v1 operations are ``delivery_guard
 (off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
 second copy. Turning it on names the enabled bots that have no operator id.
 
-Stop, completion turns, research order and delivery guard are kept in memory: ``load`` reads them
-at startup and updates refresh them. Until loaded, all are off.
+``delivery.enabled``: whether proactive messages pass the delivery layer (``proactive_delivery``) before they go
+out; off by default (proactive delivery RFC section 2). Operator-only, through ``proactive_delivery.get`` and
+``proactive_delivery.update``, like the delivery guard.
+
+Stop, completion turns, research order, delivery guard and the delivery layer are kept in memory: ``load`` reads
+them at startup and updates refresh them. Until loaded, all are off.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from typing import Any
 
 from ..db import ledger as db_ledger
 from ..db import system_settings as db_settings
+from .proactive_delivery import ENABLED_KEY as DELIVERY_ENABLED_KEY
 
 STOP_ENABLED_KEY = "chat.stop_enabled"
 DEFAULT_STOP_ENABLED = False
@@ -37,6 +42,7 @@ RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
+DEFAULT_DELIVERY_ENABLED = False
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
@@ -55,6 +61,7 @@ _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
 _delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
+_delivery_enabled = DEFAULT_DELIVERY_ENABLED
 
 
 def stop_enabled() -> bool:
@@ -113,13 +120,38 @@ async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
     return delivery_guard_view()
 
 
+def delivery_enabled() -> bool:
+    return _delivery_enabled
+
+
+def set_delivery_enabled(value: bool) -> None:
+    """Apply a value in memory only (``load`` and ``update_delivery`` store it; tests use this directly)."""
+    global _delivery_enabled
+    _delivery_enabled = value
+
+
+def delivery_view() -> dict[str, bool]:
+    return {"enabled": _delivery_enabled}
+
+
+async def update_delivery(value: bool | None) -> dict[str, bool]:
+    """Persist the operator's choice; null restores the default, off."""
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({DELIVERY_ENABLED_KEY: None if value is None else ("true" if value else "false")})
+    set_delivery_enabled(DEFAULT_DELIVERY_ENABLED if value is None else value)
+    return delivery_view()
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY])
+    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY,
+                                             DELIVERY_ENABLED_KEY])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
+    set_delivery_enabled(stored.get(DELIVERY_ENABLED_KEY) == "true")
     try:
         turns = CompletionTurns(stored.get(COMPLETION_TURNS_KEY, DEFAULT_COMPLETION_TURNS.value))
     except ValueError:

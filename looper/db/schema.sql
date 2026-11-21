@@ -2286,3 +2286,45 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_created ON outbound_reviews (cre
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_id) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
 -- outbound reviews end
+
+-- Proactive deliveries (proactive delivery RFC section 4): one row per proactive message a send point decided on with
+-- the delivery layer on (``agents/proactive_delivery.py``): sent, into the digest or dropped, the rule that settled it,
+-- whether it counts toward its direct chat's daily cap, and when the channel took it; replied_at is the user's first
+-- message in the chat after it went, which the metrics write. dedupe_key names the send point's message, so a message tried again
+-- keeps its first decision. connection.py applies this block to databases that predate it, so keep it between the
+-- markers and idempotent.
+-- proactive deliveries begin
+CREATE TABLE IF NOT EXISTS proactive_deliveries (
+    id          BIGSERIAL PRIMARY KEY,
+    dedupe_key  TEXT NOT NULL UNIQUE,
+    kind        TEXT NOT NULL CHECK (kind IN ('gate_reminder', 'task_notice', 'subscription', 'intent',
+                                              'completion', 'user_reminder')),
+    urgency     TEXT NOT NULL CHECK (urgency IN ('normal', 'blocking', 'user_set')),
+    channel_id  TEXT NOT NULL,
+    chat        TEXT NOT NULL,
+    chat_kind   TEXT NOT NULL CHECK (chat_kind IN ('direct', 'group')),
+    task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id     TEXT,
+    schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL,
+    outcome     TEXT NOT NULL CHECK (outcome IN ('send', 'digest', 'drop')),
+    reason      TEXT NOT NULL CHECK (reason IN ('silent', 'urgent', 'outside_active_hours', 'recent_reply',
+                                                'quiet_hours', 'daily_cap', 'within_limits')),
+    counted     BOOLEAN NOT NULL DEFAULT false,
+    local_date  DATE NOT NULL,  -- the decision's date in the policy's timezone: the cap counts by it
+    digest_date DATE,
+    decided_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at     TIMESTAMPTZ,
+    replied_at  TIMESTAMPTZ,
+    CONSTRAINT proactive_deliveries_digest CHECK ((outcome = 'digest') = (digest_date IS NOT NULL)),
+    CONSTRAINT proactive_deliveries_counted CHECK (NOT counted OR outcome = 'send'),
+    CONSTRAINT proactive_deliveries_sent CHECK (sent_at IS NULL OR outcome = 'send'),
+    CONSTRAINT proactive_deliveries_replied CHECK (replied_at IS NULL OR sent_at IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_counted
+    ON proactive_deliveries (channel_id, chat, local_date) WHERE counted;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_digest ON proactive_deliveries (digest_date) WHERE outcome = 'digest';
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_task ON proactive_deliveries (task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_schedule
+    ON proactive_deliveries (schedule_id) WHERE schedule_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_decided ON proactive_deliveries (decided_at);
+-- proactive deliveries end
