@@ -476,7 +476,7 @@ def test_the_index_finds_the_candidates(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_a_database_without_the_index_builds_it_online(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        await pool.execute("DROP INDEX idx_chat_messages_search; DROP FUNCTION looper_search_tokens(text)")
+        await pool.execute("DROP FUNCTION looper_search_tokens(text) CASCADE")  # with every index on the tokens
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
