@@ -111,6 +111,8 @@ PostgreSQL 自带的全文检索解析器把一串连续的中文当成一个词
 - 0.5 的命中线、部分覆盖计分和 60% 的截断都是在这一组上定的：不加截断时 `fulltext` 的精确率只有 0.42（用部分命中的线索填满 5 条），不算部分覆盖时双语召回是 0.97。数据集小、而且是我们自己写的，数字只说明方向，不是线上的效果。
 - 「找到」对 words 偏高的精确率是假象：它在 20 个查询上什么都不返回。
 
+**对话评测**（真实 Claude CLI，`leads_*` 六个对话，Sonnet 两遍；`fulltext` 另用 opus xhigh 的 Manager 一遍）：`words` 10/11，`fulltext` 12/12，opus 6/6。`words` 没过的一遍答对了，日期写成「11 月 19 日」，检查没认出带空格的日期（已修，不重跑）；还有一遍的服务在 90 秒内没起来，没有跑。新对话 `leads_english` 最能说明问题：`words` 两遍都查了三次（「Orion CPU alert threshold」0 条、「Orion CPU」1 条、「alert threshold」0 条），只是碰巧靠「Orion CPU」找到；`fulltext` 三遍都只查一次，Manager 按说明写成「Orion CPU alert threshold 告警 阈值」，1 条。
+
 **代价：** 线索没有索引，`fulltext` 每次给过滤后的每条线索算覆盖：合成的 1 万条线索上一次 0.1–0.5 秒（带 pg_trgm 的英文词最慢），`words` 是 0.05–0.08 秒（本机测试库，最好的三次）。
 
 **不包含：** 中文分词扩展（官方镜像里没有）、别名表、索引、改抽取 prompt 让线索自带英文关键词。
