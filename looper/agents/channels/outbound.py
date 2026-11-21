@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 
+from ...db.connection import PoolNotInitializedError
 from .base import PostOutcome, PostReceipt
 from .lark_api import LarkApiError
 from .lark_cli import LarkCliError, MESSAGE_GONE_CODES, TIMEOUT
@@ -291,6 +292,9 @@ class Outbox:
         try:
             if await self.db.has_unfinished(self.channel_id):
                 await self.start()
+        except PoolNotInitializedError:
+            # Standalone legacy adapters need no database while outbound is off.
+            return
         except Exception:
             # A disabled gateway must not make legacy channel startup depend on
             # the outbox database. Recovery can be retried on the next startup.

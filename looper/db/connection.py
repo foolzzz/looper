@@ -70,11 +70,15 @@ def fence() -> None:
         _pool.terminate()
 
 
+class PoolNotInitializedError(RuntimeError):
+    """No database pool has been opened in this process."""
+
+
 def get_pool() -> asyncpg.Pool:
     if _fenced:
         raise RuntimeError(_FENCED_MESSAGE)
     if _pool is None:
-        raise RuntimeError("database pool not initialised — call init_pool() first")
+        raise PoolNotInitializedError("database pool not initialised — call init_pool() first")
     return _pool
 
 
