@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -257,9 +258,22 @@ def _ago(moment: Any, now: datetime) -> str:
     return f"{int(seconds // 3600)} 小时" if seconds < 172_800 else f"{int(seconds // 86_400)} 天"
 
 
+# The most characters of a title or its context a chat line keeps.
+TEXT_MAX_CHARS = 120
+
+
+def _plain(text: Any) -> str:
+    """Text others wrote (a gate's topic, an intent's or a ledger item's title, a task, project or schedule name) as
+    one plain line: control and format characters dropped, whitespace and line breaks merged, at most
+    ``TEXT_MAX_CHARS``. The /todo reply is stored in the chat's history, which a new Manager session reads back."""
+    line = " ".join("".join(ch for ch in str(text or "") if unicodedata.category(ch) not in ("Cc", "Cf")
+                            or ch in "\n\t").split())
+    return line if len(line) <= TEXT_MAX_CHARS else line[:TEXT_MAX_CHARS - 1] + "…"
+
+
 def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
     facts = item["facts"]
-    title, context, waited = item["title"], item["context"], _ago(item["since"], now)
+    title, context, waited = _plain(item["title"]), _plain(item["context"]), _ago(item["since"], now)
     if kind == "gates":
         return f"- 【{context}】{facts['step']} {title}" + (f"（已等 {waited}）" if waited else "")
     if kind == "confirmations":
