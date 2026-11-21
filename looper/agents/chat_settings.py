@@ -10,7 +10,8 @@ ledger RFC section 3.7).
 ``manager.research_order``: whether the default Manager's contract says where to look things up, and in what order,
 before it asks the user (``research_order``; off by default).
 
-``manager.metrics.enabled``: whether turns and proactive deliveries collect observational metrics (off by default).
+``manager.metrics.enabled``: operator-only observational metrics, off by default; edited through
+``manager_metrics_settings.get`` and ``manager_metrics_settings.update``, separately from client chat settings.
 
 ``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
 The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
@@ -39,9 +40,9 @@ RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
 METRICS_ENABLED_KEY = "manager.metrics.enabled"
 DEFAULT_METRICS_ENABLED = False
-FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled", "metrics_enabled")
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -101,6 +102,19 @@ def set_metrics_enabled(value: bool) -> None:
     _metrics_enabled = value
 
 
+def metrics_view() -> dict[str, bool]:
+    return {"enabled": _metrics_enabled}
+
+
+async def update_metrics(value: bool | None) -> dict[str, bool]:
+    """Persist the operator-only metrics switch separately from client chat settings."""
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({METRICS_ENABLED_KEY: None if value is None else ("true" if value else "false")})
+    set_metrics_enabled(DEFAULT_METRICS_ENABLED if value is None else value)
+    return metrics_view()
+
+
 def delivery_guard_enabled() -> bool:
     return _delivery_guard_enabled
 
@@ -148,8 +162,7 @@ async def load() -> bool:
 async def settings_view() -> dict[str, Any]:
     """The settings in effect. ``ledger_enabled`` is the stored row (``db.ledger.enabled``), not a copy in memory."""
     return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value,
-            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled(),
-            "metrics_enabled": _metrics_enabled}
+            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled()}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -174,11 +187,6 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("research_order must be true, false or null")
         values["research_order"] = value
-    if "metrics_enabled" in body:
-        value = body["metrics_enabled"]
-        if value is not None and not isinstance(value, bool):
-            raise ValueError("metrics_enabled must be true, false or null")
-        values["metrics_enabled"] = value
     if "ledger_enabled" in body:
         value = body["ledger_enabled"]
         if value is not None and not isinstance(value, bool):
@@ -200,9 +208,6 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if "research_order" in values:
         value = values["research_order"]
         stored[RESEARCH_ORDER_KEY] = None if value is None else ("true" if value else "false")
-    if "metrics_enabled" in values:
-        value = values["metrics_enabled"]
-        stored[METRICS_ENABLED_KEY] = None if value is None else ("true" if value else "false")
     if "ledger_enabled" in values:
         value = values["ledger_enabled"]
         stored[db_ledger.ENABLED_KEY] = None if value is None else ("true" if value else "false")

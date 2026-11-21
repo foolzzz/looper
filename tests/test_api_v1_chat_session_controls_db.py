@@ -109,10 +109,10 @@ def test_client_setting_update_waits_for_confirmation_and_null_restores_default(
             assert "chat.stop_enabled" in asked["impact"] and "Telegram" in asked["impact"]
             assert await chat_settings.load() is False
             status, answer = await call("confirm", {"confirmation_id": asked["confirmation_id"]}, client=True)
-            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "metrics_enabled": False}
+            assert status == 200 and answer["result"] == {"stop_enabled": True, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             assert await chat_settings.load() is True
             status, answer = await call("chat_settings.update", {"stop_enabled": None})
-            assert status == 200 and answer["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False, "metrics_enabled": False}
+            assert status == 200 and answer["result"] == {"stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
             assert await chat_settings.load() is chat_settings.DEFAULT_STOP_ENABLED
             assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key=$1", chat_settings.STOP_ENABLED_KEY) == 0
     run_db(run, monkeypatch, timeout=30)

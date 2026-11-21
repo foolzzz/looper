@@ -1634,8 +1634,7 @@ class _Importer:
             try:
                 if name != "metrics_enabled":
                     raise ValueError("unknown portable chat setting")
-                value = chat_settings.checked({name: value})[name]
-                if value is None:
+                if not isinstance(value, bool):
                     raise ValueError("metrics_enabled must be a boolean")
             except ValueError as exc:
                 self.record("settings.chat", name, Action.SKIPPED, reason=str(exc))
