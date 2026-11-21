@@ -29,12 +29,13 @@ def test_a_new_manager_has_only_main_with_the_old_defaults(tmp_path: Path) -> No
     assert list(manager._sessions) == [MAIN_SESSION] and manager._session_now() is main
     assert main.claude_runtime is CLAUDE_CODE and not main.claude.started and not main.turn_lock.locked()
     assert {f.name: getattr(main, f.name) for f in fields(ManagerSession)
-            if f.name not in ("claude", "claude_runtime", "turn_lock")} == {
+            if f.name not in ("claude", "claude_runtime", "turn_lock", "lifecycle_gate")} == {
         "key": MAIN_SESSION, "session_id": None, "session_totals": Usage(), "session_runtime": None,
         "session_profile": None, "session_provider": None, "process": None, "pending_switch": None,
         "pending_handoff": None, "clean_start": False, "session_loaded": False, "state_shown": None,
         "state_lost": "no whole block yet", "state_generation": 0, "stopped_notes": [], "lock_owner": None,
-        "running_token": None, "last_activity": 7.0}
+        "running_token": None, "research": None, "agent_settings": None, "last_activity": 7.0}
+    assert not main.lifecycle_gate.locked() and main.lifecycle_gate is not main.turn_lock
 
 
 def test_the_old_names_read_and_write_the_session_the_context_sets(tmp_path: Path) -> None:
@@ -80,3 +81,28 @@ def test_the_main_sessions_binding_file_and_bridge_env_are_as_before(tmp_path: P
     assert entry == {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"],
                      "env": {"LOOPER_AGENT_URL": "http://127.0.0.1:9", "LOOPER_AGENT_TOKEN": "tok",
                              "LOOPER_AGENT_TURN_FILE": str(turn_file)}}
+
+
+def test_a_turns_research_sources_reach_only_its_own_sessions_prompt(tmp_path: Path) -> None:
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.profile_registry import builtin_resolved_profile
+    from looper.agents.research_order import CONTRACT_NAME, ResearchSources
+
+    manager = _manager(tmp_path)
+    group = ManagerSession(key="group:lark:chat-1", claude=CLAUDE_CODE.resident_session(manager.agent_id),
+                           claude_runtime=CLAUDE_CODE, last_activity=0.0)
+    settings = AgentSettings(profile=builtin_resolved_profile())
+    manager._research = ResearchSources(vault=True, leads=True)  # main's turn, prepared first
+
+    def group_prompt() -> str:
+        manager._current.set(group)
+        return manager._composed_prompt(settings).layers["contract"]["name"]
+
+    assert CONTRACT_NAME not in contextvars.copy_context().run(group_prompt)
+    assert CONTRACT_NAME in manager._composed_prompt(settings).layers["contract"]["name"]
+
+
+def test_group_turns_share_the_operators_session_while_there_is_only_main() -> None:
+    from looper.agents.session_routing import GroupIsolation, group_isolation
+
+    assert group_isolation("manager") is GroupIsolation.SHARED
