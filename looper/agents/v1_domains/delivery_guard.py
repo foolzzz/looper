@@ -7,11 +7,11 @@ VIEW = _object({"enabled": _BOOL}, closed=True)
 RESULTS = {}
 OPERATIONS = (
     Operation("delivery_guard.get", "POST", "/api/v1/delivery_guard/get",
-              "Read the delivery guard setting.", "Read the delivery guard setting; disabled by default.",
+              "Read the delivery guard setting.", "Read the delivery guard setting. It is disabled by default.",
               _object({}, closed=True), VIEW, operator_only=True),
     Operation("delivery_guard.update", "POST", "/api/v1/delivery_guard/update",
               "Set the delivery guard setting.",
-              "Set the delivery guard setting; null restores the disabled default. Manager wiring is separate.",
+              "Set the delivery guard setting. Null restores the disabled default; Manager wiring is separate.",
               _object({"enabled": {"type": ["boolean", "null"]}}, closed=True), VIEW,
               risk="high", confirms=True, operator_only=True),
 )
