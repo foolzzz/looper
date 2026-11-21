@@ -138,12 +138,23 @@ def _operations() -> dict[str, Any]:
     return {op.operation_id: op for module in _DOMAINS for op in module.OPERATIONS}
 
 
+# The operations whose level was decided one by one (every other one is inside).
+DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    "manager_chat_bindings.put": EXTERNAL,  # a bound chat's people talk to a Manager, which answers them there
+    "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
+    # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard
+    "channel_chats.set_policy": INSIDE,
+}
+
+
 def test_every_operation_is_inside_but_the_ones_that_bind_or_push_to_a_chat() -> None:
     operations = _operations()
     computed = {name for name, op in operations.items() if op.level_of is not None}
     fixed = {name: op.level for name, op in operations.items() if op.level is not INSIDE}
     assert computed == {"schedule_admin.create", "schedule_admin.update", "schedule_admin.confirm_target"}
-    assert fixed == {"manager_chat_bindings.put": EXTERNAL}
+    assert fixed == {name: level for name, level in DECIDED_OPERATIONS.items() if level is not INSIDE}
+    for name, level in DECIDED_OPERATIONS.items():
+        assert operations[name].level is level and operations[name].level_of is None, name
 
 
 @pytest.mark.parametrize(("fields", "level"), [
