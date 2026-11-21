@@ -30,7 +30,7 @@ class Database:
     async def get(self, id):
         return dict(self.rows[id])
 
-    async def next_due(self, channel, now):
+    async def next_due(self, channel, now, **kwargs):
         self.scans += 1
         for row in self.rows.values():
             if row['state'] == 'pending' and row['next_attempt_at'] <= now and not any(
@@ -40,16 +40,22 @@ class Database:
                 return dict(row)
         return None
 
-    async def next_attempt(self, channel):
+    async def next_attempt(self, channel, **kwargs):
         return min((row['next_attempt_at'] for row in self.rows.values()
                     if row['state'] == 'pending' and not any(
                         prior['chat'] == row['chat'] and prior['id'] < row['id'] and
                         prior['state'] in {'pending', 'sending'} for prior in self.rows.values())), default=None)
 
-    async def mark_sending(self, id):
+    async def mark_sending(self, id, *, claim_token=None):
         self.rows[id]['state'] = 'sending'
         self.rows[id]['attempts'] += 1
         return True
+
+    async def mark_attempted(self, id, now):
+        row = self.rows[id]
+        if row.get('first_possible_at') is None:
+            row['first_possible_at'] = now
+        return row['first_possible_at']
 
     async def mark_sent(self, id, external):
         self.rows[id].update(state='sent', external_id=external)

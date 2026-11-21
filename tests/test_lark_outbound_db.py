@@ -1,6 +1,7 @@
 """Durable Lark writes against PostgreSQL and the CLI stand-in only."""
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -100,10 +101,12 @@ def test_crash_recovers_keyed_send_without_new_message(monkeypatch, lark_cli_sta
         row = await channel_outbox.insert_or_get(dict(channel_id='channel-lark', idempotency_key='crash',
             kind='send', chat='oc_synthetic', body={'text': 'hello'}, source='answer'))
         await channel_outbox.mark_sending(row['id'])
+        await channel_outbox.mark_attempted(row['id'], datetime.now(timezone.utc))
         old = await channel_outbox.insert_or_get(dict(channel_id='channel-lark', idempotency_key='old',
             kind='send', chat='oc_old', body={'text': 'old'}, source='answer'))
         await channel_outbox.mark_sending(old['id'])
-        await pool.execute("UPDATE channel_outbox SET created_at=now()-interval '2 hours' WHERE id=$1", old['id'])
+        await channel_outbox.mark_attempted(old['id'], datetime.now(timezone.utc))
+        await pool.execute("UPDATE channel_outbox SET created_at=now()-interval '2 hours', first_possible_at=now()-interval '2 hours' WHERE id=$1", old['id'])
         outbox = Outbox('channel-lark', transport, Gateway('channel-lark'), channel_outbox)
         try:
             await outbox.start()

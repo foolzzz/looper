@@ -2267,12 +2267,18 @@ CREATE TABLE IF NOT EXISTS channel_outbox (
     external_id     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     sent_at         TIMESTAMPTZ,
+    first_possible_at TIMESTAMPTZ,
+    claim_token     UUID,
     UNIQUE (channel_id, idempotency_key),
     CONSTRAINT channel_outbox_sent CHECK ((state = 'sent') = (sent_at IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_channel_outbox_due
     ON channel_outbox (channel_id, chat, id) WHERE state IN ('pending', 'sending');
 CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created_at);
+ALTER TABLE channel_outbox ADD COLUMN IF NOT EXISTS first_possible_at TIMESTAMPTZ;
+ALTER TABLE channel_outbox ADD COLUMN IF NOT EXISTS claim_token UUID;
+-- Earlier versions did not record attempts separately from claims. Be conservative.
+UPDATE channel_outbox SET first_possible_at=created_at WHERE attempts>0 AND first_possible_at IS NULL;
 -- channel outbox end
 
 -- One review of an outbound action (the outbound-review RFC, section 9): who asked for it and where, the action as

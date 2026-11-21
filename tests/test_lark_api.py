@@ -606,6 +606,9 @@ def test_post_edit_preserves_the_original_markdown_message_type() -> None:
     (200, {'code': 99991400}, {'x-ogw-ratelimit-reset': '7'}, 7),
     (429, {'code': 99991400}, {'x-ogw-ratelimit-reset': '7', 'Retry-After': '3'}, 7),
     (429, {'code': 99991400}, {'x-ogw-ratelimit-reset': 'invalid', 'Retry-After': '3'}, 3),
+    (429, {'code': 99991400}, {'x-ogw-ratelimit-reset': '86400000', 'Retry-After': '3'}, 3),
+    (429, {'code': 99991400, 'retry_after': 10**1000}, {'Retry-After': '3'}, 3),
+    (429, {'code': 99991400, 'retry_after': True}, {}, None),
 ])
 def test_gateway_reset_header_is_retained_on_rate_limit(status, body, headers, delay):
     async def run():

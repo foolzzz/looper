@@ -275,3 +275,15 @@ def test_distinct_rate_buckets_and_live_limits():
         await gateway.edit('message', call)
         assert clock.now - before + 1e-9 >= 3
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('hint', [86400000, float('inf'), float('nan'), -1, 'invalid', True, 10**1000])
+def test_abnormal_retry_hints_do_not_stall_delivery(hint):
+    from looper.agents.channels.outbound import backoff
+    # Invalid platform hints must fall back to the ordinary jittered delay.
+    assert .8 <= backoff(1, hint) <= 1.2
+
+
+def test_valid_retry_hints_are_clamped():
+    from looper.agents.channels.outbound import backoff
+    assert 1 <= backoff(1, 300) <= 60

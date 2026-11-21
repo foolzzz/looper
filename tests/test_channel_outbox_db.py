@@ -48,7 +48,8 @@ def test_recovery_window_and_retention(monkeypatch):
         old = await db.insert_or_get(row("old", "chat-b"))
         for item in (recent, old):
             await db.mark_sending(item["id"])
-        await pool.execute("UPDATE channel_outbox SET created_at=$1 WHERE id=$2", now-timedelta(hours=2), old["id"])
+            await db.mark_attempted(item["id"], now)
+        await pool.execute("UPDATE channel_outbox SET created_at=$1, first_possible_at=$1 WHERE id=$2", now-timedelta(hours=2), old["id"])
         await db.recover("channel-test", now, 3600)
         assert (await db.get(recent["id"]))["state"] == "pending"
         assert (await db.get(old["id"]))["state"] == "uncertain"
@@ -98,4 +99,26 @@ def test_circuit_deferral_preserves_attempt_budget_and_last_failure(monkeypatch)
         await db.mark_sent(item['id'], 'om_sent')
         await db.defer_unsent(item['id'], at)
         assert (await db.get(item['id']))['state'] == 'sent'
+    run_db(check, monkeypatch)
+
+
+def test_upgrade_backfills_possible_delivery_conservatively(monkeypatch):
+    from looper.db import connection, channel_outbox as db
+
+    async def check(pool):
+        item = await db.insert_or_get(row('legacy-timeout'))
+        await db.mark_sending(item['id'])
+        now = datetime.now(timezone.utc)
+        await db.retry_later(item['id'], now, 'unknown', 'response lost')
+        await pool.execute("UPDATE channel_outbox SET created_at=$1 WHERE id=$2", now-timedelta(hours=2), item['id'])
+        await pool.execute('ALTER TABLE channel_outbox DROP COLUMN first_possible_at, DROP COLUMN claim_token')
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        migrated = await db.get(item['id'])
+        assert migrated['first_possible_at'] == migrated['created_at']
+        await db.recover('channel-test', now, 3600)
+        assert (await db.get(item['id']))['state'] == 'uncertain'
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name='channel_outbox'") == 1
     run_db(check, monkeypatch)

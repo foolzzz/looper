@@ -25,6 +25,7 @@ LARK_BASE_URL = "https://open.larksuite.com"
 BASE_URLS = {"feishu": FEISHU_BASE_URL, "lark": LARK_BASE_URL}
 TOKEN_INVALID_CODES = frozenset({99991661, 99991663})
 SCAN_CALLS_MAX = 40
+MAX_RETRY_HINT = 86400  # Reject implausible seconds/epoch/millisecond values.
 
 
 class LarkApiError(LarkCliError):
@@ -160,11 +161,13 @@ class LarkApi:
         delays = []
         for raw in (response.headers.get("x-ogw-ratelimit-reset"), response.headers.get("Retry-After"),
                     answer.get("retry_after")):
+            if isinstance(raw, bool):
+                continue
             try:
                 delay = float(raw)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, OverflowError):
                 continue
-            if math.isfinite(delay) and delay >= 0:
+            if math.isfinite(delay) and 0 <= delay <= MAX_RETRY_HINT:
                 delays.append(delay)
         if delays:
             error.retry_after = max(delays)

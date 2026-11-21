@@ -167,7 +167,7 @@ class LarkChannelAdapter(ChannelAdapter):
         from .outbound import Gateway, Outbox
         from ...db import channel_outbox
 
-        self._gateway = Gateway(self._channel_id)
+        self._gateway = Gateway(self._channel_id, app_id=bot_app_id)
         self._channel_outbox = Outbox(self._channel_id, self._transport, self._gateway, channel_outbox,
                                       enabled=chat_settings.outbound_enabled)
         self._transport = GatedLarkTransport(self._transport, self._gateway,

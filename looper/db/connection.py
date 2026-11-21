@@ -922,9 +922,10 @@ CREATE TABLE IF NOT EXISTS subscription_daily_claims (
 
 
 async def _channel_outbox_pending(conn: asyncpg.Connection) -> bool:
-    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CHANNEL_OUTBOX):
-        return False
-    return not await conn.fetchval("SELECT to_regclass('channel_outbox') IS NOT NULL")
+    return not await conn.fetchval("""
+        SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('channel_outbox')
+                       AND attname='claim_token' AND NOT attisdropped)
+        """)
 
 
 def _channel_outbox_ddl() -> str:
@@ -1444,7 +1445,7 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_LOOKBACK)
         if await _channel_outbox_pending(conn):
             await conn.execute(_channel_outbox_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHANNEL_OUTBOX)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _CHANNEL_OUTBOX)
         if await _ledger_pending(conn):
             await conn.execute(_ledger_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)

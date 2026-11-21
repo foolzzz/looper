@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 
@@ -61,26 +62,29 @@ async def get(id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | 
     return _row(await (pool or get_pool()).fetchrow("SELECT * FROM channel_outbox WHERE id=$1", id))
 
 
-async def next_due(channel_id: str, now: datetime, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+async def next_due(channel_id: str, now: datetime, *, expired_before: datetime | None = None, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     return _row(await (pool or get_pool()).fetchrow("""
         SELECT o.* FROM channel_outbox o
-        WHERE o.channel_id=$1 AND o.state='pending' AND o.next_attempt_at <= $2
+        WHERE o.channel_id=$1 AND o.state='pending'
+          AND (o.next_attempt_at <= $2 OR o.created_at <= $3)
           AND NOT EXISTS (SELECT 1 FROM channel_outbox prior
               WHERE prior.channel_id=o.channel_id AND prior.chat=o.chat
                 AND (prior.state='sending' OR (prior.state='pending' AND prior.id < o.id)))
         ORDER BY o.id LIMIT 1
-        """, channel_id, now))
+        """, channel_id, now, expired_before))
 
 
-async def mark_sending(id: int, *, pool: asyncpg.Pool | None = None) -> bool:
+async def mark_sending(id: int, *, claim_token: UUID | None = None, pool: asyncpg.Pool | None = None) -> bool:
     return await (pool or get_pool()).fetchval("""
-        UPDATE channel_outbox o SET state='sending', attempts=attempts+1
-        WHERE o.id=$1 AND o.state='pending'
+        UPDATE channel_outbox o SET state='sending',
+          attempts=attempts+CASE WHEN state='pending' THEN 1 ELSE 0 END, claim_token=$2
+        WHERE o.id=$1 AND (o.state='pending' OR
+          (o.state='sending' AND $2::uuid IS NOT NULL AND o.claim_token=$2))
           AND NOT EXISTS (SELECT 1 FROM channel_outbox prior
               WHERE prior.channel_id=o.channel_id AND prior.chat=o.chat AND prior.id<>o.id
                 AND (prior.state='sending' OR (prior.state='pending' AND prior.id<o.id)))
         RETURNING TRUE
-        """, id) is True
+        """, id, claim_token) is True
 
 
 async def mark_sent(id: int, external_id: str | None, *, pool: asyncpg.Pool | None = None) -> None:
@@ -103,13 +107,23 @@ async def mark_uncertain(id: int, error: str, *, pool: asyncpg.Pool | None = Non
                                       "error=$2, sent_at=NULL WHERE id=$1", id, error[:500])
 
 
+async def mark_attempted(id: int, now: datetime, *, pool: asyncpg.Pool | None = None) -> datetime:
+    """Persist the start of the platform dedupe window before any possible delivery."""
+    return await (pool or get_pool()).fetchval("""
+        UPDATE channel_outbox SET first_possible_at=coalesce(first_possible_at, $2)
+        WHERE id=$1 AND state='sending' RETURNING first_possible_at
+        """, id, now)
+
+
 async def recover(channel_id: str, now: datetime, keyed_window: float, *, pool: asyncpg.Pool | None = None) -> None:
     await (pool or get_pool()).execute("""
         UPDATE channel_outbox SET
-          state=CASE WHEN $4 AND created_at >= $3 THEN 'pending' ELSE 'uncertain' END,
-          next_attempt_at=$2,
+          state=CASE WHEN first_possible_at IS NULL OR ($4 AND first_possible_at > $3)
+                     THEN 'pending' ELSE 'uncertain' END,
+          next_attempt_at=$2, claim_token=NULL,
           error_class='unknown', error='interrupted while sending'
-        WHERE channel_id=$1 AND state='sending'
+        WHERE channel_id=$1 AND (state='sending' OR
+            (state='pending' AND first_possible_at IS NOT NULL AND (NOT $4 OR first_possible_at <= $3)))
         """, channel_id, now, now-timedelta(seconds=keyed_window), keyed_window > 0)
 
 
@@ -144,12 +158,12 @@ async def has_unfinished(channel_id: str, *, pool: asyncpg.Pool | None = None) -
         channel_id)
 
 
-async def next_attempt(channel_id: str, *, pool: asyncpg.Pool | None = None) -> datetime | None:
+async def next_attempt(channel_id: str, *, delivery_deadline: float | None = None, pool: asyncpg.Pool | None = None) -> datetime | None:
     """Earliest unblocked chat head; completion wakes heads blocked by in-flight calls."""
     return await (pool or get_pool()).fetchval("""
-        SELECT min(o.next_attempt_at) FROM channel_outbox o
+        SELECT min(least(o.next_attempt_at, o.created_at + $2 * interval '1 second')) FROM channel_outbox o
         WHERE o.channel_id=$1 AND o.state='pending'
           AND NOT EXISTS (SELECT 1 FROM channel_outbox prior
               WHERE prior.channel_id=o.channel_id AND prior.chat=o.chat
                 AND (prior.state='sending' OR (prior.state='pending' AND prior.id < o.id)))
-        """, channel_id)
+        """, channel_id, delivery_deadline)
