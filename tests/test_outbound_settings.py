@@ -20,6 +20,7 @@ def test_outbound_setting_load_update_reset_and_validation(monkeypatch):
 
     monkeypatch.setattr(chat_settings.db_settings, 'get_settings', AsyncMock(side_effect=lambda _: stored))
     monkeypatch.setattr(chat_settings.db_settings, 'put_settings', put)
+    monkeypatch.setattr(chat_settings.db_ledger, 'enabled', AsyncMock(return_value=False))
     monkeypatch.setattr(chat_settings, '_outbound_enabled', False, raising=False)
 
     async def run():
@@ -139,6 +140,7 @@ def test_outbound_limits_defaults_update_reload_reset_and_schema(monkeypatch):
                 stored[key] = value
     monkeypatch.setattr(chat_settings.db_settings, 'get_settings', AsyncMock(side_effect=lambda _: stored))
     monkeypatch.setattr(chat_settings.db_settings, 'put_settings', put)
+    monkeypatch.setattr(chat_settings.db_ledger, 'enabled', AsyncMock(return_value=False))
     monkeypatch.setattr(chat_settings, '_outbound_limits', {}, raising=False)
     async def run():
         await chat_settings.load()

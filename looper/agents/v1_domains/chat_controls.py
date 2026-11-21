@@ -30,8 +30,11 @@ CHAT_TURN = _object({"message_id": _STR, "client_message_id": _NULL_STR, "channe
                      "started_at": _STR, "state": _STR, "method": _NULL_STR,
                      "stopping": _BOOL, "can_interrupt": _BOOL})
 COMPLETION_TURNS = {"type": "string", "enum": [turns.value for turns in chat_settings.CompletionTurns]}
-CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS,
-                         "research_order": _BOOL, "outbound_enabled": _BOOL})
+_MISSING_BOT = _object({"channel_id": _STR, "channel_type": _STR, "name": _STR}, closed=True)
+CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL,
+                         "ledger_enabled": _BOOL, "outbound_enabled": _BOOL})
+CHAT_SETTINGS_UPDATED = _object({**CHAT_SETTINGS["properties"], "missing_operator_ids": _array(_MISSING_BOT)},
+                                required=CHAT_SETTINGS["required"])
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -72,15 +75,16 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read the chat settings: stopping a reply, the Manager's completion turns, and its "
-        "research order.",
+    _op("chat_settings.get", "Read the chat settings: reply stopping, completion turns, research order and whether "
+        "the ledger is on.",
         _object({}, closed=True), CHAT_SETTINGS),
-    _op("chat_settings.update", "Change the chat settings the body names; null restores a built-in default.",
+    _op("chat_settings.update", "Change the named chat settings; null restores a default. Turning the ledger on "
+        "lists enabled bots with no operator id.",
         _object({"stop_enabled": {"type": ["boolean", "null"]},
                  "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
                  "research_order": {"type": ["boolean", "null"]},
-                 **OUTBOUND_UPDATE},
-                [], closed=True), CHAT_SETTINGS, "high"),
+                 "ledger_enabled": {"type": ["boolean", "null"]}, **OUTBOUND_UPDATE},
+                [], closed=True), CHAT_SETTINGS_UPDATED, "high"),
 )
 
 
@@ -91,6 +95,8 @@ async def impact(server, operation, arguments, principal, headers):
         values = chat_settings.checked(arguments)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
+    if "ledger_enabled" in values and principal.kind != "operator":
+        raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
     if set(values).intersection(chat_settings.OUTBOUND_FIELDS) and principal.kind != "operator":
         raise OpError(ErrorCode.FORBIDDEN, "outbound settings require operator identity")
     changes = [f"Set channels.outbound.{key} to {chat_settings.OUTBOUND_DEFAULTS[key] if value is None else value}?"
@@ -124,6 +130,21 @@ async def impact(server, operation, arguments, principal, headers):
                           "order, before it asks the user; its process starts again to read them." if enabled else
                           "From its next turn, the default Manager's instructions no longer say where to look things "
                           "up; its process starts again."))
+    if "ledger_enabled" in values:
+        value = values["ledger_enabled"]
+        enabled = False if value is None else value
+        if enabled:
+            from ..channels.operator_ids import missing
+
+            names = [bot.name for bot in await missing()]
+            listed = ("" if not names else
+                      " These bots have no My ID, so a decision in their direct chats is recorded as relayed until "
+                      "Settings → Channels has one: " + ", ".join(names) + ".")
+            changes.append("Set ledger.enabled to true? Waiting items, decisions and who does what start being "
+                           "recorded, and the default Manager gains the ledger tools." + listed)
+        else:
+            changes.append(f"Set ledger.enabled to false{' (built-in default)' if value is None else ''}? "
+                           "New items stop being recorded. Items already recorded stay.")
     return " ".join(changes)
 
 
@@ -157,8 +178,10 @@ async def run(server, operation, arguments, principal, headers):
             raise OpError(ErrorCode.INVALID, str(exc)) from None
         return chat_settings.outbound_view()
     if name == "chat_settings.get":
-        return chat_settings.settings_view()
+        return await chat_settings.settings_view()
     if name == "chat_settings.update":
+        if "ledger_enabled" in arguments and principal.kind != "operator":
+            raise OpError(ErrorCode.FORBIDDEN, "ledger_enabled requires operator identity")
         if set(arguments).intersection(chat_settings.OUTBOUND_FIELDS) and principal.kind != "operator":
             raise OpError(ErrorCode.FORBIDDEN, "outbound settings require operator identity")
         try:
