@@ -1884,7 +1884,10 @@ class ClaudeRunRecorder:
         if self._record_id is None or self._closed:
             return
         self._closed = True
-        # A run that failed, or whose own report says its step failed, gets a failure class; one Looper stopped does not.
+        from ..db.llm_records import RecordStatus
+
+        # A run that failed, or whose own report says its step failed, gets a failure class; one Looper stopped
+        # does not.
         basis = (self._failure_basis or (self._result, outcome, None)) \
             if status is RecordStatus.FAILED or outcome in failures.REPORT_OUTCOMES else None
         if not self._keep_output:

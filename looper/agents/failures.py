@@ -379,6 +379,8 @@ async def recorded(runtime: RuntimeAdapter | None, result: Mapping[str, Any] | N
 
 
 def check_sql() -> str:
-    """``llm_records_failure_check``: both columns NULL, or a cause with its own class (schema.sql writes the same)."""
+    """``llm_records_failure_check``: both columns NULL, or a cause with its own class (schema.sql writes the same;
+    a NULL beside a value would make the row comparison NULL, which a check lets through, so both are tested)."""
     pairs = ", ".join(f"('{cls.value}', '{cause.value}')" for cause, cls in CAUSE_CLASS.items())
-    return f"(failure_class IS NULL AND failure_cause IS NULL) OR (failure_class, failure_cause) IN ({pairs})"
+    return ("(failure_class IS NULL AND failure_cause IS NULL) OR (failure_class IS NOT NULL AND failure_cause IS NOT "
+            f"NULL AND (failure_class, failure_cause) IN ({pairs}))")
