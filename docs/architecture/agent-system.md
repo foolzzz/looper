@@ -5998,6 +5998,14 @@ will.
 
 ### Consults of the advisor
 
+`model_call.call` (`looper/agents/model_call.py`) is the typed, tool-less call used by outbound reviews, advisor
+rounds and their judge, and leads checks. It parses one reply into the caller's type and returns `CallFailure` on
+execution or parsing failure, retaining the run's record, cost, latency and model. Its `Backend` protocol has one
+implementation, `SubscriptionBackend`: the existing Agent Profile CLI runs through `spawn.run_child` or
+`processor.run`, preserving their launch, deadlines, spend checks and record formats. Advisor lifecycle callbacks
+book each run before parsing; retry and consult state remain the advisor's. There is no direct-API backend or new
+setting, and the processor's subscription and extraction calls are unchanged.
+
 A consult (`looper/agents/advisor.py`; [advisor RFC](rfcs/advisor-v0.zh-CN.md)) asks a stronger model about one
 step, through an abstract request that code checks first. Only the Planner asks, and only in a project with
 `advisor` on; with it off, the reply contract, every DECISION message, the contract's refusals and the Worker's
