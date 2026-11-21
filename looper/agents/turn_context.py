@@ -14,7 +14,8 @@ from enum import Enum
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .message import MessageEnvelope, is_lark
+from .message import MessageEnvelope
+from .untrusted_text import display_name
 
 logger = logging.getLogger(__name__)
 
@@ -114,13 +115,13 @@ def classify(envelope: MessageEnvelope, *, operator_id: str | None, allowlist: f
     fields = envelope.payload.get("channel_context")
     fields = fields if isinstance(fields, dict) else {}
     raw_name = fields.get("sender_name")
-    name = raw_name if isinstance(raw_name, str) and raw_name else None
+    name = raw_name if isinstance(raw_name, str) else None
     if origin["channel"] == "web":
         client_id, client_name = _message_client(envelope)
         if client_id:
             speaker, chat = SpeakerKind.CLIENT, ChatKind.CLIENT
             name = client_name or client_id
-            channel = f'loopercli client "{name}"'
+            channel = "an API client"
         else:
             speaker, chat = SpeakerKind.OPERATOR, ChatKind.DASHBOARD
             channel = "the Looper dashboard"
@@ -132,24 +133,33 @@ def classify(envelope: MessageEnvelope, *, operator_id: str | None, allowlist: f
         else:
             speaker = SpeakerKind.MEMBER
         chat = (ChatKind.TOPIC if fields.get("thread_id") else ChatKind.GROUP) if origin["group"] else ChatKind.DIRECT
-        channel = "Lark" if is_lark(origin["channel"]) else "Telegram"
+        match origin["channel"]:
+            case "lark" | "lark_bot":
+                channel = "Lark"
+            case "telegram":
+                channel = "Telegram"
+            case _:
+                raise ValueError(f"unsupported turn context channel: {origin['channel']!r}")
     if speaker is SpeakerKind.OPERATOR and name is None:
         name = persona_address
-    return TurnContext(local_time, zone_name, speaker, name, chat, channel, language)
+    return TurnContext(local_time, zone_name, speaker, display_name(name) if name is not None else None,
+                       chat, channel, language)
 
 
 def render(ctx: TurnContext) -> list[str]:
     """Stable English labels independent of the process locale, followed by a blank line."""
-    name = f" ({ctx.speaker_name})" if ctx.speaker_name else ""
     match ctx.speaker:
         case SpeakerKind.OPERATOR:
-            speaker = f"the operator{name}"
+            speaker = "the operator"
         case SpeakerKind.CLIENT:
-            speaker = "the operator's coding agent" + (f' (client "{ctx.speaker_name}")' if ctx.speaker_name else "")
+            speaker = "the operator's coding agent"
         case SpeakerKind.ALLOWED:
-            speaker = f"another allowed sender{name}, not the operator"
+            speaker = "another allowed sender, not the operator"
         case SpeakerKind.MEMBER:
-            speaker = f"a group member{name}, not the operator"
+            speaker = ("a group member, not the operator" if ctx.chat in (ChatKind.GROUP, ChatKind.TOPIC)
+                       else "someone not on the allowlist, not the operator")
+    if ctx.speaker_name:
+        speaker += f' (display name, set by the sender: "{ctx.speaker_name}")'
     match ctx.chat:
         case ChatKind.DASHBOARD | ChatKind.CLIENT:
             chat = ctx.channel

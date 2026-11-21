@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents import api_v1, chat_settings
+from looper.agents.ops import OpError
+from looper.agents.v1_domains import chat_controls
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clients as clients
 
 
@@ -36,6 +38,7 @@ def test_settings_store_reload_reset_and_off_has_no_channel_reads(monkeypatch):
         return {key: state[key] for key in keys if key in state}
     monkeypatch.setattr(chat_settings.db_settings, 'put_settings', put)
     monkeypatch.setattr(chat_settings.db_settings, 'get_settings', get)
+    monkeypatch.setattr(chat_settings.db_ledger, 'enabled', AsyncMock(return_value=False))
     missing = AsyncMock(return_value=[operator_ids.BotRef('bot-example', 'lark', 'Example bot')])
     monkeypatch.setattr(operator_ids, 'missing', missing)
     monkeypatch.setattr(chat_settings, '_turn_context_enabled', False)
@@ -57,12 +60,29 @@ def test_settings_store_reload_reset_and_off_has_no_channel_reads(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('action', ['get', 'update'])
-def test_context_settings_are_operator_only(tmp_path, monkeypatch, clients, action):
+@pytest.mark.parametrize('field,value', [
+    ('turn_context_enabled', True), ('timezone', 'Asia/Shanghai'), ('reply_language', 'en'),
+])
+def test_new_context_settings_are_operator_only(monkeypatch, field, value):
+    update = AsyncMock()
+    monkeypatch.setattr(chat_settings, 'update', update)
+    async def run():
+        operation = api_v1.find('POST', '/api/v1/chat_settings/update')
+        for handler in (chat_controls.impact, chat_controls.run):
+            with pytest.raises(OpError) as refused:
+                await handler(None, operation, {field: value}, api_v1.Principal('client'), {})
+            assert refused.value.code.value == 'forbidden'
+        update.assert_not_awaited()
+    asyncio.run(run())
+    operation = api_v1.find('POST', '/api/v1/chat_settings/update')
+    assert not operation.operator_only and operation.tool is None
+
+
+def test_clients_keep_read_access_to_chat_settings(tmp_path, monkeypatch, clients):
+    monkeypatch.setattr(chat_settings, 'settings_view', AsyncMock(return_value={'stop_enabled': False}))
     async def run():
         async with _serving(tmp_path) as server:
-            status, _, answer = await _send(server, f'POST /api/v1/chat_settings/{action}', _bearer(CLIENT_TOKEN), '{}')
-            assert status == 403 and answer['error']['code'] == 'forbidden'
+            status, _, answer = await _send(server, 'POST /api/v1/chat_settings/get', _bearer(CLIENT_TOKEN), '{}')
+            assert status == 200 and answer['result']['stop_enabled'] is False
     asyncio.run(run())
-    operation = api_v1.find('POST', f'/api/v1/chat_settings/{action}')
-    assert operation.operator_only and operation.tool is None
+    assert not api_v1.find('POST', '/api/v1/chat_settings/get').operator_only
