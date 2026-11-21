@@ -44,6 +44,9 @@ BUTTON_CHANNELS = frozenset({"lark_bot", "telegram"})
 # How long a channel waits for a press's answer (Lark gives 3 s); past it the channel is told it was received and
 # the card is updated when the action ends.
 ANSWER_SECONDS = 2.5
+# What the checks a press needs before it may act (the switch, its card, where it came from, who pressed) may take,
+# from when the channel got it; past it the press is refused and nothing is claimed, however the checks end.
+AUTHORIZE_SECONDS = 1.5
 GATE_CARD_TTL = timedelta(days=7)
 # At most this many open questions, and options each, get buttons; the rest are answered by replying.
 GATE_ITEMS, GATE_OPTIONS = 3, 5
@@ -55,6 +58,7 @@ NOT_ALLOWED = {"confirmation": "只有发起人能确认", "gate": "只有发起
 ELSEWHERE = "这张卡片只能在发出它的会话里操作"
 TURNED_OFF = "按钮已关闭，请打字回复"
 RECEIVED = "已收到，正在处理"
+UNCHECKED = "没能及时核对这次点击，没有处理，请再点一次"
 
 
 @dataclass(frozen=True)
@@ -148,8 +152,28 @@ def has_buttons(channel_id: str | None) -> bool:
     return parsed is not None and parsed.channel_type in BUTTON_CHANNELS
 
 
-async def press(event: Press) -> Answer:
-    """The answer to a press, written by code (module docstring)."""
+async def press(event: Press, *, check_until: float | None = None) -> Answer:
+    """The answer to a press, written by code (module docstring). Its checks end by ``check_until`` (the event
+    loop's clock; by default ``AUTHORIZE_SECONDS`` from now) or the press is refused (``UNCHECKED``), the checks
+    cancelled and nothing claimed; only a press that passed them goes on to its handler."""
+    loop = asyncio.get_running_loop()
+    check_until = loop.time() + AUTHORIZE_SECONDS if check_until is None else check_until
+    try:
+        checked = await asyncio.wait_for(_authorize(event), max(0.0, check_until - loop.time()))
+    except TimeoutError:
+        logger.warning("%s: the checks of a card press took too long; it was refused", event.channel_id)
+        return Answer(UNCHECKED, "error")
+    except Exception:
+        logger.exception("%s: the checks of a card press failed; it was refused", event.channel_id)
+        return Answer(UNCHECKED, "error")
+    if isinstance(checked, Answer):
+        return checked
+    handler, row, choice = checked
+    return await handler(row, event, choice)
+
+
+async def _authorize(event: Press) -> Answer | tuple[Handler, dict[str, Any], str]:
+    """The checks of a press: its answer when it may not act, else its handler, card row and choice."""
     token, _, choice = event.value.partition(":")
     if not token or not choice:
         return Answer(HANDLED)
@@ -171,7 +195,7 @@ async def press(event: Press) -> Answer:
     if handler is None:
         logger.warning("no handler for a %s card's press", row["kind"])
         return Answer(HANDLED)
-    return await handler(row, event, choice)
+    return handler, row, choice
 
 
 async def _where_sent(row: Mapping[str, Any], event: Press) -> bool:
@@ -200,15 +224,18 @@ async def bind(card: Card, message_id: str | None, chat: str | None = None) -> N
 
 
 async def respond(event: Press, update: Callable[[Card], Awaitable[None]], *,
-                  seconds: float | None = None) -> Answer:
+                  seconds: float | None = None, started: float | None = None) -> Answer:
     """``press`` answered within ``seconds``, with the card as it is when the action ends in that time too. A press
     that takes longer is told ``RECEIVED`` and ``update`` gets its card when it is answered; an action that goes on
     longer comes back as the answer's ``later``, which the channel ``follow``s once it showed the answer."""
     seconds = ANSWER_SECONDS if seconds is None else seconds
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + seconds
-    task = asyncio.create_task(press(event))
-    done, _ = await asyncio.wait({task}, timeout=seconds)
+    started = loop.time() if started is None else started  # when the channel got the press
+    deadline = started + seconds
+    # Checked within AUTHORIZE_SECONDS of ``started``, before the answer is due: what goes on past the answer is
+    # only the action of a press that passed its checks.
+    task = asyncio.create_task(press(event, check_until=started + AUTHORIZE_SECONDS))
+    done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - loop.time()))
     if not done:
         _keep(_finish_late(task, update))
         return Answer(RECEIVED)

@@ -48,7 +48,7 @@ def _switch(monkeypatch: pytest.MonkeyPatch, on: bool = True) -> None:
 
 def _answered(press: Any, seconds: float = 0) -> Any:
     """``card_actions.press`` as a confirmation answers it: at once, with an action that ends after ``seconds``."""
-    async def answer(event: card_actions.Press) -> card_actions.Answer:
+    async def answer(event: card_actions.Press, **_: Any) -> card_actions.Answer:
         press.append(event)
 
         async def later() -> card_actions.Card:
@@ -326,12 +326,14 @@ def test_lark_bot_off_a_press_gets_the_acknowledgement_it_got_before_cards(
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-@pytest.mark.parametrize("noted", [True, False])
+@pytest.mark.parametrize("case", ["noted", "unnoted", "slow", "error"])
 def test_lark_a_card_sent_to_a_user_is_pressed_from_their_direct_chat_only(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, noted: bool) -> None:
-    """A gate card goes to the user's open_id and its press names their direct chat. Noted from the send's answer
-    (``noted``), the card is that chat and message; not noted (the service stopped right after sending), the press
-    is admitted from a chat the platform says is a direct one, by that user, and from no group."""
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    """A gate card goes to the user's open_id and its press names their direct chat. Noted from the send's answer,
+    the card is that chat and message; not noted (the service stopped right after sending), the press is admitted
+    from a chat the platform says is a direct one, by that user, and from no group. A lookup of the chat that takes
+    3.2 s, or fails, refuses the press within the checks' time and nothing is claimed, then or later."""
+    import time
     from datetime import timedelta
 
     from looper.agents.task_notice import NotifyTarget, TargetKind
@@ -350,28 +352,58 @@ def test_lark_a_card_sent_to_a_user_is_pressed_from_their_direct_chat_only(
             return card_actions.Answer("已交给规划者", "success")
 
         monkeypatch.setitem(card_actions._handlers, "gate", gate)
+        direct = f"oc_p2p_{ASKER}"
         async with FakeLarkPlatform() as fake:
             adapter = make_adapter({"app_id": fake.app_id}, "test-secret", runtime_root=tmp_path,
                                    allowlist=SenderAllowlist("channel-lark_bot", frozenset({ASKER})),
                                    on_rejected=None, bot_open_id=fake.bot["open_id"], base_url=fake.base_url)
             try:
                 message = "om_unnoted"
-                if noted:
+                if case == "noted":
                     receipt = await adapter.post_card(NotifyTarget(TargetKind.USER, ASKER), card)
                     (message,) = receipt.external_ids
-                    assert tuple(await pool.fetchrow("SELECT chat, message_id FROM card_actions")) == (
-                        f"oc_p2p_{ASKER}", message)
+                    assert tuple(await pool.fetchrow("SELECT chat, message_id FROM card_actions")) == (direct, message)
+                elif case == "slow":
+                    fake.slow_once[f"/open-apis/im/v1/chats/{direct}"] = 3.2
+                elif case == "error":
+                    async def failing(chat_id: str) -> str:
+                        raise TimeoutError("the chat lookup timed out")
+
+                    monkeypatch.setattr(adapter._transport, "chat_mode", failing)
 
                 async def press(chat: str) -> str:
                     answer = await adapter._card_action({"operator_id": ASKER, "chat_id": chat, "message_id": message,
                                                          "value": "tok:end"})
                     return answer["toast"]["content"]
 
+                if case in ("slow", "error"):
+                    began = time.monotonic()
+                    assert await press(direct) == "没能及时核对这次点击，没有处理，请再点一次"
+                    assert time.monotonic() - began < card_actions.AUTHORIZE_SECONDS + 0.5
+                    await asyncio.sleep(3.5 if case == "slow" else 0.2)  # the lookup's own end changes nothing
+                    assert pressed == [] and await pool.fetchval("SELECT handled_at FROM card_actions") is None
+                    return
                 assert await press("oc_team") == "这张卡片只能在发出它的会话里操作"
                 assert pressed == [] and await pool.fetchval("SELECT handled_at FROM card_actions") is None
-                assert await press(f"oc_p2p_{ASKER}") == "已交给规划者"
-                assert [event.chat for event in pressed] == [f"oc_p2p_{ASKER}"]
+                assert await press(direct) == "已交给规划者"
+                assert [event.chat for event in pressed] == [direct]
             finally:
                 await adapter._transport.aclose()
 
     run_db(test, monkeypatch, timeout=30)
+
+
+def test_telegram_a_card_is_bound_to_the_chat_and_message_the_send_answered(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+
+    bound: list[tuple[str, str | None, str | None]] = []
+
+    async def bind(card: card_actions.Card, message_id: str | None, chat: str | None = None) -> None:
+        bound.append((card.token, message_id, chat))
+
+    monkeypatch.setattr(card_actions, "bind", bind)
+    adapter, bot = _telegram(tmp_path)
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=55, chat_id=4243))
+    assert asyncio.run(adapter.post_card(NotifyTarget(TargetKind.CHAT, "99"), CARD)).external_ids == ("55",)
+    assert bound == [("tok", "55", "4243")]

@@ -438,8 +438,9 @@ class LarkChannelAdapter(ChannelAdapter):
         before cards) while card buttons are off. A press is admitted as a message in that chat would be (a card
         is in the chat it was sent to; in a direct chat only the user can press), and the card's own allowed
         confirmers narrow it further."""
+        started = asyncio.get_running_loop().time()
         try:
-            if not await card_actions.enabled():
+            if not await asyncio.wait_for(card_actions.enabled(), card_actions.AUTHORIZE_SECONDS):
                 return None
         except Exception:
             logger.warning("%s: cannot tell whether card buttons are on; a press is not answered", self.channel_id,
@@ -470,7 +471,7 @@ class LarkChannelAdapter(ChannelAdapter):
 
         answer = await card_actions.respond(card_actions.Press(self.channel_id, presser, str(event.get("value") or ""),
                                                                chat=chat, message_id=message_id, direct=direct),
-                                            update)
+                                            update, started=started)
         card_actions.follow(answer, update)  # sent after this answer's card unless the action outlasts its 3 s
         return card_actions.lark_answer(answer)
 

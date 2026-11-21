@@ -353,7 +353,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         except Exception as exc:
             logger.warning("telegram: a card post to %s failed: %s", target.id, type(exc).__name__)
             return PostReceipt(False, error=redact(str(exc)), outcome=_post_outcome(exc))
-        await card_actions.bind(card, str(message.message_id), str(chat))
+        # The chat as the platform answered it, like the message id.
+        await card_actions.bind(card, str(message.message_id), str(getattr(message, "chat_id", None) or chat))
         return PostReceipt(True, external_ids=(str(message.message_id),))
 
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
@@ -651,8 +652,9 @@ class TelegramChannelAdapter(ChannelAdapter):
         """A press of a card's button (``card_actions.respond``): a toast, and the card as it is now; a card whose
         action ends later is edited then. Only a sender this bot admits in that chat may press. While card buttons
         are off the press is left unanswered, as before cards."""
+        started = asyncio.get_running_loop().time()
         try:
-            if not await card_actions.enabled():
+            if not await asyncio.wait_for(card_actions.enabled(), card_actions.AUTHORIZE_SECONDS):
                 return
         except Exception:
             logger.warning("%s: cannot tell whether card buttons are on; a press is not answered", self.channel_id,
@@ -677,7 +679,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         answer = await card_actions.respond(
             card_actions.Press(self.channel_id, str(update.effective_user.id), str(query.data or ""),
                                chat="" if chat is None else str(chat),
-                               message_id=str(message.message_id) if message is not None else ""), update_card)
+                               message_id=str(message.message_id) if message is not None else ""), update_card,
+            started=started)
         await self._answer_press(query, answer)
         if answer.card is not None:
             try:
