@@ -585,7 +585,7 @@ def test_a_turn_let_go_of_that_exits_late_touches_nothing_of_the_turn_after_it(m
         await asyncio.wait_for(manager._handle(due), 10)  # let go of: it swallowed the cancellation
         (late_run,) = [task for task in manager._late_turns if not task.get_coro().__name__ == "stop"] or [None]
         assert manager._claude is fresh and late_run is not None
-        session = manager._session_id
+        session = manager._sessions["main"].session_id
         asking = asyncio.create_task(manager._handle(MessageEnvelope.create(
             source=channel_address("web"), target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
             payload={"text": "还在吗？", "channel_context": {"session_id": THREAD}}, correlation_id="c2",
@@ -598,7 +598,7 @@ def test_a_turn_let_go_of_that_exits_late_touches_nothing_of_the_turn_after_it(m
         assert done and isinstance(late_run.exception(), TurnStopped)  # it ends as stopped, on its own record
         assert manager._running_token is token and token.live  # its token, its binding and its runtime are its own
         assert bindings[bound:] == [] and fresh.stops == 0 and fresh.started
-        assert manager._session_id == session and manager._session_totals.cost_usd != 9.0
+        assert manager._sessions["main"].session_id == session and manager._session_totals.cost_usd != 9.0
         hold.set()
         await asyncio.wait_for(asking, 10)
         (reply,) = [e for e in _drain(bus, "channel-web") if e.message_type is MessageType.AGENT_REPLY

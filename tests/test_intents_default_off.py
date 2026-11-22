@@ -36,11 +36,12 @@ def test_default_prompts_and_tool_list_equal_the_main_baseline():
 _MAIN_COMMAND = """\
 def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
     \"\"\"The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session.\"\"\"
+    session = self._session_now()
     runtime = launch.runtime
     command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
                                        prompt_file=prompt_file, launch=launch)
-    if resume and self._session_id:
-        command.extend(runtime.resume_args(self._session_id))
+    if resume and session.session_id:
+        command.extend(runtime.resume_args(session.session_id))
     return command
 """
 _MAIN_SIGNATURE = """\
