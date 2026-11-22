@@ -26,6 +26,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_projects": "args", "looper_agent_profiles": INSIDE, "looper_models": INSIDE, "looper_providers": MACHINE,
     "looper_catalog": MACHINE, "looper_settings": "args", "looper_schedules": "args", "looper_confirm": INSIDE,
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
+    "looper_reminder_list": INSIDE, "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     "looper_task_pipeline": INSIDE, "looper_gates": "args",
     "looper_task_profiles": INSIDE, "looper_task_roles": INSIDE, "looper_task_profile_set": INSIDE,
     "looper_task_role_set": INSIDE, "looper_task_concurrency": ORIGIN,
@@ -77,6 +78,9 @@ def test_a_read_action_is_inside_and_a_tool_with_no_level_is_unknown() -> None:
 
 
 @pytest.mark.parametrize(("name", "arguments", "level"), [
+    ("looper_reminder_list", {}, INSIDE),
+    ("looper_reminder_create", {"text": "Review the PR", "in_minutes": 5}, OPERATOR),
+    ("looper_reminder_cancel", {"id": 1}, OPERATOR),
     ("looper_projects", {"action": "move", "project": "calc", "to": "/srv/calc"}, MACHINE),
     ("looper_projects", {"action": "update", "project": "calc", "name": "calc-2"}, INSIDE),
     ("looper_settings", {"action": "gateway"}, MACHINE),

@@ -142,7 +142,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                          {"sequencename": "memory_candidates_id_seq", "last_value": None},
                          {"sequencename": "memory_candidate_events_id_seq", "last_value": None},
                          {"sequencename": "memory_candidate_sources_id_seq", "last_value": None},
-                         {"sequencename": "memory_posts_id_seq", "last_value": None}],
+                         {"sequencename": "memory_posts_id_seq", "last_value": None},
+                         {"sequencename": "reminders_id_seq", "last_value": None}],
                         key=lambda row: row["sequencename"])
                 elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
                     # New builtins and additive defaults must leave every historical field intact.
