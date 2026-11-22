@@ -100,6 +100,7 @@ from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vau
 from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
+from ..ops.reminders import TOOL_NAMES as REMINDER_TOOLS
 from ..message import (
     MANAGER_ADDRESS,
     AgentAddress,
@@ -778,9 +779,9 @@ class GoalSnapshot:
 
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
-                   snapshot: str | None = None) -> MessageEnvelope:
+                   snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
-    the chat's history (``record``)."""
+    the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
         record = _chat_record(original, f"{original.message_id}:reply")
@@ -792,7 +793,8 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
         correlation_id=original.correlation_id,
         reply_to=original.message_id,
         metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original), **record,
-                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
+                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {}),
+                  **({"cards": cards} if cards else {})},
     )
 
 
@@ -1470,7 +1472,7 @@ class ManagerAgent:
             return
         asked = self.ops is not None and self.ops.asks_in(envelope.message_id)
         await self._send_reply(envelope, _with_blocks(response, turn.blocks),
-                               outcome=ReplyOutcome.CONFIRM if asked else None)
+                               outcome=ReplyOutcome.CONFIRM if asked else None, cards=turn.cards)
 
     async def _answer_gate_command(self, envelope: MessageEnvelope, text: str) -> None:
         answer = await self._gate_command(envelope, text)
@@ -1620,7 +1622,9 @@ class ManagerAgent:
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
-        if self._has_templates or has_workflows or has_leads or has_ledger or self.agent_id != DEFAULT_MANAGER_ID:
+        has_reminders = any(t["name"] in REMINDER_TOOLS for t in tools)
+        if self._has_templates or has_workflows or has_leads or has_ledger or has_reminders \
+                or self.agent_id != DEFAULT_MANAGER_ID:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
@@ -3417,7 +3421,7 @@ class ManagerAgent:
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True, outcome: ReplyOutcome | None = None,
-                          snapshot: str | None = None) -> None:
+                          snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
         history (a user gate keeps its own discussion). Web replies always retain their recovery identity.
@@ -3428,7 +3432,7 @@ class ManagerAgent:
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
-                                               record=record, snapshot=snapshot))
+                                               record=record, snapshot=snapshot, cards=cards))
         token = self._turns.find(original.message_id) or self._metrics_reply_tokens.get(original.message_id)
         if token is not None and token.message_id == original.message_id and token.times is not None and text and error is None:
             if token.times.first_reply_at is None:

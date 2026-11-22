@@ -11,13 +11,13 @@ OPERATIONS = (
               "Read the Manager metrics setting.",
               "Read the Manager metrics setting. It is disabled by default.",
               _object({}, closed=True), VIEW, operator_only=True,
-              level=ActionLevel.INSIDE),  # Reads Looper's own metrics setting.
+              level=ActionLevel.INSIDE),  # reads only Looper's own metrics setting
     Operation("manager_metrics_settings.update", "POST", "/api/v1/manager_metrics_settings/update",
               "Set the Manager metrics setting.",
               "Set the Manager metrics setting. Null restores the disabled default.",
               _object({"enabled": {"type": ["boolean", "null"]}}, closed=True), VIEW,
               risk="high", confirms=True, operator_only=True,
-              level=ActionLevel.INSIDE),  # Stores only Looper's own metrics setting; sends nothing.
+              level=ActionLevel.INSIDE),  # changes only Looper's own metrics setting
 )
 
 

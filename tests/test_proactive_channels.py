@@ -12,7 +12,8 @@ from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.task_notice import NotifyTarget, TargetKind
 
 
-def test_registry_records_post_before_returning_its_receipt(monkeypatch, tmp_path):
+@pytest.mark.parametrize("method", ["post", "post_card"])
+def test_registry_records_post_before_returning_its_receipt(monkeypatch, tmp_path, method):
     async def run():
         from looper.agents import turn_metrics
 
@@ -20,13 +21,14 @@ def test_registry_records_post_before_returning_its_receipt(monkeypatch, tmp_pat
         monkeypatch.setattr(turn_metrics, "record_proactive", lambda ref, **kw: calls.append((ref, kw)))
         registry = ChannelRegistry(MessageBus(tmp_path))
         receipt = PostReceipt(True, external_ids=("message-a",))
-        registry._channels["channel-lark"] = SimpleNamespace(post=AsyncMock(return_value=receipt))
+        registry._channels["channel-lark"] = SimpleNamespace(**{method: AsyncMock(return_value=receipt)})
         ref = turn_metrics.ProactiveRef(turn_metrics.ProactiveSource.GATE, "gate-a", "manager")
         target = NotifyTarget(TargetKind.CHAT, "oc_synthetic", group=True)
-        assert await registry.post("channel-lark", target, "question", proactive=ref) is receipt
+        body = "question" if method == "post" else SimpleNamespace(text="question")
+        assert await getattr(registry, method)("channel-lark", target, body, proactive=ref) is receipt
         assert calls == [(ref, {"channel_id": "channel-lark", "chat": "oc_synthetic", "group": True,
                                 "external_id": "message-a", "outcome": "sent", "dedupe_key": None})]
-        await registry.post("channel-lark", target, "ordinary")
+        await getattr(registry, method)("channel-lark", target, body)
         assert len(calls) == 1
 
 
@@ -48,7 +50,7 @@ def test_notify_preserves_unknown_outcome(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("method", ["notify", "post"])
+@pytest.mark.parametrize("method", ["notify", "post", "post_card"])
 def test_a_channel_exception_records_unknown_and_keeps_the_existing_error(monkeypatch, tmp_path, method):
     async def run():
         from looper.agents import turn_metrics
@@ -60,7 +62,8 @@ def test_a_channel_exception_records_unknown_and_keeps_the_existing_error(monkey
         ref = turn_metrics.ProactiveRef(turn_metrics.ProactiveSource.SCHEDULE, "run-a")
         target = "oc_synthetic" if method == "notify" else NotifyTarget(TargetKind.CHAT, "oc_synthetic")
         with pytest.raises(RuntimeError, match="lost"):
-            await getattr(registry, method)("channel-lark", target, "message", proactive=ref)
+            body = SimpleNamespace(text="message") if method == "post_card" else "message"
+            await getattr(registry, method)("channel-lark", target, body, proactive=ref)
         assert len(calls) == 1 and calls[0]["outcome"] == "unknown"
 
     asyncio.run(run())

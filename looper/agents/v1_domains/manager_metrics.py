@@ -24,7 +24,7 @@ OPERATIONS = (
         "Includes latency percentiles, delivery counts and proactive reply rates over 1–30 days.",
         _object({"days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}}, [], closed=True),
         SUMMARY, risk="read", operator_only=True,
-        level=ActionLevel.INSIDE),  # Reads only Looper's stored turn and delivery metrics.
+        level=ActionLevel.INSIDE),  # reads only Looper's stored turn and delivery metrics
 )
 
 # Use the agent/time index before looking inside the optional JSON key. Historical records without it do not count.
