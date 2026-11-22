@@ -22,6 +22,9 @@ describe("Chat settings", () => {
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
+  let metrics = false;
+  let metricsError = false;
+  let metricsPuts: unknown[];
 
   beforeEach(() => {
     stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false };
@@ -30,8 +33,20 @@ describe("Chat settings", () => {
     missing = [];
     summary = SUMMARY;
     puts = [];
+    metrics = false;
+    metricsError = false;
+    metricsPuts = [];
+    vi.stubGlobal("confirm", vi.fn(() => true));
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path.startsWith("/api/v1/manager_metrics_settings/")) {
+        if (path.endsWith("/update")) {
+          metricsPuts.push(JSON.parse(String(init?.body)));
+          if (metricsError) return Response.json({ status: "error", error: { code: "unavailable", message: "Save failed" } }, { status: 503 });
+          metrics = JSON.parse(String(init?.body)).enabled;
+        }
+        return Response.json({ status: "ok", result: { enabled: metrics } });
+      }
       if (path === "/api/v1/manager_events/summary") {
         if (summary === null) {
           return Response.json({ status: "error", error: { code: "forbidden", message: "operator only" } },
@@ -70,6 +85,44 @@ describe("Chat settings", () => {
     act(() => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
+  });
+
+  it("saves metrics through its own operator setting and preserves it across chat writes", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$='-metrics']") as HTMLInputElement;
+    expect(box).not.toBeNull();
+    expect(box.checked).toBe(false);
+    await act(async () => box.click());
+    expect(metricsPuts).toEqual([{ enabled: true }]);
+    expect(puts).toEqual([]);
+    await act(async () => (container.querySelector("input[id$='-stop']") as HTMLInputElement).click());
+    expect(puts).toEqual([{ stop_enabled: true }]);
+    expect(box.checked).toBe(true);
+    await act(async () => (container.querySelector("input[aria-label='每轮上下文']") as HTMLInputElement).click());
+    expect(puts).toEqual([{ stop_enabled: true }, { turn_context_enabled: true }]);
+    expect(box.checked).toBe(true);
+    expect(metricsPuts).toEqual([{ enabled: true }]);
+  });
+
+  it("names the metrics switch the way the dashboard's off line points to it", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$='-metrics']") as HTMLInputElement;
+    expect(box.closest("label")!.textContent).toBe("记录管家体验指标");
+  });
+
+  it("keeps the metrics value when a change is cancelled or fails", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$='-metrics']") as HTMLInputElement;
+    expect(box).not.toBeNull();
+    vi.mocked(confirm).mockReturnValue(false);
+    await act(async () => box.click());
+    expect(metricsPuts).toEqual([]);
+    expect(box.checked).toBe(false);
+    vi.mocked(confirm).mockReturnValue(true);
+    metricsError = true;
+    await act(async () => box.click());
+    expect(box.checked).toBe(false);
+    expect(container.querySelector("[role=alert]")?.textContent).toContain("Save failed");
   });
 
   it("shows Stop off with an experimental note, and turns it on", async () => {

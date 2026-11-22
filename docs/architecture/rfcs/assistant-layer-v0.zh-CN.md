@@ -80,7 +80,7 @@ D1–D6 是批准产品设计时定的；D7–D16 是维护者对本文第 16 �
 
 ### 4.1 0.1 度量埋点
 
-**开关：** `manager.metrics.enabled`（系统设置，`'true'` 为开，默认关）。关时回合记录的 `metadata` 和原来一致，`proactive_deliveries` 不写任何行，不多一次数据库写。
+**开关：** 通过仅操作者可用的 `manager_metrics_settings.get`（`{}`）和 `manager_metrics_settings.update`（`{"enabled": true}`，也接受 `false` 或 `null`，高风险、需要确认）读写；两者返回 `{"enabled": boolean}`，`null` 恢复默认关闭。Settings → Chat 使用该独立操作，`chat_settings` 的视图和写入保持不变。`manager.metrics.enabled`（系统设置，`'true'` 为开，默认关）。关时回合记录的 `metadata` 和原来一致，`proactive_deliveries` 不写任何行，不多一次数据库写。
 
 #### 4.1.1 每轮的四个数
 
@@ -119,7 +119,7 @@ D1–D6 是批准产品设计时定的；D7–D16 是维护者对本文第 16 �
 
 每发一条主动消息记一行；第 0 期**只写不拦**：写失败只记日志，写在发送之后，不在发送路径上等待。
 
-**表由第 2 期送达层（P2.6）的第一个 PR 建**（#1486，并行开发，默认关），它定表的列和迁移，0.1 不建表；下表 0.1 需要的列由 #1486 一并加上。0.1 需要那张表至少有这些（名字以那边为准）：
+**表由 0.1 的度量 PR 建**（#1488），保留唯一的命名迁移 `proactive_deliveries`。送达层（#1486）复用这张表并移除自己的建表迁移。一条消息一行，0.1 需要这些列：
 
 | 0.1 需要的 | 用途 |
 |---|---|
@@ -130,7 +130,7 @@ D1–D6 是批准产品设计时定的；D7–D16 是维护者对本文第 16 �
 | 发送时间、发送结果（发出、被拒、不确定） | 每天条数；回复率只算发出去的 |
 | 回复时间、回复方式（`quoted` 或 `next_message`），由 0.1 回填 | 30 分钟内的回复率 |
 
-送达层自己的决定列（结果、原因、是否计数、摘要日期）在送达层关闭时怎么填，以它的 RFC 为准；0.1 只写上表的列。来源的取值：`task_notice`、`completion`、`progress`、`gate`、`gate_reminder`、`subscription`、`intent`、`schedule`、`advisor_alert`、`autonomous`。
+送达层的 `decision`（`send` / `merge` / `defer` / `digest` / `drop`）、`reason`（命中规则）、`digest_date`、`counted`、`local_date` 等列可空，0.1 不写。`source` 是唯一来源列，`chat_kind TEXT`（`direct` / `group`）是唯一会话类型列。`dedupe_key` 非空时唯一：0.1 复用发送点的幂等键或总线信封 ID，重试只更新回执，保留首次决策。0.1 在发送后直接写发送结果 `outcome`；未发送的决策行中 `outcome` 和 `sent_at` 同时为空。之后由送达层的 `decide()` 成为单一决策写入点。来源的取值：`task_notice`、`completion`、`progress`、`gate`、`gate_reminder`、`subscription`、`intent`、`schedule`、`advisor_alert`、`autonomous`、`user_reminder`。
 
 **哪里写（两个出口，都在拿到发送结果之后）：**
 
@@ -141,7 +141,7 @@ D1–D6 是批准产品设计时定的；D7–D16 是维护者对本文第 16 �
 
 **回复标记：** 管家收到一条**说话人是操作者**的消息时（第 5.1 节的判断；第 0 期还没有 `SpeakerKind`，用同一个函数的第 0 期版本：控制台不经客户端，或发送者等于 `operator_sender_id`，私聊和群都算），把同一（渠道 ID，会话）里 30 分钟内发出、还没标记的行全部标上 `replied_at = now()`；消息引用或回复的平台消息 id 等于某行 `external_id` 的那一行标 `quoted`，其余标 `next_message`。后台执行，不挡回合。
 
-**保留：** 按送达层 RFC 定（0.1 不另设）。
+**保留：** 90 天，由度量开关打开时的 housekeeping 分批清理；恰好 90 天的行保留。
 
 #### 4.1.3 指标页
 
@@ -633,7 +633,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 
 | 期 | 变化 | 迁移 | 在线安全 |
 |---|---|---|---|
-| 0 | `proactive_deliveries` | 由送达层（P2.6）的第一个 PR 建，0.1 不建表 | 新表 |
+| 0 | `proactive_deliveries` | 由 0.1 建，唯一命名迁移 `proactive_deliveries`；送达层复用 | 新表 |
 | 0 | `llm_records.metadata.turn_metrics`（JSON 键） | 无 | 不改表 |
 | 1.3 | 新表 `manager_sessions`（只存 `group:`、`dm:`） | 命名迁移 `manager_sessions` | 新表 |
 | 1.4 | `agent_sessions` 加可空列 `context_tokens INTEGER`、`last_turn_cost_usd DOUBLE PRECISION` | 命名迁移 `manager_session_bounds`；`ALTER TABLE … ADD COLUMN`（无默认值、无约束，不重写表） | 小表；不加约束 |
@@ -749,7 +749,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | PR | 内容 | 依赖 | 默认关闭时 | 模型可见 | 验收 |
 |---|---|---|---|---|---|
 | 1.7a | 账本开关的入口：`chat_settings.ledger_enabled`、Settings → Chat 的开关、打开时列出没填「我的 ID」的机器人（`channels.operator_ids.missing()`） | — | 不变（开关本来就是关） | 否 | 打开、关闭、列出的测试；截图 |
-| 0.1a | `turn_metrics`、`AckBoard`、往 `proactive_deliveries` 写行（表由 P2.6 建）、回复标记、`manager.metrics.enabled`、`manager_metrics.get` | #1486（P2.6 建表） | 回合记录不变，表为空 | 否 | 第 4.1 节；第 10 节 |
+| 0.1a | `turn_metrics`、`AckBoard`、建 `proactive_deliveries` 并写行（预留送达层列）、回复标记、`manager.metrics.enabled`、`manager_metrics.get` | — | 回合记录不变，表为空 | 否 | 第 4.1 节；第 10 节 |
 | 0.1b | 首页「管家」一组（含开关关时的说明） | 0.1a | — | 否 | 无头浏览器截图（1280、390） |
 | 0.3 | `evals/assistant_experience.py`、20 条用例、假模式通过、基线文件格式；真实基线在预算获批后跑 | — | — | 否（只加评测） | 假模式 20 条都能跑通；真实基线四类都有通过率 |
 | 1.1 | `turn_context`、说话人、两个用户设置、渲染、契约、授权检查、Settings 字段 | 0.3（评测用例）、1.7a（列出机器人的函数） | prompt 逐字节不变 | 是 | 时间、身份类对比基线；第 10 节 |
@@ -773,7 +773,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 - 1.6b、1.6c 在 1.6a 之后可以并行。
 - **冲突热点：** `looper/agents/tiers/manager.py`。改它的是 0.1a、1.1、1.2、1.3a、1.3b、1.3c、1.3e、1.4、1.5，还有第 2 期并行开发的几项。**同时在做的 `manager.py` 接线 PR 不超过 2 个**（含第 2 期的）；新逻辑放进新模块，`manager.py` 里只做薄接线，PR 描述写明改了哪些行。其余 PR（0.1b、0.3、1.7a、1.3d、1.6a–c）不受这个限制。
 - 同时进行的开发会话数按开发计划第 1 节的当前上限。
-- **和第 2 期并行项的分工：** `proactive_deliveries` 由送达层（P2.6）建，0.1 只写行和回填回复；`user.timezone` 由 1.1 拥有（设置和编辑入口），提醒（P2.3）只读它；卡片按钮（P2.4）新加的飞书写调用在 1.6a 合入后要经过网关（第 5.6.4 节后的「新的写路径」）。待办（P2.5）、检索（P2.2）和本文没有交叉。
+- **和第 2 期并行项的分工：** `proactive_deliveries` 由 0.1 建表、写行和回填回复，送达层（P2.6）复用同一张表与迁移；`user.timezone` 由 1.1 拥有（设置和编辑入口），提醒（P2.3）只读它；卡片按钮（P2.4）新加的飞书写调用在 1.6a 合入后要经过网关（第 5.6.4 节后的「新的写路径」）。待办（P2.5）、检索（P2.2）和本文没有交叉。
 
 推荐的合入顺序（`manager.py` 的 PR 两个一组）：
 
@@ -821,7 +821,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created
 | 「指标页」 | 控制台首页加一组 | 现在没有单独的指标页 |
 | 1.5 中途「注入一条提醒」 | 写入常驻进程，只在声明 `MID_TURN_INPUT` 的运行时（第一版只有 Claude Code） | 0.2 证实 Claude Code 在工具返回后读到中途写入的输入 |
 | 私聊和控制台互相等，留到第 3 期 | 第 1 期加 1.3e：同一会话运行中来的你的消息并入当前回合 | 0.2 证实运行时原生支持；跨聊天并入时回复两边都发 |
-| `proactive_deliveries` 在第 0 期建 | 由送达层（P2.6）的第一个 PR 建，0.1 只写行 | 送达层已经在并行开发，表的列由它定一次 |
+| `proactive_deliveries` 的建表归属 | 由 0.1 的 #1488 建表并预留可空的送达层列；#1486 复用 | 单一表、单一命名迁移，每条消息一行；之后由 `decide()` 统一写入 |
 
 ## 16. 待定问题与答复
 

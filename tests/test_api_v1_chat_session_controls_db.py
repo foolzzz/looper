@@ -120,6 +120,19 @@ def test_client_setting_update_waits_for_confirmation_and_null_restores_default(
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("field,value", [("completion_turns", "dm_only"), ("research_order", True)])
+def test_existing_chat_fields_remain_available_to_clients(tmp_path, monkeypatch, field, value):
+    async def run(pool):
+        async with _api(tmp_path, pool, _Manager()) as (call, _):
+            previous = (await chat_settings.settings_view())[field]
+            status, asked = await call("chat_settings.update", {field: value}, client=True)
+            assert status == 202 and asked["status"] == "needs_confirmation"
+            assert (await chat_settings.settings_view())[field] == previous
+            status, answer = await call("confirm", {"confirmation_id": asked["confirmation_id"]}, client=True)
+            assert status == 200 and answer["result"][field] == value
+    run_db(run, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("operation,body,method,path", [
     ("manager_session.get", {}, "GET", "/api/manager/session"),
     ("manager_session.select_profile", {"profile_id": None}, "PUT", "/api/manager/session/profile"),

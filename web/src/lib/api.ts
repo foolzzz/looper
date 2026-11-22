@@ -635,6 +635,21 @@ export async function updateChatSettings(
   return result;
 }
 
+/** Operator-only Manager observations, separate from client-visible chat settings. */
+export interface ManagerMetricsSettings { enabled: boolean }
+
+export async function fetchManagerMetricsSettings(): Promise<ManagerMetricsSettings> {
+  const result = await callV1<ManagerMetricsSettings>("/api/v1/manager_metrics_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateManagerMetricsSettings(body: { enabled: boolean | null }): Promise<ManagerMetricsSettings> {
+  const result = await callV1<ManagerMetricsSettings>("/api/v1/manager_metrics_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 /** The processor's system setting, and the hooks the machine's administrator set for its runtime (they run in every
  * processor run and see the messages it processes; null for none). */
 export interface ProcessorSettings {

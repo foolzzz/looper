@@ -140,3 +140,27 @@ def test_bot_lookup_failure_does_not_enable_context(monkeypatch):
     with pytest.raises(RuntimeError, match='unavailable'):
         asyncio.run(chat_settings.update_turn_context({'turn_context_enabled': True}))
     put.assert_not_awaited()
+
+
+@pytest.mark.parametrize("metrics,context", [(True, False), (False, True), (True, True)])
+def test_metrics_and_turn_context_reload_independently(monkeypatch, metrics, context):
+    stored = {
+        chat_settings.METRICS_ENABLED_KEY: str(metrics).lower(),
+        chat_settings.TURN_CONTEXT_KEY: str(context).lower(),
+        chat_settings.TIMEZONE_KEY: "Asia/Shanghai",
+        chat_settings.REPLY_LANGUAGE_KEY: "en",
+    }
+
+    async def get(keys):
+        return {key: stored[key] for key in keys if key in stored}
+
+    monkeypatch.setattr(chat_settings.db_settings, "get_settings", get)
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", not metrics)
+    monkeypatch.setattr(chat_settings, "_turn_context_enabled", not context)
+    monkeypatch.setattr(chat_settings, "_timezone", None)
+    monkeypatch.setattr(chat_settings, "_reply_language", "zh-CN")
+    asyncio.run(chat_settings.load())
+    assert chat_settings.metrics_enabled() is metrics
+    assert chat_settings.turn_context_enabled() is context
+    assert chat_settings.timezone() == "Asia/Shanghai"
+    assert chat_settings.reply_language() == "en"
