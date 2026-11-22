@@ -6,7 +6,49 @@ The gateway controls use the operator-only `outbound_gateway.get/update` operati
 is under 120 characters and starts its description. Existing Manager tools remain
 unchanged, so this correction changes no model-visible content.
 
-## Regression checks
+## Integration follow-up
+
+Merged `origin/main` without rebasing, preserving both the outbox and subscription
+run-skips schema blocks. Both operator-only gateway operations explicitly declare
+`inside` and appear in the operation-level manifest; they add no Manager tools and
+remain separate from `chat_settings`.
+
+OFF recovery now runs in a background task with a 30-second deadline and is joined
+at shutdown. Before platform I/O, `mark_attempted` has a five-second total write
+budget including retry waits. Exhausting it releases the shared app slot before
+deferring the unsent row, without consuming a delivery retry or a platform breaker
+failure. A successful platform response still retries persistence outside the slot
+without resending.
+
+538 distinct Python tests passed, foreground `-n 2`, using disposable databases:
+
+| Group | Result |
+| --- | --- |
+| Tool levels, gateway settings, delivery-guard settings, OpenAPI | 365 passed |
+| Outbox loop, drain and reliability | 22 passed |
+| Catch-up, outbox schema, bridge schema, app limits, gateway, Lark outbox, chat settings | 151 passed |
+
+Four new fault cases failed before the fix: startup with an exhausted pool and
+three attempt-write failure modes (hang, repeated errors, lost acknowledgement).
+The final checks cover recovery after more than 100 ms, probe cancellation and
+deadline, a sibling app write progressing while even the defer write is blocked,
+durable deferral and later delivery with the same key. An initial catch-up run
+timed out while reading SQLite; its entire file passed in the final 151-test group.
+No catch-up timeout change was made.
+
+The follow-up adds 43 production lines and 132 test lines, excluding the manifest
+fixture. The ratio exceeds 2:1 because the regression contracts cover task
+lifecycle, shared app capacity and three distinct database failure modes through
+recovery and delivery. Ruff and whitespace checks passed; all 9 chat-settings
+frontend tests and the production frontend build passed. No UI or model-visible
+content changed, so browser screenshots and paid prompt evals were not repeated.
+
+An isolated public-CLI `looper serve` returned HTTP 200, read back outbound OFF,
+verified both merged schema blocks and no pending migration, and stopped cleanly.
+The temporary runtime and disposable databases were removed. No real channel or
+model calls were made; full-suite/PostgreSQL 18 validation remains with CI.
+
+## Earlier regression checks
 
 All Python commands used `uv run --system-certs --extra test python -m pytest -q -n 2`
 and ran in the foreground. Database checks used disposable PostgreSQL databases.

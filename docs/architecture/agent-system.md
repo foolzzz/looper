@@ -7549,10 +7549,13 @@ implementation supplies it and is retested.
   persistence; expired possibly delivered rows become `uncertain` and are never resent. Older rows without
   an attempt timestamp conservatively use their creation time on upgrade. A delivery past its total deadline
   becomes `uncertain` if attempted, otherwise `failed`, releasing the chat head even if a saved retry is far
-  in the future. A successful send retries its state write independently without another platform call; claim
-  tokens make a lost claim acknowledgement safe to retry. Restart recovery reuses the same key within the window. Callers wait at most 30 seconds for a receipt,
+  in the future. Before platform I/O, the attempt timestamp write has a five-second total deadline, including
+  retries; a database failure releases the app's shared slot and defers the unsent row without spending a retry
+  or tripping the platform breaker. A successful send retries its state write independently without another
+  platform call; claim tokens make a lost claim acknowledgement safe to retry. Restart recovery reuses the same
+  key within the window. Callers wait at most 30 seconds for a receipt,
   while queued work continues, including after the switch is turned off. Startup also recovers unfinished
-  rows with the switch off under a strict 100 ms probe/recovery deadline; unavailability adds no warning
+  rows with the switch off in a background task with a 30-second probe/recovery deadline; unavailability adds no warning
   and cannot block legacy startup, receiving or catch-up. An empty disabled outbox performs no recovery writes. Waiters share in-process
   completion futures; the scanner sleeps until the earliest unblocked retry or new work. Notifications can
   carry a caller-supplied event key to deduplicate retries. An insert failure logs a warning and falls back to the gateway. Status
