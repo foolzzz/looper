@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..db import managers as db_managers
-from . import chat_settings, completion_events
+from . import card_actions, chat_settings, completion_events
 from .channels.chat_routing import boundary_log
 from .channels.lark_quote import ReadQuote
 from .bus import MessageBus
@@ -130,6 +130,27 @@ class ManagerFleet:
         self._ops[definition.id] = ops
         return agent
 
+    async def _restore(self, manager_id: str) -> None:
+        """The Manager's confirmations a restart dropped, back from their cards (``ManagerOps.restore_confirmations``)."""
+        try:
+            restored = await self._ops[manager_id].restore_confirmations()
+        except Exception:
+            logger.warning("could not restore the confirmations of Manager %s", manager_id, exc_info=True)
+            return
+        if restored:
+            logger.info("Manager %s: %d confirmation(s) restored from their cards", manager_id, restored)
+
+    async def _press_confirmation(self, row: dict[str, Any], event: card_actions.Press,
+                                  choice: str) -> card_actions.Answer:
+        ops = self._ops.get(row.get("manager_id") or DEFAULT_MANAGER_ID)
+        if ops is None:
+            return card_actions.Answer("这个管家没有在运行", "warning")
+        return await ops.press(row, event, choice)
+
+    async def _press_gate(self, row: dict[str, Any], event: card_actions.Press, choice: str) -> card_actions.Answer:
+        return await card_actions.press_gate(row, event, choice, bus=self._bus,
+                                             has_planner=self._platform.task_router.has_planner)
+
     def _turned_off(self, manager_id: str) -> None:
         task = asyncio.create_task(self.apply(manager_id))
         self._turned_off_tasks.add(task)
@@ -149,7 +170,10 @@ class ManagerFleet:
             rows = []
         default_row = next((row for row in rows if row["id"] == DEFAULT_MANAGER_ID), None)
         default = ManagerDefinition.from_row(default_row) if default_row else default_definition()
+        card_actions.install("confirmation", self._press_confirmation)
+        card_actions.install("gate", self._press_gate)
         self._supervisor.register(self._build(default))
+        await self._restore(default.id)
         for row in rows:
             if row["id"] == DEFAULT_MANAGER_ID or not row.get("enabled"):
                 continue
@@ -158,6 +182,7 @@ class ManagerFleet:
                              MAX_ENABLED_MANAGERS)
                 continue
             self._supervisor.register(self._build(ManagerDefinition.from_row(row), await self._template_keys(row["id"])))
+            await self._restore(row["id"])
         if self._idle_task is None:
             self._idle_task = asyncio.create_task(self._idle_loop())
 
@@ -374,6 +399,7 @@ class ManagerFleet:
                 raise RuntimeError(f"Manager {manager_id} not started: at most {MAX_ENABLED_MANAGERS} Managers "
                                    "run at once")
             agent = self._build(ManagerDefinition.from_row(row), await self._read_template_keys(manager_id))
+            await self._restore(manager_id)
             await self._supervisor.start_agent(agent)
         else:
             # Running and still enabled: the definition (tools, task scope, task policy, templates) may have changed.
