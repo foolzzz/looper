@@ -139,7 +139,8 @@ def clear_private_settings(runtime_root: Path) -> int:
 
 
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
-                   settings_dir: Path | None = None, sealed: bool = False) -> list[str]:
+                   settings_dir: Path | None = None, sealed: bool = False,
+                   hooks: dict[str, Any] | None = None) -> list[str]:
     """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
 
     Every agent's command carries them, so the agents cannot diverge. A run
@@ -157,12 +158,17 @@ def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = 
     it carries only a local route token, never an upstream provider credential.
     The result depends only on those values, ``cwd`` and where the operator's
     configuration lives, so a resident agent's command stays the same between turns.
+    ``hooks`` (the outbound review's, ``outbound_hook``) go in the settings, and then no settings file loads:
+    verified against 2.1.329, under ``--setting-sources project`` a ``.claude/settings.json`` the run writes with
+    ``disableAllHooks`` turns them off at once, and under ``--setting-sources ""`` it does not.
     """
     settings: dict[str, Any] = {"autoMemoryEnabled": False,
                                 "claudeMdExcludes": _outside_memory(Path(cwd), repository=not sealed),
                                 "crossSessionInbound": "refuse", **({"disableAllHooks": True} if sealed else {})}
     if env is not None:
         settings["env"] = env
+    if hooks is not None:
+        settings["hooks"] = hooks
     content = json.dumps(settings, ensure_ascii=False, separators=(",", ":"))
     if env is not None:
         if settings_dir is None:
@@ -181,7 +187,7 @@ def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = 
             Path(temporary).unlink(missing_ok=True)
         content = str(target)
     return [
-        "--setting-sources", "" if sealed else "project",
+        "--setting-sources", "" if sealed or hooks is not None else "project",
         "--strict-mcp-config",
         "--settings", content,
     ]

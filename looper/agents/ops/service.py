@@ -48,7 +48,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -64,12 +64,15 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
+from ..reminders import reminders_on
 from ..tiers.manager_session import MAIN_SESSION
+from ..turn_context import SpeakerKind
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
+from . import reminders as reminder_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
-from .leads import TOOL as LEADS_SEARCH, leads_on
+from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
@@ -84,6 +87,7 @@ TOKEN_ENV = "LOOPER_AGENT_TOKEN"
 TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"
 TRACE_ENV = "LOOPER_MCP_TRACE"  # the bridge's trace of each call's ``_meta`` keys (``mcp_server._trace_meta``)
 BINDINGS_KEPT = 64
+CALLS_KEPT = 4096  # the tool_use ids the hook can place in their turn
 CONFIRMATION_SECONDS = 600
 # How long a write call waits for the tool_use of its turn's stream that it matches (the event may trail the call).
 MATCH_WAIT_SEC = 2.0
@@ -151,10 +155,12 @@ TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if
                                     *SCHEDULE_TOOLS, CONFIRM)
 READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Every tool a Manager may have had: a call of one it no longer has is told so. The leads search is the default
-# Manager's while leads are on, the vault's reads while it lets the Manager read it (``ManagerOps._with_operator_tools``).
-_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS)}
+# Manager's while leads are on, the vault's reads while it lets the Manager read it, the reminder tools while
+# reminders are on (``ManagerOps._with_operator_tools``).
+_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS,
+                                                    *reminder_tools.TOOLS)}
 # The default Manager's tools that only the user's own turns run, each behind its own switch.
-_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS)}
+_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, *reminder_tools.TOOLS)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
 
 
@@ -244,6 +250,19 @@ class ManagerOps:
         self._lapsing: set[asyncio.Task[None]] = set()
         # The confirmations a card's button answered (id -> what it did), so a typed confirmation of one is told so.
         self._pressed: OrderedDict[str, str] = OrderedDict()
+        # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
+        # later shell command may run one), and the turns already told the operator of a block.
+        from ..outbound_hook import CONTENT_TOOLS_KEPT, Trusted
+
+        self._review_root: Path | None = None
+        self._review_bin = "claude"
+        self._trusted = Trusted.of(None, ())  # until a process's hook is activated: none of Looper's tools
+        self._writes: deque[Any] = deque(maxlen=CONTENT_TOOLS_KEPT)
+        self._notified: OrderedDict[tuple[str | None, str | None, str | None], None] = OrderedDict()
+        # Each tool_use a turn's stream showed, by its id: the binding of the turn it belongs to (a subagent's call,
+        # its parent call's turn), which places the hook's call in its own turn.
+        self._call_turns: OrderedDict[str, str] = OrderedDict()
+        self._call_seen = asyncio.Event()
 
     @property
     def executing(self) -> bool:
@@ -347,11 +366,13 @@ class ManagerOps:
     async def _with_operator_tools(self, scope: OpsScope) -> OpsScope:
         """``scope`` with the default Manager's operator-only tools exactly while their switches are on:
         ``looper_leads_search`` while ``leads.enabled`` is, the vault's reads while the vault setting holds and says
-        ``manager_read``. Any other Manager's as it is; off, the default Manager's is what it was before them."""
+        ``manager_read``, the reminder tools while ``reminders.enabled`` is. Any other Manager's as it is; off, the
+        default Manager's is what it was before them."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
             return scope
         wanted = [*((LEADS_SEARCH,) if await leads_on() else ()),
-                  *(VAULT_READ_TOOLS if await manager_vault() is not None else ())]
+                  *(VAULT_READ_TOOLS if await manager_vault() is not None else ()),
+                  *(reminder_tools.TOOLS if await reminders_on() else ())]
         if [tool.name for tool in wanted] == [name for name in scope.tools if name in _OPERATOR_TOOLS]:
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name not in _OPERATOR_TOOLS]
@@ -488,6 +509,9 @@ class ManagerOps:
                     raise OpError(ErrorCode.NOT_THIS_TURN, "this call was not made in the running turn; it did not run")
                 _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
+                if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+                    self._pending.pop(turn.chat_key, None)
+                    raise _OperatorOnly(turn)
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
                 raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn that answers a user's "
@@ -497,6 +521,8 @@ class ManagerOps:
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
                 risk = Risk.HIGH
+                if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+                    raise _OperatorOnly(turn)
                 pending = self._ask(tool, arguments, impact, turn, confirmation=call.confirmation)
                 await self._card(pending, turn)
                 action_id = await self._record(turn, tool, arguments, risk, "needs_confirmation",
@@ -508,13 +534,17 @@ class ManagerOps:
                                          "It has not run: do not say it did."}
             answer = await self._run_tool(tool, call)
             result = _plain(answer)
+            if tool.name == LEADS_TOOL and isinstance(result, Mapping) and result.get("leads"):
+                # What the outbound review of a later call in this turn sees came from the leads.
+                turn.outside.append(("leads", json.dumps(result["leads"], ensure_ascii=False)))
             audited = isinstance(tool, RestrictedTool) and tool.audit_result is not None
             audit = tool.audit_result(answer) if audited else None  # type: ignore[union-attr]
         except _Recorded as exc:
             return _error(exc.code, str(exc))
         except OpError as exc:
             await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
-                               result={"message": str(exc)})
+                               result={"reason": "operator_only"} if isinstance(exc, _OperatorOnly)
+                               else {"message": str(exc)})
             return _error(exc.code, str(exc))
         except Exception as exc:
             logger.exception("the Manager's call of %s failed", name)
@@ -757,12 +787,41 @@ class ManagerOps:
             self._expected.pop(old, None)
             self._expected_event.pop(old, None)
 
-    def expect(self, binding: str, tool: str, arguments: Mapping[str, Any], *, call_id: str | None = None) -> None:
-        """The turn of ``binding`` streamed a tool_use of ``tool``: one call with these arguments may match it."""
+    def expect(self, binding: str, tool: str, arguments: Mapping[str, Any], *, call_id: str | None = None,
+               parent_call_id: str | None = None) -> None:
+        """The turn of ``binding`` streamed a tool_use of ``tool``: one call with these arguments may match it. A
+        subagent's (``parent_call_id``, the call that started it) belongs to its parent call's turn, for the hook."""
         self._expected.setdefault(binding, []).append((call_id or None, tool, _canonical(arguments)))
         event = self._expected_event.get(binding)
         if event is not None:
             event.set()
+        if call_id:
+            owner = self._call_turns.get(parent_call_id) if parent_call_id else binding
+            if owner is not None:  # a subagent whose start Looper did not see belongs to no turn
+                self._call_turns[call_id] = owner
+                while len(self._call_turns) > CALLS_KEPT:
+                    self._call_turns.popitem(last=False)
+                self._call_seen.set()
+
+    async def _turn_of_call(self, call_id: Any) -> Turn | None:
+        """The turn whose stream showed the tool_use ``call_id``, waiting up to ``PLACE_WAIT_SEC`` for it; None when
+        none did, or that turn is over (its call is no one's)."""
+        from ..outbound_hook import PLACE_WAIT_SEC
+
+        if not isinstance(call_id, str) or not call_id:
+            return None
+        deadline = self._clock() + PLACE_WAIT_SEC
+        while (binding := self._call_turns.get(call_id)) is None:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return None
+            self._call_seen.clear()
+            try:
+                await asyncio.wait_for(self._call_seen.wait(), remaining)
+            except asyncio.TimeoutError:
+                pass
+        turn = self._bindings.get(binding)
+        return turn if turn is not None and turn.state is TurnState.ANSWERING else None
 
     def _take(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None) -> bool:
         entries = self._expected.get(binding, [])
@@ -938,6 +997,71 @@ class ManagerOps:
             self._lapse(pending)
         self._pending.clear()
 
+    # --- The outbound review's hook ---
+
+    def tool_hook(self, runtime_root: Path, claude_bin: str, library: Any = None) -> Any:
+        """The PreToolUse hook (``outbound_hook.ToolHook``) for this Manager's Claude Code, its config written; the
+        reviews it asks for run under ``runtime_root`` with ``claude_bin``. Its MCP trust set takes effect only
+        when the Manager activates this hook for the process it actually starts."""
+        from .. import outbound_hook
+
+        self._review_root, self._review_bin = runtime_root, claude_bin
+        return replace(outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token),
+                       trusted=outbound_hook.Trusted.of(library, (*self._scope.tools, CONFIRM_TOOL)))
+
+    def activate_tool_hook(self, hook: Any) -> None:
+        """Use the immutable trust set of the actual process's hook, never a prepared capability refresh."""
+        from ..outbound_hook import Trusted
+
+        self._trusted = hook.trusted if hook is not None and hook.trusted is not None else Trusted.of(None, ())
+
+    async def check_outbound(self, payload: Any) -> dict[str, Any]:
+        """The hook's answer for one tool call of this Manager (``outbound_hook.answer``), in the turn it belongs to:
+        the one whose stream showed its tool_use, never the turn that runs when it comes; anything that goes wrong
+        blocks the call."""
+        from .. import outbound_hook
+        from ..outbound import Who
+
+        data = payload if isinstance(payload, Mapping) else {}
+        turn: Turn | None = None
+
+        async def place() -> Any:
+            nonlocal turn
+            turn = await self._turn_of_call(data.get("tool_use_id"))
+            if turn is None or turn.autonomous:
+                return outbound_hook.NO_ONES
+            if await _operator_turn(turn):
+                who = Who.OPERATOR
+            else:
+                who = Who.GROUP_MEMBER if turn.group else Who.ALLOWLISTED_PERSON
+            message = str((turn.envelope.payload.get("text") if turn.envelope else "") or "")
+            return outbound_hook.Placed(who, message, turn.channel or "", turn.chat, tuple(turn.outside))
+
+        try:
+            answer, review = await outbound_hook.answer(
+                payload, agent_id=self._scope.manager_id, place=place, writes=list(self._writes),
+                runtime_root=self._review_root or self._platform.runtime_root or Path.cwd(),
+                claude_bin=self._review_bin, trusted=self._trusted)
+        except Exception:
+            logger.exception("the outbound check of a call of %s failed", self._scope.manager_id)
+            return {"decision": "block", "message": outbound_hook.BLOCKED_MESSAGE.format(
+                reason="the check could not run")}
+        if answer["decision"] == "allow":
+            if (write := outbound_hook.write_of(payload)) is not None:
+                self._writes.append(write)
+        elif review is not None:
+            key = (turn.channel, turn.chat, turn.message_id) if turn is not None else (None, None, None)
+            if key not in self._notified:  # once a turn
+                self._notified[key] = None
+                while len(self._notified) > BINDINGS_KEPT:
+                    self._notified.popitem(last=False)
+                tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
+                await outbound_hook.notify_blocked(
+                    self._scope.manager_id, str(data.get("tool_name") or ""),
+                    str(tool_input.get("command") or tool_input.get("file_path") or ""), review.reason,
+                    review.review_id)
+        return answer
+
     # --- The Manager's MCP entry ---
 
     def server_config(self, *, session_key: str = MAIN_SESSION) -> dict[str, Any]:
@@ -993,6 +1117,17 @@ class _Recorded(OpError):
 
     def __init__(self, error: OpError) -> None:
         super().__init__(error.code, str(error))
+
+
+class _OperatorOnly(OpError):
+    """A speaker refusal with a typed audit reason, without changing other forbidden errors."""
+
+    def __init__(self, turn: Turn) -> None:
+        message = ("only the operator can authorize this: it was not run and nothing waits for confirmation; "
+                   "tell the speaker that the operator has to ask for it themselves")
+        if turn.operator_id_missing:
+            message += " (this bot has no operator id set)"
+        super().__init__(ErrorCode.FORBIDDEN, message)
 
 
 def _audience(tool: Tool) -> Audience:

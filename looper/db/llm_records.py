@@ -416,14 +416,21 @@ async def manager_spend(
     result = {m: {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0} for m in manager_ids}
     if not result:
         return result
+    # A Manager's runs, and the outbound reviews of its calls that no task owns (``outbound_reviews.record_id``).
     rows = await pool.fetch(
         """
         SELECT agent_id,
                COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $2), 0)::float8 AS today_usd,
                COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $3), 0)::float8 AS last_7d_usd,
                count(*) FILTER (WHERE created_at >= $2) AS runs_today
-        FROM llm_records
-        WHERE agent_id = ANY($1::text[]) AND created_at >= LEAST($2, $3)
+        FROM (
+            SELECT agent_id, cost_usd, created_at FROM llm_records WHERE agent_id = ANY($1::text[])
+            UNION ALL
+            SELECT o.agent_id, r.cost_usd, r.created_at FROM outbound_reviews o JOIN llm_records r ON r.id = o.record_id
+            WHERE o.agent_id = ANY($1::text[]) AND o.task_id IS NULL
+              AND o.created_at >= LEAST($2::timestamptz, $3::timestamptz)
+        ) runs
+        WHERE created_at >= LEAST($2, $3)
         GROUP BY agent_id
         """,
         list(result), since, datetime.now(timezone.utc) - timedelta(days=7),

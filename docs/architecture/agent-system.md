@@ -11,6 +11,34 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 ### Manager (`looper/agents/tiers/manager.py`)
 
+With `manager.metrics.enabled` on (default off, operator only), model user turns
+record `metadata.turn_metrics`: version, origin, chat kind, receipt time, ack kind
+and latency, first-reply latency, top-level tool calls, delivery and replay status.
+Completion turns record origin, tool calls and delivery. Proactive sends record
+their typed source and receipt in `proactive_deliveries`; an operator message
+marks deliveries in that chat from the preceding 30 minutes. All writes run in
+bounded background tasks and failures leave replies unaffected. The read-only
+`manager_metrics.get` operation (also available through the CLI) returns delivery
+counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
+counts in the server timezone and mature, successfully sent delivery reply rates
+for 1–30 days. Housekeeping retains proactive rows for 90 days. This feature owns the table's single named migration:
+one row per message, with the send receipt in `outcome`. `source` includes
+`completion` and `user_reminder`; `chat_kind` is `direct` or `group`.
+Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
+idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries update
+only the receipt, preserving the first decision. Nullable `decision`, `reason`,
+cap and digest fields are reserved for the delivery layer's future `decide()`
+write point.
+Off, turns have no metrics key and sends add no writes.
+The operator-only operations `manager_metrics_settings.get` (body `{}`) and
+`manager_metrics_settings.update` (body `{"enabled": true}`, `false` or `null`)
+read and store the switch; null restores off. Update is high risk and declares
+confirmation; Settings → Chat confirms the change before saving it. Both return
+`{"enabled": boolean}`. `manager_metrics.get` remains the read of measurements.
+Existing `chat_settings` views, schemas and writes stay unchanged for clients.
+The generated CLI exposes the same operations; Lark and Telegram need no new
+control because configuration is operator-only. Dashboard metric widgets are separate.
+
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
@@ -130,6 +158,26 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   characters). `db.tasks.task_name` is what lists, headings, the Chat page and
   the end notice show: the title, else the goal id, else the requirement's
   first line, else the task id (a task from before titles)
+- **Turn context foundation** (`turn_context.py`): typed speaker classification distinguishes the operator,
+  an API client, an allowlisted sender and a member. An operator in a group may authorize operations, while
+  access to private tools still follows the existing operator-turn check. `ManagerOps.call` refuses escalating
+  operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
+  and drops a refused confirmation. A turn with no speaker keeps the existing behavior.
+  Settings → Chat uses the operator-only v1 `turn_context_settings.get` and `turn_context_settings.update`
+  operations to store `manager.turn_context.enabled`
+  (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`
+  (`zh-CN` or `en`, default `zh-CN`). The read includes `server_timezone`; updates validate and write only named
+  fields, are high risk and declare confirmation, and null restores each default. Existing `chat_settings` views,
+  writes and access rules stay unchanged. Enabling returns the enabled bots with no operator id;
+  nobody on those bots can count as the operator. Settings are cached at startup and refreshed after updates.
+  The renderer provides a `[Turn context]` block with local time, speaker, chat and reply language, and its
+  matching contract. Sender display names pass through `untrusted_text.display_name` once during classification:
+  control characters and structural punctuation are removed, whitespace is collapsed, and names are capped at
+  40 characters. The typed speaker category comes first; the name is labelled as sender-set text. Future
+  model-visible sender names in group openers, cards and summaries must use the same helper. Unknown channel
+  types are rejected, and member wording follows the chat kind. **Manager integration is pending:** saving these
+  settings does not yet replace the `Channel:` line, inject the contract or set a turn's speaker. The dashboard, Lark, Telegram and API-client
+  turns therefore retain their current prompt and authorization behavior until that integration lands.
 - The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads), so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
@@ -4304,6 +4352,7 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
 | `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat. `manager_actions.result` keeps no note text | read; only in the user's own turns |
 | `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
+| `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 **The user's knowledge vault** (`ops/manager_vault.py`). With the vault setting's `manager_read` on, the default Manager
@@ -4363,6 +4412,26 @@ when it is the web chat without an API client, or a direct chat whose sender is 
   Manager's status). The summaries stay in memory only, and `/new` drops them.
 
 A Manager on DSH lists only the catalog's tools, so it has no leads search.
+
+**One-time reminders** ([reminders RFC](rfcs/reminders-v0.zh-CN.md)). With `reminders.enabled` on, `current_scope`
+adds the three reminder tools to the default Manager's tools; they are `RestrictedTool`s with `audience` `operator`,
+listed and run as the leads search is. Nothing is added to the system prompt. A reminder set in the user's direct chat
+goes back to it (the bot and the user's sender id there); one set on the dashboard goes to the user's direct chat with
+the first enabled bot of the default Manager that names an `operator_sender_id`, and is refused (`conflict`) when there
+is none. The table `reminders` (migration `reminders`) keeps each one with its target and status: `pending`,
+`sending`, `delivered`, `failed`, `uncertain`, `missed` or `cancelled`. `ReminderService` (started by `looper serve`,
+idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock. A stop starts no
+other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick settles a
+`sending` row left by a stopped sender as `uncertain`, then sends the due ones in code-written words
+(「⏰ 你在 <when asked> 让我提醒你：<text>」) through `ChannelRegistry.post` with the idempotency key
+`looper-reminder-<id>`, after checking that the bot still names that user as its operator. The rule keeps no state:
+every reminder due at most 2 minutes ago is sent, however many at once; one due longer ago was missed (Looper was
+down, asleep, stalled, switched off or draining), and of each chat's missed ones only the newest one due within 36
+hours is sent, with a line saying when it was due, unless a reminder on time goes to that chat in the same tick; the
+others become `missed`. A start, a sleep and two servers taking turns in an upgrade are judged alike. A refused send is tried at the next tick, three times in all;
+an unknown outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge
+window. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
+the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
 not one of these tools yet; nor are a project's execution settings, a role's
@@ -6311,8 +6380,9 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
 ### Reviews of outbound actions
 
 Before an agent does something that may leave the operator's machine, `outbound.review` (`looper/agents/outbound.py`,
-the outbound-review RFC) asks a tool-less run whether the operator asked for it, to that target. No tool calls it
-yet; its callers come with the `outbound_review.enabled` switch.
+the outbound-review RFC) asks a tool-less run whether the operator asked for it, to that target. The Managers'
+tool calls are its first caller, through a hook, while the system setting `outbound_review.enabled` is on (default
+off; `outbound_review.get` and `outbound_review.update`).
 
 - **The action** is typed: its tool and action, its `ActionLevel` (`inside`, `operator`, `origin`, `machine`,
   `external`, `unknown`; only `external` and `unknown` are reviewed), its target and a summary code wrote, and the
@@ -6340,6 +6410,42 @@ yet; its callers come with the `outbound_review.enabled` switch.
   row cannot be written in time is blocked. Its free text (the target, the summary, the model's reason) is stored
   masked. The run's record has `run_kind` `outbound_check` and the asking run as its
   `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
+- **The Managers' hook** (`looper/agents/outbound_hook.py`). While the review is on, each Manager's Claude Code
+  carries a PreToolUse hook in its `--settings` (matcher `*`) and reads no settings file (`--setting-sources ""`),
+  so nothing it writes in its working directory turns the hook off. Turning the review on or off changes the
+  command; turning it on also stops each Manager process started without the hook, and no turn or handoff runs in
+  such a process while it is on (checked right before the prompt reaches the process). The hook is
+  `outbound_hook_client.py`, run by path with `python -I`, behind a shell that prints a `deny` whenever the client
+  cannot run or prints nothing. The client sets an alarm before anything else that ends it with a `deny` at
+  `DEADLINE_SEC` (75 s) and moves it to its config's `deadline` before it reads its input; it asks
+  `POST /api/agent/v1/outbound/check` with the Manager's token, waits for the answer at most `CHECK_TIMEOUT_SEC`
+  (60 s), and denies when it gets none; Claude Code waits for the hook `HOOK_TIMEOUT_SEC` (90 s), since it runs a
+  call whose hook failed or timed out. Its config (the URL, the token, the waits) is
+  `<runtime root>/.local/outbound-hook/<manager>.json`, readable by the operator only.
+  - **What runs at once** is decided by the tool's type (`outbound_hook.level_of`): Claude Code's built-in tools have
+    a level each (`BUILTIN_LEVELS`: `Bash` and `Monitor` are `unknown`; `WebSearch`, `WebFetch`, `RemoteTrigger` and
+    `SendMessage` `external`); a tool not listed is `unknown`. Looper's own tools are `inside` here (`ManagerOps.call`
+    runs them). Another MCP server's tools are `unknown`, except the ones the operator declared `inside` for that
+    server (`mcp_tool_levels`, `mcp_tool_levels.get` and `mcp_tool_levels.put`). A name is read only against the
+    servers the Manager's process loaded (`outbound_hook.Trusted`: its library's MCP items and Looper's own), with
+    the full tool name; one that no loaded server or more than one could stand for is `unknown`. An undeclared
+    tool of a read-only MCP server is therefore reviewed in the operator's turns (a few seconds and about 0.003 USD
+    a call) and blocked in every other turn.
+  - **Whose turn:** the call's own, never the turn that runs when it comes. That is the turn whose stream showed
+    its `tool_use` (`ManagerOps.expect`); a subagent's call belongs to the turn of the call that started it
+    (`parent_tool_use_id`). A call Looper cannot place within `PLACE_WAIT_SEC`, or whose turn is over, is no one's.
+  - **What is reviewed:** an `unknown` or `external` call, in the operator's own turn (`operator_identity`); in any
+    other turn, code blocks it. The review sees the leads this turn's searches found and the files the session wrote
+    last (a later `sh s.sh` runs one).
+  - **What code refuses:** a `Write`, `Edit`, `MultiEdit` or `NotebookEdit` of Looper's own files: anything under
+    `<runtime root>/.local` or `ops`, the operator token, or the hook's client (`outbound.refuse`, `protected`).
+  - **A block** is a `deny` whose reason the model reads ("Looper's outbound review blocked this action: <reason>.
+    It did not run. …"). The operator is told once per turn in the chat the dashboard's user gates use, never in
+    the turn's own chat.
+  - **Without a hook:** the review is not turned on while an enabled Manager's Agent Profile runs on a runtime
+    without one (`RuntimeAdapter.tool_hook`: Claude Code only). While it is on, such a Manager starts no turn.
+  - **Spend:** a review of a Manager's call that no task owns is the Manager's spend (`manager_spend`), and goes
+    with the Manager when it is purged (`manager_cleanup`).
 
 ### Turns Claude runs on its own
 
@@ -6591,6 +6697,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
 | `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `message_id`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
+| `mcp_tool_levels` | The operator's declarations of an MCP server's tools for the outbound review ([Reviews of outbound actions](#reviews-of-outbound-actions)): `item_id` (going with its server), `tool`, `level` (`inside`: its calls run unreviewed) |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
@@ -6795,7 +6902,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 
 ### Pages
 
-- **Dashboard**: what is happening now, read from `GET /api/overview` every 5 s. A warning names each supervisor component that is not running: "is down" with when it restarts, or "keeps crashing" with its restarts in a row (and, when it is up between crashes, that it counts as stable after 5 minutes); else one muted "All components healthy" line. Task counts by group (In progress, Ready, Needs attention, Completed, and Cancelled or Other when they hold a task), each opening the Tasks page on that group (`#tasks?group=<group>`). "Agents running now": a table of the agent runs going on now (`live_runs`: a Manager's or a Planner's turn, a Worker's, a Reviewer's, a consult's or the processor's run, in that order) and the Worker and Reviewer runs "waiting" for room under their task's limit; each row has the role (a Manager's name; the id of the role its task's Planner defined that it runs as), its task and, for a Worker or Reviewer, its step, its runtime and model, the pid of the process serving it, how long it has run, and its TPM, linking to its agent history. TPM is the tokens of the run's usage events in the last 60 s, all four kinds (input, output, cache read, cache write; the breakdown on hover); a runtime that reports usage only when a turn ends (Codex, Coco, Cursor: `RuntimeAdapter.streams_usage` false) shows "—". The header has the total TPM of all agents, runs that ended within the minute included. It is kept in memory: a restart starts empty, and a resumed run's replay is not counted again. The Managers without a row are named below the table: busy ones (before their turn's run starts: the runtime starting, a session switch) and idle ones (between turns). "Running by project": for each project with a task in progress or ready, its running and ready tasks and its running Workers and Reviewers, with the waiting ones (a project has no limits), then how many projects are idle. "Schedules", when there is one: how many are enabled, the next 5 fires in their own zones, the failing schedules (failures in a row or an alert active, with the last run's status and the last success) and today's skipped runs by reason, each linking to its row on the project's Schedules tab. "Today's spend": the runs started since the server's local midnight, provider-priced (money) apart from the subscription equivalent (not billed), and the runs that ended without a cost.
+- **Dashboard**: what is happening now, read from `GET /api/overview` every 5 s. A warning names each supervisor component that is not running: "is down" with when it restarts, or "keeps crashing" with its restarts in a row (and, when it is up between crashes, that it counts as stable after 5 minutes); else one muted "All components healthy" line. Task counts by group (In progress, Ready, Needs attention, Completed, and Cancelled or Other when they hold a task), each opening the Tasks page on that group (`#tasks?group=<group>`). "Agents running now": a table of the agent runs going on now (`live_runs`: a Manager's or a Planner's turn, a Worker's, a Reviewer's, a consult's or the processor's run, in that order) and the Worker and Reviewer runs "waiting" for room under their task's limit; each row has the role (a Manager's name; the id of the role its task's Planner defined that it runs as), its task and, for a Worker or Reviewer, its step, its runtime and model, the pid of the process serving it, how long it has run, and its TPM, linking to its agent history. TPM is the tokens of the run's usage events in the last 60 s, all four kinds (input, output, cache read, cache write; the breakdown on hover); a runtime that reports usage only when a turn ends (Codex, Coco, Cursor: `RuntimeAdapter.streams_usage` false) shows "—". The header has the total TPM of all agents, runs that ended within the minute included. It is kept in memory: a restart starts empty, and a resumed run's replay is not counted again. The Managers without a row are named below the table: busy ones (before their turn's run starts: the runtime starting, a session switch) and idle ones (between turns). "Manager": the Manager's turns and proactive messages from `manager_metrics.get`, read on its own every 60 s over 24 h or 7 d (the choice kept in the browser): ack and first-reply P50 with P95, empty deliveries (turns that delivered no reply: count, share and the turns they are out of), proactive messages per day with the 30-minute reply rate, every local day the window touches (today and 1 or 7 days back, a day without messages shown as 0) by source, and the reply rate by source; "—" for what was not measured. With `manager.metrics.enabled` off it says so, with a link to Settings → Chat (its "记录管家体验指标" box); a failed read shows its error in the group only. "Running by project": for each project with a task in progress or ready, its running and ready tasks and its running Workers and Reviewers, with the waiting ones (a project has no limits), then how many projects are idle. "Schedules", when there is one: how many are enabled, the next 5 fires in their own zones, the failing schedules (failures in a row or an alert active, with the last run's status and the last success) and today's skipped runs by reason, each linking to its row on the project's Schedules tab. "Today's spend": the runs started since the server's local midnight, provider-priced (money) apart from the subscription equivalent (not billed), and the runs that ended without a cost.
 - **Chat history API**: The dashboard reads targets, sessions and messages and saves messages through the operator-only `POST /api/v1/operator_chat/{targets,sessions,messages,save_message}` operations. Database read failures return typed `unavailable` rather than empty history; save failures return `unavailable` rather than claiming persistence succeeded. Client-owned `chat.*` and Telegram/Lark delivery are unchanged.
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`. Its message box stays usable while the Manager replies: Enter queues the message in a staging area above the box (up to 20; the Edit button or ↑ pulls them back into the box, ahead of what is typed), and once a reply ends as `answered` the queued messages go as one message joined by a blank line; after a failed, stopped or confirm reply they go back into the box instead, and they survive a reload (kept per chat in `sessionStorage`). ↑ and ↓ in the box walk the thread's earlier messages (the latest 100, adjacent duplicates collapsed). Esc, or the Stop button that replaces Send while the box is empty, calls `POST /api/chat/stop`; typing `/stop` and Enter does the same. When the Manager's runtime cannot interrupt a reply (`can_interrupt` false), the Stop button shows disabled with "This runtime cannot interrupt a reply." and Esc does nothing. After a reload the page asks `GET /api/chat/turn` whether a reply is still running. A planner's chat has the queue and the history but no Stop. Beside the Manager, a list shows its conversations on every channel (`POST /api/v1/operator_chat/sessions`), grouped as Dashboard chat, loopercli (conversations an API client opened, with the client's name), Lark and Telegram, each the most recently active first, with its last message's start, sender and time and its message count; it is re-read every 10 s and after each answer, and a failed read shows its error. Picking a dashboard chat opens it as the web chat thread; picking a Lark or Telegram conversation shows its newest messages read-only, with their times and no message box, re-read every 10 s, and says when only the newest 200 of more are shown; an answer its channel did not deliver says so under it, with the channel's reason. Below the md breakpoint the list opens from a button in the header.
 - **Tasks**: Task list, newest first, 50 at a time with Load more ("Showing N of M"; the newest page is re-read every 3 s and the older pages loaded stay below it), with project and status filters (several chips at once, listed in the address in chip order, for example `status=init,running,waiting,waiting_user,pending`; with neither `status` nor `group` nor `schedule` the page shows Ready, Running, Waiting, Waiting for you and Pending, and `status=all` shows every task; a single value such as `status=failed` still selects that one filter; `Ready` is ready tasks; `Running` covers tasks whose Planner is planning, executing, verifying or winding down, including the assigned and running statuses; `POST /api/v1/tasks/page` takes `statuses`, one to ten of the same filter names, and returns their union, or `status` for one name, not both; counts stay per filter and count every task under the other filters), time display, each task's cost so far, a "Scheduled" badge linking to the schedule that created the task (with "continues the schedule's Planner session" on the detail page when `continues_schedule_session` is true), Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. On a stopped, failed or cancelled task, Start (here and on its detail page) goes on from its saved plan, and Start over, after an inline confirm, plans it anew (`POST /api/tasks/start` with `start_over`). `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page; `#tasks?group=<group>` lists one task group, shown as a chip that clears it, `#tasks?schedule=<id>` one schedule's tasks, shown as a chip too. With no `status`, a group or a schedule lists every task in it; an explicit `status` still narrows that list. A project link keeps the unfinished default. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
@@ -7125,6 +7232,7 @@ The retained private capability protocol is separate from this public inventory:
 |---|---|---|
 | GET | `/api/agent/v1/tools` | Manager, task Planner or run token; only that principal's tools |
 | POST | `/api/agent/v1/ops/:tool` | The same capability token; task/run/turn scope checked before dispatch |
+| POST | `/api/agent/v1/outbound/check` | A Manager's token; its Claude Code's PreToolUse hook asks whether one tool call runs ([Reviews of outbound actions](#reviews-of-outbound-actions)) |
 
 Clients cannot authenticate on the private protocol, obtain its tokens or invoke its private tools through
 `CLIENT_TOOLS`. `/login` (GET/POST), `/logout` (POST), pages and static assets deliver browser authentication
