@@ -148,7 +148,7 @@ def test_suspended_manager_restart_resumes_persisted_profile_and_incremental_usa
             second = ManagerAgent(config=ManagerConfig(claude_bin=binary, work_dir=tmp_path), runtime_root=tmp_path,
                                   definition=definition, clock=lambda: 60.0)
             await second.start(bus)
-            assert second._session_id == saved["session_id"] and second._session_totals.cost_usd == 0.25
+            assert second._sessions["main"].session_id == saved["session_id"] and second._session_totals.cost_usd == 0.25
             await ask(second, "what color")
             assert "--resume" in second._claude.command
             after = await agent_sessions.get_session(row["id"])

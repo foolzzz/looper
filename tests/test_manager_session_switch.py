@@ -336,7 +336,7 @@ def test_a_stop_during_the_handoff_keeps_the_old_session_and_the_next_message_ha
         session = _Session()
         manager, bus, queue = _manager(tmp_path, session)
         manager._session_loaded = True
-        manager._session_id, manager._session_runtime = "old-session", "omp"
+        manager._sessions["main"].session_id, manager._sessions["main"].session_runtime = "old-session", "omp"
         session.started = True
         manager._process = _Process(["claude"], None, None, None)  # type: ignore[arg-type]
         stops: list[str] = []
@@ -350,7 +350,7 @@ def test_a_stop_during_the_handoff_keeps_the_old_session_and_the_next_message_ha
         (reply,) = _replies(queue)
         assert reply["outcome"] == "stopped"
         assert stops == [] and session.started
-        assert manager._session_id == "old-session" and manager._pending_switch is None
+        assert manager._sessions["main"].session_id == "old-session" and manager._pending_switch is None
         session.hold = False
         session.running.clear()
         session._stopped.clear()
