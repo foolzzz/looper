@@ -124,10 +124,20 @@ async def _run(call: Call) -> dict[str, Any]:
                     "leads": [{"kind": lead["kind"], "summary": _fenced(lead) if fence else lead["summary"],
                                "confidence": lead["confidence"],
                                "state": lead["state"], "valid_until": lead["valid_until"],
-                               "sources": [{key: source[key] for key in _SOURCE_FIELDS}
+                               "sources": [{key: _source_field(key, source[key]) if fence else source[key]
+                                            for key in _SOURCE_FIELDS}
                                            for source in lead["sources"]]}
                               for lead in shown],
                     "more": found["more"]}, [lead["id"] for lead in shown])
+
+
+def _source_field(key: str, value: Any) -> Any:
+    from .. import untrusted as untrusted_text
+
+    if not isinstance(value, str):
+        return value
+    text = untrusted_text.display_name(value) if key == "sender" else value
+    return untrusted_text.fence(text, source=untrusted_text.Source.LEAD)
 
 
 def _fenced(lead: Mapping[str, Any]) -> str:

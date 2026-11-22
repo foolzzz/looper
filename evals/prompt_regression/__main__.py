@@ -121,6 +121,7 @@ def _parser() -> argparse.ArgumentParser:
 
     talk = sub.add_parser("dialogs", help="Run the Manager's dialogs and check what Looper did after each reply.")
     talk.add_argument("--mode", choices=("fake", "real"), default="fake")
+    talk.add_argument("--claude", help="the Claude Code executable (default: claude on PATH)")
     talk.add_argument("--model", default="haiku", help="real mode: every role runs Claude Code with this model "
                       "(default haiku; ignored with --agent or --register-agent)")
     talk.add_argument("--agent", help="every role runs this agent, by name, instead")
@@ -273,6 +274,7 @@ def _dialogs(args: argparse.Namespace) -> int:
             dsh_runtime=_selected_runtime(args, "dsh"),
             stable_context=args.stable_context,
             untrusted_fence=args.untrusted_fence,
+            claude_bin=args.claude,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)

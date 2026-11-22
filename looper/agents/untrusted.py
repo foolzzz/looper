@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
@@ -32,6 +33,8 @@ class Source(StrEnum):
     QUOTE = "quote"  # a Lark message the user's message replies to or forwards (lark_quote)
     ATTACHMENT = "attachment"  # the names of the files sent with a message (chat_attachments)
     LEAD = "lead"  # a lead's summary, from the user's Lark messages (looper_leads_search)
+    INBOX = "inbox"  # imported material in the vault's inbox/ area
+    MESSAGE_STREAM = "message_stream"  # subscription and extraction batches, possibly from mixed chat types
     INTENT = "intent"  # an intent's background, in the requirement of the task built from it (intents.build)
     GITHUB = "github"  # a GitHub pull request as a wait's check read it (gh pr view), in the Planner's [WAIT] turn
 
@@ -47,6 +50,17 @@ def _attribute(value: str) -> str:
     return " ".join(_ATTRIBUTE_DROPPED.sub(" ", value).split())
 
 
+def display_name(value: str) -> str:
+    """An outside sender's name on one line, without mention markup or invisible control characters.
+
+    This is display text, still untrusted: callers put it through ``fence`` too.
+    """
+    from .subscriptions import strip_mentions
+
+    text = "".join(" " if unicodedata.category(char) in ("Cc", "Cf") else char for char in value)
+    return " ".join(strip_mentions(text).split())
+
+
 def fence(text: str, *, source: Source, provenance: Mapping[str, str] | None = None) -> str:
     """``text`` inside an ``<untrusted>`` block naming ``source`` and ``provenance`` (attribute names are lower-case
     words; ``ValueError`` for another)."""
@@ -56,7 +70,8 @@ def fence(text: str, *, source: Source, provenance: Mapping[str, str] | None = N
     for name, value in (provenance or {}).items():
         if not _NAME.fullmatch(name) or name == "source":
             raise ValueError(f"not a provenance attribute: {name!r}")
-        attributes.append(f'{name}="{_attribute(str(value))}"')
+        shown = display_name(str(value)) if name == "from" else str(value)
+        attributes.append(f'{name}="{_attribute(shown)}"')
     body = _TAG.sub(lambda found: "&lt;" + found.group(0)[1:], strip_mentions(text))
     return f"<untrusted {' '.join(attributes)}>\n{body}\n</untrusted>"
 
