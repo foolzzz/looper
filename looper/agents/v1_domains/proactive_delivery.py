@@ -1,6 +1,7 @@
 """The delivery layer's switch (``delivery.enabled``): operator-only, separate from the chat settings clients see."""
 
 from .. import chat_settings
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _BOOL, _object
 from ..proactive_delivery import ENABLED_KEY
 
@@ -10,12 +11,14 @@ OPERATIONS = (
     Operation("proactive_delivery.get", "POST", "/api/v1/proactive_delivery/get",
               "Read whether proactive messages pass the delivery layer.",
               "Read whether proactive messages pass the delivery layer. It is off by default.",
-              _object({}, closed=True), VIEW, operator_only=True),
+              _object({}, closed=True), VIEW, operator_only=True,
+              level=ActionLevel.INSIDE),  # Reads Looper's own delivery setting.
     Operation("proactive_delivery.update", "POST", "/api/v1/proactive_delivery/update",
               "Turn the delivery layer for proactive messages on or off.",
               "Turn the delivery layer for proactive messages on or off. Null restores the default, off.",
               _object({"enabled": {"type": ["boolean", "null"]}}, closed=True), VIEW,
-              risk="high", confirms=True, operator_only=True),
+              risk="high", confirms=True, operator_only=True,
+              level=ActionLevel.INSIDE),  # Stores only Looper's own delivery setting; sends nothing.
 )
 
 
