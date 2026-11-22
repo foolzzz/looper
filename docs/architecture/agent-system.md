@@ -16,10 +16,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
   session (the `agent_sessions` row whose id is its id), runs
   (`llm_records.agent_id`), turn binding file and `ManagerOps`. What belongs
-  to its conversation (the resident runtime, the saved session, the turn lock
-  and the turn holding it, what the next turn is told) is one
-  `ManagerSession` (`looper/agents/tiers/manager_session.py`), `main`, the
-  only one so far. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  to its conversation (the resident runtime and its lifecycle lock, the saved
+  session, the turn lock and the turn holding it, the turn's research sources,
+  what the next turn is told) is one `ManagerSession`
+  (`looper/agents/tiers/manager_session.py`), `main`, the only one so far: a
+  group chat's turns run in the operator's session, which
+  `session_routing.group_isolation` reports as `shared` for a feature that
+  must not reach a group through it. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
@@ -4227,7 +4230,9 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
   within 10 minutes, does `looper_confirm` run it, with the arguments it was
   asked with; after that turn it lapses. Another chat speaking in between
   changes nothing. Confirmations live in memory: a restart or `/new` drops
-  them.
+  them, unless card buttons are on ([Card buttons](#card-buttons)): then each
+  is also a `card_actions` row, which a restart brings back and which the
+  typed confirmation and the card's 确认 button both claim, so it runs once.
 - **When the tools do not work.** Before a turn that answers a user, the
   Manager checks its MCP entry: it starts the entry's command as a runtime
   would and lists the tools through it (a success is trusted for 5 minutes).
@@ -5601,6 +5606,63 @@ writes nothing.
 - **Not yet:** the To-do page, the ledger contract in the Manager's system
   prompt (the tool descriptions are all it has), HTTP writes.
 
+### Card buttons
+
+A Manager's confirmation and a user gate can be answered with one press of a
+card's button ([Card buttons RFC](rfcs/assistant-card-actions-v0.zh-CN.md);
+`looper/agents/card_actions.py`). It is off until the system setting
+`cards.actions.enabled` is `true`; the dashboard has no switch yet. Off,
+nothing is stored, replies carry no cards, gate messages go as text, a Lark
+press gets the plain acknowledgement and a Telegram press no answer, as before;
+on or off, what the model sees of a confirmation is the same. Lark card writes
+go through one object, `lark.CardWrites`, which takes the outbound gateway
+when the channel has one.
+
+- **Where.** The bot-token Lark channel (`lark_bot`: card JSON 2.0, its
+  presses as `card.action.trigger` events on its long connection, answered in
+  the frame's acknowledgement within 2.8 s) and Telegram (an inline keyboard,
+  callback queries). The lark-cli channel and the web chat show the text and
+  are answered by typing.
+- **The table** (`card_actions`; migration `card_actions`): one row per card,
+  keyed by the opaque token that is all a button carries (`<token>:<choice>`),
+  with its `kind` (`confirmation`, `gate`), `subject`, the `digest` of the
+  parameters it is bound to, the `chat` it is in and the channel
+  `message_id` it became (both noted from the send's answer: a Lark card sent
+  to an open_id gets its direct chat's id), who may press
+  (`allowed`), `expires_at` (10 minutes for a confirmation, 7 days for a gate)
+  and what became of it (`handled_at`, `handled_by`, `handled_via` `button`,
+  `typed` or `lapsed`, `choice`, `outcome`). A row is claimed once: locked
+  first, then handled only if it has not expired by the clock after the lock.
+- **A press** is answered by code: one from another chat, or from another
+  message than the card's (a forwarded copy; a Telegram message id is unique
+  only within its chat, so both are compared), is told
+  「这张卡片只能在发出它的会话里操作」 and claims nothing (a Lark card sent to an
+  open_id whose chat was not noted is pressed from a chat the platform says is
+  direct, by that user); a sender the bot would not admit a message
+  from in that chat (its allowlist, the binding's extra senders, or anyone in
+  a group bound with `sender_policy` `chat`), or one not in `allowed`, is told
+  「只有发起人能确认」; a card handled or expired
+  「已处理」, one whose parameters changed 「已失效，请看最新的消息」. Else the
+  row is claimed and acted on, the answer (a toast and the card as it is now)
+  comes within 2.5 s, and a card whose action takes longer is updated when it
+  ends. The checks before the claim (the switch, the card, its chat and
+  message, the platform's chat lookup, the presser) must end within 1.5 s of
+  the press reaching the channel; past it, or on an error, the press is
+  refused and nothing is claimed, so only a checked press acts after the
+  answer.
+- **Confirmations.** With the switch on, every `high` call also writes its
+  row; where the channel has buttons the reply's confirmation block goes
+  after the reply as a card with 确认 and 取消. 确认 runs the call as
+  `looper_confirm` would, in a turn like the one that asked; a typed
+  confirmation of a card already pressed is refused (`conflict`). A
+  confirmation that lapses in memory lapses its row; one whose arguments have
+  a secret-looking field keeps no arguments and is not brought back after a
+  restart.
+- **Gates.** A gate message that asks for an answer gets a button per option
+  of its open questions (at most 3 questions, 5 options each) and
+  「按现在的结论结束」; a press goes into the gate as the user's message
+  (`gate_service.post_message`, `via` `button:<channel>`), like `/gate N`.
+
 ### What needs you
 
 One read-only summary of what waits for the operator
@@ -5752,7 +5814,9 @@ and `gate_timeout_seconds`, which check a schedule before a run starts.
   on; it counts only while the allowlist still lets it in, and Settings says
   when it no longer does; unset, the task page only). `GateCourier` posts
   every 2 seconds the Planner's and Looper's messages of a discussion no pass
-  has handled (`post_state`), oldest first, through the channel's `post`, and
+  has handled (`post_state`), oldest first, through the channel's `post` (with
+  [card buttons](#card-buttons) on, one that asks for an answer goes through
+  `post_card` as a card, in a channel that has buttons), and
   records the channel messages each became (`task_user_gate_posts`) or why it
   failed (the gate's `channel_posts`, and an error in the activity): the card
   is a message of its own, every later message replies under it, a Planner's
@@ -6525,6 +6589,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and the typed delivery of its message: `delivery` (`pending`, `sending`, `sent`, `failed`, `uncertain`), `delivery_attempts`, `delivery_at` (sending since, or tried again from) and `delivery_error`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
+| `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `message_id`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
@@ -7427,7 +7492,8 @@ implementation supplies it and is retested.
   the arguments (`_cmd_profile`), which the Manager answers itself
   ([Manager](#manager-looperagentstiersmanagerpy)). `/start`, `/status`,
   `/new`, `/stop`, `/profile` and `/help` from an unlisted sender get no
-  answer either. Lark has no command menu: a message that is
+  answer either. A press of a card's inline button is a callback query
+  ([Card buttons](#card-buttons)); it is not refused for its card's age. Lark has no command menu: a message that is
   exactly `/stop` goes to the Manager as text like any other and is handled the
   same way, and the status line of the stopped message ends as "已停止".
 - **Lark (bot token)** (`lark_bot.py`, `lark_bot_settings.py`): an independent
@@ -7453,7 +7519,8 @@ implementation supplies it and is retested.
   with `channel_type: "lark_bot"`,
   including sender names and rejected senders, and Settings → Channels has its
   card (app id, domain, app secret, allowlist, search, refused senders). No
-  lark-cli binary or login is required.
+  lark-cli binary or login is required. With [card buttons](#card-buttons) on
+  it sends cards and answers their presses on the same connection.
 - **Lark (lark-cli)** (`looper/agents/channels/lark.py`, `lark_cli.py`,
   `lark_settings.py`): the Manager in Lark direct messages and group chats,
   through `lark-cli`

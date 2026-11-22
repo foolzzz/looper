@@ -2326,6 +2326,37 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_i
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
 -- outbound reviews end
 
+-- The buttons of a card a chat got (assistant card actions RFC): one row per card, keyed by the opaque token that is
+-- all its buttons carry; what they act on (a Manager's confirmation, a user gate), a digest of the parameters they are
+-- bound to, the chat and the channel message it was sent as, who may press them and until when, and what became of
+-- them. A confirmation typed in the chat and its
+-- button resolve the same row (handled_via). Written only while cards.actions.enabled is on. connection.py applies
+-- this block to databases that predate it, so keep it between the markers and idempotent.
+-- card actions begin
+CREATE TABLE IF NOT EXISTS card_actions (
+    token       TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('confirmation', 'gate')),
+    subject     TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    payload     JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object'),
+    manager_id  TEXT,
+    channel_id  TEXT,
+    chat        TEXT,
+    message_id  TEXT,
+    allowed     TEXT[] NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    handled_at  TIMESTAMPTZ,
+    handled_by  TEXT,
+    handled_via TEXT CHECK (handled_via IN ('button', 'typed', 'lapsed')),
+    choice      TEXT,
+    outcome     TEXT CHECK (outcome IN ('running', 'ok', 'error', 'cancelled', 'lapsed', 'answered', 'stale')),
+    CONSTRAINT card_actions_handled CHECK ((handled_at IS NULL) = (handled_via IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_card_actions_open ON card_actions (kind, manager_id, created_at)
+    WHERE handled_at IS NULL;
+-- card actions end
+
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online
 -- (connection.py ``_ONLINE_STEPS``).

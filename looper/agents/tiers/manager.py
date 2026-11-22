@@ -772,9 +772,9 @@ class GoalSnapshot:
 
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
-                   snapshot: str | None = None) -> MessageEnvelope:
+                   snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
-    the chat's history (``record``)."""
+    the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
         record = _chat_record(original, f"{original.message_id}:reply")
@@ -786,7 +786,8 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
         correlation_id=original.correlation_id,
         reply_to=original.message_id,
         metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original), **record,
-                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
+                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {}),
+                  **({"cards": cards} if cards else {})},
     )
 
 
@@ -811,6 +812,9 @@ class ManagerAgent:
     _stopped_notes = session_field("stopped_notes")
     _lock_owner = session_field("lock_owner")
     _running_token = session_field("running_token")
+    _lifecycle_gate = session_field("lifecycle_gate")
+    _research = session_field("research")
+    _agent_settings = session_field("agent_settings")
     _last_activity = session_field("last_activity")
 
     def __init__(
@@ -834,7 +838,6 @@ class ManagerAgent:
         self._has_templates = False  # from the last read of the Manager's task templates
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
         self._vault_on = False  # whether the default Manager reads the knowledge vault, from the last read
-        self._research: ResearchSources | None = None  # where the turn being prepared may look things up, when on
         self._stable_context = False  # manager.stable_context, from the last read
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
@@ -850,8 +853,6 @@ class ManagerAgent:
         self._prompt_recommended = True  # whether _system_prompt is the recommended one (default_prompt)
         if self._definition.id != DEFAULT_MANAGER_ID:  # until _load_db_config reads it again
             self._system_prompt, self._prompt_recommended = self._definition.system_prompt or "", False
-        # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
-        self._agent_settings: AgentSettings | None = None
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         self._last_task_progress: dict[tuple[str, str], str] = {}
         # The Manager's conversations by key, only main for now (``ManagerSession``), and the one a context runs
@@ -862,8 +863,6 @@ class ManagerAgent:
         self._sessions: dict[str, ManagerSession] = {MAIN_SESSION: ManagerSession(
             key=MAIN_SESSION, claude=CLAUDE_CODE.resident_session(self.agent_id), claude_runtime=CLAUDE_CODE,
             last_activity=clock())}
-        # Serializes resident admission, reset and idle close. An idle check never waits for a busy turn.
-        self._lifecycle_gate = asyncio.Lock()
         self._clock = clock
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
@@ -1107,8 +1106,8 @@ class ManagerAgent:
         self._turns.clear()
         async def close() -> None:
             # A cancelled turn can still own its lock. Idle close alone needs serialization here.
-            async with self._lifecycle_gate:
-                for session in self._sessions.values():  # every session's resident
+            for session in self._sessions.values():  # every session's resident
+                async with session.lifecycle_gate:
                     await session.claude.stop()
 
         closing = asyncio.create_task(close())
@@ -1132,8 +1131,9 @@ class ManagerAgent:
     @property
     def deletion_blocked(self) -> bool:
         """Include runtime background work as well as preparation, queued messages and resets."""
-        return (self._idle_blocked() or self._lifecycle_gate.locked()
-                or any(session.claude.started and not getattr(session.claude, "idle", False)
+        return (self._idle_blocked()
+                or any(session.lifecycle_gate.locked()
+                       or (session.claude.started and not getattr(session.claude, "idle", False))
                        for session in self._sessions.values()))  # any session's
 
     async def try_suspend_idle(self, now: float) -> bool:
@@ -1142,12 +1142,12 @@ class ManagerAgent:
         timeout = self._definition.idle_timeout_seconds
         if self.agent_id == DEFAULT_MANAGER_ID or not timeout or not self._running or self._turned_off:
             return False
-        if self._idle_blocked() or self._lifecycle_gate.locked():
+        if self._idle_blocked() or main.lifecycle_gate.locked():
             main.last_activity = now
             return False
         if now - main.last_activity < timeout or not main.claude.started:
             return False
-        async with self._lifecycle_gate:
+        async with main.lifecycle_gate:
             # No await between this last admission check and the runtime's atomic idle claim.
             if not self._running or self._turned_off or self._idle_blocked():
                 main.last_activity = now
@@ -1397,7 +1397,7 @@ class ManagerAgent:
             return
         asked = self.ops is not None and self.ops.asks_in(envelope.message_id)
         await self._send_reply(envelope, _with_blocks(response, turn.blocks),
-                               outcome=ReplyOutcome.CONFIRM if asked else None)
+                               outcome=ReplyOutcome.CONFIRM if asked else None, cards=turn.cards)
 
     async def _answer_gate_command(self, envelope: MessageEnvelope, text: str) -> None:
         answer = await self._gate_command(envelope, text)
@@ -3306,7 +3306,7 @@ class ManagerAgent:
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True, outcome: ReplyOutcome | None = None,
-                          snapshot: str | None = None) -> None:
+                          snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
         history (a user gate keeps its own discussion). Web replies always retain their recovery identity.
@@ -3317,7 +3317,7 @@ class ManagerAgent:
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
-                                               record=record, snapshot=snapshot))
+                                               record=record, snapshot=snapshot, cards=cards))
 
     @property
     def leads_withheld(self) -> int:
