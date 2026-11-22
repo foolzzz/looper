@@ -1,6 +1,7 @@
 """Operator-only turn-context settings, separate from client-visible chat controls."""
 
 from .. import chat_settings
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _BOOL, _NULL_STR, _STR, _array, _object
 from ..ops import ErrorCode, OpError
 
@@ -14,14 +15,16 @@ OPERATIONS = (
     Operation("turn_context_settings.get", "POST", "/api/v1/turn_context_settings/get",
               "Read turn context, timezone and reply language settings.",
               "Read turn context, timezone and reply language settings. Turn context is disabled by default.",
-              _object({}, closed=True), VIEW, operator_only=True),
+              _object({}, closed=True), VIEW, operator_only=True,
+              level=ActionLevel.INSIDE),  # reads only Looper's own turn-context settings
     Operation("turn_context_settings.update", "POST", "/api/v1/turn_context_settings/update",
               "Change named turn context settings; null restores defaults.",
               "Change named turn context settings; null restores defaults. Enabling lists bots without operator IDs; "
               "Manager wiring is separate.",
               _object({"turn_context_enabled": {"type": ["boolean", "null"]}, "timezone": _NULL_STR,
                        "reply_language": {"type": ["string", "null"], "enum": ["zh-CN", "en", None]}},
-                      [], closed=True), UPDATED, risk="high", confirms=True, operator_only=True),
+                      [], closed=True), UPDATED, risk="high", confirms=True, operator_only=True,
+              level=ActionLevel.INSIDE),  # changes only Looper's own turn-context settings
 )
 
 
