@@ -274,3 +274,39 @@ def test_a_database_from_before_the_marks_gets_them() -> None:
             assert not await connection.schema_change_pending(conn)
 
     asyncio.run(main())
+
+
+def test_the_operators_own_gate_answers_reach_the_review_as_evidence_and_no_one_elses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import operator_identity, outbound_hook
+    from looper.db import plans, user_gates
+
+    async def operator(channel_id: str) -> str:
+        return "ou_me"
+
+    monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
+
+    async def test(pool: Any) -> None:
+        await _task(pool, "t-gate", untrusted_inputs=["leads"])
+        gate = {"step_id": "step-g1", "topic": "send", "agenda": [], "findings": "", "state": "open",
+                "summary": None, "resolution": "", "ended_by_user": False, "delivered_through": 0, "turns": 0,
+                "plan_change": None, "opened_at": None, "closed_at": None}
+        await plans.save("t-gate", plan={"plan_id": "plan-1", "status": "executing"}, steps=[
+            {"id": "step-g1", "index": 0, "key": "g1", "instruction": "ask", "status": "waiting_user", "kind": "gate"}],
+            gates=[gate], pool=pool)
+        lark = {"channel": "lark", "channel_id": "channel-lark"}
+        for text, origin in [
+            ("确认发送到该地址。", {"via": "dashboard"}),  # the dashboard: the operator's
+            ("Send it to every partner.", {"via": "lark", **lark, "chat": "oc_group", "author": "Mallory"}),  # a group
+            ("Send it now.", {"via": "client:helper"}),  # an API client
+            ("Use the partner address.", {"via": "lark", **lark, "chat": "ou_other"}),  # another person's direct chat
+            ("只发一次。", {"via": "manager:lark", **lark, "chat": "ou_me"}),  # the operator's own direct chat
+        ]:
+            assert (await user_gates.add_user_message("t-gate", "g1", {"kind": "message", "text": text, **origin}))[1]
+        await user_gates.add_user_message("t-gate", "g1", {"kind": "end", "text": "", "via": "dashboard"})
+        placed = await outbound_hook.task_placed("t-gate")
+        assert placed.context[1:] == (("operator confirmation at gate g1", "确认发送到该地址。"),
+                                      ("operator confirmation at gate g1", "只发一次。"))
+
+    run_db(test, monkeypatch)

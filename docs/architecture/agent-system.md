@@ -6257,7 +6257,10 @@ off; `outbound_review.get` and `outbound_review.update`).
     task's (`outbound_hook.task_placed`):
     - the operator's for a schedule, the dashboard, or the operator's own direct chat; else a group's or another
       person's, which code blocks;
-    - the message the review sees is the task's original request, and the requirement is its outside content.
+    - the message the review sees is the task's original request, and the requirement is its outside content;
+    - what the operator answered in the task's user gates in their own turn (the dashboard, the web chat, their own
+      Lark or Telegram direct chat) goes with it word for word, each as `operator confirmation at gate <label>`:
+      evidence for the review, not an allow. An API client's, a group's or another person's answer is left out.
   - **A run on a runtime without a hook** does not start: its attempt fails with `review_unsupported_runtime` and the
     Planner decides, while the operator is told. The run's hook config goes when the run ends. A run adopted after a
     restart has no review state, so its checked calls are blocked.
