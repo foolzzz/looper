@@ -84,7 +84,7 @@ PostgreSQL 自带的全文检索解析器把一串连续的中文当成一个词
 
 **开关：** 系统设置 `leads.search_mode`，类型化的两个值 `words`（默认；没有这一行、或者值不认识，都是它）和 `fulltext`（`leads_model.SearchMode`）。`agents.leads.search` 每次读它，所以命令行、操作者 API 和 Manager 工具一起变。
 
-**候选**（2026-11-21 评审后）：先由索引选出候选，只有它们才过滤、读取、算分。几组候选各取最新的 2,000 条：
+**候选**（2026-11-21 评审后）：每组先由索引找到匹配行，在组内应用来源、状态、类型、时间、聊天和人员过滤，再对线索 id 去重、取最新的 2,000 条；只有这些候选才读取、算分：
 
 - 每个词项的记号：`message_leads` 上的 `idx_message_leads_search`（`array_to_tsvector(looper_search_tokens(summary || ' ' || detail))`，升级时在线建）；
 - 装了 pg_trgm 时，原样包含这个词项（3 个字符以上，用于词中间的片段）：`idx_message_leads_trigram`（`lower(summary || ' ' || detail)` 上的 `gin_trgm_ops`）。只有这个词项的记号带来的不满一组时才查；
@@ -93,7 +93,7 @@ PostgreSQL 自带的全文检索解析器把一串连续的中文当成一个词
 
 常见词只读自己的索引；生僻词、拼错的词仍带上自己的候选。
 
-**`fulltext` 怎么匹配：** 过滤条件（`--chat`、`--person`、`--days`、`--kind`、`--state`）不变，在候选上做；每个词项的覆盖取三者里最大的：
+**`fulltext` 怎么匹配：** 过滤条件（`--chat`、`--person`、`--days`、`--kind`、`--state`）不变，在每组候选截断前应用；每个词项的覆盖取三者里最大的：
 
 - 线索的要点和详情按第 3 节算；
 - 线索涉及的会话名或人名原样包含这个词项，算 1（逐词匹配本来就查名字）；
