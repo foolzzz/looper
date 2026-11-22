@@ -3,6 +3,7 @@
 from ...db import chat_bindings as storage
 from ...db.connection import get_pool
 from .. import api_v1
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _BOOL, _NULL_STR, _STR
 from ..channels import chat_routing
 from ..channels.allowlist import AllowlistError
@@ -31,7 +32,9 @@ SCHEMAS = {"Binding": BINDING, "SeenChat": SEEN_CHAT, "UnboundChat": UNBOUND_CHA
 
 def _op(name, summary, request, result, *, risk="read"):
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), summary, summary,
-                     request, result, risk=risk, operator_only=True, confirms=name == "manager_chat_bindings.put")
+                     request, result, risk=risk, operator_only=True, confirms=name == "manager_chat_bindings.put",
+                     # a bound chat's people talk to a Manager, which answers them there
+                     level=ActionLevel.EXTERNAL if name == "manager_chat_bindings.put" else ActionLevel.INSIDE)
 
 
 OPERATIONS = (

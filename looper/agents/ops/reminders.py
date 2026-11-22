@@ -113,6 +113,7 @@ async def _cancel(call: Call) -> dict[str, Any]:
 
 TOOLS: tuple[RestrictedTool, ...] = (
     RestrictedTool(
+        refusal=f"{CREATE} runs only in the user's own direct chat or on the dashboard",
         name=CREATE, risk=Risk.WRITE, audience=Audience.OPERATOR, run=_create,
         description="Set a one-time reminder the user asks for: at its time Looper itself sends text (the user's "
                     "own words) to the user's direct chat, without you. Give at (HH:MM: the next such time; or "
@@ -126,6 +127,7 @@ TOOLS: tuple[RestrictedTool, ...] = (
             "timezone": {"type": "string", "minLength": 1, "maxLength": 64}}},
     ),
     RestrictedTool(
+        refusal=f"{LIST} runs only in the user's own direct chat or on the dashboard",
         name=LIST, risk=Risk.READ, audience=Audience.OPERATOR, run=_list,
         description="List the user's one-time reminders with the time now: the pending ones soonest first, or those "
                     "of status (all: every one, latest first). Each has its id, text, due time and zone, status "
@@ -137,6 +139,7 @@ TOOLS: tuple[RestrictedTool, ...] = (
             "limit": {"type": "integer", "minimum": 1, "maximum": store.LIST_MAX}}},
     ),
     RestrictedTool(
+        refusal=f"{CANCEL} runs only in the user's own direct chat or on the dashboard",
         name=CANCEL, risk=Risk.WRITE, audience=Audience.OPERATOR, run=_cancel,
         description="Cancel a pending one-time reminder by its id (looper_reminder_list gives it), when the user "
                     "asks.",
