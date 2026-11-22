@@ -3,6 +3,7 @@ Confirmation accepts the dashboard's displayed hash; DM confirmation is handled 
 """
 
 from ...db import memory as db_memory
+from ..action_levels import ActionLevel
 from .. import memory, memory_actions, memory_model as model, memory_settings, memory_write
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _OBJ, _NULL_OBJ
 from ..ops import ErrorCode, OpError
@@ -55,9 +56,11 @@ _SETTINGS_PUT = _object({
     "daily_budget_usd": _NUMBER}, [], closed=True)  # root is required, but {"root": null} clears: the model checks
 
 
-def _op(action, summary, details, request, result, *, risk="read", cli=True, audit_operator=True):
+def _op(action, summary, details, request, result, *, risk="read", cli=True, audit_operator=True,
+        level=ActionLevel.INSIDE):
+    # Candidate state stays inside Looper; confirmation/retry can write the operator's vault on this machine.
     return Operation(f"memory.{action}", "POST", f"/api/v1/memory/{action}", summary, f"{summary} {details}",
-                     request, result, risk=risk, operator_only=True, cli=cli, audit_operator=audit_operator)
+                     request, result, risk=risk, operator_only=True, cli=cli, audit_operator=audit_operator, level=level)
 
 
 RESULTS = {}
@@ -76,12 +79,12 @@ OPERATIONS = (
     # Lifecycle events own the erasable audit; a generic action row would retain private edits after deletion.
     _op("confirm", "Confirm the exact current memory revision for writing.",
         "Dashboard only; a stale content hash is refused. The writer commits it asynchronously.",
-        _WRITE_ITEM, _WRITE_RESULT, risk="write", cli=False, audit_operator=False),
+        _WRITE_ITEM, _WRITE_RESULT, risk="write", cli=False, audit_operator=False, level=ActionLevel.MACHINE),
     _op("confirm_many", "Confirm the selected memory revisions individually.",
         "Each selected candidate and displayed hash has its own result; one refusal does not undo another.",
         _object({"items": {"type": "array", "items": _WRITE_ITEM, "minItems": 1, "maxItems": db_memory.LIST_MAX}},
                 closed=True), _object({"items": _array(_BATCH_ITEM)}, closed=True), risk="write", cli=False,
-        audit_operator=False),
+        audit_operator=False, level=ActionLevel.MACHINE),
     _op("reject", "Reject an unwritten memory candidate.",
         "Records the operator's optional reason and clears any confirmation.",
         _object({"candidate": _ID, "reason": {"type": "string", "maxLength": model.NOTE_MAX_CHARS}},
@@ -90,10 +93,11 @@ OPERATIONS = (
         "The displayed content_hash must still be current. Paths, format, lengths and secrets are checked again.",
         _object({"candidate": _ID, "content_hash": _HASH, "changes": _CHANGES, "confirm": _BOOL},
                 ["candidate", "content_hash", "changes"], closed=True), _WRITE_RESULT, risk="write", cli=False,
-        audit_operator=False),
+        audit_operator=False, level=ActionLevel.MACHINE),
     _op("retry", "Retry a blocked memory write with the existing confirmation.",
         "Only a blocked candidate can be retried; its attempt count starts again at zero.",
-        _object({"candidate": _ID}, closed=True), _WRITE_RESULT, risk="write", audit_operator=False),
+        _object({"candidate": _ID}, closed=True), _WRITE_RESULT, risk="write", audit_operator=False,
+        level=ActionLevel.MACHINE),
     _op("revive", "Restore an expired memory candidate for review.",
         "Returns it to pending if its changes still apply, otherwise queues fresh drafting. Confirmation is required.",
         _object({"candidate": _ID}, closed=True), _WRITE_RESULT, risk="write", audit_operator=False),

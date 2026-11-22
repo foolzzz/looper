@@ -42,7 +42,6 @@ async def _seed(url: str, repo: Path, *, enabled: bool) -> tuple[str, str]:
         candidate_id = await sup.candidate(conn)
         row = dict(await conn.fetchrow("SELECT * FROM memory_candidates WHERE id = $1", candidate_id))
         row["title"] = "Weekly reports: conclusion first"
-        row["title"] = "Weekly reports: conclusion first"
         async with db_memory.transaction(conn) as transaction:
             revised = await db_memory.add_revision(
                 transaction, candidate_id, action=model.Action.DRAFT, actor=model.Actor.SYSTEM,

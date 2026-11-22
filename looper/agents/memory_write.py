@@ -316,11 +316,11 @@ def _write(config: vault.VaultConfig, settings: model.MemorySettings, found: Map
     paths = [str(relative_vault / change["path"]) for change in changes]
     _preflight(repo, settings, paths)
     try:
-        vault._git(repo, "check-ignore", "--", *paths)
-    except subprocess.CalledProcessError as error:
-        if error.returncode != 1:  # 1: none ignored; any other error is a real git failure
-            raise
-    else:
+        # check-ignore does not support --literal-pathspecs; the existing stdin helper treats paths literally.
+        ignored = memory_settings._ignored(repo, [Path(path) for path in paths], by_patterns=False)
+    except RuntimeError:
+        raise WriteFailure("blocked", "git_failed") from None
+    if ignored:
         raise WriteFailure("blocked", "vault_problem")
     where = memory_settings.worktree_root(settings, runtime_root)
     if where is None or memory_settings._worktree_problem(where, repo):
@@ -523,12 +523,18 @@ class MemoryWriteService:
                 return False
             self._busy = True
             task = asyncio.create_task(self._run_once())
+            cancelled = False
             try:
-                try:
-                    return await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    await task  # finish git AND its database readback before releasing the session lock
-                    raise
+                # Every cancellation must wait for git AND durable readback before releasing either lock.
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                result = task.result()
+                if cancelled:
+                    raise asyncio.CancelledError
+                return result
             finally:
                 self._busy = False
 

@@ -337,8 +337,10 @@ def test_cancellation_keeps_the_cross_process_lock_until_git_and_database_finish
         try:
             assert await asyncio.to_thread(entered.wait, 10)
             assert first.drain_waiting() == 1
-            task.cancel()
-            await asyncio.sleep(.01)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(.01)
+            assert first.drain_waiting() == 1
             assert not await writer.MemoryWriteService(tmp_path / "runtime", db=pool).run_once()
             assert not task.done()  # the cancelled caller must not release an in-flight git operation's locks
         finally:
@@ -374,6 +376,28 @@ def test_real_hook_timeout_kills_its_process_group_and_preserves_main(monkeypatc
         assert (row["state"], row["reason"]) == ("blocked", "git_timeout")
         assert git(repo, "rev-parse", "HEAD") == before
         assert not git(repo, "branch", "--list", "looper/memory/*")
+    run_db(check, monkeypatch, timeout=40)
+
+
+def test_ignore_probe_timeout_is_reported_as_git_timeout(monkeypatch, tmp_path):
+    repo = repo_at(tmp_path)
+    real_run = subprocess.run
+
+    def timed_out(command, *args, **kwargs):
+        if "check-ignore" in command:
+            raise subprocess.TimeoutExpired(command, 30)
+        return real_run(command, *args, **kwargs)
+
+    async def check(pool):
+        cid = await setup(pool, repo, tmp_path)
+        before = git(repo, "rev-parse", "HEAD")
+        monkeypatch.setattr(subprocess, "run", timed_out)
+        assert await writer.MemoryWriteService(tmp_path / "runtime", db=pool).run_once()
+        row = (await store.get(cid, db=pool))["candidate"]
+        assert (row["state"], row["reason"]) == ("blocked", "git_timeout")
+        assert git(repo, "rev-parse", "HEAD") == before
+        assert not git(repo, "branch", "--list", "looper/memory/*")
+
     run_db(check, monkeypatch, timeout=40)
 
 

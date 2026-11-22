@@ -141,6 +141,8 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    # Confirmation, including save-and-confirm, and retry can commit to the operator's vault.
+    **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
     "manager_chat_bindings.put": EXTERNAL,  # a bound chat's people talk to a Manager, which answers them there
     "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
     # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard
