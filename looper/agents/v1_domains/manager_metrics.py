@@ -2,6 +2,7 @@
 from ...db import proactive_deliveries
 from ...db.connection import get_pool
 from .. import chat_settings
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _BOOL, _INT, _STR
 
 _COUNTS = {"type": "object", "additionalProperties": _INT}
@@ -22,7 +23,8 @@ OPERATIONS = (
         "Read Manager turn and proactive delivery metrics. "
         "Includes latency percentiles, delivery counts and proactive reply rates over 1–30 days.",
         _object({"days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}}, [], closed=True),
-        SUMMARY, risk="read", operator_only=True),
+        SUMMARY, risk="read", operator_only=True,
+        level=ActionLevel.INSIDE),  # Reads only Looper's stored turn and delivery metrics.
 )
 
 # Use the agent/time index before looking inside the optional JSON key. Historical records without it do not count.
