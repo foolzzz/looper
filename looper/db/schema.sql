@@ -2313,6 +2313,35 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_created ON outbound_reviews (cre
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_id) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
 -- outbound reviews end
+-- One-time reminders (reminders RFC): set by the user in their own turns, delivered at due_at by code (no model
+-- call) to the user's direct chat with the bot channel_id (chat: their sender id there). pending → sending (claimed,
+-- committed before the channel is asked) → delivered, failed (the channel refused it three times, or the bot's
+-- operator changed) or uncertain (it may have been sent: never again); pending → missed (Looper was not delivering
+-- when it was due, and it is not the latest such one within 36 hours) or cancelled (by the user).
+-- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
+-- reminders begin
+CREATE TABLE IF NOT EXISTS reminders (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    text               TEXT NOT NULL CHECK (btrim(text) <> '' AND char_length(text) <= 500),
+    due_at             TIMESTAMPTZ NOT NULL,
+    timezone           TEXT NOT NULL CHECK (btrim(timezone) <> ''),
+    channel_id         TEXT NOT NULL CHECK (channel_id ~ '^channel-(telegram|lark_bot|lark)(-[1-9][0-9]*)?$'),
+    chat               TEXT NOT NULL CHECK (btrim(chat) <> ''),
+    status             TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'sending', 'delivered', 'failed', 'uncertain', 'missed',
+                                         'cancelled')),
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    detail             TEXT CHECK (char_length(detail) <= 500),
+    external_id        TEXT,
+    created_channel    TEXT NOT NULL CHECK (created_channel IN ('web', 'telegram', 'lark', 'lark_bot')),
+    created_message_id TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    settled_at         TIMESTAMPTZ,
+    CONSTRAINT reminders_settled CHECK ((status IN ('pending', 'sending')) = (settled_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (due_at) WHERE status IN ('pending', 'sending');
+-- reminders end
 
 -- Who a stored Lark or Telegram direct chat (a chat_messages session) is with, recorded when one of their messages
 -- is stored while the Manager's session search is in effect (ops/session_search.py). The search counts the chat as

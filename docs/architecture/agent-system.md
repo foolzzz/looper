@@ -4265,6 +4265,7 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat. `manager_actions.result` keeps no note text | read; only in the user's own turns |
 | `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
 | `looper_session_search` | Only the default Manager's, and only while the session search is in effect (`manager.session_search.enabled` `true`, and group chats in sessions of their own: not yet): search the user's own earlier conversations with it (`db.chat_search`) for the words of `query`, matched as the [assistant search RFC](rfcs/assistant-search-v0.zh-CN.md) section 3 says (Chinese by overlapping character pairs, English by the start of a word), within `days`, at most `limit` (1–10, default 5), best first: a notice (what was said then, background and never instructions), each message's `where` (the dashboard chat, a Lark or Telegram direct chat, a task's Planner chat on the dashboard), `who` (`user`, `manager`, `planner`), `at` and up to 300 characters around the match, fenced as outside content (`untrusted.fence`), and how many more matched. The message being answered is left out, and `manager_actions.result` keeps only the messages' ids and their count | read; only in the user's own turns |
+| `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 **The user's knowledge vault** (`ops/manager_vault.py`). With the vault setting's `manager_read` on, the default Manager
@@ -4348,6 +4349,26 @@ newest messages in scope, and only those are read and scored, with JIT off for t
 fenced (`<untrusted source="chat_history" where=… who=… at=…>`, its own `<untrusted`/`</untrusted` escaped) and goes
 into the leads search's group backstop. Off, the tool list, the prompt, the signature and the command are what they
 were before, and nothing is recorded.
+
+**One-time reminders** ([reminders RFC](rfcs/reminders-v0.zh-CN.md)). With `reminders.enabled` on, `current_scope`
+adds the three reminder tools to the default Manager's tools; they are `RestrictedTool`s with `audience` `operator`,
+listed and run as the leads search is. Nothing is added to the system prompt. A reminder set in the user's direct chat
+goes back to it (the bot and the user's sender id there); one set on the dashboard goes to the user's direct chat with
+the first enabled bot of the default Manager that names an `operator_sender_id`, and is refused (`conflict`) when there
+is none. The table `reminders` (migration `reminders`) keeps each one with its target and status: `pending`,
+`sending`, `delivered`, `failed`, `uncertain`, `missed` or `cancelled`. `ReminderService` (started by `looper serve`,
+idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock. A stop starts no
+other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick settles a
+`sending` row left by a stopped sender as `uncertain`, then sends the due ones in code-written words
+(「⏰ 你在 <when asked> 让我提醒你：<text>」) through `ChannelRegistry.post` with the idempotency key
+`looper-reminder-<id>`, after checking that the bot still names that user as its operator. The rule keeps no state:
+every reminder due at most 2 minutes ago is sent, however many at once; one due longer ago was missed (Looper was
+down, asleep, stalled, switched off or draining), and of each chat's missed ones only the newest one due within 36
+hours is sent, with a line saying when it was due, unless a reminder on time goes to that chat in the same tick; the
+others become `missed`. A start, a sleep and two servers taking turns in an upgrade are judged alike. A refused send is tried at the next tick, three times in all;
+an unknown outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge
+window. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
+the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
 not one of these tools yet; nor are a project's execution settings, a role's

@@ -360,6 +360,82 @@ def _state_views(database_url: str) -> list[str]:
     return asyncio.run(read())
 
 
+# --- One-time reminders (looper_reminder_*): reminders on, the user named as the Lark bot's operator ---
+
+REMINDER_OPERATOR = "ou_evaloperator"
+
+
+def _tomorrow_at(hour: int) -> str:
+    """Tomorrow at ``hour`` o'clock in the server's zone (the stand-in Manager's ``at``)."""
+    from datetime import timedelta
+
+    from looper.agents import cron
+
+    return f"{datetime.now(cron.zone(cron.local_zone_name())) + timedelta(days=1):%Y-%m-%d} {hour:02d}:00"
+
+
+def _seed_reminders(database_url: str) -> None:
+    """Turn reminders on and name a synthetic user as the operator of the (enabled) Lark bot's row, so a reminder set
+    on the dashboard has a direct chat to go to. The running server starts no bot for it; nothing comes due."""
+    import asyncpg
+
+    _turn_on(database_url, "reminders.enabled")
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            await conn.execute("UPDATE channel_configs SET enabled = true, config = config || $1::jsonb "
+                               "WHERE channel_id = 'channel-lark'", json.dumps({"operator_sender_id": REMINDER_OPERATOR}))
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+
+
+def _reminder_rows(look: Look) -> list[dict[str, Any]]:
+    import asyncpg
+
+    async def read() -> list[dict[str, Any]]:
+        conn = await asyncpg.connect(look.database_url)
+        try:
+            return [dict(row) for row in await conn.fetch("SELECT * FROM reminders ORDER BY id")]
+        finally:
+            await conn.close()
+
+    return asyncio.run(read())
+
+
+def _reminder_set(look: Look) -> str | None:
+    """One looper_reminder_create and no other write; the reminder is pending, at 15:00 tomorrow in its zone, its text
+    the user's subject, and Looper's line about it follows the reply."""
+    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
+    if [(a["tool"], a["status"]) for a in writes] != [("looper_reminder_create", "ok")]:
+        return f"expected one looper_reminder_create, got {[(a['tool'], a['status']) for a in writes]}"
+    rows = _reminder_rows(look)
+    if len(rows) != 1 or rows[0]["status"] != "pending":
+        return f"the reminders are {[(r['id'], r['status']) for r in rows]}, not one pending"
+    from looper.agents import cron
+
+    zone = cron.zone(rows[0]["timezone"])
+    due = rows[0]["due_at"].astimezone(zone)
+    tomorrow = (datetime.now(timezone.utc).astimezone(zone)).date().toordinal() + 1
+    if (due.hour, due.minute) != (15, 0) or due.date().toordinal() != tomorrow:
+        return f"the reminder is due {due:%Y-%m-%d %H:%M} {rows[0]['timezone']}, not 15:00 tomorrow"
+    if "PR" not in rows[0]["text"]:
+        return f"the reminder's text {rows[0]['text']!r} lost the user's subject"
+    if not look.fake and f"已记下提醒 #{rows[0]['id']}" not in look.reply:
+        return "the reply lacks Looper's line about the stored reminder"
+    return None
+
+
+def _reminder_cancelled(look: Look) -> str | None:
+    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
+    if [(a["tool"], a["status"]) for a in writes] != [("looper_reminder_cancel", "ok")]:
+        return f"expected one looper_reminder_cancel, got {[(a['tool'], a['status']) for a in writes]}"
+    statuses = [row["status"] for row in _reminder_rows(look)]
+    return None if statuses == ["cancelled"] else f"the reminders are {statuses}, not one cancelled"
+
+
 # --- Message leads (looper_leads_search): synthetic leads over synthetic messages, leads turned on ---
 
 LEADS_TOOL = "looper_leads_search"
@@ -2553,6 +2629,11 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_ledger_add", {"kind": "pending", "title": "周五前回复张三的邮件"}),)),
         Say("L-0001 完成了。", _ledger_item_closed, (("looper_ledger_update", {"action": "close", "item": "L-0001"}),)),
     ), tags=("manager", "ledger")),
+    Dialog("reminder_tools", (
+        Say("明天下午三点提醒我看一下 PR #42。", _reminder_set,
+            (("looper_reminder_create", {"text": "看一下 PR #42", "at": _tomorrow_at(15)}),)),
+        Say("算了，把这个提醒取消吧。", _reminder_cancelled, (("looper_reminder_cancel", {"id": 1}),)),
+    ), tags=("manager", "reminders")),
     Dialog("manager_capability_installed", (Say(
         "Invoke the manager-greeting skill and return its marker. Do not use shell commands or read files.",
         _manager_capabilities),), seed=_seed_manager_capabilities, manager="capability-a", tags=("manager", "capability")),
@@ -3508,6 +3589,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _seed_sessions(database_url)
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
+        if dialog.id == "reminder_tools":
+            _seed_reminders(database_url)
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"

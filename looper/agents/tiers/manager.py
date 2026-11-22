@@ -100,6 +100,7 @@ from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
 from ..ops import session_search as ops_sessions
 from ..task_notice import Notice, ends_task, web_end_text
+from ..ops.reminders import TOOL_NAMES as REMINDER_TOOLS
 from ..message import (
     MANAGER_ADDRESS,
     AgentAddress,
@@ -1549,7 +1550,8 @@ class ManagerAgent:
         has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
         has_sessions = any(t["name"] == ops_sessions.TOOL_NAME for t in tools)
-        if (self._has_templates or has_workflows or has_leads or has_ledger or has_sessions
+        has_reminders = any(t["name"] in REMINDER_TOOLS for t in tools)
+        if (self._has_templates or has_workflows or has_leads or has_ledger or has_sessions or has_reminders
                 or self.agent_id != DEFAULT_MANAGER_ID):
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
