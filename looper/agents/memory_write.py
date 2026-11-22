@@ -318,7 +318,9 @@ def _write(config: vault.VaultConfig, settings: model.MemorySettings, found: Map
     try:
         # check-ignore does not support --literal-pathspecs; the existing stdin helper treats paths literally.
         ignored = memory_settings._ignored(repo, [Path(path) for path in paths], by_patterns=False)
-    except RuntimeError:
+    except RuntimeError as error:
+        if isinstance(error.__cause__, subprocess.TimeoutExpired):
+            raise WriteFailure("blocked", "git_timeout") from None
         raise WriteFailure("blocked", "git_failed") from None
     if ignored:
         raise WriteFailure("blocked", "vault_problem")
