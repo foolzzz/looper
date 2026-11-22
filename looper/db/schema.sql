@@ -1266,7 +1266,7 @@ CREATE TABLE IF NOT EXISTS llm_records (
     -- of run it is (llm_records.RUN_KINDS; NULL on rows from before it, whose readers take it from their agent id).
     parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     run_kind TEXT CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'consult', 'advisor',
-                                      'advice_check', 'outbound_check'))
+                                      'advice_check', 'outbound_check', 'leads_check'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);

@@ -163,6 +163,7 @@ _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
 _LEADS_CHECK_ONLINE = "leads_check_online"
+_LEADS_CHECK_RUN_KIND = "leads_check_run_kind"
 _RUN_SKIPS = "run_skips"
 _RUN_SKIPS_ONLINE = "run_skips_online"
 _LLM_REQUESTS = "llm_requests"
@@ -404,6 +405,8 @@ _ONLINE_STEPS = (
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
+    _OnlineStep(_LEADS_CHECK_RUN_KIND, "leads_check_run_kind_online",
+                validate=(("llm_records", "llm_records_run_kind_check"),)),
     # The delivery tables can be large: their partial indexes are built without blocking writes.
     _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
 )
@@ -926,6 +929,14 @@ async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
         if await _lacks_outbound_check(conn, table, constraint):
             return True
     return False
+
+
+async def _leads_check_run_kind_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEADS_CHECK_RUN_KIND):
+        return False
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('llm_records') "
+        "AND conname = 'llm_records_run_kind_check' AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'leads_check'")
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -1692,6 +1703,14 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in await _outbound_reviews_ddl(conn):
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
+        if await _leads_check_run_kind_pending(conn):
+            from .llm_records import RUN_KINDS
+
+            kinds = ", ".join(f"'{kind}'" for kind in RUN_KINDS)
+            # Validate after commit: the large record table must not be scanned under ACCESS EXCLUSIVE.
+            await conn.execute("ALTER TABLE llm_records DROP CONSTRAINT llm_records_run_kind_check, ADD CONSTRAINT "
+                               f"llm_records_run_kind_check CHECK (run_kind IN ({kinds})) NOT VALID")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEADS_CHECK_RUN_KIND)
         if await _uncertain_deliveries_pending(conn):
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
         # Current databases never replay initialization DDL. Missing builtins
@@ -1747,6 +1766,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn)
+            or await _leads_check_run_kind_pending(conn)
             or await _uncertain_deliveries_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
