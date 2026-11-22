@@ -174,10 +174,12 @@ def test_only_the_default_manager_has_them_only_while_on_and_only_in_the_users_o
         assert _names(await ops.current_listing(_dm()))[-3:] == NAMES
         for turn in (_dm(group=True), _dm(sender="ou_someoneelse"), _web(client_id="client-1")):
             assert not set(NAMES) & set(_names(await ops.current_listing(turn)))
-            answer = await _call(ops, turn, ops_reminders.LIST, {})
-            assert answer["status"] == "error" and answer["error"] == {
-                "code": "forbidden",
-                "message": f"{ops_reminders.LIST} runs only in the user's own direct chat or on the dashboard"}
+            for name, arguments in ((ops_reminders.CREATE, {"text": "看 PR", "in_minutes": 5}),
+                                    (ops_reminders.LIST, {}), (ops_reminders.CANCEL, {"id": 1})):
+                answer = await _call(ops, turn, name, arguments)
+                assert answer["status"] == "error" and answer["error"] == {
+                    "code": "forbidden",
+                    "message": f"{name} runs only in the user's own direct chat or on the dashboard"}
         scenario = ManagerDefinition(
             id="manager-desk", name="Desk", description="", system_prompt="p", profile_id=None,
             tools=ManagerTools.ALL, task_scope=TaskScope.ALL, task_policy=TaskPolicy.FREE, enabled=True,
