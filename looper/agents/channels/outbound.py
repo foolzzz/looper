@@ -33,7 +33,7 @@ SEND_WAIT_SECONDS = 30
 KEYED_DEDUPE_WINDOW = 3600
 MAX_BACKOFF = 60
 DELIVERY_DEADLINE = 900
-OFF_RECOVERY_TIMEOUT = .1
+OFF_RECOVERY_TIMEOUT = 30
 STATE_WRITE_TIMEOUT = 5
 
 
@@ -160,6 +160,10 @@ class DeliveryExpired(Exception):
     pass
 
 
+class StateWriteUnavailable(Exception):
+    pass
+
+
 @dataclass
 class Counters:
     backoffs: int = 0
@@ -249,7 +253,7 @@ class Gateway:
                     if not self.breaker.allow():
                         raise CircuitOpen('outbound circuit is open')
                     result = await call()
-            except (CircuitOpen, DeliveryExpired):
+            except (CircuitOpen, DeliveryExpired, StateWriteUnavailable):
                 raise
             except Exception as exc:
                 error_class, retry_after = classify(exc)
@@ -323,6 +327,7 @@ class Outbox:
         self._start_lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._recovery_task: asyncio.Task | None = None
         self._workers: set[asyncio.Task] = set()
         self._waiters: dict[int, asyncio.Future] = {}
 
@@ -331,6 +336,10 @@ class Outbox:
         if self.enabled():
             await self.start()
             return
+        if self._task is None and (self._recovery_task is None or self._recovery_task.done()):
+            self._recovery_task = asyncio.create_task(self._recover_if_needed())
+
+    async def _recover_if_needed(self):
         try:
             async with asyncio.timeout(OFF_RECOVERY_TIMEOUT):
                 if await self.db.has_unfinished(self.channel_id):
@@ -349,6 +358,11 @@ class Outbox:
             self._task = asyncio.create_task(self._run())
 
     async def stop(self):
+        # Join the probe first: it may be about to start the scanner or new workers.
+        if self._recovery_task is not None:
+            self._recovery_task.cancel()
+            await asyncio.gather(self._recovery_task, return_exceptions=True)
+            self._recovery_task = None
         tasks = [*self._workers, *([self._task] if self._task else [])]
         for task in tasks:
             task.cancel()
@@ -466,16 +480,22 @@ class Outbox:
             logger.error('outbound delivery state write failed', exc_info=task.exception())
         self._wake.set()
 
-    async def _persist(self, call):
-        attempt = 0
-        while True:
-            try:
-                async with asyncio.timeout(STATE_WRITE_TIMEOUT):
-                    return await call()
-            except Exception:
-                attempt += 1
-                logger.warning('outbound state write unavailable; retrying without resending', exc_info=True)
-                await asyncio.sleep(min(MAX_BACKOFF, 2 ** min(attempt - 1, 6)))
+    async def _persist(self, call, *, timeout=None):
+        try:
+            # The optional total deadline includes calls and retry sleeps. A known
+            # platform result keeps retrying outside the app slot until it is saved.
+            async with asyncio.timeout(timeout):
+                attempt = 0
+                while True:
+                    try:
+                        async with asyncio.timeout(STATE_WRITE_TIMEOUT):
+                            return await call()
+                    except Exception:
+                        attempt += 1
+                        logger.warning('outbound state write unavailable; retrying without resending', exc_info=True)
+                        await asyncio.sleep(min(MAX_BACKOFF, 2 ** min(attempt - 1, 6)))
+        except TimeoutError as exc:
+            raise StateWriteUnavailable('outbound state write deadline expired') from exc
 
     def _expiry(self, row):
         now = self.clock()
@@ -499,7 +519,8 @@ class Outbox:
         if reason := self._expiry(row):
             raise DeliveryExpired(reason)
         attempted_at = self.clock()
-        row['first_possible_at'] = await self._persist(lambda: self.db.mark_attempted(row['id'], attempted_at))
+        row['first_possible_at'] = await self._persist(lambda: self.db.mark_attempted(row['id'], attempted_at),
+                                                      timeout=STATE_WRITE_TIMEOUT)
         if row['first_possible_at'] is None:
             raise DeliveryExpired('delivery claim no longer active')
         if reason := self._expiry(row):
@@ -516,6 +537,11 @@ class Outbox:
             return
         try:
             external_id = await self.gateway.write(row['kind'], lambda: self._attempt(row), keyed=True, retry=False)
+        except StateWriteUnavailable:
+            # No platform call happened. Defer outside the shared app slot even if
+            # the database also remains unavailable for this state write.
+            await self._persist(lambda: self.db.defer_unsent(row['id'],
+                                self.clock() + timedelta(seconds=backoff(1))))
         except DeliveryExpired as exc:
             await self._expire(row, str(exc))
         except CircuitOpen:

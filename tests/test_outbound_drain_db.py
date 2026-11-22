@@ -50,6 +50,7 @@ def test_disabled_boot_recovers_leftovers_and_empty_boot_does_not_write(monkeypa
         transport.send.return_value = 'om_sent'
         outbox = Outbox('app', transport, Gateway('app'), enabled=lambda: False)
         await outbox.start_if_needed()
+        await outbox._recovery_task
         assert outbox._task is None
         row = await db.insert_or_get(dict(channel_id='app', idempotency_key='leftover', kind='send',
                                          chat='chat', body={'text': 'hello'}, source='answer'))
@@ -62,6 +63,34 @@ def test_disabled_boot_recovers_leftovers_and_empty_boot_does_not_write(monkeypa
         finally:
             await outbox.stop()
     run_db(check, monkeypatch)
+
+
+def test_disabled_boot_recovers_after_the_pool_becomes_available(monkeypatch):
+    from looper.agents.channels.outbound import Gateway, Outbox
+    from looper.db import channel_outbox as db
+
+    async def check(pool):
+        row = await db.insert_or_get(dict(channel_id='app', idempotency_key='leftover', kind='send',
+                                         chat='chat', body={'text': 'hello'}, source='answer'))
+        await db.mark_sending(row['id'])
+        transport = AsyncMock()
+        transport.send.return_value = 'om_recovered'
+        outbox = Outbox('app', transport, Gateway('app'), enabled=lambda: False)
+        try:
+            async with pool.acquire():
+                await asyncio.wait_for(outbox.start_if_needed(), .05)
+                # Recovery gets more than the old 100 ms budget without blocking startup.
+                await asyncio.sleep(.15)
+                transport.send.assert_not_awaited()
+            async def delivered():
+                while (await db.get(row['id']))['state'] != 'sent':
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(delivered(), 2)
+            assert transport.send.await_count == 1
+            assert transport.send.call_args.kwargs['idempotency_key'] == 'leftover'
+        finally:
+            await outbox.stop()
+    run_db(check, monkeypatch, max_size=1, timeout=5)
 
 
 def test_waiters_and_idle_scanner_do_not_poll(monkeypatch):

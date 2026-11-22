@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+
+import pytest
 
 from looper.agents.channels import outbound
 from looper.agents.channels.base import PostOutcome
@@ -74,6 +77,37 @@ async def until(predicate):
         while not predicate():
             await asyncio.sleep(.005)
     await asyncio.wait_for(wait(), 2)
+
+
+@pytest.mark.parametrize('finish', ['deadline', 'stop'])
+def test_disabled_recovery_is_bounded_and_cancelled_at_shutdown(monkeypatch, finish):
+    monkeypatch.setattr(outbound, 'OFF_RECOVERY_TIMEOUT', .03 if finish == 'deadline' else 30)
+
+    async def run():
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        async def blocked_probe(*args):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        db = AsyncMock()
+        db.has_unfinished.side_effect = blocked_probe
+        box = outbound.Outbox('app', AsyncMock(), outbound.Gateway('app'), db, enabled=lambda: False)
+        try:
+            await asyncio.wait_for(box.start_if_needed(), .01)
+            await asyncio.wait_for(entered.wait(), 1)
+            # Repeated adapter starts share a single active probe.
+            await asyncio.wait_for(box.start_if_needed(), .01)
+            if finish == 'stop':
+                await box.stop()
+            await asyncio.wait_for(cancelled.wait(), .2)
+            db.has_unfinished.assert_awaited_once()
+            db.recover.assert_not_awaited()
+            assert box._task is None
+        finally:
+            await box.stop()
+    asyncio.run(run())
 
 
 def test_serial_per_chat_parallel_across_chats_and_replay():

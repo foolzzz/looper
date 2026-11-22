@@ -161,3 +161,66 @@ def test_timestamp_write_wait_cannot_cross_dedupe_window(monkeypatch):
         finally:
             await box.stop()
     run_db(check, monkeypatch, timeout=5)
+
+
+@pytest.mark.parametrize('failure', ['hang', 'errors', 'lost_ack'])
+def test_attempt_write_deadline_releases_app_slot_and_defers_without_sending(monkeypatch, failure):
+    from looper.agents.channels import outbound
+    from looper.db import channel_outbox as db
+
+    async def check(pool):
+        monkeypatch.setattr(outbound, 'STATE_WRITE_TIMEOUT', .05)
+        monkeypatch.setattr(outbound, 'MAX_BACKOFF', .01)
+        def limits():
+            return dict(send_qps=100, write_qps=100, max_in_flight=1, edit_interval_seconds=0)
+        gateway = outbound.Gateway('app', settings=limits, app_id='synthetic-deadline')
+        sibling = outbound.Gateway('bot', settings=limits, app_id='synthetic-deadline')
+        transport = AsyncMock()
+        transport.send.return_value = 'om_sent'
+        box = outbound.Outbox('app', transport, gateway)
+        row = await db.insert_or_get(dict(channel_id='app', idempotency_key='same-key', kind='send',
+                                         chat='chat', body={'text': 'hello'}, source='answer'))
+        await db.mark_sending(row['id'])
+        row['attempts'] = 1
+        writing, db_available, deferring = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_attempt, original_defer = db.mark_attempted, db.defer_unsent
+        async def unavailable(*args):
+            writing.set()
+            if failure == 'lost_ack':
+                await original_attempt(*args)
+            if failure == 'hang':
+                await db_available.wait()
+            raise ConnectionError('synthetic database unavailable')
+        async def defer(*args):
+            deferring.set()
+            await db_available.wait()
+            return await original_defer(*args)
+        monkeypatch.setattr(db, 'mark_attempted', unavailable)
+        monkeypatch.setattr(db, 'defer_unsent', defer)
+        worker = asyncio.create_task(box._deliver(row))
+        try:
+            await asyncio.wait_for(writing.wait(), 1)
+            # Even the defer write is blocked: a DB-free write on the sibling must proceed.
+            reaction = AsyncMock(return_value='ok')
+            assert await asyncio.wait_for(sibling.write('react', reaction), .3) == 'ok'
+            await asyncio.wait_for(deferring.wait(), .3)
+            assert gateway.breaker.state == 'closed'
+            assert not gateway.counters.failures
+            transport.send.assert_not_awaited()
+            db_available.set()
+            await asyncio.wait_for(worker, 1)
+            current = await db.get(row['id'])
+            assert current['state'] == 'pending' and current['attempts'] == 0
+            assert current['next_attempt_at'] > current['created_at']
+            monkeypatch.setattr(db, 'mark_attempted', original_attempt)
+            receipt = await asyncio.wait_for(box.send('send', 'chat', {'text': 'hello'}, None,
+                                                     'same-key', 'answer'), 2)
+            assert receipt.success and transport.send.await_count == 1
+            assert transport.send.call_args.kwargs['idempotency_key'] == 'same-key'
+            if failure == 'lost_ack':
+                assert (await db.get(row['id']))['first_possible_at'] == current['first_possible_at']
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            await box.stop()
+    run_db(check, monkeypatch, timeout=5)

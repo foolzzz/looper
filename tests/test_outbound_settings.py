@@ -40,9 +40,13 @@ def test_outbound_setting_load_update_reset_and_validation(monkeypatch):
     asyncio.run(run())
 
 
-def test_outbound_gateway_are_operator_only():
+def test_outbound_gateway_are_operator_only_and_inside():
+    from looper.agents.action_levels import ActionLevel
+
     for name in ('get', 'update'):
-        assert api_v1.find('POST', '/api/v1/outbound_gateway/' + name).operator_only
+        operation = api_v1.find('POST', '/api/v1/outbound_gateway/' + name)
+        assert operation.operator_only and operation.tool is None
+        assert operation.level is ActionLevel.INSIDE and operation.level_of is None
 
 
 @pytest.mark.parametrize('operation,body', [

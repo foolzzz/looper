@@ -1,6 +1,7 @@
 """Operator-only gateway controls, separate from agent-accessible chat settings."""
 
 from .. import chat_settings
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _BOOL, _object
 from ..ops import ErrorCode, OpError
 
@@ -18,12 +19,13 @@ OPERATIONS = (
     Operation("outbound_gateway.get", "POST", "/api/v1/outbound_gateway/get",
               "Read the outbound gateway controls.",
               "Read the outbound gateway controls. The gateway is disabled by default.",
-              _object({}, closed=True), VIEW, operator_only=True),
+              _object({}, closed=True), VIEW, operator_only=True, level=ActionLevel.INSIDE),
     Operation("outbound_gateway.update", "POST", "/api/v1/outbound_gateway/update",
               "Configure the outbound gateway and durable Lark outbox.",
               "Configure the outbound gateway and durable Lark outbox. Null restores a default; "
               "rate and edit defaults are conservative and remain to verify.",
-              _object(UPDATE, [], closed=True), VIEW, risk="high", confirms=True, operator_only=True),
+              _object(UPDATE, [], closed=True), VIEW, risk="high", confirms=True, operator_only=True,
+              level=ActionLevel.INSIDE),
 )
 
 
