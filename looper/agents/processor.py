@@ -214,6 +214,9 @@ class ProcessorFailure(str, Enum):
     TIMEOUT = "timeout"
     BUDGET = "budget"  # it reached its cap, or its cost is unknown so its cap could not be checked
     FAILED = "failed"  # it did not start, ended without a result, or with an error
+    # A prompt hook of the machine's Claude Code refused its input before any model turn (``detail`` says what the
+    # hook said). The same input is refused every time it is sent.
+    BLOCKED = "blocked"
 
 
 @dataclass(frozen=True)
@@ -427,6 +430,8 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
     failed = None
     if finished.timed_out:
         failed = ProcessorFailure.TIMEOUT, f"no reply within {deadline:g} s"
+    elif finished.blocked is not None:
+        failed = ProcessorFailure.BLOCKED, f"a Claude Code hook blocked its prompt: {finished.blocked}"
     elif result is None:
         failed = ProcessorFailure.FAILED, "its run ended without a result"
     elif launch.runtime.budget_error(result) is not None:

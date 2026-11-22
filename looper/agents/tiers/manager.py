@@ -442,6 +442,7 @@ class Prepared:
     quoted: lark_quote.QuoteRead | None = None
     # With manager.stable_context on: the sections as they read now, which ``turn_text`` leaves out.
     state: tuple[str, ...] | None = None
+    session: ManagerSession | None = None  # the session the model turn runs on, set by ``_prepare_turn``
 
 
 def api_handoff_prompt(reason: str, max_chars: int) -> str:
@@ -799,9 +800,7 @@ class ManagerAgent:
     # The state of the session the code runs on (``_session_now``), under the names it had on the Manager.
     _claude = session_field("claude")
     _claude_runtime = session_field("claude_runtime")
-    _session_id = session_field("session_id")
     _session_totals = session_field("session_totals")
-    _session_runtime = session_field("session_runtime")
     _session_profile = session_field("session_profile")
     _session_provider = session_field("session_provider")
     _turn_lock = session_field("turn_lock")
@@ -1416,7 +1415,9 @@ class ManagerAgent:
         return await self.ops.tools_problem() if self.ops is not None else None
 
     async def _library_with_server(self, library: Any) -> Any:
-        return await self.ops.library_with_server(library, self._runtime_root) if self.ops is not None else library
+        if self.ops is None:
+            return library
+        return await self.ops.library_with_server(library, self._runtime_root, session_key=self._session_now().key)
 
     async def _prepare_turn(self, token: TurnToken, envelope: MessageEnvelope, *, ask: Ask | None = None) -> Prepared:
         """Everything a turn needs before its process starts, every await a stoppable ``token.step`` or a
@@ -1563,7 +1564,8 @@ class ManagerAgent:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
-        switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
+        session = self._session_now()
+        switch = session_switch.profile_switch(session.session_id, session.session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider,
                                                command=list(signature[0]), label=self.agent_id)
         if switch is not None and switch.reason is SwitchReason.INSTRUCTIONS_CHANGED and not self._claude.started:
@@ -1576,7 +1578,7 @@ class ManagerAgent:
                 command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
                 totals=self._session_totals, price=launch.price), 10, undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
-        if switch is None and self._session_id and self._session_runtime == "api" \
+        if switch is None and session.session_id and session.session_runtime == "api" \
                 and (self._claude_runtime is not launch.runtime or not self._claude.started):
             # Restore the API session's saved context before deciding whether it needs a handoff.
             await token.keep("claude_stop", self._claude.stop(), 10)
@@ -1588,10 +1590,10 @@ class ManagerAgent:
                     totals=self._session_totals, price=launch.price), seconds,
                     undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
-        if switch is None and self._session_id and isinstance(self._claude, ReportsContext) \
+        if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
             switch = session_switch.context_full(
-                self._claude.context_tokens, self._claude.context_limit, runtime=self._session_runtime,
+                self._claude.context_tokens, self._claude.context_limit, runtime=session.session_runtime,
                 profile=self._session_profile, provider=self._session_provider)
         state: list[str] | None = None
         if ask.turn is not None and ask.turn.origin is TurnOrigin.COMPLETION:
@@ -1608,7 +1610,7 @@ class ManagerAgent:
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
-            quoted=ask.quoted, state=tuple(state) if state is not None else None)
+            quoted=ask.quoted, state=tuple(state) if state is not None else None, session=session)
 
     @contextmanager
     def _runtime_start_budget(self, launch: Launch) -> Iterator[float]:
@@ -1647,6 +1649,7 @@ class ManagerAgent:
     async def _start_turn(self, token: TurnToken, prepared: Prepared) -> None:
         """The prepared turn gets its process: the session switch, the runtime swap and the stale process's stop,
         the resume brief, the record and Claude's start. ``prepared.run`` holds what the run needs afterwards."""
+        session = prepared.session
         run, launch, signature = prepared.run, prepared.launch, prepared.signature
         envelope = prepared.envelope
         token.restart() if prepared.retried else token.advance(TurnPhase.STARTING)
@@ -1669,7 +1672,7 @@ class ManagerAgent:
             self._claude_command, prepared.prompt_file, launch))
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
         # asked for a clean one.
-        brief = "" if (self._claude.started or self._session_id or self._clean_start) and not self._pending_handoff \
+        brief = "" if (self._claude.started or session.session_id or self._clean_start) and not self._pending_handoff \
             else await token.step("resume_brief", self._resume_brief(envelope, prepared.message))
         run.brief = brief
         if prepared.state is not None:
@@ -1682,7 +1685,7 @@ class ManagerAgent:
             command=command,
             cwd=str(self._config.work_dir),
             input_text=f"{brief}\n\n{asked}" if brief else asked,
-            session_id=self._session_id,
+            session_id=session.session_id,
             system_prompt=prepared.system_prompt,
             launch=launch,
             pid_of=lambda: self._claude.pid,
@@ -1695,9 +1698,9 @@ class ManagerAgent:
                 recorder.account({"type": "system", "subtype": "compact_boundary",
                                   "compact_metadata": {"trigger": "auto", "pre_tokens": pre_context}})
             # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
-            run.resuming = self._session_id if not self._claude.started or launch.runtime.in_process else None
+            run.resuming = session.session_id if not self._claude.started or launch.runtime.in_process else None
             if not self._claude.started:
-                self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
+                session.session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
                 self._session_provider = launch.profile.provider.id
                 try:
                     with self._runtime_start_budget(launch) as seconds:
@@ -1742,7 +1745,7 @@ class ManagerAgent:
         if token is not None and token.ops_turn is not None:
             token.ops_turn.require_match = self._claude.shares_bridge
         if self.ops is not None:
-            self.ops.publish_binding(token.binding if token is not None else None)
+            self.ops.publish_binding(token.binding if token is not None else None, session_key=self._session_now().key)
 
     async def _run_prepared(self, token: TurnToken, prepared: Prepared) -> str:
         """Start the prepared turn and run it; the turn's record ends however it ends."""
@@ -2309,6 +2312,7 @@ class ManagerAgent:
         """Send the prepared message to the started Claude, follow its events and end the turn's record."""
         from ..runtimes.runner.session import RunnerSession
 
+        session = prepared.session
         message, context_envelope, ops_turn, note = prepared.message, prepared.envelope, prepared.turn, prepared.note
         retried, launch, run = prepared.retried, prepared.launch, prepared.run
         recorder, command, brief, resuming = run.recorder, run.command, run.brief, run.resuming
@@ -2333,9 +2337,9 @@ class ManagerAgent:
             # slow persistence) still saves it, and the next process resumes it.
             session_id = payload.get("session_id")
             if (payload.get("session_started") is not False and isinstance(session_id, str)
-                    and session_id and session_id != self._session_id and not token.abandoned):
-                self._session_id, self._clean_start = session_id, False
-                if self._session_runtime != "api" or not self._pending_handoff:
+                    and session_id and session_id != session.session_id and not token.abandoned):
+                session.session_id, self._clean_start = session_id, False
+                if session.session_runtime != "api" or not self._pending_handoff:
                     self._pending_switch = self._pending_handoff = None  # CLI sessions own the prompt at init
                 session_unsaved = True
             message = payload.get("message") if payload.get("type") == "assistant" else None
@@ -2560,17 +2564,17 @@ class ManagerAgent:
             if token.cancel.requested:
                 raise TurnStopped()
             switch = (session_switch.context_full(
-                self._claude.context_tokens, self._claude.context_limit, runtime=self._session_runtime,
+                self._claude.context_tokens, self._claude.context_limit, runtime=session.session_runtime,
                 profile=self._session_profile, provider=self._session_provider)
                 if isinstance(self._claude, ReportsContext) and self._claude.context_full
                 else session_switch.session_lost(
                     f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
                     profile=launch.profile.id))
-            if context_overflow and self._session_runtime == "api" and self._session_id:
+            if context_overflow and session.session_runtime == "api" and session.session_id:
                 await self._switch_session(switch, token.cancel)
             else:
                 await self._claude.stop()
-                self._session_id, self._session_totals = None, Usage()  # its totals went with it
+                session.session_id, self._session_totals = None, Usage()  # its totals went with it
                 await self._save_session_state()
                 # A rejected first request may not have stored its predecessor's handoff yet.
                 self._pending_switch = switch
@@ -2642,6 +2646,7 @@ class ManagerAgent:
         """``/new``: stop Claude and drop the saved session, so the next message starts a new session without a
         resume brief; record the reset as a run and confirm it in the chat it came from. A turn under way finishes
         first. Tasks and their Planners are not touched."""
+        session = self._session_now()
         origin = _message_origin(envelope)
         chosen = envelope.payload.get("new_session_profile_id") or None
         async with self._turn_lock, self._lifecycle_gate:
@@ -2658,15 +2663,15 @@ class ManagerAgent:
                 await self._load_session_state()
             # First: what a stopping Claude still writes (a turn of its own ending) saves the old session again.
             await self._claude.stop()
-            previous = self._session_id, self._session_totals, self._clean_start
-            self._session_id, self._session_totals, self._clean_start = None, Usage(), True
+            previous = session.session_id, self._session_totals, self._clean_start
+            session.session_id, self._session_totals, self._clean_start = None, Usage(), True
             try:
                 async with db_connection.transaction() as conn:
                     await self._write_session_state(conn)
                     await db_agent_sessions.select_profile(self.agent_id, chosen, pool=conn)
             except Exception as exc:
                 # Nothing is dropped: the next message resumes the saved session in a new process.
-                self._session_id, self._session_totals, self._clean_start = previous
+                session.session_id, self._session_totals, self._clean_start = previous
                 logger.exception("%s: could not drop its session for /new", self._log)
                 await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
                 return
@@ -2840,17 +2845,18 @@ class ManagerAgent:
         """Move to a new session because the Manager's agent changed. While the old session's Claude still runs,
         it first writes a handoff for the new one (one HANDOFF turn, recorded as a run and never sent to a
         chat)."""
+        session = self._session_now()
         if cancel.requested:
             raise TurnStopped()
         process = self._process
         handoff: str | None = None
-        api_history = (self._session_runtime == "api" and self._session_id is not None
-                       and await db_api_sessions.last_turn(self._session_id) is not None)
+        api_history = (session.session_runtime == "api" and session.session_id is not None
+                       and await db_api_sessions.last_turn(session.session_id) is not None)
         # A failed first API request has no committed conversation to summarize.
         # A process without the outbound review's hook writes no handoff while the review is on.
         if self._claude.started and process is not None and not self._claude.stale(process.signature) \
                 and not (outbound_hook.known_enabled() and process.launch.tool_hook is None) \
-                and (self._session_runtime != "api" or api_history):
+                and (session.session_runtime != "api" or api_history):
             # The handoff's prompt is not the user's message: it gets a cancel of its own, requested with the turn's, so
             # that writing it does not make the turn "running" or its message "seen".
             inner = TurnCancel()
@@ -2865,14 +2871,14 @@ class ManagerAgent:
         await self._claude.stop()
         logger.warning("%s: starting a new session (%s)%s", self._log, switch.describe(),
                        "; its previous session wrote a handoff" if handoff else "")
-        previous = self._session_id, self._session_totals, self._pending_switch, self._pending_handoff
-        self._session_id, self._session_totals = None, Usage()
+        previous = session.session_id, self._session_totals, self._pending_switch, self._pending_handoff
+        session.session_id, self._session_totals = None, Usage()
         self._pending_switch, self._pending_handoff = switch, handoff or self._pending_handoff
         try:
             # Persist the summary in the same transaction that removes the old API transcript.
             await self._write_session_state()
         except BaseException:
-            self._session_id, self._session_totals, self._pending_switch, self._pending_handoff = previous
+            session.session_id, self._session_totals, self._pending_switch, self._pending_handoff = previous
             raise
 
     async def _handoff(self, switch: SessionSwitch, process: _Process, cancel: TurnCancel) -> str | None:
@@ -2880,6 +2886,7 @@ class ManagerAgent:
         ends it with ``TurnStopped``: the old session and its process stay, and the next turn switches again."""
         from ..runtimes.runner.session import RunnerSession
 
+        session = self._session_now()
         text = (
             f"[HANDOFF] This session ends here ({switch.describe()}), and the next one cannot read this "
             "conversation. Write a compact handoff for it: what you and the user are working on in each chat, "
@@ -2887,11 +2894,11 @@ class ManagerAgent:
             f"questions. At most {HANDOFF_MAX_CHARS} characters. Reply with the handoff only; the user does not "
             "see it."
         )
-        if self._session_runtime == "api":
+        if session.session_runtime == "api":
             text = api_handoff_prompt(switch.describe(), HANDOFF_MAX_CHARS)
         recorder = ClaudeRunRecorder(
             agent_id=self.agent_id, task_id=None, command=process.command, cwd=str(self._config.work_dir),
-            input_text=text, session_id=self._session_id, system_prompt=process.system_prompt,
+            input_text=text, session_id=session.session_id, system_prompt=process.system_prompt,
             launch=process.launch, pid_of=lambda: self._claude.pid,
         )
         async with recorder:
@@ -2906,7 +2913,7 @@ class ManagerAgent:
                                  if isinstance(block, dict) and block.get("type") == "text")
 
             try:
-                if isinstance(self._claude, InProcessTools) and (self._session_runtime == "api"
+                if isinstance(self._claude, InProcessTools) and (session.session_runtime == "api"
                                                                or isinstance(self._claude, RunnerSession)):
                     self._claude.set_turn_tools(_HandoffTools())
                 if isinstance(self._claude, RunnerSession):
@@ -2962,7 +2969,8 @@ class ManagerAgent:
     async def _resume_brief(self, envelope: MessageEnvelope, message: str) -> str:
         """What starts the first turn of a new session: why it is new, the handoff the old session wrote, and
         the recent conversation of each chat; '' when there is none of these."""
-        if self._pending_handoff and self._session_runtime == "api" and self._session_id:
+        session = self._session_now()
+        if self._pending_handoff and session.session_runtime == "api" and session.session_id:
             # A prior turn may have committed before its final state write (or the Manager's restart).
             await self._save_session_state()
             if not self._pending_handoff:
@@ -3033,6 +3041,7 @@ class ManagerAgent:
         of its own, to the chat of the message Claude answered before it (the
         turn's tag), and only to the record when there is none.
         """
+        session = self._session_now()  # the session whose resident runs these turns
 
         async def begin(after: Any) -> AutonomousRun:
             self._last_activity = self._clock()
@@ -3049,7 +3058,7 @@ class ManagerAgent:
                 command=command,
                 cwd=str(self._config.work_dir),
                 input_text=AUTONOMOUS_INPUT,
-                session_id=self._session_id,
+                session_id=session.session_id,
                 system_prompt=system_prompt,
                 launch=launch,
                 autonomous=True,
@@ -3101,11 +3110,12 @@ class ManagerAgent:
 
     def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
         """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
+        session = self._session_now()
         runtime = launch.runtime
         command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
                                            prompt_file=prompt_file, launch=launch)
-        if resume and self._session_id:
-            command.extend(runtime.resume_args(self._session_id))
+        if resume and session.session_id:
+            command.extend(runtime.resume_args(session.session_id))
         return command
 
     async def _listed(self) -> db_tasks.TaskFilter:
@@ -3149,17 +3159,18 @@ class ManagerAgent:
         """What the turn starts with (``state_view.render``): the whole block when its session may not hold the
         last one: a new session (``/new``, a switch such as a full context, none saved), a new process (a server
         restart, an idle close), or a runtime whose resident session does not report its compactions."""
+        session = self._session_now()
         shown = self._state_shown
         reason = None
         if not launch.runtime.resident_compaction_events:
             reason = "no compaction events"
-        elif switch is not None or not self._session_id or (shown is not None and shown.session != self._session_id):
+        elif switch is not None or not session.session_id or (shown is not None and shown.session != session.session_id):
             reason = "new session"
         elif not self._claude.started:
             reason = "new process"
         elif shown is None:
             reason = self._state_lost
-        return state_view.render(sections, shown, session=self._session_id, whole_reason=reason)
+        return state_view.render(sections, shown, session=session.session_id, whole_reason=reason)
 
     def _context_changed(self, reason: str) -> None:
         """The session may no longer hold the last whole block (``reason``: a compaction, a turn of its own)."""
@@ -3170,12 +3181,13 @@ class ManagerAgent:
         """After a turn that started with the state: the session holds its whole block once the turn went through
         (``seen``) with the generation it was rendered for. A turn that did not go through leaves no block a later
         turn may refer to; a compaction or a turn of its own meanwhile forgot it already (``_context_changed``)."""
+        session = self._session_now()
         if run.state is None:
             return
         if not seen:
             self._state_shown, self._state_lost = None, "the last turn did not go through"
         elif run.state_generation == self._state_generation:
-            self._state_shown = replace(run.state.shown, session=self._session_id)
+            self._state_shown = replace(run.state.shown, session=session.session_id)
 
     async def _projects_section(self, listed: db_tasks.TaskFilter | None = None) -> list[str]:
         """The existing projects, so Claude can name a task's project."""

@@ -9,7 +9,9 @@ decision D-②). By default it only counts: the in-scope events of the last ``--
 subscription started, by chat kind and day, its windows and what they would cost. ``--run --budget-usd X`` runs
 them oldest first through the subscription's own rendering, processor, parsing and storing (leads marked
 ``backfill``), keeps its progress after each window (``leads.backfill.<schedule id>``) and stops before a window
-would pass the budget; run again, it resumes.
+would pass the budget; run again, it resumes. A window a prompt hook blocks, or whose reply cannot be read when asked
+twice (``extraction.ask``), is skipped, listed with the progress, and the backfill goes on; any other processor
+failure stops it there.
 """
 
 from __future__ import annotations
@@ -165,6 +167,7 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
                     claude_bin: str, runtime_root: Any) -> tuple[int, str]:
     import json
     import math
+    from collections import Counter
     from datetime import datetime, timedelta, timezone
 
     from ..db import connection, subscriptions as db_subs, system_settings
@@ -231,7 +234,9 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
         totals = {"new": 0, "merged": 0, "superseded": 0, "dropped": 0}
         # ``budget_usd`` bounds this run of the command; ``total`` is every run's, kept with the progress.
         done, total, windows = progress["done_seq"], float(progress["spent_usd"]), progress["windows"]
-        spent, events = 0.0, 0
+        # Every run's skipped windows, kept with the progress: their seqs, events and why (``extraction.SkipReason``).
+        skipped: list[dict[str, Any]] = list(progress.get("skipped") or [])
+        spent, events, valid_days = 0.0, 0, await leads_model.valid_days(pool)
         stopped = ""
         while True:
             picked = await db_subs.extraction_window(pool, scope, output_kind="leads", from_seq=done, to_seq=start,
@@ -252,38 +257,54 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
                                            known_since=max(row["sent_at"] for row in picked["rows"]))
             reference = {"kind": "leads_backfill", "schedule_id": sid, "from_seq": done, "to_seq": found.last_seq,
                          "events": len(found.rows), "context": found.context, "known": found.known}
-            result = await processor.run(
-                owner=f"{sid}:backfill", instructions=schedule["requirement"], input_text=found.text,
-                input_ref=reference, quiet_word=extraction.QUIET_WORD, budget_usd=cap,
-                timeout_s=float(processor.PROCESSOR_TIMEOUT_SEC), runtime_root=runtime_root, claude_bin=claude_bin,
-                project_id=schedule["project_id"], schedule_id=sid, contract=extraction.LEADS_CONTRACT,
-                metadata={"backfill": reference})
-            spent += result.cost_usd or 0.0
-            total += result.cost_usd or 0.0
-            if result.failure is not None:
-                stopped = f"the processor gave no reply ({result.failure.value}): {result.detail}"
-            parsed = None if stopped else extraction.parse(
-                "leads", result.reply or "", found.refs, now=now.astimezone(extraction._zone(zone_name)),
-                valid_days=await leads_model.valid_days(pool), enabled_types=(), app_seqs=found.app_seqs)
-            if parsed is not None and parsed.state == "invalid":
-                stopped = f"the processor's reply could not be read: {parsed.reason}"
+
+            async def ask(reminder: str, budget: float, timeout_s: float) -> processor.ProcessorRun:
+                return await processor.run(
+                    owner=f"{sid}:backfill",
+                    instructions=schedule["requirement"] + (f"\n\n{reminder}" if reminder else ""),
+                    input_text=found.text, input_ref=reference, quiet_word=extraction.QUIET_WORD, budget_usd=budget,
+                    timeout_s=timeout_s, runtime_root=runtime_root, claude_bin=claude_bin,
+                    project_id=schedule["project_id"], schedule_id=sid, contract=extraction.LEADS_CONTRACT,
+                    metadata={"backfill": {**reference, "reminded": bool(reminder)}})
+
+            asked = await extraction.ask(
+                ask, lambda reply: extraction.parse(
+                    "leads", reply, found.refs, now=now.astimezone(extraction._zone(zone_name)),
+                    valid_days=valid_days, enabled_types=(), app_seqs=found.app_seqs),
+                budget_usd=cap, timeout_s=float(processor.PROCESSOR_TIMEOUT_SEC))
+            spent += asked.cost_usd or 0.0
+            total += asked.cost_usd or 0.0
+            if asked.parsed is None and asked.skipped is None:
+                stopped = f"the processor gave no reply ({asked.result.failure.value}): {asked.result.detail}"
             async with connection.transaction() as conn:
-                if not stopped:
-                    counts = await extraction.store_leads(conn, parsed, source_id=sub["source_id"], run_id=None,
-                                                          record_id=result.record_id, backfill=True, more=found.more)
+                if asked.skipped is not None:  # never the whole backfill held on one window: on to the next
+                    skipped.append({"from_seq": done, "to_seq": found.last_seq, "events": len(found.rows),
+                                    "reason": asked.skipped.value})
+                elif not stopped:
+                    counts = await extraction.store_leads(conn, asked.parsed, source_id=sub["source_id"], run_id=None,
+                                                          record_id=asked.result.record_id, backfill=True,
+                                                          more=found.more)
                     for name in ("new", "merged", "superseded"):
                         totals[name] += counts[name]
                     totals["dropped"] += sum(counts["dropped"].values())
+                if not stopped:
                     done, windows, events = found.last_seq, windows + 1, events + len(found.rows)
                 await conn.execute(
                     "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
                     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key,
-                    json.dumps({"done_seq": done, "spent_usd": round(total, 6), "windows": windows}))
+                    json.dumps({"done_seq": done, "spent_usd": round(total, 6), "windows": windows,
+                                "skipped": skipped}))
             if stopped or not found.more and done >= start:
                 break
         lines.append(f"ran {windows - progress['windows']} windows: {totals['new']} new leads, {totals['merged']} "
                      f"merged, {totals['superseded']} superseded, {totals['dropped']} dropped; spent {_usd(spent)} of "
                      f"{_usd(budget_usd)} ({_usd(total)} in all); done up to seq {done} of {start}")
+        if new_skips := skipped[len(progress.get("skipped") or []):]:
+            reasons = Counter(skip["reason"] for skip in new_skips)
+            lines.append(f"  skipped {len(new_skips)} windows ("
+                         + ", ".join(f"{reason} {n}" for reason, n in sorted(reasons.items()))
+                         + f"), {sum(skip['events'] for skip in new_skips):,} events: nothing stored from them; "
+                         f"their seqs are listed with the progress ({key})")
         if stopped:
             lines.append(f"  {stopped}; run it again to resume")
         return (1 if stopped and "budget" not in stopped else 0), "\n".join(lines)

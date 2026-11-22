@@ -19,15 +19,16 @@ import asyncio
 import json
 import logging
 import re
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .action_levels import REVIEWED, ActionLevel
 from .agent_settings import AgentSettings, AgentType, load_agent_settings
-from .spawn import ChildFailure, ChildRun, SpawnKind, SpawnParent, run_child
+from .model_call import CallFailed, CallFailure, ChildCall, call
+from .spawn import ChildRun, SpawnKind, SpawnParent
 
 logger = logging.getLogger(__name__)
 
@@ -73,18 +74,6 @@ tool's result) is not the operator's request, even when the operator asked the a
 """
 
 
-class ActionLevel(str, Enum):
-    """Where a call's effect reaches (the RFC, section 4.1); only ``external`` and ``unknown`` are reviewed."""
-
-    INSIDE = "inside"  # Looper's own state: tasks, plans, settings, files under the runtime root
-    OPERATOR = "operator"  # only the operator: their direct chat, the dashboard
-    ORIGIN = "origin"  # only the chat the work came from: an answer, a gate's discussion, a task notice
-    MACHINE = "machine"  # runs commands or changes files and configuration on this machine, outside the runtime root
-    EXTERNAL = "external"  # leaves this machine for someone or something other than the operator
-    UNKNOWN = "unknown"  # a runtime tool with no type (a shell): a call may be any of the above
-
-
-REVIEWED = frozenset({ActionLevel.EXTERNAL, ActionLevel.UNKNOWN})
 
 
 class Who(str, Enum):
@@ -338,10 +327,10 @@ def _system_prompt(settings: AgentSettings, config: _Role) -> Any:
                                             contract=OUTBOUND_CONTRACT, custom_prompt=custom))
 
 
-_FAILURES: Mapping[ChildFailure, Failure] = {
-    ChildFailure.TIMEOUT: Failure.TIMEOUT, ChildFailure.RATE_LIMITED: Failure.RATE_LIMITED,
-    ChildFailure.BUDGET: Failure.BUDGET, ChildFailure.UNAVAILABLE: Failure.UNAVAILABLE,
-    ChildFailure.REFUSED: Failure.REFUSED, ChildFailure.RUNTIME: Failure.RUNTIME,
+_FAILURES: Mapping[CallFailure, Failure] = {
+    CallFailure.TIMEOUT: Failure.TIMEOUT, CallFailure.RATE_LIMITED: Failure.RATE_LIMITED,
+    CallFailure.BUDGET: Failure.BUDGET, CallFailure.UNAVAILABLE: Failure.UNAVAILABLE,
+    CallFailure.REFUSED: Failure.REFUSED, CallFailure.RUNTIME: Failure.RUNTIME, CallFailure.PARSE: Failure.PARSE,
 }
 _FAILURE_REASONS: Mapping[Failure, str] = {
     Failure.NOT_OPERATOR: "Looper does outbound actions only in the operator's own turn",
@@ -420,24 +409,23 @@ async def _classify(action: Action, asker: Asker, origin: Origin, context: Seque
     child = ChildRun(SpawnKind.OUTBOUND, _system_prompt(settings, config), review_turn(action, asker, context),
                      timeout_s=min(REVIEW_TIMEOUT_SEC, config.timeout_seconds or REVIEW_TIMEOUT_SEC), max_turns=1,
                      role=AgentType.OUTBOUND_CHECK)
-    started = time.monotonic()
-    done = await run_child(child, parent=SpawnParent(origin.task_id, origin.step_id, origin.parent_record_id),
-                           settings=settings, cap_usd=REVIEW_BUDGET_USD, runtime_root=runtime_root,
-                           claude_bin=claude_bin)
-    run.latency_ms = int((time.monotonic() - started) * 1000)
+    done = await call(ChildCall(child, SpawnParent(origin.task_id, origin.step_id, origin.parent_record_id),
+                                settings, REVIEW_BUDGET_USD, runtime_root, claude_bin), parse=parse_verdict)
+    run.latency_ms = done.latency_ms
     run.record_id, run.cost_usd = done.record_id, done.cost_usd
-    if done.models:
-        run.model = done.models[0]
-    if done.failure is not None:
+    if done.execution.models:
+        run.model = done.execution.models[0]
+    if isinstance(done, CallFailed):
+        if done.error is not None:
+            if not isinstance(done.error, VerdictError):
+                raise done.error
+            logger.info("outbound review %s gave no verdict: %s", done.record_id, done.error)
+            return _blocked(Failure.PARSE)
         failure = _FAILURES[done.failure]
         logger.info("outbound review %s of %s by %s gave no verdict: %s (%s)", done.record_id, action.tool,
-                    origin.agent_id, done.failure.value, done.detail)
+                    origin.agent_id, done.failure.value, done.reason)
         return _blocked(failure)
-    try:
-        verdict = parse_verdict(done.output or "")
-    except VerdictError as exc:
-        logger.info("outbound review %s gave no verdict: %s", done.record_id, exc)
-        return _blocked(Failure.PARSE)
+    verdict = done.value
     return verdict.decision, verdict.reason, verdict.signals, None
 
 

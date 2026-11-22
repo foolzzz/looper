@@ -17,7 +17,7 @@ from typing import Any
 import asyncpg
 import pytest
 
-from looper.agents import agent_settings, extraction, leads_check, subscription_runs, subscriptions
+from looper.agents import agent_settings, extraction, leads_check, processor, subscription_runs, subscriptions
 from looper.agents.agent_settings import AgentType
 from looper.agents.extraction import parse
 from looper.agents.ops import ErrorCode, OpError
@@ -381,21 +381,51 @@ def test_an_intents_run_stores_pending_and_flagged_intents_and_pushes_nothing(mo
     scenario(check, monkeypatch, tmp_path, reply=reply)
 
 
-@pytest.mark.parametrize("reply, outcome, status", [
-    ("Here are the leads: none really.", "output_invalid", "failed"),
-    ('{"leads": "none"}', "output_invalid", "failed"),
-])
-def test_a_reply_that_cannot_be_read_fails_the_run_and_keeps_the_cursor(monkeypatch, tmp_path, reply, outcome, status):
+def test_an_unreadable_reply_is_asked_once_more_then_its_window_is_skipped(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await extractor(env)
-        await add(env.pool, "something", sent_at=minutes_ago(env, 5))
-        before = await cursor(env, sid)
+        top = await add(env.pool, "something", sent_at=minutes_ago(env, 5))
+        fake.outcomes = [("Here are the leads: none really.", None), ('{"leads": "none"}', None)]
         run = await fire(env, sid)
-        assert (run["status"], run["stream"]["outcome"]) == (status, outcome)
-        assert "could not be read" in run["error"] and await cursor(env, sid) == before
+        assert (run["status"], run["stream"]["outcome"], run["stream"]["skip_reason"]) == (
+            "completed", "skipped", "invalid_reply")
+        # Asked twice, the second time with the reminder; never stuck: the cursor is past the window.
+        assert len(fake.calls) == 2 and extraction.REFORMAT_REMINDER in fake.calls[1]["instructions"]
+        assert extraction.REFORMAT_REMINDER not in fake.calls[0]["instructions"]
+        assert await cursor(env, sid) == top and await env.pool.fetchval("SELECT count(*) FROM message_leads") == 0
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_reply_read_on_the_second_ask_is_stored(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+        top = await add(env.pool, "I will fix the login page today", sent_at=minutes_ago(env, 5))
+        lead = {"kind": "commitment", "summary": "The login page gets fixed today", "confidence": "high",
+                "sources": ["m1"]}
+        fake.outcomes = [("Sure! Here you go.", None), (json.dumps({"leads": [lead], "instructions_seen": []}), None)]
+        run = await fire(env, sid)
+        assert (run["status"], run["stream"]["outcome"], run["stream"]["skip_reason"]) == (
+            "completed", "extracted", None)
+        assert await cursor(env, sid) == top and await env.pool.fetchval("SELECT count(*) FROM message_leads") == 1
+        # Both asks are paid for.
+        assert run["cost_usd"] == pytest.approx(2 * fake.cost)
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_window_a_prompt_hook_blocks_is_skipped_at_once_and_not_asked_again(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+        top = await add(env.pool, "something", sent_at=minutes_ago(env, 5))
+        fake.outcomes = [(None, processor.ProcessorFailure.BLOCKED)]
+        run = await fire(env, sid)
+        assert (run["status"], run["stream"]["outcome"], run["stream"]["skip_reason"]) == (
+            "completed", "skipped", "blocked_by_hook")
+        assert len(fake.calls) == 1 and await cursor(env, sid) == top
         assert await env.pool.fetchval("SELECT count(*) FROM message_leads") == 0
 
-    scenario(check, monkeypatch, tmp_path, reply=reply)
+    scenario(check, monkeypatch, tmp_path)
 
 
 def test_a_quiet_reply_stores_nothing_and_moves_the_cursor(monkeypatch, tmp_path):
@@ -490,6 +520,78 @@ def test_a_scope_changed_while_the_processor_runs_stores_nothing_and_keeps_the_c
         assert len(fake.calls) == 1 and "oc_other" not in fake.calls[0]["input_text"]
         assert run["status"] == "cancelled" and "nothing was stored" in run["error"]
         assert await env.pool.fetchval("SELECT count(*) FROM message_leads") == 0 and await cursor(env, sid) == before
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("outcomes", [[(None, "blocked")], [("prose", None), ("prose again", None)]])
+def test_a_window_skipped_under_a_scope_changed_meanwhile_is_cancelled_and_keeps_the_cursor(
+        monkeypatch, tmp_path, outcomes):
+    async def check(env, poster, fake):
+        sid = await extractor(env, subscription={"include_chats": ["oc_allowed"]})
+        await _two_chats(env, sid)
+        before = await cursor(env, sid)
+
+        async def widen():
+            fake.during = None
+            await env.ok("POST", "/api/v1/schedule_admin/update",
+                         {"schedule_id": sid, "fields": {"subscription": {"include_chats": []}}})
+
+        fake.during = widen
+        fake.outcomes = [(reply, processor.ProcessorFailure(failure) if failure else None)
+                         for reply, failure in outcomes]
+        run = await fire(env, sid)
+        # The widened scope's window was never read: moving past it would skip what it now takes in.
+        assert (run["status"], run["stream"]["outcome"], run["stream"]["skip_reason"]) == ("cancelled", "failed", None)
+        assert "nothing was stored" in run["error"] and await cursor(env, sid) == before
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_an_unreadable_reply_with_nothing_left_of_the_cap_fails_the_run_and_keeps_the_window(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+        before = await cursor(env, sid)
+        await add(env.pool, "something", sent_at=minutes_ago(env, 5))
+        fake.cost = 0.6  # the preset's whole cap: nothing is left to ask again with
+        fake.outcomes = [("Here are the leads: none really.", None)]
+        run = await fire(env, sid)
+        assert (run["status"], run["stream"]["outcome"], run["stream"]["skip_reason"]) == ("failed", "failed", None)
+        assert "(budget)" in run["error"] and len(fake.calls) == 1 and await cursor(env, sid) == before
+        assert run["cost_usd"] == pytest.approx(0.6)
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_runs_that_keep_skipping_their_window_are_alerted_once_and_recover_on_one_that_does_not(
+        monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await extractor(env)
+
+        async def firing(n, outcome):
+            await add(env.pool, f"message {n}", sent_at=minutes_ago(env, 1))
+            fake.outcomes = [outcome]
+            run = await fire(env, sid)
+            return run["status"], run["stream"]["outcome"]
+
+        async def notices():
+            return [dict(row) for row in await env.pool.fetch(
+                "SELECT kind, text FROM schedule_notifications WHERE schedule_id = $1 AND kind LIKE 'skip_%' "
+                "ORDER BY created_at, id", sid)]
+
+        blocked = (None, processor.ProcessorFailure.BLOCKED)
+        assert [await firing(1, blocked), await firing(2, blocked)] == [("completed", "skipped")] * 2
+        # A failed run neither ends nor adds to the streak.
+        assert await firing(3, (None, processor.ProcessorFailure.TIMEOUT)) == ("timed_out", "failed")
+        assert await notices() == []
+        assert await firing(4, blocked) == ("completed", "skipped")
+        [alert] = await notices()
+        assert alert["kind"] == "skip_alert" and "已连续 3 次跳过" in alert["text"] and "hook" in alert["text"]
+        assert "message" not in alert["text"]  # what the messages say is never in it
+        assert await firing(5, blocked) == ("completed", "skipped")
+        assert [n["kind"] for n in await notices()] == ["skip_alert"]  # once per streak
+        assert await firing(6, ("NONE", None)) == ("completed", "quiet")
+        assert [n["kind"] for n in await notices()] == ["skip_alert", "skip_recovered"]
 
     scenario(check, monkeypatch, tmp_path)
 
@@ -1030,3 +1132,27 @@ def test_the_backfill_caps_the_processor_at_what_is_left_of_its_budget(tmp_path,
         assert _cli(tmp_path, url, "--days", "30", "--run", "--budget-usd", "0.01") == 0
         # The subscription's own cap is $0.6 a run: the processor gets the smaller, what is left of $0.01.
         assert [call["budget_usd"] for call in fake.calls] == [0.01]
+
+
+def test_the_backfill_skips_a_blocked_window_and_an_unreadable_one_and_goes_on(tmp_path, capsys, monkeypatch):
+    from looper.agents import msgflow_commands
+
+    monkeypatch.setattr(msgflow_commands, "BACKFILL_WINDOW", 1)  # one event a window: three windows
+    fake = processor_says(monkeypatch, "NONE")
+    fake.outcomes = [(None, processor.ProcessorFailure.BLOCKED),          # window 1: blocked, not asked again
+                     ("prose", None), ("still prose", None),             # window 2: asked twice, then skipped
+                     ("NONE", None)]                                      # window 3: read
+    with fresh_database_without_recording(DSN) as (url, _):
+        asyncio.run(_backfill_setup(url, str(tmp_path)))
+        assert _cli(tmp_path, url, "--days", "30", "--run", "--budget-usd", "1") == 0
+        out = capsys.readouterr().out
+        assert "skipped 2 windows (blocked_by_hook 1, invalid_reply 1)" in out
+        [row] = asyncio.run(_rows(url, "SELECT value FROM system_settings WHERE key LIKE 'leads.backfill.%'"))
+        progress = json.loads(row["value"])
+        assert [skip["reason"] for skip in progress["skipped"]] == ["blocked_by_hook", "invalid_reply"]
+        assert all(skip["events"] == 1 and skip["from_seq"] < skip["to_seq"] for skip in progress["skipped"])
+        assert len(fake.calls) == 4 and extraction.REFORMAT_REMINDER in fake.calls[2]["instructions"]
+        # A second run has nothing left: the skipped windows are not read again.
+        fake.calls.clear()
+        assert _cli(tmp_path, url, "--days", "30", "--run", "--budget-usd", "1") == 0
+        assert fake.calls == []
