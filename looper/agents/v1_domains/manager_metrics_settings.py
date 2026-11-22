@@ -1,6 +1,7 @@
 """Operator-only configuration of Manager observations, separate from client chat controls."""
 
 from .. import chat_settings
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _object, _BOOL
 
 VIEW = _object({"enabled": _BOOL}, closed=True)
@@ -9,12 +10,14 @@ OPERATIONS = (
     Operation("manager_metrics_settings.get", "POST", "/api/v1/manager_metrics_settings/get",
               "Read the Manager metrics setting.",
               "Read the Manager metrics setting. It is disabled by default.",
-              _object({}, closed=True), VIEW, operator_only=True),
+              _object({}, closed=True), VIEW, operator_only=True,
+              level=ActionLevel.INSIDE),  # reads only Looper's own metrics setting
     Operation("manager_metrics_settings.update", "POST", "/api/v1/manager_metrics_settings/update",
               "Set the Manager metrics setting.",
               "Set the Manager metrics setting. Null restores the disabled default.",
               _object({"enabled": {"type": ["boolean", "null"]}}, closed=True), VIEW,
-              risk="high", confirms=True, operator_only=True),
+              risk="high", confirms=True, operator_only=True,
+              level=ActionLevel.INSIDE),  # changes only Looper's own metrics setting
 )
 
 
