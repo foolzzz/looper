@@ -142,7 +142,7 @@ class TestManagerContext:
                 assert _replies(chat.bus)[0].payload["outcome"] == "failed"
                 assert len(chat.model.requests) == 2
                 assert (await agent_sessions.get_session("manager"))["session_id"] == old
-                assert chat.manager._session_id == old
+                assert chat.manager._sessions["main"].session_id == old
                 history = await pool.fetchval(
                     "SELECT jsonb_agg(item ORDER BY seq)::text FROM api_session_items WHERE session_id=$1", old)
                 assert "Keep this evidence." in history and SUMMARY in history

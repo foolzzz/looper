@@ -59,6 +59,7 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
+from ..tiers.manager_session import MAIN_SESSION
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
@@ -741,13 +742,21 @@ class ManagerOps:
                 "matches": [{"by": by, "when": when, "count": count}
                             for (by, when), count in sorted(self._matches.items())]}
 
-    def publish_binding(self, binding: str | None) -> None:
-        """Write the binding file the MCP bridge reads at each call (synchronously and atomically: it must be on
-        disk before the prompt reaches the runtime). ``None``: no turn runs."""
-        if self._turn_file is None:
+    def turn_file_for(self, session_key: str) -> Path | None:
+        """The binding file of the Manager session ``session_key``: what the MCP bridge of that session's runtime
+        reads at each call. Only main has one (``turn_file``)."""
+        if session_key != MAIN_SESSION:
+            raise ValueError(f"the Manager has no session {session_key!r}")
+        return self._turn_file
+
+    def publish_binding(self, binding: str | None, *, session_key: str = MAIN_SESSION) -> None:
+        """Write the binding file of ``session_key`` (``turn_file_for``) the MCP bridge reads at each call
+        (synchronously and atomically: it must be on disk before the prompt reaches the runtime). ``None``: no turn
+        runs."""
+        path = self.turn_file_for(session_key)
+        if path is None:
             return
         self._epoch += 1
-        path = self._turn_file
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -947,18 +956,20 @@ class ManagerOps:
 
     # --- The Manager's MCP entry ---
 
-    def server_config(self) -> dict[str, Any]:
+    def server_config(self, *, session_key: str = MAIN_SESSION) -> dict[str, Any]:
+        """Looper's MCP entry for the runtime of the Manager session ``session_key``, naming its binding file."""
         config = server_config(self._url, self._token)
-        if self._turn_file is not None:
-            config["env"][TURN_FILE_ENV] = str(self._turn_file)
+        if (turn_file := self.turn_file_for(session_key)) is not None:
+            config["env"][TURN_FILE_ENV] = str(turn_file)
         if trace := os.environ.get(TRACE_ENV, "").strip():  # a server started to trace its bridge (an eval)
             config["env"][TRACE_ENV] = trace
         return config
 
-    async def library_with_server(self, library: Any, runtime_root: Path) -> Any:
-        """``library`` (``AgentLibrary``) with Looper's own MCP server added: always there for the Manager, and
-        over a catalog server of the same name."""
-        library = await library_with_server(library, runtime_root, self.server_config(), who="the Manager")
+    async def library_with_server(self, library: Any, runtime_root: Path, *, session_key: str = MAIN_SESSION) -> Any:
+        """``library`` (``AgentLibrary``) with Looper's own MCP server for the Manager session ``session_key``
+        added: always there for the Manager, and over a catalog server of the same name."""
+        library = await library_with_server(library, runtime_root, self.server_config(session_key=session_key),
+                                            who="the Manager")
         if self._scope.manager_id != DEFAULT_MANAGER_ID:
             library = replace(library, manager_tools=tuple(self._scope.tools))
         return library

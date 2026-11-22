@@ -3,9 +3,14 @@ session the context sets, else main."""
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
+import json
+import sys
 from dataclasses import fields
 from pathlib import Path
+
+import pytest
 
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import CLAUDE_CODE
@@ -41,8 +46,8 @@ def test_the_old_names_read_and_write_the_session_the_context_sets(tmp_path: Pat
 
     def turn(session: ManagerSession, session_id: str, shown: StateShown) -> tuple[object, ...]:
         manager._current.set(session)
-        manager._session_id, manager._state_shown = session_id, shown
-        return manager._session_now(), manager._session_id, manager._turn_lock, manager._state_shown
+        manager._session_now().session_id, manager._state_shown = session_id, shown
+        return manager._session_now(), manager._session_now().session_id, manager._turn_lock, manager._state_shown
 
     assert contextvars.copy_context().run(turn, group, "s-group", shown_group) == (
         group, "s-group", group.turn_lock, shown_group)
@@ -51,8 +56,27 @@ def test_the_old_names_read_and_write_the_session_the_context_sets(tmp_path: Pat
     assert (group.session_id, group.state_shown) == ("s-group", shown_group)
     assert main.turn_lock is not group.turn_lock
 
-    # Nothing set here: every old name is main's field.
+    # Nothing set here: every old name still kept is main's field.
     assert manager._current.get() is None and manager._session_now() is main
     for field in fields(ManagerSession):
-        if field.name != "key":
+        if hasattr(ManagerAgent, f"_{field.name}"):
             assert getattr(manager, f"_{field.name}") is getattr(main, field.name), field.name
+
+
+def test_the_main_sessions_binding_file_and_bridge_env_are_as_before(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.library import AgentLibrary
+    from looper.agents.ops.service import ManagerOps, Platform
+
+    monkeypatch.delenv("LOOPER_MCP_TRACE", raising=False)
+    manager = _manager(tmp_path)
+    turn_file = tmp_path / ".local" / "manager-turn.json"  # where the fleet puts it (``ManagerFleet._build``)
+    manager.ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="tok",
+                             turn_file=turn_file)
+    manager._publish_binding(None)
+    assert turn_file.read_bytes() == b'{"epoch": 1, "turn": null}'
+    library = asyncio.run(manager._library_with_server(AgentLibrary()))
+    entry = json.loads(Path(library.mcp_config).read_text(encoding="utf-8"))["mcpServers"]["looper"]
+    assert entry == {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"],
+                     "env": {"LOOPER_AGENT_URL": "http://127.0.0.1:9", "LOOPER_AGENT_TOKEN": "tok",
+                             "LOOPER_AGENT_TURN_FILE": str(turn_file)}}

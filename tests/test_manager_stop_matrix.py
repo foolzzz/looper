@@ -242,7 +242,7 @@ async def _next_turn(rig: Rig, session_id: str | None, note: str | None, *, note
     told = rig.records()[records:]
     if note is not None:
         assert len(told) == 1 and note in told[0], told
-    assert rig.manager._session_id == session_id
+    assert rig.manager._sessions["main"].session_id == session_id
 
 
 def _case(runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> Rig:
@@ -264,7 +264,7 @@ def test_a_message_stopped_while_it_waits_is_never_started(
         await rig.start()
         try:
             await rig.answer("WARM")
-            session_id = rig.manager._session_id
+            session_id = rig.manager._sessions["main"].session_id
             rig.mode("streaming")
             ahead = await rig.send("AHEAD")
             await _until(rig.reached)
@@ -300,7 +300,7 @@ def test_a_message_stopped_while_it_is_prepared_never_reaches_the_model(
         await rig.start()
         try:
             await rig.answer("WARM")
-            session_id, records = rig.manager._session_id, len(rig.records())
+            session_id, records = rig.manager._sessions["main"].session_id, len(rig.records())
             finished = len(agent_db.finish_record.await_args_list)
             hold = hold_at(monkeypatch, PREPARATION_STEPS[0])
             envelope = await rig.send("PREPARING")
@@ -337,7 +337,7 @@ def test_a_message_stopped_while_its_runtime_starts_is_not_sent(
         await rig.start()
         try:
             await rig.answer("WARM")
-            session_id = rig.manager._session_id
+            session_id = rig.manager._sessions["main"].session_id
             await rig.session.stop()  # the next turn starts the runtime again, resuming the session
             hold = hold_at(monkeypatch, "claude_start")
             envelope = await rig.send("STARTING")
@@ -371,8 +371,8 @@ def test_a_message_stopped_during_the_handoff_keeps_the_old_session(
         await rig.start()
         try:
             await rig.answer("WARM")
-            session_id, process = rig.manager._session_id, rig.session.pid
-            rig.manager._session_runtime = "omp"  # the session was an omp's: the next one is a new one, after a handoff
+            session_id, process = rig.manager._sessions["main"].session_id, rig.session.pid
+            rig.manager._sessions["main"].session_runtime = "omp"  # the session was an omp's: the next one is a new one, after a handoff
             rig.mode("streaming")  # the handoff turn streams and waits
             envelope = await rig.send("HANDMSG")
             await _until(rig.reached)
@@ -382,7 +382,7 @@ def test_a_message_stopped_during_the_handoff_keeps_the_old_session(
             replies = await rig.replied(rig.sent)
             assert replies[-1]["outcome"] == "stopped" and "error" not in replies[-1]
             assert [stop["phase"] for stop in rig.user_stops()] == ["starting"]
-            assert rig.manager._session_id == session_id  # the old session is not dropped
+            assert rig.manager._sessions["main"].session_id == session_id  # the old session is not dropped
             assert not any("HANDMSG" in record for record in rig.records())  # (the handoff's record is the only one)
             assert rig.manager._stopped_notes[-1].startswith(WITHDREW_NOTE)  # the user's message was not sent
             assert rig.left() == []
@@ -390,10 +390,10 @@ def test_a_message_stopped_during_the_handoff_keeps_the_old_session(
             # turn starts it again, resuming the session).
             assert (rig.session.pid == process) is (runtime == "claude-obeys")
             # The next turn switches again: the handoff, then the answer.
-            rig.manager._session_runtime = "omp"
+            rig.manager._sessions["main"].session_runtime = "omp"
             (rig.directory / "mode").unlink()
             await rig.answer("NEXT")
-            assert rig.manager._session_runtime == "claude-code"
+            assert rig.manager._sessions["main"].session_runtime == "claude-code"
         finally:
             await rig.finish()
 
@@ -412,7 +412,7 @@ def test_a_reply_stopped_while_it_streams(
         await rig.start()
         try:
             await rig.answer("WARM")
-            session_id = rig.manager._session_id
+            session_id = rig.manager._sessions["main"].session_id
             rig.mode("streaming")
             envelope = await rig.send("STREAMING")
             await _until(rig.reached)
@@ -502,7 +502,7 @@ def test_a_reply_stopped_in_a_tool_ends_only_an_agent_that_ignored_it_and_refuse
             await rig.start()
             try:
                 await rig.answer("WARM")
-                session_id = rig.manager._session_id
+                session_id = rig.manager._sessions["main"].session_id
                 rig.mode("tool")
                 envelope = await rig.send("TOOL")
                 if runtime == "grok-acp":
@@ -634,13 +634,13 @@ def test_a_stop_after_the_turn_ended_changes_nothing(
         try:
             envelope = await rig.answer("DONE")
             await _until(lambda: rig.manager.turn_for(envelope.message_id) is None)
-            session_id, replies, records = rig.manager._session_id, len(rig.replies), len(rig.records())
+            session_id, replies, records = rig.manager._sessions["main"].session_id, len(rig.replies), len(rig.records())
             assert await rig.manager.stop_turn(envelope.message_id, via="web") is StopResult.NOT_RUNNING
             assert await rig.api_turn() is None
             await asyncio.sleep(0.2)
             assert len(await rig.replied(replies)) == replies and len(rig.records()) == records
             assert rig.user_stops() == [] and rig.manager._stopped_notes == []
-            assert rig.manager._session_id == session_id
+            assert rig.manager._sessions["main"].session_id == session_id
             statuses = {call.kwargs["status"] for call in agent_db.finish_record.await_args_list}
             assert statuses == {"completed"}, statuses
             await rig.answer("NEXT")
