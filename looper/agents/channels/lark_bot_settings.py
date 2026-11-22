@@ -57,7 +57,7 @@ def forget() -> None:
     _bots.clear()
 
 
-async def check(config: Mapping[str, Any], app_secret: str | None, *, fresh: bool = False,
+async def check(config: Mapping[str, Any], app_secret: str | None, *, fresh: bool = False, raise_errors: bool = False,
                 ) -> tuple[str | None, BotInfo | None]:
     """Why the channel cannot run, and the bot its credentials identify when known."""
     app_id = config.get("app_id", "")
@@ -79,6 +79,9 @@ async def check(config: Mapping[str, Any], app_secret: str | None, *, fresh: boo
         try:
             bot = await api.bot_info()
         except LarkApiError as exc:
+            if raise_errors:
+                from .startup import ChannelStartError, transient
+                raise ChannelStartError(str(exc), transient=transient(exc)) from exc
             return f"the platform rejected the app credentials: {exc}", None
         finally:
             await api.aclose()
