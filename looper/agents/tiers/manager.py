@@ -100,6 +100,7 @@ from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
 from ..ops.reminders import TOOL_NAMES as REMINDER_TOOLS
+from .. import task_notice_delivery
 from ..message import (
     MANAGER_ADDRESS,
     AgentAddress,
@@ -1911,7 +1912,8 @@ class ManagerAgent:
                 message_type=MessageType.CHAT_NOTICE,
                 payload=notice.payload(),
                 correlation_id=envelope.correlation_id,
-                metadata={"origin_channel_id": origin},
+                metadata={"origin_channel_id": origin, **(task_notice_delivery.metadata(
+                    envelope.payload.get("task_id"), envelope.message_id) if ends_task(status) else {})},
             ))
             await completion_events.mark_sent(recorded)
         elif origin and not _group_task(envelope):

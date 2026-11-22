@@ -35,6 +35,7 @@ from ..message import (
     parse_channel_id,
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
+from .. import task_notice_delivery
 from ..ops.leads import for_group
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
@@ -309,6 +310,9 @@ class LarkChannelAdapter(ChannelAdapter):
         logger.info("%s adapter stopped", self.channel_id)
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
+        return await task_notice_delivery.send(envelope, self._deliver)
+
+    async def _deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
         its own, or send the answer to the chat the message came from and close its status line."""
         envelope = replace(envelope, payload={
