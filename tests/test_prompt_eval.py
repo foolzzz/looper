@@ -1079,6 +1079,10 @@ def test_pi_runner_is_an_explicit_eval_opt_in(command: str, runtime: str) -> Non
     assert getattr(cli._parser().parse_args([command, f"--{runtime}-runner"]), runtime + "_runner")
 
 
+def test_dialog_evals_accept_an_explicit_claude_executable() -> None:
+    assert cli._parser().parse_args(["dialogs", "--claude", "/synthetic/bin/claude"]).claude == "/synthetic/bin/claude"
+
+
 @pytest.mark.parametrize("command", ["run", "dialogs"])
 @pytest.mark.parametrize("value", ["-0.4", "0", "nan", "inf", "-inf"])
 def test_case_budget_must_be_finite_and_positive(
