@@ -6256,10 +6256,19 @@ writes what it wrote before, byte for byte.
   client's messages, and the operator's own, are not fenced. A Lark quote is a `quote` block instead of
   `<lark_quote>`, whoever's message it came with. The attachments' list keeps its lines outside, and the items,
   whose names the sender chose, go in an `attachment` block (the files' contents are read in the runtime, unfenced).
+  The `Channel:` label carries no sender-controlled name: the sender is in the message block's provenance,
+  processed by `untrusted.display_name` (one line, no mentions or invisible control characters).
   `looper_leads_search` fences each lead's summary (`lead`, with its first source's chat, sender and time) and
-  adds the lead line to its notice; the group backstop still compares the lead's own words.
-- **Not yet fenced** (the RFC's other entries): intents, gate messages, supplements, GitHub waits, the vault's
-  untrusted folders and the processor's input.
+  each source string, and adds the lead line to its notice; sender fields also use `display_name`.
+  The group backstop still compares the lead's own words.
+- **The vault:** Manager and task vault tools fence paths, snippets and note bodies under the vault's `inbox/`
+  area (case-insensitive), including its subdirectories and aliases whose resolved targets are there
+  (`inbox` source, with the relative path). Other folders keep their text.
+  The Manager's backstop remembers the original text before fencing it.
+- **The processor:** subscription message streams and leads and intents extraction use `untrusted.fence`
+  (`message_stream` source, because a batch can mix chat types) instead of a separate `<messages>` block.
+  Each input or tool answer with fenced content carries the lead line once. Off, the original processor and
+  vault output is byte-identical.
 
 ### Turns Claude runs on its own
 
