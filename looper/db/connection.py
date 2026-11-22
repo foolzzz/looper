@@ -480,6 +480,11 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
                 continue
             for table, constraint in step.validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+            if step.migration == _SEARCH_TOKENS:
+                # Validate every existing message with the bounded tokenizer before the concurrent build.
+                # Outside the schema transaction, this scan holds no lock that blocks message inserts.
+                await conn.fetchval("SELECT count(array_to_tsvector(looper_search_tokens(content))) "
+                                    "FROM chat_messages WHERE role IN ('user', 'assistant')")
             for name, definition in step.indexes:
                 # Kept only when it is valid and is the index the step builds: one a stopped build left INVALID,
                 # or an older definition under the same name, is dropped and built again.

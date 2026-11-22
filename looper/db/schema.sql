@@ -2393,13 +2393,16 @@ CREATE TABLE IF NOT EXISTS chat_direct_threads (
 -- array_to_tsvector(looper_search_tokens(...)); a query's words are split by the same function. Its COST keeps the
 -- planner from calling it row by row where an index can answer. connection.py applies this block to databases that
 -- predate it, so keep it between the markers and idempotent.
+-- Tokenization reads at most 8192 characters and caps ASCII tokens at 512 bytes (CJK pairs need at most 6).
+-- This bounds vector size and stays well below PostgreSQL's 2047-byte lexeme limit, including while search is off.
+-- The original message is stored in full.
 -- search tokens begin
 CREATE OR REPLACE FUNCTION looper_search_tokens(body text) RETURNS text[]
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE COST 10000 AS $$
 SELECT coalesce(array_agg(DISTINCT token ORDER BY token), '{}')
-FROM (SELECT lower(body) AS lowered) AS doc,
+FROM (SELECT lower(left(body, 8192)) AS lowered) AS doc,
 LATERAL (
-    SELECT word AS token
+    SELECT left(word, 512) AS token
     FROM regexp_split_to_table(regexp_replace(doc.lowered, '[㐀-䶿一-鿿豈-﫿]+', ' ', 'g'),
                                '[^a-z0-9]+') AS word
     WHERE char_length(word) >= 2

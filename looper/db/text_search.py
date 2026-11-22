@@ -3,8 +3,9 @@ section 3).
 
 PostgreSQL's text search parser keeps a run of Chinese characters as one word, and no Chinese segmenter ships with
 the PostgreSQL image, so the database's own ``looper_search_tokens(text)`` (schema.sql) splits a text into
-**tokens**: its lower-cased runs of ASCII letters and digits of two characters or more, and each overlapping pair of
-CJK characters (a lone one on its own). A table searched this way has a GIN index on
+**tokens** from its first 8192 characters: its lower-cased runs of ASCII letters and digits of two characters or more, and each overlapping pair of
+CJK characters (a lone one on its own). ASCII tokens are capped at 512 bytes, safely below PostgreSQL's lexeme
+limit; the stored text is unchanged. A table searched this way has a GIN index on
 ``array_to_tsvector(looper_search_tokens(<its text>))``, and the query's words are split by the same function, so
 the two always agree:
 
