@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .. import turn_metrics
@@ -18,9 +20,11 @@ from ..bus import MessageBus
 from ..message import parse_channel_id
 from ..task_notice import NotifyTarget
 from ..ops.leads import for_group
+from ..log_redaction import redact
 from .base import ChannelAdapter, PostOutcome, PostReceipt
 from .chat_routing import RouteDecision, RoutingSnapshot, load_snapshot
 from .lark_quote import QuoteRead, QuoteReader, QuoteRef, QuoteUnavailable
+from .startup import ChannelStartState, transient
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,73 @@ class ChannelRegistry:
         self._channels: dict[str, ChannelAdapter] = {}
         self._routing: dict[str, RoutingSnapshot] = {}
         self._mutation_locks: dict[str, asyncio.Lock] = {}
+        self._starts: dict[str, ChannelStartState] = {}
+        self._retries: dict[str, asyncio.Task[None]] = {}
+        self._start_lock = asyncio.Lock()
+        self._stopping = False
+
+    _retry_wait = staticmethod(asyncio.sleep)
+
+    def start_state(self, channel_id: str) -> ChannelStartState | None:
+        state = self._starts.get(channel_id)
+        return dict(state) if state is not None else None
+
+    def start_checks(self) -> list[dict[str, str]]:
+        return [{"id": f"channel:{channel_id}", "label": f"Channel {channel_id}",
+                 "status": "fail" if state["state"] == "failed" else "warn",
+                 "detail": f"{state['state']}: {state['last_error'] or ''}; next attempt: {state['next_attempt_at']}",
+                 "fix": "Check Settings → Channels and the channel's credentials or transport."}
+                for channel_id, state in self._starts.items() if state["state"] != "running"]
+
+    async def start_bot(self, channel_id: str, start: Callable[[bool], Awaitable[bool]]) -> None:
+        """Try once on startup; own one retry loop per failed enabled channel until shutdown/disable.
+
+        The callback reloads saved settings on retries and returns False if the row is gone or disabled.
+        All attempts share one lock so two recovering rows cannot claim the same bot.
+        """
+        if self._stopping or channel_id in self._retries:
+            return
+
+        async def attempt(retry: bool, delay: float) -> float | None:
+            async with self._start_lock:
+                self._starts[channel_id] = {"state": "starting", "last_error": None, "next_attempt_at": None}
+                try:
+                    if not await start(retry):
+                        self._starts.pop(channel_id, None)
+                        return None
+                except Exception as exc:
+                    delay = delay if transient(exc) else 600
+                    self._starts[channel_id] = {
+                        "state": "retrying" if transient(exc) else "failed", "last_error": redact(str(exc)),
+                        "next_attempt_at": (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()}
+                    logger.warning("%s start failed; retry in %s s: %s", channel_id, delay, exc)
+                    return delay
+                self._starts[channel_id] = {"state": "running", "last_error": None, "next_attempt_at": None}
+                return None
+
+        delay = await attempt(False, 30)
+        if delay is None:
+            return
+
+        async def retry() -> None:
+            nonlocal delay
+            try:
+                while delay is not None and not self._stopping:
+                    await self._retry_wait(delay)
+                    delay = await attempt(True, min(delay * 2, 600))
+            finally:
+                self._retries.pop(channel_id, None)
+
+        self._retries[channel_id] = asyncio.create_task(retry(), name=f"channel-start:{channel_id}")
+
+    async def cancel_start(self, channel_id: str) -> None:
+        task = self._retries.pop(channel_id, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            # A disable can race a retry that just finished registering an adapter.
+            await self.unregister(channel_id)
+        self._starts.pop(channel_id, None)
 
     def mutation_lock(self, channel_id: str) -> asyncio.Lock:
         return self._mutation_locks.setdefault(channel_id, asyncio.Lock())
@@ -65,10 +136,18 @@ class ChannelRegistry:
             logger.info("channel %s unregistered", channel_id)
 
     def prepare_stop_all(self) -> None:
+        self._stopping = True
+        for task in self._retries.values():
+            task.cancel()
         for adapter in self._channels.values():
             adapter.prepare_stop()
 
     async def stop_all(self) -> None:
+        self._stopping = True
+        for task in self._retries.values():
+            task.cancel()
+        await asyncio.gather(*self._retries.values(), return_exceptions=True)
+        self._retries.clear()
         for channel_id in list(self._channels):
             await self.unregister(channel_id)
 

@@ -43,6 +43,7 @@ from .control_plane import ControlPlaneLease, EXIT_LOCK_LOST, LockHeld
 from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
+from .channels.startup import ChannelStartError
 from .channels.base import ChannelAdapter
 from .channels.bots import BOT_TYPES, builtin_env_token, clashes, lark_app_id
 from .channels.lark import LarkChannelAdapter
@@ -171,7 +172,8 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
                         manager_id: str = "manager",
                         manager_running: Callable[[str], bool] | None = None,
                         same_bot_as: Callable[[str], str | None] | None = None,
-                        resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None) -> LarkChannelAdapter | None:
+                        resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None,
+                        raise_errors: bool = False) -> LarkChannelAdapter | None:
     """The Lark adapter, once lark-cli acts as the bot under the channel's profile and the allowlist was made for
     that app, and ``same_bot_as`` (given the app it acts as) names no running channel of that app; None (logged)
     otherwise."""
@@ -179,12 +181,16 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
 
     if _sender_allowlist(channel_id, "lark", config) is None:
         return None
-    problem, bot = await lark_cli.check(config, fresh=True)
+    problem, bot = await lark_cli.check(config, fresh=True, **({"raise_errors": True} if raise_errors else {}))
     if problem or bot is None:
         logger.error("%s not started: %s", channel_id, problem)
+        if raise_errors:
+            raise ChannelStartError(problem or "the bot identity is unavailable")
         return None
     if same_bot_as is not None and (earlier := same_bot_as(bot.app_id)) is not None:
         logger.error("%s not started: it is the same bot as %s", channel_id, earlier)
+        if raise_errors:
+            raise ChannelStartError(f"it is the same bot as {earlier}")
         return None
     logger.info("%s: bot %s (app %s, lark-cli profile %s)", channel_id, bot.bot_name, bot.app_id, bot.profile)
     return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id, bot_app_id=bot.app_id, channel_id=channel_id,
@@ -195,7 +201,8 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
 async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: Path, *,
                             channel_id: str = "channel-lark_bot", manager_id: str = "manager",
                             manager_running: Callable[[str], bool] | None = None,
-                            resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None) -> LarkChannelAdapter | None:
+                            resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None,
+                            raise_errors: bool = False) -> LarkChannelAdapter | None:
     """Start the bot-token channel only with a valid allowlist and matching app credentials."""
     from ..db.channel_configs import record_rejected
     from .channels import lark_bot_settings
@@ -206,9 +213,12 @@ async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: P
     if allowlist is None:
         return None
     add_secret(secret)
-    problem, bot = await lark_bot_settings.check(config, secret, fresh=True)
+    problem, bot = await lark_bot_settings.check(
+        config, secret, fresh=True, **({"raise_errors": True} if raise_errors else {}))
     if problem or bot is None:
         logger.error("%s not started: %s", channel_id, problem)
+        if raise_errors:
+            raise ChannelStartError(problem or "the bot identity is unavailable")
         return None
     logger.info("%s: bot %s (app %s)", channel_id, bot.app_name, config.get("app_id"))
 
@@ -248,30 +258,49 @@ async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], 
     def same_bot_as(row: dict[str, Any], app_id: str | None) -> str | None:
         return clashes([*started, {**row, "app_id": app_id}]).get(row["channel_id"])
 
-    for row in rows:
-        if row["channel_type"] not in channel_types:
+    for initial in rows:
+        if initial["channel_type"] not in channel_types:
             continue
-        with startup.measure(f"channel:{row['channel_id']}") if startup else contextlib.nullcontext():
+
+        async def start(retry: bool, initial: dict[str, Any] = initial) -> bool:
+            row = initial
+            if retry:
+                from ..db.channel_configs import get_bot_token, get_config
+                current = await get_config(initial["channel_id"])
+                if current is None or not current["enabled"]:
+                    return False
+                config = current.get("config") or {}
+                row = {**current, "config": config, "secret": await get_bot_token(current["channel_id"]) or "",
+                       "env_token": builtin_env_token(config) if current["channel_id"] == "channel-telegram" else "",
+                       "app_id": config.get("app_id") if current["channel_type"] == "lark_bot" else None}
             kwargs: dict[str, Any] = {"channel_id": row["channel_id"], "manager_id": row.get("manager_id") or "manager",
                                       "manager_running": manager_running, "resolve_chat": registry.resolve_chat,
                                       "stop_chat": stop_chat}
             adapter: ChannelAdapter | None
             found: list[str] = []
             if row["channel_type"] == "lark":
-                def lark_same_bot_as(app_id: str, row: dict[str, Any] = row) -> str | None:
+                def lark_same_bot_as(app_id: str) -> str | None:
                     found.append(app_id)
                     return same_bot_as(row, app_id)
 
-                adapter = await _lark_adapter(row["config"], runtime_root, same_bot_as=lark_same_bot_as, **kwargs)
+                adapter = await _lark_adapter(row["config"], runtime_root, same_bot_as=lark_same_bot_as,
+                                              raise_errors=True, **kwargs)
             elif (earlier := same_bot_as(row, row.get("app_id"))) is not None:
                 logger.error("%s not started: it is the same bot as %s", row["channel_id"], earlier)
-                continue
+                raise ChannelStartError(f"it is the same bot as {earlier}")
             elif row["channel_type"] == "telegram":
                 adapter = _telegram_adapter_from_config(row["config"], row["secret"], **kwargs)
             else:
-                adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root, **kwargs)
-            if adapter is not None and await _register_optional_channel(registry, adapter):
-                started.append({**row, "app_id": found[0] if found else row.get("app_id")})
+                adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root,
+                                                  raise_errors=True, **kwargs)
+            if adapter is None:
+                raise ChannelStartError(start_problem(row["channel_type"], row["config"]) or "channel cannot start")
+            await _register_optional_channel(registry, adapter, raise_errors=True)
+            started.append({**row, "app_id": found[0] if found else row.get("app_id")})
+            return True
+
+        with startup.measure(f"channel:{initial['channel_id']}") if startup else contextlib.nullcontext():
+            await registry.start_bot(initial["channel_id"], start)
 
 
 async def seed_channel_configs(pool: Any = None) -> None:
@@ -401,15 +430,22 @@ async def seed_role_configs(pool: Any = None) -> None:
 
 
 async def _register_optional_channel(
-    registry: ChannelRegistry, adapter: ChannelAdapter
+    registry: ChannelRegistry, adapter: ChannelAdapter, *, raise_errors: bool = False
 ) -> bool:
     """Whether a Settings-enabled channel started; a failure leaves the web dashboard up and its bot unclaimed."""
     try:
         await registry.register(adapter)
+        if raise_errors and not adapter.healthcheck().get("healthy"):
+            raise ChannelStartError("adapter did not start; check its configuration and installed transport")
+    except asyncio.CancelledError:
+        await registry.unregister(adapter.channel_id)
+        raise
     except Exception:
         logger.exception("%s failed to start; continuing without it", adapter.channel_id)
         with contextlib.suppress(Exception):
             await registry.unregister(adapter.channel_id)
+        if raise_errors:
+            raise
         return False
     return True
 
