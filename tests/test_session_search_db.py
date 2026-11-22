@@ -488,3 +488,35 @@ def test_a_database_without_the_index_builds_it_online(monkeypatch: pytest.Monke
             assert not await connection.schema_change_pending(conn)
 
     run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_a_huge_token_is_stored_unchanged_while_search_is_off(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    async def test(pool: Any) -> None:
+        await _switch(pool, False)
+        text = "deploy " + "A" * 10_000 + " 发布"
+        message_id = await _say(pool, "chat-old", text, role=role)
+        assert await pool.fetchval("SELECT content FROM chat_messages WHERE id = $1", message_id) == text
+        tokens = await pool.fetchval("SELECT looper_search_tokens($1)", text)
+        assert max(len(token.encode()) for token in tokens) <= 512
+        assert "deploy" in tokens
+        assert await pool.fetchval("SELECT indisvalid FROM pg_index "
+                                   "WHERE indexrelid = to_regclass('idx_chat_messages_search')") is True
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_upgrade_indexes_an_existing_message_with_a_huge_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await pool.execute("DROP FUNCTION looper_search_tokens(text) CASCADE")
+        text = "deploy " + "A" * 10_000
+        message_id = await _say(pool, "chat-old", text)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval("SELECT content FROM chat_messages WHERE id = $1", message_id) == text
+        assert await pool.fetchval("SELECT indisvalid FROM pg_index "
+                                   "WHERE indexrelid = to_regclass('idx_chat_messages_search')") is True
+        assert await pool.fetchval("SELECT count(*) FROM chat_messages WHERE "
+                                   "array_to_tsvector(looper_search_tokens(content)) @@ 'deploy'::tsquery") == 1
+        await connection.ensure_schema(pool)
+
+    run_with_channel_configs(test, monkeypatch)

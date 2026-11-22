@@ -61,3 +61,17 @@ def test_the_sql_carries_every_value_as_a_parameter_numbered_after_the_callers()
 def test_a_search_without_a_term_is_refused() -> None:
     with pytest.raises(ValueError):
         Match((), start=1)
+
+
+@needs_db
+def test_tokenization_bounds_text_and_tokens_without_losing_normal_prefixes(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        tokens = await pool.fetchval("SELECT looper_search_tokens($1)", "deploy " + "a" * 10_000 + " tailmarker")
+        assert "deploy" in tokens and "tailmarker" not in tokens
+        assert max(len(token.encode()) for token in tokens) <= 512
+        assert await pool.fetchval("SELECT array_to_tsvector(looper_search_tokens($1)) @@ '''aaa'':*'::tsquery",
+                                   "a" * 10_000)
+        chinese = await pool.fetchval("SELECT looper_search_tokens($1)", "甲" * 8192 + "乙丙")
+        assert chinese == ["甲甲"]
+
+    run_db(test, monkeypatch)
