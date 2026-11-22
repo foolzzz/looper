@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from ..db import connection, schedules as db_schedules, subscriptions as db_subs
+from . import turn_metrics
 from . import leads_model, subscriptions
 from .channels.base import PostOutcome
 from .message import builtin_channel_id, parse_channel_id
@@ -266,7 +267,9 @@ class IntentPushService:
         try:
             receipt = await self._registry.post(post["channel_id"], push_target(post["channel_id"], post["chat"]),
                                                 post["text"], reply_to=reply,
-                                                idempotency_key=f"intent-{intent['id']}-{post['id']}")
+                                                idempotency_key=f"intent-{intent['id']}-{post['id']}",
+                                                **turn_metrics.proactive_kwargs(
+                                                    turn_metrics.ProactiveSource.INTENT, intent["id"]))
             state = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "failed", PostOutcome.UNKNOWN: "uncertain"}[receipt.result]
             external = receipt.external_ids[0] if receipt.external_ids else None
             error = receipt.error

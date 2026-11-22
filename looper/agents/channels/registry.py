@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any
 
+from .. import turn_metrics
+from ..turn_metrics import ProactiveRef
 from ..bus import MessageBus
 from ..message import parse_channel_id
 from ..task_notice import NotifyTarget
@@ -79,24 +82,83 @@ class ChannelRegistry:
             return f"the {parsed.channel_type} channel is not running: enable it in Settings → Channels"
         return f"the bot {channel_id} is not running: enable it in Settings → Channels"
 
-    async def notify(self, channel_id: str, chat: str, text: str) -> tuple[bool, str | None]:
+    async def notify(self, channel_id: str, chat: str, text: str, *,
+                     proactive: ProactiveRef | None = None, group: bool = False) -> tuple[bool, str | None]:
         """Send a schedule's message through the running channel ``channel_id``: whether it was sent, and why
         not."""
         adapter = self._channels.get(channel_id)
         if adapter is None:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
+                                              group=group, external_id=None,
+                                              outcome=PostOutcome.REJECTED.value)
             return False, self._not_running(channel_id)
-        receipt = await adapter.notify(chat, text)
+        try:
+            receipt = await adapter.notify(chat, text)
+        except Exception:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat, group=group,
+                                              external_id=None, outcome=PostOutcome.UNKNOWN.value)
+            raise
+        if proactive is not None:
+            turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
+                                          group=group,
+                                          external_id=receipt.external_id, outcome=receipt.result.value)
         return receipt.success, receipt.error
 
     async def post(self, channel_id: str, target: NotifyTarget, text: str, *,
-                   reply_to: str | None = None, idempotency_key: str | None = None) -> PostReceipt:
+                   reply_to: str | None = None, idempotency_key: str | None = None,
+                   proactive: ProactiveRef | None = None) -> PostReceipt:
         """Post ``text`` to ``target`` through the running channel ``channel_id`` (``ChannelAdapter.post``)."""
         adapter = self._channels.get(channel_id)
         if adapter is None:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                              external_id=None, outcome=PostOutcome.REJECTED.value,
+                                              dedupe_key=idempotency_key)
             return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
         if target.group:
             text = for_group(text)
-        return await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
+        try:
+            receipt = await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
+        except Exception:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                              external_id=None, outcome=PostOutcome.UNKNOWN.value,
+                                              dedupe_key=idempotency_key)
+            raise
+        if proactive is not None:
+            turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                          external_id=receipt.external_ids[0] if receipt.external_ids else None,
+                                          outcome=receipt.result.value, dedupe_key=idempotency_key)
+        return receipt
+
+    async def post_card(self, channel_id: str, target: NotifyTarget, card: Any, *,
+                        reply_to: str | None = None, idempotency_key: str | None = None,
+                        proactive: ProactiveRef | None = None) -> PostReceipt:
+        """Post ``card`` (``card_actions.Card``) to ``target`` like ``post`` (``ChannelAdapter.post_card``)."""
+        adapter = self._channels.get(channel_id)
+        if adapter is None:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                              external_id=None, outcome=PostOutcome.REJECTED.value,
+                                              dedupe_key=idempotency_key)
+            return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
+        if target.group and (checked := for_group(card.text)) != card.text:
+            card = replace(card, text=checked, buttons=())
+        try:
+            receipt = await adapter.post_card(target, card, reply_to=reply_to, idempotency_key=idempotency_key)
+        except Exception:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                              external_id=None, outcome=PostOutcome.UNKNOWN.value,
+                                              dedupe_key=idempotency_key)
+            raise
+        if proactive is not None:
+            turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                          external_id=receipt.external_ids[0] if receipt.external_ids else None,
+                                          outcome=receipt.result.value, dedupe_key=idempotency_key)
+        return receipt
 
     async def edit(self, channel_id: str, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         """Edit one message through its running adapter, preserving the platform's delivery result."""

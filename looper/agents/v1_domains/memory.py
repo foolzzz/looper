@@ -3,6 +3,7 @@ section 9.3). The writes that move a candidate come with the write path."""
 
 from ...db import memory as db_memory
 from .. import memory, memory_model as model, memory_settings
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _OBJ, _NULL_OBJ
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
@@ -45,7 +46,8 @@ _SETTINGS_PUT = _object({
 
 def _op(action, summary, details, request, result, *, risk="read"):
     return Operation(f"memory.{action}", "POST", f"/api/v1/memory/{action}", summary, f"{summary} {details}",
-                     request, result, risk=risk, operator_only=True)
+                     request, result, risk=risk, operator_only=True,
+                     level=ActionLevel.INSIDE)  # reads candidates and checks or stores settings; writes no vault file
 
 
 RESULTS = {}

@@ -71,12 +71,17 @@ def exec_events(method: str, params: Mapping[str, Any], usage: Mapping[str, Any]
                 "cache_write_input_tokens": totals.get("cacheWriteInputTokens", 0),
                 "output_tokens": totals.get("outputTokens", 0),
             }}]
+        error = turn.get("error") if isinstance(turn.get("error"), Mapping) else {}
         message = "the turn was interrupted" if turn.get("status") == "interrupted" \
-            else (turn["error"].get("message") if isinstance(turn.get("error"), Mapping) else None) or "the turn failed"
-        return [{"type": "turn.failed", "error": {"message": message}}]
+            else error.get("message") or "the turn failed"
+        # codexErrorInfo, when Codex gives one, types the failure (``failures.codex``).
+        info = {"codex_error_info": error["codexErrorInfo"]} if error.get("codexErrorInfo") is not None else {}
+        return [{"type": "turn.failed", "error": {"message": message, **info}}]
     if method == "error":
-        error = params.get("error")
-        return [{"type": "error", "message": error.get("message") if isinstance(error, Mapping) else None}]
+        error = params.get("error") if isinstance(params.get("error"), Mapping) else {}
+        info = {"codex_error_info": error["codexErrorInfo"], "will_retry": params.get("willRetry") is True} \
+            if error.get("codexErrorInfo") is not None else {}
+        return [{"type": "error", "message": error.get("message"), **info}]
     return []
 
 
