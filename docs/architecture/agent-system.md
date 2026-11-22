@@ -16,10 +16,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
   session (the `agent_sessions` row whose id is its id), runs
   (`llm_records.agent_id`), turn binding file and `ManagerOps`. What belongs
-  to its conversation (the resident runtime, the saved session, the turn lock
-  and the turn holding it, what the next turn is told) is one
-  `ManagerSession` (`looper/agents/tiers/manager_session.py`), `main`, the
-  only one so far. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  to its conversation (the resident runtime and its lifecycle lock, the saved
+  session, the turn lock and the turn holding it, the turn's research sources,
+  what the next turn is told) is one `ManagerSession`
+  (`looper/agents/tiers/manager_session.py`), `main`, the only one so far: a
+  group chat's turns run in the operator's session, which
+  `session_routing.group_isolation` reports as `shared` for a feature that
+  must not reach a group through it. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
