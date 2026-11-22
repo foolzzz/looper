@@ -14,7 +14,7 @@ from .memory_model import State
 
 # The states ``open`` lists: what is not written, rejected or dropped (an expired one can be revived).
 OPEN_STATES = (State.DRAFTING, State.PENDING, State.CONFIRMED, State.WRITING, State.EXPIRED, State.CONFLICT,
-               State.BLOCKED)
+               State.BLOCKED, State.HELD, State.IN_EFFECT, State.REVOKED, State.SUPERSEDED)
 LIST_FILTERS = ("open", "all", *(state.value for state in State))
 
 

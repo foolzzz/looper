@@ -136,9 +136,11 @@ async def create(conn: asyncpg.Connection, *, kind: model.Kind | str, statement:
 
 
 def _actor_may(action: Action, actor: Actor, via: Via) -> None:
-    """The schema's rules on who acts (memory_events_user, memory_events_confirm), said before it refuses."""
+    """The schema's rules on who acts (memory_events_user, memory_events_confirm, memory_events_system)."""
     if action in model.USER_ACTIONS and actor is not Actor.USER:
         raise MemoryRefused(f"only the operator can {action} a candidate", code="invalid")
+    if action is Action.RECOVER and actor is not Actor.SYSTEM:
+        raise MemoryRefused("only the system can recover a candidate", code="invalid")
     if action is Action.CONFIRM and via not in model.CONFIRM_VIAS:
         raise MemoryRefused("a candidate is confirmed on the dashboard or in the operator's direct chat only",
                             code="invalid")
@@ -230,6 +232,13 @@ async def transition(conn: asyncpg.Connection, candidate_id: int, to: State | st
     if to is State.PENDING and row["revision"] < 1:
         raise MemoryRefused("a candidate without a revision cannot be pending", code="state", state=row["state"])
     _actor_may(action, actor, via)
+    if action is Action.RECOVER and row["attempts"] >= 3:
+        raise MemoryRefused("a candidate cannot be recovered after three write attempts", code="state",
+                            state=row["state"])
+    if to is State.PENDING and row["note_path"] is not None and await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM memory_candidates WHERE note_path = $1 AND id <> $2 AND state IN "
+            "('pending', 'confirmed', 'writing', 'conflict', 'blocked'))", row["note_path"], candidate_id):
+        raise MemoryRefused(f"another open candidate changes {row['note_path']}: revise that one", code="busy")
     if action is Action.CONFIRM and content_hash != row["content_hash"]:
         raise MemoryRefused(f"{model.format_id(candidate_id)} changed since it was shown: look at it again",
                             code="stale", state=row["state"])
