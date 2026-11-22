@@ -83,7 +83,7 @@ from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import leads_model, research_order, session_switch
 from ..research_order import ResearchSources
-from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext
+from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
 from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
@@ -874,6 +874,8 @@ class ManagerAgent:
         self._stop_tasks: set[asyncio.Task[Any]] = set()
         # Completion turns past their deadline that did not end, and the stops of their runtimes (``_tell_completion``).
         self._late_turns: set[asyncio.Task[Any]] = set()
+        # Retired runtimes' tree cleanup, separate from turns that can ignore cancellation indefinitely.
+        self._runtime_cleanups: set[asyncio.Task[None]] = set()
         # Looper's platform tools (set by ``serve``): what Claude's calls in a turn act through.
         self.ops: ManagerOps | None = None
         # The envelope the message loop is handling, and the ones a stop found unfinished (the fleet settles or
@@ -1578,6 +1580,8 @@ class ManagerAgent:
                 command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
                 totals=self._session_totals, price=launch.price), 10, undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
+            if self.ops is not None:
+                self.ops.activate_tool_hook(launch.tool_hook)
         if switch is None and session.session_id and session.session_runtime == "api" \
                 and (self._claude_runtime is not launch.runtime or not self._claude.started):
             # Restore the API session's saved context before deciding whether it needs a handoff.
@@ -1590,6 +1594,8 @@ class ManagerAgent:
                     totals=self._session_totals, price=launch.price), seconds,
                     undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
+            if self.ops is not None:
+                self.ops.activate_tool_hook(launch.tool_hook)
         if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
             switch = session_switch.context_full(
@@ -1634,15 +1640,37 @@ class ManagerAgent:
         """The outbound review was turned on: a process of this Manager started without its hook stops now, whatever
         holds its lifecycle (a turn or a handoff it runs ends failed), with its whole tree and the cleanup of the
         processes it replaced before; the next turn starts one with the hook."""
-        if self._claude.started and (self._process is None or self._process.launch.tool_hook is None):
-            logger.warning("%s: stopping its process, which has no outbound review hook", self._log)
-        elif self._claude.started:
-            return
-        await self._claude.stop(kill=True)  # waits for the tree, and joins the earlier stops' cleanup
+        for session in self._sessions.values():
+            if session.claude.started and session.process is not None and session.process.launch.tool_hook is not None:
+                continue
+            if session.claude.started:
+                logger.warning("%s: stopping its process, which has no outbound review hook", self._log)
+            await session.claude.stop(kill=True)
+        while self._runtime_cleanups:
+            # A cancelled request must not cancel a retired runtime's cleanup. New retirements made while this
+            # waits also belong to activation; a failed cleanup prevents activation from reporting success.
+            await asyncio.gather(*(asyncio.shield(task) for task in self._runtime_cleanups))
+
+    def _track_runtime_cleanup(self, runtime: ResidentSession) -> None:
+        stopping = asyncio.create_task(runtime.stop(kill=True))
+        self._runtime_cleanups.add(stopping)
+        self._late_turns.add(stopping)
+        stopping.add_done_callback(self._late_turns.discard)
+
+        def ended(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is None:
+                self._runtime_cleanups.discard(task)
+            else:
+                logger.error("%s: retired runtime cleanup did not finish successfully", self._log)
+
+        stopping.add_done_callback(ended)
 
     async def _stop_replaced_session(self, *, whole_tree: bool = False) -> None:
         if isinstance(self._claude, ResidentClaude) and not whole_tree:
             await self._claude.stop(kill=True, wait_tree=False)
+            self._track_runtime_cleanup(self._claude)
+            # Let stop capture the retired process before this resident object may start a new one.
+            await asyncio.sleep(0)
         else:
             await self._claude.stop(kill=True)
 
@@ -1711,6 +1739,8 @@ class ManagerAgent:
                             price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
                     self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
+                    if self.ops is not None:
+                        self.ops.activate_tool_hook(launch.tool_hook)
                     raise
                 except OSError as exc:
                     cause = str(exc) or type(exc).__name__
@@ -1729,6 +1759,8 @@ class ManagerAgent:
                     command = self._claude.command
                     await token.step("recorder_annotate", recorder.annotate({"command": command}))
                 self._process = _Process(command, signature, prepared.system_prompt, launch)
+                if self.ops is not None:
+                    self.ops.activate_tool_hook(launch.tool_hook)
         except TurnStopped:
             # Stopped while the record was open: it ends as stopped, with no spend.
             await token.keep("recorder_finish", self._finish_stopped_early(token, recorder, prepared.turn), 10)
@@ -2129,9 +2161,7 @@ class ManagerAgent:
         self._publish_binding(None)
         late, self._claude = self._claude, self._claude_runtime.resident_session(self.agent_id)
         self._process = None
-        stopping = asyncio.create_task(late.stop(kill=True))
-        self._late_turns.add(stopping)
-        stopping.add_done_callback(self._late_turns.discard)
+        self._track_runtime_cleanup(late)
 
     async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any], *,
                                     rejected: bool = False) -> None:
@@ -2921,12 +2951,11 @@ class ManagerAgent:
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=self._runner_limits)
                 options = {"stop": lambda: recorder.cap_stop} if isinstance(self._claude, RunnerSession) else {}
-                if outbound_hook.known_enabled() and process.launch.tool_hook is None:
-                    # Turned on since the switch was decided: with nothing awaited between this and the send, a
-                    # process without the hook writes no handoff.
-                    raise RuntimeError("the outbound review is on, and this process has no tool hook")
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, cancel=cancel, **options),
-                                              HANDOFF_TIMEOUT_SEC)
+                async with asyncio.timeout(HANDOFF_TIMEOUT_SEC):
+                    if outbound_hook.known_enabled() and process.launch.tool_hook is None:
+                        # The timeout context keeps the check and send in this task, including on Python 3.11.
+                        raise RuntimeError("the outbound review is on, and this process has no tool hook")
+                    turn = await self._claude.run_turn(text, on_event, cancel=cancel, **options)
             except TurnCancelled as exc:
                 await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
                                       status=RecordStatus.INTERRUPTED, usage=Usage())

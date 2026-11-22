@@ -241,7 +241,7 @@ class ManagerOps:
 
         self._review_root: Path | None = None
         self._review_bin = "claude"
-        self._trusted = Trusted.of(None, ())  # until a hook is written: only Looper's own server, none of its tools
+        self._trusted = Trusted.of(None, ())  # until a process's hook is activated: none of Looper's tools
         self._writes: deque[Any] = deque(maxlen=CONTENT_TOOLS_KEPT)
         self._notified: OrderedDict[tuple[str | None, str | None, str | None], None] = OrderedDict()
         # Each tool_use a turn's stream showed, by its id: the binding of the turn it belongs to (a subagent's call,
@@ -822,13 +822,19 @@ class ManagerOps:
 
     def tool_hook(self, runtime_root: Path, claude_bin: str, library: Any = None) -> Any:
         """The PreToolUse hook (``outbound_hook.ToolHook``) for this Manager's Claude Code, its config written; the
-        reviews it asks for run under ``runtime_root`` with ``claude_bin``, and its MCP tool names stand for the
-        servers ``library`` loads (``outbound_hook.Trusted``)."""
+        reviews it asks for run under ``runtime_root`` with ``claude_bin``. Its MCP trust set takes effect only
+        when the Manager activates this hook for the process it actually starts."""
         from .. import outbound_hook
 
         self._review_root, self._review_bin = runtime_root, claude_bin
-        self._trusted = outbound_hook.Trusted.of(library, (*self._scope.tools, CONFIRM_TOOL))
-        return outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token)
+        return replace(outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token),
+                       trusted=outbound_hook.Trusted.of(library, (*self._scope.tools, CONFIRM_TOOL)))
+
+    def activate_tool_hook(self, hook: Any) -> None:
+        """Use the immutable trust set of the actual process's hook, never a prepared capability refresh."""
+        from ..outbound_hook import Trusted
+
+        self._trusted = hook.trusted if hook is not None and hook.trusted is not None else Trusted.of(None, ())
 
     async def check_outbound(self, payload: Any) -> dict[str, Any]:
         """The hook's answer for one tool call of this Manager (``outbound_hook.answer``), in the turn it belongs to:
