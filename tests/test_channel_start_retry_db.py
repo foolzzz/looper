@@ -233,11 +233,20 @@ def test_serve_http_reports_retry_and_recovery(monkeypatch, tmp_path):
 
     from looper import db, ops_config
     from looper.agents import api_v1, operator_notes, profile_registry
+    from looper.agents.channels.down_alerts import Monitor
+    from looper.agents.channels.telegram import TelegramChannelAdapter
     from tests.test_lark_catchup import HistoryTransport
 
     async def test(pool):
+        from datetime import datetime, timedelta, timezone
+
+        clock = [datetime.now(timezone.utc)]
+        sent = []
         await channel_configs.set_config("channel-lark", {"enabled": True,
             "config": {"allowed_open_ids": ["ou_synthetic00001"]}}, pool=pool)
+        await channel_configs.set_config("channel-telegram", {"enabled": True,
+            "config": {"allowed_user_ids": ["1000001"], "operator_sender_id": "1000001"}}, pool=pool)
+        await channel_configs.set_bot_token("channel-telegram", "0:synthetic", pool=pool)
         await pool.execute("INSERT INTO system_settings (key, value) VALUES ('llmrec.enabled', 'false') "
                            "ON CONFLICT (key) DO UPDATE SET value = 'false'")
         identity = lark_cli.Identity("", "cli_synthetic", "Synthetic", "ou_bot000000001")
@@ -257,6 +266,16 @@ def test_serve_http_reports_retry_and_recovery(monkeypatch, tmp_path):
 
         async def wait(delay):
             await resume.wait()
+
+        async def telegram_start(adapter, bus):
+            async def send(**kwargs):
+                sent.append(kwargs)
+                return SimpleNamespace(message_id=len(sent))
+            adapter._app = SimpleNamespace(bot=SimpleNamespace(send_message=send))
+            adapter._running = True
+
+        async def telegram_stop(adapter):
+            adapter._running = False
 
         http_start = AgentHTTPServer.start
 
@@ -281,14 +300,27 @@ def test_serve_http_reports_retry_and_recovery(monkeypatch, tmp_path):
                 assert any(c["id"] == "channel:channel-lark" for c in status["checks"])
                 config = await call("channel_configs.get", {"channel_id": "channel-lark"})
                 assert config["runtime"]["state"] == "retrying"
+                monitor = Monitor(server._channels, clock=lambda: clock[0])
+                await monitor.tick()
+                clock[0] += timedelta(minutes=11)
+                await monitor.tick()
+                await monitor.tick()
+                assert any(c["id"] == "channel_down:channel-lark" for c in (await call("system.status"))["checks"])
+                assert len(sent) == 1 and sent[0]["chat_id"] == 1000001
                 resume.set()
                 await asyncio.wait_for(transport.consumer_started.wait(), 5)
                 config = await call("channel_configs.get", {"channel_id": "channel-lark"})
                 assert config["runtime"]["state"] == "running"
+                await monitor.tick()
+                await monitor.tick()
+                assert len(sent) == 2 and "恢复" in sent[-1]["text"]
+                assert not any(c["id"].startswith("channel_down:") for c in (await call("system.status"))["checks"])
                 assert not any(c["id"] == "channel:channel-lark" for c in (await call("system.status"))["checks"])
 
         monkeypatch.setattr(serve, "_lark_adapter_from_config", build)
         monkeypatch.setattr(ChannelRegistry, "_retry_wait", staticmethod(wait))
+        monkeypatch.setattr(TelegramChannelAdapter, "start", telegram_start)
+        monkeypatch.setattr(TelegramChannelAdapter, "stop", telegram_stop)
         monkeypatch.setattr(AgentHTTPServer, "start", start_http)
         monkeypatch.setattr(serve.AgentSupervisor, "start_all", check_http)
         monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
@@ -306,5 +338,6 @@ def test_serve_http_reports_retry_and_recovery(monkeypatch, tmp_path):
                                       runner_supervisor=SimpleNamespace(stop=AsyncMock()))
         assert transport.closed
         assert all(not task.get_name().startswith("channel-start:") for task in asyncio.all_tasks())
+        assert all(task.get_name() != "channel-health" for task in asyncio.all_tasks())
 
     run_with_channel_configs(test, monkeypatch)

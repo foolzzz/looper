@@ -33,6 +33,8 @@
  "channel_configs.get": "inside",
  "channel_configs.list": "inside",
  "channel_configs.update": "inside",
+ "channel_down_alert.get": "inside",
+ "channel_down_alert.update": "inside",
  "channels.people": "inside",
  "channels.status": "inside",
  "chat.conversations": "inside",

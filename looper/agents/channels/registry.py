@@ -41,8 +41,21 @@ class ChannelRegistry:
         self._retries: dict[str, asyncio.Task[None]] = {}
         self._start_lock = asyncio.Lock()
         self._stopping = False
+        self.down_checks: list[dict[str, str]] = []
+        self._deliveries: dict[str, list[tuple[datetime, bool]]] = {}
 
     _retry_wait = staticmethod(asyncio.sleep)
+    _delivery_clock = staticmethod(lambda: datetime.now(timezone.utc))
+
+    def record_delivery(self, channel_id: str, success: bool) -> None:
+        """Observe an actual send result without changing the send's return value or logging."""
+        self._deliveries.setdefault(channel_id, []).append((self._delivery_clock(), success))
+
+    def delivery_events(self, channel_id: str) -> list[tuple[datetime, bool]]:
+        return list(self._deliveries.get(channel_id, ()))
+
+    def acknowledge_deliveries(self, channel_id: str, count: int) -> None:
+        del self._deliveries.setdefault(channel_id, [])[:count]
 
     def start_state(self, channel_id: str) -> ChannelStartState | None:
         state = self._starts.get(channel_id)
@@ -53,7 +66,7 @@ class ChannelRegistry:
                  "status": "fail" if state["state"] == "failed" else "warn",
                  "detail": f"{state['state']}: {state['last_error'] or ''}; next attempt: {state['next_attempt_at']}",
                  "fix": "Check Settings → Channels and the channel's credentials or transport."}
-                for channel_id, state in self._starts.items() if state["state"] != "running"]
+                for channel_id, state in self._starts.items() if state["state"] != "running"] + self.down_checks
 
     async def start_bot(self, channel_id: str, start: Callable[[bool], Awaitable[bool]]) -> None:
         """Try once on startup; own one retry loop per failed enabled channel until shutdown/disable.
@@ -126,6 +139,7 @@ class ChannelRegistry:
                 self.bindings_changed(adapter.channel_id, snapshot)
                 adapter._resolve_chat = self.resolve_chat
         self._channels[adapter.channel_id] = adapter
+        adapter.delivery_observer = lambda success: self.record_delivery(adapter.channel_id, success)
         await adapter.start(self._bus)
         logger.info("channel %s (%s) registered", adapter.channel_id, adapter.channel_type)
 
@@ -175,10 +189,12 @@ class ChannelRegistry:
         try:
             receipt = await adapter.notify(chat, text)
         except Exception:
+            self.record_delivery(channel_id, False)
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat, group=group,
                                               external_id=None, outcome=PostOutcome.UNKNOWN.value)
             raise
+        self.record_delivery(channel_id, receipt.success)
         if proactive is not None:
             turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
                                           group=group,
@@ -201,11 +217,13 @@ class ChannelRegistry:
         try:
             receipt = await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
         except Exception:
+            self.record_delivery(channel_id, False)
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                               external_id=None, outcome=PostOutcome.UNKNOWN.value,
                                               dedupe_key=idempotency_key)
             raise
+        self.record_delivery(channel_id, receipt.success)
         if proactive is not None:
             turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                           external_id=receipt.external_ids[0] if receipt.external_ids else None,
