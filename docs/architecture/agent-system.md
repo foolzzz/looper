@@ -40,21 +40,40 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   with no operator id cannot tell its operator apart, so its direct chats stay
   in `main`; turning routing on lists such bots.
   - Sessions run in parallel; inside one, messages run in order. The message
-    loop hands each user message, and each completion wake-up (by the chat its
-    oldest pending event tells), to its session's worker
+    loop hands each user message to its session's worker. Completion wake-ups
+    resolve the bot's identity before claiming events, then use the event
+    actually claimed to select their worker
     (`tiers/manager_routing.py`). The worker runs it on that session and only
     then settles it on the bus (`subscribe(settle=False)`), so a message cut
     off replays at restart. Messages that run no model turn stay in the loop.
+    An identity read failure retains a previously known identity or pauses
+    processing for retry; it never counts as an unconfigured identity.
   - `main` stays in `agent_sessions`; the others are rows of
     `manager_sessions`. A read or write there that fails gives the turn a new
     session, never `main`'s.
-  - Each session's resident has its own label (`manager.<kind>.<digest>`,
-    for its logs and session directory) and its own binding file
-    (`ManagerOps.turn_file_for`: `.local/<manager id>-turn-<digest>.json`
-    beside main's), named in its MCP entry. With routing on, a call runs only
-    in the turn its binding names, whatever `chat.stop_enabled` says.
+  - Each non-main resident has its own label (`manager.<kind>.<digest>`,
+    for its logs and session directory), workspace, runtime state, caches, prompts,
+    MCP configuration and binding file under
+    `.local/manager-sessions/<digest>/`. Its MCP entry carries a distinct
+    credential: the server checks that a binding belongs to that credential's
+    session, so learning another binding cannot authorize its calls. Only
+    Looper's platform tools are available: no local file or shell tools,
+    catalog MCP servers, plugins, skills or subagents. Claude Code and the
+    in-process API runtime support this mode; other runtimes refuse a
+    non-main turn without falling back to main. Main's launch is unchanged.
+    Claude Code shares only its CLI login with the operator (the original
+    keychain namespace on macOS), keeping settings and histories separate.
+    A default macOS keychain login retains the original `HOME` so its native
+    refresh locks are shared; the session's explicit Claude configuration,
+    XDG and temporary directories keep its conversation state separate.
+    This tool boundary runs under the
+    server's OS user; it does not sandbox a compromised runtime executable.
+    Calls remain bound until the routed turns end, even after routing is
+    switched off, whatever `chat.stop_enabled` says.
   - At most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
-    process. A session other than main that would start one at the cap stops
+    process. Starts reserve capacity atomically, including saved-session
+    restores; successful, failed and cancelled starts release their reservation.
+    A session other than main that would start one at the cap stops
     the least recently active idle one other than main; its session id stays
     saved and resumes on its next message. When none is idle, the message
     waits, with the status 「排队中：其他会话正忙」, until a turn ends. Main
@@ -67,7 +86,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     main's: another session follows the settings and refuses `/profile`.
   - Switched off, new messages go to `main` again. Turns under way finish,
     what main's worker holds keeps its order, and the other sessions'
-    processes stop once idle (the fleet's idle sweep). Their rows stay.
+    processes stop once idle (the fleet's idle sweep). Their rows and saved
+    runtime histories stay, including across a restart while routing is off.
   - What a new group or dm session's first turn sees is not trimmed yet: its
     resume brief still carries every chat's recent messages, so routing is
     not for production use before that lands.
