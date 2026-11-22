@@ -78,6 +78,7 @@ class ApiRuntime(RuntimeAdapter):
     auth_kinds = frozenset({AuthKind.API_KEY})
     roles = frozenset({"manager"})
     in_process = True
+    supports_platform_tools_only = True
     isolation_id = "api-v1"
     can_replace_system_prompt = True
     can_interrupt = True

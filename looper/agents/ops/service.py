@@ -214,6 +214,7 @@ class ManagerOps:
         self._platform = platform
         self._url = url.rstrip("/")
         self._token = token or secrets.token_urlsafe(32)
+        self._session_tokens: dict[str, str] = {MAIN_SESSION: self._token}
         # One attribute holds everything a call is judged by; ``set_scope`` replaces it whole.
         self._scope = scope if scope is not None else (
             replace(DEFAULT_SCOPE, tools=_tool_map(tools)) if tools is not None else DEFAULT_SCOPE)
@@ -222,6 +223,9 @@ class ManagerOps:
         self._turn_file = turn_file
         self._epoch = 0
         self._bindings: OrderedDict[str, Turn] = OrderedDict()  # the last BINDINGS_KEPT turns, ended ones too
+        self._binding_sessions: dict[str, str] = {}
+        self._session_turns: dict[str, Turn] = {}
+        self._routed_turns: dict[int, Turn] = {}  # enforcement survives a switch-off until end_turn
         self._pending: dict[tuple[str | None, str | None, str | None], _Pending] = {}
         self._working_at: float | None = None  # when the MCP entry last listed the tools
         # Per binding, the tool calls its turn's stream showed and no call has claimed yet: (call id, tool, args).
@@ -265,9 +269,16 @@ class ManagerOps:
     # --- The endpoint ---
 
     def authorized(self, header: str | None) -> bool:
-        """Whether an ``Authorization`` header carries this server's token."""
+        """Whether an ``Authorization`` header carries one of this Manager's session credentials."""
+        return self.session_for(header) is not None
+
+    def session_for(self, header: str | None) -> str | None:
+        """The session a server-issued credential grants; callers cannot choose it in their arguments."""
         scheme, _, value = (header or "").partition(" ")
-        return scheme.lower() == "bearer" and hmac.compare_digest(value.strip().encode(), self._token.encode())
+        if scheme.lower() != "bearer":
+            return None
+        return next((key for key, token in self._session_tokens.items()
+                     if hmac.compare_digest(value.strip().encode(), token.encode())), None)
 
     @property
     def scope(self) -> OpsScope:
@@ -355,11 +366,12 @@ class ManagerOps:
         return [task_directory_tool(project_tool(tool)).listing() for tool in self._scope.tools.values()
                 if _audience(tool) is Audience.ANY]
 
-    async def current_listing(self, turn: Turn | None = None) -> list[dict[str, Any]]:
+    async def current_listing(self, turn: Turn | None = None, *, session_key: str | None = None) -> list[dict[str, Any]]:
         """The tools the Manager has now (``current_scope``), as ``tools/list`` names them, for ``turn`` (by default
         the one running, as MCP's ``tools/list`` and the API runtime ask): a tool only the user's own turns run is
         listed only in such a turn, never with no turn running."""
-        turn = turn or self._turn
+        turn = (turn or self._turn) if session_key is None else (
+            self._session_turns.get(session_key) or Turn(channel=None, chat=None))
         tools = list((await self.current_scope()).tools.values())
         if any(_audience(tool) is Audience.OPERATOR for tool in tools) and not (
                 turn is not None and await _operator_turn(turn)):
@@ -433,15 +445,16 @@ class ManagerOps:
         return f"looper mcp-server exited ({done.returncode}) without listing the tools{': ' + last if last else ''}"
 
     async def call(self, name: str, raw: Any, *, binding: str | None = None,
-                    call_id: str | None = None) -> dict[str, Any]:
+                    call_id: str | None = None, session_key: str | None = None) -> dict[str, Any]:
         """Run one tool call; the protocol's answer.
 
-        With stop enabled (``chat.stop_enabled``), or session routing on for this Manager (its sessions run in
-        parallel: ``session_routing.routes``), the binding is enforced: the call runs in the turn its
+        With stop enabled (``chat.stop_enabled``), or session routing on or still draining routed turns for this
+        Manager, the binding is enforced: the call runs in the turn its
         ``binding`` names (no binding, or one unknown, is Claude's own turn: it only reads), and a resident
         runtime's write call runs only when it matches a tool_use of that turn's stream. Off (the default), the
         binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
-        and each disagreement is logged and counted (``binding_report``), never refused."""
+        and each disagreement is logged and counted (``binding_report``), never refused. An authenticated session
+        can only use its own bindings, in either mode."""
         tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
@@ -451,8 +464,12 @@ class ManagerOps:
                                                    f"Manager's tools are: {', '.join(self._scope.tools)}")
             return _error(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(self._scope.tools)}")
         # With session routing on, sessions run in parallel: a call belongs only to the turn its binding names.
-        enforced = chat_settings.stop_enabled() or session_routing.routes(self._scope.manager_id)
+        enforced = (chat_settings.stop_enabled() or session_routing.routes(self._scope.manager_id)
+                    or bool(self._routed_turns) or session_key not in (None, MAIN_SESSION))
         bound = self._bindings.get(binding) if binding else None
+        if bound is not None and session_key is not None and self._binding_sessions.get(binding) != session_key:
+            self._mismatch("other_session", bound, name, enforced=True)
+            return _error(ErrorCode.FORBIDDEN, "this turn belongs to another session; the call did not run")
         self._observe_turn(name, binding, bound, enforced=enforced)
         turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
         if _audience(tool) is Audience.OPERATOR:
@@ -590,12 +607,14 @@ class ManagerOps:
 
     # --- The Manager's turns ---
 
-    def register(self, turn: Turn, binding: str) -> None:
+    def register(self, turn: Turn, binding: str, *, session_key: str = MAIN_SESSION) -> None:
         """Calls that carry ``binding`` belong to ``turn``; the last ``BINDINGS_KEPT`` stay, ended turns too."""
         self._bindings[binding] = turn
+        self._binding_sessions[binding] = session_key
         self._bindings.move_to_end(binding)
         while len(self._bindings) > BINDINGS_KEPT:
             old, _ = self._bindings.popitem(last=False)
+            self._binding_sessions.pop(old, None)
             self._expected.pop(old, None)
             self._expected_event.pop(old, None)
 
@@ -680,27 +699,32 @@ class ManagerOps:
 
     def binding_report(self) -> dict[str, Any]:
         """Whether the binding is enforced, and the mismatches counted since the server started."""
-        return {"enforced": chat_settings.stop_enabled(), "mismatches": sum(self._mismatches.values()),
+        return {"enforced": bool(chat_settings.stop_enabled() or session_routing.routes(self._scope.manager_id)
+                                  or self._routed_turns), "mismatches": sum(self._mismatches.values()),
                 "by": [{"reason": reason, "runtime": runtime, "tool": tool, "count": count}
                        for (reason, runtime, tool), count in sorted(self._mismatches.items())],
                 "matches": [{"by": by, "when": when, "count": count}
                             for (by, when), count in sorted(self._matches.items())]}
 
     def turn_file_for(self, session_key: str) -> Path | None:
-        """The binding file of the Manager session ``session_key``: what the MCP bridge of that session's runtime
-        reads at each call. Main's is the one given (``turn_file``, ``<manager id>-turn.json``); another session's is
-        beside it, named by a digest of its key (``<manager id>-turn-<digest>.json``). None without a ``turn_file``."""
+        """The binding file of ``session_key``. Main keeps the supplied path; another session keeps its file in
+        its own runtime root under ``manager-sessions/<digest>``. None without a ``turn_file``."""
         if not session_key:
             raise ValueError("a Manager session needs a key")
         if session_key == MAIN_SESSION or self._turn_file is None:
             return self._turn_file
-        path = self._turn_file
-        return path.with_name(f"{path.stem}-{session_routing.key_digest(session_key)}{path.suffix}")
+        return (self._turn_file.parent / "manager-sessions" / session_routing.key_digest(session_key)
+                / ".local" / "manager-turn.json")
 
     def publish_binding(self, binding: str | None, *, session_key: str = MAIN_SESSION) -> None:
         """Write the binding file of ``session_key`` (``turn_file_for``) the MCP bridge reads at each call
         (synchronously and atomically: it must be on disk before the prompt reaches the runtime). ``None``: no turn
         runs."""
+        if binding is not None and (turn := self._bindings.get(binding)) is not None:
+            self._binding_sessions[binding] = session_key
+            self._session_turns[session_key] = turn
+            if session_key != MAIN_SESSION:
+                self._routed_turns[id(turn)] = turn
         path = self.turn_file_for(session_key)
         if path is None:
             return
@@ -716,7 +740,7 @@ class ManagerOps:
             tmp.unlink(missing_ok=True)
             raise
 
-    def begin_turn(self, turn: Turn, binding: str | None = None) -> str:
+    def begin_turn(self, turn: Turn, binding: str | None = None, *, session_key: str = MAIN_SESSION) -> str:
         """``turn`` runs now; the note its message starts with when an operation in its chat waits for the user's
         word ('' otherwise). That operation may be confirmed in this turn only.
 
@@ -724,8 +748,11 @@ class ManagerOps:
         if turn.state is TurnState.ENDED:
             turn.state = TurnState.ANSWERING
         self._turn = turn
+        self._session_turns[session_key] = turn
+        if session_routing.routes(self._scope.manager_id) or session_key != MAIN_SESSION:
+            self._routed_turns[id(turn)] = turn
         if binding:
-            self.register(turn, binding)
+            self.register(turn, binding, session_key=session_key)
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:
             return ""
@@ -755,6 +782,10 @@ class ManagerOps:
             turn.state = TurnState.ENDED
         if self._turn is turn:
             self._turn = None
+        self._routed_turns.pop(id(turn), None)
+        for key, active in list(self._session_turns.items()):
+            if active is turn:
+                del self._session_turns[key]
         pending = self._pending.get(turn.chat_key)
         if pending is not None and not turn.autonomous and pending.answer_turn == turn.message_id:
             del self._pending[turn.chat_key]
@@ -783,7 +814,10 @@ class ManagerOps:
 
     def server_config(self, *, session_key: str = MAIN_SESSION) -> dict[str, Any]:
         """Looper's MCP entry for the runtime of the Manager session ``session_key``, naming its binding file."""
-        config = server_config(self._url, self._token)
+        token = self._session_tokens.get(session_key)
+        if token is None:
+            token = self._session_tokens[session_key] = secrets.token_urlsafe(32)
+        config = server_config(self._url, token)
         if (turn_file := self.turn_file_for(session_key)) is not None:
             config["env"][TURN_FILE_ENV] = str(turn_file)
         if trace := os.environ.get(TRACE_ENV, "").strip():  # a server started to trace its bridge (an eval)

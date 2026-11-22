@@ -1065,7 +1065,8 @@ class AgentHTTPServer:
                                                             "required"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
             try:
-                writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing()}))
+                writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing(
+                    session_key=ops.session_for(authorization))}))
             except OpError as exc:
                 writer.write(_json_response(HTTP_503, {"error": str(exc)}))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
@@ -1074,7 +1075,8 @@ class AgentHTTPServer:
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
             writer.write(_json_response(HTTP_200, await ops.call(
-                m.group(1), arguments, binding=headers.get("x-looper-turn"), call_id=headers.get("x-looper-call"))))
+                m.group(1), arguments, binding=headers.get("x-looper-turn"), call_id=headers.get("x-looper-call"),
+                session_key=ops.session_for(authorization))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()

@@ -915,7 +915,8 @@ def test_each_session_has_its_own_binding_file_and_main_keeps_its_own(tmp_path: 
     path = tmp_path / ".local" / "manager-turn.json"
     ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok", turn_file=path)
     group = "group:channel-lark-1:oc_synthetic_1"
-    own = tmp_path / ".local" / f"manager-turn-{hashlib.sha256(group.encode()).hexdigest()[:12]}.json"
+    own = (tmp_path / ".local" / "manager-sessions" / hashlib.sha256(group.encode()).hexdigest()[:12]
+           / ".local" / "manager-turn.json")
     assert ops.turn_file_for("main") == path and ops.turn_file_for(group) == own
     assert ops.server_config(session_key="main") == ops.server_config()
     assert ops.server_config(session_key=group)["env"]["LOOPER_AGENT_TURN_FILE"] == str(own)

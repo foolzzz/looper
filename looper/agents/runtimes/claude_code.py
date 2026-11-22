@@ -158,6 +158,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # Verified against Claude Code 2.1.329: /compact and an automatic compaction in the resident stream-json session
     # each write a compact_boundary event before the turn's result.
     resident_compaction_events = True
+    supports_platform_tools_only = True
     room_push = RoomPush.USER_TURN
     run_input = True  # stdin can stay open between a Worker's waiting turns
     keepable = True
@@ -221,7 +222,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         from ..llmrec.gateway import translated
 
         # Project settings load after process env; pin the attached route and all translation safeguards here too.
-        sealed = launch is not None and launch.no_tools
+        sealed = launch is not None and (launch.no_tools or launch.platform_tools_only)
         env = None
         if launch is not None and translated(launch):
             env = {**dict(TRANSLATED_ENV), AUTH_TOKEN: "", API_KEY: ""}
@@ -301,14 +302,20 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         permissions, items, knowledge or teammates: ``claude_cli.NO_TOOLS_ARGS`` with its model, effort, cap and
         binding."""
         from ..claude_cli import (
-            NO_TOOLS_ARGS, budget_args, consult_args, knowledge_args, library_args, peer_args, permission_args,
-            read_only_args,
+            NO_TOOLS_ARGS, READ_ONLY_MODE, budget_args, consult_args, knowledge_args, library_args, peer_args,
+            permission_args, read_only_args,
         )
 
         provider = launch.profile.provider
         budget = budget_args(launch.max_budget_usd) if self.cost_source(provider) is CostSource.RUNTIME else []
         if launch.no_tools:
             return [*NO_TOOLS_ARGS, "--model", launch.model, *(["--effort", launch.effort] if launch.effort else []),
+                    *budget, *self.bind_provider(provider, launch.model, launch.effort).args]
+        if launch.platform_tools_only:
+            return ["--tools", "", "--disable-slash-commands", *READ_ONLY_MODE,
+                    "--allowedTools", "mcp__looper__*", "--model", launch.model,
+                    *(["--effort", launch.effort] if launch.effort else []),
+                    *(["--mcp-config", launch.library.mcp_config] if launch.library.mcp_config else []),
                     *budget, *self.bind_provider(provider, launch.model, launch.effort).args]
         return [
             *(consult_args() if launch.consult else

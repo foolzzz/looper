@@ -43,7 +43,6 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .. import child_env
-from . import session_routing
 
 logger = logging.getLogger(__name__)
 
@@ -239,8 +238,7 @@ async def reclaim_unused(runtime_root: Path) -> list[Path]:
         saved += [(f"planner-schedule-{row['id']}", row["planner_session_runtime"])
                   for row in await schedules.list_schedules() if row["planner_session_id"]]
         saved += await tasks.live_planner_session_labels()
-        if session_routing.routing_enabled():  # off, the group and dm sessions' rows are left to go stale
-            saved += await _manager_session_labels()
+        saved += await _manager_session_labels()  # saved conversations outlive the routing switch
         lines = command_lines()
         removed = reclaim(runtime_root, keep=keep, command_lines=lines)
         removed += reclaim_sessions(runtime_root, saved=saved, command_lines=lines)

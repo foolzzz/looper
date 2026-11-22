@@ -949,12 +949,14 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
 class Access(str, Enum):
     """What a run may do (the advisor RFC, section 6). ``full``: every tool; ``read_only``: no change to files (a
     Planner's); ``consult``: only the reading tools, in a resumed fork of a seat's session (an agent room consult);
-    ``advisor``: no tool at all, its system prompt replaced (an advisor's, a judge's or an outbound review's run)."""
+    ``advisor``: no tool at all, its system prompt replaced (an advisor's, a judge's or an outbound review's run);
+    ``platform_tools``: only session-bound server tools, with no local tools or installed capabilities."""
 
     FULL = "full"
     READ_ONLY = "read_only"
     CONSULT = "consult"
     ADVISOR = "advisor"
+    PLATFORM_TOOLS = "platform_tools"  # routed Manager: only the session-bound server tools, no local tools
 
 
 @dataclass(frozen=True)
@@ -1012,7 +1014,11 @@ class Launch:
         work in parallel through Looper's Workers, whose steps Looper tracks, which teammates would bypass. A run
         with no tools (``no_tools``) has none either."""
         return (self.profile.agent_teams and self.role is not AgentType.PLANNER and not self.read_only
-                and not self.no_tools)
+                and not self.no_tools and not self.platform_tools_only)
+
+    @property
+    def platform_tools_only(self) -> bool:
+        return self.access_level is Access.PLATFORM_TOOLS
 
     @property
     def no_tools(self) -> bool:
@@ -1025,7 +1031,7 @@ class Launch:
         """Whether the run must not change files: every access level but ``full``. A Planner plans and decides, and
         gives every change to a Worker; its runtime refuses the tools and commands that would change files where it
         can, and otherwise the Planner checks its task directory after each turn (``RuntimeAdapter.read_only``)."""
-        return self.access_level is not Access.FULL
+        return self.access_level not in (Access.FULL, Access.PLATFORM_TOOLS)
 
     @property
     def read_only_mode(self) -> ReadOnly:
@@ -1101,6 +1107,8 @@ class Launch:
     def _check_binding(self) -> None:
         from .runtimes import RuntimeUnsupported
 
+        if self.platform_tools_only and not self.runtime.supports_platform_tools_only:
+            raise RuntimeUnsupported(f"{self.runtime.label} cannot restrict a routed Manager session to platform tools")
         if self.settings.profile_error:
             raise RuntimeUnsupported(self.settings.profile_error)
         if isinstance(self.profile, ResolvedAgentProfile):

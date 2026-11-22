@@ -35,6 +35,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -51,7 +52,7 @@ from ..bus import MessageBus
 from ..channels import lark_quote
 from ..channels.chat_history import CHAT_RECORD, chat_record
 from ..supervisor import cancel_and_wait
-from ..agent_settings import AgentSettings, AgentType, Launch, Layer, load_agent_settings
+from ..agent_settings import Access, AgentSettings, AgentType, Launch, Layer, load_agent_settings
 from ..session_profile import (
     Effect, ProfileCommandKind, ProfileRefError, SessionProfileResult, choices as profile_choices, display_name,
     effect as profile_effect, format_list, parse_profile_command, resolve_ref,
@@ -78,7 +79,7 @@ from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
-from ..library import load_installed
+from ..library import EMPTY_LIBRARY, load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import leads_model, research_order, session_switch
@@ -916,6 +917,62 @@ class ManagerAgent:
         """The label of the resident runtime of the session the code runs on: main's is the Manager's id."""
         return session_routing.resident_label(self.agent_id, self._session_now().route)
 
+    def _session_root(self) -> Path:
+        """Non-main sessions keep all materialized context and runtime state in their own tree, even after off."""
+        session = self._session_now()
+        if session.key == MAIN_SESSION:
+            return self._runtime_root
+        root = self._runtime_root / ".local" / "manager-sessions" / session_routing.key_digest(session.key)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return root
+
+    def _session_work_dir(self) -> Path:
+        if self._session_now().key == MAIN_SESSION:
+            return self._config.work_dir
+        path = self._session_root() / "work"
+        path.mkdir(mode=0o700, exist_ok=True)
+        return path
+
+    def _session_environment(self, launch: Launch) -> dict[str, str]:
+        env = launch.environment()
+        if self._session_now().key == MAIN_SESSION:
+            return env
+        root = self._session_root()
+        original_home = Path(env.get("HOME", str(Path.home())))
+        original_config = Path(env.get("CLAUDE_CONFIG_DIR") or original_home / ".claude")
+        login_namespace = env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR", env.get("CLAUDE_CONFIG_DIR", ""))
+        for key, name in (("HOME", "home"), ("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "config"),
+                          ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "run"),
+                          ("CLAUDE_CONFIG_DIR", "claude"), ("TMPDIR", "tmp"), ("TMP", "tmp"), ("TEMP", "tmp")):
+            path = root / name
+            path.mkdir(mode=0o700, exist_ok=True)
+            env[key] = str(path)
+        if launch.runtime is not CLAUDE_CODE:
+            return env
+        # Share only the CLI login, never its settings, projects, histories or plugin caches. The model has no
+        # local tools with which to read it. Pin the original keychain namespace: otherwise Claude hashes the
+        # isolated config directory into a new service name and cannot find or refresh the subscription login.
+        if sys.platform != "darwin" and not login_namespace:
+            # File-based logins and their refresh locks stay at the original auth root too.
+            login_namespace = str(original_config.absolute())
+        env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = login_namespace
+        keychains = original_home / "Library" / "Keychains"
+        if sys.platform == "darwin" and not login_namespace:
+            # The default keychain login locks HOME/.claude during refresh. Keep that same lock root for every
+            # borrower; Claude's histories/settings/caches still use the explicit per-session config directory.
+            env["HOME"] = str(original_home)
+        elif sys.platform == "darwin" and keychains.is_dir():
+            library = Path(env["HOME"]) / "Library"
+            library.mkdir(mode=0o700, exist_ok=True)
+            link = library / "Keychains"
+            if not link.exists():
+                link.symlink_to(keychains.absolute(), target_is_directory=True)
+        login = original_config / ".credentials.json"
+        link = Path(env["CLAUDE_CONFIG_DIR"]) / login.name
+        if login.is_file() and not link.exists():
+            link.symlink_to(login.absolute())
+        return env
+
     async def _load_session_state(self, session: ManagerSession | None = None) -> None:
         """Read the session a previous run saved, once; without a readable one the next turn starts a new one.
         ``session`` (default: the one the code runs on) is main's: the saved session is ``agent_sessions``'."""
@@ -1235,7 +1292,8 @@ class ManagerAgent:
                 # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
                 if not self._running:
                     break
-                self._bus.settle_handled(envelope)
+                if not self._router.holds_completion(envelope):
+                    self._bus.settle_handled(envelope)
         except asyncio.CancelledError:
             pass
 
@@ -1443,7 +1501,7 @@ class ManagerAgent:
     async def _library_with_server(self, library: Any) -> Any:
         if self.ops is None:
             return library
-        return await self.ops.library_with_server(library, self._runtime_root, session_key=self._session_now().key)
+        return await self.ops.library_with_server(library, self._session_root(), session_key=self._session_now().key)
 
     async def _prepare_turn(self, token: TurnToken, envelope: MessageEnvelope, *, ask: Ask | None = None) -> Prepared:
         """Everything a turn needs before its process starts, every await a stoppable ``token.step`` or a
@@ -1528,7 +1586,8 @@ class ManagerAgent:
             # Turns run one at a time; a stop while this one waits for its turn ends it.
             await token.step("turn_lock", self._turn_lock.acquire())
             self._lock_owner = token
-            waiting = self.ops.begin_turn(turn, binding=token.binding) if self.ops is not None else ""
+            waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
+                       if self.ops is not None else "")
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
                       quoted=quoted)
         token.prepared_ask = ask
@@ -1547,12 +1606,17 @@ class ManagerAgent:
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         await token.step("templates", self._read_templates())
-        library = await token.step("library", load_installed(
+        routed = self._session_now().key != MAIN_SESSION
+        library = EMPTY_LIBRARY if routed else await token.step("library", load_installed(
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
-        launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        launch = Launch(agent_settings, library, role=AgentType.MANAGER,
+                        access=Access.PLATFORM_TOOLS if routed else None)
+        if routed and not launch.runtime.supports_platform_tools_only:
+            raise ProfileUnavailable(f"{launch.runtime.label} 尚不支持仅使用平台工具的路由会话，请选择支持的 Agent Profile。",
+                                     agent_settings.profile_source)
         launch = await token.step("llmrec_attach", llmrec.attach(
-            launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
+            launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._session_work_dir()))
         if ask.turn is not None:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
         # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
@@ -1560,7 +1624,7 @@ class ManagerAgent:
         self._research = self._research_sources(tools, launch)
         system_prompt = self._composed_prompt(agent_settings)
         try:
-            prompt_file = system_prompt.write_file(self._runtime_root)
+            prompt_file = system_prompt.write_file(self._session_root())
         except OSError as exc:
             raise RuntimeError(f"无法写入 system prompt 文件：{exc}") from None
         # The command carries the model, the effort and the library's directories; the file is named by
@@ -1591,9 +1655,8 @@ class ManagerAgent:
             await token.keep("claude_stop", self._claude.stop(), 10)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
-            await token.keep("claude_start", self._claude.start(
-                command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                totals=self._session_totals, price=launch.price), 10, undo=lambda: self._claude.stop(kill=True))
+            await token.step("claude_start", self._restore_resident(token, session, envelope, command,
+                                                                   signature, launch, seconds=10))
             self._process = _Process(command, signature, system_prompt, launch)
         if switch is None and session.session_id and session.session_runtime == "api" \
                 and (self._claude_runtime is not launch.runtime or not self._claude.started):
@@ -1602,10 +1665,8 @@ class ManagerAgent:
             self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
             with self._runtime_start_budget(launch) as seconds:
-                await token.keep("claude_start", self._claude.start(
-                    command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                    totals=self._session_totals, price=launch.price), seconds,
-                    undo=lambda: self._claude.stop(kill=True))
+                await token.step("claude_start", self._restore_resident(token, session, envelope, command,
+                                                                       signature, launch, seconds=seconds))
             self._process = _Process(command, signature, system_prompt, launch)
         if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
@@ -1628,6 +1689,19 @@ class ManagerAgent:
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
             quoted=ask.quoted, state=tuple(state) if state is not None else None, session=session)
+
+    async def _restore_resident(self, token: TurnToken, session: ManagerSession, envelope: MessageEnvelope,
+                                command: list[str], signature: Any, launch: Launch, *, seconds: float) -> None:
+        """A preparation-time restore has the same capacity reservation and cancellation cleanup as a new start."""
+        async with session.lifecycle_gate:
+            try:
+                await token.step("resident_admission", self._router.admit(session, envelope))
+                await token.keep("claude_start", self._claude.start(
+                    command, cwd=str(self._session_work_dir()), signature=signature, env=self._session_environment(launch),
+                    totals=self._session_totals, price=launch.price), seconds,
+                    undo=lambda: self._claude.stop(kill=True))
+            finally:
+                await self._router.release(session)
 
     @contextmanager
     def _runtime_start_budget(self, launch: Launch) -> Iterator[float]:
@@ -1691,7 +1765,7 @@ class ManagerAgent:
             agent_id=self.agent_id,
             task_id=envelope.metadata.get("task_id"),
             command=command,
-            cwd=str(self._config.work_dir),
+            cwd=str(self._session_work_dir()),
             input_text=f"{brief}\n\n{asked}" if brief else asked,
             session_id=session.session_id,
             system_prompt=prepared.system_prompt,
@@ -1713,7 +1787,7 @@ class ManagerAgent:
                 try:
                     with self._runtime_start_budget(launch) as seconds:
                         await token.keep("claude_start", self._claude.start(
-                            command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                            command, cwd=str(self._session_work_dir()), signature=signature, env=self._session_environment(launch),
                             totals=self._session_totals if run.resuming else None,
                             autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
                             price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
@@ -1774,10 +1848,13 @@ class ManagerAgent:
                         # launch in this turn's record and retry the capability refresh next turn.
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
                                            signature=previous.signature,
-                                           prompt_file=previous.system_prompt.write_file(self._runtime_root))
+                                           prompt_file=previous.system_prompt.write_file(self._session_root()))
                         if prepared.turn is not None:
                             prepared.turn.blocks.append(notice)
-                await self._start_turn(token, prepared)
+                try:
+                    await self._start_turn(token, prepared)
+                finally:
+                    await self._router.release(prepared.session)
             return await self._converse(token, prepared)
         except BaseException as exc:
             failure = exc
@@ -1988,11 +2065,13 @@ class ManagerAgent:
         if target is None or target.manager_id != self.agent_id or self._bus is None:
             return
         off = chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
+        routed = session_routing.routes(self.agent_id)
         try:
             if off or not self._takes_completion_turns:
                 await completion_events.fall_back(self._bus, self.agent_address, target=target,
                                                   reason="off" if off else "manager_off")
                 return
+            operator = await self._router.completion_operator(target.channel_id) if routed else None
             batch = uuid.uuid4()
             rows = await db_manager_events.claim(*target.key, batch)
         except Exception:
@@ -2004,7 +2083,10 @@ class ManagerAgent:
             await self._bus.publish(completion_events.wake(self.agent_address, target))
             return
         if rows:
-            await self._tell_completion(rows, batch)
+            if routed:
+                self._router.dispatch_completion(envelope, rows, batch, operator)
+            else:
+                await self._tell_completion(rows, batch)
 
     async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -> None:
         """Run the completion turn of the claimed events (``batch``) within ``TURN_SECONDS``: its reply, with the
@@ -2175,7 +2257,7 @@ class ManagerAgent:
             self._lock_owner = token
             self._running_token = token
             if self.ops is not None:
-                self.ops.begin_turn(turn, binding=token.binding)
+                self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
             prepared = await self._prepare_turn(token, context, ask=Ask(message, "", turn))
             if prepared.action is not None:  # turned off since: it does not act as the Manager
                 raise _CompletionNotTaken()
@@ -2476,7 +2558,8 @@ class ManagerAgent:
             # is reaped and the next message starts a new process that resumes the session.
             try:
                 if isinstance(self._claude, InProcessTools) and self.ops is not None:
-                    self._claude.set_turn_tools(ManagerTurnTools(self.ops, token.binding))
+                    self._claude.set_turn_tools(ManagerTurnTools(self.ops, token.binding,
+                                                               session_key=self._session_now().key))
                 if isinstance(self._claude, RunnerSession):
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=self._runner_limits)
@@ -2903,7 +2986,7 @@ class ManagerAgent:
         if session.session_runtime == "api":
             text = api_handoff_prompt(switch.describe(), HANDOFF_MAX_CHARS)
         recorder = ClaudeRunRecorder(
-            agent_id=self.agent_id, task_id=None, command=process.command, cwd=str(self._config.work_dir),
+            agent_id=self.agent_id, task_id=None, command=process.command, cwd=str(self._session_work_dir()),
             input_text=text, session_id=session.session_id, system_prompt=process.system_prompt,
             launch=process.launch, pid_of=lambda: self._claude.pid,
         )
@@ -3053,12 +3136,12 @@ class ManagerAgent:
             turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"])
             # ^ it answers no message: it only reads
             if self.ops is not None:
-                self.ops.begin_turn(turn)
+                self.ops.begin_turn(turn, session_key=session.key)
             recorder = ClaudeRunRecorder(
                 agent_id=self.agent_id,
                 task_id=None,
                 command=command,
-                cwd=str(self._config.work_dir),
+                cwd=str(self._session_work_dir()),
                 input_text=AUTONOMOUS_INPUT,
                 session_id=session.session_id,
                 system_prompt=system_prompt,
@@ -3114,7 +3197,7 @@ class ManagerAgent:
         """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
         session = self._session_now()
         runtime = launch.runtime
-        command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
+        command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._session_work_dir(),
                                            prompt_file=prompt_file, launch=launch)
         if resume and session.session_id:
             command.extend(runtime.resume_args(session.session_id))
