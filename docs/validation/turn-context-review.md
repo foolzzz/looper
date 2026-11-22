@@ -92,3 +92,28 @@ operator service were used.
 
 ![Chat settings at 1280 px](turn-context-settings-1280.png)
 ![Chat settings at 390 px](turn-context-settings-390.png)
+
+## CI concurrency failure follow-up
+
+Merged `origin/main` at `ddc2d00df` without rebasing, retaining both the session-key
+and speaker-kind imports in the only conflict. The failing CI job was
+[Agent system tests (shard 3/4)](https://github.com/foolzzz/looper/actions/runs/44876548854/job/136762399644),
+in `TestWorkerConcurrency.test_a_raised_limit_starts_a_waiting_run_and_a_lowered_one_stops_none`.
+
+The unmodified test passed five separate runs on this branch and five on that
+`origin/main`, all foreground with `-n 2` and Python 3.14.9. The test file,
+WorkerPool and message bus are byte-identical between the two revisions.
+A temporary, uncommitted pytest probe held `w2`'s worker coroutine until the
+next event-loop turn after `w1` became ready. Both revisions then failed with
+the same missing `w2: pending` assertion as CI. The test waits for `w1` to accept
+input but takes its snapshot before ensuring that `w2` has entered the pool;
+readiness of the first worker does not synchronize delivery of the second.
+This is an existing test timing race, not a turn-context regression. No
+production change or test fix is included for it.
+
+The merge's ops and authorization paths also passed 129 tests across
+`test_manager_ops.py`, `test_turn_context_auth_db.py` and
+`test_turn_context_settings_db.py`, with no skips, using `-n 2` and a disposable
+PostgreSQL database. The original CI used Python 3.11; the local comparison
+used the same Python 3.14.9 interpreter version for both revisions. The full
+suite and a new CI run are not counted as passed by this local validation.
