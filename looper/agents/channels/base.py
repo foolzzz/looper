@@ -114,6 +114,12 @@ class ChannelAdapter(ABC):
         return PostReceipt(False, error=f"the {self.channel_type} channel cannot post messages",
                            outcome=PostOutcome.REJECTED)
 
+    async def post_card(self, target: NotifyTarget, card: Any, *, reply_to: str | None = None,
+                        idempotency_key: str | None = None) -> PostReceipt:
+        """Post ``card`` (``card_actions.Card``) like ``post``, with its buttons where this channel has them; a
+        channel without buttons posts its text."""
+        return await self.post(target, card.text, reply_to=reply_to, idempotency_key=idempotency_key)
+
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         """Edit a bot's own message when this channel supports it."""
         return PostReceipt(False, error=f"the {self.channel_type} channel cannot edit messages",
