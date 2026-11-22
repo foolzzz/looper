@@ -6270,7 +6270,12 @@ yet; its callers come with the `outbound_review.enabled` switch.
 
 - **The action** is typed: its tool and action, its `ActionLevel` (`inside`, `operator`, `origin`, `machine`,
   `external`, `unknown`; only `external` and `unknown` are reviewed), its target and a summary code wrote, and the
-  text it would send. Whose turn led to it (`Who`) is code's, never the model's: in a turn that is not the
+  text it would send. Every Looper tool declares its level in `ops/levels.py` (`TOOL_LEVELS`: a level, or a function of
+  the call's arguments and turn; a read action is `inside`, a tool with none `unknown`), not on `Tool`, whose
+  declaration the upgrade probe reads by its exact shape. Every `/api/v1` operation has `Operation.level` (default
+  `inside`) or `level_of`. `manager_chat_bindings.put` is `external`. The schedule writes and `confirm_target` go by
+  their command (`machine`) and notify target (`action_levels.target_level`: `operator` for the dashboard or the
+  operator's own chat, `origin` for the asking chat, else `external`). The levels are not in the OpenAPI document. Whose turn led to it (`Who`) is code's, never the model's: in a turn that is not the
   operator's, code blocks the action (`not_operator`) without a run.
 - **The run.** The `outbound_check` role has no tools and no harness (like `advice_check`; `ROLE_CAPABILITIES`
   `run` and `no_tools`). Its role layer chooses its Agent Profile; with none it runs its built-in
