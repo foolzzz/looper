@@ -18,6 +18,20 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.24] - 2026-11-20
+
+### Added
+
+- **Needs you, off by default.** ([#1485](https://github.com/foolzzz/looper/pull/1485)) `attention.enabled` must be `true`. No row, or any other value, leaves it off. While it is on, one read-only summary lists user gates, in-memory confirmations, failing schedules, failing logins, pending intents, ledger items that wait for the user, and `uncertain` deliveries of the last 72 hours. The dashboard page is `#todo`. `/todo` is answered by code, only in the operator's own turns. There is no dashboard switch.
+- **Delivery guard setting, off by default.** ([#1496](https://github.com/foolzzz/looper/pull/1496)) `manager.delivery_guard.enabled` must be the string `true`. Only the operator can call `delivery_guard.get` and `delivery_guard.update`. Storing `true` changes no Manager prompt, tool list, reply, record or channel call: the guard is not wired into a turn. Claude Code declares `mid_turn_input`; nothing in this release injects mid-turn input.
+
+### Changed
+
+- **A blocked or unreadable subscription window is skipped.** ([#1482](https://github.com/foolzzz/looper/pull/1482)) This is the default for a running leads, intents or push subscription. A prompt hook block skips at once (`skip_reason` `blocked_by_hook`) and the echoed prompt is not kept or pushed. An unreadable reply is asked once more; still unreadable, the window is skipped (`invalid_reply`) and the cursor moves. If the cap or the deadline is used up before that second ask, the run fails as `budget` or `timeout` and the window is kept. As many skipped completed runs in a row as the failure alert waits for (3 by default) send one `skip_alert`; the next completed run that uses its window sends `skip_recovered`.
+- **Each operator-only Manager tool refuses in its own words.** ([#1507](https://github.com/foolzzz/looper/pull/1507)) `looper_leads_search` keeps `message leads are searched only in the user's own direct chat or on the dashboard`. `looper_vault_search` and `looper_vault_read` used that same sentence. They now answer `the user's knowledge vault is searched and read only in their own direct chat or on the dashboard`.
+- **An unfinished online index step keeps an index only when it is valid and has the same definition.** ([#1485](https://github.com/foolzzz/looper/pull/1485)) An INVALID index, or a valid index whose definition differs, is dropped and built again. The new partial indexes of `uncertain` deliveries are built by `uncertain_deliveries_online`.
+- **The Manager's session state lives in one `ManagerSession`.** ([#1495](https://github.com/foolzzz/looper/pull/1495)) The only session is `main`. Prompts, tool lists, command lines and channel behavior are unchanged.
+
 ## [2.15.23] - 2026-11-20
 
 ### Added
