@@ -212,6 +212,26 @@ def test_a_failed_run_leaves_the_cursor_and_the_next_run_takes_its_window_too(mo
     scenario(check, monkeypatch, tmp_path)
 
 
+def test_a_window_a_prompt_hook_blocks_is_skipped_pushes_nothing_and_the_next_run_starts_after_it(
+        monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        first = await add(env.pool, "first", sent_at=minutes_ago(env, 100))
+        fake.outcomes = [(None, processor.ProcessorFailure.BLOCKED)]
+        run = await fire(env, sid)
+        # Blocked every time it is sent: kept, the window would be sent again with every run after it.
+        assert (run["status"], run["stream"]["outcome"], run["stream"]["skip_reason"]) == (
+            "completed", "skipped", "blocked_by_hook")
+        assert await cursor(env, sid) == first and poster.sent == []
+        second = await add(env.pool, "second", sent_at=minutes_ago(env, 5) + timedelta(minutes=10))
+        run = await fire(env, sid)
+        assert run["status"] == "completed" and (run["stream"]["from_seq"], run["stream"]["to_seq"]) == (first, second)
+        assert fake.calls[-1]["input_text"].splitlines()[0] == "消息(共 1 条):" and len(poster.sent) == 1
+
+    scenario(check, monkeypatch, tmp_path)
+
+
 def test_what_is_too_old_by_the_next_run_is_dropped_and_counted(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await started(env, subscription={"max_age_minutes": 60})

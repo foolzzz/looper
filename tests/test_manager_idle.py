@@ -137,11 +137,11 @@ def test_close_failure_keeps_session_and_retries_without_content_in_log(manager,
     async def run():
         agent, _, _ = manager
         agent._running = True
-        agent._session_id, agent._session_totals = "saved", Usage(cost_usd=1.25)
+        agent._sessions["main"].session_id, agent._session_totals = "saved", Usage(cost_usd=1.25)
         close = AsyncMock(side_effect=[OSError("private model output"), True])
         agent._claude.try_stop_if_idle = close
         assert not await agent.try_suspend_idle(60)
-        assert agent._session_id == "saved" and agent._session_totals.cost_usd == 1.25
+        assert agent._sessions["main"].session_id == "saved" and agent._session_totals.cost_usd == 1.25
         assert await agent.try_suspend_idle(65)
         assert "private model output" not in caplog.text
         assert agent.agent_id in caplog.text
@@ -191,7 +191,7 @@ def test_next_message_resumes_id_and_incremental_totals(manager, tmp_path, agent
         await agent.start(bus)
         try:
             await agent._handle(message(agent, "remember amber"))
-            assert agent._session_id == "sess-1"
+            assert agent._sessions["main"].session_id == "sess-1"
             assert agent._session_totals.cost_usd == 0.25
             clock.now = 60
             assert await agent.try_suspend_idle(clock())
@@ -199,7 +199,7 @@ def test_next_message_resumes_id_and_incremental_totals(manager, tmp_path, agent
             assert saved["session_id"] == "sess-1"
             await agent._handle(message(agent, "what color"))
             assert "--resume" in agent._claude.command
-            assert agent._session_id == "sess-1" and agent._session_totals.cost_usd == 0.5
+            assert agent._sessions["main"].session_id == "sess-1" and agent._session_totals.cost_usd == 0.5
             costs = [c.kwargs["cost_usd"] for c in agent_db.finish_record.await_args_list]
             assert costs == [0.25, 0.25]
         finally:

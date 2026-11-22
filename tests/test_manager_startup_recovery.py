@@ -128,7 +128,7 @@ def test_startup_failure_retries_once_before_one_reply(
             session.stale = lambda signature: session.started
         elif step == "switch_session":
             manager._session_loaded = True
-            manager._session_id, manager._session_runtime = "old-session", "omp"
+            manager._sessions["main"].session_id, manager._sessions["main"].session_runtime = "old-session", "omp"
         original = {"claude_stop": session.stop, "claude_start": session.start,
                     "switch_session": manager._switch_session}[step]
 

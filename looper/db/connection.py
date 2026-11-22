@@ -163,12 +163,21 @@ _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
 _LEADS_CHECK_ONLINE = "leads_check_online"
+_RUN_SKIPS = "run_skips"
+_RUN_SKIPS_ONLINE = "run_skips_online"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
+_UNCERTAIN_DELIVERIES = "uncertain_deliveries"
+# The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
+_UNCERTAIN_DELIVERY_INDEXES = (
+    ("idx_subscription_deliveries_uncertain", "ON subscription_deliveries (updated_at) WHERE state = 'uncertain'"),
+    ("idx_intent_posts_uncertain", "ON intent_posts (updated_at) WHERE state = 'uncertain'"),
+    ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
+)
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -350,7 +359,8 @@ def _run_tree_ddl() -> tuple[str, ...]:
 class _OnlineStep:
     """What a migration finishes after the schema transaction commits, taking no lock that stops reads or writes: it
     validates its NOT VALID constraints (SHARE UPDATE EXCLUSIVE) and builds its indexes concurrently (an index a
-    stopped build left invalid is dropped first). It runs once ``migration``'s marker is there and until its own
+    stopped build left INVALID, or one of an older definition under the same name, is dropped and built again; a
+    valid one that is what the step builds is kept). It runs once ``migration``'s marker is there and until its own
     ``marker`` is: a start stopped halfway resumes it, and a finished one never runs it again."""
 
     migration: str
@@ -385,12 +395,48 @@ _ONLINE_STEPS = (
                           *((table, f"{table}_{name}") for table in ("message_leads", "intents")
                             for name in ("state_check", "check_verdict_check", "check_reason_check",
                                          "check_record_id_fkey", "dropped")))),
+    _OnlineStep(_RUN_SKIPS, _RUN_SKIPS_ONLINE,
+                validate=(*(("subscription_runs", f"subscription_runs_{name}")
+                            for name in ("outcome_check", "skip_reason_check", "skipped")),
+                          ("schedule_notifications", "schedule_notifications_kind_check"))),
     _OnlineStep(_MID_TURN_INPUT, "mid_turn_input_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
+    # The delivery tables can be large: their partial indexes are built without blocking writes.
+    _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
 )
+
+
+_INDEX_PROBE = "looper_index_probe"
+
+
+async def _index_kept(conn: asyncpg.Connection, name: str, definition: str) -> bool:
+    """Whether the index ``name`` is there, valid and the same as ``definition`` (``ON <table> ...``) would build.
+    The comparison is PostgreSQL's own text of each (``pg_get_indexdef`` from ``USING`` on, uniqueness too): the
+    definition is built on an empty copy of its table in a transaction that is rolled back, so nothing is scanned
+    and no lock blocks the table's writers."""
+    existing = await conn.fetchrow("SELECT indisvalid, pg_get_indexdef(indexrelid) AS definition FROM pg_index "
+                                   "WHERE indexrelid = to_regclass($1)", name)
+    if existing is None or not existing["indisvalid"]:
+        return False
+    table = re.match(r"ON\s+(\w+)\s", definition)
+    if table is None:
+        raise ValueError(f"an online index definition starts with ON <table>: {definition!r}")
+    probe = conn.transaction()
+    await probe.start()
+    try:
+        await conn.execute(f"CREATE TEMP TABLE {_INDEX_PROBE} (LIKE {table.group(1)})")
+        await conn.execute(f"CREATE INDEX {_INDEX_PROBE}_index ON {_INDEX_PROBE} {definition[table.end():]}")
+        wanted = await conn.fetchval("SELECT pg_get_indexdef(to_regclass($1))", f"{_INDEX_PROBE}_index")
+    finally:
+        await probe.rollback()
+
+    def shape(text: str) -> tuple[bool, str]:
+        return text.startswith("CREATE UNIQUE INDEX"), text.split(" USING ", 1)[1]
+
+    return shape(existing["definition"]) == shape(wanted)
 
 
 async def _finish_online(conn: asyncpg.Connection) -> None:
@@ -423,8 +469,12 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
             for table, constraint in step.validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
             for name, definition in step.indexes:
+                # Kept only when it is valid and is the index the step builds: one a stopped build left INVALID,
+                # or an older definition under the same name, is dropped and built again.
+                if await _index_kept(conn, name, definition):
+                    continue
                 await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-                await conn.execute(f"CREATE INDEX CONCURRENTLY {name} {definition}")
+                await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _ONLINE_LOCK)
@@ -456,6 +506,15 @@ def _intent_merges_ddl() -> str:
 
 
 _LEADS_CHECK_BLOCK = re.compile(r"-- leads check begin\n(.*?)-- leads check end", re.S)
+_RUN_SKIPS_BLOCK = re.compile(r"-- run skips begin\n(.*?)-- run skips end", re.S)
+
+
+def _run_skips_ddl() -> str:
+    """A subscription run's skipped window and why, as schema.sql defines it."""
+    found = _RUN_SKIPS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its run skips block")
+    return found.group(1)
 
 
 def _leads_check_ddl() -> str:
@@ -626,6 +685,15 @@ async def _processor_role_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('agent_setting_layers') "
         "AND conname = 'agent_setting_layers_role_check' "
         "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'processor'")
+
+
+async def _uncertain_deliveries_pending(conn: asyncpg.Connection) -> bool:
+    """A database without the partial indexes of uncertain deliveries: the migration only records itself, and its
+    online step builds them after the commit (a new database has them from schema.sql)."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _UNCERTAIN_DELIVERIES):
+        return False
+    return not await conn.fetchval("SELECT bool_and(to_regclass(name) IS NOT NULL) FROM unnest($1::text[]) AS name",
+                                   [name for name, _ in _UNCERTAIN_DELIVERY_INDEXES])
 
 
 async def _headless_compaction_pending(conn: asyncpg.Connection) -> bool:
@@ -968,6 +1036,37 @@ async def _leads_check_unvalidated(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ANY($1::text[]) AND NOT convalidated "
         "AND connamespace = current_schema()::regnamespace)",
         [constraint for _, constraint in _leads_check_step().validate]))
+
+
+async def _run_skips_pending(conn: asyncpg.Connection) -> bool:
+    """Whether the subscription runs lack the skip's reason, its constraints, or ``skipped`` among their outcomes, the
+    subscriptions their skip alert, or the notifications its kinds. Judged by the catalog: a database that already
+    has them is left alone (one whose leads check block ran again since, without the kinds, is not)."""
+    if not await conn.fetchval("SELECT to_regclass('subscription_runs') IS NOT NULL"):
+        return False
+    return not await conn.fetchval(
+        "SELECT (SELECT count(*) FROM pg_attribute WHERE attnum > 0 AND NOT attisdropped AND "
+        "((attrelid = 'subscription_runs'::regclass AND attname = 'skip_reason') "
+        "OR (attrelid = 'subscriptions'::regclass AND attname = 'skip_alert_at'))) = 2 "
+        "AND (SELECT count(*) FROM pg_constraint WHERE conrelid = 'subscription_runs'::regclass "
+        "AND conname IN ('subscription_runs_skip_reason_check', 'subscription_runs_skipped')) = 2 "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'subscription_runs'::regclass "
+        "AND conname = 'subscription_runs_outcome_check' AND strpos(pg_get_constraintdef(oid), $1) > 0) "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'schedule_notifications'::regclass "
+        "AND conname = 'schedule_notifications_kind_check' AND strpos(pg_get_constraintdef(oid), $2) > 0)",
+        "'skipped'", "'skip_recovered'")
+
+
+def _online_step(migration: str) -> _OnlineStep:
+    return next(step for step in _ONLINE_STEPS if step.migration == migration)
+
+
+async def _unvalidated(conn: asyncpg.Connection, migration: str) -> bool:
+    """Whether a constraint ``migration`` adds NOT VALID is still not validated."""
+    return bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ANY($1::text[]) AND NOT convalidated "
+        "AND connamespace = current_schema()::regnamespace)",
+        [constraint for _, constraint in _online_step(migration).validate]))
 
 
 async def _message_leads_pending(conn: asyncpg.Connection) -> bool:
@@ -1562,6 +1661,18 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
                                _LEADS_CHECK)
             await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
+        # After the leads block, which writes the outcomes' constraint without 'skipped'; validated as the leads
+        # check's is.
+        if await _run_skips_pending(conn):
+            await conn.execute(_run_skips_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _RUN_SKIPS)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _RUN_SKIPS_ONLINE)
+        elif state == "empty":
+            for table, constraint in _online_step(_RUN_SKIPS).validate:
+                await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+        elif await _unvalidated(conn, _RUN_SKIPS):
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _RUN_SKIPS)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _RUN_SKIPS_ONLINE)
         if await _schedule_session_bounds_pending(conn):
             await conn.execute("""
                 ALTER TABLE schedules
@@ -1581,6 +1692,8 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in await _outbound_reviews_ddl(conn):
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
+        if await _uncertain_deliveries_pending(conn):
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1632,7 +1745,9 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
+            or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn)
+            or await _uncertain_deliveries_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _decision_snapshots_pending(conn)
