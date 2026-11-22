@@ -150,7 +150,8 @@ def test_three_delivery_retries_update_one_row(monkeypatch, key):
     run_db(check, monkeypatch)
 
 
-def test_gate_parent_fallback_updates_the_original_delivery(monkeypatch):
+@pytest.mark.parametrize("cards", [False, True])
+def test_gate_parent_fallback_updates_the_original_delivery(monkeypatch, cards):
     from unittest.mock import AsyncMock
     from looper.agents import gate_courier
     from looper.agents.channels.base import PostOutcome, PostReceipt
@@ -163,8 +164,10 @@ def test_gate_parent_fallback_updates_the_original_delivery(monkeypatch):
             PostReceipt(False, parent_gone=True, outcome=PostOutcome.REJECTED),
             PostReceipt(True, external_ids=("synthetic-fallback",)),
         ])
-        registry._channels["channel-lark"] = SimpleNamespace(post=post)
-        courier = gate_courier.GateCourier(registry.post)
+        registry._channels["channel-lark"] = SimpleNamespace(**{"post_card" if cards else "post": post})
+        courier = gate_courier.GateCourier(registry.post, post_card=registry.post_card if cards else None)
+        if cards:
+            monkeypatch.setattr(courier, "_card", AsyncMock(return_value=SimpleNamespace(text="Question")))
         monkeypatch.setattr(gate_courier.db_user_gates, "gate_state", AsyncMock(return_value="discussing"))
         monkeypatch.setattr(gate_courier.db_user_gates, "record_post", AsyncMock())
         monkeypatch.setattr(courier, "_reply_to", AsyncMock(return_value="synthetic-recalled"))

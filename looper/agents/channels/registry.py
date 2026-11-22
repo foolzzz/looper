@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any
 
 from .. import turn_metrics
@@ -120,6 +121,33 @@ class ChannelRegistry:
             text = for_group(text)
         try:
             receipt = await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
+        except Exception:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                              external_id=None, outcome=PostOutcome.UNKNOWN.value,
+                                              dedupe_key=idempotency_key)
+            raise
+        if proactive is not None:
+            turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                          external_id=receipt.external_ids[0] if receipt.external_ids else None,
+                                          outcome=receipt.result.value, dedupe_key=idempotency_key)
+        return receipt
+
+    async def post_card(self, channel_id: str, target: NotifyTarget, card: Any, *,
+                        reply_to: str | None = None, idempotency_key: str | None = None,
+                        proactive: ProactiveRef | None = None) -> PostReceipt:
+        """Post ``card`` (``card_actions.Card``) to ``target`` like ``post`` (``ChannelAdapter.post_card``)."""
+        adapter = self._channels.get(channel_id)
+        if adapter is None:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
+                                              external_id=None, outcome=PostOutcome.REJECTED.value,
+                                              dedupe_key=idempotency_key)
+            return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
+        if target.group and (checked := for_group(card.text)) != card.text:
+            card = replace(card, text=checked, buttons=())
+        try:
+            receipt = await adapter.post_card(target, card, reply_to=reply_to, idempotency_key=idempotency_key)
         except Exception:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,

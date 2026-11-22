@@ -14,6 +14,10 @@ end notice; a Planner's reply goes as it wrote it. In a Lark group a reply
 reaches the bot only when it @-mentions it, so what waits for an answer there
 says so.
 
+With card buttons on (``card_actions``), a message that asks for an answer goes, in a channel with buttons, as a
+card: its text with a button per option of the gate's open questions and one that ends the discussion
+(``post_card``).
+
 A post that sent nothing is tried again, after ``POST_RETRY_SEC``, up to
 ``POST_ATTEMPTS`` in all, and the gate's later messages wait behind it; only
 then is it ``failed``. Each post carries an idempotency key of its message
@@ -32,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..db import activity as db_activity, tasks as db_tasks, user_gates as db_user_gates
-from . import turn_metrics
+from . import card_actions, turn_metrics
 from .channels.base import PostReceipt
 from .gate_service import GateChat, _offered, dashboard_target, gate_chat
 from .task_notice import NAME_CHARS, task_link_line
@@ -164,8 +168,10 @@ class GateCourier:
     """Every ``interval`` seconds, post the gates' messages no pass has handled (``post``: ``ChannelRegistry.post``)
     and note what each did. The dashboard's target is read each pass, so a change to it applies at once."""
 
-    def __init__(self, post: Poster, *, dashboard_url: str = "", interval: float = POST_CHECK_SEC) -> None:
+    def __init__(self, post: Poster, *, dashboard_url: str = "", interval: float = POST_CHECK_SEC,
+                 post_card: Poster | None = None) -> None:
         self._post = post
+        self._post_card = post_card  # ``ChannelRegistry.post_card``: a card with buttons; None for text only
         self._dashboard_url = dashboard_url
         self._interval = interval
         self._task: asyncio.Task[Any] | None = None
@@ -224,12 +230,13 @@ class GateCourier:
         proactive = turn_metrics.proactive_kwargs(
             turn_metrics.ProactiveSource.GATE_REMINDER if MessageKind(row["kind"]) is MessageKind.REMINDER
             else turn_metrics.ProactiveSource.GATE, row["step_id"], row.get("manager_id"), dedupe_key=key)
-        receipt = await self._post(chat.channel_id, chat.target, text, reply_to=reply_to, idempotency_key=key,
-                                   **proactive)
+        card = await self._card(row, chat, text)
+        post = self._post if card is None else self._post_card
+        body: Any = text if card is None else card
+        receipt = await post(chat.channel_id, chat.target, body, reply_to=reply_to, idempotency_key=key, **proactive)
         if receipt.parent_gone:
             # The message it replies to was recalled (or deleted, which Lark counts as recalled): post it on its own.
-            receipt = await self._post(chat.channel_id, chat.target, text, reply_to=None,
-                                       idempotency_key=f"{key}-own", **proactive)
+            receipt = await post(chat.channel_id, chat.target, body, reply_to=None, idempotency_key=f"{key}-own", **proactive)
         attempt = int(row.get("post_attempts") or 0) + 1
         if not receipt.success and not receipt.external_ids and attempt < POST_ATTEMPTS:
             await db_user_gates.record_retry(row["id"], receipt.error or "not sent", datetime.now(timezone.utc)
@@ -244,6 +251,18 @@ class GateCourier:
                 task_id=row["task_id"], worker="planner", kind="error",
                 summary=f"Gate {row['step_key']}: could not send to {chat.label()}: {receipt.error}"[:500])
         return True
+
+    async def _card(self, row: Mapping[str, Any], chat: GateChat, text: str) -> card_actions.Card | None:
+        """The card the message goes as (``card_actions.gate_card``); None for its text alone, and when the card
+        cannot be made (a failure only logs)."""
+        if self._post_card is None:
+            return None
+        try:
+            return await card_actions.gate_card(row, chat.channel_id, chat.target.id, mention=chat.target.mention,
+                                                group=chat.in_group, text=text)
+        except Exception:
+            logger.warning("could not make the card of gate %s's message", row.get("step_key"), exc_info=True)
+            return None
 
     @staticmethod
     async def _reply_to(row: Mapping[str, Any], chat: GateChat) -> str | None:
