@@ -21,8 +21,8 @@ OPERATIONS = (
               "Read the outbound gateway controls. The gateway is disabled by default.",
               _object({}, closed=True), VIEW, operator_only=True, level=ActionLevel.INSIDE),
     Operation("outbound_gateway.update", "POST", "/api/v1/outbound_gateway/update",
-              "Configure the outbound gateway and durable Lark outbox.",
-              "Configure the outbound gateway and durable Lark outbox. Null restores a default; "
+              "Configure the outbound gateway and durable channel outbox.",
+              "Configure the outbound gateway and durable channel outbox. Null restores a default; "
               "rate and edit defaults are conservative and remain to verify.",
               _object(UPDATE, [], closed=True), VIEW, risk="high", confirms=True, operator_only=True,
               level=ActionLevel.INSIDE),
@@ -42,7 +42,8 @@ async def impact(server, operation, arguments, principal, headers):
         value = values["outbound_enabled"]
         enabled = chat_settings.DEFAULT_OUTBOUND_ENABLED if value is None else value
         changes.append(f"Set channels.outbound.enabled to {str(enabled).lower()}? "
-                       "Lark messages use a durable outbox, keyed retries and a shared rate limit when enabled. "
+                       "Lark and Telegram messages use a durable outbox and shared rate limits when enabled; "
+                       "only Lark retries unknown sends with platform deduplication. "
                        "Disabling restores the original transport for new writes; persisted work continues draining.")
     return " ".join(changes)
 
