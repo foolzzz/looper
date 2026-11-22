@@ -142,7 +142,7 @@ def test_per_turn_runtime_refreshes_installs_and_keeps_session(tmp_path, install
             rows["manager"] = [_extra(stored)]
             second = await manager._run_turn("two", message(manager, "two"))
             assert first.endswith("one | turn 1") and second.endswith("two | turn 2")
-            assert manager._session_id == "sess-1"
+            assert manager._sessions["main"].session_id == "sess-1"
         finally:
             await manager.stop()
     asyncio.run(run())

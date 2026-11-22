@@ -1,0 +1,335 @@
+"""What needs the operator ("needs you"): one read-only summary, gathered by code from what Looper already keeps.
+It calls no model and stores nothing.
+
+Off until the system setting ``attention.enabled`` is ``true`` (no row is off). While it is off, ``attention.summary``
+(``POST /api/v1/attention/summary``) answers ``conflict``, the dashboard shows no page for it, and ``/todo`` is an
+ordinary message: no prompt, tool list or command line changes either way.
+
+The sections, in this order (``KINDS``):
+
+- ``gates``: user gates waiting for the operator's answer (``gate_service.list_gates``, ``waiting_on=user``);
+- ``confirmations``: a Manager's operation waiting for the operator's word in a chat
+  (``ManagerOps.waiting_confirmations``: they live in memory, so a restart drops them, and the operator is asked
+  again);
+- ``schedules``: failing schedules, as the dashboard's Schedules card lists them (``db.schedules.failing``);
+- ``logins``: a runtime login an Agent Profile uses, or the Claude Code CLI or login, failing, as the HTTP server's
+  status checks report them now (``use_status_checks``);
+- ``intents``: intents waiting to be built or rejected, while intents are on;
+- ``ledger``: the ledger's own open items that wait for the user (a to-do, a decision to confirm, anything overdue),
+  while the ledger is on;
+- ``deliveries``: messages of the last ``DELIVERY_WINDOW`` that may not have arrived (``uncertain``: never sent
+  again, so the operator checks).
+
+A section is ``ok`` (read; possibly empty), ``error`` (its source could not be read: never shown as empty) or
+``unknown`` (this caller cannot read it, e.g. ``logins`` without a status reader). A feature that is off leaves its
+section out. Each section lists at most ``SHOWN`` items and counts them all.
+
+``/todo`` in a chat answers the same summary in code, only in the operator's own turns (``operator_identity``).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import unicodedata
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Any
+from urllib.parse import urlencode
+
+from ..db import attention as store, ledger as db_ledger, schedules as db_schedules, tasks as db_tasks
+from ..db import system_settings as db_settings
+from . import gate_routing, gate_service, leads_model, operator_identity
+from .message import MessageEnvelope, is_lark, parse_channel_id
+
+logger = logging.getLogger(__name__)
+
+ENABLED_KEY = "attention.enabled"
+KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries")
+SHOWN = 20
+DELIVERY_WINDOW = timedelta(hours=72)
+# The checks the dashboard's banner shows as a login that fails (web/src/components/claude-check-banner.tsx).
+LOGIN_CHECKS = ("codex_login", "coco_login", "grok_login", "cursor_login", "ttadk")
+
+StatusChecks = Callable[[], Awaitable[Sequence[Mapping[str, Any]]]]
+
+
+class NotRead(Enum):
+    """Why a reader gave no items: its feature is off (the section is left out), or this caller cannot read it
+    (the section is ``unknown``)."""
+
+    OFF = "off"
+    UNKNOWN = "unknown"
+
+
+Read = tuple[list[dict[str, Any]], int] | NotRead
+_status_checks: StatusChecks | None = None
+
+
+async def enabled() -> bool:
+    """Whether the summary is on (``attention.enabled`` is ``true``)."""
+    return (await db_settings.get_settings([ENABLED_KEY])).get(ENABLED_KEY) == "true"
+
+
+def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None) -> None:
+    """Where ``logins`` is read from: the HTTP server's startup checks with the logins read now, set while it runs
+    (``AgentHTTPServer.start``). None: ``logins`` is ``unknown``; with ``owner``, only if ``owner`` is the reader
+    (a server that stops clears its own, never a newer one's)."""
+    global _status_checks
+    if owner is None or _status_checks == owner:
+        _status_checks = read
+
+
+def _item(key: str, title: str, *, context: str = "", since: datetime | None = None, href: str | None = None,
+          ref: str | None = None, **facts: Any) -> dict[str, Any]:
+    """One thing that waits: what it is (``title``), where it belongs (``context``: a task, a project), since when,
+    where the dashboard shows it (``href``), what a chat calls it (``ref``) and the kind's own ``facts``."""
+    return {"key": key, "title": title, "context": context, "since": since, "href": href, "ref": ref, "facts": facts}
+
+
+def _task_name(row: Mapping[str, Any], task_id: str) -> str:
+    return db_tasks.task_name(title=row.get("title"), goal_id=row.get("goal_id"), requirement=row.get("requirement"),
+                              task_id=task_id)
+
+
+async def _gates(_: Any) -> Read:
+    listed = await gate_service.list_gates({"state": "open", "waiting_on": "user", "limit": str(SHOWN)})
+    items = [_item(f"gate:{row['gate']['step_id']}", row["gate"]["topic"],
+                   context=row["task"]["name"], since=row["gate"]["opened_at"],
+                   href=f"#tasks/{row['task']['task_id']}?gate={row['gate']['step']}",
+                   step=row["gate"]["step"], questions=row["agenda_open"])
+             for row in listed["gates"]]
+    return items, listed["total"]
+
+
+async def _confirmations(managers: Any) -> Read:
+    if managers is None:
+        return NotRead.UNKNOWN
+    now = datetime.now(timezone.utc)
+    items = []
+    for agent in managers.agents():
+        ops = managers.ops(agent.agent_id)
+        for waiting in ops.waiting_confirmations() if ops is not None else ():
+            items.append(_item(
+                f"confirmation:{waiting['confirmation_id']}", waiting["impact"] or waiting["tool"],
+                context=getattr(agent, "name", None) or agent.agent_id,
+                since=now - timedelta(seconds=waiting["waited_seconds"]),
+                href=_chat_href(agent.agent_id, waiting["chat"]) if waiting["channel"] == "web" else None,
+                ref=waiting["confirmation_id"], tool=waiting["tool"], channel=waiting["channel"],
+                expires_in_seconds=waiting["expires_in_seconds"]))
+    items.sort(key=lambda item: item["since"])
+    return items[:SHOWN], len(items)
+
+
+def _chat_href(manager_id: str, conversation: str | None) -> str:
+    """The dashboard chat with ``manager_id`` open on the web conversation that asked (the Chat page's query: the
+    default Manager and no conversation are left out)."""
+    query = urlencode({key: value for key, value in (("target", manager_id if manager_id != "manager" else None),
+                                                     ("conversation", conversation)) if value})
+    return f"#chat?{query}" if query else "#chat"
+
+
+_SCHEDULE_ALERTS = (("failures", "failures_alert_at"), ("stale", "stale_alert_at"),
+                    ("deadline", "deadline_alert_at"), ("overlap", "overlap_alert_at"))
+
+
+async def _schedules(_: Any) -> Read:
+    rows = await db_schedules.failing()
+    items = []
+    for row in rows:
+        alerts = [name for name, column in _SCHEDULE_ALERTS if row[column] is not None]
+        since = min((row[column] for _, column in _SCHEDULE_ALERTS if row[column] is not None), default=None)
+        items.append(_item(f"schedule:{row['id']}", row["name"], context=row["project_name"], since=since,
+                           href=f"#schedules/{row['id']}", failures=row["consecutive_failures"], alerts=alerts,
+                           last_status=row["last_status"]))
+    return items[:SHOWN], len(items)
+
+
+async def _logins(_: Any) -> Read:
+    if _status_checks is None:
+        return NotRead.UNKNOWN
+    failing = [check for check in await _status_checks()
+               if (str(check.get("id", "")).startswith("claude_") or check.get("id") in LOGIN_CHECKS)
+               and check.get("status") == "fail"]
+    items = [_item(f"login:{check['id']}", str(check.get("label") or check["id"]), href="#settings/runtimes",
+                   detail=str(check.get("detail") or ""), fix=str(check.get("fix") or ""))
+             for check in failing]
+    return items[:SHOWN], len(items)
+
+
+async def _intents(_: Any) -> Read:
+    if not await leads_model.intents_enabled():
+        return NotRead.OFF
+    rows, count = await store.pending_intents(SHOWN)
+    items = [_item(f"intent:{row['id']}", row["title"], context=row["type_name"], since=row["created_at"],
+                   href="#intents", ref=leads_model.format_intent_id(row["id"]), priority=row["priority"],
+                   confidence=row["confidence"], expires_at=row["expires_at"])
+             for row in rows]
+    return items, count
+
+
+async def _ledger(_: Any) -> Read:
+    if not await db_ledger.enabled():
+        return NotRead.OFF
+    rows, count = await store.ledger_waiting(SHOWN)
+    items = [_item(f"ledger:{row['id']}", row["title"], since=row["created_at"], ref=db_ledger.format_id(row["id"]),
+                   kind=row["kind"], due_at=row["due_at"], overdue=row["overdue"])
+             for row in rows]
+    return items, count
+
+
+def _channel_type(channel: str | None) -> str | None:
+    """``lark`` for ``channel-lark`` or ``channel-lark-2``; a channel type stays as it is."""
+    parsed = parse_channel_id(channel)
+    return parsed.channel_type if parsed is not None else channel
+
+
+_DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "task_end": "#tasks/{ref}"}
+
+
+async def _deliveries(_: Any) -> Read:
+    rows, count = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW, SHOWN)
+    items = [_item(f"delivery:{row['source']}:{row['key']}",
+                   _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"], since=row["at"],
+                   href=_DELIVERY_HREF[row["source"]].format(ref=row["ref"]),
+                   ref=leads_model.format_intent_id(int(row["ref"])) if row["source"] == "intent" else None,
+                   source=row["source"], channel=_channel_type(row["channel"]))
+             for row in rows]
+    return items, count
+
+
+_READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
+            "intents": _intents, "ledger": _ledger, "deliveries": _deliveries}
+
+
+async def collect(*, managers: Any = None) -> dict[str, Any]:
+    """The summary now: every section in ``KINDS`` order (a feature that is off leaves its own out) and ``total``,
+    the count of what the readable sections hold. ``managers`` is the Manager fleet, whose confirmations wait in
+    memory; without it ``confirmations`` is ``unknown``."""
+    sections = []
+    for kind in KINDS:
+        try:
+            read = await _READERS[kind](managers)
+        except Exception as exc:
+            logger.exception("needs-you: could not read %s", kind)
+            sections.append({"kind": kind, "state": "error", "count": 0, "items": [],
+                             "error": f"{type(exc).__name__}: {exc}"[:300]})
+            continue
+        if read is NotRead.OFF:
+            continue
+        if read is NotRead.UNKNOWN:
+            sections.append({"kind": kind, "state": "unknown", "count": 0, "items": [], "error": None})
+            continue
+        items, count = read
+        sections.append({"kind": kind, "state": "ok", "count": count, "items": items, "error": None})
+    return {"read_at": datetime.now(timezone.utc), "total": sum(s["count"] for s in sections if s["state"] == "ok"),
+            "sections": sections}
+
+
+# --- /todo: the summary in a chat, written by code -------------------------------------------------------------
+
+# "/todo" and Telegram's "/todo@bot".
+_COMMAND = re.compile(r"^/todo(?:@\w+)?$", re.IGNORECASE)
+FORBIDDEN = "「需要你处理」只给你本人看：在你和机器人的私聊或控制台里发 /todo。"
+NOTHING = "现在没有需要你处理的事。"
+_TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的操作", "schedules": "失败的定时任务",
+           "logins": "登录失效", "intents": "待处理的意图", "ledger": "账本里等你的事",
+           "deliveries": "可能没送到的消息"}
+_CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
+_ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠"}
+_LEDGER_KINDS = {"pending": "待办", "decision": "待确认的决定", "work_item": "在做的事"}
+_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知"}
+_HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
+          "confirmations": "在提问的那个聊天里回复「确认」，或回复别的放弃。",
+          "intents": "回复「建 {ref}」建任务，「驳回 {ref}」驳回。"}
+
+
+def is_command(text: str) -> bool:
+    return _COMMAND.match(text.strip()) is not None
+
+
+def _ago(moment: Any, now: datetime) -> str:
+    if not isinstance(moment, datetime):
+        return ""
+    seconds = max(0.0, (now - moment).total_seconds())
+    if seconds < 3600:
+        return f"{int(seconds // 60)} 分钟"
+    return f"{int(seconds // 3600)} 小时" if seconds < 172_800 else f"{int(seconds // 86_400)} 天"
+
+
+# The most characters of a title or its context a chat line keeps.
+TEXT_MAX_CHARS = 120
+
+
+def _plain(text: Any) -> str:
+    """Text others wrote (a gate's topic, an intent's or a ledger item's title, a task, project or schedule name) as
+    one plain line: control and format characters dropped, whitespace and line breaks merged, at most
+    ``TEXT_MAX_CHARS``. The /todo reply is stored in the chat's history, which a new Manager session reads back."""
+    line = " ".join("".join(ch for ch in str(text or "") if unicodedata.category(ch) not in ("Cc", "Cf")
+                            or ch in "\n\t").split())
+    return line if len(line) <= TEXT_MAX_CHARS else line[:TEXT_MAX_CHARS - 1] + "…"
+
+
+def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
+    facts = item["facts"]
+    title, context, waited = _plain(item["title"]), _plain(item["context"]), _ago(item["since"], now)
+    if kind == "gates":
+        return f"- 【{context}】{facts['step']} {title}" + (f"（已等 {waited}）" if waited else "")
+    if kind == "confirmations":
+        where = _CHANNELS.get(facts["channel"] or "", facts["channel"] or "聊天")
+        return f"- {title}（{where}，{max(1, facts['expires_in_seconds'] // 60)} 分钟内有效）"
+    if kind == "schedules":
+        alerts = "、".join(_ALERTS[name] for name in facts["alerts"])
+        failures = f"连续失败 {facts['failures']} 次" if facts["failures"] else ""
+        return f"- {title}（{context}；{'，'.join(part for part in (failures, alerts) if part) or '失败'}）"
+    if kind == "logins":
+        return f"- {title}：{facts['detail']}" + (f"。修复：{facts['fix']}" if facts["fix"] else "")
+    if kind == "intents":
+        return f"- {item['ref']} {title}（{context}" + ("，紧急" if facts["priority"] == "urgent" else "") + "）"
+    if kind == "ledger":
+        label = "已过期" if facts["overdue"] else _LEDGER_KINDS[facts["kind"]]
+        return f"- {item['ref']} {title}（{label}）"
+    where = _CHANNELS.get(facts["channel"] or "", facts["channel"] or "")
+    return (f"- {_DELIVERY_SOURCES[facts['source']]}：{title}" + (f"（{item['ref']}）" if item["ref"] else "")
+            + (f"，{where}" if where else "") + (f"，{waited}前" if waited else ""))
+
+
+def summary_text(summary: Mapping[str, Any]) -> str:
+    """The summary as a chat message: each section with something in it, or that could not be read. It says
+    nothing waits only when every section was read and is empty."""
+    now = datetime.now(timezone.utc)
+    parts, unread = [], []
+    for section in summary["sections"]:
+        kind = section["kind"]
+        if section["state"] == "error":
+            unread.append(f"{_TITLES[kind]}：没能读取（{section['error']}）")
+        elif section["state"] == "unknown":
+            unread.append(f"{_TITLES[kind]}：这里读不到")
+        elif section["state"] == "ok" and section["count"]:
+            lines = [f"{_TITLES[kind]} {section['count']}：", *(_line(kind, item, now) for item in section["items"])]
+            if section["count"] > len(section["items"]):
+                lines.append(f"- 另有 {section['count'] - len(section['items'])} 项，见控制台「Needs you」页")
+            hint = _HINTS[kind].format(ref=section["items"][0]["ref"]) if kind in _HINTS else ""
+            parts.append("\n".join(lines) + (f"\n\n{hint}" if hint else ""))
+    if not parts and not unread:
+        return NOTHING
+    head = (f"需要你处理（{summary['total']} 项）：" if parts
+            else "读到的来源里没有需要你处理的事，但下面这些没读到，不能说没有：")
+    return "\n\n".join([head, *parts, *unread])
+
+
+async def command_reply(envelope: MessageEnvelope, *, managers: Any = None) -> str:
+    """The reply to ``/todo``: the summary in the operator's own turn, a refusal in any other."""
+    channel = envelope.source.channel or envelope.source.agent_id or ""
+    context = envelope.payload.get("channel_context")
+    context = context if isinstance(context, dict) else {}
+    group = gate_routing._group(channel, context) if is_lark(channel) or channel == "telegram" else False
+    sender = context.get("sender_id") or context.get("user_id")
+    client = context.get("client")
+    operator = await operator_identity.operator_sender_id(envelope.source.agent_id) if channel != "web" else None
+    if not operator_identity.is_operator(channel=channel, group=group, sender=str(sender) if sender else None,
+                                        client_id=client.get("id") if isinstance(client, dict) else None,
+                                        operator_id=operator):
+        return FORBIDDEN
+    return summary_text(await collect(managers=managers))

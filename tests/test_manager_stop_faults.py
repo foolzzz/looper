@@ -74,7 +74,7 @@ def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any) -
             _with_ops(manager)
         case "switch_session":
             manager._session_loaded = True
-            manager._session_id, manager._session_runtime = "old-session", "omp"
+            manager._sessions["main"].session_id, manager._sessions["main"].session_runtime = "old-session", "omp"
         case "claude_stop":
             session.started = True
             session.stale = lambda signature: True  # type: ignore[method-assign]
@@ -97,7 +97,7 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
             manager, bus, queue = _manager(Path(tmp), session)
             _setup(name, manager, session, agent_db)
             hold = hold_at(monkeypatch, name)
-            envelope = _web("你好")
+            envelope = _web("/todo" if name == "attention_enabled" else "你好")  # only /todo reads that setting
             if name == "read_quote":  # only a message that quotes another reads it
                 envelope.payload["quote_ref"] = {"channel_id": "channel-lark", "chat_id": "oc_dm",
                                                  "message_id": "om_in", "kind": "forward"}
@@ -118,7 +118,7 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
             session.stale = lambda signature: False  # type: ignore[method-assign]
             session.on_start = None
             session.started = False
-            manager._session_id = None
+            manager._sessions["main"].session_id = None
             monkeypatch.setattr("looper.agents.tiers.turn_token.FAULTS", None)
             await asyncio.wait_for(manager._handle(_web("再来一个", 1)), 5)
             (answer,) = _replies(queue)
@@ -350,7 +350,7 @@ def test_a_stop_while_the_init_event_is_persisted_keeps_its_session(
                     await release.wait()
 
             async def save() -> None:
-                saved.append(manager._session_id)
+                saved.append(manager._sessions["main"].session_id)
 
             monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", blocked)
             manager._save_session_state = save  # type: ignore[method-assign]
@@ -363,7 +363,7 @@ def test_a_stop_while_the_init_event_is_persisted_keeps_its_session(
                 assert not release.is_set()  # the handling was given up on
                 (reply,) = _replies(queue)
                 assert reply["outcome"] == "stopped"
-                assert manager._session_id == "sess-1"
+                assert manager._sessions["main"].session_id == "sess-1"
                 assert saved and saved[-1] == "sess-1"
             finally:
                 release.set()

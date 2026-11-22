@@ -675,6 +675,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
     from unittest.mock import AsyncMock, MagicMock
 
     import looper.db as db
+    from looper import components
     from looper.agents import (
         consult, managers, operator_auth, operator_notes, proc_tree, profile_registry, read_only_copies, room,
         scheduler_settings, serve, step_workspaces, task_workspaces,
@@ -747,6 +748,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         monkeypatch.setattr(db, "init_pool", AsyncMock(return_value=pool))
         monkeypatch.setattr(db, "ensure_schema", AsyncMock())
         monkeypatch.setattr(db, "close_pool", AsyncMock())
+        # This checks service composition, independently of the source manifest's cold disk scan.
+        monkeypatch.setattr(components, "prepare_loaded_manifest", AsyncMock())
         monkeypatch.setattr(operator_auth, "ensure_token", lambda _: "unused-test-token")
         monkeypatch.setattr(operator_notes, "configure_root", lambda _: None)
         for module, name, result in (

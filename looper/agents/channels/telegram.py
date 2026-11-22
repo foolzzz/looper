@@ -206,6 +206,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             self._app.add_handler(CommandHandler("gates", self._durable(self._cmd_gates)))
             self._app.add_handler(CommandHandler("gate", self._durable(self._cmd_gate)))
             self._app.add_handler(CommandHandler("profile", self._durable(self._cmd_profile)))
+            self._app.add_handler(CommandHandler("todo", self._durable(self._cmd_todo), has_args=False))
             self._app.add_handler(
                 MessageHandler(filters.TEXT & ~filters.COMMAND, self._durable(self._on_message))
             )
@@ -695,6 +696,19 @@ class TelegramChannelAdapter(ChannelAdapter):
             await query.answer(text=answer.toast[:200])
         except Exception as exc:
             logger.info("telegram: a card press's answer failed: %s", type(exc).__name__)
+
+    async def _cmd_todo(self, update: Any, context: Any) -> None:
+        """/todo goes to the Manager as typed while the "needs you" summary is on (``attention``); off, it is dropped
+        like any other unknown command."""
+        from .. import attention
+
+        try:
+            on = await attention.enabled()
+        except Exception:
+            logger.warning("%s: cannot read whether /todo is on; dropped", self._channel_id, exc_info=True)
+            return
+        if on:
+            await self._forward_command(update)
 
     async def _on_message(self, update: Any, context: Any) -> None:
         await self._forward_command(update)

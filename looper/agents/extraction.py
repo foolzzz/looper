@@ -11,14 +11,17 @@ rows of ``message_leads`` or ``intents`` (message-leads-intents RFC, sections 4 
    context ``c`` and window ``m`` messages. The model only ever names these refs; code maps them back by set
    membership, so it cannot name or forge a message id. Over ``INPUT_MAX_CHARS`` the last rows are left for the
    next run.
-3. **One tool-less processor run** (``processor.run`` with ``contract``): its reply is ``NONE`` or one JSON object.
-4. **Parse** (``parse``): typed fields, enums, lengths and refs; a bad item is dropped and counted by reason,
+3. **One tool-less processor run** (``processor.run`` with ``contract``): its reply is ``NONE`` or one JSON object
+   (``ask``). A window a prompt hook blocks is skipped at once: it is blocked every time it is sent. A reply that
+   cannot be read is asked for once more, with ``REFORMAT_REMINDER``, then the window is skipped. A skipped window
+   is ``skipped`` with its ``SkipReason``, and the cursor moves past it.
+4. **Parse** (``parse``): the object is the whole reply, or the one object with the kind's list among prose or code
+   fences; typed fields, enums, lengths and refs; a bad item is dropped and counted by reason,
    unknown fields are ignored, nothing in the reply is run or sent. With the subscription's ``check_items`` on, a
    second model then checks each item against the messages it cites (``leads_check``): it keeps it, drops it (stored
    as ``dropped``) or changes its confidence; a check that fails leaves every item unchecked.
 5. **Store** (``store_leads``, ``store_intents``): one transaction with the run's end and the cursor, which moves
-   only to the last row read. A reply that is not ``NONE`` or such an object is ``output_invalid``: the run fails
-   and the cursor stays.
+   only to the last row read. A processor run that gives no reply fails the run, and the cursor stays.
 
 Nothing here pushes: an intents run only writes ``intents`` rows, which the intent push service polls.
 """
@@ -30,9 +33,10 @@ import logging
 import re
 import time as time_
 from collections import Counter
-from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
+from enum import Enum
 from typing import Any
 
 import asyncpg
@@ -125,6 +129,24 @@ INTENTS_CONTRACT = f"""\
 {_REPLY_TAIL}"""
 
 CONTRACTS = {"leads": LEADS_CONTRACT, "intents": INTENTS_CONTRACT}
+# Added to the instructions when a reply could not be read and the processor is asked once more.
+REFORMAT_REMINDER = """\
+## Your previous reply
+Code could not read your previous reply to these messages. Reply again as "Your reply" says: exactly NONE, or one
+JSON object and nothing else, with no words or code fence around it."""
+
+
+class SkipReason(str, Enum):
+    """Why a window was skipped: its run's cursor, or the backfill, moves past it with nothing stored."""
+
+    BLOCKED_BY_HOOK = "blocked_by_hook"  # a prompt hook refused it (``processor.ProcessorFailure.BLOCKED``)
+    INVALID_REPLY = "invalid_reply"  # its reply could not be read, asked once more too
+
+
+SKIPPED_SUMMARY = {
+    SkipReason.BLOCKED_BY_HOOK: "跳过了这段消息：本机 Claude Code 的提示词 hook 拦下了它，没有调用模型",
+    SkipReason.INVALID_REPLY: "跳过了这段消息：处理器的回复两次都读不了",
+}
 _CHAT_LABEL = {"group": "群", "topic": "话题群", "p2p": "私聊"}
 _STATE_LABEL = {"pending": "待处理", "tasked": "已建任务", "rejected": "已驳回"}
 _FENCE = re.compile(r"\A```[A-Za-z]*\s*\n?(.*?)\n?```\Z", re.DOTALL)
@@ -369,6 +391,37 @@ def _intent(item: Mapping[str, Any], refs: Refs, *, enabled_types: Collection[st
             "sources": sources, "window_sources": window, "same_as": same_as}
 
 
+_OBJECT_TRIES = 200  # the most ``{`` a reply is read from in search of its object
+
+
+def _reply_object(kind: str, text: str) -> tuple[Any, str]:
+    """The JSON value ``text`` is; else the one object with a ``kind`` key among prose or several code fences; and
+    why there is none (empty when there is one)."""
+    try:
+        return json.loads(text), ""
+    except ValueError:
+        pass
+    decoder, found = json.JSONDecoder(), []
+    at, tries = text.find("{"), 0
+    while at != -1 and tries < _OBJECT_TRIES:
+        tries += 1
+        try:
+            value, end = decoder.raw_decode(text, at)
+        except ValueError:
+            at = text.find("{", at + 1)
+            continue
+        if isinstance(value, dict) and kind in value and value not in found:
+            found.append(value)
+        at = text.find("{", end)
+    if at != -1:  # what was not searched may hold another answer
+        return None, f"the reply has more than {_OBJECT_TRIES} places a JSON object could start"
+    if len(found) == 1:
+        return found[0], ""
+    if found:  # which one it meant is a guess: asked again instead
+        return None, f"the reply has {len(found)} different JSON objects with a {kind} key"
+    return None, "the reply is neither NONE nor a JSON object"
+
+
 def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, enabled_types: Collection[str],
           app_seqs: Collection[int]) -> Parsed:
     """What ``reply`` says (the module's notes, step 4). ``now`` is in the schedule's zone: a lead's ``valid_until``
@@ -380,10 +433,9 @@ def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, 
         text = fenced.group(1).strip()
     if text == QUIET_WORD:
         return Parsed("quiet")
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return Parsed("invalid", reason="the reply is neither NONE nor a JSON object")
+    data, why = _reply_object(kind, text)
+    if why:
+        return Parsed("invalid", reason=why)
     if not isinstance(data, dict):
         return Parsed("invalid", reason="the reply is not a JSON object")
     raw = data.get(kind)
@@ -809,18 +861,64 @@ def pinned(schedule: Mapping[str, Any], snapshot: Mapping[str, Any]) -> dict[str
     return {**schedule, "subscription": {**schedule["subscription"], **snapshot["subscription"]}}
 
 
+@dataclass(frozen=True)
+class Asked:
+    """What asking the processor over one window gave (``ask``): its last run, the reply read (None when the run
+    failed or the window is skipped), what every ask cost, and why the window is skipped."""
+
+    result: processor.ProcessorRun
+    parsed: Parsed | None
+    cost_usd: float | None
+    skipped: SkipReason | None = None
+
+
+async def ask(run: Callable[[str, float, float], Awaitable[processor.ProcessorRun]], read: Callable[[str], Parsed], *,
+              budget_usd: float, timeout_s: float) -> Asked:
+    """Ask the processor over one window, ``run(reminder, budget_usd, timeout_s)``, and read its reply with ``read``
+    (the module's notes, step 3). A window a prompt hook blocks is skipped at once. A reply that cannot be read is
+    asked for once more with ``REFORMAT_REMINDER``, within what is left of ``budget_usd`` and ``timeout_s``; still
+    unreadable, the window is skipped. With nothing left of either to ask again, the run fails as over its cap
+    (``BUDGET``) or its deadline (``TIMEOUT``), so the window is kept. Any other failure is the last run's, for the
+    caller."""
+    started = time_.monotonic()
+    result, cost, reminded = await run("", budget_usd, timeout_s), None, False
+    while True:
+        cost = result.cost_usd if cost is None else cost + (result.cost_usd or 0.0)
+        if result.failure is processor.ProcessorFailure.BLOCKED:
+            return Asked(result, None, cost, SkipReason.BLOCKED_BY_HOOK)
+        if result.failure is not None:
+            return Asked(result, None, cost)
+        parsed = read(result.reply or "")
+        if parsed.state != "invalid":
+            return Asked(result, parsed, cost)
+        if reminded:
+            return Asked(result, parsed, cost, SkipReason.INVALID_REPLY)
+        left_usd, left_s = budget_usd - (cost or 0.0), timeout_s - (time_.monotonic() - started)
+        if left_usd <= 0 or left_s < 1:
+            failure, left = ((processor.ProcessorFailure.BUDGET, f"nothing is left of its cap of {budget_usd:g} USD")
+                             if left_usd <= 0 else
+                             (processor.ProcessorFailure.TIMEOUT, f"less than a second is left of its {timeout_s:g} s"))
+            return Asked(replace(result, reply=None, failure=failure,
+                                 detail=f"its reply could not be read ({parsed.reason}) and {left} to ask again"),
+                         None, cost)
+        logger.info("the processor's reply could not be read (%s): asking once more", parsed.reason)
+        result, reminded = await run(REFORMAT_REMINDER, round(left_usd, 6), left_s), True
+
+
 class _Finished(Exception):
     """The run was ended meanwhile (a restart settled it): what this one would have stored is rolled back."""
 
 
 async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: str, cost: float | None = None,
                   error: str | None = None, summary: str | None = None, advance_to: int | None = None,
-                  store: Any = None, held: Mapping[str, Any] | None = None, check_status: str | None = None) -> None:
+                  store: Any = None, held: Mapping[str, Any] | None = None, check_status: str | None = None,
+                  skip_reason: SkipReason | None = None) -> None:
     """End the run in one transaction: what ``store(conn)`` writes (it returns the counts), the run's status, outcome,
-    counts and count line, what its check did (``check_status``, kept only with what it stored) and, when
+    counts and count line, what its check did (``check_status``, kept only with what it stored), why a ``skipped``
+    run skipped its window (``skip_reason``) and, when
     ``advance_to`` is given, the cursor. An ``extracted`` run that stored nothing is ``quiet``. With ``held`` (the run's snapshot and the Profile it launched with), the schedule's row is locked first
     (a change or a confirmation waits, or has committed) and the confirmation checked again: when it no longer holds
-    nothing is stored, the run is ``cancelled`` and the cursor stays."""
+    nothing is stored or skipped, the run is ``cancelled`` and the cursor stays."""
     from .subscriptions import digest
 
     now = runs._clock()
@@ -830,11 +928,12 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
             stream = await db_subs.get_run(run_id, db=conn)
             if run is None or stream is None or run["status"] != db_schedules.RUNNING:
                 raise _Finished
-            if store is not None and held is not None:
+            if held is not None:
                 await conn.execute("SELECT 1 FROM schedules WHERE id = $1 FOR NO KEY UPDATE", run["schedule_id"])
                 if problem := await confirmation_problem(conn, run["schedule_id"], held["snapshot"],
                                                          profile=held.get("profile"), checker=held.get("checker")):
                     store, advance_to, summary, status, outcome = None, None, None, "cancelled", "failed"
+                    skip_reason = None
                     error = f"nothing was stored: {problem}; the next confirmed run reads its window again"
             counts = dict(await store(conn)) if store is not None else None
             line = count_line(kind, counts) if counts is not None else None
@@ -845,9 +944,10 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
                 raise _Finished
             await conn.execute(
                 "UPDATE subscription_runs SET outcome = $2, extract_counts = $3::jsonb, output_text = $4, "
-                "output_sha256 = $5, check_status = $6 WHERE run_id = $1", run_id, outcome,
+                "output_sha256 = $5, check_status = $6, skip_reason = $7 WHERE run_id = $1", run_id, outcome,
                 json.dumps(counts, sort_keys=True) if counts is not None else None, line,
-                digest(line) if line else None, check_status if counts is not None else None)
+                digest(line) if line else None, check_status if counts is not None else None,
+                skip_reason.value if skip_reason is not None else None)
             if advance_to is not None:
                 await db_subs.advance_cursor(conn, run["schedule_id"], from_seq=stream["from_seq"], to_seq=advance_to,
                                              at=now)
@@ -862,7 +962,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     left rows for the next run (``more``), so the scheduler fires it again. ``schedule`` carries the subscription
     fields the run was planned with and ``picked`` (the window read with them) its ``snapshot``: the confirmation is
     checked again before the processor and in the transaction that stores. A failure ends the run, leaves the cursor
-    and returns False."""
+    and returns False; a skipped window (``ask``) ends it ``skipped`` and moves the cursor past it."""
     from . import subscriptions
 
     sub = schedule["subscription"]
@@ -900,29 +1000,41 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                  "from_seq": stream["from_seq"], "to_seq": found.last_seq, "events": len(found.rows),
                  "context": found.context, "known": found.known}
     started = time_.monotonic()
-    result = await processor.run(
-        owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types), input_text=found.text,
-        input_ref=reference, quiet_word=QUIET_WORD, budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout),
-        runtime_root=runs._runtime_root, claude_bin=runs._claude_bin, project_id=schedule["project_id"],
-        schedule_id=schedule["id"], contract=CONTRACTS[kind],
-        metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(found.text)}})
-    await db_subs.update_run(pool, run_id, record_id=result.record_id, events_selected=len(found.rows))
-    if result.failure is not None:
+    valid_days, enabled = await leads_model.valid_days(pool), {row["key"] for row in types}
+
+    async def run(reminder: str, budget_usd: float, timeout_s: float) -> processor.ProcessorRun:
+        done = await processor.run(
+            owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types)
+            + (f"\n\n{reminder}" if reminder else ""), input_text=found.text, input_ref=reference,
+            quiet_word=QUIET_WORD, budget_usd=budget_usd, timeout_s=timeout_s, runtime_root=runs._runtime_root,
+            claude_bin=runs._claude_bin, project_id=schedule["project_id"], schedule_id=schedule["id"],
+            contract=CONTRACTS[kind],
+            metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(found.text),
+                                       "reminded": bool(reminder)}})
+        await db_subs.update_run(pool, run_id, record_id=done.record_id, events_selected=len(found.rows))
+        return done
+
+    asked = await ask(run, lambda reply: parse(kind, reply, found.refs, now=now.astimezone(_zone(zone_name)),
+                                               valid_days=valid_days, enabled_types=enabled, app_seqs=found.app_seqs),
+                      budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout))
+    result, parsed = asked.result, asked.parsed
+    if asked.skipped is not None:
+        # Moving past the window is checked against the confirmation as storing is: a scope widened meanwhile has
+        # more in it.
+        await end(status="completed", outcome="skipped", skip_reason=asked.skipped, cost=asked.cost_usd,
+                  advance_to=found.last_seq, summary=SKIPPED_SUMMARY[asked.skipped],
+                  held={"snapshot": snapshot, "profile": result.profile})
+        return found.more
+    if parsed is None:
+        assert result.failure is not None
         status = "timed_out" if result.failure is processor.ProcessorFailure.TIMEOUT else "failed"
-        await end(status=status, outcome="failed", cost=result.cost_usd,
+        await end(status=status, outcome="failed", cost=asked.cost_usd,
                   error=f"the processor gave no reply ({result.failure.value}): {result.detail}")
-        return False
-    parsed = parse(kind, result.reply or "", found.refs, now=now.astimezone(_zone(zone_name)),
-                   valid_days=await leads_model.valid_days(pool), enabled_types={row["key"] for row in types},
-                   app_seqs=found.app_seqs)
-    if parsed.state == "invalid":
-        await end(status="failed", outcome="output_invalid", cost=result.cost_usd,
-                  error=f"the processor's reply could not be read: {parsed.reason}")
         return False
     checked = None
     if sub.get("check_items"):
         checked = await _check(runs, kind, parsed, found, schedule, run_id=run_id, types=types,
-                               extracted_usd=result.cost_usd or 0.0, record_id=result.record_id, now=now,
+                               extracted_usd=asked.cost_usd or 0.0, record_id=result.record_id, now=now,
                                left_s=float(timeout) - (time_.monotonic() - started))
 
     async def store(conn: asyncpg.Connection) -> Mapping[str, Any]:
@@ -934,7 +1046,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                                          run_id=run_id, record_id=result.record_id, now=now, more=found.more)
         return {**counts, **checked.counts} if checked is not None else counts
 
-    cost = result.cost_usd if checked is None else (result.cost_usd or 0.0) + checked.counts["check_cost_usd"]
+    cost = asked.cost_usd if checked is None else (asked.cost_usd or 0.0) + checked.counts["check_cost_usd"]
     # What the check did, typed: skipped (off, or nothing to check), checked or failed (fail-open: stored unchecked).
     check_status = ("skipped" if checked is None or not (parsed.state == "items" and parsed.items)
                     else "failed" if checked.counts["check_failed"] else "checked")

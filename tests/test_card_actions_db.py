@@ -192,7 +192,10 @@ def test_a_restart_brings_a_waiting_confirmation_back_but_never_one_with_a_secre
     async def test(pool: Any) -> None:
         project = await _sample(pool)
         await _switch(pool)
-        asked, _ = await _ask(_ops())
+        original = _ops()
+        asked, _ = await _ask(original)
+        (waiting,) = original.waiting_confirmations()
+        assert waiting["impact"]
         secret_ops, secret_turn = _ops(), _turn("om_secret", chat="oc_other")
         pending = _Pending(id="c-secret", tool=secret_ops.scope.tools["looper_projects"],
                            arguments={**DELETE, "api_key": "sk-hidden"}, block="需要你确认：…", asked_in="om_secret",
@@ -203,6 +206,10 @@ def test_a_restart_brings_a_waiting_confirmation_back_but_never_one_with_a_secre
 
         restarted = _ops()
         assert await restarted.restore_confirmations() == 1
+        (restored,) = restarted.waiting_confirmations()
+        assert restored["impact"] == waiting["impact"]
+        assert {key: restored[key] for key in ("confirmation_id", "channel_id", "chat")} == {
+            key: waiting[key] for key in ("confirmation_id", "channel_id", "chat")}
         assert (await _card_row(pool, "c-secret"))[1:] == ("lapsed", None, "lapsed")
         following = _turn("om_next")
         assert asked["confirmation_id"] in restarted.begin_turn(following)

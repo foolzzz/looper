@@ -2248,6 +2248,33 @@ ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
 
+-- A window a subscription run did not use: the run is 'skipped' with why (skip_reason: a prompt hook blocked it, or
+-- the processor's reply could not be read when asked twice), and its cursor moves past it, since the same window
+-- would fail again with every run after it. A subscription whose runs keep skipping is alerted once (skip_alert_at,
+-- the notification kinds 'skip_alert' and 'skip_recovered'). connection.py applies this block to databases that
+-- predate it, so keep it between the markers and idempotent. Its columns come without a constraint and every
+-- constraint NOT VALID; connection._ONLINE_STEPS validates them after the migration commits (a fresh database
+-- validates them in its own transaction).
+-- run skips begin
+ALTER TABLE subscription_runs ADD COLUMN IF NOT EXISTS skip_reason TEXT;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS skip_alert_at TIMESTAMPTZ;
+ALTER TABLE schedule_notifications DROP CONSTRAINT IF EXISTS schedule_notifications_kind_check;
+ALTER TABLE schedule_notifications ADD CONSTRAINT schedule_notifications_kind_check
+    CHECK (kind IN ('run', 'failures_alert', 'failures_recovered', 'stale_alert', 'stale_recovered', 'deadline_alert',
+                'deadline_recovered', 'overlap_alert', 'overlap_recovered', 'check_alert', 'check_recovered',
+                'skip_alert', 'skip_recovered')) NOT VALID;
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_outcome_check;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_outcome_check
+    CHECK (outcome IN ('pending', 'delivering', 'delivered', 'uncertain', 'quiet', 'dashboard_only', 'output_invalid',
+                       'failed', 'extracted', 'skipped')) NOT VALID;
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_skip_reason_check;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_skip_reason_check
+    CHECK (skip_reason IN ('blocked_by_hook', 'invalid_reply')) NOT VALID;
+ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_skipped;
+ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_skipped
+    CHECK ((outcome = 'skipped') = (skip_reason IS NOT NULL)) NOT VALID;
+-- run skips end
+
 -- One review of an outbound action (the outbound-review RFC, section 9): who asked for it and where, the action as
 -- code describes it (its tool, level and target, a redacted summary), the verdict and why, and the classifier's run
 -- (record_id; none when code blocked it without one), model, cost and latency. A row is written before the action
@@ -2317,3 +2344,11 @@ CREATE TABLE IF NOT EXISTS card_actions (
 CREATE INDEX IF NOT EXISTS idx_card_actions_open ON card_actions (kind, manager_id, created_at)
     WHERE handled_at IS NULL;
 -- card actions end
+
+-- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
+-- only those rows, never the tables' history. A database that predates them builds them online
+-- (connection.py ``_ONLINE_STEPS``).
+CREATE INDEX IF NOT EXISTS idx_subscription_deliveries_uncertain ON subscription_deliveries (updated_at)
+    WHERE state = 'uncertain';
+CREATE INDEX IF NOT EXISTS idx_intent_posts_uncertain ON intent_posts (updated_at) WHERE state = 'uncertain';
+CREATE INDEX IF NOT EXISTS idx_manager_events_uncertain ON manager_events (created_at) WHERE delivery = 'uncertain';
