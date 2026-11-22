@@ -203,7 +203,7 @@ def test_the_candidates_come_from_the_indexes(monkeypatch: pytest.MonkeyPatch) -
         found = await terms(["告警阈值", "deploying"], pool)
         sql, args = message_leads.fulltext_query(found, trigram, now=NOW)
         async with pool.acquire() as conn, conn.transaction():
-            # A handful of leads is cheaper to scan: the plan without scans shows that every lead set is indexable.
+            # The plan without sequential scans shows that every lead set is indexable.
             await conn.execute("SET LOCAL enable_seqscan = off")
             plan = "\n".join(row[0] for row in await conn.fetch("EXPLAIN " + sql, *args))
         assert plan.count("Bitmap Index Scan on idx_message_leads_search") == 2, plan
@@ -238,5 +238,60 @@ def test_each_candidate_set_brings_its_newest_so_a_common_word_cannot_hide_a_rar
         await _mode(pool, "fulltext")
         assert (await _found(pool, "我们 Carol"))[0] == "Orion 的回滚由 Carol 负责"
         assert len(await _found(pool, "我们")) == 3  # the newest three a set brings
+
+    run_db(test, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize(("candidate", "excluded_by"), [
+    (candidate, excluded_by)
+    for candidate in ("token", "literal", "fuzzy", "chat_name", "person_name")
+    for excluded_by in ("expired", "kind")
+] + [("token", excluded_by) for excluded_by in ("source", "since", "chat", "person")])
+def test_filtered_leads_do_not_use_up_the_candidate_limit(
+    monkeypatch: pytest.MonkeyPatch, candidate: str, excluded_by: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        text = "Orion deploy" if candidate in ("token", "literal", "fuzzy") else "Release decision"
+        chat_name = "Orion room" if candidate == "chat_name" else "Release room"
+        (wanted,) = await _leads(pool, text, chat_name=chat_name)
+        person_name = "Orion Person" if candidate == "person_name" else "Alice Example"
+        await pool.execute("UPDATE source_people SET name = $1 WHERE source_id = $2 AND open_id = 'ou_alice'",
+                           person_name, stream.SOURCE)
+        filters = {"kind": "decision"} if excluded_by == "kind" else {}
+        if excluded_by == "source":
+            filters = {"source_id": stream.SOURCE}
+        elif excluded_by == "since":
+            filters = {"since": NOW - timedelta(days=1)}
+        elif excluded_by == "chat":
+            filters = {"chat": "oc_release"}
+        elif excluded_by == "person":
+            filters = {"person": "ou_alice"}
+        query = {"literal": "rion", "fuzzy": "deploying"}.get(candidate, "Orion")
+        # Positive control: the requested route really finds this lead before the competing rows exist.
+        await _mode(pool, "fulltext")
+        assert await _found(pool, query, **filters) == [text]
+        source = "other-stream" if excluded_by == "source" else stream.SOURCE
+        await stream.source(pool, source)
+        sender = "ou_other" if excluded_by == "person" else "ou_alice"
+        await stream.person(pool, sender, person_name, source_id=source)
+        seq = await stream.add(pool, text, chat_id="oc_other" if excluded_by == "chat" else "oc_release",
+                               chat_name=chat_name, sender=sender, sent_at=NOW, source_id=source)
+        newer = await pool.fetch(
+            "INSERT INTO message_leads (source_id, kind, summary, confidence, valid_until, first_sent_at, last_sent_at) "
+            "SELECT $1, $2, $3, 'high', $4, $5, $5 FROM generate_series(1, 2001) RETURNING id", source,
+            "fact" if excluded_by == "kind" else "decision", text,
+            NOW - timedelta(days=1) if excluded_by == "expired" else NOW + timedelta(days=1),
+            NOW - timedelta(days=2) if excluded_by == "since" else NOW)
+        ids = [row["id"] for row in newer]
+        assert len(ids) == 2001 and min(ids) > wanted
+        await pool.execute("INSERT INTO message_lead_sources (lead_id, event_seq) "
+                           "SELECT id, $2 FROM unnest($1::bigint[]) id", ids, seq)
+        await pool.execute("INSERT INTO message_lead_people (lead_id, open_id, role) "
+                           "SELECT id, $2, 'sender' FROM unnest($1::bigint[]) id", ids, sender)
+        # Exercise the common entry point used by the CLI, operator API and Manager tool in both modes.
+        await _mode(pool, "words")
+        assert await _found(pool, "deploy" if candidate == "fuzzy" else query, **filters) == [text]
+        await _mode(pool, "fulltext")
+        assert await _found(pool, query, **filters) == [text]
 
     run_db(test, monkeypatch, timeout=60)

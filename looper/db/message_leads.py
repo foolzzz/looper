@@ -125,20 +125,39 @@ async def search_rows(*, now: datetime, words: Sequence[str] = (), chat: str | N
 
 # The full-text search: _SEARCH's filters without its words ($1 source, $2 now, $3 state, $4 kind, $5 since, $6-$7
 # chat, $8-$9 person, $10 limit, $11 the names' patterns, $12 the most candidates a set brings). The candidates
-# first, each set as an index finds it, its newest $12 (the filters come after, so that nothing but the index
-# answers a set): the leads holding a term's token
+# first, each set as an index finds it, filtered to the requested scope, state, kind and time before its newest
+# $12 distinct leads are selected: the leads holding a term's token
 # (``idx_message_leads_search``), with pg_trgm those holding a term as written or one like it
 # (``idx_message_leads_trigram``), and those whose chat or person has a term in its name. Only they are read, with
 # their text and the names of the chats and people they concern, lower-cased; then each term's coverage, the terms'
 # weights and the score. The match's values follow $12.
 # A set of candidates: OFFSET 0 keeps the LIMIT from turning the index lookup into a newest-first scan.
-_SET = """(SELECT id FROM (SELECT {id} AS id FROM {source} WHERE {where} OFFSET 0) AS hit ORDER BY id DESC LIMIT $12)"""
+_FILTERS = """($1::text IS NULL OR l.source_id = $1)
+      AND ($3 = '' OR ($3 = 'active' AND l.state = 'active' AND l.valid_until > $2)
+           OR ($3 = 'expired' AND l.state = 'active' AND l.valid_until <= $2)
+           OR ($3 NOT IN ('active', 'expired') AND l.state = $3))
+      AND ($4::text IS NULL OR l.kind = $4)
+      AND ($5::timestamptz IS NULL OR l.last_sent_at >= $5)
+      AND ($6::text IS NULL OR EXISTS (
+          SELECT 1 FROM message_lead_sources s
+          JOIN source_events e ON e.seq = s.event_seq
+          JOIN source_chats c ON c.source_id = e.source_id AND c.chat_id = e.chat_id
+          WHERE s.lead_id = l.id AND (e.chat_id = $6 OR c.name ILIKE $7)))
+      AND ($8::text IS NULL OR EXISTS (
+          SELECT 1 FROM message_lead_people p
+          LEFT JOIN source_people sp ON sp.source_id = l.source_id AND sp.open_id = p.open_id
+          WHERE p.lead_id = l.id AND (p.open_id = $8 OR sp.name ILIKE $9)))
+"""
+_SET = ("(SELECT DISTINCT id FROM (SELECT l.* FROM {source} WHERE {where} OFFSET 0) AS l WHERE "
+        + _FILTERS + " ORDER BY id DESC LIMIT $12)")
 # The leads of the chats and people whose name holds a term, found from the (few) chats and people.
 _BY_CHAT = """source_chats c
         JOIN source_events e ON e.source_id = c.source_id AND e.chat_id = c.chat_id
-        JOIN message_lead_sources s ON s.event_seq = e.seq"""
+        JOIN message_lead_sources s ON s.event_seq = e.seq
+        JOIN message_leads l ON l.id = s.lead_id AND l.source_id = c.source_id"""
 _BY_PERSON = """source_people sp
-        JOIN message_lead_people p ON p.open_id = sp.open_id"""
+        JOIN message_lead_people p ON p.open_id = sp.open_id
+        JOIN message_leads l ON l.id = p.lead_id AND l.source_id = sp.source_id"""
 _FULLTEXT = """
 WITH {tokens}, ids AS MATERIALIZED (
     {candidates}
@@ -158,21 +177,6 @@ WITH {tokens}, ids AS MATERIALIZED (
                  WHERE p.lead_id = l.id) AS names
     FROM message_leads l
     WHERE l.id IN (SELECT id FROM ids)
-      AND ($1::text IS NULL OR l.source_id = $1)
-      AND ($3 = '' OR ($3 = 'active' AND l.state = 'active' AND l.valid_until > $2)
-           OR ($3 = 'expired' AND l.state = 'active' AND l.valid_until <= $2)
-           OR ($3 NOT IN ('active', 'expired') AND l.state = $3))
-      AND ($4::text IS NULL OR l.kind = $4)
-      AND ($5::timestamptz IS NULL OR l.last_sent_at >= $5)
-      AND ($6::text IS NULL OR EXISTS (
-          SELECT 1 FROM message_lead_sources s
-          JOIN source_events e ON e.seq = s.event_seq
-          JOIN source_chats c ON c.source_id = e.source_id AND c.chat_id = e.chat_id
-          WHERE s.lead_id = l.id AND (e.chat_id = $6 OR c.name ILIKE $7)))
-      AND ($8::text IS NULL OR EXISTS (
-          SELECT 1 FROM message_lead_people p
-          LEFT JOIN source_people sp ON sp.source_id = l.source_id AND sp.open_id = p.open_id
-          WHERE p.lead_id = l.id AND (p.open_id = $8 OR sp.name ILIKE $9)))
 ), covered AS (
     SELECT f.*, {coverage} FROM found f
 ), weighed AS (
@@ -202,11 +206,11 @@ def fulltext_query(found_terms: Sequence[Term], trigram: str | None, *, now: dat
     # Each term's leads by its tokens first; with pg_trgm, the term as written (inside a word) only while its tokens
     # bring fewer than a full set, and its likeness only while they bring none (a misspelling): a common word reads
     # its index alone.
-    tokens = [f"t{i} AS MATERIALIZED {_SET.format(id='l.id', source='message_leads l', where=match.holds(_VECTOR, i))}"
+    tokens = [f"t{i} AS MATERIALIZED {_SET.format(source='message_leads l', where=match.holds(_VECTOR, i))}"
               for i in range(len(match.terms))]
     sets = [f"SELECT id FROM t{i}" for i in range(len(match.terms))]
-    sets += [_SET.format(id="s.lead_id", source=_BY_CHAT, where="lower(c.name) LIKE ANY($11::text[])"),
-             _SET.format(id="p.lead_id", source=_BY_PERSON, where="lower(sp.name) LIKE ANY($11::text[])")]
+    sets += [_SET.format(source=_BY_CHAT, where="lower(c.name) LIKE ANY($11::text[])"),
+             _SET.format(source=_BY_PERSON, where="lower(sp.name) LIKE ANY($11::text[])")]
     parts = []
     for i, term in enumerate(match.terms):
         text = match.param(term.text, "::text")
@@ -214,10 +218,10 @@ def fulltext_query(found_terms: Sequence[Term], trigram: str | None, *, now: dat
         fuzzy = None
         if trigram is not None:
             if len(term.text) >= 3:  # pg_trgm finds a pattern of three characters or more
-                sets.append(_SET.format(id="l.id", source="message_leads l", where=(
+                sets.append(_SET.format(source="message_leads l", where=(
                     f"(SELECT count(*) FROM t{i}) < $12 AND {_TEXT} LIKE {match.param(_like(term.text))}")))
             if term.text.isascii() and len(term.text) >= FUZZY_MIN_CHARS:
-                sets.append(_SET.format(id="l.id", source="message_leads l", where=(
+                sets.append(_SET.format(source="message_leads l", where=(
                     f"NOT EXISTS (SELECT 1 FROM t{i}) AND {text} OPERATOR({trigram}.<%) {_TEXT}")))
                 fuzzy = (f"(SELECT CASE WHEN likeness >= {FUZZY_MIN} THEN likeness ELSE 0 END FROM (SELECT "
                          f"{trigram}.word_similarity({text}, f.doc || ' ' || array_to_string(f.names, ' '))::float8 "
