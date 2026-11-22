@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import difflib
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -107,6 +108,7 @@ async def table_rows(pool: Any, tables: tuple[str, ...]) -> dict[str, Any]:
     for table in tables:
         order = {"llm_record_events": "record_id, seq", "advisor_advice": "spawn_id",
                  "subscriptions": "schedule_id", "subscription_runs": "run_id",
+                 "subscription_deliveries": "run_id, segment",
                  "message_lead_sources": "lead_id, event_seq",
                  "message_lead_people": "lead_id, open_id, role"}.get(table, "id")
         rows[table] = [json.loads(row["row"]) for row in await pool.fetch(
@@ -146,4 +148,6 @@ def assert_golden(name: str, payload: Any, root: Path) -> None:
         assert unchanged.returncode == 0, "regenerate goldens only with production sources from baseline main"
         _FIXTURES.mkdir(parents=True, exist_ok=True)
         fixture.write_text(actual)
-    assert actual == fixture.read_text()
+    expected = fixture.read_text()
+    assert actual == expected, "\n".join(difflib.unified_diff(expected.splitlines(), actual.splitlines(),
+                                                           fromfile="main", tofile="caller"))

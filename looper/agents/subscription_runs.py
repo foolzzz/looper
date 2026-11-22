@@ -35,7 +35,8 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import cron, extraction, processor, subscription_rules, subscriptions
+from . import cron, extraction, model_call, processor, subscription_rules, subscriptions
+from .agent_settings import AgentType
 from .channels.base import PostOutcome
 from .message import builtin_channel_id
 from .task_notice import NotifyTarget, TargetKind
@@ -208,12 +209,13 @@ class SubscriptionRuns:
                    else processor.PROCESSOR_TIMEOUT_SEC)
         reference = {"kind": "subscription_window", "schedule_id": schedule["id"], "run_id": run_id,
                      "from_seq": stream["from_seq"], "to_seq": stream["to_seq"], "events": len(picked["rows"])}
-        result = await processor.run(
+        result = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
             owner=schedule["id"], instructions=schedule["requirement"], input_text=text, input_ref=reference,
             quiet_word=sub["quiet_word"], budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout),
             runtime_root=self._runtime_root, claude_bin=self._claude_bin, project_id=schedule["project_id"],
             schedule_id=schedule["id"],
-            metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(text)}})
+            metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(text)}},
+            role=AgentType.PROCESSOR), parse=str))
         await db_subs.update_run(pool, run_id, record_id=result.record_id, events_selected=len(picked["rows"]))
         if result.failure is processor.ProcessorFailure.BLOCKED:
             # Blocked every time it is sent: kept, the window would be sent again, and blocked, with every run after.
