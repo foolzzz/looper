@@ -109,7 +109,7 @@ def test_manager_autonomous_turn_keeps_early_request_between_turns(monkeypatch, 
                 await autonomous.event({"type": "assistant", "message": {
                     "content": [{"type": "text", "text": "Autonomous."}]}})
                 result = {"type": "result", "subtype": "success", "is_error": False,
-                          "result": "Autonomous.", "session_id": chat.manager._session_id}
+                          "result": "Autonomous.", "session_id": chat.manager._sessions["main"].session_id}
                 await autonomous.event(result)
                 await autonomous.end(ResidentTurn(result_event=result, usage=Usage(input_tokens=3, output_tokens=2)))
                 await proxy.close()
