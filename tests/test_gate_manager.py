@@ -63,12 +63,12 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "Postgre
             async def tools_problem() -> None:
                 return None
 
-            async def library_with_server(library: Any, root: Any) -> Any:
+            async def library_with_server(library: Any, root: Any, **_: Any) -> Any:
                 return library
 
             manager.ops = SimpleNamespace(platform=SimpleNamespace(task_router=SimpleNamespace(
                 has_planner=lambda task_id: True)), tools_problem=tools_problem,
-                asks_in=lambda message_id: False, begin_turn=lambda turn, binding=None: "", publish_binding=lambda binding: None, end_turn=lambda turn: None,
+                asks_in=lambda message_id: False, begin_turn=lambda turn, binding=None: "", publish_binding=lambda binding, **_: None, end_turn=lambda turn: None,
                 library_with_server=library_with_server, current_listing=AsyncMock(return_value=[]))
             await manager._handle(MessageEnvelope.create(
                 source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,

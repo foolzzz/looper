@@ -71,6 +71,8 @@ class FakeProcessor:
         self.check_failure: processor.ProcessorFailure | None = None
         self.check_cost = 0.0003
         self.check_record_id: int | None = None
+        # Per call of the processor's own role, in order: (reply, failure) answered before ``reply``/``failure``.
+        self.outcomes: list[tuple[str | None, processor.ProcessorFailure | None]] = []
 
     async def __call__(self, **kwargs: Any) -> processor.ProcessorRun:
         self.calls.append(kwargs)
@@ -81,6 +83,11 @@ class FakeProcessor:
             return processor.ProcessorRun(self.check_reply, self.check_record_id, self.check_cost)
         if self.during is not None:
             await self.during()
+        if self.outcomes:
+            reply, failure = self.outcomes.pop(0)
+            if failure is not None:
+                return processor.ProcessorRun(None, None, 0.0, failure=failure, detail="synthetic failure")
+            return processor.ProcessorRun(reply, None, self.cost)
         if self.failure is not None:
             return processor.ProcessorRun(None, None, self.cost, failure=self.failure, detail="synthetic failure")
         return processor.ProcessorRun(self.reply, None, self.cost)

@@ -1891,7 +1891,10 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
 
 const OUTCOME_LABELS: Record<SubscriptionRunInfo["outcome"], string> = {
   pending: "Reading", delivering: "Pushing", delivered: "Pushed", uncertain: "Pushed, some messages uncertain", quiet: "Nothing to say", dashboard_only: "Kept here (target not confirmed)",
-  output_invalid: "Reply unusable", failed: "Not pushed",
+  output_invalid: "Reply unusable", failed: "Not pushed", extracted: "Extracted", skipped: "Skipped",
+};
+const SKIP_LABELS: Record<NonNullable<SubscriptionRunInfo["skip_reason"]>, string> = {
+  blocked_by_hook: "a prompt hook blocked it", invalid_reply: "its reply could not be read, twice",
 };
 
 /** What a subscription run read and made, under its line of the history. */
@@ -1902,7 +1905,7 @@ function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
   return (
     <div className="min-w-0 text-xs sm:basis-full">
       <p className="text-muted-foreground">
-        <span className="font-medium text-foreground">{OUTCOME_LABELS[sub.outcome]}</span>
+        <span className="font-medium text-foreground">{OUTCOME_LABELS[sub.outcome]}{sub.skip_reason && ` (${SKIP_LABELS[sub.skip_reason]})`}</span>
         {" · "}{sub.events_selected} of {sub.events_in_window} messages read{dropped.length > 0 && ` (${dropped.join(", ")})`}
         {" · "}events {sub.from_seq + 1}–{sub.to_seq}
         {sub.deliveries && sub.deliveries.length > 0 && ` · messages: ${sub.deliveries.map((d) => `${d.segment} ${d.state}`).join(", ")}`}
