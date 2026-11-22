@@ -108,6 +108,7 @@ class Operation:
     stream_description: str | None = None
     stream_events: Mapping[str, Any] | None = None
     audit_operator: bool = True  # dashboard operations may opt out of the Manager/client action trail
+    cli: bool = True  # False: dashboard/DM only; never generate a loopercli command
 
 
 def _summary(description: str) -> str:
@@ -505,6 +506,8 @@ def _path_item(operation: Operation) -> dict[str, Any]:
             item[key] = value
     if operation.hand:
         item["x-looper-cli-hand"] = True
+    if not operation.cli:
+        item["x-looper-cli"] = False
     if operation.operator_only:
         item["x-looper-operator-only"] = True
     if operation.method == "POST":

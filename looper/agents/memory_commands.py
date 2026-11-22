@@ -1,10 +1,10 @@
-"""``looper memory`` reads memory candidates and checks what a write needs, directly in PostgreSQL, also with the
-service stopped (memory-write-path RFC, section 9.2).
+"""``looper memory`` reads, rejects, retries and deletes candidates, and checks what a write needs, directly in
+PostgreSQL, also with the service stopped (memory-write-path RFC, section 9.2).
 
 A candidate holds the operator's own words, so every command is refused inside a Looper agent run, as ``looper
 leads`` is. There is no ``confirm``: a candidate is confirmed only on the dashboard or in the operator's direct chat.
 Exit codes: 0 done, 1 nothing found (or a check failed), 2 usage, 3 not configured, 4 refused, 5 no such candidate,
-6 database unusable.
+6 database unusable, 7 state does not allow the action.
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ from typing import Any
 import asyncpg
 
 from .. import child_env
-from . import memory, memory_model as model, memory_settings
+from ..db import memory as db_memory
+from . import memory, memory_actions, memory_model as model, memory_settings
 
 logger = logging.getLogger(__name__)
-OK, EMPTY, USAGE, NOT_CONFIGURED, REFUSED, NOT_FOUND, NO_DATABASE = 0, 1, 2, 3, 4, 5, 6
+OK, EMPTY, USAGE, NOT_CONFIGURED, REFUSED, NOT_FOUND, NO_DATABASE, WRONG_STATE = 0, 1, 2, 3, 4, 5, 6, 7
 LIMIT_MAX = 200
 
 KIND_ZH = {"preference": "偏好", "feedback": "反馈", "decision": "决定", "lesson": "经验", "fact": "事实",
@@ -96,6 +97,16 @@ def _dump(value: Any) -> str:
 
 
 async def _command(pool: asyncpg.Pool, args: Any) -> tuple[int, str]:
+    if args.memory_command in {"reject", "retry", "delete"}:
+        try:
+            result = await memory_actions.act(args.memory_command, args.candidate, via=model.Via.CLI, db=pool,
+                                              reason=getattr(args, "reason", None))
+        except db_memory.MemoryRefused as error:
+            return {"not_found": NOT_FOUND, "state": WRONG_STATE, "stale": WRONG_STATE,
+                    "disabled": NOT_CONFIGURED, "invalid": USAGE}.get(error.code, REFUSED), str(error)
+        if args.memory_command == "delete":
+            return OK, f"{result['candidate']} 已删除，只留指纹墓碑；vault 笔记不变"
+        return OK, _line(result["candidate"])
     if args.memory_command == "list":
         result = await memory.list_view(state=args.state, kind=args.kind, limit=args.limit, db=pool)
         if args.json:
@@ -150,8 +161,10 @@ def run(args: Any, load_ops: Any) -> int:
             memory.states_for(args.state)
             if args.kind is not None and args.kind not in set(model.Kind):
                 raise ValueError(f"unknown kind {args.kind!r}: one of {', '.join(model.Kind)}")
-        elif args.memory_command == "show":
+        elif args.memory_command in {"show", "reject", "retry", "delete"}:
             model.parse_id(args.candidate)
+            if args.memory_command == "reject" and args.reason is not None and len(args.reason) > model.NOTE_MAX_CHARS:
+                raise ValueError(f"--reason has at most {model.NOTE_MAX_CHARS} characters")
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return USAGE
