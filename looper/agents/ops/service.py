@@ -51,7 +51,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from ... import child_env
 from .. import chat_settings
@@ -59,6 +59,7 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
+from ..tiers.manager_session import MAIN_SESSION
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
@@ -129,6 +130,7 @@ class _Pending:
     at: float
     confirmation: dict[str, Any]
     answer_turn: str | None = None  # the message of the turn that may confirm it, once it started
+    impact: str = ""  # what it does, as the block says it
 
 
 # The Manager's tools (a task's Planner has its own, ``ops.planner``).
@@ -464,8 +466,7 @@ class ManagerOps:
             if tool.name != CONFIRM_TOOL:
                 tool = await self._authorize(scope, name, arguments)
             if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
-                raise OpError(ErrorCode.FORBIDDEN, "message leads are searched only in the user's own direct chat "
-                                                   "or on the dashboard")
+                raise OpError(ErrorCode.FORBIDDEN, cast(RestrictedTool, tool).refusal)
             _check_answering(turn)
             matched_turn = turn if enforced else bound
             if (matched_turn is not None and matched_turn.require_match and binding
@@ -558,7 +559,8 @@ class ManagerOps:
             turn.blocks.remove(earlier.block)  # asked in this turn too: only the newest stands
         block = f"需要你确认：\n{impact}\n回复「确认」就执行；回复别的就不执行。"
         pending = _Pending(id=f"c-{uuid.uuid4().hex[:12]}", tool=tool, arguments=arguments, block=block,
-                           asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation))
+                           asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation),
+                           impact=impact)
         self._pending[turn.chat_key] = pending
         while len(self._pending) > CONFIRMATION_CHATS:
             self._pending.pop(next(iter(self._pending)))
@@ -681,13 +683,21 @@ class ManagerOps:
                 "matches": [{"by": by, "when": when, "count": count}
                             for (by, when), count in sorted(self._matches.items())]}
 
-    def publish_binding(self, binding: str | None) -> None:
-        """Write the binding file the MCP bridge reads at each call (synchronously and atomically: it must be on
-        disk before the prompt reaches the runtime). ``None``: no turn runs."""
-        if self._turn_file is None:
+    def turn_file_for(self, session_key: str) -> Path | None:
+        """The binding file of the Manager session ``session_key``: what the MCP bridge of that session's runtime
+        reads at each call. Only main has one (``turn_file``)."""
+        if session_key != MAIN_SESSION:
+            raise ValueError(f"the Manager has no session {session_key!r}")
+        return self._turn_file
+
+    def publish_binding(self, binding: str | None, *, session_key: str = MAIN_SESSION) -> None:
+        """Write the binding file of ``session_key`` (``turn_file_for``) the MCP bridge reads at each call
+        (synchronously and atomically: it must be on disk before the prompt reaches the runtime). ``None``: no turn
+        runs."""
+        path = self.turn_file_for(session_key)
+        if path is None:
             return
         self._epoch += 1
-        path = self._turn_file
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -746,24 +756,38 @@ class ManagerOps:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())
 
+    def waiting_confirmations(self) -> list[dict[str, Any]]:
+        """The operations that wait for the user's word now, oldest first: asked, no turn answering them yet, and
+        within ``CONFIRMATION_SECONDS``. Read only (the "needs you" summary, ``agents.attention``)."""
+        now = self._clock()
+        waiting = sorted(((key, pending) for key, pending in self._pending.items()
+                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS),
+                         key=lambda item: item[1].at)
+        return [{"confirmation_id": pending.id, "tool": pending.tool.name, "impact": pending.impact,
+                 "channel": channel, "channel_id": channel_id, "chat": chat, "waited_seconds": int(now - pending.at),
+                 "expires_in_seconds": max(0, int(CONFIRMATION_SECONDS - (now - pending.at)))}
+                for (channel, channel_id, chat), pending in waiting]
+
     def forget_confirmations(self) -> None:
         """Drop every waiting confirmation (the Manager's session was reset)."""
         self._pending.clear()
 
     # --- The Manager's MCP entry ---
 
-    def server_config(self) -> dict[str, Any]:
+    def server_config(self, *, session_key: str = MAIN_SESSION) -> dict[str, Any]:
+        """Looper's MCP entry for the runtime of the Manager session ``session_key``, naming its binding file."""
         config = server_config(self._url, self._token)
-        if self._turn_file is not None:
-            config["env"][TURN_FILE_ENV] = str(self._turn_file)
+        if (turn_file := self.turn_file_for(session_key)) is not None:
+            config["env"][TURN_FILE_ENV] = str(turn_file)
         if trace := os.environ.get(TRACE_ENV, "").strip():  # a server started to trace its bridge (an eval)
             config["env"][TRACE_ENV] = trace
         return config
 
-    async def library_with_server(self, library: Any, runtime_root: Path) -> Any:
-        """``library`` (``AgentLibrary``) with Looper's own MCP server added: always there for the Manager, and
-        over a catalog server of the same name."""
-        library = await library_with_server(library, runtime_root, self.server_config(), who="the Manager")
+    async def library_with_server(self, library: Any, runtime_root: Path, *, session_key: str = MAIN_SESSION) -> Any:
+        """``library`` (``AgentLibrary``) with Looper's own MCP server for the Manager session ``session_key``
+        added: always there for the Manager, and over a catalog server of the same name."""
+        library = await library_with_server(library, runtime_root, self.server_config(session_key=session_key),
+                                            who="the Manager")
         if self._scope.manager_id != DEFAULT_MANAGER_ID:
             library = replace(library, manager_tools=tuple(self._scope.tools))
         return library

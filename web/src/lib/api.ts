@@ -1259,10 +1259,14 @@ export interface SubscriptionRunInfo {
   events_too_old: number;
   events_over_cap: number;
   record_id: number | null;
-  /** "delivered" (pushed), "quiet", "dashboard_only" (the target is not confirmed), "failed", "output_invalid". */
-  outcome: "pending" | "delivering" | "delivered" | "uncertain" | "quiet" | "dashboard_only" | "output_invalid" | "failed";
+  /** "delivered" (pushed), "quiet", "dashboard_only" (the target is not confirmed), "failed", "output_invalid",
+   * "extracted" (leads or intents), "skipped" (the window was not used: `skip_reason`). */
+  outcome: "pending" | "delivering" | "delivered" | "uncertain" | "quiet" | "dashboard_only" | "output_invalid" | "failed"
+    | "extracted" | "skipped";
   output_text: string | null;
   notification_id: string | null;
+  /** Why a skipped run did not use its window: a prompt hook blocked it, or its reply could not be read twice. */
+  skip_reason?: "blocked_by_hook" | "invalid_reply" | null;
   /** Each message of its push: pending, sending, sent, failed or uncertain. */
   deliveries?: { segment: number; state: string; attempts: number; error: string | null }[];
 }

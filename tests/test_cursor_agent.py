@@ -759,14 +759,14 @@ with (owner / 'snapshots.jsonl').open('a') as log:
                     source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE, payload={"text": text}))
 
             await send("hello")
-            assert agent._session_id == "chat-1"
+            assert agent._sessions["main"].session_id == "chat-1"
             if restart:
                 await agent.stop()
                 agent = manager(bus, "prompt B")
             else:
                 agent._composed_prompt = lambda _: SystemPrompt("prompt B")
             await send("again")
-            assert agent._session_id == "chat-3"
+            assert agent._sessions["main"].session_id == "chat-3"
             old = _chat_partition(owner, tmp_path) / "chat-1"
             assert old.exists() is incomplete_replacement
             if incomplete_replacement:
