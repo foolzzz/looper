@@ -483,7 +483,8 @@ class ConsultService:
                        prompt: str, system_prompt: SystemPrompt, launch: Launch, timeout: int
                        ) -> tuple[dict[str, Any] | None, bool, bool]:
         """Run the consult's command (``single_run.run_once``): its last result (None when it gave none), whether its
-        session started (Claude names it in its init event) and whether it ran over ``timeout``."""
+        session started (Claude names it in its init event) and whether it ran over ``timeout``. A prompt a Claude
+        Code hook blocked has no answer: its result only echoes the prompt."""
         from .claude_cli import ClaudeRunRecorder
 
         recorder = ClaudeRunRecorder(agent_id=run_id, task_id=task_id, command=command, cwd=cwd, input_text=prompt,
@@ -491,10 +492,13 @@ class ConsultService:
                                      whole_process=True)
         await recorder.start()
         try:
-            return await single_run.run_once(recorder, command, cwd=cwd, prompt=prompt, launch=launch,
-                                             timeout=timeout, what="the consult", label=f"consult {run_id}")
+            finished = await single_run.run_once(recorder, command, cwd=cwd, prompt=prompt, launch=launch,
+                                                 timeout=timeout, what="the consult", label=f"consult {run_id}")
         except single_run.StartFailed as exc:
             raise _Failed(FallbackReason.RUNTIME_CANNOT, f"its runtime does not start: {exc}") from None
+        if finished.blocked is not None:
+            raise _Failed(FallbackReason.CONTRACT, f"a Claude Code hook blocked its prompt: {finished.blocked}")
+        return finished.result, finished.started, finished.timed_out
 
     async def _execute_hosted(self, handle: RunHandle, task_id: str, step: Mapping[str, Any], run_id: str,
                               cwd: str, prompt: str, system_prompt: SystemPrompt, launch: Launch, timeout: int

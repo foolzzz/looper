@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from looper.agents import memory_model as model
+from looper.agents.memory import states_for
 from looper.agents.memory_model import Action, Kind, Reason, SourceClass, State
 from looper.agents.vault import VaultConfig
 
@@ -44,7 +45,7 @@ def test_a_candidate_is_as_trusted_as_its_least_trusted_source():
 
 @pytest.mark.parametrize("current,to,action", [
     ("drafting", "pending", "draft"), ("drafting", "dropped", "drop"), ("pending", "pending", "edit"),
-    ("pending", "drafting", "redraft"), ("pending", "confirmed", "confirm"), ("pending", "rejected", "reject"),
+    ("pending", "pending", "redraft"), ("pending", "confirmed", "confirm"), ("pending", "rejected", "reject"),
     ("pending", "expired", "expire"), ("expired", "pending", "revive"), ("expired", "rejected", "reject"),
     ("confirmed", "writing", "claim"), ("writing", "written", "write"), ("writing", "conflict", "conflict"),
     ("writing", "blocked", "block"), ("writing", "confirmed", "recover"), ("conflict", "drafting", "redraft"),
@@ -58,6 +59,7 @@ def test_the_transitions_of_the_rfc_are_allowed(current, to, action):
     ("pending", "written", "write"),          # no write without a confirmation and a claim
     ("drafting", "confirmed", "confirm"),     # nothing to confirm before a revision
     ("pending", "confirmed", "edit"),         # an edit is a new revision, never a confirmation
+    ("pending", "drafting", "redraft"),       # redrafting keeps a pending candidate pending
     ("confirmed", "pending", "edit"),         # a confirmed candidate is not edited in place
     ("written", "pending", "edit"),           # written is final
     ("rejected", "pending", "revive"),        # rejected is final
@@ -67,6 +69,10 @@ def test_the_transitions_of_the_rfc_are_allowed(current, to, action):
 def test_other_transitions_are_refused(current, to, action):
     with pytest.raises(model.TransitionRefused):
         model.check_transition(current, to, action)
+
+
+def test_open_lists_every_state_except_written_rejected_and_dropped():
+    assert set(states_for("open")) == set(State) - {State.WRITTEN, State.REJECTED, State.DROPPED}
 
 
 def test_only_a_candidate_whose_drafting_failed_is_drafted_again():

@@ -115,6 +115,25 @@ def test_a_new_revision_drops_the_old_confirmation_hash_and_waits_again(monkeypa
     run_db(check, monkeypatch, timeout=20)
 
 
+def test_redrafting_pending_requires_a_new_revision_and_renews_expiry(monkeypatch):
+    async def check(pool):
+        candidate = await sup.candidate(pool)
+        first = await sup.revise(pool, candidate)
+        before = await db_memory.get(candidate, db=pool)
+        with pytest.raises(db_memory.MemoryRefused) as refused:
+            await sup.move(pool, candidate, "drafting", "redraft")
+        assert refused.value.code == "state"
+        assert await db_memory.get(candidate, db=pool) == before
+        revised = await sup.revise(pool, candidate, action=model.Action.REDRAFT, made_by=model.MadeBy.REDRAFT,
+                                   changes=[{**sup.NOTE, "content": "Conclusion first, always.\n"}],
+                                   now=sup.NOW + timedelta(days=1))
+        assert (revised["state"], revised["revision"], revised["expires_at"]) == (
+            "pending", 2, sup.NOW + timedelta(days=8))
+        assert revised["content_hash"] != first["content_hash"]
+
+    run_db(check, monkeypatch, timeout=20)
+
+
 def test_who_may_store_a_revision_and_with_what(monkeypatch):
     async def check(pool):
         candidate = await sup.candidate(pool)
@@ -181,6 +200,32 @@ def test_the_write_path_keeps_the_confirmation_and_counts_its_attempts(monkeypat
     run_db(check, monkeypatch, timeout=20)
 
 
+@pytest.mark.parametrize("actor,attempts,allowed", [
+    ("system", 2, True), ("system", 3, False),
+    ("user", 1, False), ("manager", 1, False), ("planner", 1, False),
+])
+def test_recovery_is_system_only_and_stops_after_three_attempts(monkeypatch, actor, attempts, allowed):
+    async def check(pool):
+        candidate = await sup.candidate(pool)
+        confirmed = await sup.confirmed(pool, candidate)
+        for attempt in range(attempts):
+            if attempt:
+                await sup.move(pool, candidate, "confirmed", "recover")
+            await sup.move(pool, candidate, "writing", "claim")
+        before = await db_memory.get(candidate, db=pool)
+        if allowed:
+            recovered = await sup.move(pool, candidate, "confirmed", "recover", actor=actor)
+            assert (recovered["state"], recovered["attempts"], recovered["confirmed_event_id"]) == (
+                "confirmed", attempts, confirmed["confirmed_event_id"])
+        else:
+            with pytest.raises(db_memory.MemoryRefused) as refused:
+                await sup.move(pool, candidate, "confirmed", "recover", actor=actor)
+            assert refused.value.code == ("state" if actor == "system" else "invalid")
+            assert await db_memory.get(candidate, db=pool) == before
+
+    run_db(check, monkeypatch, timeout=20)
+
+
 def test_leaving_the_confirmed_states_drops_the_confirmation(monkeypatch):
     async def check(pool):
         candidate = await sup.candidate(pool)
@@ -198,7 +243,7 @@ def test_leaving_the_confirmed_states_drops_the_confirmation(monkeypatch):
 @pytest.mark.parametrize("to,action,fields", [
     ("dropped", "drop", {}),                                         # a dropped one says why
     ("dropped", "drop", {"reason": "dirty_target"}),                 # with a reason of its own state
-    ("drafting", "redraft", {"reason": "duplicate"}),                # and no other state has one
+    ("expired", "expire", {"reason": "duplicate"}),                 # and no other state has one
     ("expired", "expire", {"pending_days": 7}),                      # pending_days only with pending
     ("rejected", "reject", {"commit_sha": "c" * 40}),                # a commit only with written
     ("rejected", "reject", {"merged_into": 1}),                      # merged_into only with a same_as drop
@@ -206,9 +251,8 @@ def test_leaving_the_confirmed_states_drops_the_confirmation(monkeypatch):
 def test_a_transition_carries_exactly_what_its_state_needs(monkeypatch, to, action, fields):
     async def check(pool):
         candidate = await sup.candidate(pool)
-        await sup.revise(pool, candidate)
-        if to == "dropped":
-            await sup.move(pool, candidate, "drafting", "redraft")
+        if to != "dropped":
+            await sup.revise(pool, candidate)
         with pytest.raises(db_memory.MemoryRefused) as refused:
             await sup.move(pool, candidate, to, action, actor="user", via="dashboard", **fields)
         assert refused.value.code == "invalid"
@@ -240,6 +284,25 @@ def test_pending_expires_and_is_revived(monkeypatch):
         assert (expired["state"], expired["expires_at"]) == ("expired", None)
         revived = await sup.move(pool, candidate, "pending", "revive", actor="user", via="dashboard", pending_days=3)
         assert revived["expires_at"] == sup.NOW + timedelta(days=3)
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_reviving_refuses_another_open_candidate_for_the_same_note(monkeypatch):
+    async def check(pool):
+        candidate = await sup.candidate(pool)
+        await sup.revise(pool, candidate)
+        await sup.move(pool, candidate, "expired", "expire")
+        other = await sup.candidate(pool, statement="Another change to the same note")
+        await sup.revise(pool, other)
+        before = await db_memory.get(candidate, db=pool)
+        with pytest.raises(db_memory.MemoryRefused) as refused:
+            await sup.move(pool, candidate, "pending", "revive", actor="user", via="dashboard", pending_days=3)
+        assert refused.value.code == "busy"
+        assert await db_memory.get(candidate, db=pool) == before
+        await sup.move(pool, other, "rejected", "reject", actor="user", via="dashboard")
+        revived = await sup.move(pool, candidate, "pending", "revive", actor="user", via="dashboard", pending_days=3)
+        assert (revived["state"], revived["expires_at"]) == ("pending", sup.NOW + timedelta(days=3))
 
     run_db(check, monkeypatch, timeout=20)
 
