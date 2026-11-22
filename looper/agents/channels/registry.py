@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any
 
 from ..bus import MessageBus
@@ -97,6 +98,16 @@ class ChannelRegistry:
         if target.group:
             text = for_group(text)
         return await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
+
+    async def post_card(self, channel_id: str, target: NotifyTarget, card: Any, *,
+                        reply_to: str | None = None, idempotency_key: str | None = None) -> PostReceipt:
+        """Post ``card`` (``card_actions.Card``) to ``target`` like ``post`` (``ChannelAdapter.post_card``)."""
+        adapter = self._channels.get(channel_id)
+        if adapter is None:
+            return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
+        if target.group and (checked := for_group(card.text)) != card.text:
+            card = replace(card, text=checked, buttons=())
+        return await adapter.post_card(target, card, reply_to=reply_to, idempotency_key=idempotency_key)
 
     async def edit(self, channel_id: str, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         """Edit one message through its running adapter, preserving the platform's delivery result."""
