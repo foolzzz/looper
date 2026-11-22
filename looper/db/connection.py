@@ -164,6 +164,7 @@ _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
 _LEADS_CHECK_ONLINE = "leads_check_online"
 _PROACTIVE_DELIVERIES = "proactive_deliveries"
+_PROACTIVE_DIGEST = "proactive_digest"
 _RUN_SKIPS = "run_skips"
 _RUN_SKIPS_ONLINE = "run_skips_online"
 _LLM_REQUESTS = "llm_requests"
@@ -371,6 +372,8 @@ class _OnlineStep:
 
 
 _ONLINE_STEPS = (
+    _OnlineStep(_PROACTIVE_DIGEST, "proactive_digest_online",
+                validate=(("proactive_deliveries", "proactive_deliveries_urgency_check"),)),
     _OnlineStep(_RUN_TREE, "run_tree_online",
                 validate=(("llm_records", "llm_records_run_kind_check"),
                           ("llm_records", "llm_records_parent_record_id_fkey")),
@@ -1006,6 +1009,15 @@ async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
 
 
+async def _proactive_digest_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DIGEST):
+        return False
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('proactive_deliveries') "
+        "AND conname = 'proactive_deliveries_urgency_check' "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'digest'")
+
+
 async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
     """Whether the intents table lacks the AFTER DELETE detach trigger ``A_intents_detach_merged``, still has the
     earlier BEFORE trigger, or has a merge key that cascades. Judged by the catalog, not the marker, so a database that
@@ -1568,6 +1580,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _proactive_deliveries_pending(conn):
             await conn.execute(_proactive_deliveries_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
+        if await _proactive_digest_pending(conn):
+            # Widen under the schema lock, then validate outside its transaction so writes can continue.
+            await conn.execute("ALTER TABLE proactive_deliveries DROP CONSTRAINT proactive_deliveries_urgency_check, "
+                               "ADD CONSTRAINT proactive_deliveries_urgency_check "
+                               "CHECK (urgency IN ('normal', 'digest', 'blocking', 'user_set')) NOT VALID")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DIGEST)
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():
                 await conn.execute(ddl)
@@ -1763,6 +1781,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _proactive_deliveries_pending(conn)
+            or await _proactive_digest_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)

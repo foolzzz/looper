@@ -459,6 +459,9 @@ class Scheduler:
     def drain_waiting(self) -> dict[str, int]:
         return {"gates": self._gates, "starting": self._starting}
 
+    def observe_user(self, envelope: MessageEnvelope) -> None:
+        self._subscriptions.observe_user(envelope)
+
     @contextmanager
     def _admit_start(self, kind: str = "agent") -> Iterator[bool]:
         """Count admission through task publication, including awaits in database transactions."""

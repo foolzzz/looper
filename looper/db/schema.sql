@@ -2326,7 +2326,7 @@ CREATE TABLE IF NOT EXISTS proactive_deliveries (
     dedupe_key  TEXT NOT NULL UNIQUE,
     kind        TEXT NOT NULL CHECK (kind IN ('gate_reminder', 'task_notice', 'subscription', 'intent',
                                               'completion', 'user_reminder')),
-    urgency     TEXT NOT NULL CHECK (urgency IN ('normal', 'blocking', 'user_set')),
+    urgency     TEXT NOT NULL CHECK (urgency IN ('normal', 'digest', 'blocking', 'user_set')),
     channel_id  TEXT NOT NULL,
     chat        TEXT NOT NULL,
     chat_kind   TEXT NOT NULL CHECK (chat_kind IN ('direct', 'group')),
