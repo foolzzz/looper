@@ -142,6 +142,8 @@ class ActionLevel(str, Enum):
 | `looper_confirm` | HIGH | 执行被确认的调用 | 被确认调用的级别（审查已在确认前做过，D7） |
 | `looper_ledger_add`、`looper_ledger_update` | WRITE | 无 | inside |
 | `looper_leads_search` | READ；`audience=OPERATOR` | 无 | inside |
+| `looper_reminder_list` | READ；`audience=OPERATOR` | 无 | inside |
+| `looper_reminder_create`、`looper_reminder_cancel` | WRITE；`audience=OPERATOR` | 创建或取消只发到操作者本人私聊的提醒 | operator |
 
 **客户端工具**（`ops/clients.py`）：`looper_task_pipeline` 为 inside；`looper_gates` 的 `reply`、`end` 为 origin。
 
