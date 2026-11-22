@@ -995,7 +995,7 @@ def test_dsh_rejected_saved_session_is_replaced_before_any_turn_executes(
                                           runtime_root=tmp_path / "runtime")
             owner._bus = MessageBus(tmp_path / "runtime")
             await owner._load_session_state()
-            assert owner._session_id == "not-a-session"
+            assert owner._sessions["main"].session_id == "not-a-session"
             envelope = MessageEnvelope.create(source=channel_address("web"), target=MANAGER_ADDRESS,
                 message_type=MessageType.USER_MESSAGE, payload={"text": "read state"}, metadata={"task_id": task})
             turn = owner._run_turn("read state", envelope)
