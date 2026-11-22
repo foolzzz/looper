@@ -1,0 +1,25 @@
+# Tool-less call compatibility fixtures
+
+The original outbound, advisor and leads-check fixtures were captured before
+`model_call` from main `2b77afb1672cda93be6681259623bafa4e290f2d`.
+The subscription, extraction, backfill and spawn fixtures were captured from
+unchanged main `1f2ac843e01adac83448c09a329df01a4dbb8566`, before migrating each caller.
+
+These are temporary refactoring evidence. Keep the fixtures and their golden
+harnesses through the 2.15 release series; remove them in 2.16 after the caller
+migration has shipped. Ordinary domain and backend contract tests remain.
+
+The stand-in is a real CLI subprocess. Comparisons retain argv, raw stdin,
+system prompts, working directories, every column of the selected database
+rows, events, delivery calls and caller outcomes. Test-owned paths and clocks
+are normalized, and UUIDs are fixed. Ancestor-exclusion paths use a portable
+logical directory tree. No prompt or record field is dropped. The one explicit
+record difference is the newly assigned `leads_check` run kind; its original
+fixture stays unchanged.
+
+To regenerate the newer fixtures, use a separate checkout of the recorded
+baseline with the golden test modules and `tests/model_call_support.py` copied
+in. Set `UPDATE_MODEL_CALL_GOLDENS=1` and run only those test modules against a
+disposable PostgreSQL database. The helper verifies the imported package path
+and that the production sources match the recorded baseline before writing.
+Never regenerate compatibility fixtures from the migrated implementation.
