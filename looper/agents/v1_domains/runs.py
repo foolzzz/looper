@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from looper.db import llm_records
 from .. import failures
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
@@ -70,7 +71,8 @@ RESULTS = {}
 def _op(action, fields, result, required=None):
     description = f"Read run records: {action.replace('_', ' ')}. Database failures return unavailable."
     return Operation(f"runs.{action}", "POST", f"/api/v1/runs/{action}", description, description,
-                     _object(fields, required, closed=True), result, risk="read", operator_only=True)
+                     _object(fields, required, closed=True), result, risk="read", operator_only=True,
+                     level=ActionLevel.INSIDE)  # only reads run records and failure statistics stored by Looper
 
 
 _ID = {"record_id": {"type": "integer", "minimum": 1}}

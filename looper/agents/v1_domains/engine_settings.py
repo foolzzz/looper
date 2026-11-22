@@ -7,6 +7,7 @@ comes later, and is refused until then.
 
 from looper.db import system_settings
 from .. import failures
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _object
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
@@ -24,7 +25,8 @@ _UPDATE = _object({"failure_typing": {"type": ["string", "null"], "enum": [*_MOD
 
 def _operation(name, summary, request, risk):
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), summary, summary, request, SETTINGS,
-                     risk=risk, operator_only=True)
+                     risk=risk, operator_only=True,
+                     level=ActionLevel.INSIDE)  # reads or changes only Looper's own engine settings
 
 
 OPERATIONS = (
