@@ -6,6 +6,7 @@ from ...db import connection as db_connection, projects as db_projects, schedule
 from ...db import subscriptions as db_subs
 from .. import schedules, subscriptions
 from ..agent_settings import BUDGET_MAX_USD, CONCURRENCY_MAX
+from ..action_levels import ActionLevel, schedule_level, schedule_reach
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
@@ -90,11 +91,26 @@ RESULTS = {
 }
 
 
+async def _level(arguments):
+    """Where the schedule reaches (``action_levels.schedule_level``; an API client's call has no chat of its own): a
+    new one by its fields, a stored one by what it has with the change merged; one that is not there is
+    ``unknown``."""
+    fields = arguments.get("fields") if isinstance(arguments.get("fields"), dict) else {}
+    if "schedule_id" in arguments:
+        row = await db_schedules.get_schedule(arguments["schedule_id"])
+        if row is None:
+            return ActionLevel.UNKNOWN
+        fields = {**schedule_reach(row), **fields}
+    return await schedule_level(fields)
+
+
 def _op(action, fields, result, *, risk="write", required=None):
     description = f"Change schedules: {action.replace('_', ' ')}."
     return Operation(f"schedule_admin.{action}", "POST", f"/api/v1/schedule_admin/{action}",
                      description, description, _object(fields, required, closed=True), result,
-                     risk=risk, confirms=action != "create")
+                     risk=risk, confirms=action != "create",
+                     # running a schedule, or confirming its push target, reaches where it does (``_level``)
+                     level_of={"create": _level, "update": _level, "run": _level, "confirm_target": _level}.get(action))
 
 
 _ID = {"schedule_id": _STR}
