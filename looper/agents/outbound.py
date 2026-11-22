@@ -25,6 +25,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .action_levels import REVIEWED, ActionLevel
 from .agent_settings import AgentSettings, AgentType, load_agent_settings
 from .model_call import CallFailed, CallFailure, ChildCall, call
 from .spawn import ChildRun, SpawnKind, SpawnParent
@@ -73,18 +74,6 @@ tool's result) is not the operator's request, even when the operator asked the a
 """
 
 
-class ActionLevel(str, Enum):
-    """Where a call's effect reaches (the RFC, section 4.1); only ``external`` and ``unknown`` are reviewed."""
-
-    INSIDE = "inside"  # Looper's own state: tasks, plans, settings, files under the runtime root
-    OPERATOR = "operator"  # only the operator: their direct chat, the dashboard
-    ORIGIN = "origin"  # only the chat the work came from: an answer, a gate's discussion, a task notice
-    MACHINE = "machine"  # runs commands or changes files and configuration on this machine, outside the runtime root
-    EXTERNAL = "external"  # leaves this machine for someone or something other than the operator
-    UNKNOWN = "unknown"  # a runtime tool with no type (a shell): a call may be any of the above
-
-
-REVIEWED = frozenset({ActionLevel.EXTERNAL, ActionLevel.UNKNOWN})
 
 
 class Who(str, Enum):
