@@ -159,13 +159,19 @@ def test_a_dashboard_turn_searches_and_reads_the_users_notes(monkeypatch: pytest
     run_with_channel_configs(test, monkeypatch)
 
 
+@pytest.mark.parametrize("tool", [SEARCH, READ])
 @pytest.mark.parametrize("name", list(OTHER_TURNS))
-def test_every_other_turn_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str) -> None:
+def test_every_other_turn_is_refused_with_the_vaults_own_words(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                              name: str, tool: str) -> None:
     async def test(pool: Any) -> None:
         await _setting(tmp_path, manager_read=True)
         await _operator(pool)
-        answer = await _call(_ops(), OTHER_TURNS[name], SEARCH, {"query": "Atlas"})
-        assert answer["status"] == "error" and answer["error"]["code"] == "forbidden", answer
+        arguments = {"query": "Atlas"} if tool == SEARCH else {"path": "部署说明.md"}
+        answer = await _call(_ops(), OTHER_TURNS[name], tool, arguments)
+        assert answer["status"] == "error" and answer["error"] == {
+            "code": "forbidden",
+            "message": "the user's knowledge vault is searched and read only in their own direct chat or on the "
+                       "dashboard"}, answer
         assert ops_leads._SEEN == {}
 
     run_with_channel_configs(test, monkeypatch)

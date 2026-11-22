@@ -13,12 +13,13 @@ import { GatesPage } from "@/pages/gates";
 import { SchedulesPage } from "@/pages/schedules";
 import { MessageStreamPage } from "@/pages/message-stream";
 import { IntentsPage } from "@/pages/intents";
+import { NeedsYouPage } from "@/pages/needs-you";
 import { SettingsPage } from "@/pages/settings";
 import { AgentHistoryPage, historyHref, isHistoryRole } from "@/pages/agent-history";
 import { ProjectPage } from "@/pages/project";
 import { DEFAULT_SETTINGS_PAGE, isSettingsPage, type SettingsPageId } from "@/lib/settings-pages";
 
-const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "gates", "projects", "schedules", "messages", "intents", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "todo", "chat", "tasks", "gates", "projects", "schedules", "messages", "intents", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -187,6 +188,9 @@ function App() {
           )}
           {route.page === "messages" && (
             <div className="h-full overflow-y-auto p-6"><MessageStreamPage /></div>
+          )}
+          {route.page === "todo" && (
+            <div className="h-full overflow-y-auto p-6"><NeedsYouPage /></div>
           )}
           {route.page === "intents" && (
             <div className="h-full overflow-y-auto"><IntentsPage /></div>
