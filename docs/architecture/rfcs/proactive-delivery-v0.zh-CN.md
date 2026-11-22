@@ -16,7 +16,7 @@
 
 | 输入 | 字段 |
 |---|---|
-| `Delivery`（这条消息） | `kind`（发送点：`gate_reminder`、`task_notice`、`subscription`、`intent`、`completion`（收尾回合）、`user_reminder`）；`urgency`（`normal`、`blocking`：关卡在等用户、卡着它的任务，`user_set`：用户自己设的提醒）；`chat`（`direct` 私聊和控制台聊天，`group` 群）；`source`（来自定时任务或订阅时，它的节制字段：生效时段和它的时区）；`silent`（来源说这次没什么要说） |
+| `Delivery`（这条消息） | `kind`（发送点：`gate_reminder`、`task_notice`、`subscription`、`intent`、`completion`（收尾回合）、`user_reminder`）；`urgency`（`normal`、`digest`：订阅摘要，沿用普通节制规则，`blocking`：关卡在等用户、卡着它的任务，`user_set`：用户自己设的提醒）；`chat`（`direct` 私聊和控制台聊天，`group` 群）；`source`（来自定时任务或订阅时，它的节制字段：生效时段和它的时区）；`silent`（来源说这次没什么要说） |
 | `DeliveryPolicy`（操作者的规则） | `timezone`（`user.timezone`）、`quiet_hours`（`DailyWindow`，可为空）、`dm_daily_cap`、`recent_reply` |
 | `DeliveryState`（这个会话此刻） | `now`、`sent_today`（今天按本地日期已计数的条数）、`last_user_message_at` |
 
@@ -63,6 +63,12 @@
 
 1. **关卡提醒**（本 PR）：`GateCourier` 发「还在等你」之前判断。提醒只对还在等用户、任务仍在进行的关卡发出（`due_reminders`），等着的关卡卡住它之后的步骤，所以一律是 `blocking`，结果总是「发」。判断本身失败（例如数据库拒绝写入）时记日志、照常发出，和开关关闭时一样：送达层不能扣下紧急消息。这一步建立判断和记录的通路，不改变发不发。
 2. 任务通知；3. 订阅推送；4. 意图推送；5. 收尾回合；6. 用户自己设的提醒（随提醒功能）。
+
+订阅接入只覆盖 `SubscriptionRuns` 的摘要正文，不覆盖运行失败通知和告警。整份输出（包括分段）以
+`subscription_run:<run id>` 共用一次 `subscription` / `digest` 判断和私聊额度；重试、重启沿用第一次判断。
+进摘要时保留 `subscription_runs.output_text` 和关联定时任务的决策记录，运行以 `dashboard_only` 结束并推进游标，
+不会重新调用处理器。发送点不重放已发送或不确定的分段；只有渠道确认接收时才记 `sent_at`。
+关闭开关不增加发送点的查询和写入；判断失败时保留输出、按现有失败路径结束，渠道已接收后的回执写入失败只记日志。
 
 **顺序约束：** 会产生「进摘要」的发送点（第 2–5 项），要等晨报能读出进摘要的消息之后才能打开，否则推迟的消息没有地方出现，等于静默丢失。
 

@@ -5025,7 +5025,18 @@ Manager's `looper_schedules` cannot create or change one.
 - **The push** goes through the channel's `post` as the bot, to the target the
   run started with (`subscription_runs.target_channel`, `target_chat`, pinned
   only when the target was confirmed for the configuration then in force:
-  `config_version`). The output is split at 4,000 characters by the group
+  `config_version`). With `delivery.enabled` on, the whole digest gets one
+  delivery decision (`kind=subscription`, `urgency=digest`) before its first
+  eligible segment is claimed; its segments and retries share that decision
+  and one daily slot. A deferred digest keeps its full output on the dashboard,
+  advances its cursor, and records its reason and `digest_date`; it is not
+  posted. Keep the switch off until a morning-report reader can surface those
+  deferred outputs. Recent Lark direct replies are observed from admitted
+  user messages, keyed by bot and user (history uses a native chat id instead).
+  This five-minute exemption is memory-only and resets on restart; existing
+  digest decisions still survive. Native-chat histories supply the other
+  targets' last user message. Off, the posts and existing run, segment and notification
+  writes are unchanged. The output is split at 4,000 characters by the group
   notice's splitter and cut at three messages, and each message is a row of
   `subscription_deliveries` (`pending`, `sending`, `sent`, `failed`,
   `uncertain`) with an idempotency key, the run id and, for a later part, the
@@ -5584,8 +5595,15 @@ message, so a message tried again keeps its first decision; decisions on one
 chat are taken one at a time, so the cap holds across send points), with
 `sent_at` once the channel took it (`replied_at`, the user's first message
 after it, is for the proactive-message metrics). Wired so far: gate
-reminders only, which are always `blocking`; a decision that fails is logged
-and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+reminders, always `blocking` (a failed decision is logged and the reminder
+posted as with the switch off), and subscription digest pushes, `digest`
+(subject to the ordinary quiet hours and cap). Digest decisions use
+`subscription_run:<run id>` across retries and restarts, with `sent_at` on
+the first accepted segment; an uncertain channel outcome is never marked
+sent. A failed digest decision prevents the channel call; a failed receipt
+write is logged without changing an accepted send. Subscription alerts and
+failure notices, task notices, intents and completion turns are not wired
+by this change. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
 
 ### What needs you
 
