@@ -135,6 +135,7 @@ def _audit(result: Any) -> dict[str, Any]:
 
 TOOL = RestrictedTool(
     name=LEADS_TOOL, risk=Risk.READ, audience=Audience.OPERATOR, audit_result=_audit, run=_run,
+    refusal="message leads are searched only in the user's own direct chat or on the dashboard",
     description="Search the leads Looper took from the user's Lark messages (sourced, unconfirmed notes) for "
                 "the words of query: up to limit (default 5), best first, each with its chat, sender and time. "
                 "Only in the user's own direct chat or the dashboard.",

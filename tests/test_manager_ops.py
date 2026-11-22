@@ -456,6 +456,28 @@ def test_a_confirmation_lapses(recorded: list[dict[str, Any]], how: str) -> None
     assert answer["status"] == "error" and ops.ran == []
 
 
+@pytest.mark.parametrize("then", ["nothing", "answer-turn-started", "too-late"])
+def test_a_confirmation_waits_until_a_turn_takes_it_up_or_it_lapses(recorded: list[dict[str, Any]],
+                                                                     then: str) -> None:
+    ops = _Ops()
+    first = Turn(channel="lark", channel_id="channel-lark", chat="oc_dm", message_id="m1")
+    ops.ops.begin_turn(first)
+    confirmation = ops.call("t_write", {"n": 3, "big": True})["confirmation_id"]
+    ops.ops.end_turn(first)
+    ops.clock.now += 60
+    if then == "answer-turn-started":
+        ops.ops.begin_turn(Turn(channel="lark", channel_id="channel-lark", chat="oc_dm", message_id="m2"))
+    elif then == "too-late":
+        ops.clock.now += CONFIRMATION_SECONDS
+    waiting = ops.ops.waiting_confirmations()
+    if then == "nothing":
+        assert waiting == [{"confirmation_id": confirmation, "tool": "t_write", "impact": "删除 3？", "channel": "lark",
+                            "channel_id": "channel-lark", "chat": "oc_dm", "waited_seconds": 60,
+                            "expires_in_seconds": CONFIRMATION_SECONDS - 60}]
+    else:
+        assert waiting == []
+
+
 def test_a_new_high_call_replaces_the_one_waiting(recorded: list[dict[str, Any]]) -> None:
     ops = _Ops()
     turn = _turn("m1")
@@ -885,6 +907,18 @@ def test_publish_binding_writes_atomically_with_mode_0600(tmp_path: Path) -> Non
     bare = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok")
     assert "LOOPER_AGENT_TURN_FILE" not in bare.server_config()["env"]
     bare.publish_binding("b1")  # no file configured: nothing to write
+
+
+def test_the_binding_file_is_the_main_sessions_and_another_session_has_none(tmp_path: Path) -> None:
+    path = tmp_path / ".local" / "manager-turn.json"
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok", turn_file=path)
+    assert ops.turn_file_for("main") == path
+    assert ops.server_config(session_key="main") == ops.server_config()
+    for call in (lambda: ops.publish_binding("b1", session_key="group:lark:chat-1"),
+                 lambda: ops.server_config(session_key="group:lark:chat-1")):
+        with pytest.raises(ValueError, match="no session"):
+            call()
+    assert not path.exists()
 
 
 def test_a_token_of_no_fleet_manager_leaves_the_default_managers_turn_alone() -> None:

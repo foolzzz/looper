@@ -171,7 +171,7 @@ def test_a_manager_session_dropped_with_new_stays_clean_after_a_restart(
         assert saved["selected_profile_id"] is None
         later = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)  # after a restart
         await later._load_session_state()
-        assert (later._session_id, later._clean_start) == (None, True)
+        assert (later._sessions["main"].session_id, later._clean_start) == (None, True)
         (reset,) = await llm_records.list_records(agent_id="manager", pool=pool)
         assert (reset["session_id"], reset["status"], reset["cost_usd"]) == ("sess-old", "completed", 0.0)
         assert reset["metadata"]["session_reset"] == {"channel": "web", "sender": None, "chat": "session-a",

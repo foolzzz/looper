@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from .claude_cli import ClaudeRunRecorder
 
 TREE_WATCH_SEC = 0.2  # how often a running process's tree is read
+# What is kept of the result of a turn a prompt hook blocked, whose text echoes the prompt: its typed fields only.
+BLOCKED_RESULT_FIELDS = ("type", "subtype", "is_error", "duration_ms", "duration_api_ms", "num_turns", "session_id",
+                         "total_cost_usd", "usage", "modelUsage", "stop_reason", "uuid")
 STDERR_TAIL_CHARS = 2000
 
 
@@ -49,6 +52,9 @@ class Finished(NamedTuple):
     result: dict[str, Any] | None  # the run's last result event; None when it gave none
     started: bool  # whether it began a session (Claude Code names it in its init event)
     timed_out: bool  # whether it ran over the deadline
+    # Why a Claude Code prompt hook refused the turn (``claude_cli.prompt_block``), when one did: no model turn ran,
+    # and its result, whose text echoes the prompt, is recorded and given with its typed fields only.
+    blocked: str | None = None
 
 
 async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str, prompt: str, launch: Launch,
@@ -71,6 +77,7 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
     started = False
     known: proc_tree.Tree = {}
     stderr_tail = ""
+    blocked: str | None = None
 
     async def stderr() -> None:
         nonlocal stderr_tail
@@ -89,8 +96,14 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
     watching = asyncio.create_task(watch_tree())
 
     async def read() -> None:
-        nonlocal result, started, known
+        nonlocal result, started, known, blocked
+        from .claude_cli import prompt_block
+
         async for event in runtime.parse_process(process, model=launch.model, launch=launch):
+            if (refused := prompt_block(event, cwd)) is not None:
+                blocked = refused.reason
+            if blocked is not None and event.get("type") == "result":
+                event = {key: event[key] for key in BLOCKED_RESULT_FIELDS if key in event}
             if event.get("type") == "result":
                 # Read before the record is awaited, which a stop may cut short.
                 known.update(await asyncio.to_thread(proc_tree.tree_of, process))
@@ -118,7 +131,9 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
     error: str | None = None
     try:
         await asyncio.wait_for(run(), timeout=timeout)
-        if result is None or result.get("is_error"):
+        if blocked is not None:
+            error = f"a Claude Code hook blocked the prompt of {what}: {blocked}"
+        elif result is None or result.get("is_error"):
             error = f"{what} gave no result"
     except asyncio.TimeoutError:
         error = f"{what} ran over {timeout:g} s"
@@ -140,4 +155,4 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
             elif error and stderr_tail:
                 error += "\n" + stderr_tail
             await recorder.finish(output_text=output, result_event=result, error=error)
-    return Finished(result, started, False)
+    return Finished(result, started, False, blocked)
