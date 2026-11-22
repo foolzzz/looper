@@ -70,7 +70,13 @@ The read-only `providers.limits` operation is also available through the
 generated CLI. Telegram/Lark behavior and Manager tools are unchanged; this
 change collects observations without admission decisions or channel alerts.
 Collection is managed through its operator-only settings operations and the
-dashboard, independently of failure-typing settings.
+dashboard, independently of failure-typing settings. Codex app-server readers
+cache the switch for five seconds and refresh it on the next quota notification;
+the recorder reuses that decision. A failed refresh disables collection until
+the next refresh. Claude continues to read the switch for every signal.
+Quota failure counts stay unknown unless failure typing is in `record` or `act`
+mode and the classification column exists. Invalid reset timestamps are omitted
+from sparse updates, preserving the last valid reset.
 
 The disabled-byte fixture was independently checked against main commit
 `2b77afb16`: prompts, tools, command lines and recorded-event hashes match.
@@ -84,3 +90,19 @@ was rechecked with all three bus-delivery variants. Production timeouts were
 unchanged. Both touched web test files passed (69 tests), as did the production
 build. No real-model evaluation was needed because model-visible content did
 not change.
+
+## Review regression checks
+
+The six touched Python test files passed 149 distinct cases with `-n 2` and a
+disposable database. Two existing Codex steering cases initially reached their
+three-second deadlines and passed when rerun unchanged; no timeout value was increased.
+Coverage includes database authentication and connection failures, unknown quota
+counts with failure typing off, `record`/`act` counts, malformed reset timestamps,
+pending/failed startup probes, and cached switch refresh with collection disabled
+on read failure. Ruff passed for all touched Python files.
+
+The isolated serve replay above was rerun after the review fixes and passed.
+Its first attempt did not become ready within the harness's 45-second deadline
+while preparing the component manifest; the unchanged replay then completed
+window persistence, usage readback, live disable and re-enable preservation.
+Temporary servers and databases were cleaned up; no real model was called.
