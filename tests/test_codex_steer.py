@@ -81,7 +81,8 @@ def response(request, result):
 
 def finish(text):
     if mode == "limits":
-        notify("account/rateLimits/updated", rateLimits={"primary": {"usedPercent": 91, "windowDurationMins": 300}})
+        for _ in range(3):
+            notify("account/rateLimits/updated", rateLimits={"primary": {"usedPercent": 91, "windowDurationMins": 300}})
     notify("item/completed", item={"id": "command-1", "type": "commandExecution", "command": "sleep 1",
                                   "aggregatedOutput": "done\n", "exitCode": 0, "status": "completed"})
     notify("item/completed", item={"id": "answer-1", "type": "agentMessage", "text": text,
@@ -1086,7 +1087,46 @@ def test_rate_limit_notification_is_forwarded_only_when_enabled(app_server, tmp_
 
     events = asyncio.run(run())
     signals = [event for event in events if event["type"] == limit_signals.CODEX_EVENT]
-    assert len(signals) == int(enabled)
+    assert len(signals) == 3 * int(enabled)
+    assert system_settings.get_settings.await_count == 1
     if enabled:
         assert signals[0]["rateLimits"]["primary"]["usedPercent"] == 91
     assert events[-1]["type"] == "result" and not events[-1]["is_error"]
+
+
+@pytest.mark.parametrize("last_setting", [{}, ConnectionRefusedError("unavailable")], ids=["disabled", "unavailable"])
+def test_limit_switch_cache_refreshes_and_stops_collection(monkeypatch, last_setting):
+    from looper.agents import limit_signals
+    from looper.agents.runtimes import codex_steer
+    from looper.db import system_settings
+
+    async def run():
+        clock = [0.]
+        monkeypatch.setattr(codex_steer, "monotonic", lambda: clock[0], raising=False)
+        settings = AsyncMock(side_effect=[{limit_signals.KEY: "true"}, last_setting])
+        monkeypatch.setattr(system_settings, "get_settings", settings)
+        saved = AsyncMock()
+        monkeypatch.setattr(limit_signals.db_limits, "upsert", saved)
+
+        async def lines(_):
+            for at in (0., 1., 5., 6.):
+                clock[0] = at
+                yield json.dumps({"method": "account/rateLimits/updated", "params": {
+                    "rateLimits": {"primary": {"usedPercent": 30}}}}).encode()
+
+        monkeypatch.setattr(codex_steer, "iter_lines", lines)
+        channel = CodexChannel(SimpleNamespace(stdout=object()), model="synthetic", effort="low",
+                               cwd="/workspace", keep_session=False)
+        queue = asyncio.Queue()
+        await channel._read_events(queue)
+        signals = []
+        while not queue.empty():
+            event = queue.get_nowait()
+            if event and event.get("type") == limit_signals.CODEX_EVENT:
+                signals.append(event)
+                await limit_signals.observe(event, "synthetic", None)
+        assert len(signals) == 2
+        assert saved.await_count == 2
+        assert settings.await_count == 2
+
+    asyncio.run(run())

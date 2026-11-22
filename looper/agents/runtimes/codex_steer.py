@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping
+from time import monotonic
 from typing import Any
 
 from ..claude_cli import iter_lines
@@ -152,6 +153,7 @@ class CodexChannel:
     async def _read_events(self, events: asyncio.Queue[dict[str, Any] | None]) -> None:
         assert self._process.stdout is not None
         usage: Mapping[str, Any] = {}
+        collect_limits, next_limit_check = False, 0.
         try:
             async for line in iter_lines(self._process.stdout):
                 try:
@@ -186,10 +188,18 @@ class CodexChannel:
                         continue
                     params = params or {}
                     if method == "account/rateLimits/updated":
-                        from ..limit_signals import codex_notification
+                        from .. import limit_signals
 
-                        if signal := await codex_notification(params):
-                            events.put_nowait(signal)
+                        now = monotonic()
+                        if now >= next_limit_check:
+                            try:
+                                collect_limits = await limit_signals.enabled()
+                            except Exception:
+                                collect_limits = False
+                                limit_signals._warn("setting", "could not read provider limit setting")
+                            next_limit_check = now + 5.
+                        if collect_limits:
+                            events.put_nowait({"type": limit_signals.CODEX_EVENT, "rateLimits": params.get("rateLimits")})
                     if method == "thread/tokenUsage/updated":
                         token_usage = params.get("tokenUsage")
                         total = token_usage.get("total") if isinstance(token_usage, dict) else None

@@ -46,11 +46,12 @@ def test_malformed_claude_signals_are_ignored(info):
     assert limit_signals.parse({"type": "rate_limit_event", "rate_limit_info": info}, now=NOW) == []
 
 
-@pytest.mark.parametrize("reset", [True, 10**100, RESET * 1000, int(NOW.timestamp()) - 1])
-def test_untrusted_reset_never_becomes_a_future_reset(reset):
+@pytest.mark.parametrize("reset", [True, None, "invalid", 10**100, RESET * 1000,
+                                  int(NOW.timestamp()) - 1, int((NOW + timedelta(days=9)).timestamp())])
+def test_untrusted_reset_preserves_the_last_good_reset(reset):
     result = dict(limit_signals.parse({"type": limit_signals.CODEX_EVENT, "rateLimits": {
         "primary": {"usedPercent": 10, "resetsAt": reset}}}, now=NOW))
-    assert result["primary"]["resets_at"] is None
+    assert "resets_at" not in result["primary"]
 
 
 def test_off_does_not_parse_or_write_and_live_disable_takes_effect(monkeypatch):
@@ -111,7 +112,7 @@ def test_codex_internal_event_is_not_transcript_content(monkeypatch):
         cwd="/workspace", input_text="synthetic", launch=builtin_launch())
     recorder._record_id = 1
     async def run():
-        event = await limit_signals.codex_notification({"rateLimits": {"primary": {"usedPercent": 40}}})
+        event = {"type": limit_signals.CODEX_EVENT, "rateLimits": {"primary": {"usedPercent": 40}}}
         await recorder.record(event)
     asyncio.run(run())
     assert saved.await_count == 1
@@ -140,3 +141,20 @@ def test_claude_top_status_does_not_reject_an_unrelated_window():
             "seven_day": {"utilization": 1}, "five_hour": {"utilization": .1}}}}, now=NOW))
     assert windows["seven_day"]["status"] == "rejected"
     assert windows["five_hour"]["status"] == "allowed"
+
+
+@pytest.mark.parametrize("error", [ConnectionRefusedError, TimeoutError, OSError])
+def test_provider_limit_doctor_probe_tolerates_connection_failure(monkeypatch, error):
+    import asyncpg
+    from looper.agents import self_check
+
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(side_effect=error("unavailable")))
+    assert asyncio.run(self_check.provider_limit_checks_for_database("postgresql://unused")) == []
+
+
+def test_provider_limit_doctor_probe_tolerates_invalid_password(monkeypatch):
+    import asyncpg
+    from looper.agents import self_check
+
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(side_effect=asyncpg.InvalidPasswordError("private")))
+    assert asyncio.run(self_check.provider_limit_checks_for_database("postgresql://unused")) == []

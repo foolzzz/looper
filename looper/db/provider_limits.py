@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from . import system_settings
 from .connection import get_pool
 
 _FIELDS = ("status", "utilization", "resets_at", "window_minutes", "source", "record_id", "observed_at")
@@ -36,7 +37,8 @@ async def windows(provider_id: str | None = None, *, pool=None) -> list[dict[str
 async def usage(provider_id: str | None = None, *, pool=None) -> list[dict[str, Any]]:
     """Runs started during the last seven UTC calendar days. An absent failure classifier is unknown, not zero."""
     pool = pool or get_pool()
-    classified = await pool.fetchval(
+    mode = (await system_settings.get_settings(["engine.failure_typing"], pool=pool)).get("engine.failure_typing")
+    classified = mode in ("record", "act") and await pool.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='llm_records'::regclass "
         "AND attname='failure_class' AND NOT attisdropped)")
     quota = "count(*) FILTER (WHERE failure_class='quota')" if classified else "NULL::bigint"

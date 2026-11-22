@@ -1152,6 +1152,7 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("cursor_login", "Cursor login"),), (("ttadk", "TTADK"),),
         (("llmrec", "Model request recording"),), (("gateway", "Local gateway"),),
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
+        (("provider_limits", "Provider quotas"),),
     )
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
@@ -1160,7 +1161,7 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
 async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: self_check.Check, *,
                                    claude_bin: str, lark_enabled: bool, projects_root: str) -> None:
     """Publish each probe as it finishes; keep display and final log order stable. Never stop serving."""
-    groups = [*_pending_advisory_checks(), []]
+    groups = _pending_advisory_checks()
 
     async def record(index: int, probe: Awaitable[self_check.Check | list[self_check.Check]]) -> None:
         try:

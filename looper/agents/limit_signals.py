@@ -1,8 +1,9 @@
 """Optional provider quota observations; no admission, retries or failure decisions.
 
 Read at the stream boundary, before a processor's transcript filter. No model
-content, prompts or run metadata is changed. The database setting is read for
-each signal so disabling collection takes effect in running processes too.
+content, prompts or run metadata is changed. Claude reads the switch per signal;
+the Codex app-server reader caches it for five seconds before emitting internal
+events, so disabling collection takes effect in running processes too.
 """
 from __future__ import annotations
 
@@ -69,8 +70,8 @@ def _window(raw: Mapping[str, Any], *, status: str, source: str, now: datetime, 
     key = "usedPercent" if codex else "utilization"
     if key in raw:
         fields["utilization"] = None if raw[key] is None else min(1., _number(raw[key]) / (100 if codex else 1))
-    if "resetsAt" in raw:
-        fields["resets_at"] = _reset(raw["resetsAt"], now)
+    if "resetsAt" in raw and (reset := _reset(raw["resetsAt"], now)) is not None:
+        fields["resets_at"] = reset
     if codex and "windowDurationMins" in raw:
         minutes = raw["windowDurationMins"]
         if minutes is not None and (type(minutes) is not int or not 0 < minutes <= 2147483647):
@@ -126,21 +127,12 @@ def parse(event: Mapping[str, Any], *, now: datetime | None = None) -> list[tupl
     return list(found.items())
 
 
-async def codex_notification(params: Mapping[str, Any]) -> dict[str, Any] | None:
-    """An internal event only when collection is on; never part of the run transcript."""
-    try:
-        if await enabled():
-            return {"type": CODEX_EVENT, "rateLimits": params.get("rateLimits")}
-    except Exception:
-        _warn("setting", "could not read provider limit setting")
-    return None
-
-
 async def observe(event: Mapping[str, Any], provider_id: str, record_id: int | None) -> None:
     if event.get("type") not in ("rate_limit_event", CODEX_EVENT):
         return
     try:
-        if not await enabled():
+        # Internal Codex events have already passed the reader's cached switch.
+        if event.get("type") != CODEX_EVENT and not await enabled():
             return
         windows = parse(event)
         if not windows:

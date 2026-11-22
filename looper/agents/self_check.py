@@ -568,13 +568,15 @@ LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check
 async def provider_limit_checks_for_database(database_url: str) -> list[Check]:
     import asyncpg
 
-    conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
+    conn = None
     try:
+        conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
         return await provider_limit_checks(pool=conn)
-    except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
-        return []  # a database awaiting its schema upgrade has no observations yet
+    except (asyncpg.PostgresError, OSError, TimeoutError):
+        return []  # database readiness is reported separately; this probe is advisory
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 async def provider_limit_checks(*, pool=None) -> list[Check]:

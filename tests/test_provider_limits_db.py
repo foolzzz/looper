@@ -63,9 +63,6 @@ def test_upgrade_matches_fresh_schema_and_records_its_migration_once():
 
 def test_usage_groups_accounts_and_utc_days_without_inventing_missing_quota_counts():
     async def check(pool):
-        classified = await pool.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='llm_records'::regclass "
-            "AND attname='failure_class' AND NOT attisdropped)")
         await pool.execute("""INSERT INTO llm_records(agent_id,created_at,input_tokens,output_tokens,
             cache_read_tokens,cache_creation_tokens,cost_usd,metadata) VALUES
             ('synthetic',now(),10,3,5,2,.25,'{"profile":{"provider":{"id":"prov-claude-subscription"}}}'),
@@ -76,13 +73,21 @@ def test_usage_groups_accounts_and_utc_days_without_inventing_missing_quota_coun
         assert len(rows) == 1
         row = rows[0]
         assert (row["runs"], row["input_tokens"], row["output_tokens"], row["cache_read_input_tokens"],
-                row["cache_creation_input_tokens"], row["cost_usd"], row["quota_failures"]) == (2,10,3,5,2,.25,0 if classified else None)
+                row["cache_creation_input_tokens"], row["cost_usd"], row["quota_failures"]) == (2,10,3,5,2,.25,None)
         assert len(await provider_limits.usage(pool=pool)) == 2
         await pool.execute("ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS failure_class TEXT, "
                            "ADD COLUMN IF NOT EXISTS failure_cause TEXT")
         await pool.execute("UPDATE llm_records SET failure_class='quota', failure_cause='usage_limit' "
                            "WHERE input_tokens=10")
-        assert (await provider_limits.usage(PROVIDER,pool=pool))[0]["quota_failures"] == 1
+        for mode, expected in ((None, None), ("off", None), ("invalid", None), ("record", 1), ("act", 1)):
+            await pool.execute("DELETE FROM system_settings WHERE key='engine.failure_typing'")
+            if mode is not None:
+                await pool.execute("INSERT INTO system_settings(key,value) VALUES ('engine.failure_typing',$1)", mode)
+            assert (await provider_limits.usage(PROVIDER, pool=pool))[0]["quota_failures"] == expected
+            assert (await provider_limits.usage("prov-codex-login", pool=pool))[0]["quota_failures"] == (
+                0 if mode in ("record", "act") else None)
+        await pool.execute("ALTER TABLE llm_records DROP COLUMN failure_class CASCADE")
+        assert (await provider_limits.usage(PROVIDER, pool=pool))[0]["quota_failures"] is None
     run_db(check)
 
 
