@@ -220,6 +220,77 @@ def test_a_database_without_the_leads_check_gets_it_unvalidated_then_validated_o
     run_db(check, monkeypatch, timeout=30)
 
 
+_RUN_SKIPS_UNDONE = (
+    "ALTER TABLE subscription_runs DROP CONSTRAINT subscription_runs_skipped, "
+    "DROP CONSTRAINT subscription_runs_skip_reason_check, DROP COLUMN skip_reason, "
+    "DROP CONSTRAINT subscription_runs_outcome_check, ADD CONSTRAINT subscription_runs_outcome_check "
+    "CHECK (outcome IN ('pending', 'delivering', 'delivered', 'uncertain', 'quiet', 'dashboard_only', "
+    "'output_invalid', 'failed', 'extracted')); "
+    "ALTER TABLE subscriptions DROP COLUMN skip_alert_at; "
+    "ALTER TABLE schedule_notifications DROP CONSTRAINT schedule_notifications_kind_check, ADD CONSTRAINT "
+    "schedule_notifications_kind_check CHECK (kind IN ('run', 'failures_alert', 'failures_recovered', 'stale_alert', "
+    "'stale_recovered', 'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered', 'check_alert', "
+    "'check_recovered')); "
+    "DELETE FROM schema_migrations WHERE name IN ('run_skips', 'run_skips_online')")
+_RUN_SKIPS_CONSTRAINTS = ["subscription_runs_outcome_check", "subscription_runs_skip_reason_check",
+                          "subscription_runs_skipped", "schedule_notifications_kind_check"]
+
+
+async def _skips_validated(pool):
+    return {row["conname"]: row["convalidated"] for row in await pool.fetch(
+        "SELECT conname, convalidated FROM pg_constraint WHERE conname = ANY($1::text[]) "
+        "AND connamespace = current_schema()::regnamespace", _RUN_SKIPS_CONSTRAINTS)}
+
+
+async def _skips_markers(pool):
+    return {row["name"] for row in await pool.fetch(
+        "SELECT name FROM schema_migrations WHERE name IN ('run_skips', 'run_skips_online')")}
+
+
+@pytest.mark.parametrize("outcome, reason", [("skipped", None), ("failed", "blocked_by_hook"),
+                                             ("skipped", "too_long")])
+def test_a_skipped_run_has_a_typed_reason_and_only_a_skipped_one_has_one(monkeypatch, outcome, reason):
+    async def check(pool):
+        fresh = await _skips_validated(pool)
+        assert fresh == dict.fromkeys(_RUN_SKIPS_CONSTRAINTS, True) and await _skips_markers(pool) == set()
+        await pool.execute("ALTER TABLE subscription_runs DROP CONSTRAINT subscription_runs_run_id_fkey")
+        await pool.execute("INSERT INTO subscription_runs (run_id, from_seq, to_seq, outcome, skip_reason) "
+                           "VALUES ('r-ok', 1, 2, 'skipped', 'blocked_by_hook')")
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute("INSERT INTO subscription_runs (run_id, from_seq, to_seq, outcome, skip_reason) "
+                               "VALUES ('r-bad', 1, 2, $1, $2)", outcome, reason)
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_a_database_without_the_run_skips_gets_them_unvalidated_then_validated_online_once(monkeypatch):
+    async def stopped(conn):
+        return None
+
+    async def check(pool):
+        fresh = [tuple(row) for row in await pool.fetch(_CHECK_CATALOG)]
+        await pool.execute(_RUN_SKIPS_UNDONE)
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        with monkeypatch.context() as patch:  # the start stops once the schema transaction committed
+            patch.setattr(connection, "_finish_online", stopped)
+            await connection.ensure_schema(pool)
+        # Added without scanning the runs under the migration's lock: validated only after it commits.
+        assert await _skips_validated(pool) == dict.fromkeys(_RUN_SKIPS_CONSTRAINTS, False)
+        assert await _skips_markers(pool) == {"run_skips"}
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+            await connection._finish_online(conn)
+        assert await _skips_validated(pool) == dict.fromkeys(_RUN_SKIPS_CONSTRAINTS, True)
+        assert await _skips_markers(pool) == {"run_skips", "run_skips_online"}
+        assert [tuple(row) for row in await pool.fetch(_CHECK_CATALOG)] == fresh
+        await connection.ensure_schema(pool)  # and a second start changes nothing
+        assert [tuple(row) for row in await pool.fetch(_CHECK_CATALOG)] == fresh
+        assert await _skips_markers(pool) == {"run_skips", "run_skips_online"}
+
+    run_db(check, monkeypatch, timeout=30)
+
+
 def test_a_dropped_lead_is_out_of_the_default_search_and_last_of_all(monkeypatch):
     async def check(pool):
         seqs = await _events(pool, "a", "b", "c")

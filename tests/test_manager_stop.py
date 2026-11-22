@@ -118,7 +118,7 @@ def test_stop_while_the_turn_runs(agent_db: Any) -> None:
             assert finish.kwargs["cost_usd"] == 0.01
             (_, notes), = [call.args for call in agent_db.add_metadata.await_args_list if "user_stop" in call.args[1]]
             assert notes["user_stop"]["via"] == "web" and notes["user_stop"]["method"] == "kill"
-            assert manager._session_id == "sess-1"
+            assert manager._sessions["main"].session_id == "sess-1"
             assert manager._running_token is None
             await bus.shutdown()
 
@@ -531,7 +531,7 @@ def test_a_stop_after_the_runtime_answered_ends_the_turn_stopped(agent_db: Any) 
             assert not ops.asks_in(envelope.message_id)
             (finish,) = agent_db.finish_record.await_args_list
             assert finish.kwargs["status"] == "interrupted"
-            assert manager._stopped_notes and manager._session_id == "sess-1"
+            assert manager._stopped_notes and manager._sessions["main"].session_id == "sess-1"
             await bus.shutdown()
 
     asyncio.run(run())
@@ -816,7 +816,7 @@ def test_the_resume_retry_after_a_stop_starts_no_second_process(agent_db: Any) -
             manager, bus, queue = _manager(Path(tmp), session)
             holder["manager"] = manager
             manager._session_loaded = True
-            manager._session_id, manager._session_runtime = "gone", "claude-code"
+            manager._sessions["main"].session_id, manager._sessions["main"].session_runtime = "gone", "claude-code"
             await manager._handle(envelope)
             assert session.starts == 1 and len(session.turns) == 1
             (reply,) = _replies(queue)

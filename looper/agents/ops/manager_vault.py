@@ -76,16 +76,17 @@ async def _read(call: Call) -> dict[str, Any]:
 
 
 _SCHEMAS = {tool.name: tool.schema for tool in TASK_TOOLS}
+REFUSAL = "the user's knowledge vault is searched and read only in their own direct chat or on the dashboard"
 TOOLS: tuple[RestrictedTool, ...] = (
     RestrictedTool(
-        name=SEARCH, risk=Risk.READ, audience=Audience.OPERATOR, run=_search, schema=_SCHEMAS[SEARCH],
+        name=SEARCH, risk=Risk.READ, audience=Audience.OPERATOR, run=_search, schema=_SCHEMAS[SEARCH], refusal=REFUSAL,
         description="Search the user's own notes, their knowledge vault (Markdown, read only), for the words of "
                     "query, in any case, in a note's path or text: the notes with the most of the words first, then "
                     "the most hits. Up to limit paths (relative to the vault), each with a snippet. Only in the "
                     "user's own direct chat or on the dashboard.",
     ),
     RestrictedTool(
-        name=READ, risk=Risk.READ, audience=Audience.OPERATOR, run=_read, schema=_SCHEMAS[READ],
+        name=READ, risk=Risk.READ, audience=Audience.OPERATOR, run=_read, schema=_SCHEMAS[READ], refusal=REFUSAL,
         description="Read one of the user's own notes from their knowledge vault by its path (relative to the "
                     "vault): its text, the first 64 KiB. Only in the user's own direct chat or on the dashboard.",
     ),

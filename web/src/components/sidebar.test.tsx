@@ -6,12 +6,15 @@ import { Sidebar } from "@/components/sidebar";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchGates, fetchOverview, fetchProjectsList, type GateList } from "@/lib/api";
 import { intentsSettingsGet } from "@/lib/api-leads";
+import { fetchAttention } from "@/lib/api-attention";
+import { V1Error } from "@/lib/v1";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
   fetchGates: vi.fn(), fetchProjectsList: vi.fn(), fetchOverview: vi.fn(),
 }));
 vi.mock("@/lib/api-leads", () => ({ intentsSettingsGet: vi.fn() }));
+vi.mock("@/lib/api-attention", () => ({ fetchAttention: vi.fn() }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => <div role="dialog" /> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -44,6 +47,7 @@ beforeEach(() => {
   vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
   vi.mocked(fetchGates).mockResolvedValue(gates(2));
   vi.mocked(intentsSettingsGet).mockResolvedValue({ enabled: false, subscriptions: [] });
+  vi.mocked(fetchAttention).mockRejectedValue(new V1Error(409, "conflict", "not enabled"));
   onNavigate.mockClear();
   vi.mocked(fetchOverview).mockResolvedValue({} as never);
   activePage = "gates";
@@ -131,6 +135,22 @@ describe("Sidebar Intents item", () => {
     expect(button.textContent).toContain("意图");
     act(() => (button as HTMLButtonElement).click());
     expect(onNavigate).toHaveBeenCalledWith("intents");
+  });
+});
+
+describe("Sidebar Needs you item", () => {
+  it("appears right after Dashboard only while the summary answers, and opens its page", async () => {
+    await render();
+    expect(host.textContent).not.toContain("Needs you");
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 0, sections: [] });
+    act(() => root.unmount());
+    root = createRoot(host);
+    await render();
+    const labels = [...host.querySelectorAll("nav")[0].querySelectorAll("button")].map((b) => b.textContent ?? "");
+    expect(labels.slice(0, 3)).toEqual(["Dashboard", "Needs you", "Chat"]);
+    const button = [...host.querySelectorAll("nav button")].find((item) => item.textContent === "Needs you")!;
+    act(() => (button as HTMLButtonElement).click());
+    expect(onNavigate).toHaveBeenCalledWith("todo");
   });
 });
 
