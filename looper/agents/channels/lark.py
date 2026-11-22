@@ -1146,7 +1146,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 if not self._running:
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
-                await record_reply(self.channel_type, envelope, await self.deliver(envelope),
+                receipt = await self.deliver(envelope)
+                self.record_envelope_delivery(envelope, receipt)
+                await record_reply(self.channel_type, envelope, receipt,
                                    runtime_root=self._runtime_root)
         except asyncio.CancelledError:
             pass

@@ -779,6 +779,8 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
+                from .channels import down_alert_settings
+                await down_alert_settings.load()
             except ValueError as exc:
                 raise StartupCheckFailed(str(exc)) from None
 
@@ -1110,12 +1112,14 @@ async def _run_agent_system_watched(
                         logger.warning("request recording health check failed", exc_info=True)
 
         proxy_checks = asyncio.create_task(check_recording_proxy(), name="llmrec-health")
+        from .channels.down_alerts import Monitor
+        channel_checks = asyncio.create_task(Monitor(registry).run(), name="channel-health")
         try:
             await stop_event.wait()
         finally:
             proxy_checks.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await proxy_checks
+            channel_checks.cancel()
+            await asyncio.gather(proxy_checks, channel_checks, return_exceptions=True)
 
         # --- Shutdown ---
 
