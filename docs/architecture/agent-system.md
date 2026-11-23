@@ -6418,10 +6418,27 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   with the morning brief's and triage's widenings.
 - `attention.summary`'s `schedules` items gain the fact `last_ok_at`; `/todo`
   and the Needs you page are unchanged.
-- The Manager side (its `idle_for()`, the shared background-turn entry, the lane
-  a check runs in, `IDLE_CHECK_DUE` routing, and what a user message does to a
-  queued or running check) and the service's start in `serve` come after the
-  lanes change; until then nothing starts a service and the switch has no effect.
+- `serve` starts the service after the Managers and stops it during shutdown;
+  draining prevents new checks. Callbacks follow the current default Manager
+  if it is replaced. With all prerequisites on, enabling the switch takes effect
+  on the next tick.
+- `ManagerAgent.idle_for()` reads only main's lock, running token, worker and
+  resident. Its clock is `ManagerSession.turn_ended_at`, written by that session's
+  worker (or the message loop for its own turns), falling back to service start.
+  Group arrivals can update `last_activity` without resetting main's idle clock.
+- `IDLE_CHECK_DUE` runs on main's background lane through `tiers/background_turn.py`,
+  sharing completion token registration, preparation, locking and bounded late
+  cleanup. The deadline is 90 seconds, followed by the completion path's cleanup
+  grace. Records add `metadata.idle_check.check_id`, lane metadata and short turn
+  metrics. Completion input, records, fallback reasons and settlement order stay
+  unchanged.
+- A main user arrival removes queued checks and records `preempted` before
+  acknowledging their wakes. An interrupted running check also records `preempted`
+  and leaves one stopped note for the next user turn; it sends nothing. Lark
+  `/stop` matches the operator's sender id even though its DM has a different id.
+- Morning-brief suppression (no check within two hours after a sent brief) awaits
+  the morning-brief table. Real-model idle and concurrent preemption evals remain
+  pending; loopback runtimes cover the service and Manager paths.
 
 ### User gates
 
