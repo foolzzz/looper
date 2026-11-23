@@ -77,9 +77,10 @@ export function SkillHistory({
     if (history?.current_version == null) return;
     setError("");
     try {
+      // The difference is what Confirm writes: the current version, then the chosen one.
       const data = await fetchSkillVersions(projectId, skillId, {
-        fromVersion: version,
-        toVersion: history.current_version,
+        fromVersion: history.current_version,
+        toVersion: version,
       });
       if (!data.diff) {
         setError("The server returned no difference.");

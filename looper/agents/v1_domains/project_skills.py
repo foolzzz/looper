@@ -61,12 +61,13 @@ OPERATIONS = (
         "project_skills.rollback", "POST", "/api/v1/project_skills/rollback", _ROLLBACK_SUMMARY,
         _ROLLBACK_SUMMARY + " The new version keeps that content and hash. Returns the projects that install the skill.",
         _object({**_IDS, "version": _INT}, closed=True), _ROLLBACK, risk="write", level=ActionLevel.INSIDE,
+        operator_only=True,
     ),
     Operation(
         "project_skills.versions", "POST", "/api/v1/project_skills/versions", _VERSIONS_SUMMARY,
         _VERSIONS_SUMMARY + " Each version records the content hash, author kind, reason and time.",
         _object({**_IDS, "from_version": _INT, "to_version": _INT}, ["project_id", "skill_id"], closed=True),
-        _VERSIONS, risk="read", level=ActionLevel.INSIDE,
+        _VERSIONS, risk="read", level=ActionLevel.INSIDE, operator_only=True,
     ),
 )
 RESULTS = {}

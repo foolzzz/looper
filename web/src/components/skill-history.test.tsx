@@ -43,17 +43,22 @@ const history = (): SkillVersions => ({
   diff: null,
 });
 
-const ranged = (fromVersion: number, toVersion: number, affected = history().affected_projects): SkillVersions => ({
-  ...history(),
-  affected_projects: affected,
-  diff: {
-    from_version: fromVersion,
-    to_version: toVersion,
-    name: { from: "deploy-check", to: "deploy-check" },
-    description: { from: "Old desc", to: "New desc" },
-    content: "--- version 1\n+++ version 2\n-one\n+two\n",
-  },
-});
+const ranged = (fromVersion: number, toVersion: number, affected = history().affected_projects): SkillVersions => {
+  const forward = fromVersion < toVersion;
+  return {
+    ...history(),
+    affected_projects: affected,
+    diff: {
+      from_version: fromVersion,
+      to_version: toVersion,
+      name: { from: "deploy-check", to: "deploy-check" },
+      description: forward ? { from: "Old desc", to: "New desc" } : { from: "New desc", to: "Old desc" },
+      content: forward
+        ? "--- version 1\n+++ version 2\n-one\n+two\n"
+        : "--- version 2\n+++ version 1\n-two\n+one\n",
+    },
+  };
+};
 
 function item(over: Partial<CatalogItem>): CatalogItem {
   return {
@@ -177,10 +182,13 @@ describe("SkillHistory", () => {
     const rollBack = buttons().find((button) => button.getAttribute("aria-label") === "Roll back to version 1")!;
     await act(async () => rollBack.click());
     expect(rollbackProjectSkill).not.toHaveBeenCalled();
-    expect(fetchSkillVersions).toHaveBeenCalledWith("proj-1", "skill-1", { fromVersion: 1, toVersion: 2 });
+    expect(fetchSkillVersions).toHaveBeenCalledWith("proj-1", "skill-1", { fromVersion: 2, toVersion: 1 });
     const pre = host.querySelector("pre")!;
-    expect(pre.textContent).toContain("-one");
-    expect(pre.textContent).toContain("+two");
+    expect(pre.textContent).toContain("--- version 2");
+    expect(pre.textContent).toContain("+++ version 1");
+    expect(pre.textContent).toContain("-two");
+    expect(pre.textContent).toContain("+one");
+    expect(host.textContent).toContain("New desc → Old desc");
     expect(pre.className).toContain("overflow-auto");
     expect(pre.className).toContain("break-words");
     expect(host.textContent).toContain("Old desc");

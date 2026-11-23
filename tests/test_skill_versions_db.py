@@ -7,6 +7,7 @@ test works in a new schema of its own, dropped afterwards.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -208,6 +209,38 @@ def test_versions_returns_history_and_a_diff(monkeypatch: pytest.MonkeyPatch, tm
     run_db(_test, monkeypatch)
 
 
+def test_a_client_cannot_read_versions_or_roll_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.v1_domains.project_skills import OPERATIONS
+    from looper.db import projects
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="calc", pool=pool)
+        async with v1_api(tmp_path, pool) as call:
+            added = _result(*await call("project_skills.add", {
+                "project_id": project["id"], "skill": _skill("notes", content="one\n")}))
+            skill_id = added["skill"]["skill_id"]
+            assert (await call("project_skills.update", {
+                "project_id": project["id"], "skill_id": skill_id, "fields": {"content": "two\n"}}))[0] == 200
+            body = {"project_id": project["id"], "skill_id": skill_id}
+            for action, arguments in (
+                ("project_skills.versions", body),
+                ("project_skills.rollback", {**body, "version": 1}),
+            ):
+                status, answer = await call(action, arguments, client=True)
+                assert status == 403 and answer["error"] == {
+                    "code": "forbidden", "message": "operator identity is required"}, answer
+            assert await pool.fetchval("SELECT skill_version FROM library_items WHERE id = $1", skill_id) == 2
+            assert await pool.fetchval("SELECT count(*) FROM skill_versions WHERE item_id = $1", skill_id) == 2
+            listed = _result(*await call("project_skills.versions", body))
+            assert listed["current_version"] == 2
+            rolled = _result(*await call("project_skills.rollback", {**body, "version": 1}))
+            assert rolled["version"] == 3
+        fresh = {op.operation_id: op for op in OPERATIONS}
+        assert fresh["project_skills.versions"].operator_only and fresh["project_skills.rollback"].operator_only
+
+    run_db(_test, monkeypatch)
+
+
 def test_delete_leaves_a_tombstone_and_project_delete_does_too(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents import project_skills
     from looper.db import projects
@@ -333,6 +366,44 @@ def test_migration_backfill_keeps_sha256_and_skips_other_origins(monkeypatch: py
     run_db(_test, monkeypatch)
 
 
+# The whole default run for this skill on origin/main: library record, launch arguments, and the
+# files under ``.local/library``. The project id and the runtime root are the only parts that vary.
+_MAIN_DEFAULT_PATH = (
+    '{"args":["--plugin-dir","<runtime>/.local/library/578d74b686aa9709b39efa146d180db0e5c45f914df31d5896b763761416f73d/project"],'
+    '"files":{"578d74b686aa9709b39efa146d180db0e5c45f914df31d5896b763761416f73d/project/.claude-plugin/plugin.json":'
+    '"{\\n  \\"name\\": \\"project\\",\\n  \\"description\\": \\"This project\'s own skills, managed by Looper.\\"\\n}\\n",'
+    '"578d74b686aa9709b39efa146d180db0e5c45f914df31d5896b763761416f73d/project/skills/deploy-check":'
+    '"link:../../../9233045e8b40d7c828c578b7d1f49dd0a9aa1dd19b36ae7881c4e9da13e1fbb0/deploy-check",'
+    '"9233045e8b40d7c828c578b7d1f49dd0a9aa1dd19b36ae7881c4e9da13e1fbb0/deploy-check/SKILL.md":'
+    '"---\\nname: deploy-check\\ndescription: \\"Use for deploy-check.\\"\\n---\\n\\nReply deploy-check.\\n"},'
+    '"record":{"items":[{"kind":"skill","name":"deploy-check","plugin":"project","scope":"project",'
+    '"sha256":"9233045e8b40d7c828c578b7d1f49dd0a9aa1dd19b36ae7881c4e9da13e1fbb0"}],'
+    '"project_id":"<project>","role":"worker",'
+    '"sha256":"2307cfe1d5cb6b95e254fcdda04b3fcee50ad3f5f721330dd1fecb88cf7449e9"}}'
+)
+
+
+def _default_path_bytes(record: dict[str, Any], args: list[str], runtime: Path, project_id: str) -> bytes:
+    root = runtime.absolute() / ".local" / "library"
+    files: dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        for name in (*dirnames, *filenames):
+            path = base / name
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                files[rel] = "link:" + os.readlink(path)
+            elif path.is_file():
+                files[rel] = path.read_text(encoding="utf-8")
+    prefix = str(runtime.absolute())
+    shown = json.loads(json.dumps(record).replace(project_id, "<project>"))
+    shown_args = [part.replace(prefix, "<runtime>") for part in args]
+    return json.dumps(
+        {"record": shown, "args": shown_args, "files": files},
+        ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode()
+
+
 def test_a_run_record_and_launch_args_omit_the_version(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -364,6 +435,7 @@ def test_a_run_record_and_launch_args_omit_the_version(
         materialized = item_directory(tmp_path / "runtime", loaded.items[0]) / "SKILL.md"
         assert materialized.read_text(encoding="utf-8") == skill_file(
             "deploy-check", "Use for deploy-check.", "Reply deploy-check.\n")
+        assert _default_path_bytes(record, args, tmp_path / "runtime", project["id"]) == _MAIN_DEFAULT_PATH.encode()
         fresh = {op.operation_id: op for op in OPERATIONS}
         assert fresh["project_skills.versions"].tool is None and fresh["project_skills.rollback"].tool is None
 
