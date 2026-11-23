@@ -1,12 +1,12 @@
 """The default Manager's search of the user's earlier conversations with it (assistant search RFC, section 2):
 ``looper_session_search``.
 
-**It takes effect only once group chats run in a session of their own.** Today every chat's turns share the default
-Manager's one model session, so a passage found in the user's own chat would stay in the context a group turn reads,
+**It takes effect only while group chats run in sessions of their own.** With session routing off every chat shares
+the default Manager's one model session, so a passage found in the user's own chat would stay in the context a group turn reads,
 and no text filter can keep all of it out of what that turn says or writes. So the setting
 ``manager.session_search.enabled`` (operator only, ``session_search.update``) is refused while ``group_sessions()``
 is ``SHARED``, and while it is the tool is never listed and nothing is recorded, whatever the stored row says. Session
-routing makes ``group_sessions()`` answer ``OWN``; nothing does yet.
+routing makes ``group_sessions()`` answer ``OWN`` while group isolation is in effect.
 
 Once in effect, only the default Manager has the tool, and it runs only in the user's own turns
 (``Audience.OPERATOR``): the dashboard chat without an API client, or a direct chat from the bot's operator. It reads
@@ -58,9 +58,12 @@ NOT_ISOLATED = ("the session search can be turned on only once group chats run i
 
 
 def group_sessions() -> GroupSessions:
-    """How group turns run now. Session routing answers ``OWN`` once each group has a session of its own; until it
-    does, ``SHARED``, and the search stays off."""
-    return GroupSessions.SHARED
+    """Follow the default Manager's actual isolation; shared group sessions keep the search off."""
+    from .. import session_routing
+    from ..managers_api import DEFAULT_MANAGER_ID
+
+    isolated = session_routing.group_isolation(DEFAULT_MANAGER_ID) is session_routing.GroupIsolation.ISOLATED
+    return GroupSessions.OWN if isolated else GroupSessions.SHARED
 
 
 async def stored(db: Any = None) -> bool:

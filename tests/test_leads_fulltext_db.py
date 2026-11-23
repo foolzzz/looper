@@ -295,3 +295,27 @@ def test_filtered_leads_do_not_use_up_the_candidate_limit(
         assert await _found(pool, query, **filters) == [text]
 
     run_db(test, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize("fulltext,fenced", [(False, False), (True, False), (False, True), (True, True)])
+def test_eval_cli_preserves_fulltext_and_fence_switches(monkeypatch, tmp_path, fulltext, fenced):
+    from evals.prompt_regression import __main__ as cli
+
+    calls = []
+
+    def run(**kwargs):
+        calls.append(kwargs)
+        return {"dialogs": [], "aborted": None}, tmp_path / "result.json"
+
+    monkeypatch.setattr(cli.dialogs, "run", run)
+    monkeypatch.setattr(cli, "_report", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.dialogs, "markdown", lambda result: "")
+    arguments = ["dialogs", "--mode", "fake", "--dialogs", "leads_english"]
+    if fulltext:
+        arguments.append("--leads-fulltext")
+    if fenced:
+        arguments.append("--untrusted-fence")
+    assert cli.main(arguments) == 0
+    assert len(calls) == 1
+    assert calls[0]["leads_fulltext"] is fulltext
+    assert calls[0]["untrusted_fence"] is fenced

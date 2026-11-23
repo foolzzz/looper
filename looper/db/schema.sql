@@ -2478,6 +2478,37 @@ CREATE TABLE IF NOT EXISTS reminders (
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (due_at) WHERE status IN ('pending', 'sending');
 -- reminders end
 
+-- The buttons of a card a chat got (assistant card actions RFC): one row per card, keyed by the opaque token that is
+-- all its buttons carry; what they act on (a Manager's confirmation, a user gate), a digest of the parameters they are
+-- bound to, the chat and the channel message it was sent as, who may press them and until when, and what became of
+-- them. A confirmation typed in the chat and its
+-- button resolve the same row (handled_via). Written only while cards.actions.enabled is on. connection.py applies
+-- this block to databases that predate it, so keep it between the markers and idempotent.
+-- card actions begin
+CREATE TABLE IF NOT EXISTS card_actions (
+    token       TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('confirmation', 'gate')),
+    subject     TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    payload     JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object'),
+    manager_id  TEXT,
+    channel_id  TEXT,
+    chat        TEXT,
+    message_id  TEXT,
+    allowed     TEXT[] NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    handled_at  TIMESTAMPTZ,
+    handled_by  TEXT,
+    handled_via TEXT CHECK (handled_via IN ('button', 'typed', 'lapsed')),
+    choice      TEXT,
+    outcome     TEXT CHECK (outcome IN ('running', 'ok', 'error', 'cancelled', 'lapsed', 'answered', 'stale')),
+    CONSTRAINT card_actions_handled CHECK ((handled_at IS NULL) = (handled_via IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_card_actions_open ON card_actions (kind, manager_id, created_at)
+    WHERE handled_at IS NULL;
+-- card actions end
+
 -- Who a stored Lark or Telegram direct chat (a chat_messages session) is with, recorded when one of their messages
 -- is stored while the Manager's session search is in effect (ops/session_search.py). The search counts the chat as
 -- the user's own while its sender is the bot's operator (channel_configs.config operator_sender_id). connection.py
@@ -2525,38 +2556,6 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_search ON chat_messages
 -- the same text). A database that predates it builds it online.
 CREATE INDEX IF NOT EXISTS idx_message_leads_search ON message_leads
     USING gin (array_to_tsvector(looper_search_tokens(summary || ' ' || detail)));
-
--- The buttons of a card a chat got (assistant card actions RFC): one row per card, keyed by the opaque token that is
--- all its buttons carry; what they act on (a Manager's confirmation, a user gate), a digest of the parameters they are
--- bound to, the chat and the channel message it was sent as, who may press them and until when, and what became of
--- them. A confirmation typed in the chat and its
--- button resolve the same row (handled_via). Written only while cards.actions.enabled is on. connection.py applies
--- this block to databases that predate it, so keep it between the markers and idempotent.
--- card actions begin
-CREATE TABLE IF NOT EXISTS card_actions (
-    token       TEXT PRIMARY KEY,
-    kind        TEXT NOT NULL CHECK (kind IN ('confirmation', 'gate')),
-    subject     TEXT NOT NULL,
-    digest      TEXT NOT NULL,
-    payload     JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object'),
-    manager_id  TEXT,
-    channel_id  TEXT,
-    chat        TEXT,
-    message_id  TEXT,
-    allowed     TEXT[] NOT NULL DEFAULT '{}',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at  TIMESTAMPTZ NOT NULL,
-    handled_at  TIMESTAMPTZ,
-    handled_by  TEXT,
-    handled_via TEXT CHECK (handled_via IN ('button', 'typed', 'lapsed')),
-    choice      TEXT,
-    outcome     TEXT CHECK (outcome IN ('running', 'ok', 'error', 'cancelled', 'lapsed', 'answered', 'stale')),
-    CONSTRAINT card_actions_handled CHECK ((handled_at IS NULL) = (handled_via IS NULL))
-);
-CREATE INDEX IF NOT EXISTS idx_card_actions_open ON card_actions (kind, manager_id, created_at)
-    WHERE handled_at IS NULL;
--- card actions end
-
 -- The operator's declarations of an MCP server's tools (the outbound-review RFC, section 6.2): a tool declared
 -- 'inside' acts only inside Looper and this machine, and the review lets its calls run unchecked; every other tool of
 -- a server other than Looper's own is reviewed. Declarations go with their server. connection.py applies this block
