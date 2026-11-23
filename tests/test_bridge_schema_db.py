@@ -127,6 +127,11 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                 elif table == "task_user_gates":
                     # Existing gates retain their discussion purpose and every historical field.
                     assert after[table] == [{**r, "purpose": "discussion"} for r in before[table]]
+                elif table == "role_configs":
+                    assert [row for row in after[table] if row["role"] != "explorer"] == before[table]
+                    explorer = [row for row in after[table] if row["role"] == "explorer"]
+                    assert len(explorer) == 1
+                    assert explorer[0]["max_turns"] == 40 and explorer[0]["timeout_seconds"] == 300
                 elif table == "sequence_state":
                     # New audit tables add unused sequences; historical values must survive.
                     historical = {row["sequencename"] for row in before[table]}
@@ -475,7 +480,7 @@ def test_unusual_rows_warn_and_keep_bridge_reading(bridge_source, caplog, damage
                 # The run tree's and the failure classes' columns are added and no row is rewritten: older rows have
                 # no kind, no parent and no failure class.
                 assert after == [{**r, "parent_record_id": None, "run_kind": None, "failure_class": None,
-                                  "failure_cause": None} for r in before]
+                                  "failure_cause": None, "attempt_id": None} for r in before]
             else:
                 assert after == before
             assert any(r.levelname == "WARNING" and identity in r.message for r in caplog.records)

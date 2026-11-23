@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any
 from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
-from .. import failures, outbound_hook, proc_tree, reported_files, vault
+from .. import attempts, failures, outbound_hook, proc_tree, reported_files, vault
 from ...db import tasks as db_tasks
 from .. import keeper, kept_dirs
 from ..keeper.client import KeeperGone
@@ -64,6 +64,7 @@ from ..keeper.protocol import ErrorCode, KeeperError
 from ..kept_run import (AdoptFailure, AdoptOutcome, AdoptResult, AttachError, DetachKind, DetachOutcome,
                         KeptRun, KeptRunState, KeeperLost, KeeperSettings, RunHold)
 from ..ops.vault import run_section
+from ..ops import subagents as subagent_ops
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..operator_notes import notes_note
@@ -636,6 +637,9 @@ class RunContext:
     # The consult of the advisor its Planner took advice from for this attempt (``agent_spawns.id``): its record
     # names it, never the advice, which reaches it only in the Planner's feedback.
     advisor_consult: int | None = None
+    attempt_id: int | None = None
+    run_failure: attempts.RunFailure | None = None
+    outcome: RunOutcome = RunOutcome.RUN_FAILED
 
 
 def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
@@ -1298,7 +1302,7 @@ class WorkerPool:
             task_role = TaskRole.from_payload(manifest.get("task_role"))
             if manifest.get("task_role") is not None and (task_role is None or task_role.kind.agent is not agent):
                 raise ValueError("invalid run task role")
-            record = await db_llm_records.get_record(record_id)
+            record = await db_llm_records.get_record(record_id, include_attempt_id=True)
             if record is None:
                 raise RecordNotResumable(f"record {record_id} does not exist")
             try:
@@ -1334,7 +1338,8 @@ class WorkerPool:
                              run_timeout, started_at, False, command,
                              severity=manifest.get("severity") is True, head=manifest.get("head"),
                              verification=manifest.get("verification"),
-                             verification_source=manifest.get("verification_source"))
+                             verification_source=manifest.get("verification_source"),
+                             attempt_id=record.get("attempt_id"))
             wp = WorkerProcess(worker_id=run_id, task_id=step_id, plan_id=manifest.get("plan_id") or "",
                                role=agent, parent_task_id=task_id, step=manifest.get("step_key") or "",
                                instruction=manifest.get("instruction") or "", task_role=run_role(manifest.get("task_role")),
@@ -1426,7 +1431,16 @@ class WorkerPool:
                            fallbacks: list[dict[str, str]]) -> None:
         async def run() -> dict:
             async with self._record_run(wp.worker_id, recorder):
-                return await self._consume(ctx, handle, recorder, start=ConsumeStart.ADOPTED)
+                if self.room_ops is not None:
+                    self.room_ops.bind_subagents(wp.worker_id, recorder, ctx.launch)
+                try:
+                    return await self._consume(ctx, handle, recorder, start=ConsumeStart.ADOPTED)
+                except asyncio.TimeoutError:
+                    ctx.run_failure = attempts.RunFailure.TIMEOUT
+                    raise
+                finally:
+                    if not ctx.is_verify and handle.state is not KeptRunState.DETACHED:
+                        await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)
 
         await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks, severity=ctx.severity)
 
@@ -1913,6 +1927,7 @@ class WorkerPool:
             data = grant["seat"]
             seat = Seat(**{**data, "kind": MemberKind(data["kind"])})
         # Revoke before awaiting presence, which also closes this run's watches.
+        await self.room_ops.end_subagents(worker_id)
         self.room_ops.revoke_run(worker_id)
         if seat is not None:
             try:
@@ -2138,13 +2153,15 @@ class WorkerPool:
         # The task's room and knowledge vault share the run's token and MCP entry.
         execution = ProjectExecution.from_row(project)
         room_on = execution.room_on
+        subagents_on = subagent_ops.worker_enabled(project, is_verify=is_verify)
         vault_config = await vault.for_project(project) if parent_task_id else None
         seat, room_text, vault_text = None, "", ""
-        if self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
+        if self.room_ops is not None and parent_task_id and (room_on or vault_config is not None or subagents_on):
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
                 mode = room_input(launch, is_verify=is_verify)
-                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept, mode=mode)
+                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept, mode=mode,
+                                            **({"subagents": True} if subagents_on else {}))
                 if not hosted:
                     library = await self.room_ops.library_with_server(
                         library, self._runtime_root, token, worker_id, reconnect_seconds=120 if kept else None)
@@ -2153,8 +2170,10 @@ class WorkerPool:
                     room_text = room_section(seat, mode)
                 if vault_config is not None:
                     vault_text = run_section(vault_config)
+                if subagents_on:
+                    room_text = "\n\n".join(part for part in (room_text, subagent_ops.WORKER_INSTRUCTIONS) if part)
             except Exception as exc:
-                unavailable = "the task's room" if room_on else "the knowledge vault"
+                unavailable = "the task's room" if room_on else "the knowledge vault" if vault_config else "subagents"
                 logger.warning("worker %s: %s is unavailable", worker_id, unavailable, exc_info=True)
                 self.room_ops.revoke_run(worker_id)
                 seat, token = None, None
@@ -2281,6 +2300,7 @@ class WorkerPool:
                         "plan_id": payload.get("plan_id"), "step_key": payload.get("step_key"),
                         "instruction": payload.get("instruction"), "task_role": payload.get("task_role"),
                         "is_verify": is_verify, "started_at": started_at.isoformat(),
+                        "attempt_id": payload.get("attempt_id"),
                         "severity": payload.get("severity") is True, "head": payload.get("head"),
                         "timeout_s": run_timeout, "max_turns": max_turns, "room_seat": seat is not None,
                         "reply": {"target": {"agent_type": envelope.source.agent_type,
@@ -2333,7 +2353,8 @@ class WorkerPool:
                           handle, system_prompt, severity=payload.get("severity") is True, head=payload.get("head"),
                           verification=verification, verification_source=verification_source,
                           advisor_consult=consult if isinstance(consult := payload.get("advisor_consult"), int)
-                          and not isinstance(consult, bool) else None)
+                          and not isinstance(consult, bool) else None,
+                          attempt_id=attempt if type(attempt := payload.get("attempt_id")) is int else None)
 
     async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
                        started_at: datetime | None = None) -> dict[str, Any]:
@@ -2358,6 +2379,7 @@ class WorkerPool:
             try:
                 result = await self._execute_once(ctx, fallbacks)
             except asyncio.TimeoutError as exc:
+                ctx.run_failure = attempts.RunFailure.TIMEOUT
                 timeout = exc
             except Exception as exc:
                 if not fallbacks:
@@ -2365,6 +2387,9 @@ class WorkerPool:
                 result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
                 break
             finally:
+                if not is_verify and not (isinstance(ctx.handle, KeptRun)
+                                          and ctx.handle.state is KeptRunState.DETACHED):
+                    await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)
                 if ctx.verification_writes is not None:
                     ctx.verification_writes.close()
             if timeout is None and result.get("failure") in ("verification_changed_code", "verification_unavailable"):
@@ -2434,6 +2459,12 @@ class WorkerPool:
             pid_of=lambda: handle.pid,
         )
         async with self._record_run(worker_id, recorder):
+            if is_verify:
+                await attempts.link_record(ctx.attempt_id, recorder.record_id)
+            else:
+                await attempts.worker_started(ctx.attempt_id, recorder.record_id, launch.profile.id)
+            if self.room_ops is not None:
+                self.room_ops.bind_subagents(worker_id, recorder, launch)
             if ctx.advisor_consult is not None:
                 await recorder.annotate({"advisor_consult": ctx.advisor_consult})
             if fallbacks:
@@ -2621,6 +2652,7 @@ class WorkerPool:
                 if blocked := prompt_block(event, work_dir):
                     raise blocked
                 if not replaying and (capped := recorder.cap_stop) is not None:
+                    ctx.run_failure = attempts.RunFailure.RUN_CAP
                     # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
                     # That result is Looper's, not a line the process wrote, so the transcript has to keep it.
                     result_event = capped.result_event
@@ -2808,6 +2840,7 @@ class WorkerPool:
                     if waiting is not None:
                         _cancel_check()
                         if (capped := recorder.cap_stop) is not None:
+                            ctx.run_failure = attempts.RunFailure.RUN_CAP
                             result_event = capped.result_event
                             await recorder.record(result_event)
                             _end_input()
@@ -2967,6 +3000,10 @@ class WorkerPool:
             await _report_finished(finished)
         # The cost is the last result's (the session's totals); the outcome is result_event's.
         recorded = last_result or result_event
+        if (result_event or {}).get("subtype") == "error_max_budget_usd":
+            ctx.run_failure = attempts.RunFailure.RUN_CAP
+        elif result_event is None and return_code != 0:
+            ctx.run_failure = attempts.RunFailure.CRASH
 
         final_text = str((result_event or {}).get("result") or "") or None
         # A successful result decides the outcome even when the process then
@@ -3046,9 +3083,9 @@ class WorkerPool:
         if is_verify and result_event is not None and result_event.get("is_error"):
             error = outcome.get("summary")
         diagnostics = _ReportDiagnostics()
+        ctx.outcome = run_outcome(result_event, outcome, is_verify=is_verify, diagnostics=diagnostics)
         await recorder.finish(output_text=final_text, result_event=recorded, error=error,
-                              outcome=run_outcome(result_event, outcome, is_verify=is_verify,
-                                                  diagnostics=diagnostics).value)
+                              outcome=ctx.outcome.value)
         if diagnostics.repaired:
             await recorder.annotate({"report_repaired": True})
         return outcome

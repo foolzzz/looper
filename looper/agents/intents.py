@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..db import connection, intents as store, tasks as db_tasks
-from . import leads_model, projects, untrusted
+from . import card_actions, leads_model, projects, untrusted
 from .leads import source_view
 from .subscriptions import strip_mentions
 
@@ -187,7 +187,7 @@ async def _final(intent_id: int) -> None:
 
 async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = None, candidate: int | None = None,
                 project_id: str | None = None, workflow_key: str | None = None, now: datetime | None = None,
-                platform: Any = None, db: Any = None) -> dict:
+                platform: Any = None, db: Any = None, card_press: card_actions.Press | None = None) -> dict:
     from .message import AgentAddress, builtin_channel_id
     from .task_notice import notify_target
     if platform is None:
@@ -197,6 +197,9 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
     async with _db(db).acquire() as conn, conn.transaction():
         await _enabled(conn)
         row = await store.locked(conn, intent_id)
+        from . import intent_cards
+        if card_press is not None:
+            await intent_cards.claim(conn, row, card_press)
         if row["state"] == "tasked":
             await resume_start(row, platform=platform, db=conn)
             raise IntentRefused(state=row["state"], row=row)
@@ -254,6 +257,7 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
         # The task's background came from messages: marked, for the outbound review (RFC section 6.3).
         await db_tasks.mark_untrusted(task_id, "intent", pool=conn)
         await store.transition(conn, intent_id, "tasked", via=via, now=now, task_id=task_id)
+        await intent_cards.resolve(conn, intent_id, intent_cards.Choice.BUILD, card_press)
     try:
         await projects.start_ready_task(task_id, platform.bus, AgentAddress("manager", fields["manager_id"]))
     except Exception as exc:
@@ -266,13 +270,18 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
 
 
 async def reject(intent_id: int, *, via: str, reason: str | None = None, now: datetime | None = None,
-                 db: Any = None) -> dict:
+                 db: Any = None, card_press: card_actions.Press | None = None) -> dict:
     if reason is not None and len(reason) > 200:
         raise ValueError("reason must have at most 200 characters")
     async with _db(db).acquire() as conn, conn.transaction():
         await _enabled(conn)
+        from . import intent_cards
+        row = await store.locked(conn, intent_id)
+        if card_press is not None:
+            await intent_cards.claim(conn, row, card_press)
         try:
             await store.transition(conn, intent_id, "rejected", via=via, now=now or _now(), reason=reason)
+            await intent_cards.resolve(conn, intent_id, intent_cards.Choice.REJECT, card_press)
         except IntentRefused as exc:
             if exc.state == "expired":
                 label = leads_model.format_intent_id(intent_id)

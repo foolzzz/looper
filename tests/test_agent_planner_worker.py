@@ -237,7 +237,8 @@ class TestWorkerPool:
                     if offline_fails:
                         raise RuntimeError("room storage unavailable")
 
-            pool.room_ops = SimpleNamespace(revoke_run=revoke, room=SimpleNamespace(presence_changed=presence_changed))
+            pool.room_ops = SimpleNamespace(revoke_run=revoke, end_subagents=AsyncMock(),
+                                            room=SimpleNamespace(presence_changed=presence_changed))
 
             async def execute(*_args: Any, **_kwargs: Any) -> None:
                 started.set()
@@ -723,6 +724,31 @@ class TestWorkerSystemPrompt:
         _worker_row(monkeypatch, {"system_prompt": ROLE + "\n", "timeout_seconds": 0, "max_turns": 0})
         agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Use uv.\nPython 3.12.",
                                                   "updated_at": "2026-10-13T12:00:00+00:00"}
+
+    @pytest.mark.parametrize("verify", [False, True], ids=["worker", "reviewer"])
+    def test_attempt_observations_preserve_model_input_hashes(self, tmp_path, monkeypatch, verify):
+        from looper.agents import attempts
+
+        monkeypatch.setattr(attempts, "worker_started", AsyncMock())
+        monkeypatch.setattr(attempts, "worker_finished", AsyncMock())
+        monkeypatch.setattr(attempts, "link_record", AsyncMock())
+
+        async def run():
+            executable = _fake_claude(tmp_path, _RECORD_RUN + (_VERDICT if verify else _SUCCESS))
+            pool = WorkerPool(config=WorkerConfig(claude_bin=executable), runtime_root=tmp_path)
+            seen = []
+            for metadata in ({}, {"attempt_id": 41, "run_no": 3, "contract_rejections": {"PLAN": 2}}):
+                result = await pool._execute(_step_envelope(tmp_path, verify=verify, **metadata), is_verify=verify)
+                assert result.get("passed") if verify else result["status"] == "completed"
+                seen.append(json.loads((tmp_path / "run.json").read_text()))
+            return seen
+
+        before, after = asyncio.run(run())
+        for key in ("argv", "prompt", "stdin"):
+            assert _sha(json.dumps(before[key], sort_keys=True)) == _sha(json.dumps(after[key], sort_keys=True))
+        # Tool flags and MCP/plugin bindings are part of the exact argv comparison.
+        for field in ("attempt_id", "run_no", "contract_rejections", "reopen_late_review", "reopen_verification"):
+            assert field not in after["prompt"] + after["stdin"] + json.dumps(after["argv"])
 
     def test_worker_gets_the_harness_role_project_task_and_work_contract(self, agent_db: Any) -> None:
         deps = [{"step": "core", "summary": "added the core module", "changed_files": ["core.py"]}]
@@ -1702,6 +1728,10 @@ class TestWorkerConcurrency:
                 for worker_id in ("w1", "w2"):
                     await bus.publish(_run_item(worker_id, "t-a", Path(tmp)))
                 await self._until_running(pool, "w1")
+                # Dispatch is asynchronous: w1 starting does not mean w2 has reached its limit yet.
+                async with asyncio.timeout(10):
+                    while not pool._slot_waiters:
+                        await asyncio.sleep(0.02)
                 seen = [{w: wp.status for w, wp in pool._active.items()}]
 
                 self._limits(agent_db, worker=2)

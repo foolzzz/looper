@@ -12,10 +12,13 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from .agent_settings import AgentSettings, AgentType
 from .spawn import ChildFailure, ChildRun, SpawnParent
+
+if TYPE_CHECKING:
+    from .processor import ProcessorRun
 
 T = TypeVar("T")
 
@@ -28,6 +31,7 @@ class CallFailure(str, Enum):
     UNAVAILABLE = "unavailable"
     BUDGET = "budget"
     REFUSED = "refused"
+    BLOCKED = "blocked"
 
 
 @dataclass(frozen=True)
@@ -63,7 +67,7 @@ class ChildCall:
 
 @dataclass(frozen=True)
 class ProcessorCall:
-    """A leads check's existing private processor record, including its input reference and event filtering."""
+    """A private processor-style run, including its input reference, settings scope and event filtering."""
 
     owner: str
     instructions: str
@@ -77,6 +81,8 @@ class ProcessorCall:
     metadata: Mapping[str, Any] | None = None
     contract: str | None = None
     role: AgentType = AgentType.LEADS_CHECK
+    project_id: str | None = None
+    schedule_id: str | None = None
 
 
 Request = ChildCall | ProcessorCall
@@ -88,7 +94,8 @@ class Backend(Protocol):
     async def run(self, request: Request) -> Execution: ...
 
 
-_CHILD_FAILURES = {failure: CallFailure(failure.value) for failure in ChildFailure}
+_CHILD_FAILURES = {failure: (CallFailure.RUNTIME if failure is ChildFailure.START_FAILURE else CallFailure(failure.value))
+                   for failure in ChildFailure}
 
 
 class SubscriptionBackend:
@@ -106,12 +113,16 @@ class SubscriptionBackend:
                              done.detail, done.models)
         from .processor import ProcessorFailure, run
 
+        scope = {name: value for name in ("project_id", "schedule_id")
+                 if (value := getattr(request, name)) is not None}
         done = await run(owner=request.owner, instructions=request.instructions, input_text=request.input_text,
                          input_ref=request.input_ref, quiet_word=request.quiet_word, budget_usd=request.budget_usd,
                          timeout_s=request.timeout_s, runtime_root=request.runtime_root, claude_bin=request.claude_bin,
-                         metadata=request.metadata, contract=request.contract, role=request.role)
+                         metadata=request.metadata, contract=request.contract, **scope,
+                         **({"role": request.role} if request.role is not AgentType.PROCESSOR else {}))
         failures = {ProcessorFailure.REFUSED: CallFailure.UNAVAILABLE, ProcessorFailure.TIMEOUT: CallFailure.TIMEOUT,
-                    ProcessorFailure.BUDGET: CallFailure.BUDGET, ProcessorFailure.FAILED: CallFailure.RUNTIME}
+                    ProcessorFailure.BUDGET: CallFailure.BUDGET, ProcessorFailure.FAILED: CallFailure.RUNTIME,
+                    ProcessorFailure.BLOCKED: CallFailure.BLOCKED}
         return Execution(done.reply, done.record_id, done.cost_usd,
                          failures[done.failure] if done.failure is not None else None, done.detail, profile=done.profile)
 
@@ -148,6 +159,19 @@ class CallFailed(_CallMetadata):
 
 
 CallResult = CallOk[T] | CallFailed
+
+
+def processor_result(result: CallResult[str]) -> ProcessorRun:
+    """Keep the processor owners' result and retry contract around a call whose reply is the output itself."""
+    from .processor import ProcessorFailure, ProcessorRun
+
+    failures = {CallFailure.UNAVAILABLE: ProcessorFailure.REFUSED, CallFailure.REFUSED: ProcessorFailure.REFUSED,
+                CallFailure.TIMEOUT: ProcessorFailure.TIMEOUT, CallFailure.BUDGET: ProcessorFailure.BUDGET,
+                CallFailure.BLOCKED: ProcessorFailure.BLOCKED}
+    done = result.execution
+    return ProcessorRun(result.value if isinstance(result, CallOk) else None, done.record_id, done.cost_usd,
+                        failures.get(result.failure, ProcessorFailure.FAILED) if isinstance(result, CallFailed) else None,
+                        done.reason, done.profile)
 
 
 async def call(request: Request, *, parse: Callable[[str], T], backend: Backend | None = None) -> CallResult[T]:
