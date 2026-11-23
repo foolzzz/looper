@@ -62,7 +62,7 @@ class TurnTimes:
     queued_behind: QueuedBehind | None = None
 
     def to_metadata(self, delivery: TurnDelivery, origin: TurnOrigin, replayed: bool) -> dict[str, Any]:
-        if origin is TurnOrigin.COMPLETION:
+        if origin in (TurnOrigin.COMPLETION, TurnOrigin.IDLE_CHECK):
             return {'origin': origin.value, 'tool_calls': self.tool_calls, 'delivery': delivery.value}
         def elapsed(at: datetime | None) -> int | None:
             return None if at is None else round((at - self.received_at).total_seconds() * 1000)
@@ -150,6 +150,7 @@ class ProactiveSource(str, Enum):
     ADVISOR_ALERT = 'advisor_alert'
     AUTONOMOUS = 'autonomous'
     USER_REMINDER = 'user_reminder'
+    IDLE_CHECK = 'idle_check'
 
 
 @dataclass(frozen=True)

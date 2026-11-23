@@ -439,6 +439,7 @@ const PROACTIVE_SOURCES: Record<string, string> = {
   task_notice: "task notices", completion: "completion turns", progress: "progress", gate: "gates",
   gate_reminder: "gate reminders", subscription: "subscriptions", intent: "intents", schedule: "schedules",
   advisor_alert: "advisor alerts", autonomous: "autonomous turns", user_reminder: "reminders",
+  idle_check: "idle checks",
 };
 const sourceLabel = (source: string) => PROACTIVE_SOURCES[source] ?? source;
 
