@@ -1,8 +1,8 @@
-"""Execute step checks after Worker success, recording evidence without changing decisions."""
+"""Execute step checks after Worker success and append versioned evidence."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import hashlib
 import logging
 import os
@@ -151,10 +151,15 @@ def _prepare(work_dir: Path, backup: Path, runtime_paths: Sequence[str]):
     before = _verification_baseline(str(directory), backup / "baseline")
     if before.get("error") or not before["git"]:
         raise EvidenceUnavailable("private snapshot unavailable")
+    if _verification_snapshot(str(work_dir)) != snapshot:
+        raise EvidenceUnavailable("source changed while preparing checks")
     root, paths = _verification_write_paths(str(directory))
     monitor = VerificationWrites(root, paths)
     monitor.start()
-    return directory, before, monitor
+    # The private tree relocates internal symlinks; its hash detects writes,
+    # while evidence must identify the source version the gate compares.
+    return directory, {**before, "source_head": snapshot.get("head"),
+                       "source_content_sha256": snapshot.get("content_sha256")}, monitor
 
 
 async def _thread(function, *args):
@@ -191,7 +196,8 @@ async def _one(*, task_id: str, step_id: str, check: Check, attempt: int, work_d
                 outcome = _error(runs.ErrorKind.EVIDENCE_UNAVAILABLE)
         try:
             row = await runs.create_run(task_id, step_id, check.row(), attempt,
-                head_sha=before.get("head"), content_sha=before.get("content_sha256"), guarded=monitor is not None)
+                head_sha=before.get("source_head", before.get("head")),
+                content_sha=before.get("source_content_sha256", before.get("content_sha256")), guarded=monitor is not None)
         except Exception as exc:
             raise EvidenceUnavailable("cannot start evidence record") from exc
         if not outcome:
@@ -282,10 +288,12 @@ async def _one(*, task_id: str, step_id: str, check: Check, attempt: int, work_d
 
 async def run_step_checks(*, task_id: str, step_id: str, checks: Sequence[Check], mode: AcceptanceChecksMode,
                           work_dir: Path, attempt: int, runtime_root: Path, base_commit: str | None = None,
-                          runtime_paths: Sequence[str] = ()) -> list[dict[str, Any]]:
+                          runtime_paths: Sequence[str] = (),
+                          rerun_after: Mapping[str, int] | None = None) -> list[dict[str, Any]]:
     """Collect once per Worker attempt; after restart, resume only interrupted/missing checks.
 
-    Neither this function nor its caller offers or removes Planner decisions.
+    A persisted ``rerun_after`` requests a new run, resuming past checks that have
+    already advanced beyond its recorded run numbers after a restart.
     ``off`` returns before any DB read, filesystem work or child process.
     """
     if mode is AcceptanceChecksMode.OFF or not checks:
@@ -294,14 +302,18 @@ async def run_step_checks(*, task_id: str, step_id: str, checks: Sequence[Check]
     key = (task_id, step_id)
     lock = locks.setdefault(key, asyncio.Lock())
     async with lock:
-        history = [r for r in await runs.list_runs(task_id, step_id) if r["attempt"] == attempt]
-        spent = sum((r["duration_ms"] or 0) / 1000 for r in history)
+        all_runs = await runs.list_runs(task_id, step_id)
+        history = [r for r in all_runs if r["attempt"] == attempt]
+        spent = sum((r["duration_ms"] or 0) / 1000 for r in all_runs)
         latest = {r["check_id"]: r for r in history}
         for check in checks:
             previous = latest.get(check.id)
             if previous is not None and previous["state"] == runs.CheckState.RUNNING.value:
                 raise EvidenceUnavailable("previous evidence record is still running")
-            if previous is not None and previous["error_kind"] != runs.ErrorKind.INTERRUPTED.value:
+            already_collected = (rerun_after is None or
+                                 previous is not None and previous["run"] > rerun_after.get(check.id, 0))
+            if (previous is not None and already_collected
+                    and previous["error_kind"] != runs.ErrorKind.INTERRUPTED.value):
                 continue
             async with semaphore:
                 current = ProjectExecution.from_row(await projects.get_task_project(task_id)).acceptance_checks
@@ -313,6 +325,37 @@ async def run_step_checks(*, task_id: str, step_id: str, checks: Sequence[Check]
                 history.append(row)
                 spent += (row["duration_ms"] or 0) / 1000
         return history
+
+
+async def mark_stale(*, task_id: str, step_id: str, checks: Sequence[Check], attempt: int,
+                     current: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Append invalidations; the original measurements and their artifacts stay immutable."""
+    _, locks = _coordination()
+    lock = locks.setdefault((task_id, step_id), asyncio.Lock())
+    async with lock:
+        latest = {row["check_id"]: row for row in current
+                  if row["step_id"] == step_id and row["attempt"] == attempt}
+        invalidations = []
+        for check in checks:
+            previous = latest.get(check.id)
+            if previous is None or previous["state"] == runs.CheckState.STALE.value:
+                continue
+            if previous["state"] == runs.CheckState.RUNNING.value:
+                raise EvidenceUnavailable("previous evidence record is still running")
+            try:
+                row = await runs.create_run(task_id, step_id, check.row(), attempt,
+                    head_sha=previous["head_sha"], content_sha=previous["content_sha"],
+                    guarded=previous["guarded"])
+                stale = await runs.finish_run(row["id"], runs.CheckState.STALE, duration_ms=0,
+                    exit_code=previous["exit_code"], output_tail=previous["output_tail"],
+                    output_bytes=previous["output_bytes"], output_sha256=previous["output_sha256"],
+                    protected_changed=previous["protected_changed"])
+            except Exception as exc:
+                raise EvidenceUnavailable("cannot record stale evidence") from exc
+            if stale is None:
+                raise EvidenceUnavailable("stale evidence record no longer running")
+            invalidations.append(stale)
+        return invalidations
 
 
 async def recover(runtime_root: Path) -> None:

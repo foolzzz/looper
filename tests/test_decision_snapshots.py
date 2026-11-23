@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from looper.agents.step_workspaces import Repo, Unusable, plan_round
-from looper.agents.tiers.decisions import Dispatch, _context, replay, turn_digest
+from looper.agents.tiers.decisions import Dispatch, _context, _context_of, replay, turn_digest
 from looper.agents.tiers.planner import PlanStep, TaskPlan
 from looper.agents.tiers.planner_protocol import Decision, DecisionContext, ResultKind
 from looper.agents.user_gates import Gate, GateState
@@ -148,6 +148,68 @@ def test_a_step_decision_replays_the_decisions_code_allowed(context, allowed, de
     assert result.same is same
     assert result.replayed == {"allowed": [d.value for d in context.allowed()]}
     assert all(Decision(value) for value in result.replayed["allowed"])
+
+
+def test_context_without_evidence_keeps_its_fixed_baseline_json():
+    # Recorded from ecc2eedbf2ac4a1b44ff9078e634002c228458c1, before evidence gating.
+    before = {"step": "s1", "result": "work", "succeeded": True, "review_required": False,
+              "retries": 0, "max_retries": 2, "last_open": False, "open_gates": None,
+              "escalate": False, "verification_repair_required": False, "adjudication_findings": [],
+              "advise": False, "checkpoint": False, "answered": False}
+    context = DecisionContext("s1", ResultKind.WORK, True, False, 0)
+    assert json.dumps(_context(context)) == json.dumps(before)
+    assert _context_of(before) == context
+
+
+@pytest.mark.parametrize(("passed", "decision"), [(False, "recheck"), (True, "accept")])
+def test_evidence_snapshot_keeps_only_gate_state_and_replays_after_json(passed, decision):
+    from looper.agents.acceptance_gate import Gate as EvidenceGate
+
+    secret = "output and command text must stay out of snapshots"
+    failed, errored, stale = ((), (), ()) if passed else (("c1",), ("c2",), ("c3",))
+    evidence = EvidenceGate(passed, failed=failed, errored=errored, stale=stale,
+                            rechecks_used=1, stale_reruns_used=2,
+                            current=({"output_tail": secret, "command": secret, "opaque": object()},),
+                            head=("measured-head", "measured-content"))
+    context = DecisionContext("s1", ResultKind.WORK, True, False, 0, evidence=evidence)
+    serialized = json.dumps(_context(context))
+    assert secret not in serialized and "measured-head" not in serialized
+    compact = json.loads(serialized)
+    assert compact["evidence"] == {"passed": passed, "failed": list(failed), "errored": list(errored), "stale": list(stale),
+                                    "rechecks_used": 1, "stale_reruns_used": 2,
+                                    "budget_spent": False}
+    restored = _context_of(compact)
+    assert isinstance(restored.evidence, EvidenceGate)
+    assert restored.evidence.failed == failed and restored.evidence.errored == errored
+    assert restored.evidence.stale == stale and restored.evidence.current == ()
+    assert restored.offered(True) == context.offered(True)
+    allowed = [item.value for item in context.offered(True)]
+    row = _decision_row(context, allowed, decision)
+    row["inputs"]["adjudicated_accept"] = True
+    result = replay(row)
+    assert result.same and result.replayed == {"allowed": allowed}
+    if not passed:
+        row["decision"]["decision"] = "accept"
+        assert not replay(row).same
+
+
+def test_a_spent_check_budget_withholds_recheck_and_replays_after_json():
+    from looper.agents.acceptance_gate import Gate as EvidenceGate
+
+    rows = ({"check_id": "c1", "error_kind": "budget", "output_tail": "secret", "opaque": object()},)
+    evidence = EvidenceGate(False, errored=("c1",), budget_spent=True, current=rows, head=("h", "c"))
+    context = DecisionContext("s1", ResultKind.WORK, True, False, 0, 3, evidence=evidence)
+    assert Decision.RECHECK not in context.allowed()
+    compact = json.loads(json.dumps(_context(context)))
+    assert compact["evidence"]["budget_spent"] is True and "secret" not in json.dumps(compact)
+    restored = _context_of(compact)
+    assert restored.allowed() == context.allowed()  # replays from the snapshot alone, without the rows
+    allowed = [item.value for item in context.offered(True)]
+    row = _decision_row(context, allowed, "retry")
+    row["inputs"]["adjudicated_accept"] = True
+    assert replay(row).same
+    row["decision"]["decision"] = "recheck"
+    assert not replay(row).same
 
 
 def test_a_turn_digest_keeps_hashes_flags_and_sizes_but_no_text():
