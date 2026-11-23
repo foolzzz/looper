@@ -18,6 +18,8 @@ from ..run_usage import Usage
 from ..session_routing import MAIN_KEY, SessionKey
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from ..agent_settings import AgentSettings, Launch
     from ..research_order import ResearchSources
     from ..runtimes import ResidentSession, RuntimeAdapter
@@ -107,6 +109,10 @@ class ManagerSession:
     # Told to the next user turn: the user stopped or withdrew the ones before.
     stopped_notes: list[str] = field(default_factory=list)
     lock_owner: TurnToken | None = None  # the turn that holds ``turn_lock`` from its preparation
+    # When this session's last user turn, and its last background turn, released the lock.
+    # Written only while metrics are on; read by queued_behind. Not persisted.
+    last_user_turn_ended_at: datetime | None = None
+    last_background_turn_ended_at: datetime | None = None
     running_token: TurnToken | None = None  # the token of the user turn being answered
     research: ResearchSources | None = None  # where the turn being prepared may look things up, when on
     # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
