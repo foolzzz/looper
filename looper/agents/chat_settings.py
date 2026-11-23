@@ -24,11 +24,15 @@ The Manager behavior is wired separately; its v1 operations are ``delivery_guard
 (off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
 second copy. Turning it on names the enabled bots that have no operator id.
 
+``delivery.enabled``: whether proactive messages pass the delivery layer (``proactive_delivery``) before they go
+out; off by default (proactive delivery RFC section 2). Operator-only, through ``proactive_delivery.get`` and
+``proactive_delivery.update``, like the delivery guard.
+
 Turn context, timezone and reply language have separate operator-only
 ``turn_context_settings.get/update`` operations; they are not client chat settings.
 
-Stop, completion turns, research order, metrics, delivery guard, outbound writes and turn context are kept in memory: ``load`` reads them
-at startup and updates refresh them. Until loaded, all are off.
+Stop, completion turns, research order, metrics, delivery guard, outbound writes, turn context and the delivery
+layer are kept in memory: ``load`` reads them at startup and updates refresh them. Until loaded, all are off.
 """
 
 from __future__ import annotations
@@ -57,6 +61,8 @@ DEFAULT_OUTBOUND_ENABLED = False
 OUTBOUND_DEFAULTS = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
 # Rate and edit defaults are conservative platform assumptions, to verify (RFC section 7).
 OUTBOUND_FIELDS = ("outbound_enabled", *OUTBOUND_DEFAULTS)
+DELIVERY_ENABLED_KEY = "delivery.enabled"
+DEFAULT_DELIVERY_ENABLED = False
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 
 TURN_CONTEXT_KEY = "manager.turn_context.enabled"
@@ -98,6 +104,7 @@ _metrics_enabled = DEFAULT_METRICS_ENABLED
 _outbound_enabled = DEFAULT_OUTBOUND_ENABLED
 _outbound_limits = dict(OUTBOUND_DEFAULTS)
 _delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
+_delivery_enabled = DEFAULT_DELIVERY_ENABLED
 
 
 def stop_enabled() -> bool:
@@ -196,13 +203,36 @@ async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
     return delivery_guard_view()
 
 
+def delivery_enabled() -> bool:
+    return _delivery_enabled
+
+
+def set_delivery_enabled(value: bool) -> None:
+    """Apply a value in memory only (``load`` and ``update_delivery`` store it; tests use this directly)."""
+    global _delivery_enabled
+    _delivery_enabled = value
+
+
+def delivery_view() -> dict[str, bool]:
+    return {"enabled": _delivery_enabled}
+
+
+async def update_delivery(value: bool | None) -> dict[str, bool]:
+    """Persist the operator's choice; null restores the default, off."""
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({DELIVERY_ENABLED_KEY: None if value is None else ("true" if value else "false")})
+    set_delivery_enabled(DEFAULT_DELIVERY_ENABLED if value is None else value)
+    return delivery_view()
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
     global _turn_context_enabled, _timezone, _reply_language
     stored = await db_settings.get_settings([
         STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
-        TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY,
+        TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY, DELIVERY_ENABLED_KEY,
         *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
     ])
     _turn_context_enabled = stored.get(TURN_CONTEXT_KEY) == "true"
@@ -214,6 +244,7 @@ async def load() -> bool:
     set_metrics_enabled(stored.get(METRICS_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
+    set_delivery_enabled(stored.get(DELIVERY_ENABLED_KEY) == "true")
     set_outbound_enabled(stored.get(OUTBOUND_ENABLED_KEY) == "true")
     limits = {}
     for key, default in OUTBOUND_DEFAULTS.items():
