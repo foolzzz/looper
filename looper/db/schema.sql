@@ -2343,6 +2343,19 @@ CREATE TABLE IF NOT EXISTS reminders (
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (due_at) WHERE status IN ('pending', 'sending');
 -- reminders end
 
+-- The compiled operator profile (one row). profile.get rewrites it only when the compiled body changes,
+-- and keeps the version when it does not. connection.py applies this block to databases that predate it,
+-- so keep it between the markers and idempotent.
+-- profile blocks begin
+CREATE TABLE IF NOT EXISTS profile_blocks (
+    id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    version      BIGINT NOT NULL CHECK (version >= 1),
+    text         TEXT NOT NULL CHECK (char_length(text) <= 1500),
+    body         JSONB NOT NULL CHECK (jsonb_typeof(body) = 'object'),
+    compiled_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- profile blocks end
+
 -- The buttons of a card a chat got (assistant card actions RFC): one row per card, keyed by the opaque token that is
 -- all its buttons carry; what they act on (a Manager's confirmation, a user gate), a digest of the parameters they are
 -- bound to, the chat and the channel message it was sent as, who may press them and until when, and what became of
