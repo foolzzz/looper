@@ -36,6 +36,7 @@ import asyncpg
 
 from ..db import (connection as db_connection, proactive_deliveries as db_deliveries,
                   schedules as db_schedules, subscriptions as db_subs)
+from . import turn_metrics
 from . import chat_settings, cron, extraction, proactive_delivery as delivery, processor, subscription_rules, subscriptions
 from .channels.base import PostOutcome
 from .message import MessageEnvelope, builtin_channel_id, channel_thread_id, is_lark, parse_channel_id
@@ -372,7 +373,9 @@ class SubscriptionRuns:
                         raise _NoPoster
                     receipt = await self._poster(builtin_channel_id(channel), push_target(channel, chat), row["text"],
                                                  idempotency_key=subscriptions.idempotency_keys(
-                                                     run_id, segment)[segment - 1])
+                                                     run_id, segment)[segment - 1],
+                                                 **turn_metrics.proactive_kwargs(
+                                                     turn_metrics.ProactiveSource.SUBSCRIPTION, run_id))
                 except _NoPoster:
                     await db_subs.mark_segment(run_id, segment, "failed", error="this server cannot send messages")
                 except Exception as exc:  # whether the channel sent it is not known: it is not sent again
@@ -383,7 +386,9 @@ class SubscriptionRuns:
                         await db_subs.mark_segment(run_id, segment, "sent", external_ids=receipt.external_ids)
                         if decided is not None:
                             try:
-                                await db_deliveries.mark_sent(f"subscription_run:{run_id}")
+                                await db_deliveries.record_receipt(
+                                    f"subscription_run:{run_id}", "sent",
+                                    receipt.external_ids[0] if receipt.external_ids else None)
                             except Exception:
                                 # The channel took it: a failed metrics receipt cannot undo or repeat that send.
                                 logger.exception("subscription run %s: delivery receipt was not recorded", run_id)

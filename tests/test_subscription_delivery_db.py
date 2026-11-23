@@ -21,13 +21,18 @@ DAY = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
 TEXT = "每日摘要 🍉\n第一条  保留空格\n第二条"
 
 
+@pytest.fixture(autouse=True)
+def _user_timezone_utc(monkeypatch):
+    """The user's timezone as the turn context settings keep it in memory: UTC here."""
+    monkeypatch.setattr(chat_settings, "_timezone", "UTC")
+
+
 async def configured(env, *, channel="lark", chat=DM):
     if channel == "telegram":
         await allow_telegram(env)
     sid = await started(env, target={"channel": channel, "chat": chat}, subscription={"output_header": ""})
     await confirm(env, sid)
     top = await add(env.pool, "synthetic event", sent_at=minutes_ago(env, 1))
-    await env.pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
     return sid, top
 
 
@@ -43,7 +48,7 @@ def test_disabled_digest_keeps_exact_posts_and_existing_writes(monkeypatch, tmp_
             pytest.fail("disabled delivery must not decide or record a receipt")
 
         monkeypatch.setattr(delivery, "decide", forbidden)
-        monkeypatch.setattr(proactive_deliveries, "mark_sent", forbidden)
+        monkeypatch.setattr(proactive_deliveries, "record_receipt", forbidden)
         run = await fire(env, sid)
         [post] = poster.sent
         assert (post["channel_id"], post["target"].id, post["text"].encode(), post["key"]) == (
@@ -106,8 +111,8 @@ def test_digest_policy_sends_or_preserves_the_whole_output(monkeypatch, tmp_path
         assert len(poster.sent) == int(sent)
         assert (run["status"], run["stream"]["outcome"], run["stream"]["output_text"]) == (
             "completed", "delivered" if sent else "dashboard_only", TEXT)
-        [row] = await env.pool.fetch("SELECT * FROM proactive_deliveries WHERE kind = 'subscription'")
-        assert (row["urgency"], row["chat_kind"], row["outcome"], row["reason"], row["counted"],
+        [row] = await env.pool.fetch("SELECT * FROM proactive_deliveries WHERE source = 'subscription'")
+        assert (row["urgency"], row["chat_kind"], row["decision"], row["reason"], row["counted"],
                 row["sent_at"] is not None, row["schedule_id"]) == (
             "digest", "group" if chat == GROUP else "direct", "send" if sent else "digest", reason,
             reason == "within_limits" and chat == DM, sent, sid)
@@ -175,7 +180,7 @@ def test_delivery_failures_do_not_lose_or_duplicate_the_output(monkeypatch, tmp_
         if failure == "decision":
             monkeypatch.setattr(delivery, "decide", broken)
         elif failure == "receipt":
-            monkeypatch.setattr(proactive_deliveries, "mark_sent", broken)
+            monkeypatch.setattr(proactive_deliveries, "record_receipt", broken)
         else:
             poster.break_after = 1
         run = await fire(env, sid)
@@ -232,6 +237,7 @@ def test_digest_urgency_upgrade_preserves_decisions_and_matches_fresh_schema(mon
             await conn.execute("ALTER TABLE proactive_deliveries DROP CONSTRAINT proactive_deliveries_urgency_check, "
                                "ADD CONSTRAINT proactive_deliveries_urgency_check "
                                "CHECK (urgency IN ('normal', 'blocking', 'user_set'))")
+            await conn.execute("DELETE FROM schema_migrations WHERE name IN ('proactive_digest', 'proactive_digest_online')")
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
         await connection.ensure_schema(pool)
@@ -246,6 +252,6 @@ def test_digest_urgency_upgrade_preserves_decisions_and_matches_fresh_schema(mon
                               dedupe_key="subscription_run:synthetic", channel_id="channel-lark", chat=DM,
                               last_user_message_at=None, now=DAY)
         assert await pool.fetchval("SELECT urgency FROM proactive_deliveries WHERE dedupe_key = 'existing:synthetic'") == "normal"
-        assert await pool.fetchval("SELECT urgency FROM proactive_deliveries WHERE kind = 'subscription'") == "digest"
+        assert await pool.fetchval("SELECT urgency FROM proactive_deliveries WHERE source = 'subscription'") == "digest"
 
     run_db(check, monkeypatch)
