@@ -5901,7 +5901,7 @@ writes nothing.
 ### Proactive messages: the delivery layer
 
 A proactive message is one Looper sends without being asked in that moment (a
-gate reminder; later a task notice, a subscription's push, an intent, a
+gate reminder, a task notice; later a subscription's push, an intent, a
 completion turn, a reminder the user set). With the system setting
 `delivery.enabled` on (operator-only `proactive_delivery.update`; off by
 default, and then no send point asks), a send point asks
@@ -5925,8 +5925,19 @@ row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
 `sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
 did. Off, the layer writes nothing. Wired so far: gate
-reminders only, which are always `blocking`; a decision that fails is logged
-and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+reminders and task notices to Lark and Telegram. A completed or failed task's
+code notice is `normal`; an opened, updated or resumed gate that needs the
+user is `blocking`, like its reminders. The channel checks a task-end notice
+immediately before sending it, retaining its text and target; a completion
+fallback keeps the original notice's decision key. Recent user messages are
+looked up by bot and chat, including its routed Manager histories. Only a
+successful channel receipt records the receipt; a deferred notice records its
+decision without calling the channel. A decision that fails is logged and
+the notice posted as with the switch off. Task progress, completion turns,
+the dashboard chat and other senders retain their existing paths. Keep the
+switch off until the briefing can read deferred messages; digest consumption
+and the delivery settings UI are not delivered here.
+Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
 
 ### Card buttons
 
