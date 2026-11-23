@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { DashboardGates } from "@/components/dashboard-gates";
+import { ManagerSessions } from "@/components/manager-sessions";
 import { RunStatusBadge, ScheduleTime } from "@/components/project-schedules";
 import {
   fetchOverview,
@@ -644,6 +645,7 @@ function ManagerMetricsSection() {
       ) : (
         <MetricFigures metrics={metrics} />
       )}
+      <ManagerSessions />
     </Section>
   );
 }

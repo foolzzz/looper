@@ -130,6 +130,8 @@
  "manager_persona.update": "inside",
  "manager_session.get": "inside",
  "manager_session.select_profile": "inside",
+ "manager_sessions.list": "inside",
+ "manager_sessions.reset": "inside",
  "manager_templates.delete": "inside",
  "manager_templates.put": "inside",
  "managers.create": "inside",

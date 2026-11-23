@@ -164,6 +164,9 @@ class Learning:
         return self.text if self.scope is LearningScope.TASK else {"text": self.text, "scope": self.scope.value}
 
 
+GATE_VIA = "gate"  # the via of a user gate's conclusion, a supplement the Planner wrote
+
+
 @dataclass(frozen=True)
 class JournalEntry:
     step_id: str  # '' for an entry of the whole task
@@ -174,6 +177,14 @@ class JournalEntry:
     id: int | None = None  # its row's id, once read back
     # A supplement code writes delivered (a user gate's conclusion, which the Planner wrote): how it came.
     via: str = ""
+    # A supplement: whether the operator gave it in their own turn (None: not known), as it was stored.
+    from_operator: bool | None = None
+
+    @property
+    def outside(self) -> bool:
+        """A supplement the operator did not give in their own turn (the untrusted fence takes it as outside
+        content), but the Planner's own gate conclusion."""
+        return self.kind is JournalKind.SUPPLEMENT and self.from_operator is not True and self.via != GATE_VIA
 
     def row(self) -> dict[str, Any]:
         """The entry as ``db.journal.insert`` writes it."""
@@ -188,7 +199,8 @@ class JournalEntry:
         return cls(step_id=str(row.get("step_id") or ""), step=str(row.get("step_key") or row.get("step_id") or ""),
                    summary=str(row.get("summary") or ""), learnings=tuple(learnings(row.get("learnings"))),
                    kind=JournalKind(row.get("kind") or JournalKind.STEP_ACCEPTED.value),
-                   id=int(row["id"]) if row.get("id") is not None else None)
+                   id=int(row["id"]) if row.get("id") is not None else None, via=str(row.get("via") or ""),
+                   from_operator=row.get("from_operator"))
 
 
 def clip(text: Any, limit: int) -> str:
@@ -288,9 +300,26 @@ def review_rounds(entries: Sequence[JournalEntry]) -> list[JournalEntry]:
             for entry, data in sorted(rounds.values(), key=lambda item: item[1].get('round', 0))]
 
 
-def _supplement_text(entry: JournalEntry) -> str:
-    """A supplement whole, its lines kept in the list item."""
-    return "- " + entry.summary.strip().replace("\n", "\n  ")
+def _supplement_text(entry: JournalEntry, fence: bool = False) -> str:
+    """A supplement whole, its lines kept in the list item; with ``fence``, an outside one in a ``supplement``
+    block."""
+    return "- " + _supplement_body(entry, fence).replace("\n", "\n  ")
+
+
+def _supplement_body(entry: JournalEntry, fence: bool) -> str:
+    from .. import untrusted
+
+    text = entry.summary.strip()
+    if fence and entry.outside:
+        return untrusted.fence(text, source=untrusted.Source.SUPPLEMENT, provenance={"via": entry.via} if entry.via
+                               else None)
+    return text
+
+
+def _lead_line(entries: Sequence[JournalEntry], fence: bool) -> list[str]:
+    from .. import untrusted
+
+    return [untrusted.LEAD_LINE] if fence and any(entry.outside for entry in entries) else []
 
 
 def _pack(order: Sequence[JournalEntry], budget: int, text: Any = _entry_text) -> tuple[set[int], int]:
@@ -357,32 +386,36 @@ def _packed_supplements(entries: Sequence[JournalEntry]) -> tuple[list[JournalEn
     return [entry for at, entry in reversed(list(enumerate(newest_first))) if at in kept], omitted
 
 
-def supplements(entries: Sequence[JournalEntry], *, title: str) -> list[str]:
+def supplements(entries: Sequence[JournalEntry], *, title: str, fence: bool = False) -> list[str]:
     """The supplements in ``entries`` under ``title``, whole and oldest first, in their own budget
-    (``SUPPLEMENTS_MAX_CHARS``): only past it are the oldest left out, and counted. None, no section."""
+    (``SUPPLEMENTS_MAX_CHARS``): only past it are the oldest left out, and counted. None, no section. With
+    ``fence`` (the untrusted fence is on), an outside one is a ``supplement`` block, after one lead line."""
     shown, omitted = _packed_supplements(entries)
     if not shown:
         return []
-    return [_omitted(title, omitted, ("older supplement", "older supplements")), *map(_supplement_text, shown)]
+    return [_omitted(title, omitted, ("older supplement", "older supplements")), *_lead_line(shown, fence),
+            *(_supplement_text(entry, fence) for entry in shown)]
 
 
-def supplement_texts(entries: Sequence[JournalEntry]) -> list[str]:
+def supplement_texts(entries: Sequence[JournalEntry], *, fence: bool = False) -> list[str]:
     """The supplements as a Worker's or Reviewer's task section lists them: each whole, oldest first, within
-    ``SUPPLEMENTS_MAX_CHARS``, after a note on how many older ones were left out, if any."""
+    ``SUPPLEMENTS_MAX_CHARS``, after a note on how many older ones were left out, if any. With ``fence``, an outside
+    one is a ``supplement`` block, after one lead line."""
     shown, omitted = _packed_supplements(entries)
-    texts = [entry.summary.strip() for entry in shown]
+    texts = [*_lead_line(shown, fence), *(_supplement_body(entry, fence) for entry in shown)]
     if omitted:
         texts.insert(0, f"({omitted} older {'supplement was' if omitted == 1 else 'supplements were'} left out)")
     return texts
 
 
-def planner_section(entries: Sequence[JournalEntry]) -> list[str]:
+def planner_section(entries: Sequence[JournalEntry], *, fence: bool = False) -> list[str]:
     """What the Planner's DECISION, SUPERVISE and CHAT turns get of the journal: the user's instructions, then
-    "Progress and findings"; nothing when the journal has neither."""
+    "Progress and findings"; nothing when the journal has neither. With ``fence``, an outside supplement is a
+    ``supplement`` block."""
     entries = [e for e in entries if e.kind is not JournalKind.REVIEW_ROUND] + review_rounds(entries)
     lines = supplements(
         entries, title="Supplements (what the user added to the task while it ran, oldest first; each stands "
-                       "unless a later one changes it)")
+                       "unless a later one changes it)", fence=fence)
     kinds = _PLANNER_KINDS + tuple(kind for kind in _REVIEW_KINDS if any(e.kind is kind for e in entries))
     progress = _by_kind(
         "Progress and findings (the task journal, newest first under each heading)",
@@ -421,10 +454,12 @@ def progress_notes(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return notes
 
 
-def lessons_journal(entries: Sequence[JournalEntry]) -> list[str]:
-    """The journal a LESSONS turn distills: the supplements, then every other kind."""
+def lessons_journal(entries: Sequence[JournalEntry], *, fence: bool = False) -> list[str]:
+    """The journal a LESSONS (or VAULT) turn distills: the supplements, then every other kind. With ``fence``, an
+    outside supplement is a ``supplement`` block, so nothing it says goes into lasting knowledge as the user's."""
     kinds = tuple(kind for kind in _HEADINGS if kind not in _REVIEW_KINDS or any(e.kind is kind for e in entries))
-    lines = supplements(entries, title="Supplements (what the user added to the task while it ran, oldest first)")
+    lines = supplements(entries, title="Supplements (what the user added to the task while it ran, oldest first)",
+                        fence=fence)
     journal = _by_kind("Task journal (newest first under each heading)", _newest_first_by_priority(entries, kinds),
                        LESSONS_JOURNAL_MAX_CHARS, kinds, _ENTRIES)
     if lines and journal:
