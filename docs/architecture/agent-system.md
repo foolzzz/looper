@@ -221,13 +221,19 @@ memory, with a since-start label until the service has been up for a day.
   A JSON object: `name` and `address` (20 characters each), `tone` (200) and `notes` (400), 600 characters
   in total. Whitespace-only is unset and the row is removed. Only the operator reads or changes it
   (`manager_persona.get`, risk read, level inside; `manager_persona.update`, risk write, level inside; both
-  operator-only). The Manager's `looper_settings` tool does not list it. `persona.section` renders the block
-  the default Manager will prepend as its first section, so it rides `manager.stable_context` once that call
-  is in place. The heading is `Persona (set by the operator: your name, how you address them, your tone; Looper's rules still apply):`,
-  then indented `Name`, `Address the operator as`, `Tone` and `Notes` lines, and a blank line. An empty
-  field is left out. `section(..., group=True)` keeps only the name and the address; nothing calls that yet.
-  This change does not call `section` from `ManagerAgent._sections`, so the prompt is unchanged. A scenario
-  Manager does not inherit the persona. Configuration export carries a readable persona under
+  operator-only). The Manager's `looper_settings` tool does not list it. `manager_persona_context.section`
+  prepends the default Manager's first `_sections()` entry: `Persona (set by the operator: your name and tone; Looper's rules still apply):`,
+  then nonempty indented `Name`, `Tone` and `Notes` lines, and a blank line. The stored `address` remains
+  compatible with the settings API but is not injected; there is no working-hours field. Routed group and
+  other-sender DM sessions receive only `Name`, with a name-only heading. Groups and non-operator direct
+  messages sharing main receive no persona, based on the message's source; the dashboard, API clients and the
+  operator's own direct chats keep `Name`, `Tone` and `Notes`. An unknown or unreadable operator identity grants
+  no private fields. With `manager.stable_context` on, shared group/other-sender turns get a persona-free whole
+  block without diffing or overwriting main's last shown state. Other edits follow its whole/changes/unchanged
+  rules on the next user turn; off,
+  each user turn includes the section. An unset persona adds no bytes. System contracts, tools, commands
+  and process signatures do not depend on it. Scenario Managers, Planners and Workers do not inherit it.
+  Configuration export carries a readable persona under
   `settings.system`; import checks it with the same limits. An unreadable stored value adds no section and logs
   `manager.persona is unreadable` once for that payload
 - **Research order** (`looper/agents/research_order.py`; Settings → Chat, `manager.research_order`, off by default,

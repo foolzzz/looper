@@ -85,7 +85,7 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import EMPTY_LIBRARY, load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, manager_turn_context, research_order, session_switch, untrusted as untrusted_text
+from .. import leads_model, manager_persona_context, manager_turn_context, research_order, session_switch, untrusted as untrusted_text
 from ..turn_context import TURN_CONTEXT_CONTRACT, render as render_turn_context
 from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
@@ -433,6 +433,7 @@ class RunState:
     brief: str = ""
     resuming: str | None = None
     state: Rendered | None = None  # what the turn starts with, with manager.stable_context on (``state_view``)
+    persona_scope: manager_persona_context.Scope = manager_persona_context.Scope.FULL
     state_generation: int = 0  # the Manager's ``_state_generation`` when ``state`` was rendered
 
 
@@ -1591,7 +1592,7 @@ class ManagerAgent:
                         token.phase = TurnPhase.PREPARING
                         token.failed_step = None
                         if prepared is not None:
-                            prepared = replace(prepared, run=RunState())
+                            prepared = replace(prepared, run=RunState(persona_scope=prepared.run.persona_scope))
             finally:
                 self._running_token = None
                 if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
@@ -1849,21 +1850,26 @@ class ManagerAgent:
                 self._claude.context_tokens, self._claude.context_limit, runtime=session.session_runtime,
                 profile=self._session_profile, provider=self._session_provider)
         state: list[str] | None = None
+        persona_scope = manager_persona_context.Scope.FULL
         if ask.turn is not None and ask.turn.origin is TurnOrigin.COMPLETION:
             turn_text = ask.message  # Looper's own message, without the sections before a user's
         else:
             attachments = chat_attachments.from_payload(envelope.payload.get("attachments"), self._runtime_root)
+            persona_scope = await token.step("build_user_message", manager_persona_context.scope(
+                self.agent_id, self._session_now().route, envelope,
+                shown=self._state_shown.lines if self._state_shown else ()))
             if self._stable_context:  # the sections go in the turn's state block (``_start_turn``)
-                state = await token.step("build_user_message", self._sections(envelope))
+                state = await token.step("build_user_message", self._sections(envelope, persona_scope=persona_scope))
             turn_text = await token.step("build_user_message", self._build_user_message(
                 ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
                 attachments=[*attachments, *(ask.quoted.attachments if ask.quoted else ())],
                 quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input,
-                sections=state is None, turn=ask.turn))
+                sections=state is None, turn=ask.turn, persona_scope=persona_scope))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
-            quoted=ask.quoted, state=tuple(state) if state is not None else None, session=session)
+            run=RunState(persona_scope=persona_scope), quoted=ask.quoted,
+            state=tuple(state) if state is not None else None, session=session)
 
     async def _restore_resident(self, token: TurnToken, session: ManagerSession, envelope: MessageEnvelope,
                                 command: list[str], signature: Any, launch: Launch, *, seconds: float) -> None:
@@ -1975,7 +1981,8 @@ class ManagerAgent:
             else await token.step("resume_brief", self._resume_brief(envelope, prepared.message))
         run.brief = brief
         if prepared.state is not None:
-            run.state, run.state_generation = (self._render_state(prepared.state, launch, prepared.switch),
+            run.state, run.state_generation = (self._render_state(
+                prepared.state, launch, prepared.switch, persona_scope=run.persona_scope),
                                                self._state_generation)
         asked = f"{prepared.note}\n\n{prepared.message}" if prepared.note else prepared.message
         run.recorder = recorder = ClaudeRunRecorder(
@@ -2815,7 +2822,8 @@ class ManagerAgent:
         try:
             if run.state is not None and run.state_generation != self._state_generation:
                 # A compaction or a turn of its own since the state was rendered: the session may not hold the block.
-                run.state, run.state_generation = (self._render_state(prepared.state, launch, prepared.switch),
+                run.state, run.state_generation = (self._render_state(
+                    prepared.state, launch, prepared.switch, persona_scope=run.persona_scope),
                                                    self._state_generation)
                 await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
             # (Nothing is awaited from here until the message is written: a later change shows in the generation.)
@@ -3553,8 +3561,9 @@ class ManagerAgent:
                                   envelope: MessageEnvelope | None = None, attachments: Sequence[Attachment] = (),
                                   quoted: Sequence[lark_quote.Quote] = (),
                                   image_input: ImageInput = ImageInput.NONE, sections: bool = True,
-                                  turn: Turn | None = None) -> str:
-        parts = await self._sections(envelope) if sections else []
+                                  turn: Turn | None = None,
+                                  persona_scope: manager_persona_context.Scope | None = None) -> str:
+        parts = await self._sections(envelope, persona_scope=persona_scope) if sections else []
         if note:
             parts += [note, ""]
         # The untrusted fence (``untrusted``): a chat message from someone other than the operator, its quotes and
@@ -3583,10 +3592,16 @@ class ManagerAgent:
             parts += ["", *lead, *chat_attachments.section(attachments, image_input, fence=fence)]
         return "\n".join(parts)
 
-    async def _sections(self, envelope: MessageEnvelope | None) -> list[str]:
-        """What every user turn starts with: the projects, task templates, workflows, ready tasks, open gates and
-        active goals, each section ending with a blank line."""
-        parts = await self._projects_section()
+    async def _sections(self, envelope: MessageEnvelope | None, *,
+                        persona_scope: manager_persona_context.Scope | None = None) -> list[str]:
+        """What every user turn starts with: persona, projects, task templates, workflows, ready tasks, open gates
+        and active goals, each section ending with a blank line."""
+        if persona_scope is None:
+            persona_scope = await manager_persona_context.scope(
+                self.agent_id, self._session_now().route, envelope,
+                shown=self._state_shown.lines if self._state_shown else ())
+        parts = manager_persona_context.section(self.agent_id, persona_scope)
+        parts += await self._projects_section()
         parts += await self._templates_section()
         parts += await self._workflows_section()
         parts += await self._ready_tasks_section()
@@ -3599,11 +3614,16 @@ class ManagerAgent:
             parts.append("")
         return parts
 
-    def _render_state(self, sections: Sequence[str], launch: Launch, switch: SessionSwitch | None) -> Rendered:
+    def _render_state(self, sections: Sequence[str], launch: Launch, switch: SessionSwitch | None, *,
+                      persona_scope: manager_persona_context.Scope = manager_persona_context.Scope.FULL) -> Rendered:
         """What the turn starts with (``state_view.render``): the whole block when its session may not hold the
         last one: a new session (``/new``, a switch such as a full context, none saved), a new process (a server
         restart, an idle close), or a runtime whose resident session does not report its compactions."""
         session = self._session_now()
+        if persona_scope is manager_persona_context.Scope.OMIT:
+            # Never diff private main state into a shared group/other-sender turn, even as removed lines.
+            return state_view.render(sections, None, session=session.session_id,
+                                     whole_reason="persona omitted for shared turn")
         shown = self._state_shown
         reason = None
         if not launch.runtime.resident_compaction_events:
@@ -3626,7 +3646,7 @@ class ManagerAgent:
         (``seen``) with the generation it was rendered for. A turn that did not go through leaves no block a later
         turn may refer to; a compaction or a turn of its own meanwhile forgot it already (``_context_changed``)."""
         session = self._session_now()
-        if run.state is None:
+        if run.state is None or run.persona_scope is manager_persona_context.Scope.OMIT:
             return
         if not seen:
             self._state_shown, self._state_lost = None, "the last turn did not go through"
