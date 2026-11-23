@@ -74,6 +74,8 @@ from ..claude_cli import (
     user_stop_result,
 )
 from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands
+from .. import delivery_guard_manager as delivery_guard
+from ..delivery_guard import GuardState
 from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
@@ -443,6 +445,7 @@ class Prepared:
     # With manager.stable_context on: the sections as they read now, which ``turn_text`` leaves out.
     state: tuple[str, ...] | None = None
     session: ManagerSession | None = None  # the session the model turn runs on, set by ``_prepare_turn``
+    delivery_followup: int = 0
 
 
 def api_handoff_prompt(reason: str, max_chars: int) -> str:
@@ -1338,7 +1341,7 @@ class ManagerAgent:
                             await self._send_reply(envelope, tools_down_reply(prepared.tools_problem),
                                                    error=prepared.tools_problem)
                             return
-                        response = await self._run_prepared(token, prepared)
+                        response = await delivery_guard.run(self, token, prepared)
                         break
                     except (TimeoutError, OSError, TurnFailed) as exc:
                         # Hosted runners own their startup recovery; return their diagnostic after one budget.
@@ -1481,6 +1484,7 @@ class ManagerAgent:
                         require_match=self._claude.shares_bridge)
             token.check()
             token.ops_turn = turn
+            delivery_guard.initialize(turn)
             # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
             self._running_token = token
             await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
@@ -1650,7 +1654,8 @@ class ManagerAgent:
             self._claude_command, prepared.prompt_file, launch))
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
         # asked for a clean one.
-        brief = "" if (self._claude.started or session.session_id or self._clean_start) and not self._pending_handoff \
+        brief = "" if (prepared.delivery_followup or (
+            (self._claude.started or session.session_id or self._clean_start) and not self._pending_handoff)) \
             else await token.step("resume_brief", self._resume_brief(envelope, prepared.message))
         run.brief = brief
         if prepared.state is not None:
@@ -1670,6 +1675,8 @@ class ManagerAgent:
         )
         try:
             await token.keep("recorder_start", recorder.start(), 10)
+            if prepared.delivery_followup:
+                await token.step("recorder_annotate", recorder.annotate(delivery_guard.metadata(prepared)))
             if run.state is not None:
                 await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
             if prepared.switch is not None and prepared.switch.reason is SwitchReason.CONTEXT_FULL:
@@ -2135,6 +2142,7 @@ class ManagerAgent:
                     sender=origin["sender"], envelope=context, origin=TurnOrigin.COMPLETION,
                     require_match=self._claude.shares_bridge)
         token.ops_turn = turn
+        delivery_guard.initialize(turn)
         state["token"], state["turn"] = token, turn
         prepared: Prepared | None = None
         try:
@@ -2294,6 +2302,7 @@ class ManagerAgent:
         task_id = context_envelope.metadata.get("task_id")
         text_parts: list[str] = []
         streamed_partials = False
+        guard = GuardState(ops_turn.debt if ops_turn is not None else None)
 
         # The runtime hands its events on one at a time, reading the next once ``on_event`` returns. What a tool
         # call's match and the turn's cap need is taken from each event at once (``observe``); recording it,
@@ -2372,7 +2381,7 @@ class ManagerAgent:
                     token.partial += text
 
         async def handle(payload: dict[str, Any]) -> None:
-            nonlocal streamed_partials, session_unsaved
+            nonlocal streamed_partials, session_unsaved, guard
             await recorder.persist(payload)
 
             if session_unsaved and not token.abandoned:
@@ -2407,6 +2416,9 @@ class ManagerAgent:
                         block_type = block.get("type", "")
                         if not top_level:
                             continue
+                        if guard.debt is not None:
+                            guard = await delivery_guard.observe(guard, block, prepared=prepared, manager=self,
+                                                                 token=token)
                         if block_type == "text":
                             chunk = str(block.get("text") or "")
                             if chunk:
@@ -2551,7 +2563,8 @@ class ManagerAgent:
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
                                         token=token, quoted=prepared.quoted)
 
-        self._settle(token)
+        if not delivery_guard.awaiting_followup(prepared, turn.result_event, text_parts):
+            self._settle(token)
 
         result_event = turn.result_event
         # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
@@ -3013,6 +3026,7 @@ class ManagerAgent:
             last = after if isinstance(after, MessageEnvelope) else None
             origin = _message_origin(last) if last is not None else {"channel": None, "channel_id": None, "chat": None}
             turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"])
+            delivery_guard.initialize(turn)
             # ^ it answers no message: it only reads
             if self.ops is not None:
                 self.ops.begin_turn(turn)

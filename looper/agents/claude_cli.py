@@ -1145,6 +1145,20 @@ class ResidentClaude:
         logger.warning("%s: the stopped turn's interrupt did not finish in %.1fs", self._label, bound)
         return StopMethod.KILL
 
+    @property
+    def can_write_mid_turn(self) -> bool:
+        """Only the direct stream-json transport is verified; a keeper's KeptProcess is excluded."""
+        return isinstance(self._process, asyncio.subprocess.Process)
+
+    async def write_mid_turn(self, text: str) -> bool:
+        """Queue input in the active stream-json turn without creating a second turn or result owner."""
+        process, turn = self._process, self._user_turn
+        if (not self.can_write_mid_turn or process.stdin is None or turn is None or turn.done.done()
+                or turn.stopping or (self._cancel is not None and self._cancel.requested)):
+            return False
+        await write_user_turn(process.stdin, text)
+        return True
+
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         """A turn's own cost and tokens: its result's running totals less the previous ones."""
         own = run_usage(result_event, before=self._totals, price=self._price)
