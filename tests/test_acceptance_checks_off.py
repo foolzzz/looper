@@ -23,6 +23,7 @@ from looper.agents.project_execution import ProjectExecution
 from looper.agents.tiers import planner, planner_protocol, worker
 from looper.db import plans, projects, tasks
 from tests.db_support import DSN, run_db
+from tests.prompt_sections import assert_frozen
 
 FIXTURE = Path(__file__).parent / "fixtures" / "acceptance_checks_off.json"
 BASELINE = json.loads(FIXTURE.read_text()) if FIXTURE.exists() else {}
@@ -87,8 +88,19 @@ def _outputs(modules, runtime_root, execution=None):
     return outputs
 
 
+# The Planner's text is frozen per section with the other renderings of it (tests/prompt_sections.py), so a change
+# another feature makes to the default contract is one edit; the other outputs keep their whole digests here.
+_PLANNER_TEXT = {"planner_contract": "reply_contract", "planner_system_prompt": "planner_prompt_acceptance_off"}
+
+
 def _hashes(outputs):
-    return {name: hashlib.sha256(value.encode("utf-8")).hexdigest() for name, value in outputs.items()}
+    return {name: hashlib.sha256(value.encode("utf-8")).hexdigest() for name, value in outputs.items()
+            if name not in _PLANNER_TEXT}
+
+
+def _assert_planner_text(outputs):
+    for name, frozen in _PLANNER_TEXT.items():
+        assert_frozen(frozen, outputs[name])
 
 
 def _main_modules(revision):
@@ -120,16 +132,19 @@ def _main_modules(revision):
 def test_default_off_model_text_and_step_serialization_match_main_bytes(tmp_path, row):
     execution = ProjectExecution.from_row(row)
     current = SimpleNamespace(planner=planner, protocol=planner_protocol, prompt=system_prompt, tasks=tasks, worker=worker)
-    assert _hashes(_outputs(current, tmp_path, execution)) == BASELINE["sha256"]
+    outputs = _outputs(current, tmp_path, execution)
+    assert _hashes(outputs) == BASELINE["sha256"]
+    _assert_planner_text(outputs)
     # Exercise the explicit argument as well as the default used by legacy callers.
-    assert hashlib.sha256(planner_protocol.reply_contract(
-        acceptance_checks=execution.acceptance_checks).encode("utf-8")).hexdigest() == BASELINE["sha256"]["planner_contract"]
+    assert_frozen("reply_contract", planner_protocol.reply_contract(acceptance_checks=execution.acceptance_checks))
 
 
 @pytest.mark.provenance
 def test_default_off_fixture_was_generated_from_main(tmp_path):
     baseline = _main_modules(BASELINE["main_revision"])
-    assert _hashes(_outputs(baseline, tmp_path)) == BASELINE["sha256"]
+    outputs = _outputs(baseline, tmp_path)
+    assert _hashes(outputs) == BASELINE["sha256"]
+    _assert_planner_text(outputs)
     assert baseline.plans._SAVE_STEP == BASELINE["step_insert_sql"]
     for status, arguments in BASELINE["step_arguments"].items():
         assert _json(baseline.plans._step_args("task-off", baseline.planner._step_row(
