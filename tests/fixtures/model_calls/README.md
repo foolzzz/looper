@@ -23,6 +23,10 @@ columns to NULL; their original prompts, launches, outcomes and other fields sta
 unchanged. Validate these additive expectations against unchanged main on the
 migrated schema as well as against the migrated callers.
 
+The later schedule-throttling migration adds `active_hours` (NULL) and
+`idle_only` (false) to schedule rows. The snapshots pin those additive defaults;
+launches, prompts, outcomes and all existing fields stay unchanged.
+
 To regenerate the newer fixtures, use a separate checkout of the recorded
 baseline with the golden test modules and `tests/model_call_support.py` copied
 in. Set `UPDATE_MODEL_CALL_GOLDENS=1` and run only those test modules against a

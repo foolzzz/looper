@@ -38,8 +38,10 @@ DECISION = "我们定了：部署方案用蓝绿发布，回滚预案由值班�
 
 @pytest.fixture
 def own_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Group chats run in sessions of their own, as session routing will make them."""
-    monkeypatch.setattr(session_search, "group_sessions", lambda: session_search.GroupSessions.OWN)
+    """Use the implemented session routing, including its search availability gate."""
+    from looper.agents import session_routing
+
+    monkeypatch.setattr(session_routing, "_routing_enabled", True)
 
 
 @pytest.fixture(autouse=True)
