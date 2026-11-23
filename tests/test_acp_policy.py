@@ -6,12 +6,63 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
+import socketserver
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
 
 import pytest
 
 from looper.agents.runtimes import acp_policy
+
+
+_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
+@pytest.fixture(autouse=True)
+def clear_operator_proxies(monkeypatch):
+    for key in _PROXY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
+@contextmanager
+def proxy_server(host="127.0.0.1", behavior="deny"):
+    requests = []
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.connection.settimeout(2)
+            line = self.rfile.readline().decode().strip()
+            if not line:  # A TCP positive control, without a CONNECT request.
+                return
+            headers = []
+            while (header := self.rfile.readline().strip()):
+                headers.append(header.decode())
+            requests.append((line, headers))
+            if behavior == "broken":
+                return
+            if behavior in {"forward", "forward_deny"}:
+                address, port = line.split()[1].rsplit(":", 1)
+                with socket.create_connection((address.strip("[]"), int(port)), timeout=1):
+                    pass
+            status = "200 Connection established" if behavior == "forward" else "403 Forbidden"
+            self.wfile.write(f"HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n".encode())
+
+    class Server(socketserver.ThreadingTCPServer):
+        address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        daemon_threads = True
+
+    with Server((host, 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        thread.start()
+        try:
+            address = f"[{host}]" if ":" in host else host
+            yield f"http://{address}:{server.server_address[1]}", requests
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
 
 
 @pytest.fixture
@@ -303,25 +354,25 @@ def test_readonly_and_fifo_inspect_roots_need_no_write_probe(configured, reposit
 
 @pytest.mark.installed
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
-@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
-def test_only_configured_loopback_proxy_port_is_allowed(configured, repository, host):
-    import socket
-
+@pytest.mark.parametrize("host,key", [("::1" if key == "HTTPS_PROXY" else "127.0.0.1", key) for key in _PROXY_KEYS])
+def test_only_configured_loopback_proxy_port_is_allowed(configured, repository, host, key, monkeypatch):
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    with socket.socket(family) as proxy, socket.socket(family) as denied:
-        proxy.bind((host, 0))
-        proxy.listen(2)
+    with proxy_server(host) as (url, requests), socket.socket(family) as denied:
+        proxy_port = int(url.rsplit(":", 1)[1])
         denied.bind((host, 0))
         denied.listen(2)
-        proxy_port, denied_port = proxy.getsockname()[1], denied.getsockname()[1]
+        denied_port = denied.getsockname()[1]
         # Both endpoints are listening before the sandbox is installed.
         for port in (proxy_port, denied_port):
             with socket.socket(family) as client:
                 client.connect((host, port))
-        address = f"[{host}]" if family == socket.AF_INET6 else host
+        monkeypatch.setenv(key, url)
+        monkeypatch.setenv("NO_PROXY", "*")  # The negative probe must still use the proxy.
         policy = asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository,
-            config_dir=configured, environment={"HTTPS_PROXY": f"http://{address}:{proxy_port}"}))
+            config_dir=configured))
         try:
+            assert requests and all(request[0].startswith("CONNECT ") for request in requests)
+            assert policy.environment({key: "http://127.0.0.1:1"})[key] == url
             assert policy.wrap()[0] == "/usr/bin/sandbox-exec"
             code = '''import errno,json,socket,sys
 host=sys.argv[1]; results=[]
@@ -380,3 +431,90 @@ def test_profile_denies_application_ipc(configured, tmp_path):
     assert '(deny lsopen)' in profile
     assert '(deny appleevent-send)' in profile
     assert '(allow network-outbound (remote unix-socket (path "/private/var/run/mDNSResponder")))' in profile
+
+
+@pytest.mark.installed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
+@pytest.mark.parametrize("behavior,reason", [("forward", "proxy_loopback_allowed"),
+    ("forward_deny", "proxy_loopback_allowed"), ("broken", "proxy_preflight_unavailable")])
+def test_proxy_preflight_refuses_unsafe_or_unproven_proxy(configured, repository, monkeypatch, behavior, reason):
+    with proxy_server(behavior=behavior) as (url, requests):
+        monkeypatch.setenv("HTTPS_PROXY", url)
+        with pytest.raises(acp_policy.PolicyError) as error:
+            asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
+        assert requests
+        assert error.value.record["reason"] == reason
+        assert url not in str(error.value)  # Never record proxy credentials.
+
+
+@pytest.mark.installed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
+def test_role_layer_proxy_cannot_open_loopback_port(configured, repository, monkeypatch):
+    from unittest.mock import AsyncMock
+    from looper.agents import acp_reviewer_settings as settings
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch, Layer, layer_update
+    from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
+    from looper.agents.runtimes import ADAPTERS, ApiProtocol, AuthKind
+    from looper.agents.runtimes.channel import RunStartError
+    from looper.agents.tiers import worker
+    from tests.runtime_model_helpers import resolved_profile
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(2)
+        port = listener.getsockname()[1]
+        with socket.create_connection(("127.0.0.1", port)):
+            pass
+        values = layer_update({"env": [{"key": "HTTPS_PROXY", "value": f"http://127.0.0.1:{port}"}]},
+                              Layer.ROLE, AgentType.REVIEWER)
+        snapshot = settings.AcpReviewerSettings(True, ("grok", "agent", "stdio"), "review-model", "Review account",
+                                                str(configured), ())
+        provider = LegacyProviderSpec("prov-acp", "Review account", AuthKind.OAUTH,
+                                      frozenset({ApiProtocol.OPENAI_RESPONSES}), "acp")
+        profile = resolved_profile("profile-acp", "ACP review", RuntimeSpec("rt-acp", "ACP", "acp", "",
+                                   ADAPTERS["acp"].capabilities), provider, "review-model")
+        launch = Launch(AgentSettings(profile=profile, env=tuple((v["key"], v["value"]) for v in values["env"])),
+                        role=AgentType.REVIEWER, acp_reviewer=snapshot)
+        assert launch.environment()["HTTPS_PROXY"].endswith(f":{port}")
+        monkeypatch.setattr(settings, "read", AsyncMock(return_value=snapshot))
+        monkeypatch.setattr(worker.vault, "load", AsyncMock(return_value=(None, None)))
+        spawn = AsyncMock(side_effect=OSError("stop before any agent process starts"))
+        monkeypatch.setattr(worker.proc_tree, "spawn", spawn)
+        handle = worker.ProcessRun(ADAPTERS["acp"], list(snapshot.command), launch=launch, cwd=repository,
+                                   session_dir=None, label="review")
+        async def run():
+            try:
+                with pytest.raises(RunStartError, match="stop before any agent"):
+                    await handle.launch()
+                spawn.assert_awaited_once()
+                code = "import socket,sys; socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=1)"
+                result = subprocess.run(handle._acp_policy.wrap([sys.executable, "-c", code, str(port)]),
+                                        capture_output=True, text=True, timeout=5)
+                assert result.returncode != 0
+                assert "Operation not permitted" in result.stderr
+                assert "HTTPS_PROXY" not in spawn.call_args.kwargs["env"]
+            finally:
+                await handle.end()
+        asyncio.run(run())
+
+
+@pytest.mark.parametrize("url", ["socks5://127.0.0.1:1080", "http://127.0.0.1:bad", "http://127.0.0.1/path"])
+def test_unverifiable_operator_proxy_refused(configured, repository, monkeypatch, url):
+    monkeypatch.setenv("HTTPS_PROXY", url)
+    with pytest.raises(acp_policy.PolicyError) as error:
+        asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
+    assert error.value.reason.value == "unknown_cli_config"
+
+
+@pytest.mark.installed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
+def test_proxy_preflight_checks_every_proxy_with_credentials(configured, repository, monkeypatch):
+    with proxy_server() as (safe_url, safe_requests), proxy_server(behavior="forward") as (unsafe_url, unsafe_requests):
+        monkeypatch.setenv("HTTP_PROXY", safe_url.replace("http://", "http://test%40user:synthetic%3Asecret@"))
+        monkeypatch.setenv("https_proxy", unsafe_url)
+        with pytest.raises(acp_policy.PolicyError) as error:
+            asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
+        assert error.value.reason.value == "proxy_loopback_allowed"
+        assert unsafe_requests and len(safe_requests) == 3
+        assert "Proxy-Authorization: Basic dGVzdEB1c2VyOnN5bnRoZXRpYzpzZWNyZXQ=" in safe_requests[0][1]
+        assert "synthetic" not in str(error.value)

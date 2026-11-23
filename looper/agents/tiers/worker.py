@@ -576,8 +576,7 @@ class ProcessRun:
                 inherited = self._launch.environment()
                 self._acp_policy = await prepare_policy(config.command, cwd=self._cwd,
                     inspect_roots=(*self._launch.read_dirs, *config.inspect_roots), config_dir=config.config_dir,
-                    runtime_root=self._runtime_root, vault=vault_config.path if vault_config else None,
-                    environment=inherited)
+                    runtime_root=self._runtime_root, vault=vault_config.path if vault_config else None)
                 self.launch_record = {"acp_write_policy": self._acp_policy.record}
                 command = self._acp_policy.wrap()
                 environment = self._acp_policy.environment(inherited)

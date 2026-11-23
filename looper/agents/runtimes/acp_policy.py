@@ -8,19 +8,22 @@ shape; an unrecognized source is a refusal, not an assumption about safety.
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 import json
+import http.client
 import os
 from pathlib import Path
 import socket
+import select
 import subprocess
 import sys
 import tempfile
 import tomllib
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 import ipaddress
 
 from .channel import RunStartError
@@ -35,6 +38,8 @@ class PolicyReason(str, Enum):
     UNREADABLE_CONFIG = "unreadable_config"
     UNRESOLVABLE_PROTECTED_PATH = "unresolvable_protected_path"
     WRITE_POLICY_UNAVAILABLE = "write_policy_unavailable"
+    PROXY_LOOPBACK_ALLOWED = "proxy_loopback_allowed"
+    PROXY_PREFLIGHT_UNAVAILABLE = "proxy_preflight_unavailable"
 
 
 @dataclass(frozen=True)
@@ -243,23 +248,73 @@ def _protected_paths(cwd: str | Path, inspect_roots: Sequence[str | Path]) -> tu
     return tuple(dict.fromkeys(paths))
 
 
+_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
 def _proxy_ports(environment: Mapping[str, str]) -> tuple[int, ...]:
     ports = set()
-    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    for name in _PROXY_KEYS:
         if not (value := environment.get(name)):
             continue
         proxy = urlsplit(value)
         host = proxy.hostname
+        if (proxy.scheme not in {"http", "https"} or not host or proxy.path not in {"", "/"}
+                or proxy.query or proxy.fragment or any(ord(c) < 32 for c in value)):
+            raise ValueError("only HTTP(S) proxies with a verifiable CONNECT boundary are supported")
+        port = proxy.port or {"http": 80, "https": 443}[proxy.scheme]
         try:
             local = host == "localhost" or (host is not None and ipaddress.ip_address(host).is_loopback)
         except ValueError:
             local = False
         if local:
-            port = proxy.port or {"http": 80, "https": 443}.get(proxy.scheme)
-            if port is None:
-                raise ValueError("local proxy requires an explicit port")
             ports.add(port)
     return tuple(sorted(ports))
+
+
+def _proxy_preflight(environment: Mapping[str, str]) -> None:
+    """Require an explicit CONNECT denial, and independently detect forwarding.
+
+    Probe from the host so sandbox denials cannot hide an unsafe proxy. Only
+    Looper-owned listeners are targeted; NO_PROXY never bypasses this check.
+    """
+    for value in dict.fromkeys(environment[key] for key in _PROXY_KEYS if environment.get(key)):
+        proxy = urlsplit(value)
+        headers = {}
+        if proxy.username is not None:
+            credentials = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}".encode()
+            headers["Proxy-Authorization"] = "Basic " + base64.b64encode(credentials).decode("ascii")
+        for host in ("127.0.0.1", "::1", "localhost"):
+            try:
+                family = socket.AF_INET6 if ":" in host else socket.AF_INET
+                with socket.socket(family) as listener:
+                    listener.bind(("::1" if family == socket.AF_INET6 else "127.0.0.1", 0))
+                    listener.listen(2)
+                    port = listener.getsockname()[1]
+                    # Establish and drain a positive control before the proxy attempt.
+                    with socket.create_connection((listener.getsockname()[0], port), timeout=1):
+                        control, _ = listener.accept()
+                        control.close()
+                    connection_type = http.client.HTTPSConnection if proxy.scheme == "https" else http.client.HTTPConnection
+                    connection = connection_type(proxy.hostname, proxy.port, timeout=2)
+                    status = None
+                    try:
+                        target = f"[{host}]:{port}" if family == socket.AF_INET6 else f"{host}:{port}"
+                        connection.request("CONNECT", target, headers=headers)
+                        with connection.getresponse() as response:
+                            status = response.status
+                    except (OSError, http.client.HTTPException):
+                        pass  # Connectivity alone is not evidence of a denied tunnel.
+                    finally:
+                        connection.close()
+                    if select.select([listener], [], [], 0)[0] or (status is not None and 200 <= status < 300):
+                        raise PolicyError(ConfigCheck(PolicyReason.PROXY_LOOPBACK_ALLOWED,
+                                                     "proxy CONNECT permits a Looper-owned loopback listener"))
+                    if status != 403:
+                        raise PolicyError(ConfigCheck(PolicyReason.PROXY_PREFLIGHT_UNAVAILABLE,
+                                                     "proxy CONNECT did not prove an explicit loopback denial"))
+            except (OSError, ValueError, http.client.HTTPException) as exc:
+                raise PolicyError(ConfigCheck(PolicyReason.PROXY_PREFLIGHT_UNAVAILABLE,
+                                             "proxy loopback preflight unavailable")) from exc
 
 
 def _profile(scratch: Path, config_dir: Path, proxy_ports: Sequence[int] = ()) -> str:
@@ -283,6 +338,7 @@ class WritePolicy:
     profile: str
     sandbox_executable: str
     _temporary: tempfile.TemporaryDirectory[str]
+    proxy_environment: dict[str, str]
 
     @property
     def record(self) -> dict[str, Any]:
@@ -296,7 +352,9 @@ class WritePolicy:
         # Never let an inherited selector bypass the directory we checked.
         env = {key: value for key, value in inherited.items()
                if not key.startswith("GROK_") and key not in {"CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME",
-                                                             "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"}}
+                                                             "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                                                             *_PROXY_KEYS, "NO_PROXY", "no_proxy"}}
+        env.update(self.proxy_environment)
         env.update(HOME=str(self.config_dir), GROK_HOME=str(self.config_dir), TMPDIR=str(self.scratch),
                    GROK_DISABLE_AUTOUPDATER="1", GROK_MEMORY="0")
         for vendor in ("CLAUDE", "CURSOR"):
@@ -369,7 +427,7 @@ with open(target, 'w') as output: output.write('scratch-ok')
 
 async def prepare_policy(command: Sequence[str], *, cwd: str | Path, inspect_roots: Sequence[str | Path] = (),
                          config_dir: str | Path = "", runtime_root: str | Path | None = None,
-                         vault: str | Path | None = None, environment: Mapping[str, str] | None = None) -> WritePolicy:
+                         vault: str | Path | None = None) -> WritePolicy:
     """Resolve, check and prove enforcement before the caller can spawn an agent."""
     protected = await asyncio.to_thread(_protected_paths, cwd,
         (*inspect_roots, *(path for path in (runtime_root, vault) if path is not None)))
@@ -391,11 +449,16 @@ async def prepare_policy(command: Sequence[str], *, cwd: str | Path, inspect_roo
         if not sandbox:
             raise PolicyError(ConfigCheck(PolicyReason.WRITE_POLICY_UNAVAILABLE,
                                          "write policy unavailable: no verified write policy on this host"))
+        # Never accept Launch.environment(): role/project/task layers are writable
+        # by the Manager and API clients, unlike the serving process environment.
+        proxy_environment = {key: os.environ[key] for key in (*_PROXY_KEYS, "NO_PROXY", "no_proxy") if key in os.environ}
         try:
-            ports = _proxy_ports(environment if environment is not None else os.environ)
+            ports = _proxy_ports(proxy_environment)
         except ValueError as exc:
-            raise PolicyError(ConfigCheck(PolicyReason.UNKNOWN_CLI_CONFIG, "invalid local proxy configuration")) from exc
-        policy = WritePolicy(list(command), scratch, config, protected, _profile(scratch, config, ports), sandbox, temporary)
+            raise PolicyError(ConfigCheck(PolicyReason.UNKNOWN_CLI_CONFIG, "invalid or unsupported proxy configuration")) from exc
+        await asyncio.to_thread(_proxy_preflight, proxy_environment)
+        policy = WritePolicy(list(command), scratch, config, protected, _profile(scratch, config, ports), sandbox, temporary,
+                             proxy_environment)
         if not await asyncio.to_thread(_preflight, policy):
             raise PolicyError(ConfigCheck(PolicyReason.WRITE_POLICY_UNAVAILABLE,
                                          "write policy unavailable: enforcement preflight failed"))
