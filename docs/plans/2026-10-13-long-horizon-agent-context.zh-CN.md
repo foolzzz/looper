@@ -1016,7 +1016,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
-- **记忆写入路径**（[RFC](../architecture/rfcs/memory-write-path-v0.zh-CN.md)）：本分支在已合入的 #1513 基础上实现确认后的 worktree 写入、候选操作和启动恢复，默认关闭。起草、来源、私聊推送和 dashboard 界面仍按 RFC 第 13 节后续切片推进。
+- **记忆写入路径**（[RFC](../architecture/rfcs/memory-write-path-v0.zh-CN.md)）：本分支在确认后的 worktree 写入基础上实现操作者私聊推送、精确回复「记 / 驳回 / 重试」、结果通知、原推送状态更新和受阻告警，默认关闭。起草、来源和 dashboard 界面仍按 RFC 第 13 节后续切片推进。后续待维护者确认：记忆推送接入 `proactive_delivery`，新增 `ProactiveSource.MEMORY` 并与晨报等来源共同扩展 `proactive_deliveries.source` 约束。
 
 - **助理人格接线**（本分支已实现，未设置即关闭，依赖 #1533）：默认 Manager 把名字、语气和补充说明放在 `_sections()` 第一段，沿用稳定块更新规则；不注入称呼、不增加工作时间，群和他人私聊共用 main 时不注入人格，独立会话只给名字；受限回合发去人格的完整稳定块且不覆盖 main 的已展示状态，场景管家和其他角色不继承。固定 main 哈希、下一轮更新/清空、稳定块及隔离服务重启由定向测试覆盖；真实模型语气和改名评测待批准，尚未执行（[RFC §5.2](../architecture/rfcs/assistant-layer-v0.zh-CN.md#52-12-人格与称呼)）。
 

@@ -2995,8 +2995,8 @@ only the operator's confirmation of its exact content lets Looper write it
 into the vault's memory folder
 ([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
 PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
-part includes the foundation and the confirmed write path. Sources, drafting,
-pushes, private-chat replies and the dashboard memory page follow separately.
+part includes the foundation, confirmed write path and operator DM delivery.
+Sources, drafting and the dashboard memory page follow separately.
 The write path adds no model-visible prompt, contract or tool.
 
 - **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
@@ -3081,6 +3081,20 @@ The write path adds no model-visible prompt, contract or tool.
   Cleanup failure after a successful merge is a warning, and later
   housekeeping retries it. Git failures use fixed reasons, with no git
   output in logs. Existing git timeouts and index-lock retries apply.
+- **Operator DMs** (`memory_push.py`, `memory_routing.py`): every ten seconds,
+  the configured push bot sends each pending revision once to its operator.
+  A session advisory lock covers the committed sending claim and channel call;
+  unknown outcomes are never resent. Only revisions whose changed lines fit
+  in 1,500 characters can be confirmed from a DM. Exact `记`, `驳回` and `重试`
+  replies run before intent routing and the model, require the bot's operator
+  in a direct chat, and bind confirmation to the push's revision and hash.
+  Confirmation wakes the writer and waits at most twenty seconds; a late
+  result has a durable final post. New revisions quote their predecessor;
+  final states edit the latest push, with a quoted message on edit failure.
+  Three consecutive blocked writes or five with one reason in twenty-four
+  hours produce at most one alert per UTC day. Disabled writing or an unset
+  push bot leaves delivery and reply routing inactive. Pushes currently use
+  the channel registry directly; delivery-layer integration follows separately.
 - **Known limits:** unsaved editor buffers do not block a write and a later
   editor save can overwrite it; the content hash and commit trailers allow
   checking what was written. An agent with a shell has the same system-user
