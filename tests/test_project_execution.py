@@ -126,6 +126,14 @@ class TestProjectApi:
         assert status == 200 and body["vault"] == value
         assert ProjectExecution.from_row(store.projects["proj-a"]).vault_on is enabled
 
+    def test_task_cap_can_wait_for_the_operator_without_changing_the_default(self, store: _Store) -> None:
+        store.add_project("proj-a", "calc")
+        assert ProjectExecution.from_row(store.projects["proj-a"]).on_task_budget.value == "fail"
+        status, body = _call("POST", "/api/v1/project_admin/update", {
+            "project_id": "proj-a", "fields": {"task_budget_action": "ask"}})
+        assert status == 200 and body["task_budget_action"] == "ask"
+        assert ProjectExecution.from_row(store.projects["proj-a"]).on_task_budget.value == "ask"
+
     def test_settings_are_stored_read_back_and_cleared(self, store: _Store) -> None:
         store.add_project("proj-a", "calc")
         assert {k: v for k, v in _call("POST", "/api/v1/project_admin/list", {})[1]["projects"][0].items() if k in UNSET} == UNSET

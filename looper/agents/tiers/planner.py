@@ -118,6 +118,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
+from . import planner_budget
 from ..acceptance_checks import Check, parse_checks
 from .. import acceptance_decisions
 from ..project_execution import AcceptanceChecksMode
@@ -1167,6 +1168,7 @@ class PlannerAgent:
         except asyncio.CancelledError:
             pass
 
+    @planner_budget.event
     async def _handle(self, envelope: MessageEnvelope) -> None:
         try:
             await self._handle_event(envelope)
@@ -1209,6 +1211,9 @@ class PlannerAgent:
                 await self._handle_user_message(envelope)
             case MessageType.TASK_CHANGE | MessageType.GATE_MESSAGE | MessageType.ROOM_MESSAGE | MessageType.WAIT_EVENT:
                 pass  # delivered below, with any other change or message waiting
+            case MessageType.SYSTEM_EVENT if envelope.payload.get("type") in (
+                    "cost_hold_continue", "usage_window_resume"):
+                await planner_budget.resume(self)
             case MessageType.SYSTEM_EVENT:
                 await self._handle_system_event(envelope)
         # Every change waiting reaches Claude once the event's turns are done: one that arrived meanwhile, or
@@ -2524,6 +2529,7 @@ class PlannerAgent:
                 # The loop drives the gates' and the waits' automatic retries: it keeps going.
                 logger.warning("planner %s: the idle check failed", self.agent_id, exc_info=True)
 
+    @planner_budget.usage_tick
     async def _idle_tick(self) -> None:
         """Post a ``gate_retry`` tick when a gate's or a wait's failed turn is due for its retry, else an ``idle`` one
         when the task has only waited for ``GATE_IDLE_STOP_SEC`` with Claude resident. The tick keeps its name: the
@@ -2569,7 +2575,7 @@ class PlannerAgent:
         a merge that failed gets a new one), else in the task directory; as the current version of its role when
         it has one (the version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
-        if not await self._within_budget(plan):
+        if not await self._within_budget(plan, "worker", step, same_attempt=same_attempt):
             return
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
@@ -2953,7 +2959,7 @@ class PlannerAgent:
         """Start the review ``step`` waits for (``review_stage``): the built-in Reviewer's, or that of its review
         role at ``review_position`` (the version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
-        if not await self._within_budget(plan):
+        if not await self._within_budget(plan, "reviewer", step, same_attempt=same_attempt):
             return
         evidence = await acceptance_decisions.reviewer_payload(self, plan, step)
         if evidence is None:
@@ -3030,7 +3036,7 @@ class PlannerAgent:
         return parse_decision(text, context, view, adjudications=enabled and step.accept_when is not None)
 
     async def _dispatch_review(self, plan: TaskPlan, step: PlanStep, *, same_attempt: bool = False) -> None:
-        if not await self._within_budget(plan):
+        if not await self._within_budget(plan, "reviewer", step, same_attempt=same_attempt):
             return
         target = plan.step(step.reviews)
         # A run that could not be adopted is no longer dispatched. A checkout gate may
@@ -4711,6 +4717,7 @@ class PlannerAgent:
             return None
         return TaskRole.from_row(row) if row else None
 
+    @planner_budget.turn
     async def _turn(self, message: str) -> str:
         async with self._turn_lock:
             try:
@@ -6085,7 +6092,7 @@ class PlannerAgent:
 
     # --- The task's spend cap ---
 
-    async def _within_budget(self, plan: TaskPlan) -> bool:
+    async def _within_budget(self, plan: TaskPlan, run_kind="planner", step=None, *, same_attempt=False) -> bool:
         """Whether the task may start another run: False once it has spent its project's task cap.
 
         At the cap the task stops for good (``_stop_at_budget``). Without a
@@ -6093,6 +6100,8 @@ class PlannerAgent:
         Carried-on runs finish under their own caps before task-cap stopping;
         reaching the task cap still blocks every new dispatch.
         """
+        if (gate := await planner_budget.within(self, plan, run_kind, step, same_attempt)) is not None:
+            return gate
         cap = self._execution.task_budget_usd
         if cap is None:
             return True

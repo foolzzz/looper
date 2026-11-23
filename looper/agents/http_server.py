@@ -293,7 +293,8 @@ class AgentHTTPServer:
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port
         )
-        attention.use_status_checks(self._checks_now)  # the "needs you" logins, as system/status reads them
+        catchup: attention.CatchupChecks | None = getattr(self._channels, "catchup_checks", None)
+        attention.use_status_checks(self._checks_now, catchup=catchup)
         if self._port == 0:
             self._port = self._server.sockets[0].getsockname()[1]
         from .. import _PROCESS_STARTED_AT
@@ -704,7 +705,10 @@ class AgentHTTPServer:
     async def _call_v1(self, principal: api_v1.Principal, session: str, name: str, data: Any,
                        **kwargs: Any) -> dict[str, Any]:
         # Opening chats or granting their Manager all tools also requires operator consent.
-        requires_consent = principal.kind == "client" or name in (
+        cost_consent = isinstance(data, Mapping) and (
+            (name == "cost_guard.update" and data.get("mode") == "enforce")
+            or (name == "cost_holds.decide" and data.get("new_limit_usd") is not None))
+        requires_consent = cost_consent or principal.kind == "client" or name in (
             "manager_chat_bindings.put", "managers.update", "memory.settings_put")
         return await self._client_ops.call(principal, session, name, data,
                                           require_confirmation=requires_consent, **kwargs)
@@ -1399,6 +1403,8 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
+        channels: Callable[[], list[dict[str, Any]]] = getattr(getattr(self, "_channels", None), "list_channels", list)
+        status["channels"].update({channel["channel_id"]: channel for channel in channels() if "catchup" in channel})
         if getattr(self, "_startup_steps", None) is not None:
             status["startup_steps"] = dict(self._startup_steps)
         if self._worker_pool is not None and (keepers := self._worker_pool.keeper_status()):

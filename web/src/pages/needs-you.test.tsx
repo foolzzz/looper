@@ -48,6 +48,19 @@ afterEach(() => {
 });
 
 describe("Needs you page", () => {
+  it("lists spend holds with their cap and a direct link to continue or stop", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "cost", state: "ok", count: 1, error: null, items: [
+        { key: "cost:1", title: "任务花费等你决定", context: "demo", since: null,
+          href: "#settings/cost", ref: "C-1", facts: { currency: "provider_priced_usd", spent_usd: 2, limit_usd: 2 } }] },
+    ] });
+    await render();
+    const section = host.querySelector('section[aria-label="花费等你决定"]')!;
+    expect(section.textContent).toContain("C-1");
+    expect(section.textContent).toContain("$2.00");
+    expect(section.querySelector("a")?.getAttribute("href")).toBe("#settings/cost");
+  });
+
   it("lists what waits, says what could not be read, and folds the empty sections into one line", async () => {
     vi.mocked(fetchAttention).mockResolvedValue(summary);
     await render();
@@ -90,6 +103,23 @@ describe("Needs you page", () => {
     ] });
     await render();
     expect(host.textContent).toContain("Nothing waits for you");
+  });
+
+  it("shows stopped Lark catch-up with the affected window and recovery action", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "deliveries", state: "ok", count: 1, error: null, items: [
+        { key: "catchup:synthetic", title: "chat-synthetic: 08:00–08:02; retry_exhausted", context: "channel-lark",
+          since: null, href: "#settings/channels", ref: null,
+          facts: { source: "catchup", channel: "lark", state: "dropped",
+            fix: "Check the chat and forward missed messages to Looper." } }] },
+    ] });
+    await render();
+    expect(host.textContent).toContain("Lark catch-up dropped");
+    expect(host.textContent).toContain("Looper never sends these again: check the chat, and resend by hand if it is missing.");
+    expect(host.textContent).toContain("from Lark");
+    expect(host.textContent).toContain("chat-synthetic: 08:00–08:02");
+    expect(host.textContent).toContain("Check the chat and forward missed messages to Looper.");
+    expect(host.querySelector('a[href="#settings/channels"]')).not.toBeNull();
   });
 
   it("says when the summary is off", async () => {
