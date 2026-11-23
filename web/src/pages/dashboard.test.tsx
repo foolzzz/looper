@@ -163,6 +163,23 @@ describe("Dashboard waiting gates", () => {
     expect(window.localStorage.getItem("looper.dashboard.managerMetricsDays")).toBe("1");
   });
 
+  it("shows the writes by category with the failed ones", async () => {
+    vi.mocked(fetchManagerMetrics).mockResolvedValue({
+      ...METRICS_OFF, enabled: true,
+      actions: { by_category: { create: { ok: 3 }, control: { ok: 2, error: 1 } } },
+    });
+    await show();
+    expect(metricsSection().querySelector('[aria-label="Writes"]')!.textContent)
+      .toBe("Writes: created 3 · controlled 2 (1 failed)");
+  });
+
+  it("shows no writes line while no write has a category", async () => {
+    vi.mocked(fetchManagerMetrics).mockResolvedValue({ ...METRICS_OFF, enabled: true, actions: { by_category: {} } });
+    await show();
+    expect(metricsSection().querySelector('[aria-label="Writes"]')).toBeNull();
+    expect(metricsSection().textContent).toContain("Ack");
+  });
+
   it("says the metrics are off, with the way to Settings → Chat, and shows no figures", async () => {
     await show();
     expect(metricsSection().textContent).toContain("Metrics are off");

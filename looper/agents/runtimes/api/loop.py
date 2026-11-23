@@ -327,6 +327,7 @@ class NormaAgentLoop:
                         return event
                 raise CodecError(ErrorKind.PROTOCOL, None, 'stream ended without completion', retryable_stream=True)
 
+            cancel.sent()  # the request is issued here: nothing before this point reached the model
             request_task = asyncio.create_task(consume())
             stopped = asyncio.get_running_loop().create_future()
             unregister = cancel.on_request(request_task.cancel)

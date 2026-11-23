@@ -1,0 +1,1224 @@
+{
+  "commit": "6613380fa48d7e7d2a7103f53ad84621d9c5efb5",
+  "listing": [
+    {
+      "name": "looper_overview",
+      "description": "What is happening now: task counts by group, the running tasks (with their own concurrency limits) and step runs, each active project's running tasks and step runs, today's spend, unhealthy components.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "looper_tasks",
+      "description": "List or search tasks (newest first), or get one task with its steps (including each kind), wait conditions and states, acceptance (accept_when, accept_state, accept_when_text), supplements, latest progress note, result, process record, cost and concurrency limits; room: what the task's agents said to each other in its room (read only).",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "get",
+              "room"
+            ]
+          },
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The task to get (action get, room)."
+          },
+          "query": {
+            "type": "string",
+            "description": "Words to find in a task's id, name, requirement or project (action list)."
+          },
+          "group": {
+            "type": "string",
+            "enum": [
+              "needs_you",
+              "in_progress",
+              "ready",
+              "attention",
+              "completed",
+              "cancelled",
+              "other"
+            ],
+            "description": "Only the tasks in this group (action list)."
+          },
+          "project": {
+            "type": "string",
+            "description": "Only this project's tasks, by name (action list)."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "At most this many (action list; default 20)."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_task_create",
+      "description": "Create a task, ready and not started, once the user confirmed it. A project that does not exist is created only after the user confirms it too (the answer is needs_confirmation). Looper adds the task's configuration and the question whether to start it to your reply.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "requirement",
+          "title",
+          "project"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "requirement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32000,
+            "description": "The clear requirement, with what the user clarified."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A few words naming the task, in the user's language."
+          },
+          "project": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The project's name: an existing one, or a new one the user named."
+          },
+          "work_dir": {
+            "type": "string",
+            "description": "The absolute directory the user named; leave it out for the project's default. A new project needs one."
+          },
+          "workspace_mode": {
+            "type": "string",
+            "enum": [
+              "worktree",
+              "in_place"
+            ],
+            "description": "Only when the user said so: worktree (a git worktree of the directory, on a branch of the task's own, left to the user to merge) or in_place (in the directory itself). Leave it out for the default."
+          },
+          "base": {
+            "type": "string",
+            "description": "Only when the user named one: the branch, tag or commit a worktree task starts from (default: what the directory has checked out)."
+          },
+          "goal_id": {
+            "type": "string",
+            "description": "A short kebab-case id for the task's goal."
+          },
+          "profiles": {
+            "type": "object",
+            "description": "An Agent Profile (id or name) the user chose for some of the task's roles.",
+            "properties": {
+              "planner": {
+                "type": "string"
+              },
+              "worker": {
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_task_control",
+      "description": "start a ready task; stop a running one; restart a stopped, failed or cancelled one (it goes on from its saved plan: accepted steps are kept and not run again); start_over one instead only when the user asks to start from scratch (its steps and plan are deleted and it plans anew; the user confirms it first); cancel a running one (the user confirms it first).",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The task's id (task-...), from looper_tasks."
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "stop",
+              "restart",
+              "start_over",
+              "cancel"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_task_instruct",
+      "description": "Add what the user said to a running task as a supplement: stored with the task, its Planner gets it in a turn and decides whether to change the plan, and every later Worker and Reviewer sees it. To change a task that has not started, use looper_task_update.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "text"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The task's id (task-...), from looper_tasks."
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The user's words for the task, as they said them."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_task_gate_reply",
+      "description": "Pass the user's message to a user gate waiting for their answer (\"Open gates\"): Looper puts the message itself into the gate's discussion, and its Planner answers there. excerpt: only when part of the message is about the gate, that part, copied word for word. end: true when the user wants the Planner to go on with the conclusions so far.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "gate"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The task's id (task-...), from looper_tasks."
+          },
+          "gate": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The gate's id in its task (g1, ...)."
+          },
+          "excerpt": {
+            "type": "string",
+            "description": "The part of the user's message that is about the gate, copied word for word; leave it out to pass on the whole message."
+          },
+          "end": {
+            "type": "boolean",
+            "description": "The user ends the discussion: the Planner closes the gate on what is settled and states its assumptions."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_task_update",
+      "description": "Change a task: its title in any task (a label, only the name it is shown by), its requirement while it has not ended (kept as a new version; a running task's Planner gets the edit in a turn), its directory (a task not started only), or the Agent Profile of some of its roles in any task but a completed one (a Worker or Reviewer from its next step on; a stopped, failed or cancelled task's restart runs with it).",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "task_id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The task's id (task-...), from looper_tasks."
+          },
+          "requirement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32000,
+            "description": "The whole new requirement."
+          },
+          "work_dir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The new absolute directory."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "description": "The new title: a few words naming the task, in the user's language."
+          },
+          "profiles": {
+            "type": "object",
+            "description": "An Agent Profile (its id or its name) for some of the task's roles; null clears the task's own choice of that role (looper_task_update only).",
+            "properties": {
+              "planner": {
+                "type": "string"
+              },
+              "worker": {
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            }
+          },
+          "system_prompt_modes": {
+            "type": "object",
+            "description": "The task's own append or replace choice per role; null returns it to the role setting.",
+            "properties": {
+              "planner": {
+                "enum": [
+                  "append",
+                  "replace",
+                  null
+                ]
+              },
+              "worker": {
+                "enum": [
+                  "append",
+                  "replace",
+                  null
+                ]
+              },
+              "reviewer": {
+                "enum": [
+                  "append",
+                  "replace",
+                  null
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_concurrency",
+      "description": "Change one task's own limit of how many of its Workers or Reviewers run at once, in any task but a completed one (a stopped, failed or cancelled task's restart runs with it); it applies at once, and a null limit clears it to the default. Concurrency is per task: projects have no limits and nothing limits how many tasks run, so a project's limit cannot be changed; say so. The default for every task is the worker or reviewer role's max_concurrency (looper_settings). Lowering a limit stops nothing that runs. looper_tasks get shows a task's limits.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "limits"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The task (task-...)."
+          },
+          "limits": {
+            "type": "object",
+            "description": "The task's new limit of each role to change, from 1 to 64; null clears it.",
+            "properties": {
+              "worker": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64
+              },
+              "reviewer": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_projects",
+      "description": "Projects: list; get one; create (name, and the work_dir and background the user gave; never pick a directory); update its name, work_dir, background or dependency_conditions (a work_dir change asks the user first when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, stopping its running tasks first (the user confirms first); move its directory and files to an absolute to path (omit to to use the configured projects root). Move asks the user first, rewrites command and agent schedule directories, preserves the old path with a symbolic link unless link_old is false, and refuses running tasks, commands or gates without interrupting them. dependency_conditions enables composed step readiness conditions (AND, OR and k-of).",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "get",
+              "create",
+              "update",
+              "delete",
+              "move"
+            ]
+          },
+          "project": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The project (get, update, delete, move)."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "create: its name; update: its new name."
+          },
+          "work_dir": {
+            "type": "string",
+            "description": "Its default absolute directory; '' for none."
+          },
+          "background": {
+            "type": "string",
+            "description": "What its agents should know."
+          },
+          "dependency_conditions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "on",
+              "off",
+              null
+            ],
+            "description": "update: enable, disable or inherit step readiness conditions."
+          },
+          "to": {
+            "type": "string",
+            "description": "move: absolute destination; omit for projects root / safe project name."
+          },
+          "link_old": {
+            "type": "boolean",
+            "description": "move: retain the old path as a symbolic link (default true)."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_agent_profiles",
+      "description": "Agent Profiles: runtime, LLM model and runtime options. List; create; update; delete one nothing uses with confirmation. Select a role's profile with looper_settings.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ]
+          },
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Its id or name (update, delete)."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "create: its name; update: its new name."
+          },
+          "runtime": {
+            "type": "string",
+            "description": "A runtime's id, name or type."
+          },
+          "model": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^model-[a-zA-Z0-9-]+$",
+                "description": "Model id from list."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "provider",
+                  "name",
+                  "protocol"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "^([A-Za-z0-9][A-Za-z0-9._:/-]*)(\\[(?:[A-Za-z0-9._:/-]+|[A-Za-z0-9._-]+=[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+=[A-Za-z0-9._-]+)*)\\])?(?![\\s\\S])"
+                  },
+                  "protocol": {
+                    "type": "string",
+                    "enum": [
+                      "anthropic-messages",
+                      "openai-responses",
+                      "openai-chat"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Choose from the runtime type's effort_levels returned by list; when null, shared levels are low, medium, high, xhigh, max. A null effort uses the runtime's default."
+          },
+          "agent_teams": {
+            "type": "boolean",
+            "description": "Claude Code only."
+          },
+          "web_search": {
+            "type": "boolean",
+            "description": "Default true. Only Grok supports false; false disables web search and web fetch tools."
+          },
+          "custom_prompt": {
+            "type": "string",
+            "description": "Text placed first in this profile's system prompt, before the harness; empty adds nothing."
+          },
+          "fallback_profile_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Fallback Agent Profile id; null clears it."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_providers",
+      "description": "LLM accounts: list vendors and accounts; register an API-key account without its key; update an account's name, endpoints, env, max_concurrency or enabled. Never take or pass a key; the user enters it on the dashboard.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "register",
+              "update"
+            ]
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Account id or name (update)."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "vendor_type": {
+            "type": "string",
+            "enum": [
+              "glm-bigmodel",
+              "glm-zai",
+              "deepseek",
+              "kimi-moonshot-cn",
+              "kimi-moonshot",
+              "cpa",
+              "opencode",
+              "sub2api",
+              "claude-subscription",
+              "codex-login",
+              "grok-login",
+              "cursor-login",
+              "coco-login",
+              "custom"
+            ]
+          },
+          "endpoints": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "protocol",
+                    "base_url"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "protocol": {
+                      "type": "string",
+                      "enum": [
+                        "anthropic-messages",
+                        "openai-responses",
+                        "openai-chat"
+                      ]
+                    },
+                    "base_url": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "env": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "key",
+                    "value"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "max_concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "update: false disables the account: its Agent Profiles keep their selections but do not run until it is enabled again. Built-in login accounts take only this."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_models",
+      "description": "LLM models: list (optionally compatible with a runtime); create; update settings; delete an unused model with confirmation. A model is one provider, exact name and protocol; use its id or full reference. chat_dialect selects the openai-chat translation dialect; null uses the provider vendor default.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ]
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Account id or name (list, create)."
+          },
+          "runtime": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Runtime id, name or type (list)."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^([A-Za-z0-9][A-Za-z0-9._:/-]*)(\\[(?:[A-Za-z0-9._:/-]+|[A-Za-z0-9._-]+=[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+=[A-Za-z0-9._-]+)*)\\])?(?![\\s\\S])",
+            "description": "Exact model name (create)."
+          },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "anthropic-messages",
+              "openai-responses",
+              "openai-chat"
+            ]
+          },
+          "model": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^model-[a-zA-Z0-9-]+$",
+                "description": "Model id from list."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "provider",
+                  "name",
+                  "protocol"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "^([A-Za-z0-9][A-Za-z0-9._:/-]*)(\\[(?:[A-Za-z0-9._:/-]+|[A-Za-z0-9._-]+=[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+=[A-Za-z0-9._-]+)*)\\])?(?![\\s\\S])"
+                  },
+                  "protocol": {
+                    "type": "string",
+                    "enum": [
+                      "anthropic-messages",
+                      "openai-responses",
+                      "openai-chat"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_usd_per_mtok": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_usd_per_mtok": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_read_usd_per_mtok": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_write_usd_per_mtok": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "efforts": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "background_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^([A-Za-z0-9][A-Za-z0-9._:/-]*)(\\[(?:[A-Za-z0-9._:/-]+|[A-Za-z0-9._-]+=[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+=[A-Za-z0-9._-]+)*)\\])?(?![\\s\\S])"
+          },
+          "chat_dialect": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "generic",
+              "openai",
+              "deepseek",
+              "moonshot",
+              "zhipu",
+              "qwen",
+              "vllm",
+              "minimax",
+              "ark",
+              "openrouter"
+            ],
+            "description": "OpenAI Chat Completions dialect; null uses the provider vendor default. Applies only to openai-chat models."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_catalog",
+      "description": "Skills, plugins and MCP servers: list with installs (with project: what reaches it); install an item globally or in a project, for some roles; update an install's roles or enabled; uninstall. Agents load it from their next run.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "install",
+              "update",
+              "uninstall"
+            ]
+          },
+          "project": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A project (list, install); leave out for global."
+          },
+          "item": {
+            "type": "string",
+            "description": "Its id or name (install)."
+          },
+          "install_id": {
+            "type": "string",
+            "description": "From list (update, uninstall)."
+          },
+          "roles": {
+            "type": "array",
+            "description": "Of manager (global only), planner, worker, reviewer; default all."
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_config_export",
+      "description": "Export looper-config/v4 (profiles, providers, settings, channels, skills, MCP, and scenario Manager definitions and task templates when any exist) to a file on this machine, never with secrets; include_projects adds each project and its schedules.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "include_projects": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_costs",
+      "description": "Spending: one task's cost; or a time range's (default all time) by project, or with project by its tasks. Money and subscription equivalent apart.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The task's id (task-...), from looper_tasks."
+          },
+          "project": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The project's name."
+          },
+          "period": {
+            "type": "string",
+            "enum": [
+              "today",
+              "this_week",
+              "this_month"
+            ]
+          },
+          "since": {
+            "type": "string",
+            "description": "A day (YYYY-MM-DD) or ISO date-time."
+          },
+          "until": {
+            "type": "string",
+            "description": "As since; a day counts whole."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_settings",
+      "description": "Settings agents inherit, a later layer winning: shared defaults → role → project → role in project. view (with project: its layers and allowed profiles) includes the gateway (enabled, port, aliases; no key); set values on one layer (no role nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners may choose (an empty list: they may choose any profile); scheduler: the schedules' system settings (the user confirms them first); llmrec: recording retention_days (1–90, default 7) and max_total_mb (256–65536 MiB, default 2048), read by view and changed after confirmation; gateway: change the local gateway (enabled, port, alias_set, alias_delete); each change needs the user's confirmation; to read it use view. Gateway key reveal and rotation are dashboard-only; waits: system limits for wait steps (the user confirms first). knowledge_vault: the notes folder agents read in projects that turn it on, and the folders they may write (the user confirms first). The user confirms shared defaults, limits and higher spend caps first. Model and effort are the profile's. The Manager's current session may run its own profile (/profile).",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "view",
+              "set",
+              "allowed_profiles",
+              "scheduler",
+              "waits",
+              "knowledge_vault",
+              "llmrec",
+              "gateway"
+            ]
+          },
+          "gateway": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "gateway: enabled and/or port, or one alias_set, or one alias_delete. All writes require confirmation; no key operations.",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "port": {
+                "type": "integer"
+              },
+              "alias_set": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "alias",
+                  "model_id"
+                ],
+                "properties": {
+                  "alias": {
+                    "type": "string"
+                  },
+                  "model_id": {
+                    "type": "string"
+                  }
+                }
+              },
+              "alias_delete": {
+                "type": "string"
+              }
+            }
+          },
+          "llmrec": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "llmrec: recording retention limits only; null restores the built-in.",
+            "properties": {
+              "retention_days": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 90
+              },
+              "max_total_mb": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 256,
+                "maximum": 65536
+              }
+            }
+          },
+          "waits": {
+            "type": "object",
+            "description": "waits: max_wait_seconds (longest wait step), min_check_seconds (least gap between checks); null restores the built-in default."
+          },
+          "knowledge_vault": {
+            "type": "object",
+            "description": "knowledge_vault: path (absolute), writable (folders in it), rules_file; {\"path\": null} turns it off."
+          },
+          "project": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The project's name."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "manager",
+              "planner",
+              "worker",
+              "reviewer"
+            ]
+          },
+          "values": {
+            "type": "object",
+            "description": "set: what to change; null inherits.",
+            "properties": {
+              "profile": {
+                "type": "string",
+                "description": "An Agent Profile's id or name."
+              },
+              "harness_prompt": {
+                "type": "string"
+              },
+              "env": {
+                "type": "object",
+                "description": "The layer's whole {NAME: value}; a null value unsets an inherited one."
+              },
+              "run_budget_usd": {
+                "type": "number",
+                "description": "Each run's spend cap."
+              },
+              "max_concurrency": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64,
+                "description": "Role worker or reviewer, no project: how many of each task's Workers or Reviewers run at once when the task sets none."
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 31536000,
+                "description": "With role, no project; 0: none."
+              },
+              "boundaries": {
+                "type": "string",
+                "description": "Shared defaults only: what every run of a role a task's Planner defines ends with."
+              }
+            }
+          },
+          "scheduler": {
+            "type": "object",
+            "description": "scheduler: min_interval_seconds (schedules' least gap), run_timeout_seconds (default), run_retention_days (days a finished schedule run is kept; each schedule keeps its newest 100); null: built-in."
+          },
+          "add": {
+            "type": "array",
+            "description": "allowed_profiles: profile ids or names."
+          },
+          "remove": {
+            "type": "array",
+            "description": "allowed_profiles: as add."
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_schedules",
+      "description": "Schedules (a project's task, or a shell command with kind command, on a time rule): list; get (with latest runs); create (disabled; Looper shows it and asks whether to enable it); update; enable (it then fires unattended: its task, or its command; the user confirms first) or disable; run now (the user confirms first); delete (the user confirms first; an agent schedule's tasks stay; a command schedule is not deleted while its command runs: tell the user it can be deleted once the command finishes and that disabling it stops new fires; if it has a queued run, that run still starts after the running one, even when disabled; disable it only if the user asks (disabling it in the same turn after its delete was refused asks the user first); otherwise the delete removes its runs and messages, and a queued run will not execute; a command schedule has no tasks); reset_planner_session (the user confirms first; the next run starts fresh; a run in progress keeps its session and will not write it back).",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "get",
+              "create",
+              "update",
+              "enable",
+              "disable",
+              "run",
+              "delete",
+              "reset_planner_session"
+            ]
+          },
+          "schedule": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Its id (sched-...) or name."
+          },
+          "project": {
+            "type": "string",
+            "minLength": 1,
+            "description": "create: its project; list: only its schedules; with a schedule's name: its project."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "list: only those enabled (true) or not."
+          },
+          "fields": {
+            "type": "object",
+            "description": "create, update (only those to change; null clears one).",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "command"
+                ],
+                "description": "create only. command: runs `command` with /bin/sh at each firing, no task, no agent and no model spend; for scripts the user names. Default agent."
+              },
+              "command": {
+                "type": "string",
+                "description": "kind command: the shell command, as the user gave it."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "kind command: variables to set; never secrets (use env_file)."
+              },
+              "env_file": {
+                "type": "string",
+                "description": "kind command: a KEY=VALUE file read at each run; only its path is stored."
+              },
+              "success_deadline": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "HH:MM in the schedule's zone: alert once when no run succeeded since the previous deadline."
+              },
+              "alert_failures_after": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Alert after this many consecutive failures; null: default."
+              },
+              "alert_stale_after_seconds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Alert after this many seconds without success; null: default."
+              },
+              "alert_overlap_after": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Alert after this many consecutive overlap skips; 0: off; null: default."
+              },
+              "name": {
+                "type": "string"
+              },
+              "cron": {
+                "type": "string",
+                "description": "5 fields."
+              },
+              "timezone": {
+                "type": "string",
+                "description": "IANA."
+              },
+              "requirement": {
+                "type": "string"
+              },
+              "work_dir": {
+                "type": "string",
+                "description": "'' for the project's."
+              },
+              "overlap": {
+                "type": "string",
+                "enum": [
+                  "skip",
+                  "queue",
+                  "parallel"
+                ]
+              },
+              "max_parallel_runs": {
+                "type": "integer"
+              },
+              "catch_up": {
+                "type": "string",
+                "enum": [
+                  "once",
+                  "skip"
+                ]
+              },
+              "run_timeout_seconds": {
+                "description": "Seconds; null: no limit; 'default' (a new schedule's): the system default."
+              },
+              "run_budget_usd": {
+                "type": "number"
+              },
+              "daily_budget_usd": {
+                "type": "number"
+              },
+              "gate_command": {
+                "type": "string",
+                "description": "Shell; prints each run's input, nothing skips it."
+              },
+              "gate_timeout_seconds": {
+                "type": "integer"
+              },
+              "notify": {
+                "type": "string",
+                "enum": [
+                  "failures",
+                  "alerts",
+                  "always",
+                  "never"
+                ]
+              },
+              "notify_format": {
+                "type": "string",
+                "enum": [
+                  "report",
+                  "deliverable"
+                ],
+                "description": "report (default): operator report; deliverable: delivered text only, agent schedules only."
+              },
+              "user_gates": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "description": "Allow this schedule's tasks to ask for user input when the project also allows user gates. Default off. Waiting counts against the run timeout."
+              },
+              "notify_target": {
+                "type": "object",
+                "description": "{channel, chat}; null: dashboard only."
+              },
+              "profiles": {
+                "type": "object",
+                "description": "{planner, worker, reviewer}: Agent Profile (id or name) per role; a role left out keeps the project's. Set only what the user asks for: a repetitive schedule's Planner may be a cheaper profile."
+              },
+              "task_limits": {
+                "type": "object",
+                "description": "{worker, reviewer}: each run's task's own limits."
+              },
+              "template_key": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "This schedule owner's template key; omitted: keep selection; a new key resets inherited inputs; null clears selection and inputs."
+              },
+              "template_inputs": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Static string values by template input key; omitted: keep inputs unless changing template_key. Supplied values replace all inputs."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "looper_confirm",
+      "description": "Run the operation the user was asked to confirm, when the user's message you answer confirms it; the note before that message gives its confirmation_id. It runs as it was asked, unchanged.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "confirmation_id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "confirmation_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ],
+  "contract": "## Looper's tools (required)\nYou act on Looper only through its tools (looper_*); never through its HTTP API\nor files. Each tool answers JSON: \"status\" is \"ok\", \"needs_confirmation\" or\n\"error\", and \"error.message\" says what to change. Each user message starts with\n\"Projects\" (the existing projects and their default directories) and, when there\nare any, \"Ready tasks\" (created, not started) and \"Open gates\" (questions a\ntask's Planner waits for the user to answer).\n\n- Reading: looper_overview, looper_tasks, looper_costs, looper_config_export\n  (the configuration as a file) and the list, get and view actions of the\n  other tools, whenever the message needs them.\n- Changing anything (creating, starting, stopping, restarting or cancelling a\n  task, adding to it, editing it; projects, Agent Profiles, providers, models,\n  settings, skills and MCP servers; concurrency; schedules) only when the\n  user's message asks for it, in the turn answering it. A turn you run on your\n  own can only read.\n- Never ask for, take or repeat an API key, token or password: the user enters\n  them on the dashboard. If the user pastes one, do not repeat it and\n  never pass it to a tool; direct them to Dashboard → Settings → LLM Providers\n  → their provider → API key.\n- Accounts (looper_providers) hold login or API access; models (looper_models)\n  identify one account, exact name and protocol. Use a model id or the full\n  {provider, name, protocol} reference; list compatible models when unsure.\n  Profiles (looper_agent_profiles) are recipes: runtime, model and runtime\n  options (effort, teams, custom prompt). Select a role's profile with\n  looper_settings.\n- Before looper_task_create: the user confirmed the task, and you know its\n  project and directory. Project: the existing project the user names or\n  clearly means; otherwise ask, offering the closest existing projects or a\n  short name for a new one, and never present a project as decided before the\n  user chose it. Directory: the one the user names (absolute, or starting with\n  ~/); when they name none, leave work_dir out and the project's default is\n  used. A new project, or one without a default, needs the user to name one:\n  ask. Never pick a directory yourself. The task is created ready, not\n  started; start it with looper_task_control only when the user says so.\n- A task under way: what the user adds for it goes to looper_task_instruct (its\n  Planner decides whether to change the plan); a different requirement goes to\n  looper_task_update. A task not started changes with looper_task_update.\n- Before looper_schedules create: you know its project (an existing one; ask\n  as for a task), when it runs (in the server's time zone unless the user\n  names one) and what each run does; then call it, without asking the user to\n  confirm first. It is created disabled; enabling it and running it now are\n  for the user's next message after Looper shows the configuration. A schedule\n  name several projects have: ask which, never pick one yourself.\n- An open gate: when the user answers or discusses the questions of one of the\n  \"Open gates\", pass their message on with looper_task_gate_reply (Looper\n  sends their own words; excerpt only when part of the message is about the\n  gate; end: true when they want its Planner to go on with the conclusions so\n  far); when it could be more than one gate, ask which first. Never answer a\n  gate's questions yourself, and do not pass on a message that is not about one.\n- Looper writes some things to the user itself, after your reply: a new\n  task's or schedule's configuration with the question whether to start or\n  enable it (in a group chat only the question), what a schedule change\n  changed, and what an operation needing confirmation does. Do not repeat\n  them; refer to them.\n- Besides a new task (the user confirms it first, as above), do not ask the\n  user to confirm an operation they asked for, such as creating, enabling,\n  running, changing or deleting a schedule: call its tool. Looper asks them\n  itself where it must: \"needs_confirmation\" (a new project, cancelling or\n  starting over a task, deleting a project, an Agent Profile or a schedule,\n  enabling or running a schedule, disabling a schedule right after its delete was refused, the shared defaults,\n  a role's default concurrency, a higher spend cap, changing what an enabled or queued command schedule runs,\n  changing the directory of a project whose enabled or queued command schedules run in it) means it did not\n  run; say so and wait. When the next message starts with a\n  [Looper] note naming the confirmation and the user confirms, call\n  looper_confirm with its confirmation_id; otherwise do not.\n- After starting or changing a task, do not wait or poll inside the turn (no\n  sleep, no repeated status calls): end the reply. Looper brings the task's\n  questions (gates) and its end to the user.\n- The user switches the Agent Profile of this conversation with /profile\n  and starts a new one with /new; Looper answers both itself. You cannot\n  switch it: when asked to, tell the user to send /profile (it lists the\n  choices). Setting the manager role's profile with looper_settings applies\n  to later sessions only when this one has its own choice.\n- Never say an operation ran unless its answer was \"ok\".\n",
+  "prepared": {
+    "system": "7d14661d728105ddd57740dc865754ac93a3a509613d185b65ec5a9adea55ebf",
+    "command": "56e5a24e2ba98eb1567ed6c69e0bbc20891a1ec0575e091eca1ae0b3bdb91e79",
+    "signature": "72637522228f0d60c219553475b05a885a8d767736f6999bbc39f8e524e73aa7"
+  }
+}

@@ -1,4 +1,4 @@
-"""Worker-only explorer tools, backed by the persistent spawn service."""
+"""Explorer tools of Workers and Planners, backed by the persistent spawn service."""
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +27,23 @@ Omit spawn_ids to list this run's explorers. With the room on, results you did n
 are delivered to your seat; use wait for full evidence. Check unverified results yourself.
 Use looper_agent_cancel when a result is no longer needed. When your run ends, unfinished
 explorers are cancelled. These tools share your run's budget and task limits.
+"""
+
+
+PLANNER_SUBAGENTS_GUIDE = """\
+## Explorers (looper_agent_spawn, looper_agent_wait, looper_agent_cancel)
+This project lets you spawn read-only explorers: bounded investigations of the code that you read before you plan.
+- Spawn before the [PLAN] reply when the plan depends on what the code or the repository holds. Give each a bounded
+  goal, the deliverable and a scope of relative paths; one question per explorer, a few explorers at most.
+- Wait for results inside the turn with looper_agent_wait (wait_seconds up to 120). A result that misses the turn
+  reaches you in the next turn; looper_agent_wait with no spawn_ids lists every explorer you spawned, with its
+  state, and returns the full result.
+- Explorers only read: they cannot edit files, browse the web or spawn agents. Work that changes files is a step for
+  a Worker. They are not the advisor: asking for advice stays the [DECISION] "advise" action.
+- Unverified results (they failed their structure check) are leads, not facts: check them before you rely on them.
+- Cancel an explorer you no longer need with looper_agent_cancel. Your turn ending does not cancel your explorers;
+  the task ending does. They share this task's explorer limits and budget.
+- Like your other changing tools, spawn and cancel work only in a turn Looper sent you.
 """
 
 
@@ -100,6 +117,13 @@ class _Parent:
     recorder: Any
     launch: Any
 
+    @property
+    def record_id(self) -> int | None:
+        return self.recorder.record_id
+
+    def owns(self, row: Mapping[str, Any]) -> bool:
+        return row["parent_record_id"] == self.record_id
+
     def caller(self) -> Spawner:
         usage = self.recorder._usage_so_far
         cost = usage.cost_usd
@@ -111,6 +135,25 @@ class _Parent:
         return Spawner(SpawnParent(self.task_id, self.seat.step_id, self.recorder.record_id),
                        "worker", Path(self.seat.work_dir), self.seat.key,
                        budget_usd=self.launch.max_budget_usd, spent_usd=cost)
+
+
+@dataclass
+class _PlannerParent:
+    """The task's Planner as a spawner: this turn's record is the parent, but it owns every explorer the task's
+    Planner spawned, across turns. Its spend and cap are not live outside the turn, so neither is a budget term."""
+    task_id: str
+    record_id: int
+    work_dir: Path
+    writable_turn: bool
+    turn_cap_usd: float = 0.0
+
+    def owns(self, row: Mapping[str, Any]) -> bool:
+        return row.get("spawner") == "planner"
+
+    def caller(self) -> Spawner:
+        return Spawner(SpawnParent(self.task_id, None, self.record_id), "planner", self.work_dir, seat="planner",
+                       writable_turn=self.writable_turn, budget_usd=None, spent_usd=None,
+                       unrecorded_usd=self.turn_cap_usd)
 
 
 def _view(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -166,6 +209,17 @@ class WorkerSubagents:
         self._locks.pop(run, None)
 
     async def call(self, task_id: str, seat: Any, name: str, raw: Any, *, call_id: str | None = None) -> dict:
+        async def resolve() -> _Parent:
+            parent = self._parents.get(seat.run)
+            if parent is None:
+                raise OpError(ErrorCode.UNAVAILABLE, "this run's explorer tools are not ready")
+            return parent
+        return await self.serve(task_id, seat.run, seat.run, resolve, name, raw, call_id)
+
+    async def serve(self, task_id: str, lock_key: str, who: str, resolve: Any, name: str, raw: Any,
+                    call_id: str | None) -> dict:
+        """One explorer tool call for the parent ``resolve`` finds (inside the parent's lock); shared by Workers and
+        the Planner. ``who`` names the caller in activity and logs."""
         try:
             # The shared validator only accepts arrays of strings. This tool
             # has integer ids; validate that field here without changing old tools.
@@ -178,10 +232,8 @@ class WorkerSubagents:
                         "spawn_ids": ids}
             else:
                 args = check_arguments(_BY_NAME[name].schema, raw)
-            async with self._locks.setdefault(seat.run, asyncio.Lock()):
-                parent = self._parents.get(seat.run)
-                if parent is None:
-                    raise OpError(ErrorCode.UNAVAILABLE, "this run's explorer tools are not ready")
+            async with self._locks.setdefault(lock_key, asyncio.Lock()):
+                parent = await resolve()
                 enabled = await self.service.pool.fetchval("SELECT p.subagents FROM projects p JOIN tasks t "
                     "ON t.project_id=p.id WHERE t.id=$1", task_id)
                 if enabled != "on":
@@ -200,7 +252,7 @@ class WorkerSubagents:
                 row = await self.service.cancel(rows[0]["id"], reason=CancelReason.REQUESTED)
                 if args.get("reason"):
                     from ...db import activity
-                    await activity.insert_activity(task_id=task_id, worker=seat.run, kind="subagent_cancelled",
+                    await activity.insert_activity(task_id=task_id, worker=who, kind="subagent_cancelled",
                         summary=args["reason"], metadata={"spawn_id": row["id"]}, pool=self.service.pool)
                 return {"status": "ok", "result": {"spawn": _view(row)}}
             seconds = args.get("wait_seconds") or 0
@@ -231,12 +283,12 @@ class WorkerSubagents:
         except OpError as exc:
             return {"status": "error", "error": {"code": exc.code.value, "message": str(exc)}}
         except Exception:
-            logger.exception("worker %s explorer tool %s failed", seat.run, name)
+            logger.exception("%s explorer tool %s failed", who, name)
             return {"status": "error", "error": {"code": "unavailable", "message": "Explorer tools unavailable; retry with the same key"}}
 
-    async def _owned(self, parent: _Parent, ids: list[int] | None) -> list[dict]:
+    async def _owned(self, parent: _Parent | _PlannerParent, ids: list[int] | None) -> list[dict]:
         rows = [row for row in await agent_spawns.for_task(parent.task_id, pool=self.service.pool)
-                if row["kind"] == "explorer" and row["parent_record_id"] == parent.recorder.record_id]
+                if row["kind"] == "explorer" and parent.owns(row)]
         if ids is not None:
             by_id = {row["id"]: row for row in rows}
             if any(spawn_id not in by_id for spawn_id in ids):
@@ -244,7 +296,7 @@ class WorkerSubagents:
             rows = [by_id[spawn_id] for spawn_id in ids]
         return rows
 
-    async def _wait(self, parent: _Parent, ids: list[int], seconds: int) -> list[dict]:
+    async def _wait(self, parent: _Parent | _PlannerParent, ids: list[int], seconds: int) -> list[dict]:
         deadline = asyncio.get_running_loop().time() + seconds
         while True:
             rows = await self._owned(parent, ids)
@@ -253,10 +305,10 @@ class WorkerSubagents:
                 return rows
             await asyncio.sleep(min(.1, remaining))
 
-    async def _remaining(self, parent: _Parent) -> dict:
+    async def _remaining(self, parent: _Parent | _PlannerParent) -> dict:
         project = await self.service.pool.fetchrow("SELECT p.* FROM projects p JOIN tasks t ON t.project_id=p.id "
                                                    "WHERE t.id=$1", parent.task_id)
-        usage = await agent_spawns.commitment(parent.task_id, parent.recorder.record_id, pool=self.service.pool)
+        usage = await agent_spawns.commitment(parent.task_id, parent.record_id, pool=self.service.pool)
         limit = await self.service.pool.fetchval("SELECT max_concurrency FROM task_concurrency_limits "
             "WHERE task_id=$1 AND role='subagent'", parent.task_id) or 4
         active = await self.service.pool.fetchval("SELECT count(*) FROM agent_spawns WHERE task_id=$1 "
@@ -284,9 +336,11 @@ class WorkerSubagents:
         for spawn_id in ids:
             if self._waiting.get(spawn_id):
                 continue
-            await self.service.pool.execute("UPDATE agent_spawns s SET delivery='room' FROM tasks t,projects p "
+            # With the room off, only the Planner has a way to get results later: its next turn.
+            await self.service.pool.execute("UPDATE agent_spawns s SET delivery=CASE WHEN COALESCE(p.agent_room,'on')='on' "
+                "THEN 'room' ELSE 'turn' END FROM tasks t,projects p "
                 "WHERE s.id=$1 AND s.task_id=t.id AND t.project_id=p.id AND p.subagents='on' "
-                "AND COALESCE(p.agent_room,'on')='on' AND s.delivered_at IS NULL", spawn_id)
+                "AND (COALESCE(p.agent_room,'on')='on' OR s.spawner='planner') AND s.delivered_at IS NULL", spawn_id)
             await deliver_room(self.service, self.room, spawn_id)
 
     async def start(self) -> None:
@@ -301,8 +355,9 @@ class WorkerSubagents:
                     if caller.budget_usd is not None and caller.spent_usd is not None:
                         await self.service.enforce_parent_budget(caller.parent.record_id, caller.budget_usd,
                                                                  caller.spent_usd)
-                rows = await self.service.pool.fetch("SELECT s.id,s.state,r.status FROM agent_spawns s "
-                    "JOIN llm_records r ON r.id=s.parent_record_id WHERE s.kind='explorer' "
+                rows = await self.service.pool.fetch("SELECT s.id,s.state,s.spawner,r.status,t.status AS task_status "
+                    "FROM agent_spawns s JOIN llm_records r ON r.id=s.parent_record_id "
+                    "JOIN tasks t ON t.id=s.task_id WHERE s.kind='explorer' "
                     "AND (s.finished_at IS NULL OR (s.delivered_at IS NULL AND EXISTS "
                     "(SELECT 1 FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=s.task_id "
                     "AND p.subagents='on' AND COALESCE(p.agent_room,'on')='on')))")
@@ -310,6 +365,14 @@ class WorkerSubagents:
                     try:
                         if row["state"] == "finishing":
                             await self.service.finish(row["id"])
+                        elif row["spawner"] == "planner":
+                            # A Planner's turn ending cancels nothing; its task ending cancels everything.
+                            if row["task_status"] != "running" and row["state"] in ("queued", "asking", "cancelling"):
+                                await self.service.cancel(row["id"], reason=CancelReason.TASK_ENDED)
+                            elif row["state"] == "queued":
+                                self.schedule(row["id"])
+                            elif row["state"] == "cancelling":
+                                await self.service.cancel(row["id"], reason=CancelReason.TASK_ENDED)
                         elif row["status"] != "running":
                             if row["state"] in ("queued", "asking", "cancelling"):
                                 await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
@@ -346,3 +409,39 @@ class WorkerSubagents:
                 except Exception:
                     logger.exception("explorer %s shutdown deferred to recovery", row["id"])
         await asyncio.gather(*list(self._jobs.values()), return_exceptions=True)
+
+
+class PlannerSubagents:
+    """The Planner's explorer tools: the Workers' code path, the same service, jobs and delivery, with the task's
+    Planner as the spawner (its running turn is the parent record) and every explorer it spawned as its own."""
+
+    def __init__(self, workers: WorkerSubagents):
+        self.workers = workers
+
+    async def _turn_cap(self, task_id: str) -> float:
+        """What the running turn may still add to the task's spend: its per-run cap, since its own spend is not
+        known here (the task cap must hold either way). 0 when no cap is set or it cannot be read."""
+        from ..agent_settings import AgentType, load_agent_settings
+        try:
+            project_id = await self.workers.service.pool.fetchval("SELECT project_id FROM tasks WHERE id=$1", task_id)
+            cap = (await load_agent_settings(AgentType.PLANNER, project_id, task_id)).max_budget_usd
+        except Exception:
+            logger.warning("task %s: could not read the Planner's per-run cap", task_id, exc_info=True)
+            return 0.0
+        return float(cap) if cap else 0.0
+
+    async def call(self, task_id: str, name: str, raw: Any, *, call_id: str | None = None,
+                   in_turn: bool = False) -> dict:
+        pool = self.workers.service.pool
+
+        async def resolve() -> _PlannerParent:
+            record_id = await pool.fetchval(
+                "SELECT id FROM llm_records WHERE task_id=$1 AND agent_id=$2 AND status='running' "
+                "ORDER BY id DESC LIMIT 1", task_id, f"planner-{task_id}")
+            if record_id is None:
+                raise Refused(RefusalReason.ROLE, "the Planner has no running turn")
+            work_dir = await pool.fetchval("SELECT work_dir FROM tasks WHERE id=$1", task_id)
+            if not work_dir:
+                raise Refused(RefusalReason.SCOPE, "the task has no working directory to explore")
+            return _PlannerParent(task_id, record_id, Path(work_dir), in_turn, await self._turn_cap(task_id))
+        return await self.workers.serve(task_id, f"planner-{task_id}", f"planner-{task_id}", resolve, name, raw, call_id)

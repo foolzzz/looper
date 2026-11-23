@@ -131,6 +131,52 @@ base it used, with its commit and its reps. The default used to be the newest
 earlier run in `evals/runs/`, which differs from one checkout to the next: use
 `--baseline previous` for that.
 
+### Project skill proposal validation
+
+The three `skill_proposal_*` tasks opt only their disposable projects into proposals. The runner reads back
+pending proposals through the operator API; a reply that merely mentions a skill does not pass the useful case.
+Fake mode scripts a secret-shaped draft in the leak case so the production validator must refuse it while
+allowing the task to complete. A real model may correctly omit that draft entirely. No real-model run has been
+performed for these cases.
+
+Start with the stand-in path (`--mode fake`, no model calls):
+
+```bash
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression run --mode fake \
+  --tasks skill_proposal_useful,skill_proposal_not_needed,skill_proposal_leak --reps 1 \
+  --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
+Pending real-model validation requires separate authorization. Proposed Planner runs (the existing `--model`
+option selects every role, including the Planner):
+
+```bash
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression run --mode real \
+  --tasks skill_proposal_useful,skill_proposal_not_needed,skill_proposal_leak --model sonnet --reps 2 \
+  --max-budget-usd 0.5 --total-cap-usd 1.5 --pg-url "$LOOPER_EVAL_DATABASE_URL"
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression run --mode real \
+  --tasks skill_proposal_useful,skill_proposal_not_needed,skill_proposal_leak --model opus --reps 1 \
+  --max-budget-usd 1 --total-cap-usd 2.5 --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
+Also proposed: two synthetic Lark Manager dialogs, using the Lark CLI stand-in rather than a real chat:
+(1) the operator asks to keep a repeated release procedure as a project skill, and exactly one `via=manager`
+pending proposal is created, with a reply explaining dashboard confirmation; (2) another allowlisted sender
+in a group asks the same, and no proposal is created (`operator_only` if the tool is attempted). Run each
+with Sonnet at two repetitions, then an Opus Manager at xhigh at one repetition. These require channel-specific
+scenario setup: the dashboard-only `prompt_regression dialogs` runner does not represent the second sender's
+group turn. Reserve $1 for each Manager tier; do not substitute a dashboard dialog for that boundary check.
+
+The committed `real-sonnet.json` measured `single_step` at $0.093921 and `dependent_steps` at $0.147312.
+Using the latter for the two-step useful case and the former for each one-step case estimates $0.67 for
+Sonnet's six case/reps. The three `dependent_steps` rows in `real-opus.json` average $0.326118, giving a
+conservative $0.98 for three Opus cases. `dialogs-real-opus.json` measured $8.426588 across 72 dialog/reps
+($0.117036 each); using that rate for all six proposed Manager dialog/reps estimates $0.70. There is no
+Sonnet Manager dialog baseline: that part is a conservative proxy, not a measurement. Total estimate $2.35,
+proposed combined cap $6 ($1.5 + $2.5 + $1 + $1). The runner checks caps between calls; an already-running
+call can exceed the remaining allowance. Existing baselines predate this contract and cannot establish its
+proposal quality; retain all failures and errors when comparing the authorized runs.
+
 ### Repetitions, outcomes and the table
 
 `--reps N` runs every task N times (default 1): rep 1 of every task, then rep

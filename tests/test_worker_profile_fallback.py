@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -35,7 +37,7 @@ def _settings(runtime, executable, *, launcher=Launcher.NATIVE, fallback=None):
     adapter = ADAPTERS[runtime]
     vendor = {"claude-code": VendorType.CLAUDE_SUBSCRIPTION, "codex": VendorType.CODEX_LOGIN,
               "coco": VendorType.COCO_LOGIN, "cursor-agent": VendorType.CURSOR_LOGIN,
-              "grok": VendorType.GROK_LOGIN}[runtime]
+              "grok": VendorType.GROK_LOGIN, "acp": VendorType.ACP_COMMAND}[runtime]
     protocol = ApiProtocol.ANTHROPIC_MESSAGES if runtime == "claude-code" else ApiProtocol.OPENAI_RESPONSES
     provider = ProviderSpec("provider", "Stand-in login", vendor, AuthKind.OAUTH, runtime)
     model = ModelSpec("model", provider.id, "unavailable-model", protocol)
@@ -543,3 +545,86 @@ def test_grok_fallback_uses_each_profiles_web_search_setting(run_primary, monkey
     assert result["status"] == "completed"
     assert [r["metadata"]["profile"]["id"] for r in records] == ["primary", "backup"]
     assert ["--disable-web-search" in r["metadata"]["command"] for r in records] == [not web_search, web_search]
+
+
+@pytest.mark.parametrize("acp_end", ["source", "target"])
+def test_acp_fallback_hop_is_refused_when_loading_stored_profiles(agent_db, monkeypatch, acp_end):
+    async def run():
+        from looper.agents import agent_settings
+        from looper.agents.agent_settings import AgentType
+        from looper.agents.runtimes import RuntimeUnsupported
+        from looper.db import profile_registry
+
+        primary = _settings("acp" if acp_end == "source" else "claude-code", "stand-in", fallback="backup")
+        backup = _settings("claude-code" if acp_end == "source" else "acp", "stand-in")
+        monkeypatch.setattr(profile_registry, "get_profile", AsyncMock(return_value={"id": "backup"}))
+        monkeypatch.setattr(agent_settings, "_stored_profile", lambda row: backup.profile)
+        with pytest.raises(RuntimeUnsupported, match="ACP|acp"):
+            await agent_settings.fallback_settings(primary, AgentType.REVIEWER)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["success_stays_alive", "disabled", "unreadable_settings", "timeout",
+                                  "run_budget", "task_budget", "vault_unavailable"])
+def test_acp_worker_records_refusals_and_ends_the_process_after_a_verdict(agent_db, monkeypatch, tmp_path, case):
+    async def run():
+        from looper.agents import acp_reviewer_settings
+        from looper.agents.runtimes import acp_policy
+
+        _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 0, "max_turns": 0})
+        if case == "timeout":
+            monkeypatch.setattr(worker, "_load_settings", AsyncMock(return_value=worker.WorkerSettings(0.2, 0, "ROLE")))
+        settings = _settings("acp", "", fallback="backup")
+        if case == "run_budget":
+            settings = replace(settings, max_budget_usd=0.10)
+        if case == "task_budget":
+            agent_db.get_task_project.return_value = {"task_budget_usd": 1.0}
+        monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
+        config = acp_reviewer_settings.AcpReviewerSettings(
+            enabled=case != "disabled", command=(sys.executable, str(Path(__file__).with_name("fake_acp.py")),
+                                                "--scenario", "hang" if case == "timeout" else "success_stays_alive"),
+            model="unavailable-model", account="Stand-in login")
+        read = AsyncMock(return_value=config, side_effect=ValueError("acp_reviewer.command unreadable")
+                         if case == "unreadable_settings" else None)
+        monkeypatch.setattr(acp_reviewer_settings, "read", read)
+        policy = SimpleNamespace(wrap=lambda: list(config.command), environment=lambda env: env,
+                                 record={"reason": "ok"}, cleanup=Mock())
+        prepare = AsyncMock(return_value=policy)
+        monkeypatch.setattr(acp_policy, "prepare_policy", prepare)
+        vault_root = tmp_path / "knowledge"
+        monkeypatch.setattr(worker.vault, "load", AsyncMock(return_value=(None, "unreadable vault")
+            if case == "vault_unavailable" else (SimpleNamespace(path=vault_root), None)))
+        spawn = worker.proc_tree.spawn
+        processes = []
+        async def tracked_spawn(*args, **kwargs):
+            process = await spawn(*args, **kwargs)
+            processes.append(process)
+            return process
+        monkeypatch.setattr(worker.proc_tree, "spawn", tracked_spawn)
+        fallback = AsyncMock()
+        monkeypatch.setattr(worker, "fallback_settings", fallback)
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        execution = pool._execute(_step_envelope(tmp_path, verify=True), is_verify=True)
+        if case == "timeout":
+            with pytest.raises(asyncio.TimeoutError, match=r"ACP reviewer .*0\.2 s"):
+                await asyncio.wait_for(execution, 8)
+        else:
+            result = await asyncio.wait_for(execution, 8)
+            assert result["passed"] is (case == "success_stays_alive")
+        fallback.assert_not_awaited()
+        assert agent_db.finish_record.await_args.kwargs["outcome"] == (
+            "passed" if case == "success_stays_alive" else "run_failed")
+        if case in {"success_stays_alive", "timeout"}:
+            assert len(processes) == 1 and processes[0].returncode is not None
+            assert agent_db.finish_record.await_args.kwargs["cost_usd"] is None
+            policy.cleanup.assert_called_once()
+            assert prepare.await_args.kwargs["runtime_root"] == tmp_path / "runtime"
+            assert prepare.await_args.kwargs["vault"] == vault_root
+        else:
+            assert not processes
+            assert "acp_reviewer" in result["summary"]
+            if case in {"run_budget", "task_budget"}:
+                assert "budget" in result["summary"]
+                prepare.assert_not_awaited()
+                assert agent_db.add_metadata.await_args.args[1]["acp_write_policy"]["reason"] == "budget_cap_unsupported"
+    asyncio.run(run())
