@@ -4080,8 +4080,8 @@ can do the import. A layer `model` or `effort`, and a provider `protocols`,
 `base_url` or `models`, are retired fields and stop the import before it
 writes. Unknown top-level fields are refused the same way. Role and task
 prompt-mode choices keep their existing meaning. Prompt-eval comparisons
-accept only `looper-prompt-eval/v2` for tasks and `looper-manager-dialogs/v2`
-for dialogs.
+accept `looper-prompt-eval/v2` and `looper-prompt-eval/v3` for tasks (a new run
+writes v3) and `looper-manager-dialogs/v2` for dialogs.
 
 Secrets (MCP environment and header values, a provider's API key, a channel
 config's keys other than its sender allowlist, its `operator_sender_id`, `*_env` names and description)

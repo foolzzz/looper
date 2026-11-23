@@ -106,7 +106,8 @@ each Planner reply, `planner_violation_reasons`), and, on a v3 row, `attempts`,
 `first_pass_steps`, `accepted_steps`, `failure_kinds` and `cost_split` (first
 and retry; planning, execution, review and advisor; `unattributed`; both billing
 bases as `metrics.step_attempts` returned them, with a Worker group named
-`execution`). Whether the Planner modified files itself (its file-editing tool
+`execution`). A failed read of that operation, or a read whose `missing_attempts`
+is not zero, leaves the three counts off the row. Whether the Planner modified files itself (its file-editing tool
 calls, and files changed while only a Planner turn ran), the tool calls its runtime refused the read-only Planner
 (`planner_denials`, from its runs' `permission_denials`), the task's vault commits (`vault_writes`, identified by
 the exact `looper: <task_id> ` subject prefix), their unique committed paths outside `codex-mem/`
@@ -152,7 +153,8 @@ midway (an interrupt, a setup that failed) has `aborted` with the reason. A
 comparison accepts `looper-prompt-eval/v2` and `looper-prompt-eval/v3` for tasks
 (a new run writes v3) and `looper-manager-dialogs/v2` for dialogs. A v2 task row
 has no attempt fields. The three columns added in v3 show an en dash (`–`) for
-a missing value, never 0. The dialog table shows a row that
+a missing value, never 0, including a task whose attempt read failed or whose
+`missing_attempts` is not zero. The dialog table shows a row that
 omits `rep` as rep 1. A row cancelled at its timeout or at the cap is an error.
 
 In the table, success is `k/n`, the passes over the scored reps, with ` · e
