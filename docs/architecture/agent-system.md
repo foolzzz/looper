@@ -213,8 +213,9 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
   commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
   path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
-  Admission yields to buffered output and rechecks immediately before writing. A failed or late write queues
-  the message. If a result arrives during the write's drain, the resident process is retired before queue
+  Admission lets OS read callbacks and the output reader run, then rechecks before and after writing,
+  even when a short line's drain returns immediately. A failed or late write queues the message.
+  If a result arrives after the write, the resident process is retired before queue
   fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
   merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
   path. The original tool binding stays in place. The final reply goes to
