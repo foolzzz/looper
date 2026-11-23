@@ -118,9 +118,13 @@ def test_disabled_or_unset_persona_matches_main(monkeypatch, tmp_path, stored, s
 
 @pytest.mark.parametrize("value", [persona.Persona(), persona.Persona(name="管家", tone="简洁、直接", notes="private-notes")])
 def test_the_planner_prompt_keeps_its_main_hash_with_or_without_persona(value):
-    persona.set_current(value)
-    planner = PlannerAgent(task_id="task-baseline", runtime_root=Path("."))
-    prompt = planner._system_prompt(
-        TaskPlan("p", "g", "Build the project", ""), PlannerSettings("Plan carefully.", 60, 0, 0),
-        EMPTY_KNOWLEDGE, Harness("Work carefully.", Layer.BUILTIN))
-    assert prompt.sha256 == "9bda3e3a4ac7dd6455a3c527df7be9e10c8c0e8e71a5a40ff34000806c73e858"
+    previous = persona.current()
+    try:
+        persona.set_current(value)
+        planner = PlannerAgent(task_id="task-baseline", runtime_root=Path("."))
+        prompt = planner._system_prompt(
+            TaskPlan("p", "g", "Build the project", ""), PlannerSettings("Plan carefully.", 60, 0, 0),
+            EMPTY_KNOWLEDGE, Harness("Work carefully.", Layer.BUILTIN))
+        assert prompt.sha256 == "9bda3e3a4ac7dd6455a3c527df7be9e10c8c0e8e71a5a40ff34000806c73e858"
+    finally:
+        persona.set_current(previous)

@@ -8,15 +8,68 @@ from types import SimpleNamespace
 import pytest
 
 from manager_mcp_stand_in import manager_endpoint, mcp_manager_claude
-from looper.agents import persona
+from looper.agents import operator_identity, persona, session_routing
 from looper.agents.bus import MessageBus
 from looper.agents.managers_api import ManagerDefinition
 from looper.agents.message import MessageEnvelope, MessageType, channel_address
-from looper.agents.session_routing import SessionKey, SessionKind
+from looper.agents.session_routing import SessionKind
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from tests.db_support import DSN, run_db, v1_api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.mark.parametrize("stable,cleared", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("channel", ["lark", "telegram"])
+@pytest.mark.parametrize("group", [False, True])
+def test_shared_main_hides_persona_from_other_chats(monkeypatch, tmp_path, stable, cleared, channel, group):
+    async def check(pool):
+        monkeypatch.setattr(session_routing, "_routing_enabled", False)
+        async def operator(_):
+            return "operator-test"
+        monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
+        if stable:
+            await pool.execute("INSERT INTO system_settings (key,value) VALUES ('manager.stable_context','true')")
+        await persona.update({"name": "管家", "tone": "private-tone", "notes": "private-notes"})
+        # Enough ordinary state to make a persona-removal diff small: it must still never be sent.
+        await pool.executemany("INSERT INTO projects (id,name) VALUES ($1,$2)",
+                              [(f"p-{i}", f"project-{i}") for i in range(30)])
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(
+            claude_bin=mcp_manager_claude(tmp_path, [[], [], []]), work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        def turns():
+            return [json.loads(line) for line in (tmp_path / "turns.jsonl").read_text().splitlines()]
+        def message(source, context):
+            return MessageEnvelope.create(source=channel_address(source), target=manager.agent_address,
+                message_type=MessageType.USER_MESSAGE, payload={"text": "hello", "channel_context": context})
+        own = message("web", {"session_id": "persona-chat"})
+        try:
+            async with manager_endpoint(manager, bus, SimpleNamespace(has_planner=lambda _: False), tmp_path):
+                await manager._handle(own)
+                assert "  Name: 管家\n  Tone: private-tone\n  Notes: private-notes" in turns()[-1]
+                shown = manager._state_shown
+                if cleared:
+                    await persona.update(dict.fromkeys(("name", "tone", "notes")))
+                await manager._handle(message(channel, {"chat_id": "-12345" if group else "12345",
+                    "chat_type": "group" if group else "p2p", "sender_id": "other-test"}))
+                outsider = turns()[-1]
+                assert all(text not in outsider for text in ("Persona", "管家", "private-tone", "private-notes"))
+                assert "Projects:" in outsider
+                assert manager._state_shown is shown
+                if stable:
+                    assert outsider.startswith("Looper state (rev ")
+                    assert shown is not None
+                await manager._handle(own)
+                if stable:
+                    assert turns()[-1].startswith("Looper state: changes" if cleared else "Looper state: unchanged")
+                else:
+                    assert "  Tone: private-tone\n  Notes: private-notes" in turns()[-1]
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    run_db(check, monkeypatch, timeout=40)
 
 
 @pytest.mark.parametrize("stable", [False, True])
@@ -77,22 +130,62 @@ def test_operator_edits_reach_the_next_turn_and_clear_without_restarting(monkeyp
     run_db(check, monkeypatch, timeout=60)
 
 
-@pytest.mark.parametrize("kind", [SessionKind.MAIN, SessionKind.GROUP, SessionKind.DM])
-def test_a_routed_session_gets_only_its_allowed_persona_fields(monkeypatch, tmp_path, kind):
+@pytest.mark.parametrize("entry,kind", [
+    ("web", SessionKind.MAIN), ("api", SessionKind.MAIN),
+    ("lark", SessionKind.MAIN), ("telegram", SessionKind.MAIN),
+    ("group", SessionKind.GROUP), ("dm", SessionKind.DM),
+])
+def test_a_routed_session_gets_only_its_allowed_persona_fields(monkeypatch, tmp_path, entry, kind):
     async def check(pool):
         await persona.update({"name": "管家", "address": "unused-address", "tone": "private-tone", "notes": "private-notes"})
         manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
-        route = SessionKey(kind) if kind is SessionKind.MAIN else SessionKey(kind, "channel-lark", "synthetic-chat")
+        async def operator(_):
+            return "operator-test"
+        monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
+        channel = entry if entry in ("lark", "telegram") else "web" if entry in ("web", "api") else "lark"
+        context = {"chat_id": "12345", "chat_type": "group" if entry == "group" else "p2p",
+                   "sender_id": "other-test" if entry == "dm" else "operator-test"}
+        payload = {"text": "hello", "channel_context": context}
+        if entry == "api":
+            context["client"] = {"id": "synthetic-client", "name": "Test client"}
+        envelope = MessageEnvelope.create(source=channel_address(channel), target=manager.agent_address,
+                                          message_type=MessageType.USER_MESSAGE, payload=payload)
+        route = await manager._router._user_key(envelope)
+        assert route.kind is kind
         session = manager._router.session(route)
         token = manager._current.set(session)
         try:
-            text = await manager._build_user_message("hello", channel="Channel: synthetic chat")
+            text = await manager._build_user_message("hello", channel="Channel: synthetic chat", envelope=envelope)
             assert text.startswith("Persona (") and "  Name: 管家" in text
             assert ("private-tone" in text) is (kind is SessionKind.MAIN)
             assert ("private-notes" in text) is (kind is SessionKind.MAIN)
             assert "unused-address" not in text
+            if kind is not SessionKind.MAIN:
+                assert "tone" not in text.splitlines()[0]
         finally:
             manager._current.reset(token)
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_unverified_direct_sender_gets_no_persona(monkeypatch, tmp_path, caplog, unavailable):
+    async def check(pool):
+        async def operator(_):
+            if unavailable:
+                raise RuntimeError("synthetic identity outage")
+            return None
+        monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
+        await persona.update({"name": "管家", "tone": "private-tone", "notes": "private-notes"})
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        envelope = MessageEnvelope.create(source=channel_address("lark"), target=manager.agent_address,
+            message_type=MessageType.USER_MESSAGE, payload={"text": "hello", "channel_context": {
+                "chat_id": "synthetic-dm", "chat_type": "p2p", "sender_id": "other-test"}})
+        text = await manager._build_user_message("hello", envelope=envelope)
+        assert "Projects:" in text and "Persona" not in text
+        assert "private-tone" not in text and "private-notes" not in text
+        if unavailable:
+            assert "could not read persona audience identity" in caplog.text
 
     run_db(check, monkeypatch, timeout=30)
 

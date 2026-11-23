@@ -1,7 +1,7 @@
 """The default Manager's persona (system setting ``manager.persona``).
 
 ``section`` is a pure renderer. ``manager_persona_context`` compiles the live value as the default Manager's
-first state section, omitting the address and trimming non-main sessions to the name.
+first state section, omitting the address and trimming by message audience and session isolation.
 
 Empty, including whitespace-only, is unset. The value is kept in memory: ``load`` at startup, ``update`` after a
 write. An unreadable stored value loads as unset and logs ``manager.persona is unreadable`` once per payload.
