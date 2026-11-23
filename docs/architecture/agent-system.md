@@ -6393,9 +6393,10 @@ adds “进摘要的事件”: up to ten newest owned digest or settled importan
 events, plus the remaining count. It uses the same first digest date's local
 midnight as its lower bound. `triage_ids` stores the exact read with the claim;
 `morning_brief_triage` consumes it in the sent/uncertain transaction or recovery.
-Refusals and released claims consume nothing. Deferred `source = triage` rows
-are excluded from the ordinary deferred-message section. These model-derived
-fields are plain operator-visible text, never model input. Every section empty means
+Refusals and released claims consume nothing. While triage is enabled, deferred
+`source = triage` rows are excluded from the ordinary deferred-message section.
+Event titles, chat names and summaries lose mention markup and escape Markdown;
+these fields are operator-visible text, never model input. Every section empty means
 nothing is sent. The switch, whether the
 channel is enabled and who the operator is are read again after the summary is
 collected and again immediately before the post. The switch is read again after
