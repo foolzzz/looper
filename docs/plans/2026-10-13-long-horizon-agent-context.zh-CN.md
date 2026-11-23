@@ -1017,7 +1017,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
-- **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，项目开关仍默认关且没有启用入口；验证见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。下一步按 RFC PR2 接 Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消；规划者入口、运行树界面和账号准入分别留给后续 PR。
+- **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消已实现，项目开关仍默认关，见[Worker 工具验收](../validation/platform-subagents-worker-tools.zh-CN.md)；真实模型运行与评测待授权执行。规划者入口、运行树界面、项目设置入口和账号准入分别留给后续 PR。
 - **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审。执行器、`step_check_runs` 与 operator-only `task_evidence.get` 已在本分支实现，复用私有检出及写通知，带资源限制、产物保留和重启恢复；Worker 成功后写证据，仍不影响决策。异常证据收尾及保存检查后再关闭的计划文本已补回归；关闭状态按 `main` 对照 prompt 和步骤行，定义仍供操作者读回。macOS local 使用网络与 job-creation 双重禁止并预检，Linux `unshare -rn` 尚未实测。证据门、Reviewer 证据、任务页展示与结果/渠道输出待后续阶段，真实模型评测未运行。
 - **助理人格接线**（本分支已实现，未设置即关闭，依赖 #1533）：默认 Manager 把名字、语气和补充说明放在 `_sections()` 第一段，沿用稳定块更新规则；不注入称呼、不增加工作时间，群和他人私聊共用 main 时不注入人格，独立会话只给名字；受限回合发去人格的完整稳定块且不覆盖 main 的已展示状态，场景管家和其他角色不继承。固定 main 哈希、下一轮更新/清空、稳定块及隔离服务重启由定向测试覆盖；真实模型语气和改名评测待批准，尚未执行（[RFC §5.2](../architecture/rfcs/assistant-layer-v0.zh-CN.md#52-12-人格与称呼)）。
 

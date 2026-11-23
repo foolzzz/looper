@@ -100,3 +100,29 @@ def test_merged_migrations_remain_discoverable_and_upgrade(migration_name, rollb
                                        migration_name)
 
     asyncio.run(test())
+
+
+@pytest.mark.parametrize("missing_marker", [False, True])
+def test_room_delivery_resumes_validation_without_replacing_constraint(missing_marker):
+    async def test():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("ALTER TABLE room_messages DROP CONSTRAINT room_messages_kind_check, "
+                "ADD CONSTRAINT room_messages_kind_check CHECK (kind IN "
+                "('info','question','answer','interface','announce','notice','escalation'))")
+            async with conn.transaction():
+                await connection.ensure_schema(conn)
+            constraint = await conn.fetchrow("SELECT oid,convalidated FROM pg_constraint "
+                "WHERE conrelid='room_messages'::regclass AND conname='room_messages_kind_check'")
+            assert not constraint["convalidated"]
+            if missing_marker:
+                await conn.execute("DELETE FROM schema_migrations WHERE name='subagent_room_delivery'")
+            await connection.ensure_schema(conn)
+            validated = await conn.fetchrow("SELECT oid,convalidated FROM pg_constraint "
+                "WHERE conrelid='room_messages'::regclass AND conname='room_messages_kind_check'")
+            assert validated["oid"] == constraint["oid"] and validated["convalidated"]
+            assert await conn.fetchval("SELECT count(*) FROM schema_migrations WHERE name IN "
+                                      "('subagent_room_delivery','subagent_room_delivery_online')") == 2
+            assert not await connection.schema_change_pending(conn)
+
+    asyncio.run(test())

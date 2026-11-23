@@ -36,7 +36,10 @@ def _surfaces() -> dict[str, str]:
             for tool in value if isinstance(value, (tuple, list)) else (value,):
                 if isinstance(tool, Tool):
                     all_tools[tool.name] = tool.listing()
-    result["tools:all"] = _hash(all_tools)
+    # New explorer tools are discovered by the level inventory, but never
+    # appear on a disabled run's MCP listing.
+    from looper.agents.ops.subagents import TOOL_NAMES
+    result["tools:all"] = _hash({key: tool for key, tool in all_tools.items() if key not in TOOL_NAMES})
     result["tools:manager"] = _hash([tool.listing() for tool in service.MANAGER_TOOLS])
     result["tools:planner"] = _hash([tool.listing() for tool in (*planner.TOOLS, *planner.ROLE_TOOLS)])
     result["tools:worker"] = _hash([tool.listing() for tool in (*room.tools_for(MemberKind.WORK), *vault.TOOLS)])
@@ -46,3 +49,12 @@ def _surfaces() -> dict[str, str]:
 def test_existing_prompts_and_tool_listings_remain_byte_identical() -> None:
     baseline = json.loads((Path(__file__).parent / "fixtures" / "subagents_default_off.json").read_text())
     assert _surfaces() == baseline["surfaces"]
+
+
+def test_disabled_run_grant_lists_exactly_the_existing_worker_tools() -> None:
+    from looper.agents.ops import room
+    from looper.agents.room import MemberKind, RoomService, Seat
+    ops = room.RoomOps(RoomService(), url="http://localhost:1")
+    token = ops.issue("task", Seat("worker@s1", "worker", MemberKind.WORK, run="worker-1"))
+    assert ops.listing("Bearer " + token) == [tool.listing() for tool in room.tools_for(MemberKind.WORK)]
+    assert "subagents" not in ops.export_run("worker-1")
