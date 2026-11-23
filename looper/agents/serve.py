@@ -925,8 +925,10 @@ async def _run_agent_system_watched(
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
                                   message_backup=db_backup.message_backup_for(ops, runtime_root))
             # The advisor's alerts go to the operator's chat through the same channels.
-            from . import advisor_alerts
+            from . import advisor_alerts, outbound_hook
             advisor_alerts.configure(registry.notify)
+            # So do the outbound review's block notices.
+            outbound_hook.configure(registry.notify)
             # It notes the user gates that have waited for the user for their project's reminder interval; the courier
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()
@@ -1196,6 +1198,7 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("cursor_login", "Cursor login"),), (("ttadk", "TTADK"),),
         (("llmrec", "Model request recording"),), (("gateway", "Local gateway"),),
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
+        (("provider_limits", "Provider quotas"),),
     )
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
@@ -1229,6 +1232,7 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_lark_cli, lark_enabled),
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),
+            self_check.provider_limit_checks(),
         )
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])

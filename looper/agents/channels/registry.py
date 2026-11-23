@@ -176,29 +176,30 @@ class ChannelRegistry:
         return f"the bot {channel_id} is not running: enable it in Settings → Channels"
 
     async def notify(self, channel_id: str, chat: str, text: str, *,
-                     proactive: ProactiveRef | None = None, group: bool = False) -> tuple[bool, str | None]:
-        """Send a schedule's message through the running channel ``channel_id``: whether it was sent, and why
-        not."""
+                     idempotency_key: str | None = None, proactive: ProactiveRef | None = None,
+                     group: bool = False) -> tuple[bool, str | None]:
+        """Send through the running channel, retaining the event key across caller retries when supplied."""
         adapter = self._channels.get(channel_id)
         if adapter is None:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
                                               group=group, external_id=None,
-                                              outcome=PostOutcome.REJECTED.value)
+                                              outcome=PostOutcome.REJECTED.value, dedupe_key=idempotency_key)
             return False, self._not_running(channel_id)
         try:
-            receipt = await adapter.notify(chat, text)
+            receipt = await adapter.notify(chat, text, **({"idempotency_key": idempotency_key}
+                                                        if idempotency_key is not None else {}))
         except Exception:
             self.record_delivery(channel_id, False)
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat, group=group,
-                                              external_id=None, outcome=PostOutcome.UNKNOWN.value)
+                                              external_id=None, outcome=PostOutcome.UNKNOWN.value, dedupe_key=idempotency_key)
             raise
         self.record_delivery(channel_id, receipt.success)
         if proactive is not None:
             turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
                                           group=group,
-                                          external_id=receipt.external_id, outcome=receipt.result.value)
+                                          external_id=receipt.external_id, outcome=receipt.result.value, dedupe_key=idempotency_key)
         return receipt.success, receipt.error
 
     async def post(self, channel_id: str, target: NotifyTarget, text: str, *,
