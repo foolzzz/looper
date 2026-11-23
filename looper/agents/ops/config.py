@@ -372,6 +372,17 @@ async def _profiles(call: Call) -> dict[str, Any]:
         _required(arguments, action, "profile")
         profile = _profile(registry, arguments["profile"])
     if action in ("create", "update"):
+        from ..acp_guards import AcpSelectionError, refuse_type
+
+        try:
+            if action == "update":
+                refuse_type(profile["runtime_type"], "looper_agent_profiles")
+            if arguments.get("runtime"):
+                runtime = by_id_or_name(registry["runtimes"], arguments["runtime"], id_key="runtime_id",
+                                        what="runtime", keys=("name", "type"))
+                refuse_type(runtime["type"], "looper_agent_profiles")
+        except AcpSelectionError as exc:
+            raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
         fields = {**_given(arguments, ("name", "effort", "agent_teams", "web_search", "custom_prompt", "fallback_profile_id"),
                           clears=("effort", "fallback_profile_id")),
                   **await _profile_parts(registry, arguments)}
@@ -819,7 +830,7 @@ TOOLS: tuple[Tool, ...] = (
                 "action": {"type": "string", "enum": ["list", "register", "update"]},
                 "provider": {"type": "string", "minLength": 1, "description": "Account id or name (update)."},
                 "name": {"type": "string", "minLength": 1},
-                "vendor_type": {"type": "string", "enum": [v.value for v in VendorType]},
+                "vendor_type": {"type": "string", "enum": [v.value for v in VendorType if v.value != "acp-command"]},
                 # Structured arrays are checked by the shared HTTP registry, beyond check_arguments' subset.
                 "endpoints": {"oneOf": [{"type": "array", "items": _PROVIDER_ENDPOINT}]},
                 "env": {"oneOf": [{"type": "array", "items": {

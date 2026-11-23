@@ -6,6 +6,8 @@ import { ProjectSkillsSection } from "@/components/project-skills";
 import { SkillHistory } from "@/components/skill-history";
 import {
   fetchCatalog,
+  fetchContextBudget,
+  fetchSkillProposals,
   fetchProjectInstalls,
   fetchSkillVersions,
   rollbackProjectSkill,
@@ -23,6 +25,8 @@ vi.mock("@/lib/api", async (original) => ({
   fetchSkillVersions: vi.fn(),
   rollbackProjectSkill: vi.fn(),
   fetchProjectSkill: vi.fn(),
+  fetchContextBudget: vi.fn(),
+  fetchSkillProposals: vi.fn(),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -151,6 +155,16 @@ beforeEach(() => {
   vi.mocked(rollbackProjectSkill).mockResolvedValue({} as never);
   vi.mocked(fetchProjectInstalls).mockResolvedValue(installs());
   vi.mocked(fetchCatalog).mockResolvedValue({ items: [] } as unknown as Catalog);
+  vi.mocked(fetchSkillProposals).mockResolvedValue({ mode: "off", proposals: [] });
+  vi.mocked(fetchContextBudget).mockResolvedValue({
+    limit: 8000,
+    counts_plugin_skills: false,
+    roles: {
+      planner: { chars: 1, skills: 1, over: false },
+      worker: { chars: 1, skills: 1, over: false },
+      reviewer: { chars: 1, skills: 1, over: false },
+    },
+  });
   rolledBack.mockClear();
   host = document.createElement("div");
   document.body.appendChild(host);
