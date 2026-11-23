@@ -78,9 +78,11 @@ def test_default_off_preserves_chat_settings_view_and_writes(settings):
     async def check():
         await chat_settings.load()
         assert await chat_settings.settings_view() == {
-            "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
+            "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False,
+            "session_routing_enabled": False, "max_resident": 2}
         assert await chat_settings.update({"research_order": False}) == {
-            "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False}
+            "stop_enabled": False, "completion_turns": "off", "research_order": False, "ledger_enabled": False,
+            "session_routing_enabled": False, "max_resident": 2}
         assert settings[1] == [{"manager.research_order": "false"}]
         with pytest.raises(ValueError, match="unknown setting"):
             chat_settings.checked({"delivery_guard_enabled": True})

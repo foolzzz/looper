@@ -10,6 +10,11 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, Awaitable, Protocol
+from enum import Enum
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from uuid import uuid4
 
 from . import lark_cli
 from .lark_content import ResourceRef
@@ -23,7 +28,13 @@ _CONSUMER_STOP_GRACE_SEC = 5.0
 READ_FIRST_SECONDS = 7.0
 
 
+class LarkTransportKind(str, Enum):
+    CLI = "cli"
+    BOT = "bot"
+
+
 class LarkTransport(Protocol):
+    kind: LarkTransportKind
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
                    idempotency_key: str | None = None, return_id: bool = False) -> str | None: ...
@@ -37,6 +48,14 @@ class LarkTransport(Protocol):
     async def names(self, open_ids: Iterable[str]) -> dict[str, str]: ...
     def available(self) -> bool: ...
     async def aclose(self) -> None: ...
+
+
+# All protocol writes require explicit wrappers. Forward only reviewed reads/receive state, so a newly added
+# transport write cannot silently bypass the gateway even before it is added to the protocol.
+LARK_WRITE_METHODS: frozenset[str] = frozenset({'send', 'reply', 'edit', 'react'})
+_LARK_READ_ATTRIBUTES = frozenset({'download', 'events', 'names', 'available', 'consumer_started',
+                                 'get_message', 'list_messages', 'list_threads', 'list_thread_messages',
+                                 'chat_mode'})  # card authorization checks whether the source chat is direct
 
 
 def _batch_items(batch: asyncio.Future[dict[str, Any]], message_id: str) -> list[dict[str, Any]] | None:
@@ -82,6 +101,8 @@ async def _stop_consumer(process: asyncio.subprocess.Process) -> None:
 
 class CliTransport:
     """Send through lark-cli and consume one event subprocess per connection."""
+
+    kind = LarkTransportKind.CLI
 
     def __init__(self, profile: str = "") -> None:
         self._profile = profile
@@ -322,3 +343,105 @@ class CliTransport:
                 logger.warning("lark event consumer stopped (exit %s); its last output: %s",
                                process.returncode, " | ".join(stderr_tail))
 
+
+
+@dataclass
+class _MessageScope:
+    message_id: str
+    source: str = "answer"
+    chat: str | None = None
+    durable: bool = True
+    part: int = 0
+
+
+class OutboundDeliveryError(lark_cli.LarkCliError):
+    """Keep the outbox receipt's refusal/unknown distinction for existing callers."""
+
+    def __init__(self, receipt: Any) -> None:
+        from .base import PostOutcome
+
+        super().__init__(receipt.error or "outbound delivery is still pending",
+                         code=230011 if receipt.parent_gone else None)
+        self._rejected = receipt.result is PostOutcome.REJECTED
+
+    @property
+    def refused(self) -> bool:
+        return self._rejected
+
+
+class GatedLarkTransport:
+    """One switch for both Lark transports; reads keep the inner transport's behavior."""
+
+    def __init__(self, inner: LarkTransport, gateway: Any, *, enabled: Callable[[], bool],
+                 outbox: Any = None) -> None:
+        self.inner = inner
+        self.gateway = gateway
+        self.outbox = outbox
+        self._enabled = enabled
+        self._scope: ContextVar[_MessageScope | None] = ContextVar("lark_outbound_scope", default=None)
+
+    @property
+    def kind(self) -> LarkTransportKind | None:
+        return getattr(self.inner, "kind", None)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in LARK_WRITE_METHODS or name not in _LARK_READ_ATTRIBUTES:
+            raise AttributeError(f"{type(self).__name__} has no gated method {name!r}")
+        return getattr(self.inner, name)
+
+    @contextmanager
+    def message_scope(self, message_id: str, *, source: str = "answer", chat: str | None = None,
+                      durable: bool = True):
+        token = self._scope.set(_MessageScope(message_id, source, chat, durable))
+        try:
+            yield
+        finally:
+            self._scope.reset(token)
+
+    async def _message(self, kind: str, body: dict[str, Any], reply_to: str | None = None) -> str | None:
+        from .outbound import derived_key
+
+        async def direct():
+            if reply_to is not None:
+                return await self.inner.reply(reply_to, **body)
+            return await self.inner.send(**body)
+
+        if not self._enabled():
+            return await direct()
+        scope = self._scope.get()
+        if scope is not None and not scope.durable:
+            body["idempotency_key"] = body.get("idempotency_key") or derived_key(
+                self.gateway.channel_id, f"status:{scope.message_id}", scope.part)
+            scope.part += 1
+            return await self.gateway.write(kind, direct, keyed=True)
+        if self.outbox is None:
+            return await self.gateway.write(kind, direct, keyed=bool(body.get("idempotency_key")))
+        scope = scope or _MessageScope(str(uuid4()))
+        key = body.get("idempotency_key") or derived_key(self.gateway.channel_id, scope.message_id, scope.part)
+        scope.part += 1
+        chat = scope.chat or body.get("chat_id") or body.get("user_id") or reply_to
+        payload = {k: v for k, v in body.items() if k not in {"idempotency_key", "return_id"} and v is not None}
+        receipt = await self.outbox.send(kind, chat, payload, reply_to, key, scope.source)
+        if not receipt.success:
+            raise OutboundDeliveryError(receipt)
+        return receipt.external_ids[0] if body.get("return_id") and receipt.external_ids else None
+
+    async def send(self, **kwargs: Any) -> str | None:
+        return await self._message("send", kwargs)
+
+    async def reply(self, message_id: str, **kwargs: Any) -> str | None:
+        return await self._message("reply", kwargs, message_id)
+
+    async def edit(self, message_id: str, **kwargs: Any) -> None:
+        if not self._enabled():
+            return await self.inner.edit(message_id, **kwargs)
+        await self.gateway.edit(message_id, lambda: self.inner.edit(message_id, **kwargs))
+
+    async def aclose(self) -> None:
+        await self.gateway.stop()
+        await self.inner.aclose()
+
+    async def react(self, message_id: str) -> None:
+        if not self._enabled():
+            return await self.inner.react(message_id)
+        await self.gateway.write("react", lambda: self.inner.react(message_id))

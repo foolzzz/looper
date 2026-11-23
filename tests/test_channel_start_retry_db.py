@@ -149,7 +149,8 @@ def test_retry_runs_real_adapter_catchup_with_current_bindings(monkeypatch, tmp_
 
         def build(*args, **kwargs):
             adapter = original(*args, **kwargs)
-            adapter._transport = transport
+            adapter._transport.inner = transport
+            adapter._channel_outbox.transport = transport
             return adapter
 
         monkeypatch.setattr(serve, "_lark_adapter_from_config", build)
@@ -261,7 +262,8 @@ def test_serve_http_reports_retry_and_recovery(monkeypatch, tmp_path):
 
         def build(*args, **kwargs):
             adapter = original(*args, **kwargs)
-            adapter._transport = transport
+            adapter._transport.inner = transport
+            adapter._channel_outbox.transport = transport
             return adapter
 
         async def wait(delay):

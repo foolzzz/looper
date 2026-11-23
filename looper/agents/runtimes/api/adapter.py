@@ -20,6 +20,7 @@ from .. import (
 
 if TYPE_CHECKING:
     from ...agent_settings import Launch
+    from ...failures import Evidence, Failure
     from ...profile_registry import LegacyProviderSpec as ProviderSpec
     from ...run_usage import Usage
 
@@ -78,6 +79,7 @@ class ApiRuntime(RuntimeAdapter):
     auth_kinds = frozenset({AuthKind.API_KEY})
     roles = frozenset({"manager"})
     in_process = True
+    supports_platform_tools_only = True
     isolation_id = "api-v1"
     can_replace_system_prompt = True
     can_interrupt = True
@@ -190,6 +192,11 @@ class ApiRuntime(RuntimeAdapter):
 
         errors = (result_event or {}).get("errors")
         return log_redaction.redact(str(errors[0]))[:300] if errors else None
+
+    def failure_signal(self, result_event: dict[str, Any] | None, evidence: Evidence) -> Failure | None:
+        from ... import failures
+
+        return failures.api(result_event, evidence)
 
     def instruction_files(self, cwd: str | Path) -> tuple:
         return ()

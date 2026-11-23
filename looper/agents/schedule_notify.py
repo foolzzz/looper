@@ -27,6 +27,7 @@ import asyncpg
 
 from ..db import (connection as db_connection, managers as db_managers, projects as db_projects,
                   schedules as db_schedules, tasks as db_tasks)
+from . import turn_metrics
 from . import completion_events, cron, scheduler_settings
 from .links import run_link, schedule_link, task_link
 from .channels.base import PostOutcome
@@ -36,7 +37,7 @@ from .project_execution import format_usd
 logger = logging.getLogger(__name__)
 
 # (channel type, chat, text) -> whether it was sent, and why not.
-Sender = Callable[[str, str, str], Awaitable[tuple[bool, str | None]]]
+Sender = Callable[..., Awaitable[tuple[bool, str | None]]]
 
 FAILURES_ALERT_AT = 3
 STALE_LIMIT = timedelta(hours=24)
@@ -473,7 +474,10 @@ class Notifier:
             try:
                 receipt = await self._poster(channel_id, push_target(channel, chat), text,
                                              idempotency_key=f"looper-{'reply' if reply else 'notice'}-"
-                                                             f"{manager_event_id}")
+                                                             f"{manager_event_id}",
+                                             **turn_metrics.proactive_kwargs(
+                                                 turn_metrics.ProactiveSource.SCHEDULE, run_id,
+                                                 schedule.get("manager_id")))
             except Exception as exc:  # in the channel's hands: it may have gone
                 outcome, error = PostOutcome.UNKNOWN, f"{type(exc).__name__}: the channel did not say"
             else:
@@ -643,7 +647,14 @@ class Notifier:
                 error = "this server cannot send messages"
             else:
                 try:
-                    sent, error = await self._sender(builtin_channel_id(channel), chat, text)
+                    proactive = turn_metrics.proactive_kwargs(
+                        turn_metrics.ProactiveSource.SCHEDULE, run_id, schedule.get("manager_id"))
+                    if proactive:
+                        from .subscription_runs import push_target
+
+                        # Keep the scheduler's existing notification target convention.
+                        proactive["group"] = push_target(channel, chat).group
+                    sent, error = await self._sender(builtin_channel_id(channel), chat, text, **proactive)
                 except Exception as exc:  # a channel's failure is the message's, never the scheduler's
                     sent, error = False, f"{type(exc).__name__}: {exc}"
                 status = "sent" if sent else "failed"
