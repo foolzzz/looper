@@ -3,8 +3,8 @@
 from . import OnlineStep
 
 name = "failure_typing"
-order = 600
-pending_order = 325
+order = 610
+pending_order = 322
 
 
 async def pending(conn):
@@ -27,9 +27,14 @@ async def apply(conn, *, sql, state):
 online_order = 120
 online = (
     OnlineStep(
-        migration=name,
-        marker="failure_typing_online",
+        "failure_typing",
+        "failure_typing_online",
         validate=(("llm_records", "llm_records_failure_check"),),
-        indexes=(("idx_llm_records_failures", "ON llm_records (created_at) WHERE failure_class IS NOT NULL"),),
+        indexes=(
+            (
+                "idx_llm_records_failures",
+                "ON llm_records (created_at) WHERE failure_class IS NOT NULL",
+            ),
+        ),
     ),
 )

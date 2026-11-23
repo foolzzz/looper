@@ -1,8 +1,8 @@
 """The memory_candidates migration, in its released execution order."""
 
 name = "memory_candidates"
-order = 610
-pending_order = 327
+order = 620
+pending_order = 323
 
 
 async def pending(conn):
@@ -17,5 +17,6 @@ async def apply(conn, *, sql, state):
     if await legacy._memory_candidates_pending(conn):
         await conn.execute(legacy._memory_candidates_ddl())
         await conn.execute(
-            "INSERT INTO schema_migrations (name) VALUES ($1)", legacy._MEMORY_CANDIDATES
+            "INSERT INTO schema_migrations (name) VALUES ($1)",
+            legacy._MEMORY_CANDIDATES,
         )

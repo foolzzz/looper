@@ -1,8 +1,8 @@
 """The mcp_tool_levels migration, in its released execution order."""
 
 name = "mcp_tool_levels"
-order = 595
-pending_order = 323
+order = 600
+pending_order = 321
 
 
 async def pending(conn):

@@ -1,8 +1,8 @@
 """The manager_sessions migration, in its released execution order."""
 
 name = "manager_sessions"
-order = 630
-pending_order = 580
+order = 640
+pending_order = 571
 
 
 async def pending(conn):
