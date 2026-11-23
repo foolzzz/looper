@@ -42,7 +42,8 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import leads_model, processor
+from . import leads_model, model_call, processor, triage_settings
+from .agent_settings import AgentType
 
 logger = logging.getLogger(__name__)
 
@@ -427,6 +428,10 @@ def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, 
     """What ``reply`` says (the module's notes, step 4). ``now`` is in the schedule's zone: a lead's ``valid_until``
     is clamped to [tomorrow 00:00 there, now + ``valid_days``]. ``app_seqs`` are the input's alert-bot messages: an
     intent whose sources are all among them must be ``leads_model.ALERT_TYPE``."""
+    if kind == "triage":
+        from . import triage_run
+
+        return triage_run.parse(reply, refs)
     text = reply.strip()
     fenced = _FENCE.match(text)
     if fenced:
@@ -609,6 +614,10 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
 
 def count_line(kind: str, counts: Mapping[str, Any]) -> str:
     """What a run says it did, written by code (never the leads' or intents' text)."""
+    if kind == "triage":
+        from . import triage_run
+
+        return triage_run.count_line(counts)
     dropped = sum(counts.get("dropped", {}).values())
     parts = ([f"新线索 {counts['new']}", f"合并 {counts['merged']}", f"推翻 {counts.get('superseded', 0)}"]
              if kind == "leads" else [f"新意图 {counts['new']}", f"合并 {counts['merged']}"])
@@ -700,6 +709,10 @@ async def intent_types(conn: Any) -> list[dict[str, Any]]:
 
 def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]]) -> str:
     """The processor's instructions: the subscription's requirement and, for intents, one line per enabled type."""
+    if kind == "triage":
+        from . import triage_run
+
+        return f"{triage_run.INSTRUCTIONS}\n\n## Operator criteria\n{requirement.strip()}"
     if kind != "intents":
         return requirement
     lines = [f"- {row['key']} {_flat(row['name'])}: {_flat(row['guidance'])}" for row in types]
@@ -753,9 +766,13 @@ async def batch(conn: Any, kind: str, sub: Mapping[str, Any], picked: Mapping[st
     rows = list(picked["rows"])
     source_id = sub["source_id"]
     before, parents = await context_candidates(conn, source_id, rows, to_seq=to_seq, own_apps=own_apps)
+    if kind == "triage":
+        from . import triage_run
+
+        before, parents = await triage_run.filter_context(conn, before, parents)
     known = (await known_leads(conn, source_id, {row["chat_id"] for row in rows}, now=now,
                                since=(known_since or now) - KNOWN_LEADS_WITHIN) if kind == "leads"
-             else await recent_intents(conn, source_id, now=now))
+             else [] if kind == "triage" else await recent_intents(conn, source_id, now=now))
     people = await participants(
         conn, source_id, {row["sender_id"] for row in (*rows, *before, *parents) if row.get("sender_id")})
     rows, context, text, refs = fit(kind, rows, before=before, parents=parents, participants=people, known=known,
@@ -783,7 +800,10 @@ async def plan(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, now: da
 
     sub = schedule["subscription"]
     kind = subscriptions.output_kind(sub)
-    if not await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(conn):
+    if kind == "triage":
+        if not await triage_settings.enabled(conn):
+            return {"skip_reason": triage_settings.TURNED_OFF}
+    elif not await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(conn):
         return {"skip_reason": TURNED_OFF[kind]}
     version = await subscriptions.config_version(schedule)
     if sub["target_confirmed_at"] is None or sub.get("target_confirmed_version") != version:
@@ -828,7 +848,10 @@ async def confirmation_problem(db: Any, schedule_id: str, snapshot: Mapping[str,
     kind = subscriptions.output_kind(sub)
     if kind != snapshot["subscription"]["output_kind"]:
         return "its output kind changed"
-    if not await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(db):
+    if kind == "triage":
+        if not await triage_settings.enabled(db):
+            return triage_settings.TURNED_OFF
+    elif not await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(db):
         return TURNED_OFF[kind]
     confirmed = sub["target_confirmed_at"]
     if (confirmed is None or confirmed.isoformat() != snapshot["confirmed_at"]
@@ -853,6 +876,8 @@ async def kind_on(run_id: str) -> bool:
     if schedule is None or not subscriptions.is_extraction(schedule.get("subscription")):
         return False
     kind = subscriptions.output_kind(schedule["subscription"])
+    if kind == "triage":
+        return await triage_settings.enabled(pool)
     return await (leads_model.leads_enabled if kind == "leads" else leads_model.intents_enabled)(pool)
 
 
@@ -912,7 +937,7 @@ class _Finished(Exception):
 async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: str, cost: float | None = None,
                   error: str | None = None, summary: str | None = None, advance_to: int | None = None,
                   store: Any = None, held: Mapping[str, Any] | None = None, check_status: str | None = None,
-                  skip_reason: SkipReason | None = None) -> None:
+                  skip_reason: SkipReason | None = None, window_seqs: Sequence[int] | None = None) -> None:
     """End the run in one transaction: what ``store(conn)`` writes (it returns the counts), the run's status, outcome,
     counts and count line, what its check did (``check_status``, kept only with what it stored), why a ``skipped``
     run skipped its window (``skip_reason``) and, when
@@ -937,7 +962,8 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
                     error = f"nothing was stored: {problem}; the next confirmed run reads its window again"
             counts = dict(await store(conn)) if store is not None else None
             line = count_line(kind, counts) if counts is not None else None
-            if counts is not None and outcome == "extracted" and not (counts["new"] or counts["merged"]):
+            if counts is not None and outcome == "extracted" and not (
+                    (counts["important"] or counts["digest"]) if kind == "triage" else (counts["new"] or counts["merged"])):
                 outcome = "quiet"
             if not await db_schedules.finish_run(conn, run_id, status=status, at=now, summary=summary or line,
                                                  error=error, cost_usd=cost if cost is not None else run.get("cost_usd")):
@@ -948,6 +974,9 @@ async def _finish(runs: Any, run_id: str, kind: str, *, status: str, outcome: st
                 json.dumps(counts, sort_keys=True) if counts is not None else None, line,
                 digest(line) if line else None, check_status if counts is not None else None,
                 skip_reason.value if skip_reason is not None else None)
+            if kind == "triage" and outcome == "skipped" and window_seqs is not None:
+                await conn.execute("UPDATE subscription_runs SET window_seqs = $2::bigint[] WHERE run_id = $1",
+                                   run_id, list(window_seqs))
             if advance_to is not None:
                 await db_subs.advance_cursor(conn, run["schedule_id"], from_seq=stream["from_seq"], to_seq=advance_to,
                                              at=now)
@@ -963,7 +992,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     fields the run was planned with and ``picked`` (the window read with them) its ``snapshot``: the confirmation is
     checked again before the processor and in the transaction that stores. A failure ends the run, leaves the cursor
     and returns False; a skipped window (``ask``) ends it ``skipped`` and moves the cursor past it."""
-    from . import subscriptions
+    from . import subscriptions, triage_run
 
     sub = schedule["subscription"]
     kind = subscriptions.output_kind(sub)
@@ -1003,14 +1032,14 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     valid_days, enabled = await leads_model.valid_days(pool), {row["key"] for row in types}
 
     async def run(reminder: str, budget_usd: float, timeout_s: float) -> processor.ProcessorRun:
-        done = await processor.run(
+        done = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
             owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types)
             + (f"\n\n{reminder}" if reminder else ""), input_text=found.text, input_ref=reference,
             quiet_word=QUIET_WORD, budget_usd=budget_usd, timeout_s=timeout_s, runtime_root=runs._runtime_root,
             claude_bin=runs._claude_bin, project_id=schedule["project_id"], schedule_id=schedule["id"],
-            contract=CONTRACTS[kind],
+            contract=triage_run.CONTRACT if kind == "triage" else CONTRACTS[kind],
             metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(found.text),
-                                       "reminded": bool(reminder)}})
+                                       "reminded": bool(reminder)}}, role=AgentType.PROCESSOR), parse=str))
         await db_subs.update_run(pool, run_id, record_id=done.record_id, events_selected=len(found.rows))
         return done
 
@@ -1023,7 +1052,8 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         # more in it.
         await end(status="completed", outcome="skipped", skip_reason=asked.skipped, cost=asked.cost_usd,
                   advance_to=found.last_seq, summary=SKIPPED_SUMMARY[asked.skipped],
-                  held={"snapshot": snapshot, "profile": result.profile})
+                  held={"snapshot": snapshot, "profile": result.profile},
+                  window_seqs=[row["seq"] for row in found.rows] if kind == "triage" else None)
         return found.more
     if parsed is None:
         assert result.failure is not None
@@ -1032,7 +1062,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                   error=f"the processor gave no reply ({result.failure.value}): {result.detail}")
         return False
     checked = None
-    if sub.get("check_items"):
+    if kind != "triage" and sub.get("check_items"):
         checked = await _check(runs, kind, parsed, found, schedule, run_id=run_id, types=types,
                                extracted_usd=asked.cost_usd or 0.0, record_id=result.record_id, now=now,
                                left_s=float(timeout) - (time_.monotonic() - started))
@@ -1041,6 +1071,13 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         if kind == "leads":
             counts = await store_leads(conn, parsed, source_id=sub["source_id"], run_id=run_id,
                                        record_id=result.record_id, backfill=False, more=found.more)
+        elif kind == "triage":
+            source = dict(await conn.fetchrow("SELECT id, user_open_id FROM event_sources WHERE id = $1",
+                                               sub["source_id"]))
+            raised = await triage_run.raise_floor(conn, parsed, found.rows, source=source, window_end_seq=found.last_seq)
+            counts = (await triage_run.store(conn, raised, source_id=sub["source_id"], schedule_id=schedule["id"],
+                                             run_id=run_id, record_id=result.record_id,
+                                             window_rows=found.rows)).as_dict()
         else:
             counts = await store_intents(conn, parsed, source_id=sub["source_id"], schedule_id=schedule["id"],
                                          run_id=run_id, record_id=result.record_id, now=now, more=found.more)
@@ -1051,7 +1088,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     check_status = ("skipped" if checked is None or not (parsed.state == "items" and parsed.items)
                     else "failed" if checked.counts["check_failed"] else "checked")
     await end(status="completed", outcome="extracted", cost=cost, advance_to=found.last_seq, store=store,
-              summary="没有可整理的（处理器回复了 NONE）" if parsed.state == "quiet" else None,
+              summary="没有可整理的（处理器回复了 NONE）" if parsed.state == "quiet" and kind != "triage" else None,
               held={"snapshot": snapshot, "profile": result.profile,
                     "checker": checked.profile if checked is not None else None}, check_status=check_status)
     return found.more

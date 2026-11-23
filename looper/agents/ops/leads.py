@@ -19,7 +19,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -171,6 +171,30 @@ TOOL = RestrictedTool(
         "state": {"type": "string", "enum": ["active", "expired", "all"]},
         "limit": {"type": "integer", "minimum": 1, "maximum": 5}}},
 )
+
+
+# What the Manager is told of the search while ``leads.search_mode`` is ``fulltext`` (assistant search RFC, section 4):
+# how a lead matches, and to give the words in both languages; otherwise the tool is ``TOOL``, as it was.
+TOOL_FULLTEXT = replace(
+    TOOL, description="Search the leads Looper took from the user's Lark messages (sourced, unconfirmed notes) for "
+                      "the words of query: a lead matches any of them, as written or by most of a Chinese word's "
+                      "characters (an English word also by its start or likeness), and the leads that match more of "
+                      "them come first. Up to limit (default 5), each with its chat, sender and time. The messages "
+                      "may be in Chinese or English: give a few short words separated by spaces, both ways when "
+                      "they could differ (发布 release). Only in the user's own direct chat or the dashboard.")
+
+
+async def leads_tool() -> RestrictedTool | None:
+    """The leads search the default Manager has now: None while leads are off, ``TOOL_FULLTEXT`` while the search
+    mode is ``fulltext``, else ``TOOL``. Off when the switches cannot be read (no database)."""
+    if not await leads_on():
+        return None
+    try:
+        mode = await leads_model.search_mode()
+    except Exception:
+        logger.debug("could not read leads.search_mode; the search counts as words", exc_info=True)
+        return TOOL
+    return TOOL_FULLTEXT if mode is leads_model.SearchMode.FULLTEXT else TOOL
 
 
 # --- The group backstop (RFC R-2) ---

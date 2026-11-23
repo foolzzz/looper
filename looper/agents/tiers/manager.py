@@ -74,7 +74,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook, status_card, turn_metrics
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from .. import delivery_guard_manager as delivery_guard
 from ..delivery_guard import GuardState
@@ -407,7 +407,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "attention_enabled", "route_to_gate", "route_memory", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message", "session_budget",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
@@ -1707,6 +1707,10 @@ class ManagerAgent:
             if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
+            if (memory := await token.step("route_memory", memory_routing.route(envelope))) is not None:
+                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                self._acting(token)
+                return Prepared(action=lambda: self._answer_intent(envelope, memory))
             try:
                 intent = await token.keep("route_intent", self._route_intent(envelope), 60)
                 if intent is not None:

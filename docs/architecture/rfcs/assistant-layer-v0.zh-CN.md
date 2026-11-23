@@ -130,7 +130,7 @@ D1–D6 是批准产品设计时定的；D7–D16 是维护者对本文第 16 �
 | 发送时间、发送结果（发出、被拒、不确定） | 每天条数；回复率只算发出去的 |
 | 回复时间、回复方式（`quoted` 或 `next_message`），由 0.1 回填 | 30 分钟内的回复率 |
 
-送达层的 `decision`（`send` / `merge` / `defer` / `digest` / `drop`）、`reason`（命中规则）、`digest_date`、`counted`、`local_date` 等列可空，0.1 不写。`source` 是唯一来源列，`chat_kind TEXT`（`direct` / `group`）是唯一会话类型列。`dedupe_key` 非空时唯一：0.1 复用发送点的幂等键或总线信封 ID，重试只更新回执，保留首次决策。0.1 在发送后直接写发送结果 `outcome`；未发送的决策行中 `outcome` 和 `sent_at` 同时为空。之后由送达层的 `decide()` 成为单一决策写入点。来源的取值：`task_notice`、`completion`、`progress`、`gate`、`gate_reminder`、`subscription`、`intent`、`schedule`、`advisor_alert`、`autonomous`、`user_reminder`。
+送达层的 `decision`（`send` / `merge` / `defer` / `digest` / `drop`）、`reason`（命中规则）、`digest_date`、`counted`、`local_date` 等列可空，0.1 不写。`source` 是唯一来源列，`chat_kind TEXT`（`direct` / `group`）是唯一会话类型列。`dedupe_key` 非空时唯一：0.1 复用发送点的幂等键或总线信封 ID，重试只更新回执，保留首次决策。0.1 在发送后直接写发送结果 `outcome`；未发送的决策行中 `outcome` 和 `sent_at` 同时为空。之后由送达层的 `decide()` 成为单一决策写入点。来源的取值：`task_notice`、`completion`、`progress`、`gate`、`gate_reminder`、`subscription`、`intent`、`schedule`、`advisor_alert`、`autonomous`、`user_reminder`、`morning_brief`（晨报本身，见晨报 RFC；不计数、不进摘要）。
 
 **哪里写（两个出口，都在拿到发送结果之后）：**
 

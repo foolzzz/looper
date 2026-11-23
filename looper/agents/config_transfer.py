@@ -511,6 +511,7 @@ async def export_chunks(
     from .. import __version__
     from ..db import config_transfer as db
     from ..db.projects import EXECUTION_COLUMNS
+    from .project_execution import omit_unset_subagents
     from ..db import workflows as db_workflows
 
     summary = summary if summary is not None else ExportSummary()
@@ -617,7 +618,7 @@ async def export_chunks(
             entry = {
                 "name": project["name"], "description": project["description"], "background": project["background"],
                 "default_workflow": project["default_workflow"],
-                "execution": {column: project[column] for column in EXECUTION_COLUMNS} | (
+                "execution": omit_unset_subagents({column: project[column] for column in EXECUTION_COLUMNS}) | (
                     {"acceptance_checks": project["acceptance_checks"]} if project.get("acceptance_checks") else {}),
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],

@@ -271,6 +271,8 @@ _EXTRACTION_SCOPE = {
                 "(SELECT a.app_id FROM intent_alert_senders a WHERE a.source_id = e.source_id)))"),
 }
 
+_EXTRACTION_SCOPE["triage"] = _EXTRACTION_SCOPE["intents"]
+
 
 def extraction_scope(output_kind: str) -> str:
     """The SQL condition of what ``output_kind`` reads, over ``source_events e``, ``source_chats c`` and
