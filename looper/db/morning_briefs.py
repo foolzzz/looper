@@ -22,6 +22,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from ..agents import triage_settings
+
 
 async def get(conn: Any, local_date: date, channel_id: str, chat: str) -> dict[str, Any] | None:
     row = await conn.fetchrow(
@@ -113,12 +115,13 @@ async def _record_read(conn: Any, channel_id: str, chat: str, read_ids: list[int
     """Record the digest rows a brief actually read. An id that is not this chat's digest is ignored."""
     if not read_ids:
         return
+    triage_filter = "AND source <> 'triage' " if await triage_settings.enabled(db=conn) else ""
     await conn.execute(
         "INSERT INTO morning_brief_consumed (delivery_id) "
         "SELECT id FROM proactive_deliveries "
         "WHERE id = ANY($1::bigint[]) AND decision = 'digest' AND channel_id = $2 AND chat = $3 "
-        "AND source <> 'morning_brief' AND source <> 'triage' "
-        "ON CONFLICT DO NOTHING",
+        "AND source <> 'morning_brief' "
+        + triage_filter + "ON CONFLICT DO NOTHING",
         read_ids, channel_id, chat)
 
 
@@ -180,10 +183,11 @@ async def digests(conn: Any, *, channel_id: str, chat: str, until: datetime,
     in ``morning_brief_consumed`` is not read again. A morning brief is not one of them. ``source`` is what the
     metrics call the send point. There is no lower bound on ``decided_at``: a row that commits after this read,
     with an earlier ``decided_at``, is still here next time."""
+    triage_filter = "AND source <> 'triage' " if await triage_settings.enabled(db=conn) else ""
     rows = await conn.fetch(
         "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "
-        "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND source <> 'morning_brief' AND source <> 'triage' "
-        "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
+        "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND source <> 'morning_brief' "
+        + triage_filter + "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
         "AND NOT EXISTS (SELECT 1 FROM morning_brief_consumed c WHERE c.delivery_id = proactive_deliveries.id) "
         "ORDER BY decided_at, id",
         channel_id, chat, until, dates or [])

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -41,6 +42,7 @@ from .channels.base import PostOutcome
 from .operator_identity import OPERATOR_KEY, operator_dm_target
 from .proactive_delivery import ChatKind, Delivery, DeliveryKind, DeliveryState, Outcome, Urgency
 from .reminders import target
+from .subscriptions import strip_mentions
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +130,9 @@ def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], 
 
 
 def _triage_line(event: BriefEvent, tz: ZoneInfo) -> str:
-    # Model-derived text is shown only to the operator. Do not carry mention marks into the DM.
-    title, chat, summary = (_plain(value.replace("@", ""))
+    # Use memory_push's literal Markdown escaping after removing Lark mention markup.
+    title, chat, summary = (re.sub(r'([\\`*_{}\[\]<>()#+\-.!|~])', r'\\\1',
+                                   strip_mentions(_plain(value)).replace("@", ""))
                             for value in (event.title, event.chat_name, event.summary))
     when = event.last_sent_at.astimezone(tz)
     line = f"E-{event.id} {title}（{chat} · {when:%H:%M}）：{summary}"

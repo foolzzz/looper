@@ -4,8 +4,12 @@ its switch is off, reads that switch and stops."""
 from __future__ import annotations
 
 import asyncio
+import re
+from dataclasses import replace
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from looper.agents import attention, chat_settings, morning_brief
 from looper.agents.morning_brief import digest_dates, digest_dates_through, is_due, render
@@ -32,6 +36,25 @@ def test_triage_is_plain_text_with_local_time_and_flags_after_the_digest() -> No
     assert text.startswith(before + "\n\n")
     assert render(day=MONDAY, needs=None, reminders=[], digests=[_digest()], tz=ZONE,
                   triage=[], triage_more=2) == before
+
+
+@pytest.mark.parametrize("field", ["title", "chat_name", "summary"])
+def test_triage_fields_neutralize_lark_mentions_and_markdown_links(field) -> None:
+    from looper.agents.triage_model import Category
+    from looper.db.triage_events import BriefEvent
+
+    probe = '<at user_id="ou_victim">bob</at> [click](https://evil.example) ＠所有人 @所有人 @all'
+    event = BriefEvent(id=42, category=Category.DIGEST, title="Title", summary="Summary", flagged=False,
+                       last_sent_at=datetime(2026, 11, 23, 16, 5, tzinfo=timezone.utc),
+                       chat_name="Synthetic room")
+    event = replace(event, **{field: probe})
+    text = render(day=MONDAY, needs=None, reminders=[], digests=[], tz=ZONE, triage=[event])
+    assert text is not None
+    assert "bob" in text
+    assert "<at" not in text.lower()
+    assert not any(mention in text for mention in ("＠所有人", "@所有人", "@all"))
+    assert r"\[click\]\(https://evil\.example\)" in text
+    assert re.search(r"(?<!\\)\[[^\]]*\]\(", text) is None
 
 
 def test_monday_covers_the_weekend_and_another_workday_covers_itself() -> None:

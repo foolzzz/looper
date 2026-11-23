@@ -241,19 +241,27 @@ def test_only_the_enabled_operator_dm_gets_and_consumes_events(monkeypatch, enab
     run_with_channel_configs(check, monkeypatch)
 
 
-def test_deferred_triage_is_excluded_from_both_digest_read_and_consumption(monkeypatch):
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("settlement", ["sent", "recovery"])
+def test_deferred_triage_exclusion_requires_the_switch_for_read_and_consumption(monkeypatch, enabled, settlement):
     async def check(pool):
+        await triage_settings.update(enabled)
         await pool.execute(
             "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, "
             "decision, reason, counted, local_date, digest_date, decided_at) VALUES "
             "('deferred-triage', 'triage', 'normal', $1, $2, 'direct', 'digest', 'quiet_hours', false, $3, $3, $4)",
             CHANNEL, DM, DAY, NOW)
         row_id = await pool.fetchval("SELECT id FROM proactive_deliveries")
-        assert await store.digests(pool, channel_id=CHANNEL, chat=DM, until=NOW, dates=[DAY]) == []
+        deferred = await store.digests(pool, channel_id=CHANNEL, chat=DM, until=NOW, dates=[DAY])
+        assert [row["id"] for row in deferred] == ([] if enabled else [row_id])
         async with pool.acquire() as conn:
             assert await store.claim(conn, DAY, CHANNEL, DM, NOW, attempts_limit=3, read_ids=[row_id])
-            await store.settle(conn, DAY, CHANNEL, DM, "sent", now=NOW, read_ids=[row_id])
-        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+            if settlement == "recovery":
+                assert await store.orphans_uncertain(conn, NOW) == 1
+            else:
+                await store.settle(conn, DAY, CHANNEL, DM, "sent", now=NOW, read_ids=[row_id])
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == (0 if enabled else 1)
+        assert await store.digests(pool, channel_id=CHANNEL, chat=DM, until=NOW, dates=[DAY]) == []
     run_db(check, monkeypatch)
 
 
