@@ -298,13 +298,9 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             if count == 0:
                 break
 
-    # Only a process that has opened the pool has idle-check rows to clean; without one the step skips.
     with _step(report, "idle checks"):
-        try:
-            while (count := await idle_checks.purge(now - timedelta(days=idle_checks.RETENTION_DAYS))):
-                report.idle_checks += count
-        except db_connection.PoolNotInitializedError:
-            pass
+        while (count := await idle_checks.purge(now - timedelta(days=idle_checks.RETENTION_DAYS))):
+            report.idle_checks += count
 
     with _step(report, "llm requests"):
         await _prune_llm_requests(report, now)
