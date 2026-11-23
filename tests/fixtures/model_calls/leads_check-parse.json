@@ -145,7 +145,6 @@
     "llm_records": [
       {
         "agent_id": "planner-task-golden",
-        "attempt_id": null,
         "cache_creation_tokens": null,
         "cache_read_tokens": null,
         "compactions": null,
@@ -176,7 +175,6 @@
       },
       {
         "agent_id": "leads_check:golden-check",
-        "attempt_id": null,
         "cache_creation_tokens": 0,
         "cache_read_tokens": 0,
         "compactions": [],
