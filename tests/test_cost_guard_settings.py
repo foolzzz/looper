@@ -57,7 +57,7 @@ def test_no_default_daily_caps_and_observe_survives_reload(stored):
 
 
 @pytest.mark.parametrize("body", [
-    {"mode": "enforce"}, {"mode": True}, {"daily_usd": True}, {"daily_usd": -1},
+    {"mode": "ask"}, {"mode": True}, {"daily_usd": True}, {"daily_usd": -1},
     {"daily_usd": float("nan")}, {"daily_usd": float("inf")}, {"unknown": 1}, {},
     {"roles": {"worker": {"daily_usd": 1}}}, {"roles": {"advisor": {"fallback": "cheap"}}},
 ])
@@ -135,7 +135,7 @@ def test_guard_settings_never_expand_chat_settings(stored):
     assert operation.confirms and operation.risk == "high"
     impact = asyncio.run(api_v1.domain_for(operation).impact(
         None, operation, {"daily_usd": None}, api_v1.OPERATOR, {}))
-    assert "observe" in impact and "no enforcement" in impact
+    assert "observe" in impact and "quota-failure" in impact
     assert stored == ({}, [])
 
 
@@ -184,7 +184,7 @@ def test_cost_guard_configuration_export_preview_apply_readback(monkeypatch):
         assert settings.cached().mode is settings.Mode.OBSERVE
         assert settings.cached().roles["outbound_check"].daily_equivalent_usd == 0.1
         refresh.assert_awaited_once()
-        bad = {"format": config_transfer.FORMAT, "settings": {"cost_guard": {"mode": "enforce"}}}
+        bad = {"format": config_transfer.FORMAT, "settings": {"cost_guard": {"mode": "ask"}}}
         before = await pool.fetch("SELECT key,value FROM system_settings WHERE key LIKE 'cost_guard.%' ORDER BY key")
         plan = await config_imports._run(bad, apply=True)
         assert any(change.action is config_transfer.Action.SKIPPED for change in plan.changes)

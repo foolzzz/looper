@@ -5,15 +5,30 @@ import { callV1 } from "@/lib/v1";
 
 type Counter = { scope: string; scope_ref: string; currency: string; spent_usd: number; reserved_usd: number; limit_usd: number | null };
 type Observation = { at?: string; run_kind: string; currency: string; estimate_usd: number; estimate_source: string;
-  decision?: string; scope: string | null; scope_ref: string | null; action: string | null };
-type View = { mode: "off" | "observe"; daily_usd: number | null; daily_equivalent_usd: number | null;
+  decision?: string; scope: string | null; scope_ref: string | null; action: string | null;
+  would_hold_until?: string; note?: string };
+type Hold = { provider: string; reason: string; until: string; window: string | null; reset_known: boolean };
+type View = { mode: "off" | "observe" | "enforce"; daily_usd: number | null; daily_equivalent_usd: number | null;
   roles: Record<string, { daily_usd: number | null; daily_equivalent_usd: number | null }>;
   counters: Counter[]; recent: Observation[]; recommended_daily_usd: number | null;
-  recommended_daily_equivalent_usd: number | null; problem: string | null };
+  recommended_daily_equivalent_usd: number | null; problem: string | null; holds?: Hold[] };
 
 const money = (value: number | null) => value === null ? "未设上限" : `$${value.toFixed(2)}`;
 const currency = (value: string) => value === "equivalent_usd" ? "等价花费" : "真钱";
 const ACTIONS: Record<string, string> = { ask: "需询问", stop_role: "停到明天", skip: "跳过这次", hold: "暂缓" };
+const HOLD_REASONS: Record<string, string> = {
+  rejected: "账号被拒", high_utilization: "用量过高", quota_failure: "配额失败", quota_cooldown: "配额冷却",
+};
+const modeLabel = (mode: View["mode"]) => mode === "off" ? "已关闭" : mode === "enforce" ? "执行中" : "仅观察";
+function outcomeText(row: Observation): string {
+  if (row.decision === "hold") return row.would_hold_until ? `暂缓到 ${row.would_hold_until}` : "暂缓";
+  if (row.decision === "admit" && (row.would_hold_until || row.note)) {
+    return ["本来会放行", row.would_hold_until, row.note].filter(Boolean).join(" · ");
+  }
+  if (row.decision === "admit") return "本来会放行";
+  if (row.action) return ACTIONS[row.action] ?? row.action;
+  return "超出上限";
+}
 const SOURCES: Record<string, string> = { run_cap: "单次上限", p95: "近 30 天 P95", floor: "角色下限", floor_no_samples: "无历史样本，使用下限" };
 const SCOPES: Record<string, string> = { task: "任务", schedule_day: "定时任务当天", role_day: "角色当天", global_day: "全局当天" };
 
@@ -36,9 +51,11 @@ export function CostGuardSettingsSection() {
   return <div className="space-y-6">
     {view.problem && <p role="alert" className="text-sm text-destructive">{view.problem}</p>}
     <Card>
-      <CardHeader><CardTitle className="flex flex-wrap items-center gap-3">花费守卫 <Badge variant="outline">{view.mode === "off" ? "已关闭" : "仅观察"}</Badge></CardTitle></CardHeader>
+      <CardHeader><CardTitle className="flex flex-wrap items-center gap-3">花费守卫 <Badge variant="outline">{modeLabel(view.mode)}</Badge></CardTitle></CardHeader>
       <CardContent className="space-y-4 text-sm">
-        <p>先观察一周，再根据实际花费决定上限。目前只记录预留和本来会被拦下的运行，不拦截、不提问、不发消息。</p>
+        <p>{view.mode === "enforce"
+          ? "执行中：定时触发和后台角色会等到用量窗口重置，或最多等五分钟。你自己发起的运行只记录。"
+          : "先观察一周，再根据实际花费决定上限。目前只记录预留和本来会被拦下的运行，不拦截、不提问、不发消息。"}</p>
         <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div><dt className="text-muted-foreground">全局每日真钱上限</dt><dd className="mt-1 font-mono">{money(view.daily_usd)}</dd></div>
           <div><dt className="text-muted-foreground">全局每日等价花费上限</dt><dd className="mt-1 font-mono">{money(view.daily_equivalent_usd)}</dd></div>
@@ -54,6 +71,16 @@ export function CostGuardSettingsSection() {
           : <p className="text-muted-foreground">观察满一周后才提供每日上限建议；建议不会自动生效。</p>}
       </CardContent>
     </Card>
+    {view.holds && view.holds.length > 0 && <Card>
+      <CardHeader><CardTitle>用量窗口暂缓</CardTitle></CardHeader>
+      <CardContent>
+        <ul className="divide-y divide-border text-sm">{view.holds.map((hold) => <li key={`${hold.provider}:${hold.window ?? "failure"}:${hold.until}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3 first:pt-0 last:pb-0">
+          <Badge variant="warning">{HOLD_REASONS[hold.reason] ?? hold.reason}</Badge>
+          <span>{hold.provider}{hold.window ? ` · ${hold.window}` : " · 失败记录"}</span>
+          <span className="font-mono text-xs">{hold.until}{hold.reset_known ? "" : " · 重置时间未知"}</span>
+        </li>)}</ul>
+      </CardContent>
+    </Card>}
     <Card>
       <CardHeader><CardTitle>今天已花与预留</CardTitle></CardHeader>
       <CardContent>
@@ -72,7 +99,7 @@ export function CostGuardSettingsSection() {
       <CardContent>
         {view.recent.length === 0 ? <p className="text-sm text-muted-foreground">暂无观察记录。</p>
           : <ul className="divide-y divide-border text-sm">{view.recent.slice(0, 20).map((row, index) => <li key={`${row.at}:${index}`} className="space-y-1 py-3 first:pt-0 last:pb-0">
-            <p>{row.run_kind} · {currency(row.currency)} {money(row.estimate_usd)} · {row.decision === "admit" ? "本来会放行" : row.action ? ACTIONS[row.action] ?? row.action : "超出上限"}</p>
+            <p>{row.run_kind} · {currency(row.currency)} {money(row.estimate_usd)} · {outcomeText(row)}</p>
             <p className="text-xs text-muted-foreground">{SCOPES[row.scope ?? ""] ?? row.scope} {row.scope_ref} · {SOURCES[row.estimate_source] ?? row.estimate_source}{row.at ? ` · ${new Date(row.at).toLocaleString()}` : ""}</p>
           </li>)}</ul>}
       </CardContent>
