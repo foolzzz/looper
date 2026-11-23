@@ -6791,6 +6791,14 @@ off; `outbound_review.get` and `outbound_review.update`).
   row cannot be written in time is blocked. Its free text (the target, the summary, the model's reason) is stored
   masked. The run's record has `run_kind` `outbound_check` and the asking run as its
   `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
+- **Looper's own tools** (layer 1, `ops/review.py`). While the review is on, a write call whose level is
+  `external` (`ops.levels`, `Operation.level`) is reviewed after its turn checks and before `escalate` and the
+  user's confirmation, which it never replaces. A blocked call does not run: the model gets the error `blocked`
+  (HTTP 403 for an API client) with the reason, the action trail records it (`error_code` `blocked`, linked from
+  the review's `manager_action_id`), and the operator is told once per turn. In a Manager turn that is not the
+  operator's, and for every API client (never the operator), code blocks it. The operator's own calls on the
+  dashboard and with the operator token are not reviewed. `looper_confirm` runs a call reviewed when it asked, so it
+  is not reviewed again. A task's Planner has no `external` tool, so its entry has no check.
 - **The Managers' hook** (`looper/agents/outbound_hook.py`). While the review is on, each Manager's Claude Code
   carries a PreToolUse hook in its `--settings` (matcher `*`) and reads no settings file (`--setting-sources ""`),
   so nothing it writes in its working directory turns the hook off. Turning the review on or off changes the
