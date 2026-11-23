@@ -1041,6 +1041,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.4 验证缺口
 
+- **管家中途输入**（本分支实现，默认关闭）：按助理层 RFC §5.3.6 接入 `manager.mid_turn_input.enabled`，只有操作者可用独立的 `mid_turn_input.get/update`。脚本 CLI 与隔离 PostgreSQL 覆盖同聊天/跨聊天并入、队列回退、停止、重启重放和关闭时的主干哈希对照；没有调用真实模型。同聊天与控制台到私聊的真实 Claude Code 并入对照仍待维护者单独批准，不能将替身通过算作模型行为验证；Settings 页面开关与配置导入导出尚未接入。
+
 - **LLM 模型层（已随 2.13 发布；凭据和基线缺口仍在）**：2026-10-20 的前序演练（当时的 `tests/test_llm_registry_rehearsal_db.py`，本二进制不再包含该文件）复用 patched-v2 固定种子，在独立 disposable 源库和模板克隆迁移库验证 count-only dry-run、事务迁移及新连接二次 schema 初始化；20/20 profiles 映射、unresolved/binding/pricing mismatch 均为 0，全部引用层、静态 launch 输入、固定 usage 费用和历史聚合相等，坏引用阻止且事务回滚。dry-run 的 `models_after=27` 仅计转换模型，正常启动额外补齐 11 个内置登录模型（总计 38），测试单独核对新增项；本种子的未知厂商账户保持分离，账户合并及会话重映射由独立 apply/pinned 测试覆盖。同日的恢复演练（当时的 `tests/test_llm_registry_recovery_db.py`，本二进制不再包含该文件）已用真实完整备份恢复第三个 disposable 库，并核对结构/约束/序列、全部行、旧入口绑定/价格夹具和历史费用；固定旧源码最小回移 version=2 guard 的独立入口在 v3 库任何 DDL 前拒绝，提交后的新写入保留在迁移后库，禁止绕过备份或原地反向迁移。仍需待发布旧补丁制品验证、新旧服务副本上真实 CLI 启动/计价/会话续接对照；不能在新 schema 上直接启动未带门禁的旧版。新增迁移后服务 smoke 已在真实 `serve` 上用脚本 CLI 验证 Manager/HTTP 读回及重启续接，并运行浏览器检查迁移 profiles 和未知价提示、保留截图；选择式真实 CLI 入口把显式组合先写入 v2 再迁移，四种 CLI 已安装但本卡无独立凭据，真实请求和 Manager haiku/opus xhigh 两档 comparison 均记为未测，候选版本全量评测亦未运行。这些数字是前序证据，不是本二进制仍在执行的 v2→v3 迁移。当前只接受 `looper-config/v4`；空库记 `post_bridge_baseline`，当前库不重放初始化 DDL，精确的 v2.13.165 桥接库只走一次 `upgrade_from_bridge`。退役的 provider `protocols`/`base_url`/`models` 和层上的 `model`/`effort` 在导入时直接拒绝。真实 CLI 凭据、haiku/opus xhigh dialogs 对照仍未测；五任务、一次重复的 Sonnet 基线不是完整基线，对话基线仍缺。不能把模型层写成已无缺口。详见 [评测说明](../../evals/README.md)。
 
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
