@@ -80,6 +80,9 @@ def response(request, result):
     emit({"id": request["id"], "result": result})
 
 def finish(text):
+    if mode == "limits":
+        for _ in range(3):
+            notify("account/rateLimits/updated", rateLimits={"primary": {"usedPercent": 91, "windowDurationMins": 300}})
     notify("item/completed", item={"id": "command-1", "type": "commandExecution", "command": "sleep 1",
                                   "aggregatedOutput": "done\n", "exitCode": 0, "status": "completed"})
     notify("item/completed", item={"id": "answer-1", "type": "agentMessage", "text": text,
@@ -643,6 +646,8 @@ def test_worker_bus_input_uses_detected_steering_capability(agent_db: Any, app_s
             async with asyncio.timeout(5):
                 while not pool.accepts_input("w1"):
                     await asyncio.sleep(0.01)
+                if steer:
+                    await pool._inputs["w1"].wait_input_ready()
             ack = await bus.request(MessageEnvelope.create(
                 source=planner_address("t1"), target=worker_address("w1"), message_type=MessageType.WORKER_INPUT,
                 payload={"text": "include HERON"},
@@ -1062,3 +1067,66 @@ def test_room_steer_after_last_tool_keeps_report_even_with_queued_output(blocked
             await iterator.aclose()
 
     asyncio.run(asyncio.wait_for(run(), 3))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_rate_limit_notification_is_forwarded_only_when_enabled(app_server, tmp_path, monkeypatch, enabled):
+    from looper.agents import limit_signals
+    from looper.db import system_settings
+    executable, _ = app_server
+    monkeypatch.setenv("FAKE_CODEX_MODE", "limits")
+    monkeypatch.setattr(system_settings, "get_settings", AsyncMock(
+        return_value={limit_signals.KEY: "true"} if enabled else {}))
+
+    async def run():
+        async with _channel(executable, tmp_path) as (channel, process):
+            await channel.start("synthetic")
+            events = await asyncio.wait_for(_collect(channel), 5)
+            await process.wait()
+            return events
+
+    events = asyncio.run(run())
+    signals = [event for event in events if event["type"] == limit_signals.CODEX_EVENT]
+    assert len(signals) == 3 * int(enabled)
+    assert system_settings.get_settings.await_count == 1
+    if enabled:
+        assert signals[0]["rateLimits"]["primary"]["usedPercent"] == 91
+    assert events[-1]["type"] == "result" and not events[-1]["is_error"]
+
+
+@pytest.mark.parametrize("last_setting", [{}, ConnectionRefusedError("unavailable")], ids=["disabled", "unavailable"])
+def test_limit_switch_cache_refreshes_and_stops_collection(monkeypatch, last_setting):
+    from looper.agents import limit_signals
+    from looper.agents.runtimes import codex_steer
+    from looper.db import system_settings
+
+    async def run():
+        clock = [0.]
+        monkeypatch.setattr(codex_steer, "monotonic", lambda: clock[0], raising=False)
+        settings = AsyncMock(side_effect=[{limit_signals.KEY: "true"}, last_setting])
+        monkeypatch.setattr(system_settings, "get_settings", settings)
+        saved = AsyncMock()
+        monkeypatch.setattr(limit_signals.db_limits, "upsert", saved)
+
+        async def lines(_):
+            for at in (0., 1., 5., 6.):
+                clock[0] = at
+                yield json.dumps({"method": "account/rateLimits/updated", "params": {
+                    "rateLimits": {"primary": {"usedPercent": 30}}}}).encode()
+
+        monkeypatch.setattr(codex_steer, "iter_lines", lines)
+        channel = CodexChannel(SimpleNamespace(stdout=object()), model="synthetic", effort="low",
+                               cwd="/workspace", keep_session=False)
+        queue = asyncio.Queue()
+        await channel._read_events(queue)
+        signals = []
+        while not queue.empty():
+            event = queue.get_nowait()
+            if event and event.get("type") == limit_signals.CODEX_EVENT:
+                signals.append(event)
+                await limit_signals.observe(event, "synthetic", None)
+        assert len(signals) == 2
+        assert saved.await_count == 2
+        assert settings.await_count == 2
+
+    asyncio.run(run())

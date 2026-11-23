@@ -612,6 +612,8 @@ the reply must carry Looper's line about it; then "取消这个提醒" must beco
 descriptions are all the Manager is told about reminders. Run it as the Manager PR commands above say, with
 `--dialogs reminder_tools`. Delivery at the time, the catch-up after downtime and the other turns are unit tests
 (`tests/test_reminders_db.py`).
+Fake mode fixes the reminder clock at 2026-11-22 12:00 UTC and uses UTC for the server and scripted call.
+Both modes check tomorrow against the turn's reference time in the stored reminder's zone, even if the reply crosses midnight.
 
 #### The Manager's knowledge vault
 

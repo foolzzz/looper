@@ -5,8 +5,8 @@ is stored (NULL: not known, a row from before the column). The untrusted fence t
 outside content. Nullable without a default, so adding it rewrites no row."""
 
 name = "journal_supplement_sender"
-order = 590
-pending_order = 580
+order = 660
+pending_order = 590
 fresh_ddl = "ALTER TABLE task_journal ADD COLUMN IF NOT EXISTS from_operator BOOLEAN;\n"
 
 
