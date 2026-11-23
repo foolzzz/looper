@@ -89,6 +89,10 @@ TOKEN_ENV = "LOOPER_AGENT_TOKEN"
 TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"
 TRACE_ENV = "LOOPER_MCP_TRACE"  # the bridge's trace of each call's ``_meta`` keys (``mcp_server._trace_meta``)
 BINDINGS_KEPT = 64
+# The tools that put what a turn says into a task (``looper_task_update`` only with a new requirement): in a session
+# that found leads, the task they write is marked (RFC section 6.3).
+TAINTING_TOOLS = frozenset({"looper_task_create", "looper_task_instruct", "looper_task_gate_reply",
+                            "looper_task_update"})
 CALLS_KEPT = 4096  # the tool_use ids the hook can place in their turn
 CONFIRMATION_SECONDS = 600
 # How long a write call waits for the tool_use of its turn's stream that it matches (the event may trail the call).
@@ -268,6 +272,7 @@ class ManagerOps:
         # Each tool_use a turn's stream showed, by its id: the binding of the turn it belongs to (a subagent's call,
         # its parent call's turn), which places the hook's call in its own turn.
         self._call_turns: OrderedDict[str, str] = OrderedDict()
+        self._leads_session: str | None = None  # the session that found leads ('' when none has; None: not read)
         self._call_seen = asyncio.Event()
 
     @property
@@ -563,8 +568,12 @@ class ManagerOps:
             answer = await self._run_tool(tool, call)
             result = _plain(answer)
             if tool.name == LEADS_TOOL and isinstance(result, Mapping) and result.get("leads"):
-                # What the outbound review of a later call in this turn sees came from the leads.
+                # What the outbound review of a later call in this turn sees came from the leads; and the session
+                # that found them marks the tasks it creates or adds to (RFC section 6.3).
                 turn.outside.append(("leads", json.dumps(result["leads"], ensure_ascii=False)))
+                await self._found_leads()
+            elif tool.name in TAINTING_TOOLS and (tool.name != "looper_task_update" or "requirement" in arguments):
+                await self._mark_task(tool.task_id(arguments) or _created_task(result))
             audited = isinstance(tool, RestrictedTool) and tool.audit_result is not None
             audit = tool.audit_result(answer) if audited else None  # type: ignore[union-attr]
         except _Recorded as exc:
@@ -642,6 +651,8 @@ class ManagerOps:
             await self._record(turn, tool, pending.arguments, Risk.HIGH, "error", error_code=error.code.value,
                                result={"message": str(error)}, confirmation_id=pending.id)
             raise _Recorded(error) from None
+        if tool.name in TAINTING_TOOLS and (tool.name != "looper_task_update" or "requirement" in pending.arguments):
+            await self._mark_task(tool.task_id(pending.arguments) or _created_task(result))
         await self._record(turn, tool, pending.arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
         return result
 
@@ -1029,12 +1040,13 @@ class ManagerOps:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())
 
-    def waiting_confirmations(self) -> list[dict[str, Any]]:
+    def waiting_confirmations(self, *, unpersisted_only: bool = False) -> list[dict[str, Any]]:
         """The operations that wait for the user's word now, oldest first: asked, no turn answering them yet, and
         within ``CONFIRMATION_SECONDS``. Read only (the "needs you" summary, ``agents.attention``)."""
         now = self._clock()
         waiting = sorted(((key, pending) for key, pending in self._pending.items()
-                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS),
+                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS
+                          and (not unpersisted_only or pending.card is None)),
                          key=lambda item: item[1].at)
         return [{"confirmation_id": pending.id, "tool": pending.tool.name, "impact": pending.impact,
                  "channel": channel, "channel_id": channel_id, "chat": chat, "waited_seconds": int(now - pending.at),
@@ -1046,6 +1058,45 @@ class ManagerOps:
         for pending in self._pending.values():
             self._lapse(pending)
         self._pending.clear()
+
+    # --- Tasks a session that found leads wrote (the outbound-review RFC, section 6.3) ---
+
+    def _session(self) -> str | None:
+        return getattr(self._platform.manager, "current_session_id", None)
+
+    async def _found_leads(self) -> None:
+        """A leads search of this turn found leads: the Manager's session is marked, and so are the tasks it creates
+        or adds to from now on, until a new session starts. A mark that cannot be written fails the search: its
+        leads are not handed on unmarked."""
+        from ...db import agent_sessions
+
+        if (session := self._session()) is None:
+            return
+        try:
+            await agent_sessions.set_leads_session(self._scope.manager_id, session)
+        except Exception as exc:
+            logger.warning("cannot mark %s's session as having found leads", self._scope.manager_id, exc_info=True)
+            raise OpError(ErrorCode.UNAVAILABLE, "Looper could not record that this session found leads, so it does "
+                                                 "not show them; tell the user, and try again later") from exc
+        self._leads_session = session
+
+    async def _mark_task(self, task_id: str | None) -> None:
+        """Mark ``task_id`` as having taken leads when this session found some. A mark that cannot be written fails
+        the call (the change itself was made): the task's runs would go unchecked."""
+        from ...db import agent_sessions
+
+        if task_id is None or (session := self._session()) is None:
+            return
+        try:
+            if self._leads_session is None:
+                self._leads_session = await agent_sessions.leads_session(self._scope.manager_id) or ""
+            if self._leads_session == session:
+                await db_tasks.mark_untrusted(task_id, "leads")
+        except Exception as exc:
+            logger.warning("cannot mark task %s as having taken leads", task_id, exc_info=True)
+            raise OpError(ErrorCode.UNAVAILABLE, f"the change to task {task_id} was made, but Looper could not record "
+                                                 "that leads went into it, so its runs are not checked: tell the "
+                                                 "user") from exc
 
     # --- The outbound review's hook ---
 

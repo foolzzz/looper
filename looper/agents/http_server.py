@@ -1106,6 +1106,13 @@ class AgentHTTPServer:
             writer.write(_json_response(
                 HTTP_503, {"error": "this run is being adopted after a restart; retry shortly"},
                 headers={"Retry-After": "2"}))
+        elif path == f"{AGENT_API}outbound/check" and method == "POST":
+            # The outbound review's hook in a step's run of a task outside content went into (RFC section 6.3).
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(header, payload)))
         elif path == f"{AGENT_API}tools" and method == "GET":
             answer = {"tools": ops.listing(header)}
             if (retry_safety := ops.retry_safety(header)) is not None:
@@ -1116,7 +1123,8 @@ class AgentHTTPServer:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
-            writer.write(_json_response(HTTP_200, await ops.call(header, m.group(1), arguments)))
+            writer.write(_json_response(HTTP_200, await ops.call(
+                header, m.group(1), arguments, call_id=headers.get("x-looper-call"))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()

@@ -196,6 +196,8 @@ async def _update(call: Call) -> dict[str, Any]:
             items, more = await store.list_items(
                 status=None if status == "all" else status, kind=args.get("kind"), project_id=project,
                 limit=args.get("limit", store.LIST_DEFAULT), added_in=scope)
+            from .. import ledger_cards
+            await ledger_cards.offer(call, items)
             return {"items": [_listed(item) for item in items], "more": more}
         if "item" not in args:
             raise OpError(ErrorCode.INVALID, "item is required")
@@ -205,6 +207,8 @@ async def _update(call: Call) -> dict[str, Any]:
             raise store.LedgerRefused("not_found", f"{store.format_id(number)} does not exist")
         if action == "get":
             events = await store.list_events(number, limit=_EVENTS_SHOWN)
+            from .. import ledger_cards
+            await ledger_cards.offer(call, [item])
             return {"item": {**_listed(item), "detail": item["detail"]},
                     "events": [{"at": e["created_at"], "action": e["action"], "actor_kind": e["actor_kind"],
                                 "via": e["via"], "quote": e["quote"], "note": e["note"]} for e in events]}

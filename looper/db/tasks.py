@@ -420,12 +420,14 @@ def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """A ``task_steps`` row as the plan and the task page read it: ``result`` and ``review_roles`` decoded, the array
     columns as lists."""
     step = dict(row)
-    for name in ("result", "review_roles", "ready_when", "accept_when"):
+    for name in ("result", "review_roles", "ready_when", "accept_when", "checks"):
         if isinstance(step.get(name), str):
             step[name] = json.loads(step[name])
     for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
                  "missed_messages"):
         step[name] = list(step.get(name) or [])
+    if not step.get("checks"):
+        step.pop("checks", None)
     return step
 
 
@@ -751,3 +753,21 @@ async def status_counts(*, manager_id: str | None = None, project_ids: Sequence[
         manager_id, project_ids,
     )
     return [dict(r) for r in rows]
+
+
+UNTRUSTED_SOURCES = ("leads", "intent")
+
+
+async def mark_untrusted(task_id: str, source: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
+    """Note that outside content (``source``: leads or an intent) went into the task; a mark is never removed."""
+    if source not in UNTRUSTED_SOURCES:
+        raise ValueError(f"untrusted input is one of {', '.join(UNTRUSTED_SOURCES)}")
+    pool = pool or get_pool()
+    await pool.execute("UPDATE tasks SET untrusted_inputs = untrusted_inputs || ARRAY[$2]::text[] "
+                       "WHERE id = $1 AND NOT ($2 = ANY(untrusted_inputs))", task_id, source)
+
+
+async def untrusted_inputs(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> tuple[str, ...]:
+    """The outside content that went into the task (``mark_untrusted``); none for a task that is gone."""
+    pool = pool or get_pool()
+    return tuple(await pool.fetchval("SELECT untrusted_inputs FROM tasks WHERE id = $1", task_id) or ())

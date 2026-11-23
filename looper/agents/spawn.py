@@ -27,6 +27,7 @@ round, moves its row itself (``db.agent_spawns``) and calls ``run_child`` for ea
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -53,6 +54,7 @@ OUTPUT_MAX_CHARS = 20_000
 
 class SpawnKind(str, Enum):
     ADVISOR = "advisor"
+    EXPLORER = "explorer"
     OUTBOUND = "outbound"  # a review of an outbound action (``outbound.review``); never a row of agent_spawns
 
 
@@ -61,6 +63,7 @@ class SpawnKind(str, Enum):
 _KINDS: Mapping[SpawnKind, tuple[Access, str, str]] = {
     SpawnKind.ADVISOR: (Access.ADVISOR, "advisor", "looper-advisor"),
     SpawnKind.OUTBOUND: (Access.ADVISOR, "outbound_check", "looper-outbound"),
+    SpawnKind.EXPLORER: (Access.EXPLORE, "explorer", "looper-explorer"),
 }
 
 
@@ -69,6 +72,7 @@ class ChildFailure(str, Enum):
 
     UNAVAILABLE = "unavailable"  # it could not start: its settings, runtime, price or route (``detail``)
     RUNTIME = "runtime"  # its process did not start, or ended without a result or in error
+    START_FAILURE = "start_failure"  # an explorer did not create a model session
     TIMEOUT = "timeout"
     BUDGET = "budget"  # it reached its cap, cost more, its cost is unknown, or too little was left to start it
     REFUSED = "refused"  # its model refused, or another model answered
@@ -154,10 +158,10 @@ def _problem(settings: AgentSettings, launch: Launch) -> str | None:
     if settings.profile_error:
         return settings.profile_error
     adapter = ADAPTERS.get(settings.profile.runtime.type)
-    if adapter is None or Capability.NO_TOOLS not in adapter.capabilities:
+    if adapter is None or (not launch.explore and Capability.NO_TOOLS not in adapter.capabilities):
         return (f"Agent Profile {settings.profile.name!r} cannot run a spawned run: its runtime "
                 f"{settings.profile.runtime.type!r} has no mode without tools")
-    if not adapter.can_replace_system_prompt:
+    if not launch.explore and not adapter.can_replace_system_prompt:
         return (f"Agent Profile {settings.profile.name!r} cannot run a spawned run: its runtime "
                 f"{settings.profile.runtime.type!r} cannot replace its system prompt")
     if translated(launch):
@@ -186,7 +190,11 @@ def _refusal(result: Mapping[str, Any], model: str) -> str | None:
 
 async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSettings, cap_usd: float,
                     runtime_root: Path, claude_bin: str = "claude",
-                    on_record: Callable[[int], Awaitable[None]] | None = None) -> ChildResult:
+                    on_record: Callable[[int], Awaitable[None]] | None = None,
+                    cwd: Path | None = None,
+                    on_process: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None,
+                    keeper: Any = None, on_handle: Callable[[Any], None] | None = None,
+                    on_stale: Callable[[str], None] | None = None) -> ChildResult:
     """Run ``child`` once with ``settings``, spending at most ``cap_usd`` (lowered by the layers' per-run cap), as the
     module's notes say; any reason it gives no output is in the result. ``on_record`` is told the run's record id
     once it has one."""
@@ -206,13 +214,20 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
     launch = Launch(replace(settings, max_budget_usd=cap), role=child.role, access=access)
     if problem := _problem(settings, launch):
         return ChildResult(None, failure=ChildFailure.UNAVAILABLE, detail=problem)
-    directory = _directory(child.kind, child.run_id)
-    directory.mkdir(mode=0o700, parents=True)
+    if child.kind is SpawnKind.EXPLORER and cwd is None:
+        return ChildResult(None, failure=ChildFailure.UNAVAILABLE, detail="explorers require a read-only working directory")
+    if child.kind is not SpawnKind.EXPLORER and cwd is not None:
+        raise ValueError("only explorers may read a spawner's working directory")
+    directory = cwd if cwd is not None else _directory(child.kind, child.run_id)
+    if cwd is None:
+        directory.mkdir(mode=0o700, parents=True)
+    session_dir = runtime_root / ".local" / "explorer-homes" / child.agent_id if launch.explore else None
     try:
-        prompt_file = child.system_prompt.write_file(runtime_root)
+        prompt_file = child.system_prompt.write_file(session_dir if session_dir is not None else runtime_root)
         try:
             command = launch.runtime.run_command(launch.executable(claude_bin), cwd=directory, prompt_file=prompt_file,
-                                                 launch=launch, max_turns=child.max_turns)
+                                                 launch=launch, max_turns=child.max_turns,
+                                                 **({"session_dir": session_dir} if session_dir else {}))
         except RuntimeUnsupported as exc:
             return ChildResult(None, failure=ChildFailure.UNAVAILABLE, detail=str(exc))
         input_text = child.prompt
@@ -225,17 +240,54 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
                                      run_kind=run_kind, parent_record_id=parent.record_id,
                                      keep=typed_events if child.private else None, keep_output=not child.private)
         await recorder.start()
+        if launch.explore and recorder.record_id is None:
+            return ChildResult(None, failure=ChildFailure.UNAVAILABLE,
+                               detail="the explorer record could not be persisted; no process was started")
         if on_record is not None and recorder.record_id is not None:
-            await on_record(recorder.record_id)
+            try:
+                await on_record(recorder.record_id)
+            except BaseException:
+                await recorder.finish(output_text=None, result_event=None, error="child stopped before launch")
+                raise
+        async def process_started(process):
+            from . import proc_tree
+            started = await asyncio.to_thread(proc_tree._start_time, process.pid)
+            if started is None:
+                raise RuntimeError("cannot read explorer process identity")
+            if on_process is not None:
+                await on_process({"pid": process.pid, "started": started})
         try:
-            finished = await single_run.run_once(
-                recorder, command, cwd=str(directory), prompt=child.prompt, launch=launch, timeout=child.timeout_s,
-                what=f"the {child.kind.value} run", label=f"{child.kind.value} {child.agent_id}", quiet=child.private)
+            if launch.explore and keeper is not None and launch.runtime.keepable and not launch.runtime.hosts_runs:
+                from .kept_run import KeptRun
+                from . import keeper as keeper_module
+                handle = KeptRun(launch.runtime, command, launch=launch, cwd=directory,
+                    session_dir=session_dir, label=f"explorer {child.agent_id}",
+                    run_dir=runtime_root / keeper_module.RUNS_DIR / child.agent_id,
+                    runtime_root=runtime_root, epoch=keeper.epoch, on_stale=on_stale or (lambda reason: None))
+                handle.set_record(recorder.record_id)
+                handle.manifest.update({"role": "explorer", "task_id": parent.task_id,
+                    "step_id": parent.step_id, "timeout_s": child.timeout_s, "profile_id": settings.profile.id,
+                    "launch": launch.record()})
+                if on_handle is not None:
+                    on_handle(handle)
+                finished = await run_kept_child(handle, recorder, launch=launch, prompt=child.prompt,
+                    timeout=child.timeout_s, on_process=on_process)
+            else:
+                finished = await single_run.run_once(
+                    recorder, command, cwd=str(directory), prompt=child.prompt, launch=launch, timeout=child.timeout_s,
+                    what=f"the {child.kind.value} run", label=f"{child.kind.value} {child.agent_id}", quiet=child.private,
+                    **({"on_process": process_started} if on_process is not None else {}))
         except single_run.StartFailed as exc:
-            return ChildResult(None, recorder.record_id, failure=ChildFailure.RUNTIME,
+            return ChildResult(None, recorder.record_id, 0.0 if launch.explore else None,
+                               failure=ChildFailure.START_FAILURE if launch.explore else ChildFailure.RUNTIME,
                                detail=f"its runtime does not start: {exc}")
     finally:
-        shutil.rmtree(directory, ignore_errors=True)
+        if cwd is None:
+            shutil.rmtree(directory, ignore_errors=True)
+        if session_dir is not None:
+            from .kept_run import KeptRunState
+            if not (keeper is not None and 'handle' in locals() and handle.state is KeptRunState.DETACHED):
+                shutil.rmtree(session_dir, ignore_errors=True)
     result, record_id = finished.result, recorder.record_id
     recorded: float | None = None
     try:
@@ -296,3 +348,85 @@ async def spawn(kind: SpawnKind, parent: SpawnParent, brief: Mapping[str, Any], 
             spent_usd=result.cost_usd or 0.0, result=outcome, append={"rounds": result.round()},
             detail=result.detail or None)
     return SpawnOutcome(finished, result)
+
+
+class ChildDetached(Exception):
+    """The keeper owns the still-running child across a planned restart."""
+
+
+async def run_kept_child(handle: Any, recorder: Any, *, launch: Launch, prompt: str | None,
+                         timeout: float, on_process: Any = None) -> Any:
+    """Use the same recorder, deadline and spend cap with a keeper-owned process.
+
+    ``prompt=None`` attaches to an existing first turn. Replayed events rebuild
+    accounting without writing the transcript twice. A detached run stays open.
+    """
+    from . import proc_tree, single_run
+    from .kept_run import KeptRunState
+    from .runtimes.channel import RunStartError
+
+    result = None
+    timed_out = False
+    error = None
+    started = False
+
+    async def consume():
+        nonlocal result, started
+        if prompt is not None:
+            await handle.launch()
+            if on_process:
+                identity = await asyncio.to_thread(proc_tree._start_time, handle.pid)
+                if identity is None:
+                    raise RuntimeError("cannot read kept explorer process identity")
+                await on_process({"pid": handle.pid, "started": identity, "kept": True,
+                                  "run_dir": str(handle.run_dir)})
+            await handle.channel.start(prompt)
+        recorder.track_pid(lambda: handle.pid)
+        async for event in handle.channel.events():
+            if handle.replaying:
+                recorder.account(event, replayed=True)
+            else:
+                await recorder.record(event)
+            if recorder.cap_stop is not None:
+                result = recorder.cap_stop.result_event
+                handle.channel.end_input()
+                await handle.end()
+                return
+            if event.get("type") == "system" and event.get("subtype") == "init":
+                started = True
+            if event.get("type") == "result":
+                result = event
+                handle.channel.end_input()
+        # A keeper retains its control socket after a natural child exit.
+        # Close that attachment before wait() drains its client callbacks.
+        await handle.end()
+        await handle.wait()
+
+    try:
+        await asyncio.wait_for(consume(), timeout)
+        if result is None or result.get("is_error"):
+            error = "explorer gave no successful result"
+    except asyncio.TimeoutError:
+        error = "explorer ran over its deadline"
+        timed_out = True
+    except RunStartError as exc:
+        error = f"cannot start explorer: {exc}"
+        raise single_run.StartFailed(str(exc)) from exc
+    except asyncio.CancelledError:
+        if handle.state is KeptRunState.DETACHED:
+            recorder.detach()
+            raise ChildDetached from None
+        error = "explorer was stopped"
+        raise
+    except BaseException:
+        error = "explorer runtime failed"
+        raise
+    finally:
+        if handle.state is not KeptRunState.DETACHED:
+            try:
+                await handle.end()
+            finally:
+                await recorder.finish(output_text=str((result or {}).get("result") or "") or None,
+                                      result_event=result, error=error)
+                handle.release()
+    return single_run.Finished(result, started, timed_out)
