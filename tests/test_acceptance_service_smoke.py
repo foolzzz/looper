@@ -138,6 +138,17 @@ def test_serve_gates_acceptance_and_delivers_retry_and_reviewer_evidence(tmp_pat
                 finally:
                     await conn.close()
 
+            async def settled_attempts():
+                conn = await asyncpg.connect(url)
+                try:
+                    return [(row["attempt"], row["decision"], row["failure_kind"]) for row in await conn.fetch(
+                        "SELECT attempt, decision, failure_kind FROM step_attempts WHERE task_id=$1 "
+                        "AND step_key='s1' ORDER BY attempt", task_id)]
+                finally:
+                    await conn.close()
+
+            # The measured failure marks the first attempt; the accepted one has no failure.
+            assert asyncio.run(settled_attempts()) == [(1, "retry", "check_failed"), (2, "accept", None)]
             prompts = asyncio.run(recorded_prompts())
             workers = [prompt for kind, prompt in prompts if kind == "worker"]
             reviews = [prompt for kind, prompt in prompts if kind == "reviewer"]

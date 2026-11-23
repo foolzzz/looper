@@ -3386,7 +3386,8 @@ class PlannerAgent:
         step.status = "verified" if succeeded else "failed"
         await attempts.decide_attempt(await self._attempt(step),
                                       attempts.Decision.ACCEPT if succeeded else attempts.Decision.FAIL,
-                                      record_id=self._last_record_id)
+                                      record_id=self._last_record_id,
+                                      failure_kind=acceptance_decisions.failure_kind(context))
         await self._activity(
             "error",
             f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
@@ -3445,7 +3446,8 @@ class PlannerAgent:
             return  # the decision turn on the failed merge took over
         if decision in (Decision.ACCEPT, Decision.RETRY, Decision.REPLAN, Decision.FAIL):
             await attempts.decide_attempt(await self._attempt(step), attempts.Decision(decision.value),
-                                          record_id=self._last_record_id, adjudicated=bool(reply.adjudications))
+                                          record_id=self._last_record_id, adjudicated=bool(reply.adjudications),
+                                          failure_kind=acceptance_decisions.failure_kind(context))
         if reply.final is not None:
             plan.final_summary = reply.final.markdown()
 

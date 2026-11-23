@@ -185,3 +185,54 @@ def test_explicit_review_false_with_checks_is_decided_by_gate_even_under_review_
             assert saved.status == "verified"
             agent._send_to_review.assert_not_awaited()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("decision", ["retry", "replan", "fail"])
+@pytest.mark.parametrize("state,protected,required,expected", [
+    ("failed", [], True, "check_failed"), ("error", [], True, "check_failed"),
+    ("passed", ["shared.txt"], True, "check_failed"),
+    ("failed", [], False, None), ("passed", [], True, None),
+])
+def test_measured_required_failure_settles_the_attempt_as_check_failed(
+        tmp_path, monkeypatch, decision, state, protected, required, expected):
+    from looper.agents import attempts
+
+    async def run():
+        agent, plan, step, context, history = setup(tmp_path, monkeypatch, state)
+        history[0]["protected_changed"] = protected
+        if not required:
+            step.checks = (replace(step.checks[0], required=False),)
+        settled = AsyncMock()
+        monkeypatch.setattr(attempts, "decide_attempt", settled)
+        monkeypatch.setattr(agent, "_attempt", AsyncMock(return_value=7))
+        monkeypatch.setattr(agent, "_ask", AsyncMock(return_value=protocol.DecisionReply(
+            decision=protocol.Decision(decision), feedback="Fix it", reason="No", steps=(), summary="")))
+        monkeypatch.setattr(agent, "_dispatch_step", AsyncMock())
+        monkeypatch.setattr(agent, "_report_progress", AsyncMock())
+        monkeypatch.setattr(agent, "_replan", AsyncMock())
+        await agent._decide(plan, step, context, [])
+        assert settled.await_args.kwargs["failure_kind"] == (attempts.FailureKind(expected) if expected else None)
+    asyncio.run(run())
+
+
+def test_no_decision_fallback_settles_the_attempt_as_check_failed(tmp_path, monkeypatch):
+    from looper.agents import attempts
+
+    async def run():
+        agent, plan, step, context, _ = setup(tmp_path, monkeypatch)
+        settled = AsyncMock()
+        monkeypatch.setattr(attempts, "decide_attempt", settled)
+        monkeypatch.setattr(agent, "_attempt", AsyncMock(return_value=7))
+        monkeypatch.setattr(agent, "_ask", AsyncMock(side_effect=planner.PlannerTurnError("invalid")))
+        await agent._decide(plan, step, context, [])
+        assert settled.await_args.args[1] is attempts.Decision.FAIL
+        assert settled.await_args.kwargs["failure_kind"] is attempts.FailureKind.CHECK_FAILED
+    asyncio.run(run())
+
+
+def test_checks_off_leaves_the_default_failure_mapping(tmp_path, monkeypatch):
+    from looper.agents import acceptance_decisions
+
+    agent, plan, step, context, _ = setup(tmp_path, monkeypatch)
+    agent._execution = ProjectExecution(acceptance_checks=AcceptanceChecksMode.OFF)
+    assert acceptance_decisions.failure_kind(context) is None  # no evidence on the context

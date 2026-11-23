@@ -189,9 +189,11 @@ async def review_finished(attempt_id: int | None, passed: bool, blocking_finding
 
 
 async def decide_attempt(attempt_id: int | None, decision: Decision, record_id: int | None = None,
-                         adjudicated: bool = False, *, pool=None):
+                         adjudicated: bool = False, failure_kind: FailureKind | None = None, *, pool=None):
+    """``failure_kind`` overrides the failure a non-accept decision would otherwise map to."""
     if attempt_id is not None:
-        await _observe(step_attempts.decide_attempt, attempt_id, decision, record_id, adjudicated, pool=pool)
+        await _observe(step_attempts.decide_attempt, attempt_id, decision, record_id, adjudicated, failure_kind,
+                       pool=pool)
 
 
 async def close_attempts(task_id: str, decision: Decision = Decision.TASK_ENDED,

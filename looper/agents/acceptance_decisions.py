@@ -12,6 +12,7 @@ from .acceptance_checks import AcceptanceChecksMode
 from .acceptance_context import AcceptanceBaseline
 from .acceptance_gate import current_evidence, gate
 from . import acceptance_runner
+from .attempts import FailureKind
 from .tiers.planner_protocol import Decision, DecisionContext, ResultKind
 
 
@@ -175,6 +176,16 @@ async def before_decision(agent, plan, step, context, reply):
     if reply.decision is Decision.REPLAN and not context.evidence.passed:
         await agent._activity("acceptance_check", f"Replan replaces blocked checks for step {step.label}")
     return reply
+
+
+def failure_kind(context: DecisionContext) -> FailureKind | None:
+    """CHECK_FAILED when a required check was measured failed or errored on the version being decided, else the
+    default mapping. A required check with no row (the Worker never reached collection) does not count."""
+    gate = context.evidence
+    if gate is None:
+        return None
+    measured = {row["check_id"] for row in gate.current}
+    return FailureKind.CHECK_FAILED if measured & {*gate.failed, *gate.errored} else None
 
 
 async def reviewer_payload(agent, plan, step):
