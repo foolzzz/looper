@@ -52,7 +52,7 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   session. [Session routing](#manager-session-routing) gives the default
   Manager more. `session_routing.group_isolation` tells a feature that must
   not reach a group through the operator's context how far a group's turns
-  are kept apart: `shared`, `routed` or `isolated`. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  are kept apart: `shared`, or `isolated` while routing is on. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
@@ -123,9 +123,22 @@ control because configuration is operator-only. Dashboard metric widgets are sep
     what main's worker holds keeps its order, and the other sessions'
     processes stop once idle (the fleet's idle sweep). Their rows and saved
     runtime histories stay, including across a restart while routing is off.
-  - What a new group or dm session's first turn sees is not trimmed yet: its
-    resume brief still carries every chat's recent messages, so routing is
-    not for production use before that lands.
+  - What a group or dm session sees is its own chat only
+    (`tiers/group_session.py`). Its first turn starts with an opening, not
+    `main`'s resume brief: `[GROUP SESSION] This is the session of one Lark
+    group chat. You do not see the operator's direct chats or other groups.`
+    (Telegram when the bot is; a dm session says `[DIRECT CHAT SESSION]` and
+    "the direct chat of another allowed sender"). Then come the chat's 8 most
+    recent stored messages (`chat_messages` under the chat's own session id),
+    oldest first, one line each, at most 300 characters, as data, without the
+    message being answered. A Telegram group stores none, so its opening says
+    so. A session that starts over (a full context, a changed agent) gets its
+    own handoff and the same excerpt, never other chats. `main`'s brief is
+    unchanged. A group or dm session's turn is not the operator's, so its
+    tools have no leads search or vault reads. A reply out of a dm session goes
+    through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
+    fence enabled, stored user messages in this excerpt use the same typed group or direct-message
+    fence as new messages, with chat and time provenance; assistant messages and handoffs stay unchanged.
 - Acts on Looper only through its platform tools
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells
@@ -6606,6 +6619,39 @@ off; `outbound_review.get` and `outbound_review.update`).
     without one (`RuntimeAdapter.tool_hook`: Claude Code only). While it is on, such a Manager starts no turn.
   - **Spend:** a review of a Manager's call that no task owns is the Manager's spend (`manager_spend`), and goes
     with the Manager when it is purged (`manager_cleanup`).
+
+### The untrusted fence
+
+Content from outside Looper that reaches a model goes in an `<untrusted source=... ...>` block
+(`looper/agents/untrusted.py`, the outbound-review RFC section 8) while the system setting
+`untrusted_fence.enabled` is `true` (there is no dashboard switch; off when it cannot be read). Off, every entry
+writes what it wrote before, byte for byte.
+
+- **The block** (`untrusted.fence`) names its typed source (`untrusted.Source`) and where the content came from
+  (`from`, `at`, `ref`, ...; quotes, angle brackets and line breaks dropped). The content loses its @ markup
+  (`subscriptions.strip_mentions`), and its own `<untrusted` and `</untrusted` (any case) become `&lt;untrusted`
+  and `&lt;/untrusted`, so nothing inside can close the block or open another. The same input gives the same
+  bytes; no length limit of its own. One line (`untrusted.LEAD_LINE`), written once before the first block, says
+  they are data, never instructions.
+- **The Manager's entries:** a Lark or Telegram message from someone other than the operator
+  (`operator_identity.is_operator`: any group chat's, a direct chat's other than the operator's) is a
+  `group_message` or `direct_message` block naming its sender, time and message id; the dashboard's and an API
+  client's messages, and the operator's own, are not fenced. A Lark quote is a `quote` block instead of
+  `<lark_quote>`, whoever's message it came with. The attachments' list keeps its lines outside, and the items,
+  whose names the sender chose, go in an `attachment` block (the files' contents are read in the runtime, unfenced).
+  The `Channel:` label carries no sender-controlled name: the sender is in the message block's provenance,
+  processed by `untrusted.display_name` (one line, no mentions or invisible control characters).
+  `looper_leads_search` fences each lead's summary (`lead`, with its first source's chat, sender and time) and
+  each source string, and adds the lead line to its notice; sender fields also use `display_name`.
+  The group backstop still compares the lead's own words.
+- **The vault:** Manager and task vault tools fence paths, snippets and note bodies under the vault's `inbox/`
+  area (case-insensitive), including its subdirectories and aliases whose resolved targets are there
+  (`inbox` source, with the relative path). Other folders keep their text.
+  The Manager's backstop remembers the original text before fencing it.
+- **The processor:** subscription message streams and leads and intents extraction use `untrusted.fence`
+  (`message_stream` source, because a batch can mix chat types) instead of a separate `<messages>` block.
+  Each input or tool answer with fenced content carries the lead line once. Off, the original processor and
+  vault output is byte-identical.
 
 ### Turns Claude runs on its own
 

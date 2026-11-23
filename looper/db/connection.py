@@ -181,6 +181,7 @@ _OUTBOUND_REVIEWS = "outbound_reviews"
 _CARD_ACTIONS = "card_actions"
 
 _MEMORY_CANDIDATES = "memory_candidates"
+_PROVIDER_LIMIT_WINDOWS = "provider_limit_windows"
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
 _UNCERTAIN_DELIVERY_INDEXES = (
@@ -459,6 +460,9 @@ _ONLINE_STEPS = (
     _OnlineStep(_FAILURE_TYPING, "failure_typing_online",
                 validate=(("llm_records", "llm_records_failure_check"),),
                 indexes=(("idx_llm_records_failures", "ON llm_records (created_at) WHERE failure_class IS NOT NULL"),)),
+    _OnlineStep(_PROVIDER_LIMIT_WINDOWS, "provider_limit_windows_online",
+                indexes=(("idx_llm_records_provider_day",
+                          "ON llm_records ((metadata->'profile'->'provider'->>'id'), created_at)"),)),
 )
 
 
@@ -1020,6 +1024,20 @@ async def _mcp_tool_levels_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MCP_TOOL_LEVELS):
         return False
     return not await conn.fetchval("SELECT to_regclass('mcp_tool_levels') IS NOT NULL")
+
+
+async def _provider_limit_windows_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", _PROVIDER_LIMIT_WINDOWS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('provider_limit_windows') IS NOT NULL")
+
+
+def _provider_limit_windows_ddl() -> str:
+    found = re.search(r"-- provider limit windows begin\n(.*?)-- provider limit windows end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its provider limit windows block")
+    return found.group(1)
 
 
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
@@ -1865,6 +1883,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _manager_sessions_pending(conn):
             await conn.execute(_manager_sessions_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_SESSIONS)
+        if await _provider_limit_windows_pending(conn):
+            await conn.execute(_provider_limit_windows_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_LIMIT_WINDOWS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1918,6 +1939,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
+            or await _provider_limit_windows_pending(conn)
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn)
             or await _uncertain_deliveries_pending(conn) or await _mcp_tool_levels_pending(conn)
