@@ -32,6 +32,27 @@ def test_python_tests_job_stages_dashboard_before_pytest() -> None:
     assert node.start() < stage.start() < tests.start(), job
 
 
+@pytest.mark.parametrize("workflow,job_name", [
+    ("python-tests", "agent-system"), ("python-tests", "bridge-schema-pg18"),
+    ("python-tests", "provenance"), ("installed-tests", "installed"),
+])
+def test_parallel_database_jobs_raise_postgres_lock_capacity(workflow: str, job_name: str) -> None:
+    text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
+    job = re.split(r"\n  (?=\S)", text.split(f"  {job_name}:\n", 1)[1], maxsplit=1)[0]
+    configure = re.search(
+        r"      - name: Increase PostgreSQL lock capacity\n"
+        r"(?:        if: needs.changes.outputs.docs_only != 'true'\n)?"
+        r"        run: \|\n((?:          .*\n)+)", job)
+    assert configure, job
+    assert ("if: needs.changes.outputs.docs_only != 'true'" in configure.group(0)) == (workflow == "python-tests")
+    script = configure.group(1)
+    assert "ALTER SYSTEM SET max_locks_per_transaction = 1024" in script
+    assert script.index("ALTER SYSTEM") < script.index("docker restart") < script.index("pg_isready")
+    assert 'test "$(docker exec' in script and 'SHOW max_locks_per_transaction' in script
+    assert script.rstrip().endswith('= 1024')
+    assert configure.start() < job.index("python -m pytest"), job
+
+
 @pytest.mark.parametrize("ancestors", [("/private/tmp", "/private", ""), ("/tmp", "")])
 def test_settings_comparison_ignores_the_hosts_temp_root_ancestors(ancestors: tuple[str, ...]) -> None:
     root = "/tmp/looper-x"
