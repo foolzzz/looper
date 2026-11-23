@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import time
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -19,30 +19,37 @@ from looper.agents.runtimes.cursor_agent import CursorAgentRuntime
 from tests.runtime_model_helpers import builtin_launch
 
 
+# The watched event loop sets this on every tick; a slow removal clears it when it starts.
+_TICKED = threading.Event()
+# The slow removals during which the watched event loop never ran.
+_STALLED: list[Path] = []
+
+
+def _block_until_the_loop_ticks(path) -> None:
+    """Block like a slow removal until the watched event loop has run since this call began: soon when the removal
+    is off the loop, never when it runs on it. A bound on the loop's gaps would also count pauses that are not the
+    removal, such as a full garbage collection on a busy runner."""
+    _TICKED.clear()
+    if not _TICKED.wait(5):
+        _STALLED.append(Path(path))
+
+
+async def _tick(running):
+    while running():
+        await asyncio.sleep(0.01)
+        _TICKED.set()
+
+
 async def _responsive(operation):
-    gaps = []
     running = True
-    warm = asyncio.Event()
-
-    async def tick():
-        previous = time.monotonic()
-        while running:
-            await asyncio.sleep(0.01)
-            current = time.monotonic()
-            # The first wake-up is task start-up, not the code under test: measure from the second.
-            if warm.is_set():
-                gaps.append(current - previous)
-            warm.set()
-            previous = current
-
-    ticker = asyncio.create_task(tick())
-    await warm.wait()
+    _STALLED.clear()
+    ticker = asyncio.create_task(_tick(lambda: running))
     try:
         await operation
     finally:
         running = False
         await ticker
-    assert gaps and max(gaps) < 0.2, gaps
+    assert not _STALLED, f"the event loop did not run while removing {_STALLED}"
 
 
 @pytest.fixture
@@ -52,7 +59,7 @@ def slow_removal(monkeypatch):
 
     def remove(path, *args, **kwargs):
         calls.append(Path(path))
-        time.sleep(0.5)
+        _block_until_the_loop_ticks(path)
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(shutil, "rmtree", remove)
@@ -165,26 +172,13 @@ def test_startup_session_sweep_keeps_loop_responsive(tmp_path, monkeypatch):
     async def run(pool):
         directory = room.run_session_dir(tmp_path, "codex", "ended-task", "run").parent
         directory.mkdir(parents=True)
-        gaps = []
         ticking = True
         ticker = None
-        warm = asyncio.Event()
-
-        async def tick():
-            previous = time.monotonic()
-            while ticking:
-                await asyncio.sleep(0.01)
-                current = time.monotonic()
-                # The first wake-up is task start-up, not the code under test: measure from the second.
-                if warm.is_set():
-                    gaps.append(current - previous)
-                warm.set()
-                previous = current
+        _STALLED.clear()
 
         async def keeping_sessions(**kwargs):
             nonlocal ticker
-            ticker = asyncio.create_task(tick())
-            await warm.wait()
+            ticker = asyncio.create_task(_tick(lambda: ticking))
             return []
 
         original_measure = serve._StartupSteps.measure
@@ -201,7 +195,7 @@ def test_startup_session_sweep_keeps_loop_responsive(tmp_path, monkeypatch):
 
         def slow_remove(path, *args, **kwargs):
             removed.append(Path(path))
-            time.sleep(0.5)
+            _block_until_the_loop_ticks(path)
             return original_remove(path, *args, **kwargs)
 
         monkeypatch.setattr(shutil, "rmtree", slow_remove)
@@ -229,6 +223,6 @@ def test_startup_session_sweep_keeps_loop_responsive(tmp_path, monkeypatch):
                 await ticker
         assert removed == [directory]
         assert not directory.exists()
-        assert gaps and max(gaps) < 0.2, gaps
+        assert not _STALLED, f"the event loop did not run while removing {_STALLED}"
 
     run_db(run, monkeypatch, timeout=45)

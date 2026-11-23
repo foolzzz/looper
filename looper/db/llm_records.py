@@ -86,8 +86,8 @@ def normalize_record_metadata(metadata: Any) -> Any:
                 "error": library.get("error"), "project_error": project.get("error")}}}
 
 
-# The run tree's columns, which no record view shows yet.
-_UNVIEWED = ("parent_record_id", "run_kind")
+# Internal run attribution, which existing record views do not expose.
+_UNVIEWED = ("parent_record_id", "run_kind", "attempt_id")
 
 
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
@@ -108,7 +108,7 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
 # have no run_kind (its migration rewrites no row), and readers take theirs from these too (``RUN_KIND``). An agent
 # id none of them matches has no kind.
 RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check",
-             "outbound_check", "explorer")
+             "outbound_check", "explorer", "leads_check")
 _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     # (kind, exact ids, id prefixes)
     ("manager", ("manager",), ("manager-",)),
@@ -116,6 +116,7 @@ _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("worker", (), ("worker-",)),
     ("reviewer", (), ("reviewer-",)),
     ("processor", (), ("processor:",)),
+    ("leads_check", (), ("leads_check:",)),
     ("consult", (), ("consult-",)),
 )
 
@@ -357,6 +358,22 @@ async def add_metadata(record_id: int, metadata: dict[str, Any], *, pool: asyncp
     )
 
 
+async def increment_contract_rejections(
+    record_id: int, contract_kind: str, *, pool: asyncpg.Pool | None = None,
+) -> None:
+    """Count a parser rejection on its turn, atomically and without retaining the rejected reply."""
+    pool = pool or get_pool()
+    await pool.execute(
+        """UPDATE llm_records
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+               'contract_rejections', COALESCE(metadata->'contract_rejections', '{}'::jsonb)
+               || jsonb_build_object($2::text,
+                   COALESCE((metadata->'contract_rejections'->>$2::text)::integer, 0) + 1))
+           WHERE id = $1""",
+        record_id, contract_kind,
+    )
+
+
 async def list_events(
     record_id: int,
     *,
@@ -575,13 +592,18 @@ async def list_records(
 async def get_record(
     record_id: int,
     *,
+    include_attempt_id: bool = False,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, Any] | None:
+    """Read an existing record view; only internal run recovery opts into attempt attribution."""
     pool = pool or get_pool()
     row = await pool.fetchrow("SELECT * FROM llm_records WHERE id = $1", record_id)
     if row is None:
         return None
-    return _row_to_dict(row)
+    record = _row_to_dict(row)
+    if include_attempt_id:
+        record["attempt_id"] = row["attempt_id"]
+    return record
 
 
 # A run with a runtime's own login (a subscription: Claude Code's, priced by Claude Code; Codex's, priced by Looper

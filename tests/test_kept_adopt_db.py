@@ -293,6 +293,10 @@ def test_a_fallback_run_survives_control_plane_restart(tmp_path, monkeypatch, re
 def test_an_adopted_run_continues_its_record(tmp_path, monkeypatch):
     async def run(db):
         async with _pools(db, tmp_path, monkeypatch) as case:
+            attempt = await db.fetchval(
+                "INSERT INTO step_attempts(task_id,step_key,task_run_no,attempt,trigger) "
+                "VALUES ('task-adopt','implement',1,1,'first') RETURNING id")
+            await db.execute('UPDATE llm_records SET attempt_id=$1', attempt)
             await _detach(case)
             await _adopt(case)
             (tmp_path / 'release').touch()
@@ -301,6 +305,8 @@ def test_an_adopted_run_continues_its_record(tmp_path, monkeypatch):
             records = await db.fetch('SELECT * FROM llm_records')
             assert len(records) == 1
             assert records[0]['status'] == 'completed'
+            assert records[0]['attempt_id'] == attempt
+            assert await db.fetchval('SELECT run_outcome FROM step_attempts WHERE id=$1', attempt) == 'completed'
             assert float(records[0]['cost_usd']) == .375
             events = await db.fetch('SELECT seq, event FROM llm_record_events ORDER BY seq')
             assert [row['seq'] for row in events] == list(range(1, len(events) + 1))

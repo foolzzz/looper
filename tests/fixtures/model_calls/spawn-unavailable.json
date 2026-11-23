@@ -1,0 +1,141 @@
+{
+  "baseline": "1f2ac843e01adac83448c09a329df01a4dbb8566",
+  "launches": [],
+  "outcome": {
+    "child": {
+      "cost_usd": null,
+      "detail": "settings unavailable",
+      "failure": "unavailable",
+      "models": [],
+      "output": null,
+      "record_id": null
+    },
+    "row": {
+      "attempt": 1,
+      "brief": {
+        "why": "Choose an execution strategy."
+      },
+      "budget_usd": 0.2,
+      "cancel_reason": null,
+      "child_process": null,
+      "child_record_id": null,
+      "created_at": "<timestamp>",
+      "delivered_at": null,
+      "delivery": null,
+      "detail": "settings unavailable",
+      "failure_cause": null,
+      "failure_class": null,
+      "finished_at": "<timestamp>",
+      "id": 1,
+      "idempotency_key": null,
+      "inputs": {
+        "language": "Python"
+      },
+      "kind": "advisor",
+      "parent_record_id": 1,
+      "parent_spend_known": null,
+      "profile_id": null,
+      "result": {
+        "failure": "unavailable",
+        "rounds": [
+          {
+            "cost_usd": null,
+            "failure": "unavailable",
+            "models": [],
+            "record_id": null
+          }
+        ]
+      },
+      "returns": 0,
+      "rounds": 1,
+      "spawner": null,
+      "spent_usd": 0.0,
+      "state": "failed",
+      "step_id": "step-golden",
+      "task_id": "task-golden",
+      "updated_at": "<timestamp>"
+    }
+  },
+  "tables": {
+    "agent_spawns": [
+      {
+        "attempt": 1,
+        "brief": {
+          "why": "Choose an execution strategy."
+        },
+        "budget_usd": 0.2,
+        "cancel_reason": null,
+        "child_process": null,
+        "child_record_id": null,
+        "created_at": "<timestamp>",
+        "delivered_at": null,
+        "delivery": null,
+        "detail": "settings unavailable",
+        "failure_cause": null,
+        "failure_class": null,
+        "finished_at": "<timestamp>",
+        "id": 1,
+        "idempotency_key": null,
+        "inputs": {
+          "language": "Python"
+        },
+        "kind": "advisor",
+        "parent_record_id": 1,
+        "parent_spend_known": null,
+        "profile_id": null,
+        "result": {
+          "failure": "unavailable",
+          "rounds": [
+            {
+              "cost_usd": null,
+              "failure": "unavailable",
+              "models": [],
+              "record_id": null
+            }
+          ]
+        },
+        "returns": 0,
+        "rounds": 1,
+        "spawner": null,
+        "spent_usd": 0.0,
+        "state": "failed",
+        "step_id": "step-golden",
+        "task_id": "task-golden",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "llm_record_events": [],
+    "llm_records": [
+      {
+        "agent_id": "planner-task-golden",
+        "cache_creation_tokens": null,
+        "cache_read_tokens": null,
+        "compactions": null,
+        "context_tokens": null,
+        "cost_source": null,
+        "cost_usd": null,
+        "created_at": "<timestamp>",
+        "duration_ms": null,
+        "error": null,
+        "failure_cause": null,
+        "failure_class": null,
+        "finished_at": null,
+        "id": 1,
+        "input_summary": null,
+        "input_text": null,
+        "input_tokens": null,
+        "last_output_at": null,
+        "metadata": null,
+        "model": null,
+        "output_summary": null,
+        "output_text": null,
+        "output_tokens": null,
+        "parent_record_id": null,
+        "run_kind": "planner",
+        "session_id": null,
+        "status": "running",
+        "task_id": "task-golden"
+      }
+    ]
+  }
+}
