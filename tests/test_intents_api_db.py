@@ -79,8 +79,8 @@ def test_every_intent_operation_rejects_api_client_identity(monkeypatch, tmp_pat
     async def check(pool):
         async with v1_api(tmp_path, pool) as call:
             operations = [op for op in api_v1.operations() if op.operation_id.split(".")[0] in
-                          ("intents", "intent_types", "intent_bindings", "intent_alert_senders")]
-            assert len(operations) == 21
+                          ("intents", "intent_types", "intent_bindings", "intent_alert_senders", "intent_group_reads")]
+            assert len(operations) == 26
             for operation in operations:
                 assert operation.operator_only
                 status, answer = await call(operation.operation_id, {}, client=True)
@@ -207,4 +207,122 @@ def test_api_needs_project_returns_the_same_selection_instruction(monkeypatch, t
             expected = ("项目：这个会话没有绑定项目。候选：1. Synthetic project\n回复「建 I-0001 <编号>」"
                         if with_candidates else "请到意图页选择项目。")
             assert answer["error"] == {"code": "conflict", "message": expected}
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_group_reads_round_trip_and_refusals(monkeypatch, tmp_path):
+    from datetime import timedelta
+    from looper.agents import chat_settings, cron, extraction
+
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(chat_settings, "_delivery_enabled", False)
+
+    async def check(pool):
+        await stream.source(pool)
+        seq = await stream.add(pool, "Synthetic requirement", chat_id="oc_group", sent_at=now,
+                               chat_name='<at user_id="all">ALL</at> Synthetic group')
+        await stream.add(pool, "Synthetic robot", chat_id="oc_group", sent_at=now, sender_kind="app")
+        await stream.add(pool, "Synthetic import", chat_id="oc_group", sent_at=now, origin="import")
+        await stream.add(pool, "Old message", chat_id="oc_group", sent_at=now - timedelta(days=2))
+        await leads.intent(pool, [seq], chat_id="oc_group")
+        async with v1_api(tmp_path, pool) as call:
+            async def ok(action, body):
+                operation = f"intent_group_reads.{action}"
+                status, answer = await call(operation, body)
+                assert status == 200, answer
+                schema = next(op.result for op in api_v1.operations() if op.operation_id == operation)
+                api_v1.validate_arguments(schema, answer["result"])
+                assert "<at" not in str(answer)
+                return answer["result"]
+
+            listed = await ok("list", {})
+            assert listed == {"enabled": False, "delivery_enabled": False, "run_max": 200,
+                              "day_max": 500, "max_groups": 10, "groups": []}
+            preview = await ok("preview", {"chat_id": "oc_group"})
+            assert preview["group"]["messages_24h"] == 1
+            assert preview["group"]["estimate_usd"] == [round(n, 4) for n in extraction.estimate(1, 1)]
+            assert (await ok("list", {}))["groups"] == []
+            listed = await ok("put", {"chat_id": "oc_group"})
+            group = listed["groups"][0]
+            assert group["name"] == preview["group"]["name"]
+            assert group["kind"] == "group" and group["readable"]
+            assert group["messages_24h"] == group["intents_7d"] == 1
+            assert group["read_today"] == group["skipped_today"] == 0
+            before = group["read_from"]
+            assert (await ok("put", {"chat_id": "oc_group"}))["groups"][0]["read_from"] == before
+            day = now.astimezone(cron.zone(cron.local_zone_name())).date()
+            await pool.execute("INSERT INTO intent_group_read_days(source_id,chat_id,day,read,skipped) "
+                               "VALUES($1,'oc_group',$2,7,3)", stream.SOURCE, day)
+            group = (await ok("list", {}))["groups"][0]
+            assert group["read_today"] == 7 and group["skipped_today"] == 3
+            await pool.execute("UPDATE source_chats SET extraction='excluded',extraction_excluded_at=now() WHERE chat_id='oc_group'")
+            assert not (await ok("list", {}))["groups"][0]["readable"]
+            await pool.execute("UPDATE source_chats SET extraction='included',extraction_excluded_at=NULL WHERE chat_id='oc_group'")
+            for n in range(1, 11):
+                await stream.chat(pool, f"oc_extra_{n}", kind="topic" if n == 1 else "group")
+                if n < 10:
+                    await ok("put", {"chat_id": f"oc_extra_{n}"})
+            status, answer = await call("intent_group_reads.put", {"chat_id": "oc_extra_10"})
+            assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert "at most 10" in answer["error"]["message"]
+            status, answer = await call("intent_group_reads.settings_put", {"enabled": True})
+            assert status == 409 and answer["error"]["code"] == "conflict", answer
+            assert "delivery.enabled" in answer["error"]["message"]
+            assert not (await ok("list", {}))["enabled"]
+            monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
+            listed = await ok("settings_put", {"enabled": True})
+            assert listed["enabled"] and listed["delivery_enabled"]
+            assert next(g for g in listed["groups"] if g["chat_id"] == "oc_group")["read_from"] > before
+            starts = {g["chat_id"]: g["read_from"] for g in listed["groups"]}
+            assert {g["chat_id"]: g["read_from"] for g in (await ok("settings_put", {"enabled": True}))["groups"]} == starts
+            assert not (await ok("settings_put", {"enabled": False}))["enabled"]
+            listed = await ok("delete", {"chat_id": "oc_group"})
+            assert "oc_group" not in {g["chat_id"] for g in listed["groups"]}
+            assert await pool.fetchval("SELECT count(*) FROM intents") == 1
+            await ok("delete", {"chat_id": "oc_group"})
+            for action, body in (("list", {}), ("preview", {"chat_id": "oc_extra_1"}),
+                                 ("put", {"chat_id": "oc_extra_1"}), ("delete", {"chat_id": "oc_extra_1"}),
+                                 ("settings_put", {"enabled": True})):
+                status, answer = await call(f"intent_group_reads.{action}", body, client=True)
+                assert status == 403, answer
+            status, answer = await call("intent_group_reads.settings_put", {"enabled": "true"})
+            assert status == 400, answer
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("case", ["p2p", "unknown", "stream_excluded", "extraction_excluded", "missing", "empty"])
+def test_group_reads_reject_unfollowable_chats(monkeypatch, tmp_path, case):
+    async def check(pool):
+        await stream.source(pool)
+        if case not in ("missing", "empty"):
+            await stream.chat(pool, "oc_test", kind=case if case in ("p2p", "unknown") else "group")
+            if case == "stream_excluded":
+                await pool.execute("UPDATE source_chats SET inclusion='excluded',exclusion_reason='operator' WHERE chat_id='oc_test'")
+            elif case == "extraction_excluded":
+                await pool.execute("UPDATE source_chats SET extraction='excluded',extraction_excluded_at=now() WHERE chat_id='oc_test'")
+        async with v1_api(tmp_path, pool) as call:
+            for action in ("put", "preview"):
+                status, answer = await call(f"intent_group_reads.{action}", {"chat_id": "" if case == "empty" else "oc_test"})
+                assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert await pool.fetchval("SELECT count(*) FROM intent_group_reads") == 0
+    run_db(check, monkeypatch, timeout=30)
+
+
+
+def test_enabling_group_reads_never_moves_a_group_before_its_added_at(monkeypatch):
+    from datetime import timedelta
+    from looper.agents import chat_settings, intents
+
+    monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
+
+    async def check(pool):
+        await stream.source(pool)
+        await stream.chat(pool, "oc_added_later")
+        # Model an addition newer than the enabling transaction's clock snapshot.
+        added = datetime.now(timezone.utc) + timedelta(minutes=1)
+        await pool.execute("INSERT INTO intent_group_reads(source_id,chat_id,added_at,read_from) "
+                           "VALUES($1,'oc_added_later',$2,$2)", stream.SOURCE, added)
+        result = await intents.group_read_settings_put(True, db=pool)
+        assert result["enabled"]
+        assert result["groups"][0]["read_from"] == added.isoformat()
     run_db(check, monkeypatch, timeout=30)
