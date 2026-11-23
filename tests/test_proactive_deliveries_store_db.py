@@ -38,11 +38,16 @@ def test_delivery_table_has_nullable_decision_columns_and_one_migration(upgrade,
     async def check(pool):
         from looper.db import connection
         if upgrade:
-            await pool.execute("DROP TABLE proactive_deliveries; DELETE FROM schema_migrations WHERE name='proactive_deliveries'")
+            # morning_brief_consumed references the table; the morning briefs migration recreates it.
+            await pool.execute("DROP TABLE morning_brief_consumed; DROP TABLE proactive_deliveries; "
+                               "DELETE FROM schema_migrations WHERE name='proactive_deliveries'")
         async with pool.acquire() as conn:
             await connection.ensure_schema(conn)
             await connection.ensure_schema(conn)
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
+        assert await pool.fetchval("SELECT count(*) FROM pg_constraint WHERE contype = 'f' "
+                                   "AND conrelid = 'morning_brief_consumed'::regclass "
+                                   "AND confrelid = 'proactive_deliveries'::regclass") == 1
         # Fresh schemas use the baseline marker; upgrades record the one named migration.
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name='proactive_deliveries'") == int(upgrade)
         columns = await pool.fetch("SELECT column_name, data_type, is_nullable FROM information_schema.columns "
