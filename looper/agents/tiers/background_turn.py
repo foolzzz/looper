@@ -216,7 +216,7 @@ async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -
     the way ``/stop`` stops it; one that cannot runs to its end, and its reply only stays on its record."""
     from .manager import NoReply, OverCap, _CompletionNotTaken
 
-    if rows[0].get("kind") == "triage":  # its own settling: no code notice, no task links
+    if rows and rows[0].get("kind") == "triage":  # its own settling: no code notice, no task links
         from . import triage_background
 
         return await triage_background.tell(self, rows, batch)
