@@ -14,7 +14,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
-from ..db import (connection as db_connection, decision_snapshots, manager_events, proactive_deliveries,
+from ..db import (connection as db_connection, decision_snapshots, idle_checks, manager_events, proactive_deliveries,
                   schedules as db_schedules, llm_requests, channel_outbox)
 from . import chat_attachments, scheduler_settings
 from .command_runs import CommandRuns, Finished, Lost, LOGS_DIR, RUNNER_DIR, RUNS_DIR
@@ -42,6 +42,7 @@ class Report:
     channel_outbox: int = 0
     decision_snapshots: int = 0
     proactive_deliveries: int = 0
+    idle_checks: int = 0
     logs: int = 0
     log_bytes: int = 0
     run_dirs: int = 0
@@ -296,6 +297,10 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             report.proactive_deliveries += count
             if count == 0:
                 break
+
+    with _step(report, "idle checks"):
+        while (count := await idle_checks.purge(now - timedelta(days=idle_checks.RETENTION_DAYS))):
+            report.idle_checks += count
 
     with _step(report, "llm requests"):
         await _prune_llm_requests(report, now)

@@ -74,6 +74,8 @@
  "gateway.key_reveal": "inside",
  "gateway.key_rotate": "inside",
  "gateway.update": "inside",
+ "idle_check_settings.get": "inside",
+ "idle_check_settings.update": "inside",
  "installs.create": "inside",
  "installs.delete": "inside",
  "installs.project": "inside",
