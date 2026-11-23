@@ -136,6 +136,7 @@ _CHAT_BINDING_SENDER_POLICY = "chat_binding_sender_policy"
 _PROVIDER_ENABLED = "provider_enabled"
 _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
+_SCHEDULE_THROTTLE = "schedule_throttle"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _TASK_CHAT_GROUP = "task_chat_group"
 _PROCESSOR_ROLE = "processor_role"
@@ -458,6 +459,10 @@ _ONLINE_STEPS = (
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
+    # schedule_runs can be large: its widened status check is validated without blocking writes.
+    _OnlineStep(_SCHEDULE_THROTTLE, "schedule_throttle_online",
+                validate=(("schedules", "schedules_active_hours_check"),
+                          ("schedule_runs", "schedule_runs_status_check"))),
     # The delivery tables can be large: their partial indexes are built without blocking writes.
     _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
     _OnlineStep(_FAILURE_TYPING, "failure_typing_online",
@@ -1376,6 +1381,28 @@ async def _manager_scope_projects_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+def _schedule_throttle_ddl(sql: str) -> tuple[str, ...]:
+    """The throttle columns of ``schedules`` and the run status they add, their checks NOT VALID (validated
+    online), as schema.sql has them."""
+    hours = re.search(r"CONSTRAINT schedules_active_hours_check (CHECK \(.*?\)\)),\n", sql, re.S)
+    status = re.search(r"status        TEXT NOT NULL (CHECK \(status IN \(.*?'skipped_busy'\)\))", sql, re.S)
+    if hours is None or status is None:
+        raise RuntimeError("schema.sql lost the schedule throttle checks")
+    return ("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS active_hours TEXT, "
+            "ADD COLUMN IF NOT EXISTS idle_only BOOLEAN NOT NULL DEFAULT false",
+            f"ALTER TABLE schedules ADD CONSTRAINT schedules_active_hours_check {hours.group(1)} NOT VALID",
+            "ALTER TABLE schedule_runs DROP CONSTRAINT schedule_runs_status_check, "
+            f"ADD CONSTRAINT schedule_runs_status_check {status.group(1)} NOT VALID")
+
+
+async def _schedule_throttle_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _SCHEDULE_THROTTLE):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('schedules') "
+        "AND attname = 'idle_only' AND NOT attisdropped)")
+
+
 async def _schedule_missed_since_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
                            _SCHEDULE_MISSED_SINCE):
@@ -1640,6 +1667,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _schedule_deferred_by_drain_pending(conn):
             await conn.execute("ALTER TABLE schedule_runs ADD COLUMN deferred_by_drain BOOLEAN NOT NULL DEFAULT false")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_DEFERRED_BY_DRAIN)
+        if await _schedule_throttle_pending(conn):
+            for ddl in _schedule_throttle_ddl(sql):
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_THROTTLE)
         if await _task_chat_group_pending(conn):
             await conn.execute("ALTER TABLE tasks ADD COLUMN chat_group BOOLEAN NOT NULL DEFAULT false")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_CHAT_GROUP)
@@ -1947,6 +1978,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
+            or await _schedule_throttle_pending(conn)
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
             or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
