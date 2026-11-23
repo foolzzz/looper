@@ -211,3 +211,171 @@ tasked、rejected、merged 是终态。
 1. **复核器失败时：** 推荐放行，条目照常入库并计数，理由见上。备选是这次运行失败、游标不动、下一轮重来，但这样复核器一出故障，线索和意图就全停了。
 2. **复核器默认模型：** 推荐以 PR2 的实测为准，在 Haiku 5.5 和 Opus 5.5 之间取达到目标里最便宜的；两个都达不到就报告，不自动换别的。
 3. **被丢弃的条目要不要留：** 推荐留（`dropped` 状态），用来评测错丢；它们的出处被删时照样跟着删。
+
+## 11. 补充：意图读取指定群里所有人发的消息
+
+维护者 2026-11-23 定下要点（下面「已定」），本节写怎么落地。默认关闭，关闭时行为和 `main` 逐字节一致。
+
+**已定（维护者）：**
+
+- 群名单只有操作者能改，默认为空；每个群逐个点名，没有通配，也没有「机器人所在的全部群」。
+- 和项目绑定无关：名单上的群不需要绑定项目，绑定了项目的会话也不会因此进名单。
+- 只读人发的消息：机器人和应用发的、导入和回填的历史都不读。
+- 一个群加入名单后，只读从那一刻起的消息：加入时记下它的开始时间，更早的永远不读。
+- 每个群可以单独撤销，撤销后立刻停止读取。
+- 推送仍然只发操作者私聊：第 6 节和 `intent_push.target_for` 的私聊检查不变，群永远不是推送目标。
+- 一个总开关，默认关闭；关闭时行为和今天逐字节一致，用固定基线钉住。
+
+**本节另外的选择**（标 ⚑ 的列在 11.10，待维护者确认）：
+
+| 选择 | 理由 |
+|---|---|
+| 名单是一张表，每个群一行，带开始时间；不是系统设置里的一串 id | 开始时间、撤销、会话被删时跟着删都是行级的；按行加锁，撤销和入库能串行 |
+| ⚑ 名单和开关都不进订阅的 `config_version` | 进了的话，加群、撤销、开关都会让意图订阅的确认失效，私聊里的意图也一起停到重新确认；加群本身就是操作者的显式动作，界面在加之前列出这个群的消息量和花费 |
+| 开始时间同时约束发送时间和入库时间；开关从关到开时，所有群的开始时间改为当时 | 排期之后加入的群、打开的开关都不会让一次运行读到开始时间之前的消息；运行快照不用加字段，开和关时都不变 |
+| ⚑ 每次运行最多 200 条「名单消息」，超出的留给紧接着的补跑；每个订阅每天最多 2,000 条，超出的当天跳过、计数、不再读 | 意图每天的花费上限（$3）是私聊和群共用的；不封顶的话，一个热闹的群就能用完预算，当天私聊里的意图也停了 |
+| 撤销只停止以后的读取；进行中的运行在入库时复查，引用了已撤销群的名单消息的条目丢弃；已入库的意图不动 | 「立即停止」落到入库这一步才算数；已推送的意图按原规则过期或由操作者处理，要删用现有的「不整理并删除」 |
+| 前文跟着锚点走：锚在名单消息上的前文和父消息也只取开始时间之后的；锚在原范围消息上的照旧 | 名单不让任何开始时间之前的消息进入处理器，也不减少原来 @ 消息的前文 |
+| 名单只对 `output_kind = 'intents'` 生效；线索（本来就读所有人发的消息）和事件分流（沿用意图原来的范围）不变 | 改动只落在点名的功能上 |
+
+**名单消息：** 只因名单才读到的消息。原范围里的消息（私聊、@ 操作者、操作者自己发的、白名单告警机器人）即使在名单上的群里，也不是名单消息，处理和今天一样。
+
+### 11.1 数据与开关
+
+- **表：** 命名迁移 `intent_group_reads`（`order = 1500`、`pending_order = 1500`；`main` 上最高 1420，在审 PR 里最高 1480），只建表，不改旧行：
+
+  ```sql
+  CREATE TABLE IF NOT EXISTS intent_group_reads (
+      source_id  TEXT NOT NULL,
+      chat_id    TEXT NOT NULL,
+      added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),   -- 操作者点名的时刻，只用于显示
+      read_from  TIMESTAMPTZ NOT NULL DEFAULT now(),   -- 开始时间：加入时等于 added_at，开关从关到开时改为当时
+      PRIMARY KEY (source_id, chat_id),
+      FOREIGN KEY (source_id, chat_id) REFERENCES source_chats(source_id, chat_id) ON DELETE CASCADE,
+      CHECK (read_from >= added_at)
+  );
+  ```
+
+  撤销就是删掉这一行；再加入是新的一行，开始时间是再加入的时刻，中间的消息不读。会话被删（#1449）时这一行跟着删。
+- **开关：** 系统设置 `intents.group_read.enabled`，只有字符串 `true` 是开，和 `intents.enabled` 同样的读法；键名和 `group_read_enabled()` 放在 `leads_model`。开关只管读不读，不动名单，关着也能维护名单。`intents.enabled` 关闭时意图订阅整个不跑，这个开关不起作用。
+- **能加什么：** `source_chats.kind` 为 `group` 或 `topic` 的会话（私聊本来就整段读；`unknown` 等采集认出类型再加），会话已在消息流里，并且没有被消息流或抽取排除。加入以后才被排除的，名单行留着但不读（读取条件里排除优先），列表里标出来。
+- **不导出：** 配置导出（`config_transfer`）不含名单和开关，和告警机器人白名单一样。
+
+### 11.2 操作接口与入口
+
+四个操作都是 `operator_only`：只接受操作者身份（仪表盘），API 客户端不能调，也不做成 Manager 工具；`tests/operation_levels.json` 里登记为 `inside`。写操作沿用 v1 写操作的操作记录。
+
+| 操作 | 请求 | 结果、拒绝 |
+|---|---|---|
+| `intent_group_reads.list` | `source_id`（只有一个来源时可省） | `{enabled, run_max, day_max, groups: [{chat_id, name, kind, added_at, read_from, readable, messages_24h, intents_7d}]}`；`readable` 为假表示被排除、不读；`messages_24h` 是最近 24 小时人发的实时消息条数，只计数，供估算 |
+| `intent_group_reads.put` | `source_id`、`chat_id` | 同 `list`；已在名单上的不改开始时间；会话不存在、不是群或话题群、被排除时拒绝（`invalid`，说明原因） |
+| `intent_group_reads.delete` | `source_id`、`chat_id` | 同 `list`；不在名单上也算成功 |
+| `intent_group_reads.settings_put` | `enabled` | 同 `list`；从关到开时，在同一个事务里把所有群的 `read_from` 改为当时 |
+
+`intents.settings_get`、`intents.settings_put` 的请求和结果不变。
+
+**入口：** 仪表盘意图页新增「关注的群」标签：开关；名单（群名、类型、加入时间、开始时间、24 小时消息数、7 天意图数、撤销）；按名字或 id 搜会话（`leads.chats`，只列群和话题群）后点「关注」。「关注」先弹确认框，写明：从现在起读这个群里人发的消息，加入之前的、机器人和导入的都不读；最近 24 小时 N 条，按第 8 节的单价每天约 $X–Y，计入意图订阅每天的上限；推送只发你的私聊。飞书和 Telegram 不变（推送本来就只发私聊，来源一行已写群名）；命令行不加，和告警机器人白名单一样只在仪表盘。
+
+### 11.3 读取路径
+
+开关打开、名单非空时，意图运行（只有 `output_kind = 'intents'`）在第 2 节的固定范围之外再读一项：
+
+```sql
+OR (e.sender_kind = 'user' AND e.origin = 'live' AND EXISTS (
+      SELECT 1 FROM intent_group_reads g
+      WHERE g.source_id = e.source_id AND g.chat_id = e.chat_id
+        AND e.sent_at >= g.read_from AND e.ingested_at >= g.read_from))
+```
+
+- **只读人发的，按类型化字段判断，不看文字：** `sender_kind = 'user'`（来自飞书的 `sender_type`，排除 `app` 和 `other`）；`origin = 'live'`（排除 `import`，也排除 `history`：首次拉会话或话题带出的更早消息、晚到 24 小时以上的桥接行）。Looper 自己的应用照旧排除。
+- **原有条件都还在：** 会话在消息流和抽取里都是 included、订阅的 `include_chats` 和 `exclude_chats`、`max_age_minutes`、不读导入。排除优先于名单。
+- 查询多返回一列 `via_group`（`NOT (原范围)`），标出名单消息。
+- **前文：** 一个会话的 `c` 前文锚在它窗口里的第一条消息上；第一条是名单消息时，前文只取发送时间不早于开始时间的；名单消息的父消息也一样。锚在原范围消息上的前文和父消息照旧。
+- **模型可见（草案）：** 有名单消息的会话，标题写成 `《群名》（群 · 关注的群）`；这次窗口里有名单消息时，指令末尾（意图类型之后）追加下面一段，没有时一个字不加：
+
+  ```text
+  ## Followed groups
+  A chat marked 关注的群 is a group the user chose to follow: every person's message in it is here, not only the
+  ones to the user, and most are between other people. From such a chat, an intent is a message that asks the user
+  to do something (by name, by @ or in reply to the user) or in which the user takes something on. A request or a
+  problem between other people is not one, however urgent it sounds.
+  ```
+
+  回复契约、解析和校验不变，`instructions_seen` 和 `flagged` 照旧。
+- **确认文字：** 开关开、名单非空时，意图订阅确认文字的读取范围后加一行「另读关注的群：N 个（各自从开始时间起人发的实时消息；每次最多 200 条，每天最多 2,000 条）」，24 小时估算也算上名单消息；否则不变。
+- **入库时复查：** 在第 4 节的入库事务里，锁住出处之后，再按会话 `FOR SHARE` 锁住名单行、读开关。一个条目只要有一条 `m` 出处是名单消息，而它的群已不在名单上、开始时间晚于这条消息的发送或入库时间，或者开关已关，整条丢弃，按 `group_revoked` 计数（和 `chat_excluded` 一样）。撤销（删行）和入库因此串行：撤销先提交，入库读不到这一行就丢；入库先锁住，撤销等它提交，这一批算撤销之前读的，留下。
+- 读出来的意图和别的意图一样：`chat_id` 是群，项目按 `message_chat_projects` 取，没绑定就列候选，推送只发操作者私聊。
+
+### 11.4 开始时间、撤销与重新打开
+
+| 事件 | 结果 |
+|---|---|
+| 加入 | `added_at = read_from = now()`；发送或入库早于它的消息永远不读 |
+| 已在名单上又加一次 | 不变 |
+| 撤销 | 删行。下一次读取（含重启后重读窗口）不再包含这个群；进行中的运行在入库时丢掉引用它名单消息的条目；已入库的意图和已发的推送不动，按原规则过期，操作者可以驳回；要删用 `leads.set_chat` 的「不整理并删除」 |
+| 撤销后再加入 | 新的开始时间；撤销期间的消息不读 |
+| 开关从关到开 | 所有群的 `read_from` 改为当时；关着期间的群消息不读 |
+| 开关从开到关 | 下一次读取起不读名单消息；进行中的运行在入库时丢掉引用名单消息的条目；名单保留 |
+| 会话被消息流或抽取排除 | 名单行留着、不读；排除时删除已整理内容的规则照旧 |
+| 会话被删 | 名单行跟着删 |
+
+### 11.5 和游标、回看窗口的关系
+
+- 意图订阅只用游标（`window = cursor`）。加入时不回退游标、不补读：游标之前的消息不会因为加入而重读，游标之后、开始时间之前的消息由上面的时间条件排除。
+- 一次运行在排期时读一遍窗口，执行时（含重启后接管）按 `fired_at` 再读一遍。排期之后撤销的，执行时那一遍不再读到，入库时再查一次。排期之后加入的群、打开的开关，执行那一遍可能多读到它们开始时间之后的消息，但读不到更早的。所以运行快照（`execution_snapshot`）不加字段。
+- `max_age_minutes`（预设 7 天）、`max_events`（500）、输入 60,000 字、满窗口立刻补跑最多 6 次，都照样适用于名单消息。推送订阅的回看窗口（`window = lookback`）不涉及：名单只对意图订阅生效。
+
+### 11.6 量与花费的上限
+
+- **每次运行**最多 200 条名单消息（常量 `GROUP_READ_RUN_MAX`）。窗口按 seq 从旧到新取，遇到第 201 条名单消息就停在它之前，`more` 为真，游标停在最后取到的一条，调度器立刻补跑；原范围的消息不会因此被丢，只是挪到下一次。200 条按实测单价约 $0.05，远低于单次 $0.3 的上限。
+- **每天**（服务器本地日，和每日预算同一个分界）每个意图订阅最多 2,000 条名单消息（常量 `GROUP_READ_DAY_MAX`，按当天各次运行 `extract_counts.group_read` 之和算）。到顶以后，当天剩下的名单消息跳过：游标越过它们，以后也不再读，按 `group_over_cap` 计数；原范围的消息照常读。跳过而不是推迟，是因为意图讲时效（24 小时过期），积压的群消息第二天再推已经没用，还会挤占私聊里的意图；线索打开时，这些消息仍在线索的范围里。跳过的运行（`skipped`）不存计数，读过的名单消息不计入当天额度，花费照常计入每日预算。
+- **推测**（按第 8 节的单价）：名单消息本身每天最多约 $0.40；名单会让本来为空的 10 分钟窗口也调用一次处理器，最多 144 次 × $0.008 ≈ $1.15；合计每天最多约 $1.6。加上原范围的 $0.3–1，仍在意图订阅每天 $3 的上限之内。第二道检查（`check_items`）打开时另算，共用同一次运行的上限。
+- 两个数是常量，不做成设置；真实流量上按 `extract_counts` 的数据再调，改动写进 PR。
+- **已知局限：** 每天的 2,000 条按 seq 先到先得，一个特别热闹的群可能占满当天额度，名单上其他群当天就读不到了（计数里看得到）。按群分额度记为待办。
+
+### 11.7 关闭时
+
+`intents.group_read.enabled` 不是 `true`，或者名单为空时：读取的 SQL、前文、渲染、指令和契约、运行快照、`extract_counts`、计数行、确认文字、`config_version` 都和 `main` 一样，迁移只建一张空表。
+
+**钉住的方式：** 实现分支的第一个提交只加测试和基线，不改生产代码，在 `main` `9912920e4` 上截取一次完整意图运行的 golden（`tests/fixtures/model_calls/intents-group-read-off.json`）：处理器的启动参数、system prompt 和输入，`llm_records`、`schedule_runs`、`subscriptions`、`subscription_runs`、`intents`、`intent_sources` 的行，确认文字和 24 小时估算；窗口所在的来源里有一个群，群里有一条普通的人发消息，以及机器人、导入、`history` 的消息。之后「名单上有这个群、开关没设」「名单上有这个群、开关为 false」「开关为 true、名单为空」三种情况都必须和这份 golden 逐字节相同。
+
+### 11.8 可观测
+
+- **每次运行的计数**（只在这次运行开着名单时才有这些键，关闭时 `extract_counts` 不变）：`group_read`（交给处理器的名单消息数，按 `fit` 之后算）、`group_over_cap`（因每天上限跳过的条数）；`dropped.group_revoked`（入库时因撤销或关闭丢弃的条目）。计数行追加「；关注的群 N 条」，有跳过时再加「，超出今天的上限跳过 M 条」。
+- **日志**（info）：加入、撤销、开关（来源 id、会话 id、开始时间）；某次排期或运行因每天上限跳过名单消息（订阅 id、跳过条数），窗口因此为空、没有生成运行时也记。日志不写消息内容和群名。
+- **界面：** 「关注的群」标签里每个群的 24 小时消息数和 7 天意图数；订阅的运行历史里看计数行。
+- 不加新告警：跳过不是失败；处理器失败照旧走订阅的失败告警。
+
+### 11.9 测试
+
+按计划第 1 节第 4 条：一条规则一个测试，测在离入口最近的那一层，变体参数化。
+
+| 测试 | 断言 |
+|---|---|
+| `test_followed_group_reads_only_live_human_messages_since_read_from`（数据库，参数化） | 名单群里实时的、开始时间之后的人发消息读到且 `via_group` 为真；同一群里 @ 操作者的消息 `via_group` 为假；机器人（`app`）、`other`、`import`、`history`、发送早于开始时间、入库早于开始时间、不在名单上的群，都读不到 |
+| `test_exclusions_win_over_a_followed_group`（数据库，参数化） | 抽取排除、消息流排除、订阅的 `exclude_chats`、不含它的 `include_chats`：都不读 |
+| `test_revoking_stops_the_next_read_and_drops_what_a_running_run_read`（数据库） | 排期后撤销：执行时的重读不含它；读完后、入库前撤销：引用名单消息的条目丢弃并计 `group_revoked`，引用原范围消息的条目入库，游标照常前进；撤销之前入库的意图还在 |
+| `test_re_adding_or_switching_on_starts_again_from_now`（数据库） | 撤销后再加入、开关关了再开：中间的消息都不读；开着时再设一次开不改开始时间 |
+| `test_context_anchored_on_a_followed_row_starts_at_read_from`（纯函数） | 锚在名单消息上的前文和父消息不早于开始时间；锚在原范围消息上的照旧 |
+| `test_followed_rows_are_capped_per_run_and_per_day`（纯函数和数据库） | 第 201 条名单消息之前停、`more` 为真；当天累计到 2,000 条后名单消息跳过并计 `group_over_cap`，原范围消息照读 |
+| `test_followed_chats_are_labelled_and_the_note_is_added_only_with_them`（纯函数） | 只有含名单消息的会话标题带标记；没有名单消息时指令和输入逐字节不变 |
+| `test_triage_and_leads_ignore_followed_groups`（数据库） | 开关开、名单非空时，线索和事件分流的窗口和估算不变 |
+| `test_a_followed_group_intent_goes_only_to_the_operator_dm`（数据库） | 名单群里来的意图推到操作者私聊；订阅目标改成群时不推 |
+| `test_group_reads_round_trip_and_refusals`（接口） | 四个操作的声明形状；私聊、`unknown`、被排除、不存在的会话被拒；重复加入不改开始时间；API 客户端被拒 |
+| `test_intents_off_path_matches_main`（golden，参数化） | 11.7 的三种情况和 `main` 的 golden 逐字节相同 |
+| 迁移 | 旧库升级后有这张表；会话被删时名单行跟着删 |
+| 界面（`intents.test.tsx`） | 「关注的群」标签：列表、确认后关注、撤销、开关 |
+
+**processor 评测**（模型可见，sonnet `--reps 2`）：`intents_group_read`（名单群里的闲聊、别人之间的请求和一条点名请用户做的事：只认出最后一条）、`intents_group_read_quiet`（只有闲聊和别人之间的请求：`NONE`）、`intents_group_read_injection`（名单群里要助手建任务的消息：进 `instructions_seen`，没有只以它为出处的意图）。原有意图用例的输入和 prompt 不变，不重跑。
+
+**真实路径：** 在工作树上对一次性数据库跑 `looper serve`（不用 8767），用桥接文件写入合成的群消息；加入一个群，Run now 意图订阅，核对意图行和计数行，截一张「关注的群」标签的图；模型可见内容用真实 Claude CLI 跑一次。
+
+### 11.10 PR 与待定
+
+一个实现 PR（`codex/intents-group-read`，以本节的 RFC 分支为基线），默认关闭，可以独立回滚：迁移、读取与入库、操作接口、「关注的群」标签、评测用例，以及 `agent-system.md` 里读取范围和接口两段。
+
+**待维护者确认（各有推荐）：**
+
+1. **加群要不要让意图订阅重新确认：** 推荐不要（名单和开关不进 `config_version`），理由见本节开头的表；代价是第 4 节「改会话范围要重新确认」对名单不适用，改由加群时的确认框承担。备选是把名单放进 `config_version`：每次加群、撤销都要重新确认，确认之前私聊里的意图也停。
+2. **上限：** 推荐每次 200 条、每天 2,000 条，超出每天上限的跳过、不补。备选是只推迟不跳过：不丢，但积压会推迟私聊里的意图，也可能用完每天 $3 的预算。
+3. **模型可见的那段说明：** 上面是草案，以评测结果定稿。
