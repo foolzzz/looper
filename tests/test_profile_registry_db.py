@@ -26,6 +26,7 @@ from tests.db_support import DSN, run_db
 from tests.test_catalog_db import _Writer, _global_settings_request
 from tests.test_dsh_runtime import MODELS as DSH_MODELS, dsh_policy as dsh_policy
 from tests.role_support import EVERY_ROLE, ROLES_WITH_TOOLS, RUN_ONLY_ROLES
+from tests.builtin_support import BUILTIN_PROFILES, FROZEN_PROFILES, FROZEN_PROVIDERS, builtin_providers
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -210,8 +211,8 @@ def test_dsh_policy_refuses_invalid_profile_create_and_edit(
             invalid = change
         status, payload = await _call("POST", "/api/agent-profiles", {**valid, **invalid})
         assert status == 400, payload
-        # only the built-in profiles (every role's, the advisor's, its judge's, the leads check's)
-        assert len(await db.list_profiles()) == 4
+        # only the built-in profiles
+        assert len(await db.list_profiles()) == len(BUILTIN_PROFILES)
         profile_id = (await _ok("POST", "/api/agent-profiles", valid))["profile"]["profile_id"]
         before = await db.get_profile(profile_id)
         status, payload = await _call("PUT", f"/api/agent-profiles/{profile_id}", invalid)
@@ -297,8 +298,11 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         await ensure_schema(pool)
         await ensure_schema(pool)
         profiles = {row["name"]: row for row in await db.list_profiles()}
-        assert set(profiles) == {"claude-code/opus", "claude-code/fable-5-2", "claude-code/sonnet-5-5",
-                                 "claude-code/haiku-5-5"}
+        # Every declared built-in comes back, under its declared id; the ones that exist now keep their ids and names.
+        assert {row["id"]: name for name, row in profiles.items()} == {
+            profile.id: name for name, profile in BUILTIN_PROFILES.items()}
+        assert FROZEN_PROFILES.items() <= {row["id"]: name for name, row in profiles.items()}.items()
+        assert FROZEN_PROVIDERS.items() <= dict(await builtin_providers(pool)).items()
         assert (profiles["claude-code/fable-5-2"]["effort"], profiles["claude-code/fable-5-2"]["model"]["name"]) == (
             "high", "claude-fable-5-2")
         profile = profiles["claude-code/opus"]
@@ -309,8 +313,11 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         (runtime,) = registry["runtimes"]
         assert (runtime["builtin"], runtime["executable"], runtime["version"]) == (True, "", None)
         assert set(runtime["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
-        # Each CLI's own login, with the models it offers as suggestions.
-        claude, coco, codex, cursor, grok = registry["providers"]
+        # Each CLI's own login, with the models it offers as suggestions: every built-in the schema seeds, in order.
+        assert [p["provider_id"] for p in registry["providers"]] == [i for i, _ in await builtin_providers(pool)]
+        by_id = {p["provider_id"]: p for p in registry["providers"]}
+        claude, coco, codex, cursor, grok = (by_id[i] for i in (
+            "prov-claude-subscription", "prov-coco-login", "prov-codex-login", "prov-cursor-login", "prov-grok-login"))
         assert (claude["name"], claude["auth"], claude["oauth_runtime_type"], claude["api_key"]) == (
             "claude-subscription", "oauth", "claude-code", None)
         assert (coco["provider_id"], coco["name"], coco["builtin"], coco["auth"], coco["oauth_runtime_type"],
@@ -1499,7 +1506,8 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
         assert unlimited["provider"]["max_concurrency"] is None
         builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
         # Coco discovers its catalog from the CLI; the other logins have pinned models.
-        assert {b["provider_id"]: (b["max_concurrency"], b["model_count"]) for b in builtins} == {
+        assert {b["provider_id"]: (b["max_concurrency"], b["model_count"]) for b in builtins
+                if b["provider_id"] in FROZEN_PROVIDERS} == {
             "prov-claude-subscription": (None, 6), "prov-coco-login": (None, 0),
             "prov-codex-login": (None, 7), "prov-cursor-login": (None, 5), "prov-grok-login": (None, 4)}
 

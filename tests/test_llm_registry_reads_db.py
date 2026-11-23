@@ -10,6 +10,7 @@ from looper.agents.runtimes import AuthKind, VendorType
 from looper.db import agent_setting_layers as layers, connection, profile_registry as db
 from tests.db_support import DSN, run_db
 from tests.role_support import EVERY_ROLE
+from tests.builtin_support import BUILTIN_PROFILES, builtin_providers
 
 SECRET = "sk-synthetic-registry-read-test-only"
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -70,9 +71,7 @@ def test_normalized_nested_reads_counts_order_and_missing(monkeypatch):
     async def test(pool):
         await _seed(pool)
         providers = await db.list_providers()
-        assert [p['id'] for p in providers] == [
-            'prov-claude-subscription', 'prov-coco-login', 'prov-codex-login', 'prov-cursor-login', 'prov-grok-login',
-            'prov-test', 'prov-empty']
+        assert [p['id'] for p in providers] == [*(i for i, _ in await builtin_providers(pool)), 'prov-test', 'prov-empty']
         provider = await db.get_provider('prov-test')
         assert provider == next(p for p in providers if p['id'] == 'prov-test')
         assert (provider['model_count'], provider['profile_count'], provider['api_key_set']) == (3, 2, True)
@@ -98,8 +97,9 @@ def test_normalized_nested_reads_counts_order_and_missing(monkeypatch):
         assert await db.get_provider('missing') is None
         assert await db.get_profile('missing') is None
         assert await db.get_model('missing') is None
-        # The built-in profile and the advisor's, its judge's and the leads check's.
-        assert await db.login_profile_count('claude-code') == 4
+        # The built-in profiles on the Claude subscription.
+        assert await db.login_profile_count('claude-code') == sum(
+            p.provider.oauth_runtime_type == 'claude-code' for p in BUILTIN_PROFILES.values())
         assert await db.login_profile_count('codex') == 0
         assert SECRET not in repr((providers, models, profiles))
         assert await db.get_api_key('prov-test') == SECRET  # positive control for the isolated secret path
