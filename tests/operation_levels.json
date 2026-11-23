@@ -245,6 +245,7 @@
  "project_skills.restore": "inside",
  "project_skills.rollback": "inside",
  "project_skills.update": "inside",
+ "project_skills.usage": "inside",
  "project_skills.versions": "inside",
  "projects.create": "inside",
  "projects.delete": "inside",

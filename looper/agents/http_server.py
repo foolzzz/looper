@@ -293,7 +293,8 @@ class AgentHTTPServer:
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port
         )
-        attention.use_status_checks(self._checks_now)  # the "needs you" logins, as system/status reads them
+        attention.use_status_checks(self._checks_now,
+                                    catchup=self._channels.catchup_checks if self._channels is not None else None)
         if self._port == 0:
             self._port = self._server.sockets[0].getsockname()[1]
         from .. import _PROCESS_STARTED_AT
@@ -1402,6 +1403,9 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
+        if self._channels is not None:
+            status["channels"].update({channel["channel_id"]: channel for channel in self._channels.list_channels()
+                                       if "catchup" in channel})
         if getattr(self, "_startup_steps", None) is not None:
             status["startup_steps"] = dict(self._startup_steps)
         if self._worker_pool is not None and (keepers := self._worker_pool.keeper_status()):

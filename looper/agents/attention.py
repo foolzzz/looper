@@ -17,7 +17,7 @@ The sections, in this order (``KINDS``):
 - ``ledger``: the ledger's own open items that wait for the user (a to-do, a decision to confirm, anything overdue),
   while the ledger is on;
 - ``deliveries``: messages of the last ``DELIVERY_WINDOW`` that may not have arrived (``uncertain``: never sent
-  again, so the operator checks);
+  again, so the operator checks), and persisted dropped Lark catch-up windows;
 - ``cost``: pending spend holds, while the cost guard enforces limits.
 
 A section is ``ok`` (read; possibly empty), ``error`` (its source could not be read: never shown as empty) or
@@ -53,6 +53,7 @@ DELIVERY_WINDOW = timedelta(hours=72)
 LOGIN_CHECKS = ("codex_login", "coco_login", "grok_login", "cursor_login", "ttadk")
 
 StatusChecks = Callable[[], Awaitable[Sequence[Mapping[str, Any]]]]
+CatchupChecks = Callable[[], Sequence[Mapping[str, Any]]]
 
 
 class NotRead(Enum):
@@ -65,6 +66,7 @@ class NotRead(Enum):
 
 Read = tuple[list[dict[str, Any]], int] | NotRead
 _status_checks: StatusChecks | None = None
+_catchup_checks: CatchupChecks | None = None
 
 
 async def enabled() -> bool:
@@ -72,13 +74,15 @@ async def enabled() -> bool:
     return (await db_settings.get_settings([ENABLED_KEY])).get(ENABLED_KEY) == "true"
 
 
-def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None) -> None:
+def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None,
+                      catchup: CatchupChecks | None = None) -> None:
     """Where ``logins`` is read from: the HTTP server's startup checks with the logins read now, set while it runs
     (``AgentHTTPServer.start``). None: ``logins`` is ``unknown``; with ``owner``, only if ``owner`` is the reader
-    (a server that stops clears its own, never a newer one's)."""
-    global _status_checks
+    (a server that stops clears its own, never a newer one's). ``catchup`` reads only the registry's cached windows."""
+    global _status_checks, _catchup_checks
     if owner is None or _status_checks == owner:
         _status_checks = read
+        _catchup_checks = catchup
 
 
 def _item(key: str, title: str, *, context: str = "", since: datetime | None = None, href: str | None = None,
@@ -227,7 +231,17 @@ def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
 
 async def _deliveries(_: Any) -> Read:
     rows, count = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW, SHOWN)
-    return [_delivery_item(row) for row in rows], count
+    catchup = await _catchup_items()
+    return [*catchup, *(_delivery_item(row) for row in rows)][:SHOWN], count + len(catchup)
+
+
+async def _catchup_items() -> list[dict[str, Any]]:
+    if _catchup_checks is None:
+        return []
+    return [_item(check["id"], str(check["detail"]), context=str(check["label"]), href="#settings/channels",
+                  source="catchup", channel="lark", state="dropped", fix=str(check["fix"]))
+            for check in _catchup_checks()
+            if str(check.get("id", "")).startswith("lark_catchup:") and check.get("status") == "fail"]
 
 
 def _cost_item(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -302,7 +316,7 @@ async def _earliest_ledger(_: Any) -> dict[str, Any] | None:
 
 async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
     row = await store.earliest_uncertain_delivery(datetime.now(timezone.utc) - DELIVERY_WINDOW)
-    return None if row is None else _delivery_item(row)
+    return _oldest([*([] if row is None else [_delivery_item(row)]), *await _catchup_items()])
 
 
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
@@ -360,7 +374,7 @@ _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的�
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠"}
 _LEDGER_KINDS = {"pending": "待办", "decision": "待确认的决定", "work_item": "在做的事"}
-_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知"}
+_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知", "catchup": "飞书消息补收失败"}
 _HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
           "confirmations": "在提问的那个聊天里回复「确认」，或回复别的放弃。",
           "cost": "回复「继续 {ref} <新上限美元>」提高上限并继续，或「停 {ref}」。",
@@ -415,6 +429,8 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
     if kind == "ledger":
         label = "已过期" if facts["overdue"] else _LEDGER_KINDS[facts["kind"]]
         return f"- {item['ref']} {title}（{label}）"
+    if kind == "deliveries" and facts["source"] == "catchup":
+        return f"- {_DELIVERY_SOURCES['catchup']}：{title}。{_plain(facts['fix'])}"
     where = _CHANNELS.get(facts["channel"] or "", facts["channel"] or "")
     return (f"- {_DELIVERY_SOURCES[facts['source']]}：{title}" + (f"（{item['ref']}）" if item["ref"] else "")
             + (f"，{where}" if where else "") + (f"，{waited}前" if waited else ""))
