@@ -72,6 +72,20 @@ jobs:
       LOOPER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       LOOPER_TEST_SHARD: ${{ matrix.shard }}/6
     steps:
+      - name: Increase PostgreSQL lock capacity
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          # Concurrent schema creation/drop locks every table and index until commit.
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET max_locks_per_transaction = 1024"
+          docker restart "${{ job.services.postgres.id }}"
+          for attempt in {1..30}; do
+            if docker exec "${{ job.services.postgres.id }}" pg_isready -U postgres -d postgres; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc 'SHOW max_locks_per_transaction')" = 1024
+
       - if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
         with:
@@ -141,6 +155,20 @@ jobs:
     env:
       LOOPER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
+      - name: Increase PostgreSQL lock capacity
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          # Concurrent schema creation/drop locks every table and index until commit.
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET max_locks_per_transaction = 1024"
+          docker restart "${{ job.services.postgres.id }}"
+          for attempt in {1..30}; do
+            if docker exec "${{ job.services.postgres.id }}" pg_isready -U postgres -d postgres; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc 'SHOW max_locks_per_transaction')" = 1024
+
       - if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
         with:
@@ -183,6 +211,20 @@ jobs:
     env:
       LOOPER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
+      - name: Increase PostgreSQL lock capacity
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          # Concurrent schema creation/drop locks every table and index until commit.
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET max_locks_per_transaction = 1024"
+          docker restart "${{ job.services.postgres.id }}"
+          for attempt in {1..30}; do
+            if docker exec "${{ job.services.postgres.id }}" pg_isready -U postgres -d postgres; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc 'SHOW max_locks_per_transaction')" = 1024
+
       - if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
         with:
