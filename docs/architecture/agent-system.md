@@ -21,7 +21,9 @@ bounded background tasks and failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature, successfully sent delivery reply rates
-for 1–30 days. Housekeeping retains proactive rows for 90 days. This feature owns the table's single named migration:
+for 1–30 days. Housekeeping retains proactive rows for 90 days whether or not
+metrics are on, because delivery writes the same table while that switch is off.
+This feature owns the table's single named migration:
 one row per message, with the send receipt in `outcome`. `source` includes
 `completion`, `user_reminder` and `morning_brief` (the digest itself); `chat_kind`
 is `direct` or `group`.
@@ -5858,11 +5860,15 @@ direct chat. It names what waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). Every brief reads from the first attempt's dates (Monday also
 Saturday and Sunday) through the day being sent, except digest rows already
-recorded by id in `morning_brief_consumed`. A sent or uncertain brief records,
-in the same transaction as its row, only the rows that read returned, so a
-rejected Tuesday brief's digest is still in Wednesday's, and a row whose insert
-had not committed is read once it has. `consumed_until` is the check time, not
-a watermark. Every section empty means nothing is sent. The switch, whether the
+recorded by id in `morning_brief_consumed`. The claim stores the ids that
+read returned, in that same write. A sent or uncertain brief records them in
+the same transaction as its row. A refusal records none and clears the stored
+ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
+that stops before the record is `uncertain` on restart, and that recovery
+consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
+insert had not committed is therefore still read once, on the next brief.
+`consumed_until` is the check time, not a watermark. Every section empty means
+nothing is sent. The switch, whether the
 channel is enabled and who the operator is are read again after the summary is
 collected and again immediately before the post. The switch is read again after
 the operator
