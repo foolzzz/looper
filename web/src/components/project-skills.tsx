@@ -4,6 +4,7 @@ import { OriginTag, RoleChecks } from "@/components/install-controls";
 import { McpSummary } from "@/components/mcp-servers";
 import { SkillHistory } from "@/components/skill-history";
 import { SkillProposals } from "@/components/skill-proposals";
+import { SkillUsage, useSkillUsage, type SkillUsageState } from "@/components/skill-usage";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -201,6 +202,7 @@ function InstallRow({
   taskRoles,
   caps,
   busy,
+  usage,
   onApply,
 }: {
   projectId: string;
@@ -208,6 +210,7 @@ function InstallRow({
   taskRoles: InstallRole[];
   caps: SkillCaps;
   busy: boolean;
+  usage: SkillUsageState;
   onApply: Apply;
 }) {
   const id = useId();
@@ -400,6 +403,7 @@ function InstallRow({
           </Button>
         </div>
       </div>
+      {writtenHere && item.kind === "skill" && <SkillUsage skillId={item.item_id} usage={usage} />}
       {lifecycleError && <p role="alert" className="break-words text-xs text-destructive">{lifecycleError}</p>}
       {confirming && (
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
@@ -589,6 +593,7 @@ export function ProjectSkillsSection({ projectId }: { projectId: string }) {
   const [budget, setBudget] = useState<ContextBudget | null>(null);
   const [budgetError, setBudgetError] = useState("");
   const [budgetGeneration, setBudgetGeneration] = useState(0);
+  const usage = useSkillUsage(projectId);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [catalogError, setCatalogError] = useState("");
   const [adding, setAdding] = useState(false);
@@ -754,6 +759,7 @@ export function ProjectSkillsSection({ projectId }: { projectId: string }) {
                       taskRoles={data.task_roles}
                       caps={caps}
                       busy={busy}
+                      usage={usage}
                       onApply={apply}
                     />
                   ),
