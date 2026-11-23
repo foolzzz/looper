@@ -83,7 +83,8 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import EMPTY_LIBRARY, load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, research_order, session_switch, untrusted as untrusted_text
+from .. import leads_model, manager_turn_context, research_order, session_switch, untrusted as untrusted_text
+from ..turn_context import TURN_CONTEXT_CONTRACT, render as render_turn_context
 from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
@@ -2559,6 +2560,9 @@ class ManagerAgent:
         if getattr(self, "_stable_context", False):  # last, so every part before it reads as it does without it
             contract_name += "+STABLE_CONTEXT_CONTRACT"
             contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
+        if chat_settings.turn_context_enabled():
+            contract_name += "+TURN_CONTEXT_CONTRACT"
+            contract += "\n" + TURN_CONTEXT_CONTRACT
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
@@ -3444,7 +3448,10 @@ class ManagerAgent:
         # The untrusted fence (``untrusted``): a chat message from someone other than the operator, its quotes and
         # its attachments' names go in <untrusted> blocks, after one line saying how to read them.
         fence = await untrusted_text.enabled()
-        if channel:
+        context = await manager_turn_context.prepare(envelope, turn)
+        if context is not None:
+            parts += render_turn_context(context)
+        elif channel:
             # Rebuild the channel label without the sender-controlled name. Its name belongs to the message's
             # provenance, inside the same fence; off, keep even a caller-supplied label byte for byte.
             parts += [channel_line(envelope, fence=True)
