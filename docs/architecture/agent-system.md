@@ -6506,6 +6506,44 @@ list or command line changes either way.
   (`operator_identity.is_operator`); a group, another sender and an API
   client get a refusal.
 
+### Idle checks
+
+([RFC](rfcs/assistant-phase3-v0.zh-CN.md) section 4.)
+
+When the default Manager has been idle for 30 minutes, code reads the needs-you
+summary, picks what is new since it last looked, and only then asks the Manager
+(a read-only turn in `main`) whether to say something; the Manager may answer
+`NO_REPLY`, and what it writes goes to the operator's direct chat through the
+delivery layer. The switch is `manager.idle_checks.enabled` (default off, no
+row is off), set only through the operator-only `idle_check_settings.get` and
+`update`; `update(true)` answers `conflict` unless `delivery.enabled`,
+`attention.enabled` and `manager.lanes.enabled` are on. Not in `chat_settings`.
+
+- `agents/idle_checks.py`: `plan(state)` is a pure function of typed inputs
+  (the rules of RFC 4.3, cheap ones first, each skip typed); `select` takes the
+  summary's sections by a typed table (`gates` and `confirmations` never; the
+  rest by their own rule) and drops what a check of the last 7 days that ended
+  `silent`, `sent` or `uncertain` already named, by a per-section fingerprint
+  (a schedule's includes `last_ok_at`, so "fail, skipped gate, fail" is new);
+  `render_message` writes the English `[IDLE CHECK]` text with every title
+  fenced (`untrusted.Source.NEEDS_YOU`); `parse_reply` accepts `NO_REPLY`
+  exactly; `deliver_result` settles the check (`silent`, `sent`, `uncertain`,
+  `deferred`, `failed`) after `proactive_delivery.decide`.
+- `IdleCheckService` ticks every 5 minutes. With the switch off a tick reads the
+  setting and stops. A tick that decides not to check writes nothing (it counts
+  the reason and logs it at DEBUG). The advisory lock covers only "decide,
+  insert, publish". Checks left `running` by an earlier server fail as `restart`.
+- Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
+  `idle_check_source` adds `idle_check` to the source check of
+  `proactive_deliveries`, built from the check's current values, so it composes
+  with the morning brief's and triage's widenings.
+- `attention.summary`'s `schedules` items gain the fact `last_ok_at`; `/todo`
+  and the Needs you page are unchanged.
+- The Manager side (its `idle_for()`, the shared background-turn entry, the lane
+  a check runs in, `IDLE_CHECK_DUE` routing, and what a user message does to a
+  queued or running check) and the service's start in `serve` come after the
+  lanes change; until then nothing starts a service and the switch has no effect.
+
 ### User gates
 
 In a project with `user_gates` `on`, also when unset (the default), a task's
