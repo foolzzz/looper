@@ -238,6 +238,8 @@ def test_context_budget_counts_only_the_skills_a_run_would_list(monkeypatch: pyt
         with pytest.raises(ProjectSkillNotFound):
             await context_budget("project-missing")
 
+    run_db(_test, monkeypatch)
+
 
 def test_a_deprecated_skill_is_not_a_task_role_choice(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Planner's choices omit a deprecated skill. D13 does not add task-role items to the role budget."""
@@ -263,8 +265,6 @@ def test_a_deprecated_skill_is_not_a_task_role_choice(monkeypatch: pytest.Monkey
             await check_items(project["id"], ["old"])
         with pytest.raises(RoleForbidden):
             await check_items(project["id"], [old_id])
-
-    run_db(_test, monkeypatch)
 
     run_db(_test, monkeypatch)
 
