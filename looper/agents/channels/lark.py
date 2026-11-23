@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 import re
+import uuid as _uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
@@ -45,7 +46,7 @@ from .proactive import record_delivery
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, LarkCliOutputError, mention
-from .lark_transport import CliTransport, LarkTransport
+from .lark_transport import CliTransport, LarkTransport, LarkTransportKind, GatedLarkTransport
 from .lark_inbox import LarkInbox, history_event
 from .lark_quote import QuoteKind, QuoteRead, QuoteRef
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -205,8 +206,18 @@ class LarkChannelAdapter(ChannelAdapter):
         self._stop_chat = stop_chat
         self._backoff = backoff
         self._transport = transport if transport is not None else CliTransport(profile)
-        # The bot token's transport sends cards (``card_actions``); the lark-cli one shows their text.
-        self._cards = CardWrites(self._transport) if hasattr(self._transport, "send_card") else None
+        from .. import chat_settings
+        from .outbound import Gateway, Outbox
+        from ...db import channel_outbox
+
+        self._gateway = Gateway(self._channel_id, app_id=bot_app_id)
+        self._channel_outbox = Outbox(self._channel_id, self._transport, self._gateway, channel_outbox,
+                                      enabled=chat_settings.outbound_enabled)
+        # Cards share the gateway while retaining the bot transport's card methods.
+        self._cards = CardWrites(self._transport, gateway=self._gateway, enabled=chat_settings.outbound_enabled) \
+            if hasattr(self._transport, "send_card") else None
+        self._transport = GatedLarkTransport(self._transport, self._gateway,
+                                             enabled=chat_settings.outbound_enabled, outbox=self._channel_outbox)
         self._allowlist = allowlist  # open_ids
         self._profile = profile  # lark-cli's --profile; "" for its active one
         # The bot's own open_id: a group message is handled only when it @-mentions this; none, none is.
@@ -257,8 +268,8 @@ class LarkChannelAdapter(ChannelAdapter):
 
         if self.channel_type == "lark":
             self._inbox = await LarkInbox.open(bus.runtime_root / ".local" / "lark" / self.channel_id / "inbox.sqlite3")
-            if isinstance(self._transport, CliTransport):
-                self._transport.on_thread_activity = self._remember_thread
+            if self._transport.kind is LarkTransportKind.CLI:
+                self._transport.inner.on_thread_activity = self._remember_thread
             boundary = self._inbox.boundary
             # Discovery itself can fail or be cancelled while live checkpoints advance.
             if boundary is not None and time() - boundary <= _CATCHUP_MAX_AGE:
@@ -276,6 +287,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     "%s: messages sent by other bots are not received on this channel type unless the app "
                     "has Lark's permission to receive bot messages; alternatively use the lark-cli channel's "
                     "polling", self.channel_id)
+        await self._channel_outbox.start_if_needed()
         self._bus = bus
         self._running = True
         self._outbound_task = asyncio.create_task(self._outbound_loop())
@@ -301,8 +313,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 except asyncio.CancelledError:
                     pass
         await self._reactions.stop()
-        if isinstance(self._transport, CliTransport):
-            self._transport.on_thread_activity = None
+        if self._transport.kind is LarkTransportKind.CLI:
+            self._transport.inner.on_thread_activity = None
+        await self._channel_outbox.stop()
         await self._transport.aclose()
         if self._inbox is not None:
             if clean:
@@ -312,7 +325,13 @@ class LarkChannelAdapter(ChannelAdapter):
         logger.info("%s adapter stopped", self.channel_id)
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        return await task_notice_delivery.send(envelope, self._deliver)
+        source = ("notice" if envelope.message_type is MessageType.CHAT_NOTICE else
+                  "progress" if envelope.message_type is MessageType.STATUS_UPDATE else "answer")
+        raw_route = envelope.metadata.get("reply_route")
+        route = raw_route if isinstance(raw_route, dict) else {}
+        chat = self._correlation_chat.get(envelope.correlation_id) or route.get("chat_id")
+        with self._transport.message_scope(envelope.message_id, source=source, chat=chat):
+            return await task_notice_delivery.send(envelope, self._deliver)
 
     async def _deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
@@ -607,7 +626,8 @@ class LarkChannelAdapter(ChannelAdapter):
                                             else PostOutcome.UNKNOWN))
 
     async def _send_status(self, correlation_id: str, text: str) -> str | None:
-        return await self._answer(correlation_id, text=text, return_id=True)
+        with self._transport.message_scope(correlation_id, durable=False):
+            return await self._answer(correlation_id, text=text, return_id=True)
 
     async def _edit_status(self, chat_id: str, message_id: str, text: str) -> None:
         await self._transport.edit(message_id, text=text)
@@ -615,7 +635,11 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _react(self, chat_id: str, message_id: str) -> None:
         await self._transport.react(message_id)
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
+        with self._transport.message_scope(idempotency_key or str(_uuid.uuid4()), source="notify", chat=chat):
+            return await self._notify(chat, text)
+
+    async def _notify(self, chat: str, text: str) -> DeliveryReceipt:
         """Send ``text`` as the bot to a Lark user (open_id) or native chat (chat_id)."""
         text = files.redact(text, self._runtime_root)
         try:
@@ -638,6 +662,11 @@ class LarkChannelAdapter(ChannelAdapter):
 
     async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
                    idempotency_key: str | None = None) -> PostReceipt:
+        with self._transport.message_scope(str(_uuid.uuid4()), source="post", chat=target.id):
+            return await self._post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
+
+    async def _post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
+                    idempotency_key: str | None = None) -> PostReceipt:
         """Send ``text`` as Markdown: a reply to the message ``reply_to`` (``om_...``) when given, which @-mentions
         nobody; else to ``target`` like an end notice (a user, or a group @-mentioning the requester). Lark sends one
         message per ``idempotency_key`` within an hour, so a post retried after a lost answer is not sent twice."""
@@ -676,10 +705,10 @@ class LarkChannelAdapter(ChannelAdapter):
             "active_conversations": len(self._correlation_chat),
         }
 
-        if isinstance(self._transport, CliTransport):
+        if self._transport.kind is LarkTransportKind.CLI:
             info["lark_cli_available"] = self._transport.available()
         else:
-            info["transport"] = type(self._transport).__name__
+            info["transport"] = type(self._transport.inner).__name__
         return info
 
     # --- Inbound: transport events → Bus ---
@@ -1047,6 +1076,11 @@ class LarkChannelAdapter(ChannelAdapter):
             return "handled" if handled else "ignored"
 
     async def _process_lark_event(self, event: dict[str, Any]) -> bool | None:
+        with self._transport.message_scope(event.get("message_id") or str(_uuid.uuid4()),
+                                           chat=event.get("chat_id")):
+            return await self._process_scoped_event(event)
+
+    async def _process_scoped_event(self, event: dict[str, Any]) -> bool | None:
         """Publish text, rich posts and merged forwards to the Bus, with a reference to what they quote
         (``payload["quote_ref"]``, read by the Manager), and answer other admitted message types. The event is
         lark-cli's flat one: ``chat_id``,
@@ -1327,6 +1361,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
                 receipt = await self.deliver(envelope)
+                self.record_envelope_delivery(envelope, receipt)
                 if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
                     route = envelope.metadata.get("reply_route")
                     route = route if isinstance(route, dict) else {}
