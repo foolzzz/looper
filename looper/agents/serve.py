@@ -718,7 +718,7 @@ async def _run_agent_system_watched(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
-    from . import chat_settings, links, operator_notes, projects, scheduler_settings, waits
+    from . import chat_settings, links, operator_notes, persona, projects, scheduler_settings, waits
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
@@ -781,6 +781,7 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
+                await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
             except ValueError as exc:
@@ -934,8 +935,9 @@ async def _run_agent_system_watched(
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook
             advisor_alerts.configure(registry.notify)
-            # So do the outbound review's block notices.
+            # So do the outbound review's block notices; its switch is read once here, and kept by its operations.
             outbound_hook.configure(registry.notify)
+            await outbound_hook.enabled()
             # It notes the user gates that have waited for the user for their project's reminder interval; the courier
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()

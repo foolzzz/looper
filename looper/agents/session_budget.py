@@ -1,5 +1,5 @@
-"""The Manager's session budget (assistant-layer RFC, section 5.4): the rules and the setting, with no Manager
-wiring yet.
+"""The Manager's session budget (assistant-layer RFC, section 5.4): the policy and the operator-only setting.
+Runtime wiring lives in ``tiers.manager_budget``.
 
 ``manager.turn_budget_usd`` (a positive number of US dollars) turns it on; no row is off. When it is on, the
 Manager will, after each turn, apply ``decide`` to that turn's context and cost, compact or rotate its session as
