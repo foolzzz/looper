@@ -10,6 +10,9 @@ ledger RFC section 3.7).
 ``manager.research_order``: whether the default Manager's contract says where to look things up, and in what order,
 before it asks the user (``research_order``; off by default).
 
+``manager.metrics.enabled``: operator-only observational metrics, off by default; edited through
+``manager_metrics_settings.get`` and ``manager_metrics_settings.update``, separately from client chat settings.
+
 ``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
 The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
 
@@ -17,7 +20,7 @@ The Manager behavior is wired separately; its v1 operations are ``delivery_guard
 (off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
 second copy. Turning it on names the enabled bots that have no operator id.
 
-Stop, completion turns, research order and delivery guard are kept in memory: ``load`` reads them
+Stop, completion turns, research order, metrics and delivery guard are kept in memory: ``load`` reads them
 at startup and updates refresh them. Until loaded, all are off.
 """
 
@@ -35,6 +38,8 @@ DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
 RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
+METRICS_ENABLED_KEY = "manager.metrics.enabled"
+DEFAULT_METRICS_ENABLED = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
@@ -54,6 +59,7 @@ DEFAULT_COMPLETION_TURNS = CompletionTurns.OFF
 _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
+_metrics_enabled = DEFAULT_METRICS_ENABLED
 _delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
 
 
@@ -87,6 +93,28 @@ def set_research_order(value: bool) -> None:
     _research_order = value
 
 
+def metrics_enabled() -> bool:
+    return _metrics_enabled
+
+
+def set_metrics_enabled(value: bool) -> None:
+    global _metrics_enabled
+    _metrics_enabled = value
+
+
+def metrics_view() -> dict[str, bool]:
+    return {"enabled": _metrics_enabled}
+
+
+async def update_metrics(value: bool | None) -> dict[str, bool]:
+    """Persist the operator-only metrics switch separately from client chat settings."""
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({METRICS_ENABLED_KEY: None if value is None else ("true" if value else "false")})
+    set_metrics_enabled(DEFAULT_METRICS_ENABLED if value is None else value)
+    return metrics_view()
+
+
 def delivery_guard_enabled() -> bool:
     return _delivery_guard_enabled
 
@@ -116,8 +144,11 @@ async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY])
+    stored = await db_settings.get_settings([
+        STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
+    ])
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
+    set_metrics_enabled(stored.get(METRICS_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
     try:
