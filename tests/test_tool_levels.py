@@ -145,6 +145,8 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    "manager_persona.get": INSIDE,  # reads Looper's stored persona; sends nothing
+    "manager_persona.update": INSIDE,  # changes Looper's stored persona; sends nothing
     "manager_sessions.list": INSIDE,  # reads the default Manager's stored sessions; sends nothing
     "manager_sessions.reset": INSIDE,  # clears one Looper session; sends nothing
     "providers.limits": INSIDE,  # reads stored quota windows and usage

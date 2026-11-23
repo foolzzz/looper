@@ -717,7 +717,7 @@ async def _run_agent_system_watched(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
-    from . import chat_settings, links, operator_notes, projects, scheduler_settings, waits
+    from . import chat_settings, links, operator_notes, persona, projects, scheduler_settings, waits
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
@@ -780,6 +780,7 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
+                await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
             except ValueError as exc:
