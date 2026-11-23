@@ -31,13 +31,16 @@ class ManagerOps:
     def authorized(self, header: str | None) -> bool:
         return header == f"Bearer {AGENT}"
 
+    def session_for(self, header: str | None) -> str | None:
+        return "main" if self.authorized(header) else None
+
     def refuse(self, path: str) -> None:
         pass
 
     def listing(self) -> list:
         return []
 
-    async def current_listing(self) -> list:
+    async def current_listing(self, *, session_key: str | None = None) -> list:
         return []
 
     def binding_report(self) -> dict:

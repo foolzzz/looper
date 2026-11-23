@@ -54,7 +54,7 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
             result = response.json()["result"]
             assert {c["id"] for c in result["checks"] if c["status"] == "pending"} == {
                 "claude_cli", "claude_login", "codex_login", "grok_login", "cursor_login", "ttadk",
-                "llmrec", "gateway", "lark_cli", "git", "projects_root",
+                "llmrec", "gateway", "lark_cli", "git", "projects_root", "provider_limits",
             }
             api_v1.validate_arguments(api_v1.find("POST", "/api/v1/system/status").result, result)
 
@@ -127,6 +127,7 @@ def test_advisory_checks_overlap_and_log_in_original_order(monkeypatch, caplog):
             return asyncio.run_coroutine_threadsafe(check(name), loop).result(timeout=2)
 
         monkeypatch.setattr(serve.self_check, "check_claude", lambda *_: [sync_check("claude")])
+        monkeypatch.setattr(serve.self_check, "provider_limit_checks", AsyncMock(return_value=[]))
         for name in ("codex", "grok", "cursor", "ttadk", "llmrec", "gateway"):
             monkeypatch.setattr(serve.self_check, name + "_check" if name in ("ttadk", "llmrec", "gateway") else name + "_login_check",
                                 lambda name=name: check(name))
@@ -139,5 +140,38 @@ def test_advisory_checks_overlap_and_log_in_original_order(monkeypatch, caplog):
         expected = ["claude", "codex", "grok", "cursor", "ttadk", "llmrec", "gateway", "lark", "git", "projects"]
         assert [c["id"] for c in snapshot] == ["database", *expected]
         assert [r.message.split(":")[0].split()[-1] for r in caplog.records if "SELF-CHECK" in r.message] == expected
+
+    asyncio.run(run())
+
+
+def test_provider_limit_probe_has_pending_and_failure_states(monkeypatch):
+    async def run():
+        pending = serve._pending_advisory_checks()
+        assert pending[-1][0].id == "provider_limits"
+        assert pending[-1][0].status == serve.self_check.PENDING
+        ready, finish = asyncio.Event(), asyncio.Event()
+
+        async def probe():
+            ready.set()
+            await finish.wait()
+            raise ConnectionRefusedError("unavailable")
+
+        ok = serve.self_check.Check("test", "Test", "ok", "ready")
+        monkeypatch.setattr(serve.self_check, "provider_limit_checks", probe)
+        for name in ("claude_check", "codex_login_check", "grok_login_check", "cursor_login_check",
+                     "ttadk_check", "llmrec_check", "gateway_check"):
+            monkeypatch.setattr(serve.self_check, name, AsyncMock(return_value=ok))
+        for name in ("check_lark_cli", "check_git", "check_projects_root"):
+            monkeypatch.setattr(serve.self_check, name, lambda *_: ok)
+        snapshot = []
+        task = asyncio.create_task(serve._advisory_startup_checks(snapshot, ok,
+            claude_bin="unused", lark_enabled=False, projects_root=""))
+        try:
+            await asyncio.wait_for(ready.wait(), 2)
+            assert next(c for c in snapshot if c["id"] == "provider_limits")["status"] == "pending"
+        finally:
+            finish.set()
+            await task
+        assert next(c for c in snapshot if c["id"] == "provider_limits")["status"] == "warn"
 
     asyncio.run(run())

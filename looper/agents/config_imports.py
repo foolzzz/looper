@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..db.channel_configs import BUILTIN_CHANNEL_IDS
-from . import config_transfer, persona, scheduler_settings
+from . import chat_settings, config_transfer, persona, scheduler_settings
 from .config_transfer import ConfigFileError
 from .library import LIBRARY_MAX_BYTES
 from .ops import ErrorCode, OpError
@@ -78,6 +78,9 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
     """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
         return data
+    if data.get("settings", {}).get("chat"):
+        raise OpError(ErrorCode.FORBIDDEN, "Chat settings require operator identity; "
+                      "upload this configuration with an operator token")
     if data.get("workflows"):
         raise OpError(ErrorCode.FORBIDDEN, "Workflow definitions require operator identity; "
                       "upload this configuration with an operator token")
@@ -119,6 +122,7 @@ async def _run(data: dict[str, Any], *, apply: bool) -> config_transfer.Plan:
     if apply:
         await scheduler_settings.load()  # a minimum interval in the file applies at once
         await persona.load()  # the default Manager's persona applies at once
+        await chat_settings.load()
     return plan
 
 

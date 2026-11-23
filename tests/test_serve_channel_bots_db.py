@@ -77,11 +77,18 @@ class _Registry:
     def __init__(self) -> None:
         self.adapters: list[Any] = []
 
+    async def start_bot(self, channel_id, start):
+        try:
+            await start(False)
+        except Exception:
+            pass
+
     def resolve_chat(self, channel_id: str, chat_id: str):
         raise AssertionError("this construction-only registry does not receive ingress")
 
     async def register(self, adapter: Any) -> None:
         self.adapters.append(adapter)
+        adapter.healthcheck = lambda: {"healthy": True}
 
     async def unregister(self, channel_id: str) -> None:
         pass
@@ -141,7 +148,7 @@ def test_only_builtin_rows_register_todays_ids(monkeypatch: pytest.MonkeyPatch, 
         await _builtin(pool, "channel-lark", {"allowed_open_ids": [OPEN_ID]})
         from looper.agents.channels import lark_cli
 
-        async def check(config: Any, *, fresh: bool = False) -> Any:
+        async def check(config: Any, *, fresh: bool = False, raise_errors: bool = False) -> Any:
             return None, SimpleNamespace(profile="", app_id="cli_x", bot_name="B", bot_open_id="ou_bot00000001")
 
         monkeypatch.setattr(lark_cli, "check", check)
@@ -207,7 +214,7 @@ def test_same_telegram_bot_twice_starts_once(monkeypatch: pytest.MonkeyPatch, tm
 def test_same_lark_profile_twice_starts_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.agents.channels import lark_cli
 
-    async def check(config: Any, *, fresh: bool = False) -> Any:
+    async def check(config: Any, *, fresh: bool = False, raise_errors: bool = False) -> Any:
         return None, SimpleNamespace(profile=config.get("profile"), app_id="cli_x", bot_name="B",
                                      bot_open_id="ou_bot00000001")
 
@@ -272,7 +279,7 @@ def test_builtin_lark_row_that_cannot_start_leaves_its_app_to_a_later_row(
     # cli_main, which ran before, still runs.
     from looper.agents.channels import lark_cli
 
-    async def check(config: Any, *, fresh: bool = False) -> Any:
+    async def check(config: Any, *, fresh: bool = False, raise_errors: bool = False) -> Any:
         return "lark-cli is not signed in as the bot", None
 
     monkeypatch.setattr(lark_cli, "check", check)
@@ -301,7 +308,7 @@ def test_lark_app_learnt_late_still_starts_once(monkeypatch: pytest.MonkeyPatch,
     async def identity(profile: Any = None, *, fresh: bool = False) -> Any:
         raise lark_cli.LarkCliError("not signed in yet")
 
-    async def check(config: Any, *, fresh: bool = False) -> Any:
+    async def check(config: Any, *, fresh: bool = False, raise_errors: bool = False) -> Any:
         return None, SimpleNamespace(profile=config.get("profile"), app_id="cli_x", bot_name="B",
                                      bot_open_id="ou_bot00000001")
 
@@ -335,7 +342,7 @@ def test_added_lark_cli_bot_records_refused_senders_under_its_id(monkeypatch: py
     from looper.agents.channels import lark_cli
     from looper.db import channel_configs
 
-    async def check(config: Any, *, fresh: bool = False) -> Any:
+    async def check(config: Any, *, fresh: bool = False, raise_errors: bool = False) -> Any:
         return None, SimpleNamespace(profile=config.get("profile"), app_id="cli_x", bot_name="B",
                                      bot_open_id="ou_bot00000001")
 
@@ -431,6 +438,7 @@ def test_first_successful_bot_owns_identity_and_failed_listener_is_stopped(
         async def start(adapter: Any, bus: Any) -> None:
             attempts.append(adapter)
             adapter._running = True
+            adapter.healthcheck = lambda: {"healthy": adapter._running}
             adapter._outbound_task = asyncio.create_task(listen(adapter))
             # Keep the task for assertions even when stop() clears the adapter's handle.
             outbound_tasks.append(adapter._outbound_task)
@@ -571,7 +579,9 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             else:
                 adapter._bus = bus
                 adapter._running = True
-                adapter._transport = transport
+                # Retain the outbound scope hook while replacing the platform boundary.
+                adapter._transport.inner = transport
+                adapter._channel_outbox.transport = transport
             adapters.append(adapter)
             await receive(adapter)
 
