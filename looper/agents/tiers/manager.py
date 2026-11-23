@@ -2998,33 +2998,66 @@ class ManagerAgent:
                     # Nothing is reset: the session and its Claude stay as they were.
                     await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
                     return
-            if not self._session_loaded:
-                await self._load_session_state()
-            # First: what a stopping Claude still writes (a turn of its own ending) saves the old session again.
-            await self._claude.stop()
-            previous = session.session_id, self._session_totals, self._clean_start
-            session.session_id, self._session_totals, self._clean_start = None, Usage(), True
-            try:
-                async with db_connection.transaction() as conn:
-                    await self._write_session_state(conn)
-                    if main:  # the profile chosen for the session is main's
-                        await db_agent_sessions.select_profile(self.agent_id, chosen, pool=conn)
-            except Exception as exc:
-                # Nothing is dropped: the next message resumes the saved session in a new process.
-                session.session_id, self._session_totals, self._clean_start = previous
-                logger.exception("%s: could not drop its session for /new", self._log)
-                await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
+            previous, error = await self._drop_loaded_session(chosen, envelope, origin)
+            if error is not None:
+                await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{error}", error=str(error))
                 return
-            self._pending_switch = self._pending_handoff = None
-            self._stopped_notes = []
-            if main:  # another session's /new leaves main's confirmations and remembered leads alone
-                if self.ops is not None:
-                    self.ops.forget_confirmations()
-                ops_leads.forget(self.agent_id)
-            await self._record_new_session(envelope, origin, previous[0], chosen)
         logger.info("%s: a new session on /new from %s (sender %s); the previous one was %s", self._log,
-                    origin["channel"], origin["sender"] or "-", previous[0] or "none")
+                    origin["channel"], origin["sender"] or "-", previous or "none")
         await self._send_reply(envelope, NEW_SESSION_REPLY + (f"这次会话用「{name}」。" if name else ""))
+
+    async def _drop_loaded_session(
+        self, chosen: str | None, envelope: MessageEnvelope, origin: dict[str, Any],
+    ) -> tuple[str | None, BaseException | None]:
+        """Stop the process and clear the saved session the code runs on. The caller holds that session's turn
+        lock and lifecycle gate. Returns the previous session id, and an error when the write failed (the session
+        is restored, and nothing is posted)."""
+        session = self._session_now()
+        main = session.key == MAIN_SESSION
+        if not self._session_loaded:
+            await self._load_session_state()
+        # First: what a stopping Claude still writes (a turn of its own ending) saves the old session again.
+        await self._claude.stop()
+        previous = session.session_id, self._session_totals, self._clean_start
+        session.session_id, self._session_totals, self._clean_start = None, Usage(), True
+        try:
+            async with db_connection.transaction() as conn:
+                await self._write_session_state(conn)
+                if main:  # the profile chosen for the session is main's
+                    await db_agent_sessions.select_profile(self.agent_id, chosen, pool=conn)
+        except Exception as exc:
+            # Nothing is dropped: the next message resumes the saved session in a new process.
+            session.session_id, self._session_totals, self._clean_start = previous
+            logger.exception("%s: could not drop its session for /new", self._log)
+            return previous[0], exc
+        self._pending_switch = self._pending_handoff = None
+        self._stopped_notes = []
+        if main:  # another session's /new leaves main's confirmations and remembered leads alone
+            if self.ops is not None:
+                self.ops.forget_confirmations()
+            ops_leads.forget(self.agent_id)
+        await self._record_new_session(envelope, origin, previous[0], chosen)
+        return previous[0], None
+
+    async def reset_named_session(self, key: session_routing.SessionKey) -> None:
+        """Drop one session the way ``/new`` does, without posting into its chat. The caller has already checked
+        that the key is main or a stored group or dm row. A turn under way finishes first."""
+        session = (self._sessions[MAIN_SESSION] if key.kind is session_routing.SessionKind.MAIN
+                   else self._router.session(key))
+        token = self._current.set(session)
+        try:
+            envelope = MessageEnvelope.create(
+                source=channel_address("web", "dashboard"), target=self.agent_address,
+                message_type=MessageType.USER_MESSAGE,
+                payload={"text": "manager_sessions.reset", "channel_context": {"session_id": "dashboard"}})
+            origin = _message_origin(envelope)
+            async with self._turn_lock, self._lifecycle_gate:
+                _previous, error = await self._drop_loaded_session(None, envelope, origin)
+                if error is not None:
+                    raise error
+            await self._router.changed()
+        finally:
+            self._current.reset(token)
 
     async def _record_new_session(self, envelope: MessageEnvelope, origin: dict[str, Any],
                                   previous: str | None, chosen: str | None = None) -> None:

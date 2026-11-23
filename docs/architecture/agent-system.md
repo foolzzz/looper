@@ -129,6 +129,10 @@ memory, with a since-start label until the service has been up for a day.
     it leaves main's pending confirmations and remembered leads alone. The
     profile chosen for the session (`/profile`, `select_session_profile`) is
     main's: another session follows the settings and refuses `/profile`.
+    The dashboard's Manager section lists these sessions (name, kind, whether
+    a process is running, last activity, cost) and can reset one. That reset
+    clears the session the same way `/new` does and does not post into the
+    chat. `loopercli manager-sessions list` reads the same list.
   - Switched off, new messages go to `main` again. Turns under way finish,
     what main's worker holds keeps its order, and the other sessions'
     processes stop once idle (the fleet's idle sweep). Their rows and saved
