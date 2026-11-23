@@ -161,3 +161,27 @@ def test_adjudication_cannot_offer_accept_with_failed_evidence(tmp_path, monkeyp
         passed = await decision_context(agent, plan, step, context)
         assert agent._offers_adjudicated_accept(plan, step, passed)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode,checked,needs_review", [("network", True, False), ("network", False, True),
+                                                      ("off", False, True)])
+def test_explicit_review_false_with_checks_is_decided_by_gate_even_under_review_all(
+    tmp_path, monkeypatch, mode, checked, needs_review,
+):
+    async def run():
+        agent, plan, step, context, _ = setup(tmp_path, monkeypatch, "passed")
+        plan.steps = []
+        agent._execution = ProjectExecution.from_row({"acceptance_checks": mode, "review_policy": "all"})
+        specification = protocol.StepSpec("s1", "Implement", ("Works",), (), False,
+                                           checks=step.checks if checked else ())
+        saved, = agent._add_steps(plan, (specification,))
+        assert agent._needs_review(saved) is needs_review
+        assert saved.review is needs_review
+        if checked:
+            saved.result = {"status": "completed"}
+            monkeypatch.setattr(agent, "_ask", AsyncMock(side_effect=planner.PlannerTurnError("invalid")))
+            monkeypatch.setattr(agent, "_send_to_review", AsyncMock())
+            await agent._decide(plan, saved, replace(context, review_required=agent._needs_review(saved)), [])
+            assert saved.status == "verified"
+            agent._send_to_review.assert_not_awaited()
+    asyncio.run(run())

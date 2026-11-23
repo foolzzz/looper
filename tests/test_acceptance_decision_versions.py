@@ -189,3 +189,29 @@ def test_real_runner_and_database_invalidate_then_rerun_before_reviewer(tmp_path
         assert "Acceptance evidence" in payload["evidence"] and "PASSED" in payload["evidence"]
         assert current_evidence(rows) == (rows[2],)
     run_db(run, monkeypatch)
+
+
+@pytest.mark.parametrize("continue_plan", [False, True])
+def test_interrupted_unfrozen_merge_cannot_adopt_new_unmeasured_source(tmp_path, monkeypatch, continue_plan):
+    from types import SimpleNamespace
+    from looper.agents.step_workspaces import StepWorkspaceState
+    async def run():
+        agent, plan, step, context, work = setup(tmp_path, monkeypatch)
+        memory_measurements(agent, plan, step, monkeypatch)
+        await decisions.decision_context(agent, plan, step, context)
+        step.workspace = SimpleNamespace(state=StepWorkspaceState.MERGING, result_commit=None, work_dir=str(work))
+        (work / "code.txt").write_text("changed while stopped before commit_pending\n")
+        monkeypatch.setattr(agent, "_decide_again", AsyncMock())
+        monkeypatch.setattr(planner.workspaces, "merge", AsyncMock())
+        monkeypatch.setattr(agent, "_step_settled", AsyncMock())
+        if continue_plan:
+            assert not await agent._merged(plan, step, decide=False)
+            agent._decide_again.assert_not_awaited()
+        else:
+            await agent._finish_merge(plan, step)
+            agent._decide_again.assert_awaited_once_with(plan, step)
+        planner.workspaces.merge.assert_not_awaited()
+        agent._step_settled.assert_not_awaited()
+        assert step.status == "deciding"
+        assert decisions.EvidenceState.read(step).stale_reruns_used == 1
+    asyncio.run(run())

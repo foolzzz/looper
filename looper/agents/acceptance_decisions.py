@@ -218,3 +218,19 @@ async def _invalidate_review(agent, plan, step):
     step.result = {key: value for key, value in result.items()
                    if key not in {"worker_head", "verify_passed", "verify_findings", "verify_summary",
                                   "verify_learnings", "role_reviews", "review_round"}}
+
+
+async def resume_merge(agent, plan, step, *, decide: bool) -> bool:
+    """An unfrozen interrupted merge must not commit source changed while the server was stopped."""
+    from .step_workspaces import StepWorkspaceState
+    if not step.checks or step.workspace.state is not StepWorkspaceState.MERGING or step.workspace.result_commit:
+        return True
+    before = EvidenceState.read(step).stale_reruns_used
+    context = DecisionContext(step.label, ResultKind.WORK, True, agent._needs_review(step), step.retries,
+                              agent._execution.step_retries)
+    context = await decision_context(agent, plan, step, context)
+    if context.evidence is None or (context.evidence.passed and context.evidence.stale_reruns_used == before):
+        return True
+    if decide:
+        await agent._decide_again(plan, step)
+    return False

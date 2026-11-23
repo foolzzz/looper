@@ -1342,7 +1342,7 @@ class PlannerAgent:
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
             step.review = (spec.gate is None and spec.wait is None
-                           and (spec.review or (self._execution.review_all and not self._is_verification(step)))
+                           and (spec.review or (self._execution.review_all and not spec.checks and not self._is_verification(step)))
                            and not (self._panel_on and self._is_verification(step)))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             step.difficulty = spec.difficulty if spec.gate is None and spec.wait is None else None
@@ -2774,6 +2774,8 @@ class PlannerAgent:
         current = step.workspace
         if current is None or current.state not in (StepWorkspaceState.ACTIVE, StepWorkspaceState.MERGING):
             return True
+        if not await acceptance_decisions.resume_merge(self, plan, step, decide=decide):
+            return False
         outcome = await workspaces.merge(current, step_key=step.label, title=_clip(step.instruction, 72),
                                          save=self._save_workspace)
         merged = step.workspace = outcome.workspace
@@ -3511,6 +3513,8 @@ class PlannerAgent:
         project reviews every step."""
         if self._panel_on and self._is_verification(step):
             return False
+        if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+            return step.review
         return step.review or (self._execution.review_all and not self._is_verification(step))
 
     def _is_verification(self, step: PlanStep) -> bool:
