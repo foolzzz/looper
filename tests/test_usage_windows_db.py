@@ -5,6 +5,7 @@ and a held leads check stores every item unchecked.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -601,6 +602,105 @@ def test_settings_get_lists_a_current_hold_and_omits_it_while_off(monkeypatch: p
             await _quiet()
 
     run_db(test, monkeypatch)
+
+
+def test_a_firing_sends_its_notice_once_after_its_commit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import usage_windows
+
+        published: list[tuple[Any, Any]] = []
+        a_queued = asyncio.Event()
+        b_failed = asyncio.Event()
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            a_id = (await env.enabled())["schedule_id"]
+            b_id = (await env.enabled())["schedule_id"]
+            await _window(env.pool, status="rejected", utilization=1,
+                          resets_at=env.clock.now + timedelta(minutes=30), observed_at=env.clock.now)
+            real_block = env.scheduler._usage_block
+            real_notify = usage_windows.notify_hold
+
+            async def block(schedule, now, notices):
+                if schedule["id"] == b_id:
+                    await asyncio.wait_for(a_queued.wait(), timeout=10)
+                held = await real_block(schedule, now, notices)
+                assert notices
+                if schedule["id"] == a_id:
+                    a_queued.set()
+                    await asyncio.wait_for(b_failed.wait(), timeout=10)
+                else:
+                    assert published == []
+                    raise RuntimeError("firing rolled back after its notice was queued")
+                return held
+
+            async def notify(provider_id, hold):
+                async with env.pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '500ms'")
+                        await conn.fetch(
+                            "SELECT id FROM schedules WHERE id = ANY($1::text[]) FOR UPDATE", [a_id, b_id])
+                assert b_failed.is_set()
+                published.append((provider_id, hold))
+                await real_notify(provider_id, hold)
+
+            env.scheduler._usage_block = block
+            monkeypatch.setattr(usage_windows, "notify_hold", notify)
+
+            async def fire_a() -> None:
+                with pytest.raises(usage_windows.ScheduleDeferred):
+                    await env.scheduler.run_now(a_id)
+
+            async def fire_b() -> None:
+                try:
+                    with pytest.raises(RuntimeError, match="firing rolled back after its notice was queued"):
+                        await env.scheduler.run_now(b_id)
+                finally:
+                    b_failed.set()
+
+            await asyncio.gather(fire_a(), fire_b())
+            assert len(published) == 1 and published[0][0] == BUILTIN
+            assert await env.pool.fetchval(
+                "SELECT count(*) FROM schedule_runs WHERE schedule_id = ANY($1::text[])", [a_id, b_id]) == 0
+            assert await env.pool.fetchval(
+                "SELECT count(*) FROM system_settings WHERE key LIKE 'cost_guard_hold:%'") == 1
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_rolled_back_firing_sends_no_notice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import usage_windows
+
+        published: list[Any] = []
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            sid = (await env.enabled())["schedule_id"]
+            await _window(env.pool, status="rejected", utilization=1,
+                          resets_at=env.clock.now + timedelta(minutes=30), observed_at=env.clock.now)
+            real_block = env.scheduler._usage_block
+
+            async def block(schedule, now, notices):
+                await real_block(schedule, now, notices)
+                assert notices
+                raise RuntimeError("firing rolled back after its notice was queued")
+
+            async def notify(*_args, **_kwargs):
+                published.append("sent")
+
+            env.scheduler._usage_block = block
+            monkeypatch.setattr(usage_windows, "notify_hold", notify)
+            with pytest.raises(RuntimeError, match="firing rolled back after its notice was queued"):
+                await env.scheduler.run_now(sid)
+            assert published == []
+            assert await env.pool.fetchval(
+                "SELECT count(*) FROM system_settings WHERE key LIKE 'cost_guard_hold:%'") == 0
+            assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs WHERE schedule_id = $1", sid) == 0
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 _STAND_IN = r'''
