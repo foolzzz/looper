@@ -94,7 +94,7 @@ async def _shape(conn: Any) -> dict[str, Any]:
 
 
 async def _before_the_run_tree(conn: Any) -> None:
-    """The database as it was before: no run tree, no spawn tables, no step difficulty, no markers for them."""
+    """Before the run tree and its dependent explorer and failure-typing migrations."""
     # Roll back the dependent explorer migration too, so recreating this older
     # table exercises the complete forward migration path.
     await conn.execute("DELETE FROM schema_migrations WHERE name IN "
@@ -103,10 +103,12 @@ async def _before_the_run_tree(conn: Any) -> None:
                        "DROP COLUMN subagent_task_budget_usd, DROP COLUMN subagents_per_run, "
                        "DROP COLUMN subagents_per_task")
     await conn.execute("DROP TABLE advisor_advice, agent_spawns")
-    await conn.execute("ALTER TABLE llm_records DROP COLUMN parent_record_id, DROP COLUMN run_kind")
+    await conn.execute("ALTER TABLE llm_records DROP COLUMN parent_record_id, DROP COLUMN run_kind, "
+                       "DROP COLUMN failure_class, DROP COLUMN failure_cause")
     await conn.execute("ALTER TABLE task_steps DROP COLUMN difficulty")
     await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1)", [
-        "run_tree", "agent_spawns", "step_difficulty", "run_tree_online", "step_difficulty_online"])
+        "run_tree", "agent_spawns", "step_difficulty", "run_tree_online", "step_difficulty_online",
+        "failure_typing", "failure_typing_online"])
 
 
 def test_a_database_from_before_the_run_tree_gets_it_without_a_row_rewritten_and_with_the_fresh_shape() -> None:
@@ -118,6 +120,15 @@ def test_a_database_from_before_the_run_tree_gets_it_without_a_row_rewritten_and
             await connection.ensure_schema(conn)
             fresh = await _shape(conn)
             await _before_the_run_tree(conn)
+            # The upgrade must start before both dependent features, not with a
+            # newer failure-typing schema hidden under an older run-tree marker.
+            assert not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() "
+                "AND table_name='llm_records' AND column_name IN "
+                "('parent_record_id', 'run_kind', 'failure_class', 'failure_cause'))")
+            assert not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name IN "
+                "('failure_typing', 'failure_typing_online', 'platform_subagents', 'platform_subagents_online'))")
             agents = ["manager", "manager-ops", "planner-t1", "worker-0a1b2c3d4e5f", "reviewer-0a1b2c3d4e5f",
                       "processor:sched-1", "consult-0a1b2c3d4e5f", "gate-run-1", "managerx", "planner_x"]
             for agent in agents:

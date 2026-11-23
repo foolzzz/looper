@@ -1,8 +1,8 @@
 {
-  "baseline": "bf447cff97e76990be2e920342d5fdb4a2a55d28",
+  "baseline": "2087fa7ba2caffe89038ce77b8a1e1a2456686d7",
   "surfaces": {
     "prompts:system_prompt": "c4b30c0ef66483ce734831973e41f364d056012a0ddcbf3acf49e5c2eb16a1fc",
-    "prompts:tiers.manager": "64225889b0851324666745967497f548b8035f445d1794bf5f2af4d144144437",
+    "prompts:tiers.manager": "8f8023f988a5a67b9969dcb57342ac37d6f6a1eda653c85047bead5c82625408",
     "prompts:tiers.planner": "87afaf5610fdab9741964da25c4627c7bc7c198fcff2ef5a8be38efec607aa36",
     "prompts:tiers.planner_protocol": "3f7b1bba80096fe6961103536e6da55e4202444e2412818758defea69b8c9bc7",
     "prompts:tiers.worker": "95f4802b9e6c5b8db1f8e219b3dc16c940f1964771437bf3e4151e97f78140be",

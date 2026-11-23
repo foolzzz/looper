@@ -161,12 +161,16 @@ def test_every_role_and_runtime_keeps_its_command_line(fixed_root: Path) -> None
     (AgentType.REVIEWER, Access.CONSULT, Access.CONSULT),
     (None, Access.ADVISOR, Access.ADVISOR),
     (AgentType.WORKER, Access.READ_ONLY, Access.READ_ONLY),
+    (AgentType.MANAGER, Access.PLATFORM_TOOLS, Access.PLATFORM_TOOLS),
+    (AgentType.EXPLORER, None, Access.EXPLORE),
+    (AgentType.WORKER, Access.EXPLORE, Access.EXPLORE),
 ])
 def test_a_launch_has_its_roles_access_level_unless_it_names_one(role: AgentType | None, access: Access | None,
                                                                  level: Access) -> None:
     launch = Launch(AgentSettings(profile=builtin_resolved_profile()), role=role, access=access)
     assert launch.access_level is level
-    assert launch.read_only is (level is not Access.FULL)
+    assert launch.read_only is (level not in (Access.FULL, Access.PLATFORM_TOOLS))
+    assert launch.platform_tools_only is (level is Access.PLATFORM_TOOLS)
     assert launch.consult is (level is Access.CONSULT)
     assert launch.no_tools is (level is Access.ADVISOR or role is AgentType.PROCESSOR)
 
@@ -188,3 +192,23 @@ def test_an_advisor_launch_has_no_tool_and_replaces_its_system_prompt(fixed_root
     for flag in ("--dangerously-skip-permissions", "--replay-user-messages", "--append-system-prompt-file",
                  "--teammate-mode", "--plugin-dir", "--add-dir"):
         assert flag not in argv
+
+
+def test_a_runtime_without_verified_platform_only_tools_refuses_the_launch() -> None:
+    launch = Launch(AgentSettings(profile=_profile("codex")), role=AgentType.MANAGER)
+    assert launch.environment()  # the regular operator path remains available
+    with pytest.raises(RuntimeUnsupported, match="platform tools"):
+        replace(launch, access=Access.PLATFORM_TOOLS).environment()
+
+
+@pytest.mark.parametrize("access", [Access.PLATFORM_TOOLS, Access.EXPLORE])
+def test_restricted_launches_stay_sealed_and_keep_the_tool_hook(access: Access, fixed_root: Path) -> None:
+    from looper.agents.outbound_hook import ToolHook
+
+    hook = ToolHook("synthetic-hook-command")
+    launch = Launch(AgentSettings(profile=builtin_resolved_profile()), access=access, tool_hook=hook)
+    argv = launch.runtime.isolation_args(fixed_root, launch=launch)
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert settings["hooks"] == hook.settings()
+    assert launch.read_only is (access is Access.EXPLORE)

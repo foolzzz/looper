@@ -627,7 +627,7 @@ class Notifier:
         return await db_schedules.set_alert(db_connection.get_pool(), schedule_id, column, at)
 
     async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> str:
-        """Send and record the message; its status: ``sent``, ``failed`` (not handed to a channel) or ``dashboard``."""
+        """Record ``sent``/``failed`` only after calling the sender; otherwise keep it on the dashboard."""
         from .schedules import notify_targets
 
         if schedule.get("kind") == "subscription":
@@ -641,10 +641,10 @@ class Notifier:
         unconfirmed = await _held_back(schedule, run_id)
         if channel and chat and schedule["notify"] != "never" and not dashboard_alert and not unconfirmed:
             if not any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
-                status, error = "failed", ("the notification target is unavailable: "
-                                           "its allowlist entry or chat binding was removed")
+                error = ("the notification target is unavailable: "
+                         "its allowlist entry or chat binding was removed")
             elif self._sender is None:
-                status, error = "failed", "this server cannot send messages"
+                error = "this server cannot send messages"
             else:
                 try:
                     proactive = turn_metrics.proactive_kwargs(
@@ -658,7 +658,7 @@ class Notifier:
                 except Exception as exc:  # a channel's failure is the message's, never the scheduler's
                     sent, error = False, f"{type(exc).__name__}: {exc}"
                 status = "sent" if sent else "failed"
-            if status == "failed":
+            if status == "failed" or error:
                 logger.warning("schedule %s: the %s message to %s could not be sent", schedule["id"], kind.value, channel)
         try:
             await db_schedules.insert_notification(

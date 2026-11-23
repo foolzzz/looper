@@ -3,11 +3,11 @@
 from . import OnlineStep
 
 name = "platform_subagents"
-order = 600
-pending_order = 600
+order = 650
+pending_order = 650
 
-# The failure classifier is a later dependency. Keep its declared pairs here
-# until the shared failures.check_sql is available on the baseline.
+# Explorer service outcomes also include local start_failure and runtime causes;
+# keep those explicit alongside the shared classifier's declared pairs.
 _FAILURE = """(failure_class IS NULL AND failure_cause IS NULL) OR
     (failure_class IS NOT NULL AND failure_cause IS NOT NULL AND (
        (failure_class = 'quota' AND failure_cause IN ('usage_limit', 'rate_limit')) OR
@@ -82,7 +82,7 @@ async def apply(conn, *, sql, state):
         await conn.execute("INSERT INTO schema_migrations(name) VALUES ($1)", name)
 
 
-online_order = 120
+online_order = 140
 online = (OnlineStep(
     migration=name, marker="platform_subagents_online",
     validate=tuple(("agent_spawns", constraint) for constraint in (

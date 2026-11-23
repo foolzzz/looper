@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any
 from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
-from .. import proc_tree, reported_files, vault
+from .. import failures, proc_tree, reported_files, vault
 from .. import keeper, kept_dirs
 from ..keeper.client import KeeperGone
 from ..keeper.protocol import ErrorCode, KeeperError
@@ -2444,7 +2444,7 @@ class WorkerPool:
                 await handle.end()
                 error = f"Cannot prepare {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
-                                      outcome=RunOutcome.RUN_FAILED.value)
+                                      outcome=RunOutcome.RUN_FAILED.value, failure=failures.start_failure(exc))
                 result = _verify_failed(error) if is_verify else _work_failed(error)
                 return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except RunStartError as exc:
@@ -2454,7 +2454,7 @@ class WorkerPool:
                 logger.error("worker %s failed to start run: %s", worker_id, exc)
                 error = f"Cannot start {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
-                                      outcome=RunOutcome.RUN_FAILED.value)
+                                      outcome=RunOutcome.RUN_FAILED.value, failure=failures.start_failure(exc))
                 result = {"status": "failed", "error": error}
                 return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except BaseException as exc:
@@ -2922,7 +2922,8 @@ class WorkerPool:
             if waiting is not None:
                 error += f"; the Worker ended while waiting for: {waiting.waiting_for[:200]}"
             await recorder.finish(output_text=None, result_event=result_event, error=error,
-                                  outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc))
+                                  outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc),
+                                  failure=failures.TIMED_OUT if timed_out else None)
             if timed_out:
                 raise asyncio.TimeoutError(error) from exc
             raise
