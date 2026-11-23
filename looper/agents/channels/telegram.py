@@ -403,6 +403,21 @@ class TelegramChannelAdapter(ChannelAdapter):
         await card_actions.bind(card, str(message.message_id), str(getattr(message, "chat_id", None) or chat))
         return PostReceipt(True, external_ids=(str(message.message_id),))
 
+    async def edit_card(self, target: NotifyTarget, external_id: str, card: Any) -> PostReceipt:
+        """Update a card's text and keyboard, explicitly clearing the keyboard once it is settled."""
+        if self._app is None:
+            return PostReceipt(False, error="the Telegram bot is not started", outcome=PostOutcome.REJECTED)
+        try:
+            chat, message_id = int(target.id), int(external_id)
+        except ValueError:
+            return PostReceipt(False, error="invalid Telegram chat or message id", outcome=PostOutcome.REJECTED)
+        try:
+            await self._app.bot.edit_message_text(chat_id=chat, message_id=message_id, text=self._redact(card.text)[:4000],
+                                                  reply_markup=card_actions.telegram_markup(card))
+        except Exception as exc:
+            return PostReceipt(False, error=redact(str(exc)), outcome=_post_outcome(exc))
+        return PostReceipt(True, external_ids=(external_id,))
+
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         if self._app is None:
             return PostReceipt(False, error="the Telegram bot is not started", outcome=PostOutcome.REJECTED)

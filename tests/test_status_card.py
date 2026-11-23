@@ -98,6 +98,7 @@ def _quiet_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("looper.db.tasks.names_and_projects_of", names)
     monkeypatch.setattr("looper.db.projects.names_of", names)
     monkeypatch.setattr("looper.agents.attention.enabled", off)
+    monkeypatch.setattr("looper.agents.card_actions.enabled", off)
     monkeypatch.setattr("looper.agents.reminders.enabled", off)
 
 

@@ -1,0 +1,348 @@
+"""Worker-only explorer tools, backed by the persistent spawn service."""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+from ...db import agent_spawns
+from ...db.agent_spawns import CancelReason, FINISHED, SpawnState
+from ..spawn import SpawnParent
+from ..subagents import Delivery, Refused, RefusalReason, Spawner, SpawnService
+from . import ErrorCode, OpError, RetrySafety, Risk, Tool, check_arguments
+
+logger = logging.getLogger(__name__)
+SPAWN, WAIT, CANCEL = "looper_agent_spawn", "looper_agent_wait", "looper_agent_cancel"
+WAIT_MAX_SECONDS = 120
+WORKER_INSTRUCTIONS = """## Explorer tools
+For read-only investigation, use looper_agent_spawn (kind: explorer). Give a bounded goal,
+deliverable and scope of relative paths. Explorers cannot edit files, browse the web or spawn agents.
+For work that edits files, ask the Planner to add a step. Do not use native subagents to edit files.
+You can continue working after spawn, then use looper_agent_wait for the complete result.
+Omit spawn_ids to list this run's explorers. With the room on, results you did not wait for
+are delivered to your seat; use wait for full evidence. Check unverified results yourself.
+Use looper_agent_cancel when a result is no longer needed. When your run ends, unfinished
+explorers are cancelled. These tools share your run's budget and task limits.
+"""
+
+
+def worker_enabled(project: Mapping[str, Any] | None, *, is_verify: bool = False) -> bool:
+    return not is_verify and (project or {}).get("subagents") == "on"
+
+
+async def kept_explorer_records(runtime_root: Path, pool: Any) -> dict[str, int]:
+    """Delegate persisted explorer keepers to SpawnService before the Worker startup sweep."""
+    from ..keeper import RUNS_DIR
+    rows = await pool.fetch("SELECT s.child_record_id,s.child_process,r.agent_id FROM agent_spawns s "
+        "JOIN llm_records r ON r.id=s.child_record_id WHERE s.kind='explorer' AND s.state='asking' "
+        "AND s.child_process->>'kept'='true' AND r.run_kind='explorer' AND r.status='running'")
+    owned = {}
+    root = (runtime_root / RUNS_DIR).resolve()
+    for row in rows:
+        identity = row["child_process"]
+        if isinstance(identity, str):
+            identity = json.loads(identity)
+        location = identity.get("run_dir")
+        if not isinstance(location, str) or not location:
+            continue
+        directory = Path(location).resolve()
+        if directory.parent == root and directory.name == row["agent_id"]:
+            owned[directory.name] = row["child_record_id"]
+    return owned
+
+
+async def _never(call):
+    raise AssertionError("explorer tools require a run grant")
+
+
+_WAIT = {"type": "integer", "minimum": 0, "maximum": WAIT_MAX_SECONDS}
+TOOLS = (
+    Tool(name=SPAWN, description="Spawn a bounded read-only explorer for this run; optionally wait for its result. "
+         "It cannot edit files or browse the web. Use a key to repeat a request without spawning twice.",
+         schema={"type": "object", "additionalProperties": False, "required": ["kind", "brief"], "properties": {
+             "kind": {"type": "string", "enum": ["explorer"]},
+             "brief": {"type": "object", "additionalProperties": False,
+                       "required": ["goal", "deliverable", "scope"], "properties": {
+                           "goal": {"type": "string", "minLength": 1, "maxLength": 2000},
+                           "deliverable": {"type": "string", "minLength": 1, "maxLength": 2000},
+                           "scope": {"type": "array", "minItems": 1, "maxItems": 32,
+                                     "items": {"type": "string", "minLength": 1, "maxLength": 500}},
+                           "questions": {"type": "array", "maxItems": 20,
+                                         "items": {"type": "string", "minLength": 1, "maxLength": 1000}}}},
+             "profile": {"type": "string", "minLength": 1},
+             "budget_usd": {"type": "number", "minimum": .01, "maximum": 5},
+             "wait_seconds": _WAIT, "key": {"type": "string", "minLength": 1, "maxLength": 200}}},
+         risk=Risk.WRITE, run=_never),
+    Tool(name=WAIT, description="Read this run's explorers and remaining limits; optionally wait for the selected results. "
+         "Omit spawn_ids for all explorers spawned by this run. Completed results include evidence or a typed failure.",
+         schema={"type": "object", "additionalProperties": False, "properties": {
+             "spawn_ids": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True,
+                           "items": {"type": "integer", "minimum": 1}}, "wait_seconds": _WAIT}},
+         risk=Risk.READ, run=_never),
+    Tool(name=CANCEL, description="Cancel one explorer spawned by this run and release its unspent reservation.",
+         schema={"type": "object", "additionalProperties": False, "required": ["spawn_id"], "properties": {
+             "spawn_id": {"type": "integer", "minimum": 1},
+             "reason": {"type": "string", "maxLength": 1000}}}, risk=Risk.WRITE, run=_never),
+)
+TOOL_NAMES = frozenset(tool.name for tool in TOOLS)
+RETRY_SAFETY = {SPAWN: RetrySafety.IDEMPOTENT, WAIT: RetrySafety.READ_ONLY, CANCEL: RetrySafety.IDEMPOTENT}
+_BY_NAME = {tool.name: tool for tool in TOOLS}
+
+
+@dataclass
+class _Parent:
+    task_id: str
+    seat: Any
+    recorder: Any
+    launch: Any
+
+    def caller(self) -> Spawner:
+        usage = self.recorder._usage_so_far
+        cost = usage.cost_usd
+        if cost is None and any(getattr(usage, field, None) is not None for field in
+                                ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")):
+            from ..runtimes.pricing import pricer
+            price = pricer(self.launch.settings.resolved_model, catalog=self.launch.settings.pricing_catalog)
+            cost = price(self.launch.model, usage)
+        return Spawner(SpawnParent(self.task_id, self.seat.step_id, self.recorder.record_id),
+                       "worker", Path(self.seat.work_dir), self.seat.key,
+                       budget_usd=self.launch.max_budget_usd, spent_usd=cost)
+
+
+def _view(row: Mapping[str, Any]) -> dict[str, Any]:
+    value = {key: row[key] for key in ("id", "state", "budget_usd", "delivery")}
+    value["profile"] = row.get("profile_id")
+    if SpawnState(row["state"]) in FINISHED:
+        if row.get("result"):
+            # Service accounting and raw runtime fields remain private to the service.
+            value["result"] = {k: v for k, v in row["result"].items()
+                               if k in ("summary", "findings", "open_questions", "confidence", "verified", "text")}
+        if row.get("failure_class"):
+            value["failure"] = {"class": row["failure_class"], "cause": row["failure_cause"]}
+        for key in ("detail", "cancel_reason"):
+            if row.get(key):
+                value[key] = row[key]
+    return value
+
+
+class WorkerSubagents:
+    """Own launch/delivery tasks separately from an HTTP request's lifetime."""
+    def __init__(self, service: SpawnService, room: Any, *, worker_pool: Any = None):
+        self.service, self.room = service, room
+        self.worker_pool = worker_pool
+        if worker_pool is not None:
+            service.stop_parent = self._stop_parent
+        self._parents: dict[str, _Parent] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._jobs: dict[int, asyncio.Task] = {}
+        self._waiting: dict[int, int] = {}
+        self._scanner: asyncio.Task | None = None
+
+    def bind(self, task_id: str, seat: Any, recorder: Any, launch: Any) -> None:
+        directory = getattr(recorder, "_cwd", None) or seat.work_dir
+        if recorder.record_id is None or not directory:
+            raise ValueError("explorer tools require a recorded parent and working directory")
+        # Verification Workers may run in a private checkout rather than the
+        # dispatch's directory. Explore the actual recorded runtime directory.
+        self._parents[seat.run] = _Parent(task_id, replace(seat, work_dir=str(directory)), recorder, launch)
+
+    async def end(self, run: str) -> None:
+        if run not in self._parents:
+            return
+        async with self._locks.setdefault(run, asyncio.Lock()):
+            parent = self._parents.pop(run, None)
+            if parent is not None:
+                try:
+                    for row in await self._owned(parent, None):
+                        if row["state"] == "finishing":
+                            await self.service.finish(row["id"])
+                            await self._fallback([row["id"]])
+                finally:
+                    await self.service.cascade(parent_record_id=parent.recorder.record_id, reason=CancelReason.PARENT_ENDED)
+        self._locks.pop(run, None)
+
+    async def call(self, task_id: str, seat: Any, name: str, raw: Any, *, call_id: str | None = None) -> dict:
+        try:
+            # The shared validator only accepts arrays of strings. This tool
+            # has integer ids; validate that field here without changing old tools.
+            if name == WAIT and isinstance(raw, dict) and "spawn_ids" in raw:
+                ids = raw["spawn_ids"]
+                if (not isinstance(ids, list) or not 1 <= len(ids) <= 8
+                        or any(type(i) is not int or i < 1 for i in ids) or len(set(ids)) != len(ids)):
+                    raise OpError(ErrorCode.INVALID, "spawn_ids must contain 1 to 8 distinct positive integers")
+                args = {**check_arguments(_BY_NAME[name].schema, {k: v for k, v in raw.items() if k != "spawn_ids"}),
+                        "spawn_ids": ids}
+            else:
+                args = check_arguments(_BY_NAME[name].schema, raw)
+            async with self._locks.setdefault(seat.run, asyncio.Lock()):
+                parent = self._parents.get(seat.run)
+                if parent is None:
+                    raise OpError(ErrorCode.UNAVAILABLE, "this run's explorer tools are not ready")
+                enabled = await self.service.pool.fetchval("SELECT p.subagents FROM projects p JOIN tasks t "
+                    "ON t.project_id=p.id WHERE t.id=$1", task_id)
+                if enabled != "on":
+                    raise Refused(RefusalReason.OFF, "subagents are off for this project")
+                if name == SPAWN:
+                    key = args.get("key") or call_id
+                    if not isinstance(key, str) or not 1 <= len(key) <= 200:
+                        raise OpError(ErrorCode.INVALID, "spawn requires a bridge call id or an explicit key")
+                    row = await self.service.admit(parent.caller(), args["brief"], key=key,
+                        kind=args["kind"], profile=args.get("profile"), budget_usd=args.get("budget_usd"),
+                        delivery=Delivery.TOOL)
+                    rows = [row]
+                else:
+                    rows = await self._owned(parent, [args["spawn_id"]] if name == CANCEL else args.get("spawn_ids"))
+            if name == CANCEL:
+                row = await self.service.cancel(rows[0]["id"], reason=CancelReason.REQUESTED)
+                if args.get("reason"):
+                    from ...db import activity
+                    await activity.insert_activity(task_id=task_id, worker=seat.run, kind="subagent_cancelled",
+                        summary=args["reason"], metadata={"spawn_id": row["id"]}, pool=self.service.pool)
+                return {"status": "ok", "result": {"spawn": _view(row)}}
+            seconds = args.get("wait_seconds") or 0
+            ids = [row["id"] for row in rows]
+            for spawn_id in ids:
+                self._waiting[spawn_id] = self._waiting.get(spawn_id, 0) + 1
+            try:
+                for spawn_id in ids:
+                    self.schedule(spawn_id)
+                rows = await self._wait(parent, ids, seconds)
+                from ..subagent_delivery import mark_tool_delivered
+                # Hold off room delivery until this tool has claimed its completed results.
+                await mark_tool_delivered(self.service.pool, ids)
+            finally:
+                for spawn_id in ids:
+                    count = self._waiting[spawn_id] - 1
+                    if count:
+                        self._waiting[spawn_id] = count
+                    else:
+                        del self._waiting[spawn_id]
+            await self._fallback(ids)
+            rows = await self._owned(parent, ids)
+            result = {"spawn": _view(rows[0])} if name == SPAWN else {
+                "spawns": [_view(row) for row in rows], "remaining": await self._remaining(parent)}
+            return {"status": "ok", "result": result}
+        except Refused as exc:
+            return {"status": "refused", "reason": exc.reason.value, "detail": str(exc)}
+        except OpError as exc:
+            return {"status": "error", "error": {"code": exc.code.value, "message": str(exc)}}
+        except Exception:
+            logger.exception("worker %s explorer tool %s failed", seat.run, name)
+            return {"status": "error", "error": {"code": "unavailable", "message": "Explorer tools unavailable; retry with the same key"}}
+
+    async def _owned(self, parent: _Parent, ids: list[int] | None) -> list[dict]:
+        rows = [row for row in await agent_spawns.for_task(parent.task_id, pool=self.service.pool)
+                if row["kind"] == "explorer" and row["parent_record_id"] == parent.recorder.record_id]
+        if ids is not None:
+            by_id = {row["id"]: row for row in rows}
+            if any(spawn_id not in by_id for spawn_id in ids):
+                raise OpError(ErrorCode.FORBIDDEN, "spawn_ids must belong to this run")
+            rows = [by_id[spawn_id] for spawn_id in ids]
+        return rows
+
+    async def _wait(self, parent: _Parent, ids: list[int], seconds: int) -> list[dict]:
+        deadline = asyncio.get_running_loop().time() + seconds
+        while True:
+            rows = await self._owned(parent, ids)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if all(SpawnState(row["state"]) in FINISHED for row in rows) or remaining <= 0:
+                return rows
+            await asyncio.sleep(min(.1, remaining))
+
+    async def _remaining(self, parent: _Parent) -> dict:
+        project = await self.service.pool.fetchrow("SELECT p.* FROM projects p JOIN tasks t ON t.project_id=p.id "
+                                                   "WHERE t.id=$1", parent.task_id)
+        usage = await agent_spawns.commitment(parent.task_id, parent.recorder.record_id, pool=self.service.pool)
+        limit = await self.service.pool.fetchval("SELECT max_concurrency FROM task_concurrency_limits "
+            "WHERE task_id=$1 AND role='subagent'", parent.task_id) or 4
+        active = await self.service.pool.fetchval("SELECT count(*) FROM agent_spawns WHERE task_id=$1 "
+            "AND kind='explorer' AND state IN ('asking','cancelling')", parent.task_id)
+        return {"budget_usd": max(0, (project["subagent_task_budget_usd"] or 3) - usage["task_committed"]),
+                "per_run": max(0, (project["subagents_per_run"] if project["subagents_per_run"] is not None else 4) - usage["parent_count"]),
+                "per_task": max(0, (project["subagents_per_task"] if project["subagents_per_task"] is not None else 20) - usage["task_count"]),
+                "concurrency": max(0, limit - active)}
+
+    def schedule(self, spawn_id: int) -> None:
+        if spawn_id not in self._jobs:
+            self._jobs[spawn_id] = asyncio.create_task(self._run(spawn_id), name=f"explorer-{spawn_id}")
+
+    async def _run(self, spawn_id: int) -> None:
+        try:
+            await self.service.run(spawn_id)
+            await self._fallback([spawn_id])
+        except Exception:
+            logger.exception("explorer %s launch or delivery failed; recovery will retry", spawn_id)
+        finally:
+            self._jobs.pop(spawn_id, None)
+
+    async def _fallback(self, ids: list[int]) -> None:
+        from ..subagent_delivery import deliver_room
+        for spawn_id in ids:
+            if self._waiting.get(spawn_id):
+                continue
+            await self.service.pool.execute("UPDATE agent_spawns s SET delivery='room' FROM tasks t,projects p "
+                "WHERE s.id=$1 AND s.task_id=t.id AND t.project_id=p.id AND p.subagents='on' "
+                "AND COALESCE(p.agent_room,'on')='on' AND s.delivered_at IS NULL", spawn_id)
+            await deliver_room(self.service, self.room, spawn_id)
+
+    async def start(self) -> None:
+        await self.service.recover()
+        self._scanner = asyncio.create_task(self._scan(), name="explorer-recovery")
+
+    async def _scan(self) -> None:
+        while True:
+            try:
+                for parent in list(self._parents.values()):
+                    caller = parent.caller()
+                    if caller.budget_usd is not None and caller.spent_usd is not None:
+                        await self.service.enforce_parent_budget(caller.parent.record_id, caller.budget_usd,
+                                                                 caller.spent_usd)
+                rows = await self.service.pool.fetch("SELECT s.id,s.state,r.status FROM agent_spawns s "
+                    "JOIN llm_records r ON r.id=s.parent_record_id WHERE s.kind='explorer' "
+                    "AND (s.finished_at IS NULL OR (s.delivered_at IS NULL AND EXISTS "
+                    "(SELECT 1 FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=s.task_id "
+                    "AND p.subagents='on' AND COALESCE(p.agent_room,'on')='on')))")
+                for row in rows:
+                    try:
+                        if row["state"] == "finishing":
+                            await self.service.finish(row["id"])
+                        elif row["status"] != "running":
+                            if row["state"] in ("queued", "asking", "cancelling"):
+                                await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
+                        elif row["state"] == "queued":
+                            self.schedule(row["id"])
+                        elif row["state"] == "cancelling":
+                            await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
+                        await self._fallback([row["id"]])
+                    except Exception:
+                        logger.exception("explorer %s recovery deferred", row["id"])
+            except Exception:
+                logger.exception("explorer recovery scan failed")
+            await asyncio.sleep(1)
+
+    async def _stop_parent(self, record_id: int) -> None:
+        parent = next((p for p in self._parents.values() if p.recorder.record_id == record_id), None)
+        if parent is not None and self.worker_pool is not None:
+            await self.worker_pool.kill(parent.seat.run)
+
+    async def stop(self, *, epoch: int | None = None) -> None:
+        if self._scanner is not None:
+            self._scanner.cancel()
+            await asyncio.gather(self._scanner, return_exceptions=True)
+        if epoch is not None:
+            await self.service.detach(epoch=epoch)
+        else:
+            rows = await self.service.pool.fetch("SELECT id,state FROM agent_spawns WHERE kind='explorer' AND finished_at IS NULL")
+            for row in rows:
+                try:
+                    if row["state"] == "finishing":
+                        await self.service.finish(row["id"])
+                    else:
+                        await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
+                except Exception:
+                    logger.exception("explorer %s shutdown deferred to recovery", row["id"])
+        await asyncio.gather(*list(self._jobs.values()), return_exceptions=True)
