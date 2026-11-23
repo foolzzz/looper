@@ -74,6 +74,7 @@ from .scheduler import Scheduler
 from .message import MessageType
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
+from .tiers import triage_background
 from .tiers.manager import ManagerConfig
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
@@ -1014,6 +1015,8 @@ async def _run_agent_system_watched(
             from .managers import ManagerFleet
             platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                                 supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
+            from . import cost_holds
+            cost_holds.configure(platform, sender=registry.notify, dashboard_url=dashboard_url)
             tools_ready = asyncio.Event()
             fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                                  url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
@@ -1155,6 +1158,7 @@ async def _run_agent_system_watched(
         await memory_writer.start()
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
+        triage_background.configure(registry.post)
         await idle_check_service.start()
         await morning_brief_service.start()  # idle while the morning brief is off
         await metrics_alert_service.start()

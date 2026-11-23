@@ -119,3 +119,16 @@ describe("Sub-agent cost share", () => {
     expect(renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, by_role: { ...COST.by_role } }} />)).toBe(before);
   });
 });
+
+describe("Consult cost share", () => {
+  it("adds the consult share only when the task has consult runs", () => {
+    const before = renderToStaticMarkup(<TaskCostBreakdown cost={COST} />);
+    expect(before).not.toContain("Consults");
+    expect(renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, by_role: { ...COST.by_role, consult: { cost_usd: 0, runs: 0 } } }} />)).toBe(before);
+    const cost = { ...COST, by_role: { ...COST.by_role, consult: { cost_usd: 0.05, runs: 1 } } };
+    const html = renderToStaticMarkup(<TaskCostBreakdown cost={cost} />);
+    expect(html).toContain("Consults");
+    expect(html).toContain("$0.0500");
+    expect(renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, by_role: { ...COST.by_role } }} />)).toBe(before);
+  });
+});

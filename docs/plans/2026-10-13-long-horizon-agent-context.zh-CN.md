@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；M9g Pi 运行时的适配器、界面和假 provider 闭环已在本分支实现，真实 Responses、DeepSeek 与 Claude 对照未验证；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付。v2.13.165 是固定桥（2026-10-27）：更早的安装先升到 v2.13.165 并启动一次；规划时的 v2.13.166 不移动边界；移除之后的第一版是 v2.14.0，版本号由发布工具写入。其余见第 5 节待办。
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；M9g Pi 运行时的适配器、界面和假 provider 闭环已在本分支实现，真实 Responses、DeepSeek 与 Claude 对照未验证；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付。v2.13.165 是固定桥（2026-10-27）：更早的安装先升到 v2.13.165 并启动一次；规划时的 v2.13.166 不移动边界；移除之后的第一版是 v2.14.0，版本号由发布工具写入。事件分流的晨报事件段已实现（默认关闭）：操作者 DM 的最新 10 条摘要/重要兜底事件，认领、结算与恢复均按实际读取的事件 id 去重；消息流 why 的「进了晨报」展示留作后续。其余见第 5 节待办。
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -63,7 +63,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
-| P4.7 花费守卫 | PR 1：运行前预留、历史 P95 与每日计数重算、全部模型回合及调度触发的观察接线、操作者只读展示已实现；默认关闭，仅支持 `off/observe`；定向测试 433 通过，隔离服务及替身 Manager 回合已验证，真实模型验证待批准；执行拦截、等待、通知、暂停与用量窗口按 RFC 后续 PR 交付 | [RFC](../architecture/rfcs/cost-guard-v0.zh-CN.md) |
+| P4.7 花费守卫 | 运行前预留、观察模式与操作者只读展示已交付；任务和全局每日上限的 `enforce`、`ask` 等待、持久化决定/到期、操作者管家回合例外、私聊回复与最小花费界面已实现，默认仍为 `off`。收尾回合按实际准入决定，范围链没有上限时不按预留软停；离开 `enforce` 后已有等待的私聊决定、待办、Settings 和到期仍可用。金额上限拒绝优先于用量窗口暂缓；账号被拒和 quota 失败也暂缓自发运行，95% 利用率只暂缓后台和定时触发。角色每日额度、定时预算动作与无人回复推送仍按 RFC 后续阶段交付；[替身服务验收](../validation/cost-guard/run.md) | [RFC](../architecture/rfcs/cost-guard-v0.zh-CN.md) |
 | 热升级 v0 | 组件规划、排空、Claude Code 看护与跨重启接管 | 默认关闭；macOS launchd 替身链路已验证，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍有缺口（[证据](../validation/kept-runs/README.md)） | M9a、M9c |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发和控制台命令型表单 | 现有定时任务；热升级排空功能 |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发，以及管家创建、配置展示与确认命令型定时任务 | 现有定时任务；热升级排空功能 |

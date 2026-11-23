@@ -1244,12 +1244,39 @@ async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None
                   expected_version: str | None = None) -> dict[str, Any]:
     """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays.
 
-    A manual run is not held for a usage window; the observation still records one. The schedule's own firing
-    keeps a hold note that was already there.
+    An agent or a command the operator starts is not held for a usage window; the observation still records
+    one, and a hold note already left for the schedule's own firing stays. A subscription is held: its
+    processor would fail the run, so this returns 409 and leaves the cursor where it is. The notice is the
+    same one a firing publishes after it commits. A stale ``expected_version`` is refused before that hold:
+    the row is locked and the version checked, and a mismatch is the configuration conflict, with no notice.
     """
+    from . import cost_guard
     from .usage_windows import ScheduleDeferred
 
     try:
+        row = await db_schedules.get_schedule(schedule_id)
+        if row is not None and row["kind"] == "subscription":
+            async with db_connection.transaction() as conn:
+                row = await db_schedules.lock_schedule(conn, schedule_id)
+                if row is not None:
+                    await db_schedules.check_configuration_version(conn, row, expected_version)
+            if row is not None and row["kind"] == "subscription":
+                found = await cost_guard.schedule_enforced_hold(row)
+            else:
+                found = None
+            if found and found[0] is not None:
+                hold, provider_id = found
+                notices: list[tuple[str | None, Any]] = []
+                await scheduler._usage_block(row, scheduler._clock(), notices)
+                if not notices:
+                    notices.append((provider_id, hold))
+                await scheduler._publish_hold_notices(notices)
+                when = hold.until.astimezone().strftime("%H:%M")
+                reason = hold.reason.value
+                raise ScheduleDeferred(
+                    hold.until, reason,
+                    text=(f"usage window on hold until {when} ({reason}); "
+                          "the subscription runs when it lifts"))
         run_id = await scheduler.run_now(schedule_id, operator=True, **({"expected_version": expected_version}
                                                                       if expected_version is not None else {}))
     except db_schedules.ConfigurationChanged as exc:
