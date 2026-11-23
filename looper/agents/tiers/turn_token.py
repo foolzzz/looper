@@ -83,6 +83,8 @@ class TurnToken:
     kind: TurnKind = TurnKind.MODEL
     outcome: Any = None  # ReplyOutcome
     method: Any = None  # StopMethod: how the runtime ended the turn; None until known
+    preempted_by: str | None = None  # the user message that stopped a background turn
+    preemption_noted: bool = False  # its fallback note was handed to the session, once
     envelope: MessageEnvelope | None = field(default=None, repr=False)  # what the stop's status is published for
     # The Manager let go of the turn (a completion turn past its deadline that did not end): whenever it ends, it
     # writes only its own record, never the Manager's session, runtime, binding or another turn's token.
