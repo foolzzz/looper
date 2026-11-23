@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
+from dataclasses import dataclass
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -274,6 +276,33 @@ _EXTRACTION_SCOPE = {
 _EXTRACTION_SCOPE["triage"] = _EXTRACTION_SCOPE["intents"]
 
 
+@dataclass(frozen=True)
+class GroupRead:
+    """An intents run's followed-group allowance: at most ``run_max`` of their messages this run, and per chat what
+    is left of today's quota (every listed chat has an entry, 0 when used up)."""
+    run_max: int
+    left: Mapping[str, int]
+
+
+_GROUP_FROM = f"""
+        FROM source_events e
+        JOIN event_sources s ON s.id = e.source_id
+        JOIN source_chats c ON c.source_id = e.source_id AND c.chat_id = e.chat_id
+        JOIN intent_group_reads g ON g.source_id = e.source_id AND g.chat_id = e.chat_id
+        WHERE e.source_id = $1 AND e.seq > $2 AND e.seq <= $3
+          AND c.inclusion = 'included' AND c.extraction = 'included'
+          AND (cardinality($4::text[]) = 0 OR e.chat_id = ANY($4::text[])) AND NOT e.chat_id = ANY($5::text[])
+          AND e.sender_kind = 'user' AND e.origin = 'live'
+          AND e.sent_at >= g.read_from AND e.ingested_at >= g.read_from
+          AND NOT COALESCE({_EXTRACTION_SCOPE['intents']}, false)"""
+
+_WINDOW_COLUMNS = """e.seq, e.external_id, e.chat_id, c.kind AS chat_kind, c.name AS chat_name, e.thread_id, e.root_id,
+               e.parent_id, e.sender_id, e.sender_kind,
+               (SELECT p.name FROM source_people p WHERE p.source_id = e.source_id AND p.open_id = e.sender_id)
+                   AS sender_name,
+               e.sent_at, e.mentions_me, e.mention_ids, e.text"""
+
+
 def extraction_scope(output_kind: str) -> str:
     """The SQL condition of what ``output_kind`` reads, over ``source_events e``, ``source_chats c`` and
     ``event_sources s``, besides the chats, the age and Looper's own apps (``extraction_window``)."""
@@ -300,7 +329,7 @@ def _extraction_from(output_kind: str) -> str:
 
 async def extraction_tally(conn: Db, sub: Mapping[str, Any], *, output_kind: str, since: datetime, to_seq: int,
                            own_apps: Collection[str], include_import: bool, zone_name: str,
-                           from_seq: int = 0) -> list[dict[str, Any]]:
+                           from_seq: int = 0, group_read: bool = False) -> list[dict[str, Any]]:
     """How many events ``output_kind`` reads among those after ``from_seq`` up to ``to_seq`` sent since ``since``, by
     chat kind and by day in ``zone_name``: rows of ``chat_kind``, ``day`` and ``events``."""
     rows = await conn.fetch(
@@ -308,38 +337,108 @@ async def extraction_tally(conn: Db, sub: Mapping[str, Any], *, output_kind: str
         f"{_extraction_from(output_kind)} AND e.sent_at >= $8 GROUP BY 1, 2 ORDER BY 2, 1",
         sub["source_id"], from_seq, to_seq, list(sub["include_chats"]), list(sub["exclude_chats"]), list(own_apps),
         include_import, since, zone_name)
+    if group_read and output_kind == "intents":
+        extra = await conn.fetch(
+            f"SELECT c.kind AS chat_kind, (e.sent_at AT TIME ZONE $7)::date AS day, count(*) AS events "
+            f"{_GROUP_FROM} AND e.sent_at >= $6 GROUP BY 1, 2",
+            sub["source_id"], from_seq, to_seq, list(sub["include_chats"]), list(sub["exclude_chats"]), since,
+            zone_name)
+        totals = Counter({(r["day"], r["chat_kind"]): r["events"] for r in rows})
+        totals.update({(r["day"], r["chat_kind"]): r["events"] for r in extra})
+        return [{"day": day, "chat_kind": kind, "events": n} for (day, kind), n in sorted(totals.items())]
     return [dict(row) for row in rows]
 
 
 async def extraction_window(conn: Db, sub: Mapping[str, Any], *, output_kind: str, from_seq: int, to_seq: int,
-                            now: datetime, own_apps: Collection[str], include_import: bool = False) -> dict[str, Any]:
+                            now: datetime, own_apps: Collection[str], include_import: bool = False,
+                            group_read: GroupRead | None = None) -> dict[str, Any]:
     """Selected events with ``from_seq < seq <= to_seq``, in seq order, at most ``sub['max_events']``: the chats the
     stream and the subscription include and the extraction does not exclude, not Looper's own apps, not imported
     (unless ``include_import``: a backfill), sent within ``max_age_minutes``, and what ``output_kind`` reads
     (``extraction_scope``). Nothing is dropped: ``last_seq`` is the seq of the last row taken when more rows remain
     (``more``), else ``to_seq``; the cursor moves only to it. ``in_window`` counts every event in the range,
     ``too_old`` the selected ones sent before the age limit."""
+    if group_read is not None and (output_kind != "intents" or include_import):
+        raise ValueError("only an intents run reads followed groups")
     where = _extraction_from(output_kind)
     common = (sub["source_id"], from_seq, to_seq, list(sub["include_chats"]), list(sub["exclude_chats"]),
               list(own_apps), include_import)
     oldest = now - timedelta(minutes=sub["max_age_minutes"])
     found = await conn.fetch(
         f"""
-        SELECT e.seq, e.external_id, e.chat_id, c.kind AS chat_kind, c.name AS chat_name, e.thread_id, e.root_id,
-               e.parent_id, e.sender_id, e.sender_kind,
-               (SELECT p.name FROM source_people p WHERE p.source_id = e.source_id AND p.open_id = e.sender_id)
-                   AS sender_name,
-               e.sent_at, e.mentions_me, e.mention_ids, e.text
+        SELECT {_WINDOW_COLUMNS}
         {where} AND e.sent_at >= $8
         ORDER BY e.seq LIMIT $9
         """, *common, oldest, sub["max_events"] + 1)
     too_old = await conn.fetchval(f"SELECT count(*) {where} AND e.sent_at < $8", *common, oldest)
     in_window = await conn.fetchval("SELECT count(*) FROM source_events WHERE source_id = $1 AND seq > $2 AND seq <= $3",
                                     sub["source_id"], from_seq, to_seq)
+    if group_read is not None:
+        group_common = common[:5]
+        chats = list(group_read.left)
+        lefts = [group_read.left[c] for c in chats]
+        extra = await conn.fetch(
+            f"""SELECT x.* FROM (SELECT {_WINDOW_COLUMNS}, g.read_from, true AS via_group,
+                       row_number() OVER (PARTITION BY e.chat_id ORDER BY e.seq) AS chat_n
+                    {_GROUP_FROM} AND e.sent_at >= $6) x
+                JOIN unnest($7::text[], $8::int[]) AS q(chat_id, left_n) ON q.chat_id = x.chat_id
+                WHERE x.chat_n <= q.left_n ORDER BY x.seq LIMIT $9""",
+            *group_common, oldest, chats, lefts, group_read.run_max + 1)
+        merged = sorted([*({**dict(r), "via_group": False} for r in found),
+                         *({k: v for k, v in dict(r).items() if k != "chat_n"} for r in extra)],
+                        key=lambda r: r["seq"])
+        rows, taken, more = [], 0, False
+        for row in merged:
+            if len(rows) == sub["max_events"]:
+                more = True
+                break
+            if row["via_group"]:
+                if taken == group_read.run_max:
+                    more = True
+                    break
+                taken += 1
+            rows.append(row)
+        last_seq = rows[-1]["seq"] if more else to_seq
+        skipped = await group_over_cap(conn, sub, from_seq=from_seq, to_seq=to_seq, now=now,
+                                       last_seq=last_seq, rows=rows)
+        too_old += await conn.fetchval(f"SELECT count(*) {_GROUP_FROM} AND e.sent_at < $6", *group_common, oldest)
+        return {"in_window": in_window, "too_old": too_old, "rows": rows, "last_seq": last_seq, "more": more,
+                "group_over_cap": skipped}
     rows = [dict(row) for row in found[:sub["max_events"]]]
     more = len(found) > len(rows)
     return {"in_window": in_window, "too_old": too_old, "rows": rows,
             "last_seq": rows[-1]["seq"] if more else to_seq, "more": more}
+
+
+async def group_over_cap(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int, now: datetime,
+                         last_seq: int, rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Only quota-skipped group messages the final cursor actually moves past, after any input trimming."""
+    fresh = {r["chat_id"]: r["n"] for r in await conn.fetch(
+        f"SELECT e.chat_id, count(*) AS n {_GROUP_FROM} AND e.sent_at >= $6 AND e.seq <= $7 GROUP BY 1",
+        sub["source_id"], from_seq, to_seq, list(sub["include_chats"]), list(sub["exclude_chats"]),
+        now - timedelta(minutes=sub["max_age_minutes"]), last_seq)}
+    took = Counter(r["chat_id"] for r in rows if r.get("via_group"))
+    return {c: fresh[c] - took[c] for c in fresh if fresh[c] > took[c]}
+
+
+async def group_read_left(conn: Db, source_id: str, day: date, day_max: int) -> dict[str, int]:
+    """Each followed chat of the source and what is left of its quota on ``day``."""
+    rows = await conn.fetch(
+        "SELECT g.chat_id, COALESCE(d.read, 0) AS read FROM intent_group_reads g LEFT JOIN intent_group_read_days d "
+        "ON d.source_id = g.source_id AND d.chat_id = g.chat_id AND d.day = $2 WHERE g.source_id = $1", source_id, day)
+    return {r["chat_id"]: max(0, day_max - r["read"]) for r in rows}
+
+
+async def count_group_day(conn: Db, source_id: str, day: date, *, read: Mapping[str, int],
+                          skipped: Mapping[str, int]) -> None:
+    """Add to the day's counts of each chat (one upsert per chat) and forget days older than 30."""
+    for chat_id in sorted(read.keys() | skipped.keys()):
+        await conn.execute(
+            "INSERT INTO intent_group_read_days (source_id, chat_id, day, read, skipped) VALUES ($1, $2, $3, $4, $5) "
+            "ON CONFLICT (source_id, chat_id, day) DO UPDATE SET read = intent_group_read_days.read + EXCLUDED.read, "
+            "skipped = intent_group_read_days.skipped + EXCLUDED.skipped",
+            source_id, chat_id, day, read.get(chat_id, 0), skipped.get(chat_id, 0))
+    await conn.execute("DELETE FROM intent_group_read_days WHERE day < $1::date - 30", day)
 
 
 async def insert_run(conn: asyncpg.Connection, run_id: str, *, from_seq: int, to_seq: int, in_window: int,

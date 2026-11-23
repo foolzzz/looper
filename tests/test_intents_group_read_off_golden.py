@@ -23,7 +23,7 @@ _REPLY = json.dumps({"intents": [{"type": "bug_triage", "title": "Fix synthetic 
                                 "confidence": "high", "sources": ["m1"]}], "instructions_seen": []})
 
 
-@pytest.mark.parametrize("case", ["baseline"])
+@pytest.mark.parametrize("case", ["baseline", "listed_switch_absent", "listed_switch_false", "switch_on_list_empty"])
 def test_intents_off_path_matches_main(case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     executable = golden_cli(monkeypatch, tmp_path, runs=[{"reply": _REPLY}], uuid_modules=(processor,))
     monkeypatch.setattr(extraction, "time_", type("Clock", (), {"monotonic": staticmethod(lambda: 10.0)}))
@@ -51,6 +51,12 @@ def test_intents_off_path_matches_main(case: str, monkeypatch: pytest.MonkeyPatc
             sent = _NOW - timedelta(minutes=[50, 40, 35, 30, 25, 20, 15][n - 1])
             seq = await add(pool, "Synthetic request", sent_at=sent, ingested_at=sent + timedelta(minutes=1), **fields)
             await pool.execute("UPDATE source_events SET external_id = $2 WHERE seq = $1", seq, f"om_golden_{n}")
+        if case.startswith("listed_"):
+            await pool.execute("INSERT INTO intent_group_reads (source_id, chat_id, added_at, read_from) "
+                               "VALUES ($1, 'oc_followed_golden', $2, $2)", SOURCE, _NOW - timedelta(hours=1))
+        if case in ("listed_switch_false", "switch_on_list_empty"):
+            await pool.execute("INSERT INTO system_settings (key, value) VALUES ('intents.group_read.enabled', $1)",
+                               "false" if case == "listed_switch_false" else "true")
         schedule = await db_schedules.get_schedule("schedule-golden")
         await db_subs.update(pool, "schedule-golden", {"target_confirmed_at": _NOW,
                             "target_confirmed_version": await subscriptions.config_version(schedule)})

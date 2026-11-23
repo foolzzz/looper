@@ -131,7 +131,8 @@ class SubscriptionRuns:
             if not await triage_settings.enabled(conn):
                 return {"skip_reason": triage_settings.TURNED_OFF}
         if subscriptions.is_extraction(sub):
-            return await extraction.plan(conn, schedule, now=now, own_apps=await self._own_apps())
+            return await extraction.plan(conn, schedule, now=now, own_apps=await self._own_apps(),
+                                         day_start=self.day_start(now))
         to_seq = await db_subs.committed_seq(conn, sub["source_id"])
         mode = sub.get("window", "cursor")
         from_seq = sub["cursor_seq"] if mode == "cursor" else 0
@@ -211,7 +212,8 @@ class SubscriptionRuns:
             picked = await db_subs.extraction_window(
                 pool, planned["subscription"], output_kind=subscriptions.output_kind(planned["subscription"]),
                 from_seq=stream["from_seq"], to_seq=stream["to_seq"], now=run["fired_at"],
-                own_apps=await self._own_apps())
+                own_apps=await self._own_apps(),
+                group_read=await extraction.group_read(pool, planned, day=self.day_start(run["fired_at"]).date()))
             snapshot = {**snapshot, "config_epoch": stream["config_epoch"]} if snapshot else None
             return await extraction.execute(self, run_id, planned, stream, {**picked, "snapshot": snapshot})
         await self._push_run(run_id, run, schedule, stream)
