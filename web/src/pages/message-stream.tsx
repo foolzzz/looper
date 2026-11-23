@@ -350,6 +350,9 @@ const WHY_RULE: Record<NonNullable<TriageWhy["rule"]>, string> = {
 const WHY_CATEGORY: Record<NonNullable<TriageWhy["category"]>, string> = {
   important: "重要", digest: "进摘要", ignore: "忽略",
 };
+const WHY_KIND: Record<NonNullable<TriageWhy["reason_kind"]>, string> = {
+  model: "模型给出", raised: "代码调高", uncited: "未引用",
+};
 
 function whyNext(answer: TriageWhy): string {
   if (answer.case === "triage_off") return answer.cause === "no_subscription" ? "先建一条分流订阅。" : "分流开关是关的。";
@@ -401,30 +404,38 @@ function WhyLookup() {
             </Button>
           </form>
           {error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{error}</p>}
-          {answer && (
-            <dl className="space-y-2 text-sm">
-              <div>
-                <dt className={LABEL}>结论</dt>
-                <dd>{conclusion}</dd>
-              </div>
-              {answer.event_id && (
+          <div aria-live="polite">
+            {answer && (
+              <dl className="space-y-2 text-sm">
                 <div>
-                  <dt className={LABEL}>事件</dt>
-                  <dd className="font-mono">{answer.event_id}</dd>
+                  <dt className={LABEL}>结论</dt>
+                  <dd>{conclusion}</dd>
                 </div>
-              )}
-              {answer.reason && (
+                {answer.event_id && (
+                  <div>
+                    <dt className={LABEL}>事件</dt>
+                    <dd className="font-mono">{answer.event_id}</dd>
+                  </div>
+                )}
+                {answer.reason && (
+                  <div>
+                    <dt className={LABEL}>理由</dt>
+                    <dd className="[overflow-wrap:anywhere]">{answer.reason}</dd>
+                  </div>
+                )}
+                {answer.reason_kind && (
+                  <div>
+                    <dt className={LABEL}>理由来源</dt>
+                    <dd>{WHY_KIND[answer.reason_kind]}</dd>
+                  </div>
+                )}
                 <div>
-                  <dt className={LABEL}>理由</dt>
-                  <dd className="[overflow-wrap:anywhere]">{answer.reason}</dd>
+                  <dt className={LABEL}>下一步</dt>
+                  <dd className="[overflow-wrap:anywhere]">{whyNext(answer)}</dd>
                 </div>
-              )}
-              <div>
-                <dt className={LABEL}>下一步</dt>
-                <dd className="[overflow-wrap:anywhere]">{whyNext(answer)}</dd>
-              </div>
-            </dl>
-          )}
+              </dl>
+            )}
+          </div>
         </CardContent>
       </Card>
     </section>

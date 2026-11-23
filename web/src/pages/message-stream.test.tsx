@@ -293,11 +293,70 @@ describe("MessageStreamPage", () => {
     expect(text).toContain("有事件引用（重要）");
     expect(text).toContain("E-7");
     expect(text).toContain("synthetic-reason-delta");
+    expect(text).toContain("模型给出");
+    expect(container.querySelector('[aria-live="polite"]')?.textContent).toContain("模型给出");
     expect(text).toContain("not handed to the Manager yet (that step is not built)");
     vi.mocked(triageWhy).mockRejectedValueOnce(new Error("the read failed"));
     await act(async () => { form.requestSubmit(); });
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("the read failed");
     expect(container.textContent).not.toContain("E-7");
+  });
+
+  it("labels a code-raised reason and keeps the model label off that result", async () => {
+    vi.mocked(fetchMessageStream).mockResolvedValue({ sources: [source()] });
+    vi.mocked(triageWhy).mockResolvedValueOnce({
+      case: "event", event_id: "E-8", category: "digest", reason: "代码保底", reason_kind: "raised",
+    });
+    await show();
+    const form = container.querySelector<HTMLFormElement>('form[aria-label="为什么没告诉我"]')!;
+    await change("#why-message", "om_raised");
+    await act(async () => { form.requestSubmit(); });
+    const live = container.querySelector('[aria-live="polite"]');
+    expect(live?.textContent).toContain("理由来源");
+    expect(live?.textContent).toContain("代码调高");
+    expect(live?.textContent).toContain("代码保底");
+    expect(live?.textContent).toContain("有事件引用（进摘要）");
+    expect(live?.textContent).not.toContain("模型给出");
+  });
+
+  it("keeps the existing page region when reading is off", async () => {
+    vi.mocked(fetchMessageStream).mockResolvedValue({ sources: [source({ ingest_mode: "off", health: "off" })] });
+    await show();
+    const why = container.querySelector("#why-title")?.closest("section");
+    const copy = container.cloneNode(true) as HTMLElement;
+    copy.querySelector("#why-title")?.closest("section")?.remove();
+    const region = (copy.textContent ?? "").replace(/\s+/g, " ").trim();
+    expect(why?.textContent).toContain("为什么没告诉我");
+    for (const line of [
+      "Message stream", "Not reading", "Nothing is being read. What was stored stays.", "Mode: off",
+      "Messages stored", "1,234", "56 in the last hour", "Chats", "No chats found.",
+      "Delete stored messages", "Recent passes", "No pass has run yet.",
+    ]) expect(region).toContain(line);
+    expect(region).not.toContain("为什么没告诉我");
+    // textContent inserts no space between adjacent elements. This is that collapsed region.
+    expect(region).toBe([
+      "Message stream",
+      "Messages Looper has read into its own database, for subscriptions to use.",
+      "Lark messages", "Off", "Not reading",
+      "Nothing is being read. What was stored stays. Mode: off, every pass on */2 * * * * (UTC).",
+      "Messages stored", "1,234", "56 in the last hour",
+      "Newest message", "3 min ago",
+      "Last good pass", "2 min ago",
+      "Chats", "12", "1 excluded · 0 failing",
+      "/srv/collector",
+      "Raw storage", "2.0 KB", "1.0 KB added in 24 h",
+      "Daily events", "70", "Ingested in the last 24 h",
+      "Bodies expired", "4", "Message text is kept",
+      "Retention last ran", "never",
+      "Retention: human raw messages kept indefinitely; bot raw messages kept for 30 days. Expired raw bodies are cleared daily. Text is kept. This page never shows message text.",
+      "Chats", "Search",
+      "Excluding a chat stops collection and removes it from every subscription window. Stored messages remain until deleted. Up to 200 matching chats are shown; search to narrow the list.",
+      "No chats found.",
+      "Delete stored messages", "1. Choose what to delete", "One message", "Time range", "Whole chat", "Message ID",
+      "Whole-chat deletion also erases its name and excludes it. Deletions cannot be undone and block matching messages from future imports.",
+      "Review deletion",
+      "Recent passes", "No pass has run yet.",
+    ].join(""));
   });
 
 });

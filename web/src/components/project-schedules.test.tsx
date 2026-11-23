@@ -928,7 +928,8 @@ describe("subscription schedules", () => {
     vi.stubGlobal("fetch", page(leads));
     await act(async () => root.render(<RunHistory schedule={subscription(null)} open version={1} />));
     const again = container.textContent ?? "";
-    expect(again).toContain("18 of 21 messages read (2 too old, 1 over the cap)");
+    // The run line recorded before triage counts: a non-triage count object leaves this region unchanged.
+    expect(again).toContain("Extracted · 18 of 21 messages read (2 too old, 1 over the cap) · events 11–31");
     expect(again).not.toContain("important 1");
     expect(again).not.toContain("uncited");
   });

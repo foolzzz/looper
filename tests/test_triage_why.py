@@ -89,8 +89,51 @@ def test_each_case_is_one_chinese_fact_per_line():
     assert format_lines(unknown) == ["无法判断", "已核对：in_scope、covering_runs=0"]
 
 
+# Response fields of message_stream operations at PARENT. The metadata tuple above does not include them.
+MESSAGE_STREAM_RESPONSE_AT_PARENT = (
+    ("message_stream.status", ("sources",), ("sources",)),
+    ("message_stream.runs", ("source_id", "runs"), ("runs", "source_id")),
+    ("message_stream.configure", (
+        "source_id", "name", "kind", "ingest_mode", "bridge_dir", "start_from", "cron", "timezone", "user_open_id",
+        "health", "last_run_at", "last_ok_at", "committed_seq", "events", "events_last_hour", "newest_sent_at",
+        "body_bytes", "chats", "chats_excluded", "chats_failing", "body_retention_days", "app_body_retention_days",
+        "retention_last_at", "events_last_day", "body_bytes_last_day", "bodies_dropped", "last_run"), (
+        "app_body_retention_days", "bodies_dropped", "body_bytes", "body_bytes_last_day", "body_retention_days",
+        "bridge_dir", "chats", "chats_excluded", "chats_failing", "committed_seq", "cron", "events", "events_last_day",
+        "events_last_hour", "health", "ingest_mode", "kind", "last_ok_at", "last_run", "last_run_at", "name",
+        "newest_sent_at", "retention_last_at", "source_id", "start_from", "timezone", "user_open_id")),
+    ("message_stream.chats", ("source_id", "chats"), ("chats", "source_id")),
+    ("message_stream.chat_update", (
+        "chat_id", "kind", "name", "inclusion", "state", "events_7d", "purged_at"), (
+        "chat_id", "events_7d", "inclusion", "kind", "name", "purged_at", "state")),
+    ("message_stream.delete_preview", (
+        "source_id", "scope", "events", "confirmation_token", "backups", "limits"), (
+        "backups", "confirmation_token", "events", "limits", "scope", "source_id")),
+    ("message_stream.delete", ("source_id", "deleted", "deletion_id"), ("deleted", "deletion_id", "source_id")),
+)
+# A subscription run's response at PARENT, before extract_counts was added as an optional triage field.
+SUBSCRIPTION_RUN_REQUIRED_AT_PARENT = (
+    "from_seq", "to_seq", "events_in_window", "events_selected", "events_too_old", "events_over_cap", "record_id",
+    "outcome", "output_text", "notification_id", "skip_reason",
+)
+
+
+def _response(op):
+    return (op.operation_id, tuple(op.result.get("required", ())), tuple(sorted(op.result["properties"])))
+
+
 def test_message_stream_and_other_runs_stay_as_recorded_at_the_parent():
     assert tuple(_operation(op) for op in message_stream.OPERATIONS) == MESSAGE_STREAM_AT_PARENT
+    assert tuple(_response(op) for op in message_stream.OPERATIONS) == MESSAGE_STREAM_RESPONSE_AT_PARENT
+    source = next(op.result for op in message_stream.OPERATIONS if op.operation_id == "message_stream.configure")
+    assert source["properties"]["ingest_mode"]["enum"] == ["off", "bridge", "collect"]
+    assert source["properties"]["health"]["enum"] == ["off", "healthy", "degraded", "stale"]
+    from looper.agents.v1_domains.schedule_reads import SUBSCRIPTION_RUN
+
+    assert tuple(SUBSCRIPTION_RUN["required"]) == SUBSCRIPTION_RUN_REQUIRED_AT_PARENT
+    assert "extract_counts" not in SUBSCRIPTION_RUN["required"]
+    # The rendered page with reading off is frozen in web/src/pages/message-stream.test.tsx.
+    api_v1.validate_arguments(SUBSCRIPTION_RUN, subscription_run_view(RUN_AT_PARENT))
     assert subscription_run_view(RUN_AT_PARENT) == RUN_AT_PARENT
     leads = {**RUN_AT_PARENT, "extract_counts": {"new": 1, "merged": 2}}
     assert subscription_run_view(leads) == RUN_AT_PARENT
