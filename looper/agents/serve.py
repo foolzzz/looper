@@ -61,6 +61,7 @@ from .wait_service import WaitService
 from .ledger_reconciler import LedgerReconciler
 from .source_service import SourceService, own_bot_app_ids
 from .intent_push import IntentPushService
+from . import intent_recognition
 from .memory_write import MemoryWriteService
 from .memory_push import MemoryPushService
 from .reminders import ReminderService
@@ -780,6 +781,7 @@ async def _run_agent_system_watched(
     advisory_checks: asyncio.Task[None] | None = None
     http_server: AgentHTTPServer | None = None
     control = None
+    recognition_service: intent_recognition.IntentRecognitions | None = None
     memory_writer: MemoryWriteService | None = None
     memory_push_service: MemoryPushService | None = None
     mode = ShutdownMode.END_RUNS
@@ -1001,6 +1003,10 @@ async def _run_agent_system_watched(
             completion_events.set_scheduler(scheduler)
             source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
             intent_push_service = IntentPushService(registry, drain=drain)
+            recognition_service = intent_recognition.IntentRecognitions(
+                registry, runtime_root=runtime_root, claude_bin=claude_bin, drain=drain)
+            await recognition_service.start()
+            intent_recognition.install(recognition_service)
             memory_writer = MemoryWriteService(runtime_root=runtime_root, drain=drain)
             memory_push_service = MemoryPushService(registry, drain=drain, dashboard_url=dashboard_url)
             drain.add_source(lambda: {"starting": memory_writer.drain_waiting()})
@@ -1243,6 +1249,7 @@ async def _run_agent_system_watched(
             await wait_service.stop()
             await completion_service.stop()
             await source_service.stop()
+            await recognition_service.stop()
             await intent_push_service.stop()
             await memory_push_service.stop()
             await memory_writer.stop()
@@ -1286,6 +1293,8 @@ async def _run_agent_system_watched(
             with contextlib.suppress(asyncio.CancelledError):
                 await advisory_checks
         try:
+            if recognition_service is not None:
+                await recognition_service.stop()
             if memory_push_service is not None:
                 await memory_push_service.stop()
             if memory_writer is not None:

@@ -1,4 +1,4 @@
-"""Continuous group recognition through isolated serve, bridge files and HTTP, with offline CLIs only."""
+"""Continuous and one-off group recognition through isolated serve, bridge files and offline CLIs."""
 from __future__ import annotations
 
 import asyncio
@@ -208,3 +208,47 @@ sys.exit(main(['serve','--host','127.0.0.1','--port',sys.argv[1],'--runtime-root
             outgoing = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
             sends = [call for call in outgoing if "+messages-send" in call]
             assert sends and all("--user-id" in call and OPEN_ID in call for call in sends)
+
+            # A separate switch enables a confirmed one-off read of the unlisted group's live messages.
+            listed_before = sql("SELECT * FROM intent_group_reads ORDER BY source_id,chat_id", fetch=True)
+            cursor_before = sql("SELECT cursor_seq FROM subscriptions WHERE schedule_id=$1", sid, fetch=True)[0][0]
+            state = post("intent_recognitions/settings_put", {"source_id":"smoke", "enabled":True})
+            assert state["enabled"] is True and state["recognitions"] == []
+            preview = post("intent_recognitions/preview", {"source_id":"smoke", "chat_id":"oc_other_smoke"})
+            assert preview["events"] == 1 and preview["truncated"] is None
+            assert (datetime.fromisoformat(preview["range_to"]) - datetime.fromisoformat(preview["range_from"])).days == 7
+            recognition = post("intent_recognitions/start", {"source_id":"smoke", "chat_id":"oc_other_smoke",
+                "since":preview["range_from"], "until":preview["range_to"]})["recognition"]
+            assert recognition["id"].startswith("R-")
+            def recognized_once():
+                records = post("intent_recognitions/list", {"source_id":"smoke"})["recognitions"]
+                return records[0] if records and records[0]["state"] != "running" else None
+            record = until(recognized_once, "one-off recognition completion")
+            assert record["state"] == "done", record
+            assert record["events_in_range"] == record["events_read"] == 1
+            assert record["cost_usd"] > 0 and len(record["intents"]) == 1
+            rid = int(record["id"].removeprefix("R-"))
+            one_off = sql("SELECT id,title,type_key,via,recognition_id,run_id,record_id FROM intents "
+                          "WHERE recognition_id=$1", rid, fetch=True)
+            assert len(one_off) == 1
+            item = one_off[0]
+            assert (item["title"],item["type_key"],item["via"],item["recognition_id"],item["run_id"]) == (
+                "REQUEST_SYNTHETIC", "dev_task", "on_request", rid, None)
+            assert record["intents"][0]["id"] == f"I-{item['id']:04}"
+            assert sql("SELECT * FROM intent_group_reads ORDER BY source_id,chat_id", fetch=True) == listed_before
+            assert sql("SELECT cursor_seq FROM subscriptions WHERE schedule_id=$1", sid, fetch=True)[0][0] == cursor_before
+            # Wait until the live push poller has visited the one-off row, proving its suppression path ran.
+            until(lambda: sql("SELECT expires_at FROM intents WHERE id=$1", item["id"], fetch=True)[0][0],
+                  "one-off row visited by the push service")
+            assert sql("SELECT p.id FROM intent_posts p JOIN intents i ON i.id=p.intent_id "
+                       "WHERE i.recognition_id=$1", rid, fetch=True) == []
+            recorded = sql("SELECT agent_id,run_kind,input_text FROM llm_records WHERE id=$1",
+                           item["record_id"], fetch=True)
+            assert len(recorded) == 1 and recorded[0]["agent_id"] == f"processor:intent-recognition-{rid}"
+            assert recorded[0]["run_kind"] == "processor"
+            reference = json.loads(recorded[0]["input_text"])
+            assert reference["kind"] == "intent_recognition" and reference["recognition_id"] == rid
+            assert reference["events"] == 1 and reference["sha256"] and reference["chars"] > 0
+            launches = [json.loads(line) for line in seen.read_text().splitlines()]
+            assert len(launches) == 3 and extraction.GROUP_REQUESTS_NOTE in launches[-1]["instructions"]
+            assert "REQUEST_SYNTHETIC unlisted" in launches[-1]["input"]

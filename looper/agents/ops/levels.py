@@ -73,6 +73,7 @@ TOOL_LEVELS: Mapping[str, ActionLevel | LevelOf] = {
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE,
     "looper_skill_propose": INSIDE,  # stores only a proposal row in Looper's own database
     "looper_leads_search": INSIDE,  # reads message leads stored by Looper, including full-text search
+    "looper_intents_recognize": OPERATOR,
     "looper_session_search": INSIDE,  # reads earlier conversations stored by Looper
     "looper_reminder_list": INSIDE,
     # Reminder writes affect delivery only to the operator's own direct chat.

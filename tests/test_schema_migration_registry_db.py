@@ -88,6 +88,8 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
     ("provider_limit_windows", "DROP TABLE provider_limit_windows CASCADE"),
     ("provider_admission", "DROP TABLE provider_admission, provider_admission_events CASCADE"),
     ("cost_holds", "DROP TABLE cost_holds"),
+    ("intent_recognitions", "ALTER TABLE intents DROP COLUMN recognition_id CASCADE; "
+                            "DROP TABLE intent_recognitions CASCADE"),
 ])
 def test_merged_migrations_remain_discoverable_and_upgrade(migration_name, rollback):
     async def test():

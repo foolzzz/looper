@@ -79,8 +79,8 @@ def test_every_intent_operation_rejects_api_client_identity(monkeypatch, tmp_pat
     async def check(pool):
         async with v1_api(tmp_path, pool) as call:
             operations = [op for op in api_v1.operations() if op.operation_id.split(".")[0] in
-                          ("intents", "intent_types", "intent_bindings", "intent_alert_senders", "intent_group_reads")]
-            assert len(operations) == 26
+                          ("intents", "intent_types", "intent_bindings", "intent_alert_senders", "intent_group_reads", "intent_recognitions")]
+            assert len(operations) == 30
             for operation in operations:
                 assert operation.operator_only
                 status, answer = await call(operation.operation_id, {}, client=True)
@@ -376,3 +376,68 @@ def test_turning_group_reads_off_waits_for_the_current_store_to_commit(monkeypat
                 closing.cancel()
                 await asyncio.gather(closing, return_exceptions=True)
     run_db(check, monkeypatch, timeout=20)
+
+
+def test_recognitions_round_trip_and_refusals(monkeypatch, tmp_path):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from looper.agents import intent_recognition, subscriptions
+    from looper.agents.serve import seed_role_configs
+    from looper.db import schedules as db_schedules, subscriptions as db_subs
+
+    stream.processor_says(monkeypatch, json.dumps({"intents": [{"type": "dev_task", "title": "Synthetic request",
+        "summary": "Synthetic requirement", "confidence": "high", "sources": ["m1"]}]}))
+    async def check(pool):
+        now = datetime.now(timezone.utc)
+        await stream.source(pool)
+        await stream.add(pool, "Synthetic development request", chat_id="g", sent_at=now)
+        await pool.execute("INSERT INTO projects(id,name) VALUES('p','Synthetic project')")
+        await pool.execute("INSERT INTO schedules(id,project_id,name,cron,timezone,requirement,kind) "
+            "VALUES('s','p','Intents','*/10 * * * *','UTC',$1,'subscription')", subscriptions.preset("intents", source_id=stream.SOURCE, zone_name="UTC")["requirement"])
+        await db_subs.create(pool, "s", subscriptions.preset("intents", source_id=stream.SOURCE, zone_name="UTC")["subscription"])
+        schedule = await db_schedules.get_schedule("s")
+        await db_subs.update(pool, "s", {"target_confirmed_at": now,
+            "target_confirmed_version": await subscriptions.config_version(schedule)})
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES('intents.enabled','true')")
+        service = intent_recognition.IntentRecognitions(SimpleNamespace(), runtime_root=tmp_path, claude_bin="unused")
+        monkeypatch.setattr(intent_recognition, "_active", service)
+        await service.start()
+        try:
+            async with v1_api(tmp_path, pool) as call:
+                async def valid(operation, body):
+                    status, response = await call(operation, body)
+                    assert status == 200, response
+                    schema = next(op.result for op in api_v1.operations() if op.operation_id == operation)
+                    api_v1.validate_arguments(schema, response["result"])
+                    return response["result"]
+                result = await valid("intent_recognitions.list", {})
+                assert result == {"enabled": False, "recognitions": []}
+                status, response = await call("intent_recognitions.preview", {"chat_id": "g"})
+                assert status == 409, response
+                await valid("intent_recognitions.settings_put", {"enabled": True})
+                preview = await valid("intent_recognitions.preview", {"chat_id": "g"})
+                assert preview["events"] == 1
+                assert await pool.fetchval("SELECT count(*) FROM intent_recognitions") == 0
+                started = await valid("intent_recognitions.start", {"chat_id": "g",
+                    "since": preview["range_from"], "until": preview["range_to"]})
+                assert started["recognition"]["state"] == "running"
+                await asyncio.gather(*tuple(service._tasks))
+                result = await valid("intent_recognitions.list", {})
+                record = result["recognitions"][0]
+                assert record["state"] == "done" and record["events_read"] == 1
+                assert record["intents"][0]["type"]["key"] == "dev_task"
+                for op in ("preview", "start", "list", "settings_put"):
+                    status, response = await call(f"intent_recognitions.{op}", {}, client=True)
+                    assert status == 403, response
+                for body in ({"chat_id": "missing"}, {"chat_id": "g", "since": "invalid"},
+                             {"chat_id": "g", "since": "2026-11-01T00:00:00"}):
+                    status, response = await call("intent_recognitions.preview", body)
+                    assert status == 400, response
+                await valid("intent_recognitions.settings_put", {"enabled": False})
+                status, response = await call("intent_recognitions.start", {"chat_id": "g"})
+                assert status == 409, response
+        finally:
+            await service.stop()
+    run_db(check, monkeypatch, setup=seed_role_configs)
