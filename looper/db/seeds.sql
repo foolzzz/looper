@@ -2,6 +2,10 @@
 INSERT INTO managers (id, name, tools, task_scope, idle_timeout_seconds)
     VALUES ('manager', 'Manager', 'all', 'all', 0) ON CONFLICT (id) DO NOTHING;
 
+-- The role prompt is maintained by serve.seed_role_configs, as for the other roles.
+INSERT INTO role_configs (role, display_name, max_turns, timeout_seconds)
+    VALUES ('explorer', 'Explorer', 40, 300) ON CONFLICT (role) DO NOTHING;
+
 -- Builtin seeds never overwrite operator choices.
 -- Login endpoints use the CLI's own connection; no token or URL is copied.
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
@@ -88,7 +92,7 @@ INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams
 SELECT 'agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', id, true, true
 FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'opus' AND protocol = 'anthropic-messages'
 ON CONFLICT DO NOTHING;
--- The built-in profiles of the advisor, its judge and the outbound check (profile_registry.BUILTIN_ROLE_PROFILES): each
+-- The built-in profiles of the advisor, its judge, explorer and outbound check (profile_registry.BUILTIN_ROLE_PROFILES): each
 -- role runs its own when its role layer chooses none.
 INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, builtin, agent_teams)
 SELECT 'agent-claude-code-fable-5-2', 'claude-code/fable-5-2', 'rt-claude-code', id, 'high', true, false

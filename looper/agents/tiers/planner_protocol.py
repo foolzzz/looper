@@ -44,6 +44,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
+from ..acceptance_checks import Check, PROTOCOL_SECTION, parse_checks
+from ..project_execution import AcceptanceChecksMode
 from ..project_execution import DEFAULT_STEP_RETRIES
 from ..task_roles import RoleKind
 from ..user_gates import (
@@ -201,6 +203,7 @@ class StepSpec:
     wait: WaitSpec | None = None
     ready_when: Condition | None = None
     difficulty: str | None = None  # a work step's, with the advisor on: routine, hard or critical
+    checks: tuple[Check, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -403,6 +406,7 @@ class PlanView:
     verification_exhausted: bool = False
     verification_repair_required: bool = False
     advisor: bool = False  # the project consults the advisor: steps may say their difficulty, decisions advise
+    acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
@@ -496,7 +500,8 @@ def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy(),
                conditions: bool = False, isolate_steps: bool = False, review_panel: bool = False,
                verification_role: str | None = None, work_role: str | None = None, advisor: bool = False,
-               advise: bool = False, answered: bool = False) -> PlanReply:
+               advise: bool = False, answered: bool = False,
+               acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF) -> PlanReply:
     """A PLAN reply. With the advisor on, ``advise`` lets it ask the advisor instead
     (``{"advise": {"advice_request": ..., "advice_bindings": ...}}``), and after its answer (``answered``) the plan
     must carry ``advice_adoption``."""
@@ -516,14 +521,16 @@ def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
             raise ProtocolError('this plan follows the advisor\'s answer, so it must carry "advice_adoption": which '
                                 "points you take, how far, for which steps and why")
         adoption = parse_adoption(data["advice_adoption"])
-    steps = _step_list(data.get("steps"), "steps", conditions=conditions, review_panel=review_panel, advisor=advisor)
+    steps = _step_list(data.get("steps"), "steps", conditions=conditions, review_panel=review_panel, advisor=advisor,
+                       acceptance_checks=acceptance_checks)
     if not steps:
         raise ProtocolError("steps must list at least one step")
     steps = _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
                                                wait_policy=wait_policy, conditions=conditions,
                                                isolate_steps=isolate_steps, review_panel=review_panel,
                                                verification_role=verification_role,
-                                               work_role=work_role, advisor=advisor), replace_pending=True)
+                                               work_role=work_role, advisor=advisor,
+                                               acceptance_checks=acceptance_checks), replace_pending=True)
     return PlanReply(steps, adoption=adoption)
 
 
@@ -577,7 +584,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjud
         reason = _required_text(data, "reason")
     elif decision is Decision.REPLAN:
         steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions, review_panel=plan.review_panel,
-                           advisor=plan.advisor)
+                           advisor=plan.advisor, acceptance_checks=plan.acceptance_checks)
         if not steps and not context.acceptable:
             raise ProtocolError(
                 f"step {context.step} cannot be accepted, so a replan must list the steps that replace it"
@@ -862,13 +869,13 @@ def _chat_action(data: Mapping[str, Any], plan: PlanView) -> ChatReply:
         text_out = _required_text(data, "text")
     elif action is ChatAction.ADD_STEPS:
         steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions, review_panel=plan.review_panel,
-                           advisor=plan.advisor)
+                           advisor=plan.advisor, acceptance_checks=plan.acceptance_checks)
         if not steps:
             raise ProtocolError("add_steps must list at least one step")
         steps = _check_new_steps(steps, plan, replace_pending=False)
     elif action is ChatAction.REPLAN:
         steps = _step_list(data.get("steps", []), "steps", conditions=plan.conditions, review_panel=plan.review_panel,
-                           advisor=plan.advisor)
+                           advisor=plan.advisor, acceptance_checks=plan.acceptance_checks)
         stop = _stop_list(data.get("stop", []), plan)
         after = plan
         for label in stop:
@@ -1163,22 +1170,32 @@ def _find_cycle(graph: Mapping[str, Iterable[str]]) -> list[str] | None:
 
 
 def _step_list(value: Any, field: str, *, conditions: bool = False, review_panel: bool = False,
-               advisor: bool = False) -> tuple[StepSpec, ...]:
+               advisor: bool = False, acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF) -> tuple[StepSpec, ...]:
     if not isinstance(value, list):
         raise ProtocolError(f"{field} must be a list of steps")
     if review_panel and any(isinstance(item, dict) and "review_roles" in item for item in value):
         raise ProtocolError("the workflow fixes the review panel")
-    return tuple(_step(item, i, conditions=conditions, advisor=advisor) for i, item in enumerate(value))
+    return tuple(_step(item, i, conditions=conditions, advisor=advisor, acceptance_checks=acceptance_checks)
+                 for i, item in enumerate(value))
 
 
-def _step(value: Any, index: int, *, conditions: bool = False, advisor: bool = False) -> StepSpec:
+def _step(value: Any, index: int, *, conditions: bool = False, advisor: bool = False,
+          acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF) -> StepSpec:
     where = f"steps[{index}]"
     if not isinstance(value, dict):
         raise ProtocolError(f"{where} must be an object")
+    if "checks" in value:
+        if acceptance_checks is AcceptanceChecksMode.OFF:
+            raise ProtocolError(f"{where}.checks: acceptance_checks is off; enable it in the project's "
+                                "Settings → Execution, or omit checks")
+        if value.get("kind", WORK_KIND) != WORK_KIND:
+            raise ProtocolError(f"{where}.checks is only allowed on work steps")
     if "ready_when" in value and not conditions:
         raise ProtocolError(f"{where}.ready_when: dependency_conditions is off for this project; "
                             "omit ready_when or enable dependency conditions")
     optional = {"ready_when"} if conditions else set()
+    if acceptance_checks is not AcceptanceChecksMode.OFF:
+        optional.add("checks")
     kind = value.get("kind", WORK_KIND)
     if kind == GATE_KIND:
         return _gate_step(value, where, optional)
@@ -1217,10 +1234,14 @@ def _step(value: Any, index: int, *, conditions: bool = False, advisor: bool = F
     role = value.get("role")
     if role is not None and (not isinstance(role, str) or not role):
         raise ProtocolError(f"{where}.role must be a role's id")
+    try:
+        checks = parse_checks(value["checks"], len(criteria), acceptance_checks) if "checks" in value else ()
+    except ValueError as exc:
+        raise ProtocolError(f"{where}.{exc}") from None
     return StepSpec(step_id, instruction.strip(), tuple(c.strip() for c in criteria), tuple(depends_on), review,
                     role=role, ready_when=ready_when,
                     review_roles=_review_roles(value.get("review_roles"), f"{where}.review_roles"),
-                    difficulty=difficulty)
+                    difficulty=difficulty, checks=checks)
 
 
 def _ready_when(value: Mapping[str, Any], depends_on: list[str], where: str) -> Condition | None:
@@ -1930,7 +1951,7 @@ ADJUDICATION_RULES = (
 def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False,
                    room: bool = False, wait_commands: bool = False, wait_limits: WaitLimits = WaitLimits(),
                    conditions: bool = False, workflow_roles: bool = False, review_panel: bool = False, adjudication: bool = False,
-                   advisor: bool = False) -> str:
+                   advisor: bool = False, acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF) -> str:
     """The reply contract for a project whose steps may be retried ``max_retries`` times; with ``roles``, whose
     Planners may define the roles their steps run as; with ``gates``, for a task that may open user gates or has
     one that is not closed; with ``room``, whose agents share a room. Waits use ``wait_limits``;
@@ -1961,6 +1982,8 @@ def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = Fal
         contract = contract.replace('"reason" is optional for the other decisions.\n',
                                     _ADVISOR_DECISIONS + '"reason" is optional for the other decisions.\n', 1)
         contract += "\n" + _ADVISOR_SECTION
+    if acceptance_checks is not AcceptanceChecksMode.OFF:
+        contract += PROTOCOL_SECTION
     return contract
 
 

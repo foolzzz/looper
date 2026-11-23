@@ -145,6 +145,10 @@ class ChannelAdapter(ABC):
         channel without buttons posts its text."""
         return await self.post(target, card.text, reply_to=reply_to, idempotency_key=idempotency_key)
 
+    async def edit_card(self, target: NotifyTarget, external_id: str, card: Any) -> PostReceipt:
+        """Update an existing card, removing its buttons when settled; text-only channels edit its text."""
+        return await self.edit(target, external_id, card.text)
+
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         """Edit a bot's own message when this channel supports it."""
         return PostReceipt(False, error=f"the {self.channel_type} channel cannot edit messages",

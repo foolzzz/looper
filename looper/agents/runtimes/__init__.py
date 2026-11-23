@@ -257,6 +257,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
     "manager": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "planner": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "worker": frozenset({Capability.RUN}),
+    "explorer": frozenset({Capability.RUN}),
     "reviewer": frozenset({Capability.RUN}),
     "processor": frozenset({Capability.RUN, Capability.NO_TOOLS}),
     # The advisor and its judge run once with no tools, over a request another run wrote (the advisor RFC).
