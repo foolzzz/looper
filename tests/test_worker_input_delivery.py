@@ -191,15 +191,27 @@ def test_readiness_and_send_share_one_budget(tmp_path: Path, monkeypatch: pytest
     async def run() -> None:
         async with delivery(tmp_path) as (_, planner, _, step, channel, ready, acks):
             loop = asyncio.get_running_loop()
-            opening = loop.call_later(0.04, ready.set)
-            accepting = loop.call_later(0.08, channel.release.set)
-            try:
+            now = loop.time()
+
+            async def become_ready() -> None:
+                nonlocal now
+                now += 0.04  # leaves 0.02 of the 0.06 budget: enough for the send's 0.01
+                ready.set()
+
+            async def accept_late() -> None:
+                nonlocal now
+                now += 0.04  # acceptance would come after the send's own timeout
+                await asyncio.Event().wait()
+
+            # Both waits advance the clock themselves. Timers set before the request raced the budget, which
+            # starts only when the pool begins sending: after a stalled runner, acceptance had already landed.
+            with monkeypatch.context() as clock:
+                clock.setattr(loop, "time", lambda: now)
+                clock.setattr(ready, "wait", become_ready)
+                clock.setattr(channel.release, "wait", accept_late)
                 assert await planner._send_worker_input(step, "use blue", "corr") is DeliveryResult.UNKNOWN
                 assert [ack.payload for ack in acks] == [{"delivered": None}]
-                assert channel.sent == []
-            finally:
-                opening.cancel()
-                accepting.cancel()
+                assert len(channel.written) == 1 and channel.sent == []
 
     asyncio.run(asyncio.wait_for(run(), 2))
 

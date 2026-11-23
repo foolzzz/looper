@@ -18,7 +18,7 @@ def _hash(value) -> str:
                                      separators=(",", ":")).encode()).hexdigest()
 
 
-def _surfaces() -> dict[str, str]:
+def _surfaces(baseline_tools: dict[str, str]) -> dict[str, str | dict[str, str]]:
     from looper.agents.ops import Tool
     from looper.agents import ops
     from looper.agents.ops import planner, room, service, vault
@@ -36,19 +36,24 @@ def _surfaces() -> dict[str, str]:
             for tool in value if isinstance(value, (tuple, list)) else (value,):
                 if isinstance(tool, Tool):
                     all_tools[tool.name] = tool.listing()
-    # New explorer tools are discovered by the level inventory, but never
-    # appear on a disabled run's MCP listing.
+    # Freeze existing tools individually so unrelated catalog additions are allowed.
+    assert baseline_tools.keys() <= all_tools.keys(), "baseline tool missing from catalog"
+    result["tools:each"] = {name: _hash(all_tools[name]) for name in baseline_tools}
+    # Explorer tools must never appear on a disabled run's MCP listing.
     from looper.agents.ops.subagents import TOOL_NAMES
-    result["tools:all"] = _hash({key: tool for key, tool in all_tools.items() if key not in TOOL_NAMES})
-    result["tools:manager"] = _hash([tool.listing() for tool in service.MANAGER_TOOLS])
-    result["tools:planner"] = _hash([tool.listing() for tool in (*planner.TOOLS, *planner.ROLE_TOOLS)])
-    result["tools:worker"] = _hash([tool.listing() for tool in (*room.tools_for(MemberKind.WORK), *vault.TOOLS)])
+    for name, tools in {
+        "manager": service.MANAGER_TOOLS,
+        "planner": (*planner.TOOLS, *planner.ROLE_TOOLS),
+        "worker": (*room.tools_for(MemberKind.WORK), *vault.TOOLS),
+    }.items():
+        assert TOOL_NAMES.isdisjoint(tool.name for tool in tools), name
+        result[f"tools:{name}"] = _hash([tool.listing() for tool in tools])
     return result
 
 
 def test_existing_prompts_and_tool_listings_remain_byte_identical() -> None:
     baseline = json.loads((Path(__file__).parent / "fixtures" / "subagents_default_off.json").read_text())
-    assert _surfaces() == baseline["surfaces"]
+    assert _surfaces(baseline["surfaces"]["tools:each"]) == baseline["surfaces"]
 
 
 def test_disabled_run_grant_lists_exactly_the_existing_worker_tools() -> None:
