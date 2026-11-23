@@ -101,10 +101,13 @@ async def _gates(call: Call) -> dict[str, Any]:
     end = action == "end"
     data = ({"text": arguments.get("text") or ""} if end else
             {key: arguments[key] for key in ("text", "agenda_item", "option") if arguments.get(key) is not None})
+    from .service import operator_call
+
     return await answered(gate_service.post_message(
         task_id, label, data, has_planner=call.platform.task_router.has_planner(task_id), bus=call.platform.bus,
         source=call.manager_address if call.turn.client_id else channel_address("web"),
-        via=_via(call.turn) if call.turn.client_id else gate_service.VIA_DASHBOARD, end=end))
+        via=_via(call.turn) if call.turn.client_id else gate_service.VIA_DASHBOARD, end=end,
+        from_operator=await operator_call(call.turn)))
 
 
 GATES_TOOL = Tool(
