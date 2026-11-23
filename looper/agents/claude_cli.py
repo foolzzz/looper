@@ -671,6 +671,7 @@ class _UserTurn:
     capped: CapStop | None = None  # the turn was ended at its soft cap
     stopping: bool = False  # the user's stop was asked of Claude; its next result ends the turn
     answered: bool = False  # its result had come when the stop was asked: that result is a whole turn's
+    result_received: bool = False  # before on_event awaits: its input window has already closed
 
     def starts_with(self, event: dict[str, Any]) -> bool:
         """Claude began this message's turn: its "started" lifecycle event, or its replay."""
@@ -763,6 +764,8 @@ class _Output:
         if turn is not None and turn.started:
             if _is_init(event):
                 turn.session_started = True
+            if event.get("type") == "result":
+                turn.result_received = True
             if not turn.stopping:
                 await turn.on_event(event)  # (R1: a stopped turn's events go nowhere; its result still ends it)
             if event.get("type") == "result":
@@ -1136,6 +1139,23 @@ class ResidentClaude:
             usage=turn.usage,
             prompt_sent=sent,
         )
+
+    async def write_mid_turn(self, text: str) -> bool:
+        """Write another input into the current user turn, without starting a new one.
+
+        A prompt queued behind an autonomous turn is not running yet. Admission
+        checks and stdin.write have no await between them; a result arriving during
+        drain must not turn an already-written input into a queued duplicate.
+        """
+        process, output, turn, cancel = self._process, self._output, self._user_turn, self._cancel
+        if (process is None or process.returncode is not None or process.stdin is None or process.stdin.is_closing()
+                or output is None or output.ended or output.discard or turn is None or output.turn is not turn
+                or not turn.started or turn.result_received or turn.done.done() or turn.stopping or cancel is None
+                or not cancel.prompt_sent or cancel.requested):
+            return False
+        async with asyncio.timeout(5):
+            await write_user_turn(process.stdin, text)
+        return True
 
     async def _stopped_by_user(self) -> StopMethod | None:
         """How the user's stop of the running turn ended it, once it has (bounded); None when none was asked."""
