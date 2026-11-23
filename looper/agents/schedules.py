@@ -790,6 +790,7 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     if stream is not None:
         try:
             subscriptions.check_extraction(stream)
+            await subscriptions.check_triage_enabled(stream)
         except ValueError as exc:
             raise RequestError(HTTP_400, str(exc)) from None
         await check_private_target(stream, fields.get("notify_channel"), fields.get("notify_chat"))

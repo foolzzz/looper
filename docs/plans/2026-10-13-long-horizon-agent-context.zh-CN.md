@@ -47,7 +47,7 @@
 | M5 | 项目执行配置 | ✅ 已交付（looper #37） | M2 |
 | M6 | prompt 回归评测 | ✅ 已交付（looper #36） | M1 |
 | M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #45） | M2、M5 |
-| 事件分流 v0 | [RFC](../architecture/rfcs/event-triage-v0.zh-CN.md) 的表、类型、只读访问器与独立操作者开关 | 基础层已实现，默认关闭；分流运行、why 入口、管家交接与晨报仍待后续 PR | M7a，#1482 |
+| 事件分流 v0 | [RFC](../architecture/rfcs/event-triage-v0.zh-CN.md) 的表、类型、独立操作者开关与分流运行 | 分流预设、确认、解析、代码保底和入库已实现，默认关闭；真实模型验证待批准，why 入口、管家交接与晨报仍待后续 PR | M7a，#1482 |
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ✅ 已交付（looper #46） | M7a |
 | M7c | 及时沉淀：日志记失败与重试、决策理由、用户指令、会话切换；换 agent 前的交接摘要和新会话的续接简报；Manager 续接；项目经验随时进草稿 | ✅ 已交付（looper #66） | M7b、M9a |
 | M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付（looper #48） | M1.6、M4 |
@@ -1017,6 +1017,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - ~~**dashboard 在非安全上下文里白屏**~~（✅ 已修复 looper #213）（looper #207 的真实浏览器检查发现，早于 #207）：`web/src/pages/chat.tsx` 用 `crypto.randomUUID()`，浏览器只在 https 或 localhost 下提供它；用 http 从别的机器（`--host 0.0.0.0` 加局域网地址）打开时，登录成功后页面在首次渲染就抛 `TypeError` 而白屏。现在非安全上下文里生成 id 已回退到 `crypto.getRandomValues`，从别的机器通过普通 http 打开 dashboard 也能正常渲染。
 
 ### 5.2 工程待办
+
+- **记忆写入路径**（[RFC](../architecture/rfcs/memory-write-path-v0.zh-CN.md)）：本分支在确认后的 worktree 写入基础上实现操作者私聊推送、精确回复「记 / 驳回 / 重试」、结果通知、原推送状态更新和受阻告警，默认关闭。起草、来源和 dashboard 界面仍按 RFC 第 13 节后续切片推进。后续待维护者确认：记忆推送接入 `proactive_delivery`，新增 `ProactiveSource.MEMORY` 并与晨报等来源共同扩展 `proactive_deliveries.source` 约束。
 
 - **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消已实现，项目开关仍默认关，见[Worker 工具验收](../validation/platform-subagents-worker-tools.zh-CN.md)；真实模型运行与评测待授权执行。项目设置表单、操作者 `runs.tree`、运行树与等待时间线、费用分份、Agents 分组和 Pipeline 计数已在本分支实现（[界面与读取验收](../validation/run-tree/README.md)）。规划者入口、账号准入和运行树单节点取消仍待后续阶段。首次启用走项目设置表单及项目管理 API；Manager 工具列表和 schema 保持基线字节一致，从聊天修改设置及 Manager 对话对比留给后续 PR。
 - **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审。执行器、`step_check_runs` 与 operator-only `task_evidence.get` 已在本分支实现，复用私有检出及写通知，带资源限制、产物保留和重启恢复；Worker 成功后写证据，仍不影响决策。异常证据收尾及保存检查后再关闭的计划文本已补回归；关闭状态按 `main` 对照 prompt 和步骤行，定义仍供操作者读回。macOS local 使用网络与 job-creation 双重禁止并预检，Linux `unshare -rn` 尚未实测。证据门、Reviewer 证据、任务页展示与结果/渠道输出待后续阶段，真实模型评测未运行。
