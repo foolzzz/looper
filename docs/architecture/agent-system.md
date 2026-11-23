@@ -5362,7 +5362,18 @@ Manager's `looper_schedules` cannot create or change one.
 - **The push** goes through the channel's `post` as the bot, to the target the
   run started with (`subscription_runs.target_channel`, `target_chat`, pinned
   only when the target was confirmed for the configuration then in force:
-  `config_version`). The output is split at 4,000 characters by the group
+  `config_version`). With `delivery.enabled` on, the whole digest gets one
+  delivery decision (`kind=subscription`, `urgency=digest`) before its first
+  eligible segment is claimed; its segments and retries share that decision
+  and one daily slot. A deferred digest keeps its full output on the dashboard,
+  advances its cursor, and records its reason and `digest_date`; it is not
+  posted. Keep the switch off until a morning-report reader can surface those
+  deferred outputs. Recent Lark direct replies are observed from admitted
+  user messages, keyed by bot and user (history uses a native chat id instead).
+  This five-minute exemption is memory-only and resets on restart; existing
+  digest decisions still survive. Native-chat histories supply the other
+  targets' last user message. Off, the posts and existing run, segment and notification
+  writes are unchanged. The output is split at 4,000 characters by the group
   notice's splitter and cut at three messages, and each message is a row of
   `subscription_deliveries` (`pending`, `sending`, `sent`, `failed`,
   `uncertain`) with an idempotency key, the run id and, for a later part, the
@@ -5925,7 +5936,8 @@ row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
 `sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
 did. Off, the layer writes nothing. Wired so far: gate
-reminders and task notices to Lark and Telegram. A completed or failed task's
+reminders, task notices to Lark and Telegram, and subscription digest pushes.
+A completed or failed task's
 code notice is `normal`; an opened, updated or resumed gate that needs the
 user is `blocking`, like its reminders. The channel checks a task-end notice
 immediately before sending it, retaining its text and target; a completion
@@ -5933,8 +5945,14 @@ fallback keeps the original notice's decision key. Recent user messages are
 looked up by bot and chat, including its routed Manager histories. Only a
 successful channel receipt records the receipt; a deferred notice records its
 decision without calling the channel. A decision that fails is logged and
-the notice posted as with the switch off. Task progress, completion turns,
-the dashboard chat and other senders retain their existing paths. Keep the
+the notice posted as with the switch off. Subscription digest pushes use
+`digest` urgency, subject to the ordinary quiet hours and cap. Digest decisions
+use `subscription_run:<run id>` across retries and restarts, with the receipt
+on the first accepted segment; an uncertain channel outcome is never marked
+sent. A failed digest decision prevents the channel call; a failed receipt
+write is logged without changing an accepted send. Subscription alerts and
+failure notices, task progress, intents, completion turns, the dashboard chat
+and other senders retain their existing paths. Keep the
 switch off until the briefing can read deferred messages; digest consumption
 and the delivery settings UI are not delivered here.
 Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
