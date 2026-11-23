@@ -8775,18 +8775,19 @@ implementation supplies it and is retested.
   and merged with that chat's next startup window. Discovery work is also durable
   until its windows have been assigned to chats. While the service runs, unfinished
   windows retry after 30 seconds, 1 minute, 2 minutes, 5 minutes, then 10 minutes
-  between attempts. Assigned chat and thread debt retains its owed bounds and
-  uses the same chat, page, thread and transport limits; unfinished discovery
-  extends through the current time once the consumer is ready. Completed windows
+  between attempts. Discovery, chat and thread debt are clamped to the most
+  recent 15 minutes before scanning, using the same chat, page, thread and
+  transport limits; unfinished discovery extends through the current time once
+  the consumer is ready. Completed windows
   cause no retry work. Page caps, non-advancing pagination and permission errors
   are terminal typed failures: their windows become `dropped` immediately.
   Other failures exhaust ten attempts, counted durably across restarts, before
   becoming `dropped` with `reason: retry_exhausted`. Shutdown cancels and joins
   retries without consuming an attempt for an interrupted request. Pending and
   dropped windows survive restarts. Catch-up admission in `_handle_lark_event`
-  rejects messages older than 15 minutes, recording visible `stale` dropped
-  windows instead of handing them to the Manager. Admitted messages carry their
-  original send time in the turn's envelope timestamp.
+  rejects messages older than 15 minutes after filtering self-sent posts and
+  unmentioned group messages, without creating per-message drops. Admitted
+  messages carry their original send time in the turn's envelope timestamp.
   `system.status.channels.<channel-id>.catchup` reports `pending`, `dropped` and
   `windows` (chat id, start/end epoch seconds, state, attempts, reason and the
   optional thread id and the dropped record's `recorded_at` timestamp); an empty
@@ -8805,8 +8806,11 @@ implementation supplies it and is retested.
   boundary initializes the state without replaying history. A boundary older
   than 15 minutes records the expired portion as a visible `boundary_expired`
   dropped window and still discovers the most recent 15 minutes. Pending
-  discovery uses the same freshness cutoff, recording its expired portion as
-  `stale`; previously assigned debt is scanned with the admission age guard above.
+  discovery and assigned chat/thread debt record their expired portions as
+  `stale`, aggregated once per chat in each pass. Expired portions end at the
+  earlier of the cutoff and the owed endpoint. The drop and the advanced start
+  (or removal of a fully expired window) are committed together, so a failed
+  scan or restart cannot record the same expired prefix again.
   Each startup or retry pass logs one INFO
   `lark_catchup` summary: boundary, expired-window flag, chats scanned, messages
   found, handled, duplicate and too-old skips, failures, `threads_scanned`,
