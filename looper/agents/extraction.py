@@ -202,6 +202,7 @@ def render(kind: str, rows: Sequence[Mapping[str, Any]], *, context: Sequence[Ma
     known leads (``leads``) or the recent intents (``intents``), newest first."""
     from .subscriptions import _js_slice, clock
 
+    group = {row["chat_id"] for row in rows if row.get("via_group")}
     window = {row["seq"] for row in rows}
     context = [row for row in context if row["seq"] not in window]
     chats: dict[str, list[list[Mapping[str, Any]]]] = {}
@@ -213,8 +214,8 @@ def render(kind: str, rows: Sequence[Mapping[str, Any]], *, context: Sequence[Ma
     refs: Refs = {}
     by_external: dict[str, str] = {}
     for before, inside in chats.values():
-        for letter, group in (("c", before), ("m", inside)):
-            for row in group:
+        for letter, messages in (("c", before), ("m", inside)):
+            for row in messages:
                 ref = f"{letter}{sum(1 for key in refs if key[0] == letter) + 1}"
                 refs[ref] = row["seq"]
                 if row.get("external_id"):
@@ -226,7 +227,7 @@ def render(kind: str, rows: Sequence[Mapping[str, Any]], *, context: Sequence[Ma
     for before, inside in chats.values():
         first = (inside or before)[0]
         label = _CHAT_LABEL.get(first.get("chat_kind") or "", "会话")
-        lines.append(f"《{_flat(first.get('chat_name')) or first['chat_id']}》（{label}）")
+        lines.append(f"《{_flat(first.get('chat_name')) or first['chat_id']}》（{label}{GROUP_LABEL if first['chat_id'] in group else ''}）")
         for row in (*before, *inside):
             sender = row.get("sender_id") or ""
             if sender not in people:
@@ -274,6 +275,18 @@ def select_context(rows: Sequence[Mapping[str, Any]], before: Sequence[Mapping[s
                    parents: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     """The context of ``rows`` among the candidates: the messages before a chat's first window message of the chats
     still in ``rows``, and the parents of ``rows`` not in it; at most ``CONTEXT_MAX``, the oldest dropped first."""
+    floors = {row["chat_id"]: row["read_from"] for row in rows if row.get("via_group")}
+    if floors:
+        anchors: dict[str, Mapping[str, Any]] = {}
+        for row in _order(rows):
+            anchors.setdefault(row["chat_id"], row)
+        before = [row for row in before
+                  if not (anchors.get(row["chat_id"], {}).get("via_group") and row["chat_id"] in floors
+                          and row["sent_at"] < floors[row["chat_id"]])]
+        base_parents = {row["parent_id"] for row in rows if row.get("parent_id") and not row.get("via_group")}
+        parents = [row for row in parents
+                   if row["external_id"] in base_parents or row["chat_id"] not in floors
+                   or row["sent_at"] >= floors[row["chat_id"]]]
     chats = {row["chat_id"] for row in rows}
     inside = {row["seq"] for row in rows}
     wanted = {row["parent_id"] for row in rows if row.get("parent_id")}
@@ -385,7 +398,7 @@ def _lead(item: Mapping[str, Any], refs: Refs, *, now: datetime, valid_days: int
 
 
 def _intent(item: Mapping[str, Any], refs: Refs, *, enabled_types: Collection[str],
-            app_seqs: Collection[int]) -> dict[str, Any]:
+            app_seqs: Collection[int], group_seqs: Collection[int] = ()) -> dict[str, Any]:
     if not _member(item.get("type"), enabled_types):
         raise _Drop("unknown_type")
     if not _member(item.get("confidence"), _CONFIDENCES):
@@ -403,6 +416,8 @@ def _intent(item: Mapping[str, Any], refs: Refs, *, enabled_types: Collection[st
         raise _Drop("no_window_source")
     if all(seq in app_seqs for seq in sources) and item["type"] != leads_model.ALERT_TYPE:
         raise _Drop("app_only_not_alert")
+    if group_seqs and set(window) & set(group_seqs) and item["type"] not in leads_model.GROUP_INTENT_TYPES:
+        raise _Drop("group_type")
     return {"type": item["type"], "title": title, "summary": summary, "confidence": item["confidence"],
             "sources": sources, "window_sources": window, "same_as": same_as}
 
@@ -439,7 +454,7 @@ def _reply_object(kind: str, text: str) -> tuple[Any, str]:
 
 
 def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, enabled_types: Collection[str],
-          app_seqs: Collection[int]) -> Parsed:
+          app_seqs: Collection[int], group_seqs: Collection[int] = ()) -> Parsed:
     """What ``reply`` says (the module's notes, step 4). ``now`` is in the schedule's zone: a lead's ``valid_until``
     is clamped to [tomorrow 00:00 there, now + ``valid_days``]. ``app_seqs`` are the input's alert-bot messages: an
     intent whose sources are all among them must be ``leads_model.ALERT_TYPE``."""
@@ -475,7 +490,8 @@ def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, 
             if not isinstance(item, dict):
                 raise _Drop("unknown_kind" if kind == "leads" else "unknown_type")
             items.append(_lead(item, refs, now=now, valid_days=valid_days) if kind == "leads"
-                         else _intent(item, refs, enabled_types=enabled_types, app_seqs=app_seqs))
+                         else _intent(item, refs, enabled_types=enabled_types, app_seqs=app_seqs,
+                                      group_seqs=group_seqs))
         except _Drop as drop:
             dropped[str(drop)] += 1
         except (TypeError, ValueError, OverflowError):  # a shape no rule above foresaw: this item only
@@ -585,7 +601,8 @@ async def store_leads(conn: asyncpg.Connection, parsed: Parsed, *, source_id: st
 
 
 async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: str, schedule_id: str,
-                        run_id: str | None, record_id: int | None, now: datetime, more: bool) -> dict[str, Any]:
+                        run_id: str | None, record_id: int | None, now: datetime, more: bool,
+                        via: str = "subscription") -> dict[str, Any]:
     """Write the parsed intents in the caller's transaction: ``pending``, or ``merged`` into the intent it is
     ``same_as`` when that one is pending or tasked within ``SAME_MATTER_WITHIN`` or rejected within
     ``REJECTED_WITHIN`` (a ``dropped`` one never: nothing is merged into it). One the check dropped is stored as
@@ -613,12 +630,12 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
         intent_id = await conn.fetchval(
             "INSERT INTO intents (source_id, schedule_id, type_key, type_version, title, summary, confidence, state, "
             "chat_id, project_id, merged_into, flagged, run_id, record_id, handled_at, handled_via, check_verdict, "
-            "check_reason, check_record_id) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id",
+            "check_reason, check_record_id, via) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id",
             source_id, schedule_id, item["type"], versions[item["type"]], item["title"], item["summary"],
             item["confidence"], "dropped" if dropped else "merged" if target else "pending", chat_id, project_id,
             target, any(seq in seen for seq in sources), run_id, record_id, now if dropped else None,
-            "system" if dropped else None, verdict, reason, checked_by)
+            "system" if dropped else None, verdict, reason, checked_by, via)
         # Only its own sources: the messages its text came from (a merged one's are not the target's).
         await conn.executemany("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                                [(intent_id, seq) for seq in sources])
@@ -722,7 +739,7 @@ async def intent_types(conn: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]]) -> str:
+def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]], *, group: bool = False) -> str:
     """The processor's instructions: the subscription's requirement and, for intents, one line per enabled type."""
     if kind == "triage":
         from . import triage_run
@@ -731,7 +748,8 @@ def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]]
     if kind != "intents":
         return requirement
     lines = [f"- {row['key']} {_flat(row['name'])}: {_flat(row['guidance'])}" for row in types]
-    return f"{requirement.strip()}\n\n## Intent types\n" + "\n".join(lines)
+    return (f"{requirement.strip()}\n\n## Intent types\n" + "\n".join(lines)
+            + ("\n\n" + GROUP_REQUESTS_NOTE if group else ""))
 
 
 async def participants(conn: Any, source_id: str, people: Collection[str]) -> Participants:
