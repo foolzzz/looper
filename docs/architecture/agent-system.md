@@ -161,8 +161,11 @@ memory, with a since-start label until the service has been up for a day.
   With routing off, both kinds of turn use main's worker, keeping the message
   loop available. Claimed, unstarted batches expire 15 minutes after their earliest
   event was recorded, even while the interactive lane stays busy. Their deadline
-  callback and the worker claim a typed queue state atomically. Control interrupts
-  clean children first observed during the turn; uncertain process ownership falls
+  callback and the worker claim a typed queue state atomically. The completion's
+  running token is registered before loading task facts, so arrivals can interrupt
+  preparation too. Control interrupts clean children first observed after the turn's
+  `system/init` checkpoint, preserving tools initialized by a cold resident;
+  uncertain process ownership or a missing checkpoint falls
   back to killing the resident and resuming the session on the next turn.
   The operator-only `manager_lanes.get/update` operations and generated
   `loopercli manager-lanes get/update` commands manage the switch. Update is high
