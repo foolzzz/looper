@@ -47,6 +47,12 @@ def _needs_project(label: str, candidates: list[dict[str, Any]]) -> str:
     return f"项目：这个会话没有绑定项目。候选：{names}\n回复「建 {label} <编号>」"
 
 
+def is_reply(text: str) -> bool:
+    """Whether text has the exact intent reply grammar, without reading or acting on an intent."""
+    text = " ".join(text.split())
+    return bool(_BUILD.fullmatch(text) or _REJECT.fullmatch(text))
+
+
 async def route(envelope: MessageEnvelope, *, platform: Any) -> RouteResult | None:
     if not await leads_model.intents_enabled():
         return None
