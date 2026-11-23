@@ -332,7 +332,7 @@ async def check(kind: str, items: list[dict[str, Any]], *, messages: Mapping[int
     failures = {CallFailure.UNAVAILABLE: ProcessorFailure.REFUSED, CallFailure.TIMEOUT: ProcessorFailure.TIMEOUT,
                 CallFailure.BUDGET: ProcessorFailure.BUDGET, CallFailure.RUNTIME: ProcessorFailure.FAILED,
                 CallFailure.PARSE: ProcessorFailure.FAILED, CallFailure.RATE_LIMITED: ProcessorFailure.FAILED,
-                CallFailure.REFUSED: ProcessorFailure.REFUSED}
+                CallFailure.REFUSED: ProcessorFailure.REFUSED, CallFailure.BLOCKED: ProcessorFailure.BLOCKED}
     detail = (f"{failures[called.failure].value}: {called.reason}" if isinstance(called, CallFailed)
               else checked.reason if checked is not None and checked.state != "checked" else "")
     return Outcome(counts(checked, cost_usd=result.cost_usd), result.profile, result.record_id, checked, detail)

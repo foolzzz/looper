@@ -63,7 +63,7 @@ def _ignored(toplevel: Path, paths: list[Path], *, by_patterns: bool) -> set[Pat
                               env={**child_env.inherited(), "GIT_TERMINAL_PROMPT": "0"},
                               timeout=vault.GIT_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError(f"git check-ignore could not run ({type(error).__name__})") from None
+        raise RuntimeError(f"git check-ignore could not run ({type(error).__name__})") from error
     if done.returncode not in (0, 1):
         raise RuntimeError(f"git check-ignore failed (exit {done.returncode})")
     return {Path(name) for name in done.stdout.decode("utf-8", errors="replace").split("\0") if name}
