@@ -17,7 +17,7 @@ from typing import Any
 import asyncpg
 import pytest
 
-from looper.agents import agent_settings, extraction, leads_check, processor, subscription_runs, subscriptions
+from looper.agents import agent_settings, extraction, leads_check, processor, subscription_runs, subscriptions, triage_settings
 from looper.agents.agent_settings import AgentType
 from looper.agents.extraction import parse
 from looper.agents.ops import ErrorCode, OpError
@@ -311,6 +311,35 @@ def scenario(test, monkeypatch, tmp_path, *, reply: str = LEADS_REPLY):
     run_scheduled(body, monkeypatch, tmp_path)
 
 
+def test_with_triage_off_a_push_run_keeps_the_parent_stored_outcome_and_readback(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        await stream(env.pool)
+        assert not await triage_settings.enabled(env.pool)
+        schedule = await env.enabled(kind="subscription", requirement="Synthetic push criteria", run_budget_usd=0.5,
+                                     notify="failures", subscription={**SUBSCRIPTION_FIELDS, "output_header": ""})
+        sid = schedule["schedule_id"]
+        seq = await add(env.pool, "Synthetic group update", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        stored = await db_subs.get_run(run["id"], db=env.pool)
+        # The push row's behavior fields on the parent, including the absent triage window key.
+        expected = {"from_seq": 0, "to_seq": seq, "events_in_window": 1, "events_selected": 1,
+                    "events_too_old": 0, "events_over_cap": 0, "record_id": None, "outcome": "dashboard_only",
+                    "output_text": "Synthetic summary", "output_sha256": subscriptions.digest("Synthetic summary"),
+                    "notification_id": None, "target_channel": None, "target_chat": None, "config_version": None,
+                    "extract_counts": None, "check_status": None, "skip_reason": None}
+        assert {key: stored[key] for key in expected} == expected
+        assert "window_seqs" not in stored
+        assert run["status"] == "completed" and run["summary"] == "Synthetic summary"
+        assert await cursor(env, sid) == seq and poster.sent == []
+        assert await env.pool.fetchval("SELECT count(*) FROM triage_events") == 0
+        assert await env.pool.fetchval("SELECT count(*) FROM message_leads") == 0
+        assert await env.pool.fetchval("SELECT count(*) FROM intents") == 0
+        [call] = fake.calls
+        assert call["instructions"] == "Synthetic push criteria" and "contract" not in call
+
+    scenario(check, monkeypatch, tmp_path, reply="Synthetic summary")
+
+
 def test_a_leads_run_from_its_preset_stores_the_leads_its_reply_names_and_moves_the_cursor(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await extractor(env)
@@ -322,6 +351,7 @@ def test_a_leads_run_from_its_preset_stores_the_leads_its_reply_names_and_moves_
         before = await cursor(env, sid)
         run = await fire(env, sid)
         assert run["status"] == "completed" and run["stream"]["outcome"] == "extracted"
+        assert "window_seqs" not in await db_subs.get_run(run["id"], db=env.pool)
         counts = json.loads(run["stream"]["extract_counts"])
         assert counts == {"new": 1, "merged": 0, "superseded": 0, "dropped": {}, "instructions_seen": 0,
                           "more": False}
@@ -366,6 +396,7 @@ def test_an_intents_run_stores_pending_and_flagged_intents_and_pushes_nothing(mo
         await add(env.pool, "lunch?", sent_at=minutes_ago(env, 6))  # group chatter: out of scope
         run = await fire(env, sid)
         assert run["status"] == "completed" and run["stream"]["outcome"] == "extracted"
+        assert "window_seqs" not in await db_subs.get_run(run["id"], db=env.pool)
         counts = json.loads(run["stream"]["extract_counts"])
         assert (counts["new"], counts["dropped"], counts["instructions_seen"]) == (3, {"app_only_not_alert": 1}, 1)
         rows = await env.pool.fetch("SELECT * FROM intents ORDER BY id")
