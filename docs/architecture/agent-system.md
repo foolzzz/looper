@@ -6431,12 +6431,30 @@ The operator-only v1 operations (all POST) are:
   `looper leads eval-export --chat CHAT --days N --intents --out FILE` writes
   anonymous human-message windows and all sourced lead labels to an ignored or
   external file of mode 600, for local review and count-only intent evaluation.
+- `intent_recognitions.preview`, `start`, `list`, `settings_put`, under
+  `/api/v1/intent_recognitions/`, expose separately opt-in one-off recognition.
+  A confirmed intents subscription supplies the project and processor Profile.
+  Preview reports the collected human-message count and estimated cost; the
+  dashboard and Manager ask for confirmation before starting a background run.
+  The default range is seven days, at most thirty, with only the newest 2,000
+  live/history human messages and at most $1 allocated across processor calls.
+  Context is restricted to those messages. It may precede a followed group's
+  start time, without changing the list, daily allowances or any cursor.
+  Records retain state, counts, actual cost, truncation and linked `on_request`
+  intents, including partial results after failure. Restart fails unfinished
+  runs rather than replaying them. The asking Lark/Telegram direct chat gets one
+  result message, bypassing the delivery layer; dashboard runs remain in the
+  recognition list. These intents never get individual push/progress notices.
+  The operator v1 operations are available through the generated CLI; no new
+  dedicated CLI command is added.
 
-Only build and reject require intents to be enabled, so the operator can
-prepare configuration while it is off. Disabling also disables intents
-subscriptions in the same transaction; enabling does not restart them. No
-intent operation is a Manager tool. The dashboard page and extraction runs
-are delivered separately; CLI callers use the same operator API operations.
+Build, reject, previewing recognition and starting recognition require intents
+to be enabled. The operator can prepare configuration while it is off. Disabling
+also disables intents subscriptions in the same transaction; enabling does not
+restart them. The default Manager also has `looper_intents_recognize` only while
+both `intents.enabled` and `intents.on_request.enabled` are on, and only in the
+operator's own console or direct-chat turns. The dashboard page and extraction
+runs are delivered separately; CLI callers use the same operator API operations.
 
 ### The ledger
 
