@@ -1,8 +1,6 @@
 {
   "main_revision": "bc0e118d404b464bf7dcf6fbfbb42c2f031864a3",
   "sha256": {
-    "planner_contract": "2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42",
-    "planner_system_prompt": "09b66d2425267899c5c99fed1b9f43e8f7536f7ac1d439262c4d9d29687ca4ea",
     "planner_plan_turn": "e318c780e153b167d9d8ef47f59cef44ffe7b1d4a22fdd9e981a070fe6a3b6f3",
     "planner_step_row": "14964c7e175c4ec9aaaba1acc59839a43a91ebdee7e414181385a52111c899f7",
     "planner_decision_work_False": "680be50a9cfa4c5aad37332d79c406ecd5cb10a50554fe7aefd6a51c44d601c8",

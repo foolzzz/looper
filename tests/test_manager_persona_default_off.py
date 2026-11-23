@@ -12,15 +12,13 @@ from types import SimpleNamespace
 import pytest
 
 from looper.agents import claude_cli, persona, profile_registry
-from looper.agents.agent_settings import Harness, Layer
 from looper.agents.bus import MessageBus
-from looper.agents.knowledge import EMPTY_KNOWLEDGE
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
-from looper.agents.tiers.planner import PlannerAgent, PlannerSettings, TaskPlan
 from tests.db_support import DSN, run_db
 from tests.manager_surface_support import assert_main_surfaces
+from tests.prompt_sections import assert_frozen, planner_prompt
 from tests.test_manager_session_routing_db import _Resident
 
 
@@ -121,10 +119,9 @@ def test_the_planner_prompt_keeps_its_main_hash_with_or_without_persona(value):
     previous = persona.current()
     try:
         persona.set_current(value)
-        planner = PlannerAgent(task_id="task-baseline", runtime_root=Path("."))
-        prompt = planner._system_prompt(
-            TaskPlan("p", "g", "Build the project", ""), PlannerSettings("Plan carefully.", 60, 0, 0),
-            EMPTY_KNOWLEDGE, Harness("Work carefully.", Layer.BUILTIN))
-        assert prompt.sha256 == "9bda3e3a4ac7dd6455a3c527df7be9e10c8c0e8e71a5a40ff34000806c73e858"
+        text = planner_prompt().text
+        assert_frozen("planner_prompt", text)
+        # Sections may be added by other features; the persona's own words never reach the Planner.
+        assert not any(word and word in text for word in (value.name, value.tone, value.notes))
     finally:
         persona.set_current(previous)
