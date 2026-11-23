@@ -530,7 +530,7 @@ class ManagerOps:
                 _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
                 if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
-                    self._pending.pop(turn.chat_key, None)
+                    self._lapse(self._pending.pop(turn.chat_key, None))
                     raise _OperatorOnly(turn)
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:

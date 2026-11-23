@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from looper.agents import chat_settings
+from looper.agents import card_actions, chat_settings
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.ops import Risk, Tool, Turn, TurnOrigin
 from looper.agents.ops.service import ManagerOps, Platform
@@ -227,6 +228,7 @@ def test_manager_speaker_enforces_escalation(monkeypatch, tmp_path, enabled, sen
 def test_confirmation_hijack_uses_the_next_messages_typed_sender(monkeypatch, tmp_path, speaker):
     async def check(pool):
         await seed(pool)
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true')", card_actions.ENABLED_KEY)
         ran, answers = [], []
 
         async def run(call):
@@ -240,6 +242,10 @@ def test_confirmation_hijack_uses_the_next_messages_typed_sender(monkeypatch, tm
         rig = rig_with_ops(tmp_path, tools=(tool,))
         await pool.execute("INSERT INTO system_settings (key, value) VALUES ('leads.enabled', 'true')")
         ops = rig.manager.ops
+
+        async def restored_count():
+            restarted = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", tools=(tool,))
+            return await restarted.restore_confirmations()
 
         async def calls(on_event):
             turn = rig.manager._running_token.ops_turn
@@ -256,6 +262,7 @@ def test_confirmation_hijack_uses_the_next_messages_typed_sender(monkeypatch, tm
 
             await rig.manager._handle(envelope("client" if speaker == "client" else OPEN_ID))
             assert answers[0]["status"] == "needs_confirmation"
+            assert await restored_count() == 1
             await rig.manager._handle(envelope(speaker))
             if speaker == OPEN_ID or speaker == "client":
                 assert answers[1] == {"status": "ok", "result": {"done": True}}
@@ -263,6 +270,10 @@ def test_confirmation_hijack_uses_the_next_messages_typed_sender(monkeypatch, tm
             else:
                 assert answers[1]["error"]["code"] == "forbidden" and not ran
             assert not ops._pending
+            await asyncio.gather(*ops._lapsing)
+            assert await restored_count() == 0
+            assert await pool.fetchval("SELECT outcome FROM card_actions") == (
+                "ok" if speaker in (OPEN_ID, "client") else "lapsed")
         finally:
             await rig.close()
 
