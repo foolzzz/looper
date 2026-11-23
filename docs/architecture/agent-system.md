@@ -5459,6 +5459,19 @@ subscription's current configuration is confirmed. Quiet types stay on the
 operator's intents list. New evidence replies to the original push, extending
 a pending suggestion's expiry to 24 hours after that delivery.
 
+With `delivery.enabled` on (off by default), the initial push and new-evidence
+reply ask `proactive_delivery.decide` before claiming a send. Both are `intent`
+with `normal` urgency, including a type whose display priority is `urgent`:
+neither is a blocking gate or a reminder the user set. The target chat's most
+recent user message supplies the five-minute grace. A `send` keeps the exact
+text, target, reply and idempotency key; a successful receipt sets `sent_at`.
+Retries reuse `intent_post:<post id>` and its first decision. A digest or drop
+keeps the original `intent_posts` text without spending a send attempt; a
+decision failure logs and waits for the next poll. Final edits and their
+fallback replies keep their existing path. With the switch off there are no
+additional decision reads or writes. Keep delivery off until the briefing can
+surface deferred intents, as required by the [delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md#3-发送点的接入顺序).
+
 `建 I-0042` (or `建` quoting a push) creates and starts one task;
 `驳回 I-0042` rejects the suggestion. Code handles these before the Manager's
 model and checks the operator's typed identity, including dashboard turns.
@@ -5610,8 +5623,10 @@ message, so a message tried again keeps its first decision; decisions on one
 chat are taken one at a time, so the cap holds across send points), with
 `sent_at` once the channel took it (`replied_at`, the user's first message
 after it, is for the proactive-message metrics). Wired so far: gate
-reminders only, which are always `blocking`; a decision that fails is logged
-and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+reminders, which are always `blocking` (a decision that fails is logged and
+the reminder posted as with the switch off), and initial and new-evidence
+intent pushes, which are `normal` (a decision failure waits for the next
+poll). Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
 
 ### Card buttons
 
