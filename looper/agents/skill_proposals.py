@@ -31,6 +31,8 @@ EXPIRY = timedelta(days=7)
 WHY_MAX_CHARS = 500
 NOTE_MAX_CHARS = 500
 EVIDENCE_MAX = 5
+EVIDENCE_ID_MAX_CHARS = 64
+TASK_PROPOSAL_MAX = 2
 LIST_MAX = 100
 _ITEM_KEYS = frozenset({"action", "name", "description", "content", "why", "skill", "evidence"})
 _EVIDENCE_KEYS = frozenset({"task", "step"})
@@ -69,6 +71,23 @@ class Refusal(StrEnum):
     OFF = "off"
     UNKNOWN_SKILL = "unknown_skill"
     STALE = "stale"
+
+    @property
+    def explanation(self) -> str:
+        """Code-owned feedback: validation exceptions may quote untrusted draft fields."""
+        return {
+            Refusal.SHAPE: "Use a complete create or update proposal in the required shape.",
+            Refusal.NAME: "Use a unique lowercase skill slug of at most 64 characters; updates keep the name.",
+            Refusal.DESCRIPTION: "Use a nonempty, single-line description of at most 1024 characters.",
+            Refusal.CONTENT: "Use a nonempty skill body without frontmatter, within 65536 UTF-8 bytes.",
+            Refusal.SECRET: "Leave credentials and secret-shaped text out of the proposal.",
+            Refusal.LIMIT: "The project or task proposal limit has been reached.",
+            Refusal.WHY: "Explain what repeated and why it holds for later tasks, within 500 characters.",
+            Refusal.EVIDENCE: "Cite 1 to 5 existing project tasks and optional steps, each identifier at most 64 characters.",
+            Refusal.OFF: "Skill proposals are off for this project.",
+            Refusal.UNKNOWN_SKILL: "An update must name an existing skill of this project.",
+            Refusal.STALE: "The skill or proposal changed; review its current version before trying again.",
+        }[self]
 
 
 class ProposalRefused(ProjectSkillError):
@@ -158,9 +177,9 @@ def _evidence_shape(raw: Any) -> list[dict[str, str]]:
         if not isinstance(entry, Mapping) or set(entry) - _EVIDENCE_KEYS:
             raise ProposalRefused(Refusal.EVIDENCE, "an evidence entry is an object with a task and optionally a step")
         task, step = entry.get("task"), entry.get("step")
-        if not isinstance(task, str) or not task.strip() or (
-                step is not None and (not isinstance(step, str) or not step.strip())):
-            raise ProposalRefused(Refusal.EVIDENCE, "an evidence entry names its task, and its step by key if given")
+        if (not isinstance(task, str) or not 1 <= len(task.strip()) <= EVIDENCE_ID_MAX_CHARS or (
+                step is not None and (not isinstance(step, str) or not 1 <= len(step.strip()) <= EVIDENCE_ID_MAX_CHARS))):
+            raise ProposalRefused(Refusal.EVIDENCE, Refusal.EVIDENCE.explanation)
         item = {"task": task.strip(), **({"step": step.strip()} if step is not None else {})}
         if item not in found:
             found.append(item)
@@ -235,7 +254,7 @@ async def _note(conn: Any, row: Mapping[str, Any], text: str) -> None:
         steps = sorted({e["step"] for e in row["evidence"] if e["task"] == task_id and "step" in e})
         origin = f" from step {', '.join(steps)}" if steps else ""
         await activity.insert_activity(
-            task_id=task_id, kind="phase", summary=f"Skill proposal #{row['id']}{origin} {text}"[:500], pool=conn)
+            task_id=task_id, kind="phase", summary=f"Skill proposal p-{row['id']}{origin} {text}"[:500], pool=conn)
 
 
 async def _supersede(conn: Any, row: Mapping[str, Any], *, at: datetime, note: str) -> None:
@@ -263,6 +282,11 @@ async def propose(
         try:
             if await store.project_mode(conn, project_id) != "on":
                 raise ProposalRefused(Refusal.OFF, "skill proposals are off for this project")
+            # The project lock serializes replayed and concurrent closing replies. Count all statuses.
+            if via == Via.PLANNER and await conn.fetchval(
+                    "SELECT count(*) FROM skill_proposals WHERE project_id = $1 AND proposer = $2",
+                    project_id, proposer) >= TASK_PROPOSAL_MAX:
+                raise ProposalRefused(Refusal.LIMIT, Refusal.LIMIT.explanation)
             checked = await _check(conn, project_id, item, evidence)
         except ProposalRefused as exc:
             return ProposalResult(None, exc.reason, exc.detail)
@@ -278,7 +302,7 @@ async def propose(
         )
         await store.add_event(conn, row["id"], action="propose", actor_kind="agent", via=Via(via).value,
                               content_sha256=checked.sha256)
-        await _note(conn, row, f"for {checked.name!r} was created")
+        await _note(conn, row, f"created for {checked.name!r}")
     return ProposalResult(await view(row), superseded=tuple(superseded))
 
 

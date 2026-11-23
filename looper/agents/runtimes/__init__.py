@@ -157,6 +157,7 @@ class VendorType(str, Enum):
     GROK_LOGIN = "grok-login"
     CURSOR_LOGIN = "cursor-login"
     COCO_LOGIN = "coco-login"
+    ACP_COMMAND = "acp-command"
     CUSTOM = "custom"
 
     @property
@@ -180,6 +181,8 @@ _LOGIN_VENDORS = {
     VendorType.CURSOR_LOGIN: ("cursor-agent", ApiProtocol.OPENAI_RESPONSES),
     # This protocol is used only for pairing, not for requests.
     VendorType.COCO_LOGIN: ("coco", ApiProtocol.OPENAI_RESPONSES),
+    # This protocol is used only for pairing, not for requests.
+    VendorType.ACP_COMMAND: ("acp", ApiProtocol.OPENAI_RESPONSES),
 }
 
 
@@ -806,6 +809,7 @@ def replace_refusal(adapter: RuntimeAdapter) -> str | None:
 
 
 def _adapters() -> dict[str, RuntimeAdapter]:
+    from .acp import AcpRuntime
     from .api import ApiRuntime
     from .claude_code import ClaudeCodeRuntime
     from .coco import CocoRuntime
@@ -817,7 +821,7 @@ def _adapters() -> dict[str, RuntimeAdapter]:
     from .pi import PiRuntime
 
     return {adapter.type: adapter for adapter in (
-        ClaudeCodeRuntime(), CocoRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), CursorAgentRuntime(), DshRuntime(), PiRuntime(), ApiRuntime())}
+        ClaudeCodeRuntime(), CocoRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), CursorAgentRuntime(), DshRuntime(), PiRuntime(), ApiRuntime(), AcpRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

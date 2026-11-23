@@ -21,11 +21,13 @@ import pytest
 import looper
 from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec, builtin_resolved_profile
-from looper.agents.runtimes import ADAPTERS, ApiProtocol, AuthKind, RuntimeUnsupported, adapter
+from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, adapter
 from tests.runtime_model_helpers import resolved_profile
 
 # sha256 of ``_command_lines`` on main 961070ce4, before the access level (the same on macOS and Linux).
 COMMAND_LINES_SHA256 = "73e7b9e04fd07ff27d649609434cfe7754dc0e85d680f6fd6f124838a74f2183"
+# Keep the historical snapshot's runtime set fixed; later adapters have their own launch tests.
+BASELINE_RUNTIMES = ("api", "claude-code", "coco", "codex", "cursor-agent", "dsh", "grok", "omp", "pi")
 
 ROLES = (AgentType.MANAGER, AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER, AgentType.PROCESSOR)
 
@@ -115,7 +117,7 @@ def _command_lines(root: Path) -> dict[str, Any]:
     cwd = root / "work"
     cwd.mkdir(exist_ok=True)
     seen: dict[str, Any] = {}
-    for runtime in sorted(ADAPTERS):
+    for runtime in BASELINE_RUNTIMES:
         for name, launch in _launches(runtime).items():
             run = launch.runtime
             seen[f"{runtime}/{name}"] = _normalized({
@@ -145,7 +147,7 @@ def fixed_root() -> Any:
 
 def test_every_role_and_runtime_keeps_its_command_line(fixed_root: Path) -> None:
     lines = _command_lines(fixed_root)
-    assert len(lines) == len(ADAPTERS) * (len(ROLES) + 2)
+    assert len(lines) == len(BASELINE_RUNTIMES) * (len(ROLES) + 2)
     digest = hashlib.sha256(json.dumps(lines, sort_keys=True).encode()).hexdigest()
     assert digest == COMMAND_LINES_SHA256, json.dumps(lines, sort_keys=True, indent=1)[:4000]
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,9 +11,9 @@ import { LABEL, SELECT } from "@/components/registry-ui";
 import { leadsSettingsGet } from "@/lib/api-leads";
 import {
   configureMessageStream, fetchMessageStream, fetchMessageStreamRuns, fetchMessageStreamChats,
-  setMessageStreamChat, previewMessageStreamDeletion, deleteMessageStream,
+  setMessageStreamChat, previewMessageStreamDeletion, deleteMessageStream, triageWhy,
   type MessageStreamRun, type MessageStreamSource, type MessageStreamChat,
-  type MessageStreamDeletion, type MessageStreamDeletionPreview,
+  type MessageStreamDeletion, type MessageStreamDeletionPreview, type TriageWhy,
 } from "@/lib/api";
 import { sinceText } from "@/lib/gates";
 import { cn } from "@/lib/utils";
@@ -332,6 +332,116 @@ function Deletion({ sourceId, onDeleted }: { sourceId: string; onDeleted: () => 
   );
 }
 
+const WHY_CASE: Record<TriageWhy["case"], string> = {
+  triage_off: "分流没开",
+  out_of_scope: "不在分流范围",
+  not_yet: "还没轮到这条消息",
+  skipped: "这一段被跳过",
+  event: "有事件引用",
+  uncited: "忽略（未引用）",
+  unknown: "无法判断",
+};
+const WHY_RULE: Record<NonNullable<TriageWhy["rule"]>, string> = {
+  chat_excluded: "会话被排除",
+  sender_kind: "发送人类型不符",
+  imported_history: "导入的历史",
+  own_app: "Looper 自己的应用",
+};
+const WHY_CATEGORY: Record<NonNullable<TriageWhy["category"]>, string> = {
+  important: "重要", digest: "进摘要", ignore: "忽略",
+};
+const WHY_KIND: Record<NonNullable<TriageWhy["reason_kind"]>, string> = {
+  model: "模型给出", raised: "代码调高", uncited: "未引用",
+};
+
+function whyNext(answer: TriageWhy): string {
+  if (answer.case === "triage_off") return answer.cause === "no_subscription" ? "先建一条分流订阅。" : "分流开关是关的。";
+  if (answer.case === "out_of_scope") return `范围规则：${answer.rule ? WHY_RULE[answer.rule] : "没有对上的规则"}`;
+  if (answer.case === "not_yet") return answer.next_run_at ? `下次运行：${answer.next_run_at}` : "没有下次运行。";
+  if (answer.case === "skipped") return `跳过原因：${answer.skip_reason ?? ""}`;
+  if (answer.case === "event") return answer.handling ?? "这条消息已有事件。";
+  if (answer.case === "uncited") return "处理器没有提到这条消息。";
+  return `已核对：${(answer.checked ?? []).join("、")}`;
+}
+
+/** Look up one message. The stream has no per-message list yet, so this is a paste box rather than a label on each row. */
+function WhyLookup() {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [answer, setAnswer] = useState<TriageWhy | null>(null);
+  const ask = async (event: FormEvent) => {
+    event.preventDefault();
+    const ref = message.trim();
+    if (!ref) return;
+    setBusy(true);
+    setError("");
+    try {
+      setAnswer(await triageWhy(ref));
+    } catch (err) {
+      setAnswer(null);
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const conclusion = answer == null ? "" : answer.case === "event" && answer.category
+    ? `${WHY_CASE.event}（${WHY_CATEGORY[answer.category]}）` : WHY_CASE[answer.case];
+  return (
+    <section aria-labelledby="why-title">
+      <Card>
+        <CardHeader><CardTitle id="why-title" className="text-base text-foreground">为什么没告诉我</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <form aria-label="为什么没告诉我" className="space-y-3" onSubmit={(event) => void ask(event)}>
+            <div className="space-y-1.5">
+              <label htmlFor="why-message" className={LABEL}>消息编号或链接</label>
+              <Input id="why-message" aria-label="消息编号或链接" className="font-mono" value={message} disabled={busy}
+                onChange={(event) => setMessage(event.target.value)} />
+            </div>
+            <Button type="submit" disabled={busy || !message.trim()} className="min-h-11">
+              {busy && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
+              查询
+            </Button>
+          </form>
+          {error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{error}</p>}
+          <div aria-live="polite">
+            {answer && (
+              <dl className="space-y-2 text-sm">
+                <div>
+                  <dt className={LABEL}>结论</dt>
+                  <dd>{conclusion}</dd>
+                </div>
+                {answer.event_id && (
+                  <div>
+                    <dt className={LABEL}>事件</dt>
+                    <dd className="font-mono">{answer.event_id}</dd>
+                  </div>
+                )}
+                {answer.reason && (
+                  <div>
+                    <dt className={LABEL}>理由</dt>
+                    <dd className="[overflow-wrap:anywhere]">{answer.reason}</dd>
+                  </div>
+                )}
+                {answer.reason_kind && (
+                  <div>
+                    <dt className={LABEL}>理由来源</dt>
+                    <dd>{WHY_KIND[answer.reason_kind]}</dd>
+                  </div>
+                )}
+                <div>
+                  <dt className={LABEL}>下一步</dt>
+                  <dd className="[overflow-wrap:anywhere]">{whyNext(answer)}</dd>
+                </div>
+              </dl>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
 /** The message stream: one source, whether it is being read, how current it is, and its recent passes. */
 export function MessageStreamPage() {
   const [sources, setSources] = useState<MessageStreamSource[] | null>(null);
@@ -426,6 +536,7 @@ export function MessageStreamPage() {
           </section>
         </>
       )}
+      {(!leadsOn || tab === "stream") && <WhyLookup />}
     </div>
   );
 }

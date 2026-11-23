@@ -18,7 +18,7 @@ import pytest
 from looper.agents import api_v1, project_skills, skill_proposals as sp
 from looper.agents.project_skills import skill_md
 from looper.db import projects
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, fresh_schema, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -58,7 +58,8 @@ async def _task(pool: Any, project_id: str, task_id: str = "task-1", step_key: s
 async def _propose(pool: Any, project_id: str, evidence: Any = None, **over: Any) -> sp.ProposalResult:
     if evidence is None:
         evidence = [await _task(pool, project_id, f"task-{await pool.fetchval('SELECT count(*) FROM tasks') + 1}")]
-    return await sp.propose(project_id, _item(**over), proposer="planner:task-1", evidence=evidence, now=T0)
+    return await sp.propose(project_id, _item(**over), proposer=f"planner:{evidence[0]['task']}",
+                            evidence=evidence, now=T0)
 
 
 async def _accepted(pool: Any, project_id: str, evidence: Any = None, **over: Any) -> dict[str, Any]:
@@ -143,6 +144,15 @@ def test_evidence_must_name_this_projects_tasks_and_steps(monkeypatch):
         assert accepted.proposal["evidence"] == [mine]
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("field", ["task", "step"])
+def test_evidence_shape_refuses_identifiers_over_64_characters(field):
+    valid = {"task": "task-one", field: "a" * 64}
+    assert sp._evidence_shape([valid]) == [valid]
+    with pytest.raises(sp.ProposalRefused) as error:
+        sp._evidence_shape([{"task": "task-one", field: "a" * 65}])
+    assert error.value.reason is sp.Refusal.EVIDENCE
 
 
 def test_twenty_skills_refuse_a_create_and_still_allow_an_update(monkeypatch):
@@ -693,7 +703,11 @@ def test_the_migration_checks_the_objects_not_only_its_marker(monkeypatch):
         assert await pool.fetchval("SELECT count(*) FROM skill_proposals") == 0
         async with pool.acquire() as conn, conn.transaction():
             await migration.apply(conn, sql="", state="current")  # a second pass changes nothing
-        assert await pool.fetchval(
-            "SELECT count(*) FROM pg_constraint WHERE conname = 'skill_proposals_confirmed_event_fk'") == 1
+        async with fresh_schema() as other:
+            await other.execute("CREATE TABLE unrelated (id int, "
+                                "CONSTRAINT skill_proposals_confirmed_event_fk CHECK (id > 0))")
+            assert await pool.fetchval(
+                "SELECT count(*) FROM pg_constraint WHERE conname = 'skill_proposals_confirmed_event_fk' "
+                "AND conrelid = to_regclass('skill_proposals')") == 1
 
     run_db(test, monkeypatch)

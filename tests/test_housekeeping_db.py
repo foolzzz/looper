@@ -344,3 +344,19 @@ def test_scheduler_runs_housekeeping_hourly_and_reports_failures(monkeypatch, tm
         assert not env.scheduler._background
 
     run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_idle_checks_are_kept_ninety_days(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv) -> None:
+        for days, state in ((91, "silent"), (89, "silent"), (200, "running")):
+            await env.pool.execute(
+                "INSERT INTO idle_checks (manager_id, local_date, items, state, finished_at, channel_id, chat, "
+                "created_at) VALUES ('manager', $1, '[{}]'::jsonb, $2, CASE WHEN $2::text = 'running' THEN NULL ELSE $3::timestamptz END, "
+                "'channel-lark', 'ou_synthetic', $3)", (env.clock.now - timedelta(days=days)).date(), state,
+                env.clock.now - timedelta(days=days))
+        report = await housekeeping.run_once(env.runtime_root, env.clock.now, current_runner=None, commands=None)
+        assert report.idle_checks == 1 and not report.failed_steps
+        assert sorted([row["state"] for row in await env.pool.fetch("SELECT state FROM idle_checks")]) == [
+            "running", "silent"]
+
+    run_scheduled(test, monkeypatch, tmp_path)

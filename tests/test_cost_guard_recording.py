@@ -64,7 +64,7 @@ def test_off_keeps_the_original_stored_fields(monkeypatch):
     recorder._untrack()
 
 
-@pytest.mark.provenance
+# Not marked provenance: this is the off-path comparison itself, not a proof of where a fixture came from.
 @pytest.mark.parametrize("role", ["manager", "planner", "processor"])
 def test_off_record_payload_is_byte_identical_to_the_pinned_main_recorder(monkeypatch, tmp_path, role):
     """Read the actual base implementation, then compare complete would-be stored rows without running a model."""

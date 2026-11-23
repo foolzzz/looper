@@ -51,6 +51,23 @@ rows without that timestamp fall back to `created_at`. Queue counts include pend
 rows of any age. Gateway events retain at most 10,000 entries for 24 hours in
 memory, with a since-start label until the service has been up for a day.
 
+Task quality is read from the typed `step_attempts` and `task_outcomes` records by the operator-only
+operations `metrics.task_outcomes` (`days`, `project`, `profile`, `difficulty`) and `metrics.step_attempts`
+(`task_id`). A ratio shows from 20 cases with its Wilson 95% interval, else `{"insufficient": true, "n": n}`;
+each figure carries the same figure of the comparison window (the `4 * days` before the window), and a figure
+that cannot be computed returns `{"error": ...}` while the others answer. `coverage_since` is when the records
+begin (nothing is backfilled) and `missing_attempts` counts Worker runs since then with no attempt. A profile
+filter keeps a run that has an attempt of that profile, and a step that has any attempt of that profile, so a
+step that used more than one profile is counted under each of them. The first-pass rate is original-plan steps
+whose first attempt was decided in the window and that were accepted on their only attempt; a step still open,
+skipped, or cut off when the task ended is left out, and one that was reopened and is still pending stays in
+the denominator. Contract rates count the runs whose outcome ended in the window (each run's records from its
+start until the next run starts), not earlier runs of the same task. Costs split
+per billing basis; an unknown cost is null, never 0. The home page's cost comparison states the equivalent
+spend beside the supplier price. `task_feedback.get` and `task_feedback.set` hold the
+operator's delivery verdict on a completed task; neither the verdict nor its note reaches an agent, and the
+Manager has no tool for it. The dashboard shows the task page's 指标 card and the home page's 任务质量 group.
+
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
@@ -3142,8 +3159,15 @@ confirm (`projects.skill_proposals`, NULL or `off` by default, set with
 export only while it is `on`). A proposal (`skill_proposals`,
 `looper/agents/skill_proposals.py`) is a `create` or an `update` with its full
 text, its reason and the tasks and steps it comes from. It changes no catalog
-item and reaches no run. In this release nothing gives an agent the means to
-propose: the function exists for the Planner and Manager paths that follow.
+item and reaches no run. With the switch on, a task's Planner may store at most two full skill proposals across
+its closing replies, including replays and restarts. Planner-originated validation refusals and later confirmation
+or rejection results reach the next Planner of that project once; a failed PLAN turn releases its feedback claim.
+Validation refusals carry only a typed reason and its fixed explanation, without quoted draft fields. A malformed
+proposal becomes a shape refusal and preserves the final summary. Evidence task and step identifiers are capped
+at 64 characters.
+The Manager's operator-only `looper_skill_propose` tool also creates proposals and is listed only while a project
+opts in; its validation refusals return to the Manager and are not sent to a Planner. Workers and Reviewers supply
+evidence through their learnings and cannot propose or confirm.
 The checks reuse the skill field rules, refuse a secret-shaped string in the
 description, the content or the reason (`skill_secrets`, a fixed table of
 named rules), allow only an `update` once the project has 20 skills, and keep
@@ -3302,8 +3326,31 @@ the Planner runs checks before asking for its decision and stores append-only
 `step_check_runs` evidence. This stage does not change decisions or Reviewer prompts.
 The operator-only `task_evidence.get` operation (also available through `loopercli`)
 accepts `task` and optional `step`, returning definitions and all evidence attempts,
-including history retained after disabling checks; artifact bytes and storage paths
-are excluded. No evidence tool is added to the Manager or Planner.
+including history retained after disabling checks. It returns no artifact bytes and
+no storage path. No evidence tool is added to the Manager or Planner.
+
+`GET /api/v1/evidence/<task_id>/<run_id>/<index>` returns one artifact's bytes.
+This prefix uses the operator gate, ahead of the `/api/v1/` client API. The handler
+then requires an operator browser session, so a bearer token and an API client are
+refused. The file path is rebuilt
+from the run row that belongs to that task. The URL supplies the task, the run id
+and the artifact index, not a path. The content type is the extension of the stored
+name: `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `text/plain` or
+`application/json`. Those four image types are `Content-Disposition: inline`. Every
+other type is `attachment` with `filename` set to the stored name. A mime recorded
+on the row is ignored, so a row that claims `text/html` or `image/svg+xml` is not
+served as that type. The response also sets `X-Content-Type-Options: nosniff`,
+`Content-Security-Policy: sandbox` and `Cache-Control: no-store`. A run id outside
+the signed 64-bit range is 404 and is not queried.
+
+An attention row from `tasks.page` carries `failed_checks` and `failed_check_step`
+when a required check's current evidence failed. Current evidence is the greatest
+run of the latest attempt. The names are check ids that the step's current `checks`
+still define. A skipped step is omitted. An advisory failure, an error and a stale
+row are omitted. The same name is listed once, on its earliest step.
+`failed_check_step` is that step's id. A row without such a failure, the compact
+task list and task detail omit both keys. The task page reads `task_evidence.get`
+again when the task status or a step's id, status or retries change.
 
 Git checks reuse the verification runner's private checkout, runtime-path copying
 and kernel write notifications. Writing existing code, even restoring its bytes,
@@ -3351,7 +3398,7 @@ views of previously enabled projects with saved checks. Definitions remain in
 the database for operator evidence reads. See the
 [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
 and 13, for the protocol and subsequent stages (decision gates, Reviewer evidence,
-artifact downloads and task-page evidence are still pending).
+and result or channel evidence lines are still pending).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -5264,7 +5311,7 @@ channel command is added.
 
 With a project's `subagents` set to `on` (unset is off), a Worker's `run.` token
 also has `looper_agent_spawn`, `looper_agent_wait` and `looper_agent_cancel`.
-Reviewers and explorers never receive them; Planner support is a later slice.
+Reviewers and explorers never receive them. A task's Planner gets them too, below.
 The run's recorded identity, working directory and live spend supply the parent
 authority; model arguments cannot select a different task or parent. Spawn and
 cancel are write tools, wait is read; all three declare the `inside` action level.
@@ -5291,6 +5338,19 @@ detaches keeps its children across the planned handover. The serve lifecycle
 recovers existing rows, retries queued work and pending room delivery, and
 cancels or hands over children on shutdown. With the switch off, existing
 prompts, tool listings, run grants and launch parameters retain their bytes.
+
+With the same switch on, a task's Planner lists the three tools and its system
+prompt gets an explorers guide (`PlannerSubagents`, the Workers' code path with
+the Planner as spawner and its running turn's record as parent). Spawn and cancel
+run only in a turn Looper sent (`needs_user_turn` otherwise); wait without ids lists
+every explorer the task's Planner spawned, across turns. The Planner's spend is not
+streamed to the server, so the parent-budget term does not take part
+(`parent_spend_known` is false). A result the Planner did not wait for goes to
+the room as a `spawn_result` message pending for it, which wakes it, or, with the room
+off, is appended to its next turn (4,000 characters, the rest by wait); a tool,
+room or turn receipt claims the first delivery under one row lock. A Planner's turn
+ending cancels nothing; the task leaving `running` cancels its explorers
+(`task_ended`).
 
 ### A task's Planner's tools
 
@@ -5909,6 +5969,25 @@ Recovered running triage attempts are cancelled before extraction. There is no
 triage preset, renderer, parser, writer, why API/CLI, UI, Manager hand-off or
 briefing reader yet. The dashboard, Lark and Telegram therefore gain no new
 message behavior; CLI configuration can call the operator-only operations.
+
+### Event triage Manager handoff
+
+An important triage event that owns at least one message of its run is handed to the Manager:
+`agents.triage_run.store` calls `agents.triage_handoff` in the same transaction, which writes one
+`manager_events` row of kind `triage` (no task) per owning event and sets `triage_events.manager_event_id`.
+Ownership is the highest category that cites a window message, then the earliest event id
+(`db.triage_events.owned_counts`, which the brief reads too); an event fully covered by another has no row.
+The row targets the default Manager's operator direct chat (`operator_dm_target`), else the operator's newest
+dashboard chat, else it falls back at once (`no_chat`). It never targets a group, and holds ids only.
+`manager_events.claim` takes a `kind` (default `task_end`), so a triage event never joins a task-end batch.
+`agents.triage_turn` is what a turn runs on: the `[TRIAGE]` message with every event fenced as outside content,
+the reply contract (a message, or exactly `NO_REPLY`), the daily cap (`subscriptions.triage.max_turns_per_day`,
+default 12, in `triage_settings.get/update`; past it the batch falls back as `daily_cap`) and `finish`, which
+settles the batch: `NO_REPLY` is `skipped`/`manager_silent`, a message goes through the delivery layer
+(`ProactiveSource.TRIAGE`) to `delivered`, `delivery_deferred` or `send_failed`, and a failed, timed-out or
+preempted turn falls back (`turn_failed`, `turn_timeout`, `turn_stopped`). A triage fallback sends nothing:
+it has no code notice and the processor's text is never sent; the event waits for the brief. The Manager does
+not run these turns yet (`manager.py` is untouched); an unclaimed triage row falls back as `queue_deadline`.
 
 ### Message leads
 
@@ -6534,14 +6613,55 @@ list or command line changes either way.
 - **API:** `POST /api/v1/attention/summary`, read-only and operator-only:
   `{read_at, total, sections: [{kind, state, count, items, error}]}`, each
   item `{key, title, context, since, href, ref, facts}`.
+  `POST /api/v1/attention/settings_get` returns `{enabled}` to the operator,
+  including while off, without reading summary sources.
 - **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
-  only while the summary answers. Failing logins that were read are left to
-  the startup-check banner every page shows; a confirmation asked in the
+  only while the setting is on. The sidebar reads the setting rather than
+  requesting the summary on every page load. Failing logins that were read
+  are left to the startup-check banner every page shows; a confirmation asked in the
   dashboard chat links to that conversation.
 - **Chat:** `/todo` (and Telegram's `/todo@bot`) is answered by code next to
   `/new` and `/gates`, only in the operator's own turns
   (`operator_identity.is_operator`); a group, another sender and an API
   client get a refusal.
+
+### Idle checks
+
+([RFC](rfcs/assistant-phase3-v0.zh-CN.md) section 4.)
+
+When the default Manager has been idle for 30 minutes, code reads the needs-you
+summary, picks what is new since it last looked, and only then asks the Manager
+(a read-only turn in `main`) whether to say something; the Manager may answer
+`NO_REPLY`, and what it writes goes to the operator's direct chat through the
+delivery layer. The switch is `manager.idle_checks.enabled` (default off, no
+row is off), set only through the operator-only `idle_check_settings.get` and
+`update`; `update(true)` answers `conflict` unless `delivery.enabled`,
+`attention.enabled` and `manager.lanes.enabled` are on. Not in `chat_settings`.
+
+- `agents/idle_checks.py`: `plan(state)` is a pure function of typed inputs
+  (the rules of RFC 4.3, cheap ones first, each skip typed); `select` takes the
+  summary's sections by a typed table (`gates` and `confirmations` never; the
+  rest by their own rule) and drops what a check of the last 7 days that ended
+  `silent`, `sent` or `uncertain` already named, by a per-section fingerprint
+  (a schedule's includes `last_ok_at`, so "fail, skipped gate, fail" is new);
+  `render_message` writes the English `[IDLE CHECK]` text with every title
+  fenced (`untrusted.Source.NEEDS_YOU`); `parse_reply` accepts `NO_REPLY`
+  exactly; `deliver_result` settles the check (`silent`, `sent`, `uncertain`,
+  `deferred`, `failed`) after `proactive_delivery.decide`.
+- `IdleCheckService` ticks every 5 minutes. With the switch off a tick reads the
+  setting and stops. A tick that decides not to check writes nothing (it counts
+  the reason and logs it at DEBUG). The advisory lock covers only "decide,
+  insert, publish". Checks left `running` by an earlier server fail as `restart`.
+- Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
+  `idle_check_source` adds `idle_check` to the source check of
+  `proactive_deliveries`, built from the check's current values, so it composes
+  with the morning brief's and triage's widenings.
+- `attention.summary`'s `schedules` items gain the fact `last_ok_at`; `/todo`
+  and the Needs you page are unchanged.
+- The Manager side (its `idle_for()`, the shared background-turn entry, the lane
+  a check runs in, `IDLE_CHECK_DUE` routing, and what a user message does to a
+  queued or running check) and the service's start in `serve` come after the
+  lanes change; until then nothing starts a service and the switch has no effect.
 
 ### User gates
 

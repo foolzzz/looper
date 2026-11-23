@@ -121,6 +121,10 @@ export interface TaskInfo {
   manager_id?: string;
   manager_name?: string | null;
   continues_schedule_session: boolean;
+  /** Required checks whose current evidence failed. Present only on an attention row, and only when one did. */
+  failed_checks?: string[];
+  /** The step database id of the first of `failed_checks`, so the row can open that card. */
+  failed_check_step?: string;
 }
 
 /** The agents that work on one task; their runs make up its cost. */
@@ -1444,6 +1448,16 @@ export interface SubscriptionRunInfo {
   skip_reason?: "blocked_by_hook" | "invalid_reply" | null;
   /** Each message of its push: pending, sending, sent, failed or uncertain. */
   deliveries?: { segment: number; state: string; attempts: number; error: string | null }[];
+  /** Present on a triage run: category counts for that window. Absent on push, leads and intents runs. */
+  extract_counts?: {
+    important: number;
+    digest: number;
+    ignore: number;
+    uncited: number;
+    raised: number;
+    none?: boolean;
+    dropped?: Record<string, number>;
+  } | null;
 }
 
 /** One firing of a schedule (or a "Run now"), and the task it started. */
@@ -1549,6 +1563,8 @@ export interface ScheduleInfo {
   enabled: boolean;
   /** Null while disabled. */
   next_fire_at: string | null;
+  /** Set while a firing waits for a usage window. The instant is the stored reset or cooldown, not a locale clock. */
+  usage_hold?: { until: string; reason: string; reset_known: boolean; window: string | null };
   last_fired_at: string | null;
   last_success_at: string | null;
   consecutive_failures: number;
@@ -3111,6 +3127,19 @@ export interface JournalEntry {
   created_at: string;
 }
 
+/** One acceptance check bound to a criterion (1-based). Omitted on a step that has none. */
+export interface AcceptanceCheck {
+  id: string;
+  criterion: number;
+  type: "command" | "artifact";
+  command: string;
+  timeout_seconds: number;
+  required: boolean;
+  network: boolean;
+  protect: string[];
+  artifact?: string[];
+}
+
 /** A review role a step names. */
 export interface StepReviewRole {
   role: string;
@@ -3135,6 +3164,8 @@ export interface TaskStep {
   instruction: string;
   /** How to tell the step is done, as the Planner wrote it; checked by its Worker and its Reviewer. */
   acceptance_criteria: string[];
+  /** Omitted when the step has none, so a task without checks stays as it was. */
+  checks?: AcceptanceCheck[];
   target_files: string[];
   /** The ids of the steps it needs before it starts. */
   depends_on: string[];
@@ -3770,6 +3801,28 @@ export const previewMessageStreamDeletion = async (fields: MessageStreamDeletion
 };
 export const deleteMessageStream = (fields: MessageStreamDeletion & { confirmation_token: string }, session: string) =>
   messageStreamOperation<{ source_id: string; deleted: number; deletion_id: number }>("delete", fields, undefined, session);
+
+export interface TriageWhy {
+  case: "triage_off" | "out_of_scope" | "not_yet" | "skipped" | "event" | "uncited" | "unknown";
+  cause?: "disabled" | "no_subscription";
+  rule?: "chat_excluded" | "imported_history" | "own_app" | "sender_kind";
+  next_run_at?: string | null;
+  cursor_seq?: number;
+  skip_reason?: string;
+  run_id?: string;
+  event_id?: string;
+  category?: "important" | "digest" | "ignore";
+  reason?: string;
+  reason_kind?: "model" | "uncited" | "raised";
+  handling?: string;
+  checked?: string[];
+}
+
+export async function triageWhy(message: string): Promise<TriageWhy> {
+  const result = await callV1<TriageWhy>("/api/v1/triage/why", { message });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
 
 export interface LlmrecSettingsUpdate {
   enabled?: boolean;

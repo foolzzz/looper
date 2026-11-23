@@ -3,6 +3,13 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import App from "./App";
+import { attentionSettingsGet, fetchAttention } from "@/lib/api-attention";
+
+vi.mock("@/lib/api-attention", () => ({
+  attentionSettingsGet: vi.fn(),
+  fetchAttention: vi.fn().mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 0, sections: [] }),
+  isAttentionOff: () => false,
+}));
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
@@ -22,6 +29,26 @@ vi.mock("@/pages/tasks", () => ({ TasksPage: ({ query }: { query: string }) => <
 vi.mock("@/pages/settings", () => ({ SettingsPage: ({ sub }: { sub: string }) => <div>Settings {sub}</div> }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+it("opens #todo directly with attention off without requesting a summary", async () => {
+  let resolveSettings!: (settings: { enabled: boolean }) => void;
+  vi.mocked(attentionSettingsGet).mockReturnValue(new Promise((resolve) => { resolveSettings = resolve; }));
+  window.history.replaceState(null, "", "#todo");
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<App />));
+    expect(fetchAttention).not.toHaveBeenCalled();
+    await act(async () => { resolveSettings({ enabled: false }); });
+    expect(attentionSettingsGet).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("This summary is off");
+    expect(fetchAttention).not.toHaveBeenCalled();
+    expect(container.querySelector("section")).toBeNull();
+  } finally {
+    act(() => root.unmount());
+    vi.clearAllMocks();
+  }
+});
 
 it.each([
   ["tasks?project=p1&manager=m1", "Tasks project=p1&manager=m1", "tasks?project=p1&manager=m1"],
