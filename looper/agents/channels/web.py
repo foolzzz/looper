@@ -44,6 +44,13 @@ def reply_message_id(message_id: str) -> str:
     return f"{message_id}:reply"
 
 
+def _ephemeral_chat(envelope: MessageEnvelope) -> bool:
+    """An enabled ``/status`` reply is streamed and then dropped, including when the journal replays it."""
+    from ..status_card import EPHEMERAL_CHAT
+
+    return envelope.metadata.get(EPHEMERAL_CHAT) is True
+
+
 class WebChannelAdapter(ChannelAdapter):
     """Bridges Web UI HTTP/SSE with the agent message bus."""
 
@@ -95,23 +102,27 @@ class WebChannelAdapter(ChannelAdapter):
             envelope = replace(envelope, payload={
                 key: chat_attachments.redact(value, self._bus.runtime_root, paths=paths)
                 if isinstance(value, str) else value for key, value in envelope.payload.items()})
-        chat_session = envelope.payload.get("chat_session_id")
-        if envelope.message_type == MessageType.AGENT_REPLY and isinstance(chat_session, str) and chat_session:
-            return await self._add_to_chat(chat_session, envelope)
-
         corr_id = envelope.correlation_id
         saved: DeliveryReceipt | None = None
-        if envelope.message_type in _ANSWERS and (awaiting := self._awaiting.pop(corr_id, None)):
-            # Saved here, not by the page: a page left before the answer came would lose it.
-            session_id, message_id = awaiting
-            saved = await self._add_to_chat(session_id, envelope, message_id=reply_message_id(message_id))
-        elif envelope.message_type in _ANSWERS and envelope.source.agent_type == "manager":
-            # A replayed request has no in-memory awaiting entry after restart.
-            route = envelope.metadata.get("reply_route")
-            if isinstance(route, dict):
-                session_id, message_id = route.get("session_id"), route.get("message_id")
-                if isinstance(session_id, str) and session_id and isinstance(message_id, str) and message_id:
-                    saved = await self._add_to_chat(session_id, envelope, message_id=message_id)
+        if _ephemeral_chat(envelope):
+            # Shown on the live stream only. A journal replay after restart has no awaiting entry and would
+            # otherwise store the card through reply_route.
+            self._awaiting.pop(corr_id, None)
+        else:
+            chat_session = envelope.payload.get("chat_session_id")
+            if envelope.message_type == MessageType.AGENT_REPLY and isinstance(chat_session, str) and chat_session:
+                return await self._add_to_chat(chat_session, envelope)
+            if envelope.message_type in _ANSWERS and (awaiting := self._awaiting.pop(corr_id, None)):
+                # Saved here, not by the page: a page left before the answer came would lose it.
+                session_id, message_id = awaiting
+                saved = await self._add_to_chat(session_id, envelope, message_id=reply_message_id(message_id))
+            elif envelope.message_type in _ANSWERS and envelope.source.agent_type == "manager":
+                # A replayed request has no in-memory awaiting entry after restart.
+                route = envelope.metadata.get("reply_route")
+                if isinstance(route, dict):
+                    session_id, message_id = route.get("session_id"), route.get("message_id")
+                    if isinstance(session_id, str) and session_id and isinstance(message_id, str) and message_id:
+                        saved = await self._add_to_chat(session_id, envelope, message_id=message_id)
         sse_q = self._sse_queues.get(corr_id)
 
         if sse_q is None:
@@ -211,6 +222,7 @@ class WebChannelAdapter(ChannelAdapter):
         supplement_id: int | None = None,
         new_session_profile_id: str | None = None,
         client: Mapping[str, str] | None = None,
+        persist: bool = True,
     ) -> dict[str, str]:
         """Send a chat message (``message_id``, in the chat ``session_id``) to its agent; its answer is saved to
         that chat under ``reply_message_id(message_id)``. ``supplement_id``: a message to a task's Planner, stored
@@ -226,7 +238,7 @@ class WebChannelAdapter(ChannelAdapter):
 
         sse_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
         self._sse_queues[correlation_id] = sse_q
-        if session_id and message_id:
+        if session_id and message_id and persist:
             self._awaiting[correlation_id] = (session_id, message_id)
             while len(self._awaiting) > AWAITING_MAX:  # answers that never came
                 self._awaiting.popitem(last=False)

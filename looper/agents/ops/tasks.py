@@ -550,7 +550,10 @@ async def _instruct(call: Call) -> dict[str, Any]:
                 payload={"task_id": task_id}))
         return supplement_id
 
-    supplement = await add_task_supplement(task_id, call.arguments["text"], via=_via(call.turn), wake=wake)
+    from .service import operator_call
+
+    supplement = await add_task_supplement(task_id, call.arguments["text"], via=_via(call.turn), wake=wake,
+                                           from_operator=await operator_call(call.turn))
     return {"task_id": task_id, "supplement_id": supplement,
             "note": "the task's Planner gets it in its next turn and decides whether to change the plan; every later "
                     "Worker and Reviewer sees it too"}
@@ -654,9 +657,12 @@ async def _gate_reply(call: Call) -> dict[str, Any]:
                   "external_id": str(context.get("message_id") or "") or None}
     has_planner = call.platform.task_router.has_planner(task_id)
     try:
+        from .service import operator_call
+
         posted = await post_gate_message(task_id, label, {"text": text},
                                          has_planner=has_planner, bus=call.platform.bus, source=call.manager_address,
-                                         via=_via(turn), end=bool(arguments.get("end")), origin=origin)
+                                         via=_via(turn), end=bool(arguments.get("end")), origin=origin,
+                                         from_operator=await operator_call(turn))
     except RequestError as exc:
         raise _request_error(exc) from None
     kept = posted["delivered"] == "kept"
