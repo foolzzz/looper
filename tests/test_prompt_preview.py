@@ -416,3 +416,16 @@ def test_preview_path_knowledge_reuses_launch_index(monkeypatch, tmp_path, store
     assert not any("knowledge is omitted" in note for note in result["notes"])
     if stored_kind:
         assert any("doc-2" in note and "Stored guide" in note and "omitted" in note for note in result["notes"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_manager_preview_tracks_the_turn_context_contract(monkeypatch, enabled):
+    from looper.agents import chat_settings
+    from looper.agents.turn_context import TURN_CONTEXT_CONTRACT
+
+    module, profile, _ = _dependencies(monkeypatch, role="manager")
+    monkeypatch.setattr(chat_settings, "_turn_context_enabled", enabled)
+    result = asyncio.run(module.preview(profile.id, "manager"))
+    assert result["prompt_layers"]["contract"]["name"] == (
+        "TOOLS_CONTRACT+TURN_CONTEXT_CONTRACT" if enabled else "TOOLS_CONTRACT")
+    assert any(TURN_CONTEXT_CONTRACT in (block["text"] or "") for block in result["blocks"]) is enabled

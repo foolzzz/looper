@@ -1295,6 +1295,9 @@ not measured charges. Total estimated $2.29, proposed cap $5; separate authoriza
 is required. Existing assistant baselines contain the original 20 conversations
 only. Merge a measured subset into the corresponding baseline or refresh the full
 27-conversation baseline; do not overwrite the 20-case baseline with a subset.
+Add `--turn-context` to enable per-turn context through `turn_context_settings.update`
+on each disposable server and read its timezone through `turn_context_settings.get`;
+the default leaves that switch off. The result records the selected switch.
 `--manager-model` and `--manager-effort` override the selected Manager profile.
 `--jobs > 1` under a total cap requires `--case-budget-usd`, reserving that amount for
 in-flight cases. The runner stops admitting cases at the total cap and checks spending
