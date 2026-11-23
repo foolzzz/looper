@@ -1013,6 +1013,33 @@ describe("subscription schedules", () => {
     expect(writes[0]).not.toHaveProperty("notify_target");
   });
 
+  it.each([false, "unavailable"])("hides the triage preset when its switch is %s", async (enabled) => {
+    const fetch = vi.fn(async (url: RequestInfo | URL) => {
+      let result: unknown;
+      if (url === "/api/v1/schedule_admin/project_list") result = { schedules: [], limits: {
+        default_timezone: "UTC", name_max_chars: 80, requirement_max_chars: 10000, run_timeout_default_seconds: 60,
+        run_timeout_max_seconds: 2592000, roles: ["planner"], gate_command_max_chars: 2000, gate_timeout_default_seconds: 30,
+        gate_timeout_max_seconds: 300, max_parallel_runs_limit: 10, concurrency_max: 100, notify_targets: [],
+      } };
+      else if (url === "/api/v1/managers/list") result = { managers: [], max_enabled: 8 };
+      else if (url === "/api/v1/registry/view") result = { providers: [], profiles: [] };
+      else if (url === "/api/v1/triage_settings/get") {
+        if (enabled === "unavailable") return Response.json({ status: "error", error: { code: "unavailable", message: "Unavailable" } }, { status: 503 });
+        result = { enabled };
+      } else throw new Error(`Unexpected request: ${url}`);
+      return Response.json({ status: "ok", result });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await act(async () => root.render(<ProjectSchedulesSection project={{ project_id: "project", name: "Example" } as Project} linked="" onLink={() => {}} />));
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text);
+    await act(async () => button("New schedule")!.click());
+    await act(async () => container.querySelector<HTMLInputElement>('input[type="radio"][value="subscription"]')!.click());
+    expect(button("事件分流")).toBeUndefined();
+    expect(button("消息线索")).toBeDefined();
+    expect(button("意图识别")).toBeDefined();
+    expect(fetch.mock.calls.every(([url]) => url !== "/api/v1/schedule_admin/subscription_preset")).toBe(true);
+  });
+
   it("offers the triage preset and saves it without a delivery target", async () => {
     const writes: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -1023,6 +1050,7 @@ describe("subscription schedules", () => {
         gate_timeout_max_seconds: 300, max_parallel_runs_limit: 10, concurrency_max: 100,
         notify_targets: [{ channel: "lark", chat: "ou_synthetic", label: "Synthetic direct chat", channel_enabled: true }],
       } };
+      else if (url === "/api/v1/triage_settings/get") result = { enabled: true };
       else if (url === "/api/v1/managers/list") result = { managers: [{ id: "manager", enabled: true }], max_enabled: 8 };
       else if (url === "/api/v1/registry/view") result = { providers: [], profiles: [] };
       else if (url === "/api/v1/schedule_admin/subscription_preset") result = { fields: {

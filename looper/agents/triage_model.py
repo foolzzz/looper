@@ -52,11 +52,12 @@ class ExtractCounts:
     ignore: int = 0
     uncited: int = 0
     raised: int = 0
+    none: bool = False
     dropped: dict[str, int] = field(default_factory=dict)
 
-    def as_dict(self) -> dict[str, int | dict[str, int]]:
+    def as_dict(self) -> dict[str, int | bool | dict[str, int]]:
         return {"important": self.important, "digest": self.digest, "ignore": self.ignore, "uncited": self.uncited,
-                "raised": self.raised, "dropped": dict(self.dropped)}
+                "raised": self.raised, "none": self.none, "dropped": dict(self.dropped)}
 
 
 _EVENT_ID = re.compile(r"(?:E-)?([0-9]{1,18})", re.IGNORECASE)

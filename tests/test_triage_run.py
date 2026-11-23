@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -59,7 +60,9 @@ def test_highest_category_wins_and_ties_keep_the_first_item():
     assert by_title["First"]["window_sources"] == [11]
     assert by_title["A decision"]["window_sources"] == [12]
     assert by_title[""]["window_sources"] == [13]
-    assert parsed.dropped == {"no_sources": 1}
+    assert parsed.dropped == {}
+    assert by_title["Second"]["window_sources"] == []
+    assert by_title["A decision"]["sources"] == [11, 12]
 
 
 def test_instructions_seen_only_resolves_known_message_refs():
@@ -71,10 +74,11 @@ def test_instructions_seen_only_resolves_known_message_refs():
 def test_floor_raises_unanswered_dm_and_mention_but_preserves_important_and_answered():
     async def check():
         rows = [{"seq": n, "chat_id": f"chat-{n}", "sender_id": "synthetic-peer", "chat_kind": "p2p",
-                 "mentions_me": False} for n in range(1, 6)]
+                 "mentions_me": False, "sender_kind": "user", "origin": "live",
+                 "sent_at": datetime(2026, 1, 1, tzinfo=timezone.utc)} for n in range(1, 6)]
         rows[4].update(chat_kind="group", mentions_me=True)
         conn = AsyncMock()
-        conn.fetch.return_value = [{"chat_id": "chat-2", "seq": 7}]
+        conn.fetch.return_value = [{"chat_id": "chat-2", "sent_at": datetime(2026, 1, 2, tzinfo=timezone.utc)}]
         parsed = triage_run.parse(reply([event(category="important", sources=["m3"])],
                                        [{"sources": ["m1", "m2", "m4", "m5"], "reason": "Routine"}]),
                                   {f"m{n}": n for n in range(1, 6)})
@@ -89,3 +93,19 @@ def test_floor_raises_unanswered_dm_and_mention_but_preserves_important_and_answ
         assert items[5]["title"] == "未回复的 @你"
         assert items[1]["summary"] == "" and items[1]["confidence"] == "high"
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("text", ["NONE", "```\nNONE\n```", "```text\nNONE\n```"])
+def test_none_accepts_code_fences_and_keeps_a_typed_marker(text):
+    parsed = triage_run.parse(text, {"m1": 11})
+    assert parsed.state == "quiet" and parsed.none is True
+
+
+def test_missing_ignored_is_empty_and_items_are_capped_across_both_lists():
+    from looper.agents.extraction import ITEMS_MAX
+
+    assert triage_run.parse(json.dumps({"events": [event()]}), {"m1": 11}).state == "items"
+    parsed = triage_run.parse(reply([event()] * (ITEMS_MAX - 1),
+                                   [{"sources": ["m1"], "reason": "Routine"}] * 3), {"m1": 11})
+    assert len(parsed.items) == ITEMS_MAX
+    assert parsed.dropped == {"over_limit": 2}

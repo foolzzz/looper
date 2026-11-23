@@ -50,6 +50,7 @@ import {
   type TaskRole,
 } from "@/lib/api";
 import { subscriptionPreset, type SubscriptionPresetFields } from "@/lib/api-leads";
+import { callV1 } from "@/lib/v1";
 import { roleLabel } from "@/lib/runtime-catalog";
 import {
   scheduleNotifyOptions,
@@ -1573,6 +1574,15 @@ function SubscriptionForm({
   onTask?: () => void;
 }) {
   const [draft, setDraft] = useState(() => subDraftOf(schedule, limits));
+  const [triageEnabled, setTriageEnabled] = useState(false);
+  useEffect(() => {
+    if (schedule) return;
+    let alive = true;
+    callV1<{ enabled: boolean }>("/api/v1/triage_settings/get", {}).then((result) => {
+      if (alive) setTriageEnabled(!("status" in result) && result.enabled);
+    }).catch(() => { if (alive) setTriageEnabled(false); });
+    return () => { alive = false; };
+  }, [schedule]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -1650,7 +1660,7 @@ function SubscriptionForm({
         <div className="flex flex-wrap gap-2">
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("leads")}>消息线索</Button>
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("intents")}>意图识别</Button>
-          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("triage")}>事件分流</Button>
+          {triageEnabled && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("triage")}>事件分流</Button>}
         </div>
       )}
       <div className="grid gap-3 sm:grid-cols-2">

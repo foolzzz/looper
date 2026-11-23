@@ -47,7 +47,7 @@ def test_none_counts_the_exact_window_as_ignored_without_rows_and_advances(monke
         run = await fire(env, sid)
         assert (run["status"], run["stream"]["outcome"]) == ("completed", "quiet")
         counts = json.loads(run["stream"]["extract_counts"])
-        assert counts == {"important": 0, "digest": 0, "ignore": 2, "uncited": 0, "raised": 0, "dropped": {}}
+        assert counts == {"important": 0, "digest": 0, "ignore": 2, "uncited": 0, "raised": 0, "none": True, "dropped": {}}
         assert run["stream"]["window_seqs"] == seqs
         assert await cursor(env, sid) == await db_subs.committed_seq(env.pool, SOURCE)
         assert await env.pool.fetchval("SELECT count(*) FROM triage_events") == 0
@@ -110,7 +110,7 @@ def test_events_link_their_sources_mark_instructions_and_leave_uncited_messages_
         run = await fire(env, sid)
         assert run["status"] == "completed" and run["stream"]["outcome"] == "extracted"
         counts = json.loads(run["stream"]["extract_counts"])
-        assert counts == {"important": 1, "digest": 1, "ignore": 2, "uncited": 1, "raised": 0, "dropped": {}}
+        assert counts == {"important": 1, "digest": 1, "ignore": 2, "uncited": 1, "raised": 0, "none": False, "dropped": {}}
         assert run["stream"]["window_seqs"] == seqs
         rows = await env.pool.fetch("SELECT * FROM triage_events ORDER BY id")
         assert len(rows) == 3
@@ -140,8 +140,8 @@ def test_events_link_their_sources_mark_instructions_and_leave_uncited_messages_
 
 
 def test_an_unanswered_ignored_dm_is_raised_but_an_answered_or_important_one_is_not(monkeypatch, tmp_path):
-    reply = json.dumps({"events": [event("m3", category="important")],
-                        "ignored": [{"sources": ["m1", "m2"], "reason": "Routine messages"}],
+    reply = json.dumps({"events": [event("m4", category="important")],
+                        "ignored": [{"sources": ["m1", "m2", "m3"], "reason": "Routine messages"}],
                         "instructions_seen": []})
 
     async def check(env, poster, fake):
@@ -152,14 +152,14 @@ def test_an_unanswered_ignored_dm_is_raised_but_an_answered_or_important_one_is_
                              sent_at=minutes_ago(env, 8))
         important = await add(env.pool, "Urgent synthetic DM", chat_id="oc_important", kind="p2p",
                               sent_at=minutes_ago(env, 7))
-        # This reply is in the same seq interval but deliberately absent from the selected window.
-        await add(env.pool, "The operator already answered", chat_id="oc_answered", kind="p2p", sender=DM,
-                  origin="import", sent_at=minutes_ago(env, 6))
+        # A live operator reply counts by sent_at and remains eligible for the selected window.
+        answer = await add(env.pool, "The operator already answered", chat_id="oc_answered", kind="p2p", sender=DM,
+                  origin="live", sent_at=minutes_ago(env, 6))
         run = await fire(env, sid)
-        rows = await env.pool.fetch("SELECT e.*, s.event_seq FROM triage_events e JOIN triage_event_sources s "
-                                    "ON s.event_id = e.id ORDER BY s.event_seq")
-        by_seq = {row["event_seq"]: row for row in rows}
-        assert set(by_seq) == {unanswered, answered, important}
+        from dataclasses import asdict
+        from looper.db import triage_events
+        by_seq = {seq: asdict((await triage_events.for_message(seq, db=env.pool))[0])
+                  for seq in (unanswered, answered, important, answer)}
         raised = by_seq[unanswered]
         assert (raised["category"], raised["reason_kind"], raised["title"], raised["summary"], raised["reason"],
                 raised["confidence"]) == ("digest", "raised", "未回复的私聊", "",
@@ -167,8 +167,8 @@ def test_an_unanswered_ignored_dm_is_raised_but_an_answered_or_important_one_is_
         assert (by_seq[answered]["category"], by_seq[answered]["reason_kind"]) == ("ignore", "model")
         assert (by_seq[important]["category"], by_seq[important]["reason_kind"]) == ("important", "model")
         counts = json.loads(run["stream"]["extract_counts"])
-        assert (counts["important"], counts["digest"], counts["ignore"], counts["raised"]) == (1, 1, 1, 1)
-        assert run["stream"]["window_seqs"] == [unanswered, answered, important]
+        assert (counts["important"], counts["digest"], counts["ignore"], counts["raised"]) == (1, 1, 2, 1)
+        assert run["stream"]["window_seqs"] == [unanswered, answered, important, answer]
 
     scenario(check, monkeypatch, tmp_path, reply=reply)
 
@@ -187,7 +187,7 @@ def test_raise_floor_queries_replies_outside_the_supplied_window_rows(monkeypatc
         held = await triage_run.raise_floor(pool, parsed, rows, source=src, window_end_seq=answer)
         assert len(held.items) == 1 and held.items[0]["category"] == "ignore"
         before_answer = await triage_run.raise_floor(pool, parsed, rows, source=src, window_end_seq=first)
-        assert len(before_answer.items) == 1 and before_answer.items[0]["reason_kind"] == "raised"
+        assert [item["reason_kind"] for item in before_answer.items if item["window_sources"]] == ["raised"]
 
     run_db(check, monkeypatch)
 
@@ -319,7 +319,7 @@ def test_triage_refuses_a_chat_allowlist_and_a_second_model_check(monkeypatch, t
     scenario(check, monkeypatch, tmp_path)
 
 
-def test_creating_or_updating_triage_while_off_is_rejected(monkeypatch, tmp_path):
+def test_switch_off_refuses_creation_but_allows_disabling_and_renaming(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         await source(env.pool)
         fields = (await env.ok("POST", "/api/v1/schedule_admin/subscription_preset",
@@ -329,10 +329,18 @@ def test_creating_or_updating_triage_while_off_is_rejected(monkeypatch, tmp_path
         assert status == 400 and triage_settings.TURNED_OFF in json.dumps(body)
         sid = await triager(env)
         await triage_settings.update(False)
-        status, body = await env.call("POST", "/api/v1/schedule_admin/update",
-                                      {"schedule_id": sid, "fields": {"subscription": {"max_events": 20}}})
-        assert status == 400 and triage_settings.TURNED_OFF in json.dumps(body)
-        assert fake.calls == []
+        before = await cursor(env, sid)
+        run = await fire(env, sid)
+        assert (run["status"], run["error"]) == ("skipped_gate", triage_settings.TURNED_OFF)
+        await env.ok("POST", "/api/v1/schedule_admin/update",
+                     {"schedule_id": sid, "fields": {"enabled": False}})
+        await env.ok("POST", "/api/v1/schedule_admin/update",
+                     {"schedule_id": sid, "fields": {"name": "Renamed while off"}})
+        await env.ok("POST", "/api/v1/schedule_admin/update",
+                     {"schedule_id": sid, "fields": {"subscription": {"max_events": 20}}})
+        stored = await db_schedules.get_schedule(sid)
+        assert stored["name"] == "Renamed while off" and not stored["enabled"]
+        assert await cursor(env, sid) == before and fake.calls == []
 
     scenario(check, monkeypatch, tmp_path)
 
@@ -379,3 +387,73 @@ def test_an_orphaned_triage_run_is_interrupted_and_its_next_confirmed_run_reads_
         assert len(fake.calls) == 1 and await env.pool.fetchval("SELECT count(*) FROM triage_events") == 0
 
     scenario(check, monkeypatch, tmp_path, reply="NONE")
+
+
+def test_shared_citations_keep_every_link_and_flag_but_count_only_the_highest_category(monkeypatch, tmp_path):
+    from looper.db import triage_events
+
+    reply = json.dumps({"events": [event("m1", "m2", "c1", title="Digest"),
+                                   event("m1", "c1", category="important", title="Important"),
+                                   event("m1", "c1", title="Shared only")],
+                        "ignored": [], "instructions_seen": ["m1", "c1"]})
+
+    async def check(env, poster, fake):
+        await source(env.pool)
+        context = await add(env.pool, "Earlier context", sender=DM, sent_at=minutes_ago(env, 30))
+        sid = await triager(env)
+        seqs = [await add(env.pool, "My synthetic update", sender=DM, sent_at=minutes_ago(env, n)) for n in (9, 8)]
+        run = await fire(env, sid)
+        counts = json.loads(run["stream"]["extract_counts"])
+        assert (counts["important"], counts["digest"], counts["ignore"], counts["dropped"]) == (1, 1, 0, {})
+        events = await triage_events.for_run(run["id"], db=env.pool)
+        assert len(events) == 3 and all(item.flagged for item in events)
+        links = await triage_events.source_rows([item.id for item in events], db=env.pool)
+        assert {item.title: {row["seq"] for row in links[item.id]} for item in events} == {
+            "Important": {seqs[0], context}, "Digest": {*seqs, context}, "Shared only": {seqs[0], context}}
+        cited = await triage_events.for_message(seqs[0], db=env.pool)
+        assert cited[0].category == "important" and len(cited) == 3
+        await env.pool.execute("DELETE FROM source_events WHERE seq = $1", seqs[0])
+        assert await triage_events.for_run(run["id"], db=env.pool) == []
+        assert poster.sent == []
+
+    scenario(check, monkeypatch, tmp_path, reply=reply)
+
+
+@pytest.mark.parametrize("sender_kind,origin,reply_origin,reply_offset,expected", [
+    ("app", "live", None, 1, "ignore"),
+    ("user", "import", None, 1, "ignore"),
+    ("user", "live", "import", 1, "digest"),
+    ("user", "live", "live", -1, "digest"),
+    ("user", "live", "live", 1, "ignore"),
+])
+def test_floor_uses_live_user_messages_and_reply_send_time(monkeypatch, sender_kind, origin,
+                                                          reply_origin, reply_offset, expected):
+    async def check(pool):
+        await source(pool)
+        now = datetime.now(timezone.utc)
+        first = await add(pool, "Synthetic request", chat_id="oc_dm", kind="p2p", sent_at=now,
+                          sender_kind=sender_kind, origin=origin)
+        end = first
+        if reply_origin:
+            end = await add(pool, "Synthetic answer", chat_id="oc_dm", kind="p2p", sender=DM,
+                            sent_at=now + timedelta(seconds=reply_offset), origin=reply_origin)
+        rows = [dict(await pool.fetchrow("SELECT e.*, 'p2p' AS chat_kind FROM source_events e WHERE seq = $1", first))]
+        src = dict(await pool.fetchrow("SELECT * FROM event_sources WHERE id = $1", SOURCE))
+        parsed = triage_run.parse(json.dumps({"events": [], "ignored": [
+            {"sources": ["m1"], "reason": "Routine"}]}), {"m1": first})
+        held = await triage_run.raise_floor(pool, parsed, rows, source=src, window_end_seq=end)
+        assert [item["category"] for item in held.items if item["window_sources"]] == [expected]
+
+    run_db(check, monkeypatch)
+
+
+def test_none_marker_survives_the_code_floor(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await triager(env)
+        await add(env.pool, "Unanswered synthetic DM", kind="p2p", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        counts = json.loads(run["stream"]["extract_counts"])
+        assert counts["none"] is True and counts["raised"] == counts["digest"] == 1
+        assert counts["uncited"] == counts["ignore"] == 0
+
+    scenario(check, monkeypatch, tmp_path, reply="```text\nNONE\n```")

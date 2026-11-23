@@ -1,4 +1,4 @@
-"""Event triage: validate exclusive citations, raise unanswered messages and store local outcomes."""
+"""Event triage: preserve citations and count exclusive categories, raise unanswered messages and store local outcomes."""
 
 from __future__ import annotations
 
@@ -56,12 +56,14 @@ class DropReason(StrEnum):
     MALFORMED = "malformed"
     SOURCE_DELETED = "source_deleted"
     CHAT_EXCLUDED = "chat_excluded"
+    OVER_LIMIT = "over_limit"
 
 
 @dataclass
 class TriageParsed:
     state: str
     reason: str = ""
+    none: bool = False
     items: list[dict[str, Any]] = field(default_factory=list)
     instructions_seen_seqs: list[int] = field(default_factory=list)
     dropped: Counter[DropReason] = field(default_factory=Counter)
@@ -110,34 +112,36 @@ def _item(raw: Any, refs: extraction.Refs, *, ignored: bool) -> dict[str, Any]:
 def parse(reply: str, refs: extraction.Refs) -> TriageParsed:
     """Resolve only known references; an invalid item never discards a valid sibling."""
     text = reply.strip()
+    fenced = extraction._FENCE.match(text)
+    if fenced:
+        text = fenced.group(1).strip()
     if text == extraction.QUIET_WORD:
-        return TriageParsed("quiet", reason="处理器回复了 NONE")
+        return TriageParsed("quiet", reason="处理器回复了 NONE", none=True)
     data, why = extraction._reply_object("events", text)
     if why:
         return TriageParsed("invalid", reason=why)
-    if not isinstance(data, dict) or not isinstance(data.get("events"), list) or not isinstance(data.get("ignored"), list):
+    if not isinstance(data, dict) or not isinstance(data.get("events"), list) or not isinstance(data.get("ignored", []), list):
         return TriageParsed("invalid", reason="the reply needs events and ignored lists")
     seen = data.get("instructions_seen")
     parsed = TriageParsed("items", instructions_seen_seqs=list(dict.fromkeys(
         refs[ref] for ref in (seen if isinstance(seen, list) else [])
         if isinstance(ref, str) and ref[:1] in ("m", "c") and ref in refs)))
-    for ignored, raw_items in ((False, data["events"]), (True, data["ignored"])):
-        for raw in raw_items:
-            try:
-                parsed.items.append(_item(raw, refs, ignored=ignored))
-            except _Drop as drop:
-                parsed.dropped[drop.reason] += 1
+    raw_items = [(False, raw) for raw in data["events"]] + [(True, raw) for raw in data.get("ignored", [])]
+    if len(raw_items) > extraction.ITEMS_MAX:
+        parsed.dropped[DropReason.OVER_LIMIT] = len(raw_items) - extraction.ITEMS_MAX
+    for ignored, raw in raw_items[:extraction.ITEMS_MAX]:
+        try:
+            parsed.items.append(_item(raw, refs, ignored=ignored))
+        except _Drop as drop:
+            parsed.dropped[drop.reason] += 1
     claimed: set[int] = set()
     rank = {Category.IMPORTANT: 0, Category.DIGEST: 1, Category.IGNORE: 2}
     kept = []
     for item in sorted(parsed.items, key=lambda item: rank[item["category"]]):
         window = [seq for seq in item["window_sources"] if seq not in claimed]
-        if not window:
-            parsed.dropped[DropReason.NO_SOURCES] += 1
-            continue
-        sources = [seq for seq in item["sources"] if seq not in claimed]
-        kept.append({**item, "sources": sources, "window_sources": window})
-        claimed.update(sources)
+        # Exclusivity is only for counts; every citation remains provenance, even for a zero-count item.
+        kept.append({**item, "window_sources": window})
+        claimed.update(window)
     parsed.items = kept
     return parsed
 
@@ -162,24 +166,26 @@ async def raise_floor(conn: Any, parsed: TriageParsed, rows: Sequence[Mapping[st
     user = source.get("user_open_id")
     if not user:
         return parsed
-    categories = {seq: item["category"] for item in parsed.items for seq in item["sources"]}
-    candidates = [row for row in rows if row.get("sender_id") != user
+    categories = {seq: item["category"] for item in parsed.items for seq in item["window_sources"]}
+    candidates = [row for row in rows if row.get("sender_kind") == "user" and row.get("origin") != "import"
+                  and row.get("sender_id") != user
                   and (row.get("chat_kind") == "p2p" or row.get("mentions_me"))
                   and categories.get(row["seq"], Category.IGNORE) == Category.IGNORE]
     if not candidates:
         return parsed
     replies = await conn.fetch(
-        "SELECT chat_id, max(seq) AS seq FROM source_events WHERE source_id = $1 AND sender_id = $2 "
-        "AND chat_id = ANY($3::text[]) AND seq > $4 AND seq <= $5 GROUP BY chat_id", source["id"], user,
-        sorted({row["chat_id"] for row in candidates}), min(row["seq"] for row in candidates), window_end_seq)
-    last_reply = {row["chat_id"]: row["seq"] for row in replies}
-    raised = [row for row in candidates if last_reply.get(row["chat_id"], 0) <= row["seq"]]
+        "SELECT chat_id, max(sent_at) AS sent_at FROM source_events WHERE source_id = $1 AND sender_id = $2 "
+        "AND sender_kind = 'user' AND origin <> 'import' AND chat_id = ANY($3::text[]) "
+        "AND sent_at > $4 AND seq <= $5 GROUP BY chat_id", source["id"], user,
+        sorted({row["chat_id"] for row in candidates}), min(row["sent_at"] for row in candidates), window_end_seq)
+    last_reply = {row["chat_id"]: row["sent_at"] for row in replies}
+    raised = [row for row in candidates if row["chat_id"] not in last_reply
+              or last_reply[row["chat_id"]] <= row["sent_at"]]
     seqs = {row["seq"] for row in raised}
     items = []
     for item in parsed.items:
         window = [seq for seq in item["window_sources"] if seq not in seqs]
-        if window:
-            items.append({**item, "sources": [seq for seq in item["sources"] if seq not in seqs], "window_sources": window})
+        items.append({**item, "window_sources": window})
     items.extend({"category": Category.DIGEST, "title": "未回复的私聊" if row.get("chat_kind") == "p2p" else "未回复的 @你",
                   "summary": "", "reason": "操作者还没在这个会话里回复（代码保底）", "reason_kind": ReasonKind.RAISED,
                   "confidence": Confidence.HIGH, "sources": [row["seq"]], "window_sources": [row["seq"]]} for row in raised)
@@ -206,7 +212,7 @@ async def store(conn: Any, parsed: TriageParsed, *, source_id: str, schedule_id:
         if any(events[seq]["chat_id"] in revoked for seq in sources):
             dropped[DropReason.CHAT_EXCLUDED] += 1
             continue
-        if len(sources) != len(item["sources"]) or not window:
+        if len(sources) != len(item["sources"]) or not sources:
             # Retaining text after losing any citation could preserve text derived from a deleted message.
             dropped[DropReason.SOURCE_DELETED] += 1
             continue
@@ -226,7 +232,7 @@ async def store(conn: Any, parsed: TriageParsed, *, source_id: str, schedule_id:
     uncited = len(set(seqs) - cited)
     categories[Category.IGNORE] += uncited
     counts = ExtractCounts(important=categories[Category.IMPORTANT], digest=categories[Category.DIGEST],
-                           ignore=categories[Category.IGNORE], uncited=0 if parsed.reason == "处理器回复了 NONE" else uncited,
+                           ignore=categories[Category.IGNORE], uncited=0 if parsed.none else uncited, none=parsed.none,
                            raised=raised, dropped=dict(dropped))
     await conn.execute("UPDATE subscription_runs SET window_seqs = $2::bigint[], extract_counts = $3::jsonb "
                        "WHERE run_id = $1", run_id, seqs, json.dumps(counts.as_dict(), sort_keys=True))

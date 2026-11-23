@@ -19,7 +19,7 @@ def test_event_ids_and_uncited_counts_are_typed():
         parse_event_id("lead-123")
     counts = ExtractCounts(ignore=2, uncited=1, raised=1, dropped={"missing_source": 3})
     assert counts.as_dict() == {"important": 0, "digest": 0, "ignore": 2, "uncited": 1, "raised": 1,
-                                "dropped": {"missing_source": 3}}
+                                "none": False, "dropped": {"missing_source": 3}}
     with pytest.raises(FrozenInstanceError):
         counts.ignore = 4
 
@@ -56,7 +56,7 @@ def test_event_reads_are_typed_stable_and_read_only(monkeypatch):
             assert row.manager_event_id is None and row.briefed_run_id is None
             assert (await triage_events.get(ids[1], db=conn)).reason_kind is ReasonKind.RAISED
             assert await triage_events.get(ids[-1] + 1, db=conn) is None
-            assert [event.id for event in await triage_events.for_message(seqs[0], db=conn)] == ids
+            assert [event.id for event in await triage_events.for_message(seqs[0], db=conn)] == list(reversed(ids))
             assert [event.id for event in await triage_events.for_run("triage-run", db=conn)] == ids
             assert await triage_events.for_message(seqs[-1] + 1, db=conn) == []
             assert await triage_events.for_run("missing", db=conn) == []

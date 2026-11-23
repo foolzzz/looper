@@ -862,7 +862,6 @@ async def _subscription_changes(conn: asyncpg.Connection, row: Mapping[str, Any]
         raise RequestError(HTTP_400, "a subscription's output_kind cannot change; create a new subscription")
     try:
         subscriptions.check_extraction({**current, **changes})
-        await subscriptions.check_triage_enabled({**current, **changes}, conn)
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     if changes.get("window", current["window"]) == "cursor" and (

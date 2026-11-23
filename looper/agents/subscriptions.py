@@ -145,7 +145,7 @@ def check_extraction(sub: Mapping[str, Any]) -> None:
 
 async def check_triage_enabled(sub: Mapping[str, Any], db: Any = None) -> None:
     if output_kind(sub) == "triage" and not await triage_settings.enabled(db):
-        raise ValueError(f"cannot create or update a triage subscription: {triage_settings.TURNED_OFF}")
+        raise ValueError(f"cannot create a triage subscription: {triage_settings.TURNED_OFF}")
 
 
 _PARSERS = {

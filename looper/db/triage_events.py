@@ -30,10 +30,10 @@ async def get(event_id: int, *, db: Db | None = None) -> TriageEvent | None:
 
 
 async def for_message(event_seq: int, *, db: Db | None = None) -> list[TriageEvent]:
-    """Events citing this message, in id order; an uncited window is not an event citation."""
+    """Events citing this message, highest category first then earliest id; an uncited window is not an event citation."""
     rows = await _db(db).fetch(
         "SELECT e.* FROM triage_events e JOIN triage_event_sources s ON s.event_id = e.id "
-        "WHERE s.event_seq = $1 ORDER BY e.id", event_seq)
+        "WHERE s.event_seq = $1 ORDER BY CASE e.category WHEN 'important' THEN 0 WHEN 'digest' THEN 1 ELSE 2 END, e.id", event_seq)
     return [_event(row) for row in rows]
 
 
