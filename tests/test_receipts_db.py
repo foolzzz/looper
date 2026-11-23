@@ -711,9 +711,10 @@ def test_a_reset_named_session_does_not_read_the_notes_left_in_it(monkeypatch: p
 
         async def ask_and_press() -> None:
             turn = _turn("om_ask")
-            ops.begin_turn(turn, session_key="group:g1")
-            await ops.call("looper_projects", DELETE)
+            ops.begin_turn(turn, "b-ask", session_key="group:g1")
+            asked = await ops.call("looper_projects", DELETE, binding="b-ask", session_key="group:g1")
             ops.end_turn(turn)
+            assert asked["status"] == "needs_confirmation", asked
             await (await press(_value(turn))).later
 
         await ask_and_press()
