@@ -538,17 +538,17 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 76 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- haiku on all 77 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
-- sonnet on all 76 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+- sonnet on all 77 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all 76 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 77 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
   --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
 
 Omitting `--dialogs` selects every dialog in `dialogs.select(None)`: currently
-76, or 228 case/reps per three-rep tier. A complete 76-dialog cost measurement is blocked
+77, or 231 case/reps per three-rep tier. A complete 77-dialog cost measurement is blocked
 pending evaluation credentials, a fresh disposable database/runtime root and
 an authorized budget. Set the three `*_DIALOG_CAP_USD` variables to explicitly
 authorized candidate measurement ceilings before running these commands;
@@ -557,8 +557,8 @@ until each tier completes. Do not extrapolate from the committed 24-dialog
 reports: at clean commit `c9ac42d5c562306259203790cb23766d9abed34f`,
 `dialogs-real-haiku.json` covers 72 rows / $4.226970 and
 `dialogs-real-opus.json` covers 72 rows / $8.426588 (other roles on haiku).
-Neither measures the current 76-dialog selection; no Sonnet dialog report exists.
-After each full real candidate run, verify all 76 IDs at reps 1–3, no cap stop,
+Neither measures the current 77-dialog selection; no Sonnet dialog report exists.
+After each full real candidate run, verify all 77 IDs at reps 1–3, no cap stop,
 skipped or error rows, and reconcile row costs with the report total. Record
 the candidate commit, models/Manager effort, selected IDs/count, repetitions,
 row count and measured total here before deriving numeric caps with headroom.
@@ -640,6 +640,20 @@ RFC, section 5). Run them with Sonnet at two reps and the opus xhigh Manager at 
 above say, with `--dialogs leads_background,leads_dont_search,leads_conflict,leads_instruction,leads_task_requirement`;
 `status` and `confirm_create_start` with leads off show that the default path is unchanged. Group chats, other
 senders and turning leads off are unit tests (`tests/test_leads_manager_tool_db.py`).
+
+#### Delivery recovery
+
+`tools_only_no_text` enables `manager.delivery_guard.enabled` through its operator-only operation. In fake
+mode the first turn reads the projects and ends without text, and the hidden follow-up delivers the answer.
+The check requires two records in the same session, the exact hidden input and the follow-up annotation.
+Real models may answer immediately; that checks normal delivery with the guard enabled, rather than forcing
+them to produce an empty turn.
+
+`dialogs --delivery-guard` enables the guard in every selected dialog's disposable server. The JSON records
+the number of hidden follow-ups per dialog (`followups`), and the Markdown report gives their total. Select
+the affected tools and reply dialogs explicitly with `--dialogs`; run fake mode first. Real-mode comparisons
+require separate authorization: Sonnet at two reps and the Opus xhigh Manager at one rep, each with a $3
+total cap and the guard on. A fake pass checks wiring, not model behavior.
 
 #### The Manager's state block
 
@@ -846,6 +860,7 @@ database, a disposable `looper serve`, and fake or real mode.
 
 | dialog | what it checks |
 |---|---|
+| `tools_only_no_text` | the delivery guard recovers a successful tool-only turn with a hidden follow-up; fake mode requires two records in the same session and the recovery annotation |
 | `workflow_named` | a task created after confirmation uses the workflow the user named, stores its snapshot and names it in the reply |
 | `workflow_unspecified` | with a workflow available but none requested, a confirmed task on a project without a default uses no workflow |
 | `template_review_task` | a scenario Manager (`code-review`, from `docs/examples`): a PR link is restated and confirmation asked before anything is created; 「确认」 creates one task from the `pr_review` template with that link |
@@ -917,7 +932,7 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode now selects all 76 dialogs by
+MCP; it takes about two minutes. Real mode now selects all 77 dialogs by
 default. The committed cost references cover only 24 dialogs (see the release
 tiers above), so neither they nor the default `--total-cap-usd` (0.50)
 establish a sufficient cap. Use an explicitly authorized measurement ceiling
@@ -936,7 +951,7 @@ content in `<untrusted>` blocks; compare with the same dialogs without it),
 `--claude <executable>` (the real Claude Code CLI; default `claude` on PATH),
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
-does not establish a cap for the current 76 dialogs; give it
+does not establish a cap for the current 77 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
