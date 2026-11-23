@@ -129,7 +129,7 @@
 
 和抽取一样，入库和结束运行、推进游标在同一个事务里：
 - 先锁住出处，再复核确认；复核不过，这次运行取消，游标不动。
-- 当前运行阶段（PR ②）只写 `triage_events` 和 `triage_event_sources`；`important.manager_event_id` 保持 NULL，不向尚未接入分流回合的完成事件队列写入。管家交接在 PR ④ 实现后，才在同一个事务里写 `manager_events`。
+- 当前运行阶段（PR ②）只写 `triage_events` 和 `triage_event_sources`；`important.manager_event_id` 保持 NULL，不向尚未接入分流回合的完成事件队列写入。PR ④ 起，同一个事务里为「至少拥有一条窗口消息」的重要事件写 `manager_events`（被更高类别或更早的同类事件完全覆盖的事件不写，见 `owned_counts`）。
 - `window_seqs` 只存实际选中、渲染后保留的窗口消息；跳过的窗口也保存它。类别计数按窗口消息计，`raised` 是 `digest` 的子集，`uncited` 是 `ignore` 的子集。
 - 显式忽略组落一行事件，标题和摘要为空。未引用消息不落事件行，基础层的 `reason_kind = uncited` 枚举在本阶段不用于写入。`NONE` 将全窗口计为忽略而不建事件；未回复私聊和 @ 的代码保底仍只调高类别。
 
