@@ -148,6 +148,10 @@ def _operations() -> dict[str, Any]:
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     # Confirmation, including save-and-confirm, and retry can commit to the operator's vault.
     **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
+    "manager_persona.get": INSIDE,  # reads Looper's stored persona; sends nothing
+    "manager_persona.update": INSIDE,  # changes Looper's stored persona; sends nothing
+    "manager_sessions.list": INSIDE,  # reads the default Manager's stored sessions; sends nothing
+    "manager_sessions.reset": INSIDE,  # clears one Looper session; sends nothing
     "providers.limits": INSIDE,  # reads stored quota windows and usage
     "limit_signals_settings.get": INSIDE,  # reads Looper's collection switch
     "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch

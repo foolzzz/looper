@@ -888,6 +888,6 @@ def test_the_dashboard_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         assert (item["name"], item["consecutive_failures"], item["last_status"]) == ("failing", 3, "gate_failed")
         assert item["failures_since"] is not None and item["project_name"] == "alerts"
         assert summary["skipped_today"] == {"skipped_gate": 1, "skipped_overlap": 0, "skipped_missed": 0,
-                                            "skipped_budget": 0}
+                                            "skipped_budget": 0, "skipped_busy": 0}
 
     run_scheduled(test, monkeypatch, tmp_path)
