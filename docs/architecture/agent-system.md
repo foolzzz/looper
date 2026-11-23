@@ -3407,7 +3407,9 @@ evaluation is required before the original schedule requirement is complete.
   sender allowlist allows. Every message is recorded in
   `schedule_notifications`: `sent`, `failed` with the reason (such as a channel
   that is not running), or `dashboard` (no chat, an alert under `never`, or
-  an alert/recovery for a `deliverable` schedule).
+  an alert/recovery for a `deliverable` schedule, a removed target, or no sender).
+  Pre-send refusals retain their reason in `error`; only messages handed to
+  the sender are recorded as `sent` or `failed`.
 - **Deleting.** A project with schedules is not deleted (409) until they are.
   Deleting a schedule (the project's Schedules tab, the Schedules page, the
   schedule's page, `POST /api/v1/schedule_admin/delete` with `schedule_id`, the Manager's
@@ -7359,7 +7361,8 @@ it until recovery, refreshing every 30 seconds. Delivery streaks combine
 `schedule_notifications` sent/failed outcomes with notification, post and chat
 delivery receipts; phase updates, streaming deltas, empty replies and missing
 chat routes cannot prove delivery recovery. A successful send ends a delivery
-failure streak. Dashboard-only schedule messages are not sends.
+failure streak. Dashboard-only schedule messages, including pre-send refusals
+for removed targets or missing senders, are not sends.
 
 Each outage also attempts one operator notice through every other enabled,
 healthy bot with an `operator_sender_id`, and one recovery notice when it
