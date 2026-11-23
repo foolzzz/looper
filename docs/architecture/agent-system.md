@@ -49,6 +49,16 @@ rows without that timestamp fall back to `created_at`. Queue counts include pend
 rows of any age. Gateway events retain at most 10,000 entries for 24 hours in
 memory, with a since-start label until the service has been up for a day.
 
+Task quality is read from the typed `step_attempts` and `task_outcomes` records by the operator-only
+operations `metrics.task_outcomes` (`days`, `project`, `profile`, `difficulty`) and `metrics.step_attempts`
+(`task_id`). A ratio shows from 20 cases with its Wilson 95% interval, else `{"insufficient": true, "n": n}`;
+each figure carries the same figure of the comparison window (the `4 * days` before the window), and a figure
+that cannot be computed returns `{"error": ...}` while the others answer. `coverage_since` is when the records
+begin (nothing is backfilled) and `missing_attempts` counts Worker runs since then with no attempt. Costs split
+per billing basis; an unknown cost is null, never 0. `task_feedback.get` and `task_feedback.set` hold the
+operator's delivery verdict on a completed task; neither the verdict nor its note reaches an agent, and the
+Manager has no tool for it. The dashboard shows the task page's 指标 card and the home page's 任务质量 group.
+
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
