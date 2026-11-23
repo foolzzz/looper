@@ -24,14 +24,15 @@ from typing import TYPE_CHECKING, Any
 from ...db import manager_actions as db_actions, projects as db_projects, tasks as db_tasks, user_gates as db_user_gates
 from .. import gate_service, projects
 from ..managers_api import DEFAULT_MANAGER_ID
-from ..message import channel_address
+from ..message import CancelBy, channel_address
 from ..tiers.journal import clip
 from ..user_gates import MESSAGE_MAX_CHARS
 from . import API_CHANNEL, Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
 from .config import answered
 from .service import (CONFIRM_TOOL, CONFIRMATION_CHATS, CONFIRMATION_SECONDS, MANAGER_TOOLS, Platform, _created_task,
                       _error, _plain)
-from .tasks import TASKS_LISTED, TASKS_SEARCHED, _TASK_ID, _gate_listed, _group, _task_argument, _via, task_workflow_tool
+from .tasks import (TASKS_LISTED, TASKS_SEARCHED, _TASK_ID, _control, _gate_listed, _group, _task_argument, _via,
+                    task_workflow_tool)
 
 if TYPE_CHECKING:
     from ..api_v1 import Principal
@@ -168,8 +169,13 @@ def _client_tasks(original: Tool) -> Tool:
     return replace(original, schema=schema, run=run)
 
 
+async def _client_control(call: Call) -> dict[str, Any]:
+    return await _control(call, by=CancelBy.USER)
+
+
 CLIENT_TOOLS: tuple[Tool, ...] = (*(_client_tasks(t) if t.name == "looper_tasks" else
-                                  task_workflow_tool(t, None) if t.name == "looper_task_create" else t
+                                  task_workflow_tool(t, None) if t.name == "looper_task_create" else
+                                  replace(t, run=_client_control) if t.name == "looper_task_control" else t
                                   for t in MANAGER_TOOLS if t.name not in MANAGER_ONLY), PIPELINE_TOOL,
                                   GATES_TOOL)
 
