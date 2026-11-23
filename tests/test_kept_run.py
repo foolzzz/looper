@@ -5,12 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import random
 import signal
 import shutil
-import string
 import subprocess
 import sys
+import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -57,15 +56,11 @@ def live(pid: int) -> bool:
     return bool(result.stdout.strip()) and not result.stdout.strip().startswith('Z')
 
 
-def short_directory() -> Path:
-    # This checkout leaves just four bytes before the socket filename's limit.
-    # A normal pytest temporary path is too long for a Unix socket on macOS.
-    for suffix in random.sample(string.ascii_letters + string.digits, 62):
-        directory = ROOT / f'.k{suffix}'
-        if not directory.exists():
-            assert len(os.fsencode(directory / keeper.SOCKET)) <= keeper.SOCKET_PATH_MAX
-            return directory
-    raise AssertionError('no short keeper test directory is available')
+@pytest.fixture
+def tmp_path():
+    # Keep Unix sockets short on macOS, with an atomically allocated root per test.
+    with tempfile.TemporaryDirectory(prefix='looper-kept-', dir='/tmp') as directory:
+        yield Path(directory)
 
 
 async def clean_directory(directory: Path) -> None:
@@ -89,18 +84,20 @@ async def clean_directory(directory: Path) -> None:
 
 @asynccontextmanager
 async def opened(tmp_path: Path, body: str = ECHO, *, on_stale=None, grant=None) -> AsyncIterator[KeptRun]:
-    directory = short_directory()
-    executable = fake_claude(tmp_path / 'claude', body)
-    handle = KeptRun(CLAUDE_CODE, [executable], launch=builtin_launch(), cwd=tmp_path,
-                     session_dir=None, label='kept-run test', run_dir=directory,
-                     runtime_root=tmp_path / 'runtime', epoch=1, on_stale=on_stale or (lambda reason: None),
-                     grant=grant)
-    try:
-        await handle.launch()
-        yield handle
-    finally:
-        await handle.end()
-        await clean_directory(directory)
+    # Other modules use this helper with pytest's longer temporary paths.
+    with tempfile.TemporaryDirectory(prefix='looper-kept-', dir='/tmp') as root:
+        directory = Path(root) / 'run'
+        executable = fake_claude(tmp_path / 'claude', body)
+        handle = KeptRun(CLAUDE_CODE, [executable], launch=builtin_launch(), cwd=tmp_path,
+                         session_dir=None, label='kept-run test', run_dir=directory,
+                         runtime_root=tmp_path / 'runtime', epoch=1, on_stale=on_stale or (lambda reason: None),
+                         grant=grant)
+        try:
+            await handle.launch()
+            yield handle
+        finally:
+            await handle.end()
+            await clean_directory(directory)
 
 
 def test_kept_launch_persists_only_its_exported_grant(tmp_path: Path) -> None:
@@ -166,9 +163,8 @@ def test_pool_detaches_a_peer_while_a_completed_run_is_leaving_its_seat(tmp_path
 
     handles = []
 
-    class ShortKeptRun(KeptRun):
+    class TrackedKeptRun(KeptRun):
         def __init__(self, *args, **kwargs):
-            kwargs['run_dir'] = short_directory()
             super().__init__(*args, **kwargs)
             handles.append(self)
 
@@ -183,7 +179,7 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
                   'result': json.dumps({'status': 'completed', 'summary': 'done', 'changed_files': {}})}), flush=True)
 """
     executable = fake_claude(tmp_path / 'claude', body)
-    monkeypatch.setattr(worker, 'KeptRun', ShortKeptRun)
+    monkeypatch.setattr(worker, 'KeptRun', TrackedKeptRun)
     monkeypatch.setattr(worker, 'load_task_limit', AsyncMock(return_value=2))
     monkeypatch.setattr(worker, '_load_settings', AsyncMock(return_value=worker.WorkerSettings(0, 0, 'work')))
 
@@ -363,7 +359,7 @@ def test_error_output_reads_the_stderr_log(tmp_path: Path) -> None:
 
 def test_a_keeper_survives_the_kill_of_its_starters_process_group(tmp_path: Path) -> None:
     async def run() -> None:
-        directory = short_directory()
+        directory = tmp_path / 'run'
         executable = fake_claude(tmp_path / 'claude', 'import time; time.sleep(60)')
         script = f"""\
 import asyncio
@@ -544,7 +540,7 @@ def test_a_new_controller_fences_the_old_run_without_ending_its_child(tmp_path: 
 @pytest.mark.parametrize('connected', [False, True], ids=['default', 'during-initialize'])
 def test_a_failed_keeper_launch_releases_its_directory(tmp_path: Path, monkeypatch, connected: bool) -> None:
     async def run() -> None:
-        directory = short_directory()
+        directory = tmp_path / 'run'
         handle = KeptRun(CLAUDE_CODE, [str(tmp_path / 'absent-claude')], launch=builtin_launch(),
                          cwd=tmp_path, session_dir=None, label='cannot-start test', run_dir=directory,
                          runtime_root=tmp_path / 'runtime', epoch=1, on_stale=lambda reason: None)

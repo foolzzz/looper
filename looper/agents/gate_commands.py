@@ -22,7 +22,7 @@ from ..db import user_gates as db_user_gates
 from .bus import MessageBus
 from .gate_routing import _author, _group
 from .gate_service import (
-    HTTP_400, HTTP_404, HTTP_409, dashboard_target, gate_chat, origin_chat, post_message, receipt,
+    HTTP_400, HTTP_404, HTTP_409, dashboard_target, gate_chat, origin_chat, post_message, receipt, sender_is_operator,
 )
 from .message import AgentAddress, MessageEnvelope, is_lark
 from .projects import RequestError
@@ -203,7 +203,11 @@ async def _gate(envelope: MessageEnvelope, number: str, answer: str, *, has_plan
     try:
         posted = await post_message(entry.task_id, entry.label, {"text": "" if end else answer},
                                     has_planner=has_planner(entry.task_id), bus=bus, source=source,
-                                    via=f"command:{channel}", end=end, origin=origin)
+                                    via=f"command:{channel}", end=end, origin=origin,
+                                    from_operator=await sender_is_operator(
+                                        channel_id, channel, group=_group(channel, context),
+                                        sender=str(context.get("sender_id") or context.get("user_id") or ""))
+                                    if chat_origin else not context.get("client"))  # the dashboard: unless a client
     except RequestError as exc:
         if exc.status in (HTTP_404, HTTP_409):
             return await _fresh_list(envelope, f"【{entry.name}】的 {entry.label} 已经不在等你了（{exc}）。", manager_id, scope)
