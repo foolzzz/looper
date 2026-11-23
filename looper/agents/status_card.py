@@ -4,7 +4,8 @@ Off until the system setting ``status_card.enabled`` is ``true`` (no row, or any
 While it is off, ``status_card.get`` answers conflict and ``/status`` stays an ordinary message. The snapshot
 itself does not check the switch, so a test can build one either way. A section is ``ok``, ``error`` (its source
 could not be read: the text never says that source is empty) or ``unknown`` (this caller cannot read it). A
-feature that is off leaves its section out. There is no recent-receipts section and no per-lane queue count.
+feature that is off leaves its section out, so the ``recent`` receipts section exists only while action receipts are on.
+There is no per-lane queue count.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 ENABLED_KEY = "status_card.enabled"
 FORBIDDEN = "状态只在你本人的私聊和控制台里看。"
 _FAILURE_CHARS = 300
-_LABELS = {"manager": "管家", "tasks": "任务", "schedules": "定时任务", "waiting": "等你", "reminders": "提醒"}
+_LABELS = {"manager": "管家", "tasks": "任务", "schedules": "定时任务", "waiting": "等你", "reminders": "提醒", "recent": "最近"}
 _WAITING = {"gates": "关卡", "confirmations": "确认", "schedules": "失败的定时任务", "logins": "登录",
             "intents": "意图", "ledger": "待办", "deliveries": "可能没送到"}
 _BACKGROUND = {"completion": "收尾", "own": "自己发起"}
@@ -164,8 +165,20 @@ class _RemindersSection(TypedDict):
     next: NotRequired[_ReminderNext | None]
 
 
+class _RecentItem(TypedDict):
+    receipt: str
+    at: str | None
+
+
+class _RecentSection(TypedDict):
+    name: Literal["recent"]
+    state: SectionState
+    error: str | None
+    items: NotRequired[list[_RecentItem]]
+
+
 _Section = (_ManagerSection | _TasksSection | _SchedulesSection | _WaitingSection | _RemindersSection
-            | _ErrorSection | _UnknownSection)
+            | _RecentSection | _ErrorSection | _UnknownSection)
 
 
 class StatusSnapshot(TypedDict):
@@ -320,6 +333,9 @@ async def snapshot(*, fleet: Any, task_router: Any, worker_pool: Any, now: datet
     reminders = await _reminders_section()
     if reminders is not None:
         sections.append(reminders)
+    recent = await _recent_section()
+    if recent is not None:
+        sections.append(recent)
     text = _render(now, sections)
     failed = ",".join(section["name"] for section in sections if section["state"] == "error") or "-"
     elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -532,6 +548,21 @@ async def _reminders_section() -> dict[str, Any] | None:
     return {"name": "reminders", "state": "ok", "error": None, "next": nxt}
 
 
+async def _recent_section() -> dict[str, Any] | None:
+    from . import receipts_settings
+
+    if not receipts_settings.enabled():
+        return None
+    try:
+        from ..db import manager_actions as db_actions
+
+        rows = await db_actions.recent_receipts(hours=24, limit=5)
+    except Exception as exc:
+        return _error("recent", exc)
+    return {"name": "recent", "state": "ok", "error": None,
+            "items": [{"receipt": _plain(row["receipt"]), "at": row["at"]} for row in rows]}
+
+
 def _plain(text: Any) -> str:
     from . import attention
 
@@ -575,6 +606,8 @@ def _section_line(section: Mapping[str, Any], now: datetime) -> str:
         return _schedules_text(section, now)
     if section["name"] == "waiting":
         return _waiting_text(section)
+    if section["name"] == "recent":
+        return _recent_text(section, now)
     return _reminders_text(section, now)
 
 
@@ -698,6 +731,25 @@ def _reminders_text(section: Mapping[str, Any], now: datetime) -> str:
     if not nxt:
         return "提醒：没有待发的"
     return f"提醒：下一条 {_clock(nxt['due_at'], nxt.get('timezone'), now)} {nxt['text']}"
+
+
+def _recent_text(section: Mapping[str, Any], now: datetime) -> str:
+    from . import chat_settings
+
+    items = section["items"]
+    if not items:
+        return "最近：没有"
+    zone = chat_settings.timezone() or None
+    return "最近：" + "；".join(
+        f"{item['receipt']}（{_clock(item['at'], zone, now) if zone else _local_clock(item['at'], now)}）" for item in items)
+
+
+def _local_clock(moment: Any, now: datetime) -> str:
+    """The time in the machine's zone, as the header reads it when no timezone is set."""
+    if not isinstance(moment, datetime):
+        return ""
+    local = moment.astimezone()
+    return local.strftime("%H:%M" if local.date() == now.astimezone().date() else "%m-%d %H:%M")
 
 
 def _clock(moment: Any, zone_name: str | None, now: datetime) -> str:

@@ -165,6 +165,8 @@ class Turn:
     debt: DeliveryDebt | None = None
     # The outside content its calls brought in (source, text), as the outbound review reads it: the leads it found.
     outside: list[tuple[str, str]] = field(default_factory=list)
+    # The receipts whose lines are among ``blocks`` (``agents.receipts``); empty while receipts are off.
+    receipts: list[Any] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.origin is None:
