@@ -13,6 +13,10 @@ before it asks the user (``research_order``; off by default).
 ``manager.metrics.enabled``: operator-only observational metrics, off by default; edited through
 ``manager_metrics_settings.get`` and ``manager_metrics_settings.update``, separately from client chat settings.
 
+``channels.outbound.enabled``: the operator's shared write gateway and durable channel outbox
+(``outbound_enabled``; off by default), configured only through ``outbound_gateway.get/update``.
+Lark is wired first; Telegram follows separately.
+
 ``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
 The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
 
@@ -27,12 +31,17 @@ out; off by default (proactive delivery RFC section 2). Operator-only, through `
 ``morning_brief.enabled`` and ``morning_brief.time``: the weekday morning brief (off by default, 09:15).
 Operator-only, through ``morning_brief.get`` and ``morning_brief.update``. Not part of the chat settings clients see.
 
+``manager.session_routing.enabled`` and ``manager.sessions.max_resident``: whether the default Manager gives each
+group and each other sender's direct chat a session of its own, and how many sessions keep a process resident
+(``session_routing``; off, and 2). Operator-only. Turning routing on names the enabled bots that have no operator
+id: their direct chats stay in the main session. Configured through ``session_routing.get/update``.
+
 Turn context, timezone and reply language have separate operator-only
 ``turn_context_settings.get/update`` operations; they are not client chat settings.
 
-Stop, completion turns, research order, metrics, delivery guard, turn context, the delivery layer and the morning
-brief are kept in memory: ``load`` reads them at startup and updates refresh them. Until loaded, the switches are
-off and the brief's time is 09:15.
+Stop, completion turns, research order, metrics, delivery guard, outbound writes, turn context, the delivery
+layer, session routing and the morning brief are kept in memory: ``load`` reads them at startup and updates
+refresh them. Until loaded, the switches are off and the brief's time is 09:15.
 """
 
 from __future__ import annotations
@@ -41,9 +50,11 @@ import re
 from collections.abc import Mapping
 from dataclasses import asdict
 from enum import Enum
+import math
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import session_routing
 from ..db import ledger as db_ledger
 from ..db import system_settings as db_settings
 
@@ -56,6 +67,11 @@ METRICS_ENABLED_KEY = "manager.metrics.enabled"
 DEFAULT_METRICS_ENABLED = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
+OUTBOUND_ENABLED_KEY = "channels.outbound.enabled"
+DEFAULT_OUTBOUND_ENABLED = False
+OUTBOUND_DEFAULTS = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
+# Rate and edit defaults are conservative platform assumptions, to verify (RFC section 7).
+OUTBOUND_FIELDS = ("outbound_enabled", *OUTBOUND_DEFAULTS)
 DELIVERY_ENABLED_KEY = "delivery.enabled"
 DEFAULT_DELIVERY_ENABLED = False
 MORNING_BRIEF_ENABLED_KEY = "morning_brief.enabled"
@@ -64,6 +80,8 @@ DEFAULT_MORNING_BRIEF_ENABLED = False
 DEFAULT_MORNING_BRIEF_TIME = "09:15"
 _MORNING_BRIEF_TIME = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
+OPERATOR_FIELDS = ("ledger_enabled",)  # only the operator sets the ledger
+SESSION_ROUTING_FIELDS = ("session_routing_enabled", "max_resident")
 
 TURN_CONTEXT_KEY = "manager.turn_context.enabled"
 TIMEZONE_KEY = "user.timezone"
@@ -101,6 +119,8 @@ _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
 _metrics_enabled = DEFAULT_METRICS_ENABLED
+_outbound_enabled = DEFAULT_OUTBOUND_ENABLED
+_outbound_limits = dict(OUTBOUND_DEFAULTS)
 _delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
 _delivery_enabled = DEFAULT_DELIVERY_ENABLED
 _morning_brief_enabled = DEFAULT_MORNING_BRIEF_ENABLED
@@ -157,6 +177,24 @@ async def update_metrics(value: bool | None) -> dict[str, bool]:
     await db_settings.put_settings({METRICS_ENABLED_KEY: None if value is None else ("true" if value else "false")})
     set_metrics_enabled(DEFAULT_METRICS_ENABLED if value is None else value)
     return metrics_view()
+
+
+def outbound_enabled() -> bool:
+    return _outbound_enabled
+
+
+def set_outbound_enabled(value: bool) -> None:
+    """Apply the operator's outbound control in memory; persistent updates go through ``update_outbound``."""
+    global _outbound_enabled
+    _outbound_enabled = value
+
+
+def outbound_limits() -> dict[str, float | int]:
+    return dict(_outbound_limits)
+
+
+def outbound_view() -> dict[str, Any]:
+    return {"outbound_enabled": outbound_enabled(), **outbound_limits()}
 
 
 def delivery_guard_enabled() -> bool:
@@ -265,9 +303,12 @@ async def load() -> bool:
     global _turn_context_enabled, _timezone, _reply_language
     stored = await db_settings.get_settings([
         STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
-        TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, DELIVERY_ENABLED_KEY,
+        TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY, DELIVERY_ENABLED_KEY,
+        session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY,
+        *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
         MORNING_BRIEF_ENABLED_KEY, MORNING_BRIEF_TIME_KEY,
     ])
+    session_routing.apply_stored(stored)
     _turn_context_enabled = stored.get(TURN_CONTEXT_KEY) == "true"
     _timezone = stored.get(TIMEZONE_KEY)
     _reply_language = stored.get(REPLY_LANGUAGE_KEY, "zh-CN")
@@ -282,6 +323,20 @@ async def load() -> bool:
     raw_time = stored.get(MORNING_BRIEF_TIME_KEY)
     set_morning_brief_time(raw_time if isinstance(raw_time, str) and _MORNING_BRIEF_TIME.fullmatch(raw_time)
                            else DEFAULT_MORNING_BRIEF_TIME)
+    set_outbound_enabled(stored.get(OUTBOUND_ENABLED_KEY) == "true")
+    limits = {}
+    for key, default in OUTBOUND_DEFAULTS.items():
+        raw = stored.get("channels.outbound." + key)
+        try:
+            value = float(raw) if raw is not None else default
+            if key == "max_in_flight" and value == int(value):
+                value = int(value)
+            checked_outbound({key: value})
+        except (ValueError, TypeError, OverflowError):
+            value = default
+        limits[key] = value
+    global _outbound_limits
+    _outbound_limits = limits
     try:
         turns = CompletionTurns(stored.get(COMPLETION_TURNS_KEY, DEFAULT_COMPLETION_TURNS.value))
     except ValueError:
@@ -354,6 +409,49 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     return view
 
 
+def session_routing_view() -> dict[str, Any]:
+    return {"session_routing_enabled": session_routing.routing_enabled(),
+            "max_resident": session_routing.max_resident()}
+
+
+def checked_session_routing(body: Mapping[str, Any]) -> dict[str, Any]:
+    if unknown := [key for key in body if key not in SESSION_ROUTING_FIELDS]:
+        raise ValueError(f"unknown session routing setting {unknown[0]!r}")
+    if not body:
+        raise ValueError(f"give at least one of {', '.join(SESSION_ROUTING_FIELDS)} (null: the default)")
+    values: dict[str, Any] = {}
+    if "session_routing_enabled" in body:
+        value = body["session_routing_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("session_routing_enabled must be true, false or null")
+        values["session_routing_enabled"] = value
+    if "max_resident" in body:
+        value = body["max_resident"]
+        values["max_resident"] = None if value is None else session_routing.checked_max_resident(value)
+    return values
+
+
+async def update_session_routing(body: Mapping[str, Any]) -> dict[str, Any]:
+    values = checked_session_routing(body)
+    stored: dict[str, str | None] = {}
+    if "session_routing_enabled" in values:
+        value = values["session_routing_enabled"]
+        stored[session_routing.ROUTING_KEY] = None if value is None else ("true" if value else "false")
+    if "max_resident" in values:
+        value = values["max_resident"]
+        stored[session_routing.MAX_RESIDENT_KEY] = None if value is None else str(value)
+    await db_settings.put_settings(stored)
+    await load()
+    view = session_routing_view()
+    if values.get("session_routing_enabled") is True:
+        from .channels.operator_ids import missing
+
+        view["missing_operator_ids"] = [
+            {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
+            for bot in await missing()]
+    return view
+
+
 TURN_CONTEXT_FIELDS = ("turn_context_enabled", "timezone", "reply_language")
 
 
@@ -417,3 +515,44 @@ async def update_turn_context(body: Mapping[str, Any]) -> dict[str, Any]:
     if missing_bots is not None:
         view["missing_operator_ids"] = [asdict(bot) for bot in missing_bots]
     return view
+
+
+def checked_outbound(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate operator-only gateway controls without extending the chat settings contract."""
+    if unknown := [key for key in body if key not in OUTBOUND_FIELDS]:
+        raise ValueError(f"unknown outbound setting {unknown[0]!r}")
+    if not body:
+        raise ValueError(f"give at least one of {', '.join(OUTBOUND_FIELDS)} (null: the default)")
+    values: dict[str, Any] = {}
+    if "outbound_enabled" in body:
+        value = body["outbound_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("outbound_enabled must be true, false or null")
+        values["outbound_enabled"] = value
+    for key in OUTBOUND_DEFAULTS:
+        if key not in body:
+            continue
+        value = body[key]
+        if value is not None:
+            if key == "max_in_flight":
+                if type(value) is not int or not 1 <= value <= 32:
+                    raise ValueError("max_in_flight must be an integer from 1 to 32 or null")
+            elif type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{key} must be a finite positive number or null")
+        values[key] = value
+    return values
+
+
+async def update_outbound(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist and refresh gateway controls; null restores each disabled or conservative default."""
+    values = checked_outbound(body)
+    stored: dict[str, str | None] = {}
+    if "outbound_enabled" in values:
+        value = values["outbound_enabled"]
+        stored[OUTBOUND_ENABLED_KEY] = None if value is None else ("true" if value else "false")
+    for key in OUTBOUND_DEFAULTS:
+        if key in values:
+            stored["channels.outbound." + key] = None if values[key] is None else str(values[key])
+    await db_settings.put_settings(stored)
+    await load()
+    return outbound_view()
