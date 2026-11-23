@@ -716,6 +716,18 @@ class TelegramChannelAdapter(ChannelAdapter):
         await self._command_reply(update, text)
 
     async def _cmd_status(self, update: Any, context: Any) -> None:
+        """``/status`` is the typed command while the status card is on; off, it is still the progress question."""
+        from .. import status_card
+
+        try:
+            on = status_card.enabled()
+        except Exception:
+            logger.warning("%s: cannot read whether /status is on; forwarded as before", self._channel_id,
+                           exc_info=True)
+            on = False
+        if on:
+            await self._forward_command(update)
+            return
         await self._forward(update, "当前任务进度怎么样？", status=True)
 
     async def _cmd_help(self, update: Any, context: Any) -> None:

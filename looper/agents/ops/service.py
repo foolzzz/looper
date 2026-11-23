@@ -88,6 +88,10 @@ TOKEN_ENV = "LOOPER_AGENT_TOKEN"
 TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"
 TRACE_ENV = "LOOPER_MCP_TRACE"  # the bridge's trace of each call's ``_meta`` keys (``mcp_server._trace_meta``)
 BINDINGS_KEPT = 64
+# The tools that put what a turn says into a task (``looper_task_update`` only with a new requirement): in a session
+# that found leads, the task they write is marked (RFC section 6.3).
+TAINTING_TOOLS = frozenset({"looper_task_create", "looper_task_instruct", "looper_task_gate_reply",
+                            "looper_task_update"})
 CALLS_KEPT = 4096  # the tool_use ids the hook can place in their turn
 CONFIRMATION_SECONDS = 600
 # How long a write call waits for the tool_use of its turn's stream that it matches (the event may trail the call).
@@ -267,6 +271,7 @@ class ManagerOps:
         # Each tool_use a turn's stream showed, by its id: the binding of the turn it belongs to (a subagent's call,
         # its parent call's turn), which places the hook's call in its own turn.
         self._call_turns: OrderedDict[str, str] = OrderedDict()
+        self._leads_session: str | None = None  # the session that found leads ('' when none has; None: not read)
         self._call_seen = asyncio.Event()
 
     @property
@@ -536,6 +541,8 @@ class ManagerOps:
             if risk is not Risk.READ and turn.autonomous:
                 raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn that answers a user's "
                                                          "message; tell the user what you would do instead")
+            if risk is not Risk.READ and (blocked := await self._outbound_check(tool, arguments, turn, risk)):
+                return blocked
             call = Call(arguments, turn, self._platform, scope=scope)
             impact = await tool.escalate(call) if tool.escalate is not None else None
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
@@ -555,8 +562,12 @@ class ManagerOps:
             answer = await self._run_tool(tool, call)
             result = _plain(answer)
             if tool.name == LEADS_TOOL and isinstance(result, Mapping) and result.get("leads"):
-                # What the outbound review of a later call in this turn sees came from the leads.
+                # What the outbound review of a later call in this turn sees came from the leads; and the session
+                # that found them marks the tasks it creates or adds to (RFC section 6.3).
                 turn.outside.append(("leads", json.dumps(result["leads"], ensure_ascii=False)))
+                await self._found_leads()
+            elif tool.name in TAINTING_TOOLS and (tool.name != "looper_task_update" or "requirement" in arguments):
+                await self._mark_task(tool.task_id(arguments) or _created_task(result))
             audited = isinstance(tool, RestrictedTool) and tool.audit_result is not None
             audit = tool.audit_result(answer) if audited else None  # type: ignore[union-attr]
         except _Recorded as exc:
@@ -634,6 +645,8 @@ class ManagerOps:
             await self._record(turn, tool, pending.arguments, Risk.HIGH, "error", error_code=error.code.value,
                                result={"message": str(error)}, confirmation_id=pending.id)
             raise _Recorded(error) from None
+        if tool.name in TAINTING_TOOLS and (tool.name != "looper_task_update" or "requirement" in pending.arguments):
+            await self._mark_task(tool.task_id(pending.arguments) or _created_task(result))
         await self._record(turn, tool, pending.arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
         return result
 
@@ -1039,6 +1052,45 @@ class ManagerOps:
             self._lapse(pending)
         self._pending.clear()
 
+    # --- Tasks a session that found leads wrote (the outbound-review RFC, section 6.3) ---
+
+    def _session(self) -> str | None:
+        return getattr(self._platform.manager, "current_session_id", None)
+
+    async def _found_leads(self) -> None:
+        """A leads search of this turn found leads: the Manager's session is marked, and so are the tasks it creates
+        or adds to from now on, until a new session starts. A mark that cannot be written fails the search: its
+        leads are not handed on unmarked."""
+        from ...db import agent_sessions
+
+        if (session := self._session()) is None:
+            return
+        try:
+            await agent_sessions.set_leads_session(self._scope.manager_id, session)
+        except Exception as exc:
+            logger.warning("cannot mark %s's session as having found leads", self._scope.manager_id, exc_info=True)
+            raise OpError(ErrorCode.UNAVAILABLE, "Looper could not record that this session found leads, so it does "
+                                                 "not show them; tell the user, and try again later") from exc
+        self._leads_session = session
+
+    async def _mark_task(self, task_id: str | None) -> None:
+        """Mark ``task_id`` as having taken leads when this session found some. A mark that cannot be written fails
+        the call (the change itself was made): the task's runs would go unchecked."""
+        from ...db import agent_sessions
+
+        if task_id is None or (session := self._session()) is None:
+            return
+        try:
+            if self._leads_session is None:
+                self._leads_session = await agent_sessions.leads_session(self._scope.manager_id) or ""
+            if self._leads_session == session:
+                await db_tasks.mark_untrusted(task_id, "leads")
+        except Exception as exc:
+            logger.warning("cannot mark task %s as having taken leads", task_id, exc_info=True)
+            raise OpError(ErrorCode.UNAVAILABLE, f"the change to task {task_id} was made, but Looper could not record "
+                                                 "that leads went into it, so its runs are not checked: tell the "
+                                                 "user") from exc
+
     # --- The outbound review's hook ---
 
     def tool_hook(self, runtime_root: Path, claude_bin: str, library: Any = None,
@@ -1067,7 +1119,6 @@ class ManagerOps:
         the one whose stream showed its tool_use, never the turn that runs when it comes; anything that goes wrong
         blocks the call."""
         from .. import outbound_hook
-        from ..outbound import Who
 
         data = payload if isinstance(payload, Mapping) else {}
         turn: Turn | None = None
@@ -1079,12 +1130,8 @@ class ManagerOps:
             if turn is None or turn.autonomous or self._binding_sessions.get(binding) != session_key:
                 turn = None
                 return outbound_hook.NO_ONES
-            if await _operator_turn(turn):
-                who = Who.OPERATOR
-            else:
-                who = Who.GROUP_MEMBER if turn.group else Who.ALLOWLISTED_PERSON
-            message = str((turn.envelope.payload.get("text") if turn.envelope else "") or "")
-            return outbound_hook.Placed(who, message, turn.channel or "", turn.chat, tuple(turn.outside))
+            return outbound_hook.Placed(await _who(turn), _message(turn), turn.channel or "", turn.chat,
+                                        tuple(turn.outside))
 
         writes = self._writes.setdefault(session_key, deque(maxlen=outbound_hook.CONTENT_TOOLS_KEPT))
         trusted = self._trusted.get(session_key, outbound_hook.Trusted.of(None, ()))
@@ -1101,17 +1148,54 @@ class ManagerOps:
             if (write := outbound_hook.write_of(payload)) is not None:
                 writes.append(write)
         elif review is not None:
-            key = (turn.channel, turn.chat, turn.message_id) if turn is not None else (None, None, None)
-            if key not in self._notified:  # once a turn
-                self._notified[key] = None
-                while len(self._notified) > BINDINGS_KEPT:
-                    self._notified.popitem(last=False)
-                tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
-                await outbound_hook.notify_blocked(
-                    self._scope.manager_id, str(data.get("tool_name") or ""),
-                    str(tool_input.get("command") or tool_input.get("file_path") or ""), review.reason,
-                    review.review_id)
+            tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
+            await self._notify_once(turn, str(data.get("tool_name") or ""),
+                                    str(tool_input.get("command") or tool_input.get("file_path") or ""), review)
         return answer
+
+    async def _notify_once(self, turn: Turn | None, tool: str, target: str, review: Any) -> None:
+        """Tell the operator a call was blocked, once a turn (``outbound_hook.notify_blocked``)."""
+        from .. import outbound_hook
+
+        key = (turn.channel, turn.chat, turn.message_id) if turn is not None else (None, None, None)
+        if key in self._notified:
+            return
+        self._notified[key] = None
+        while len(self._notified) > BINDINGS_KEPT:
+            self._notified.popitem(last=False)
+        await outbound_hook.notify_blocked(self._scope.manager_id, tool, target, review.reason, review.review_id)
+
+    async def _outbound_check(self, tool: Tool, arguments: Mapping[str, Any], turn: Turn,
+                              risk: Risk) -> dict[str, Any] | None:
+        """The ``blocked`` answer when the outbound review stops this call of Looper's own tool (``ops.review``);
+        None when it may go on: the review is off, the call is not ``external``, or the review allowed it."""
+        from .. import outbound, outbound_hook
+        from ...db import outbound_reviews
+        from . import levels, review as layer_one
+
+        if not outbound_hook.known_enabled():  # read at startup and by each turn, set by its switch
+            return None
+        level = await levels.level_of(tool, arguments, turn)
+        if level not in outbound.REVIEWED:
+            return None
+        action = await layer_one.action_of(tool.name, arguments, level)
+        checked = await outbound.review(
+            action, outbound.Asker(await _who(turn), turn.channel or "", _message(turn)),
+            outbound.Origin(self._scope.manager_id, outbound.Source.TOOL, channel=turn.channel, chat=turn.chat),
+            context=list(turn.outside), runtime_root=self._review_root or self._platform.runtime_root or Path.cwd(),
+            claude_bin=self._review_bin)
+        if checked.allowed:
+            return None
+        message = outbound_hook.BLOCKED_MESSAGE.format(reason=checked.reason.rstrip("."))
+        action_id = await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.BLOCKED.value,
+                                       result={"message": message})
+        if action_id is not None and checked.review_id is not None:
+            try:
+                await outbound_reviews.link_action(checked.review_id, action_id)
+            except Exception:
+                logger.warning("cannot link outbound review %s to its call", checked.review_id, exc_info=True)
+        await self._notify_once(turn, tool.name, action.target, checked)
+        return _error(ErrorCode.BLOCKED, message)
 
     # --- The Manager's MCP entry ---
 
@@ -1186,6 +1270,21 @@ class _OperatorOnly(OpError):
 
 def _audience(tool: Tool) -> Audience:
     return tool.audience if isinstance(tool, RestrictedTool) else Audience.ANY
+
+
+async def _who(turn: Turn) -> Any:
+    """Whose turn it is, as the outbound review reads it (``outbound.Who``): by code, never by what the model says."""
+    from ..outbound import Who
+
+    if turn.autonomous:
+        return Who.AUTONOMOUS
+    if await _operator_turn(turn):
+        return Who.OPERATOR
+    return Who.GROUP_MEMBER if turn.group else Who.ALLOWLISTED_PERSON
+
+
+def _message(turn: Turn) -> str:
+    return str((turn.envelope.payload.get("text") if turn.envelope is not None else "") or "")
 
 
 async def operator_call(turn: Turn) -> bool:

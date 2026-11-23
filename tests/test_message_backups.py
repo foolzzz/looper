@@ -479,8 +479,12 @@ def test_stopping_the_scheduler_reaps_a_running_message_dump(
         scheduler._consider_message_backup(NOW)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if pid_path.exists():
+            try:
                 pid = int(pid_path.read_text())
+            except (FileNotFoundError, ValueError):
+                # The child can create the file before its PID has been written.
+                pass
+            else:
                 if _alive(pid):
                     break
             await asyncio.sleep(0.02)

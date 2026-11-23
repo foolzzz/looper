@@ -33,6 +33,7 @@ STATUS: dict[ErrorCode, str] = {
     ErrorCode.INVALID: "400 Bad Request",
     ErrorCode.UNAUTHORIZED: "401 Unauthorized",
     ErrorCode.FORBIDDEN: "403 Forbidden",
+    ErrorCode.BLOCKED: "403 Forbidden",
     ErrorCode.NOT_FOUND: "404 Not Found",
     ErrorCode.CONFLICT: "409 Conflict",
     ErrorCode.EXPIRED: "410 Gone",

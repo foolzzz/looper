@@ -71,6 +71,7 @@ class ErrorCode(str, Enum):
     NOT_THIS_TURN = "not_this_turn"  # a write call no tool_use of the running turn's stream matches
     UNAVAILABLE = "unavailable"  # Looper could not do it now (its database); the call may be tried again
     RATE_LIMITED = "rate_limited"  # over a limit of how often or how much (a room's); the message says when
+    BLOCKED = "blocked"  # the outbound review stopped it (``ops.review``): it did not run
 
 
 class ErrorDetails(TypedDict, total=False):

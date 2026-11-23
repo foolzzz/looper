@@ -93,19 +93,19 @@ def _task_name(row: Mapping[str, Any], task_id: str) -> str:
                               task_id=task_id)
 
 
+def _gate_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _item(f"gate:{row['gate']['step_id']}", row["gate"]["topic"],
+                 context=row["task"]["name"], since=row["gate"]["opened_at"],
+                 href=f"#tasks/{row['task']['task_id']}?gate={row['gate']['step']}",
+                 step=row["gate"]["step"], questions=row["agenda_open"])
+
+
 async def _gates(_: Any) -> Read:
     listed = await gate_service.list_gates({"state": "open", "waiting_on": "user", "limit": str(SHOWN)})
-    items = [_item(f"gate:{row['gate']['step_id']}", row["gate"]["topic"],
-                   context=row["task"]["name"], since=row["gate"]["opened_at"],
-                   href=f"#tasks/{row['task']['task_id']}?gate={row['gate']['step']}",
-                   step=row["gate"]["step"], questions=row["agenda_open"])
-             for row in listed["gates"]]
-    return items, listed["total"]
+    return [_gate_item(row) for row in listed["gates"]], listed["total"]
 
 
-async def _confirmations(managers: Any) -> Read:
-    if managers is None:
-        return NotRead.UNKNOWN
+def _confirmation_items(managers: Any) -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
     items = []
     for agent in managers.agents():
@@ -119,6 +119,13 @@ async def _confirmations(managers: Any) -> Read:
                 ref=waiting["confirmation_id"], tool=waiting["tool"], channel=waiting["channel"],
                 expires_in_seconds=waiting["expires_in_seconds"]))
     items.sort(key=lambda item: item["since"])
+    return items
+
+
+async def _confirmations(managers: Any) -> Read:
+    if managers is None:
+        return NotRead.UNKNOWN
+    items = _confirmation_items(managers)
     return items[:SHOWN], len(items)
 
 
@@ -134,8 +141,7 @@ _SCHEDULE_ALERTS = (("failures", "failures_alert_at"), ("stale", "stale_alert_at
                     ("deadline", "deadline_alert_at"), ("overlap", "overlap_alert_at"))
 
 
-async def _schedules(_: Any) -> Read:
-    rows = await db_schedules.failing()
+def _schedule_items(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     items = []
     for row in rows:
         alerts = [name for name, column in _SCHEDULE_ALERTS if row[column] is not None]
@@ -143,40 +149,56 @@ async def _schedules(_: Any) -> Read:
         items.append(_item(f"schedule:{row['id']}", row["name"], context=row["project_name"], since=since,
                            href=f"#schedules/{row['id']}", failures=row["consecutive_failures"], alerts=alerts,
                            last_status=row["last_status"]))
+    return items
+
+
+async def _schedules(_: Any) -> Read:
+    items = _schedule_items(await db_schedules.failing())
     return items[:SHOWN], len(items)
+
+
+def _login_failing(checks: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [check for check in checks
+            if (str(check.get("id", "")).startswith("claude_") or check.get("id") in LOGIN_CHECKS)
+            and check.get("status") == "fail"]
+
+
+def _login_items(checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [_item(f"login:{check['id']}", str(check.get("label") or check["id"]), href="#settings/runtimes",
+                  detail=str(check.get("detail") or ""), fix=str(check.get("fix") or ""))
+            for check in _login_failing(checks)]
 
 
 async def _logins(_: Any) -> Read:
     if _status_checks is None:
         return NotRead.UNKNOWN
-    failing = [check for check in await _status_checks()
-               if (str(check.get("id", "")).startswith("claude_") or check.get("id") in LOGIN_CHECKS)
-               and check.get("status") == "fail"]
-    items = [_item(f"login:{check['id']}", str(check.get("label") or check["id"]), href="#settings/runtimes",
-                   detail=str(check.get("detail") or ""), fix=str(check.get("fix") or ""))
-             for check in failing]
+    items = _login_items(await _status_checks())
     return items[:SHOWN], len(items)
+
+
+def _intent_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _item(f"intent:{row['id']}", row["title"], context=row["type_name"], since=row["created_at"],
+                 href="#intents", ref=leads_model.format_intent_id(row["id"]), priority=row["priority"],
+                 confidence=row["confidence"], expires_at=row["expires_at"])
 
 
 async def _intents(_: Any) -> Read:
     if not await leads_model.intents_enabled():
         return NotRead.OFF
     rows, count = await store.pending_intents(SHOWN)
-    items = [_item(f"intent:{row['id']}", row["title"], context=row["type_name"], since=row["created_at"],
-                   href="#intents", ref=leads_model.format_intent_id(row["id"]), priority=row["priority"],
-                   confidence=row["confidence"], expires_at=row["expires_at"])
-             for row in rows]
-    return items, count
+    return [_intent_item(row) for row in rows], count
+
+
+def _ledger_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _item(f"ledger:{row['id']}", row["title"], since=row["created_at"], ref=db_ledger.format_id(row["id"]),
+                 kind=row["kind"], due_at=row["due_at"], overdue=row["overdue"])
 
 
 async def _ledger(_: Any) -> Read:
     if not await db_ledger.enabled():
         return NotRead.OFF
     rows, count = await store.ledger_waiting(SHOWN)
-    items = [_item(f"ledger:{row['id']}", row["title"], since=row["created_at"], ref=db_ledger.format_id(row["id"]),
-                   kind=row["kind"], due_at=row["due_at"], overdue=row["overdue"])
-             for row in rows]
-    return items, count
+    return [_ledger_item(row) for row in rows], count
 
 
 def _channel_type(channel: str | None) -> str | None:
@@ -188,19 +210,89 @@ def _channel_type(channel: str | None) -> str | None:
 _DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "task_end": "#tasks/{ref}"}
 
 
+def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _item(f"delivery:{row['source']}:{row['key']}",
+                 _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"], since=row["at"],
+                 href=_DELIVERY_HREF[row["source"]].format(ref=row["ref"]),
+                 ref=leads_model.format_intent_id(int(row["ref"])) if row["source"] == "intent" else None,
+                 source=row["source"], channel=_channel_type(row["channel"]))
+
+
 async def _deliveries(_: Any) -> Read:
     rows, count = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW, SHOWN)
-    items = [_item(f"delivery:{row['source']}:{row['key']}",
-                   _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"], since=row["at"],
-                   href=_DELIVERY_HREF[row["source"]].format(ref=row["ref"]),
-                   ref=leads_model.format_intent_id(int(row["ref"])) if row["source"] == "intent" else None,
-                   source=row["source"], channel=_channel_type(row["channel"]))
-             for row in rows]
-    return items, count
+    return [_delivery_item(row) for row in rows], count
+
+
+def _oldest(items: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The earliest item by ``since``; the first when none is dated (logins have no clock)."""
+    dated = [item for item in items if isinstance(item.get("since"), datetime)]
+    if dated:
+        return dict(min(dated, key=lambda item: item["since"]))
+    return dict(items[0]) if items else None
+
+
+async def _earliest_gates(_: Any) -> dict[str, Any] | None:
+    from ..db import user_gates as db_user_gates
+
+    # The list page is newest-opened first and capped. The card's earliest is the oldest user-waiting gate.
+    rows = await db_user_gates.list_gates(state="open")
+    waiting = [gate_service._listed_view(row) for row in rows]
+    waiting = [row for row in waiting if row["gate"]["waiting_on"] == "user"]
+    return _oldest([_gate_item(row) for row in waiting])
+
+
+async def _earliest_confirmations(managers: Any) -> dict[str, Any] | None:
+    if managers is None:
+        return None
+    return _oldest(_confirmation_items(managers))
+
+
+async def _earliest_schedules(_: Any) -> dict[str, Any] | None:
+    return _oldest(_schedule_items(await db_schedules.failing()))
+
+
+async def _earliest_logins(_: Any) -> dict[str, Any] | None:
+    if _status_checks is None:
+        return None
+    return _oldest(_login_items(await _status_checks()))
+
+
+async def _earliest_intents(_: Any) -> dict[str, Any] | None:
+    if not await leads_model.intents_enabled():
+        return None
+    row = await store.earliest_pending_intent()
+    return None if row is None else _intent_item(row)
+
+
+async def _earliest_ledger(_: Any) -> dict[str, Any] | None:
+    if not await db_ledger.enabled():
+        return None
+    row = await store.earliest_ledger_item()
+    return None if row is None else _ledger_item(row)
+
+
+async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
+    row = await store.earliest_uncertain_delivery(datetime.now(timezone.utc) - DELIVERY_WINDOW)
+    return None if row is None else _delivery_item(row)
 
 
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
             "intents": _intents, "ledger": _ledger, "deliveries": _deliveries}
+_EARLIEST = {"gates": _earliest_gates, "confirmations": _earliest_confirmations, "schedules": _earliest_schedules,
+             "logins": _earliest_logins, "intents": _earliest_intents, "ledger": _earliest_ledger,
+             "deliveries": _earliest_deliveries}
+
+
+async def earliest(kind: str, *, managers: Any = None) -> dict[str, Any] | None:
+    """The oldest item of one kind, from its own read.
+
+    ``collect`` keeps at most ``SHOWN`` items and several kinds are ordered by urgency, so the oldest can be
+    missing from that list. This does not change the list ``/todo`` shows.
+    """
+    reader = _EARLIEST.get(kind)
+    if reader is None:
+        return None
+    return await reader(managers)
 
 
 async def collect(*, managers: Any = None) -> dict[str, Any]:

@@ -50,6 +50,13 @@ async def list_reminders(*, status: str | None, limit: int = LIST_DEFAULT,
     return [dict(row) for row in rows[:limit]], len(rows) > limit
 
 
+async def next_pending(*, db: Any = None) -> dict[str, Any] | None:
+    """The soonest pending reminder, or None when none is pending."""
+    row = await _db(db).fetchrow(
+        "SELECT * FROM reminders WHERE status = 'pending' ORDER BY due_at, id LIMIT 1")
+    return dict(row) if row is not None else None
+
+
 async def cancel(reminder_id: int, *, now: datetime, db: Any = None) -> tuple[dict[str, Any] | None, bool]:
     """Cancel a pending reminder: (the reminder as it now is, whether this call cancelled it); (None, False) when
     there is none."""

@@ -768,8 +768,12 @@ class AgentHTTPServer:
             tool = Tool(name=operation.operation_id, description=operation.description, schema=operation.request or {},
                         risk=Risk(operation.risk), run=run,
                         escalate=impact if callable(getattr(domain, "impact", None)) else None)
+            async def level(arguments: Mapping[str, Any]) -> Any:
+                # where the operation's call reaches, for the outbound review (``Operation.level``)
+                return await operation.level_of(arguments) if operation.level_of is not None else operation.level
+
             answer = await self._call_v1(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
-                                         tool.name, data, tool=tool,
+                                         tool.name, data, tool=tool, level_of=level,
                                          validator=getattr(domain, "validate_arguments", api_v1.validate_arguments))
             if answer.get("status") == "error":
                 log_refusal(logger, operation, principal, answer["error"]["code"])
@@ -1102,6 +1106,13 @@ class AgentHTTPServer:
             writer.write(_json_response(
                 HTTP_503, {"error": "this run is being adopted after a restart; retry shortly"},
                 headers={"Retry-After": "2"}))
+        elif path == f"{AGENT_API}outbound/check" and method == "POST":
+            # The outbound review's hook in a step's run of a task outside content went into (RFC section 6.3).
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(header, payload)))
         elif path == f"{AGENT_API}tools" and method == "GET":
             answer = {"tools": ops.listing(header)}
             if (retry_safety := ops.retry_safety(header)) is not None:
@@ -1350,8 +1361,13 @@ class AgentHTTPServer:
         """Send ``text`` to ``target``: the one way a chat message goes in, for the dashboard and for an API client
         (``client``: its ``id`` and ``name``). Stores it as the Planner's supplement and as the thread's user message
         first; the adapter's answer has the ``correlation_id`` its reply streams under."""
+        from . import status_card
+
+        # An enabled /status to a Manager is not a chat turn: neither the command nor its card is stored.
+        ephemeral = status_card.ephemeral_status(text, target_type=target.agent_type)
+
         async def deliver(supplement_id: int | None) -> dict[str, Any]:
-            if session_id and message_id:
+            if session_id and message_id and not ephemeral:
                 try:
                     from ..db.chat import save_message
                     await save_message(
@@ -1370,6 +1386,7 @@ class AgentHTTPServer:
                 target=target,
                 message_id=message_id or None,
                 supplement_id=supplement_id,
+                persist=not ephemeral,
                 **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id is not None else {}),
                 **({"client": client} if client is not None else {}),
             )
