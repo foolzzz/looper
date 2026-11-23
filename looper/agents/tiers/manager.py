@@ -101,6 +101,7 @@ from . import state_view
 from .state_view import Rendered
 from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_field
 from . import manager_budget
+from .. import lanes, lanes_settings
 from .manager_routing import SessionRouter
 from . import group_session
 from .. import session_routing
@@ -1370,7 +1371,9 @@ class ManagerAgent:
                 if self._drain is not None:
                     await self._drain.wait_serving()
                 if (session := await self._router.target(envelope)) is not None:
-                    if not await self._mid_turn.merge(session, envelope):
+                    merged = (await lanes.route_arrival(self, session, envelope) if lanes_settings.enabled()
+                              else await self._mid_turn.merge(session, envelope))
+                    if not merged:
                         self._router.dispatch(session, envelope)  # its worker handles and settles it
                     continue
                 self._handling = envelope
@@ -2343,7 +2346,7 @@ class ManagerAgent:
             await self._bus.publish(completion_events.wake(self.agent_address, target))
             return
         if rows:
-            if routed:
+            if routed or lanes_settings.enabled():
                 self._router.dispatch_completion(envelope, rows, batch, operator)
             else:
                 await self._tell_completion(rows, batch)
@@ -2357,7 +2360,7 @@ class ManagerAgent:
         assert self._bus is not None
         started = time.monotonic()
         logger.info("completion turn started batch=%s manager=%s events=%d", batch, self.agent_id, len(rows))
-        state: dict[str, Any] = {}
+        state: dict[str, Any] = {"rows": rows}
         run = asyncio.create_task(self._completion_turn(rows, batch, state))
         try:
             done, _ = await asyncio.wait({run}, timeout=completion_events.TURN_SECONDS)
@@ -2501,6 +2504,7 @@ class ManagerAgent:
         try:
             await completion_events.fall_back(self._bus, self.agent_address, reason=reason, batch=batch,
                                               record_id=state.get("record_id"), rejected=rejected)
+            lanes.completion_note(self._session_now(), state.get("token"), len(state.get("rows", ())))
         except Exception:
             logger.exception("%s: the completion turn %s's events could not fall back", self._log, batch)
 
@@ -2524,6 +2528,7 @@ class ManagerAgent:
                     sender=origin["sender"], envelope=context, origin=TurnOrigin.COMPLETION,
                     require_match=self._claude.shares_bridge)
         token.ops_turn = turn
+        lanes.prepare_background(self._session_now(), token)
         delivery_guard.initialize(turn)
         state["token"], state["turn"] = token, turn
         prepared: Prepared | None = None
@@ -2556,7 +2561,7 @@ class ManagerAgent:
                 try:
                     await recorder.annotate({"completion": {
                         "batch": str(batch), "event_ids": [row["id"] for row in rows],
-                        "task_ids": [row["task_id"] for row in rows]}})
+                        "task_ids": [row["task_id"] for row in rows]}, **lanes.completion_metadata(token)})
                 except Exception:
                     logger.warning("%s: could not mark run %s as a completion turn", self._log,
                                    recorder.record_id, exc_info=True)

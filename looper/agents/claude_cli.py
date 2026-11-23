@@ -1053,7 +1053,8 @@ class ResidentClaude:
         requested, Claude is asked to interrupt the turn with a control
         request and given ``INTERRUPT_GRACE_SEC`` to end it with its result
         (``CONTROL``; the process stays, and what Claude leaves running with
-        the interrupt is its own); else Claude is killed with its tree
+        the interrupt is its own, unless preemption requires this turn's children
+        to be cleaned); else Claude is killed with its tree
         (``KILL``; the turn returns ``user_stop_result``). A turn stopped
         before its message was written writes nothing and leaves the process
         alone. From the request on, the turn's events are not handed to
@@ -1069,12 +1070,16 @@ class ResidentClaude:
         Claude running.
         """
         from .runtimes import StopMethod
-        from .runtimes.cancel import TurnCancel
+        from .runtimes.cancel import StopCleanup, TurnCancel
 
         process, output = self._process, self._output
         assert process is not None and process.stdin is not None and output is not None
         cancel = cancel or TurnCancel.never()
         if cancel.requested:  # stopped before anything was written: the process is untouched
+            return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
+        checkpoint = (await self._tree.checkpoint() if self._tree is not None
+                      and cancel.cleanup is not StopCleanup.NONE else None)
+        if cancel.requested:  # the stop arrived while the before-prompt snapshot was read
             return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
         turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag, on_event=on_event,
                          done=asyncio.get_running_loop().create_future(), stop=stop)
@@ -1099,6 +1104,11 @@ class ResidentClaude:
             while pending := set(self._ending) - self._background_ending:
                 await asyncio.gather(*(asyncio.shield(task) for task in pending))
             method = await self._stopped_by_user()
+            if method is StopMethod.CONTROL and cancel.cleanup is StopCleanup.REQUIRED:
+                if self._tree is None or not await self._tree.end_since(checkpoint):
+                    logger.warning("%s: cannot isolate the preempted turn's children; killing the resident", self._label)
+                    await self.stop(kill=True)
+                    method = StopMethod.KILL
         except BaseException as exc:
             self._user_turn, self._cancel, self._interrupting = None, None, None
             if output.turn is turn:
