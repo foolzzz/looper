@@ -1,10 +1,9 @@
-"""Operator-only event triage switch. Execution is delivered separately from this foundation."""
+"""Operator-only event triage switch. Gates subscription creation and execution."""
 
 from ..db import system_settings
 
 KEY = "subscriptions.triage.enabled"
 TURNED_OFF = "subscriptions.triage.enabled is off"
-NOT_IMPLEMENTED = "triage execution is not available yet"
 
 
 async def enabled(db=None) -> bool:
