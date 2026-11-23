@@ -39,12 +39,13 @@ class HoldReason(str, Enum):
 
 
 class ScheduleDeferred(Exception):
-    """A firing the operator did not start waited. Nothing was started."""
+    """A firing waited. Nothing was started. ``text`` replaces the catch-up sentence."""
 
-    def __init__(self, until: datetime, reason: str):
+    def __init__(self, until: datetime, reason: str, *, text: str | None = None):
         self.until = until
         self.reason = reason
-        super().__init__(f"usage window on hold until {until.astimezone().strftime('%H:%M')}")
+        when = until.astimezone().strftime("%H:%M")
+        super().__init__(text or f"usage window on hold until {when}")
 
 
 @dataclass(frozen=True)

@@ -100,12 +100,12 @@ from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered
 from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_field
-from . import background_turn, idle_check_turn, manager_budget
+from . import background_turn, idle_check_turn, manager_budget, triage_background
 from .background_turn import completion_context as _completion_context  # noqa: F401 (router compatibility)
 from .. import lanes, lanes_settings
 from .manager_routing import SessionRouter
 from . import group_session
-from .. import session_routing
+from .. import session_routing, cost_guard, cost_hold_routing, cost_manager
 from ..mid_turn_input import MidTurnInputs
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..ops.service import _operator_turn, tools_down_reply
@@ -1372,8 +1372,7 @@ class ManagerAgent:
                 finally:
                     self._handling = None
                     self._last_activity = self._clock()
-                    if envelope.message_type in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE,
-                                                  MessageType.IDLE_CHECK_DUE) and not self._router.holds_completion(envelope):
+                    if envelope.message_type is MessageType.USER_MESSAGE:
                         self._sessions[MAIN_SESSION].turn_ended_at = self._clock()
                 # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
                 if not self._running:
@@ -1621,7 +1620,10 @@ class ManagerAgent:
             elif (reply := manager_budget.cap_reply(self._session_now(), exc)) is not None:
                 await self._send_reply(envelope, _with_blocks(reply, turn.blocks), error=str(exc))
                 return
-            elif isinstance(exc, TurnFailed):
+            elif isinstance(exc, cost_guard.Held):
+                await self._send_reply(envelope, cost_manager.usage_reply(exc))
+                return
+            elif isinstance(exc, (TurnFailed, cost_guard.Denied)):
                 logger.error("%s failed to answer %s: %s", self._log, envelope.message_id, exc.error)
                 await self._send_reply(envelope, _with_blocks(exc.reply, turn.blocks), error=exc.error)
                 return
@@ -1705,7 +1707,7 @@ class ManagerAgent:
                 self._acting(token)
                 return Prepared(action=lambda: self._answer_intent(envelope, memory))
             try:
-                intent = await token.keep("route_intent", self._route_intent(envelope), 60)
+                intent = await token.keep("route_intent", cost_hold_routing.before_intent(self, envelope), 60)
                 if intent is not None:
                     await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
                     self._acting(token)
@@ -2067,6 +2069,7 @@ class ManagerAgent:
         if self.ops is not None:
             self.ops.publish_binding(token.binding if token is not None else None, session_key=self._session_now().key)
 
+    @cost_manager.defer_maintenance
     async def _run_prepared(self, token: TurnToken, prepared: Prepared) -> str:
         """Start the prepared turn and run it; the turn's record ends however it ends."""
         notice = "能力变更待应用：已保存的 skills 将在 /new 后生效；当前会话继续使用原有能力。"
@@ -2324,6 +2327,7 @@ class ManagerAgent:
         target = completion_events.Target.from_payload(envelope.payload)
         if target is None or target.manager_id != self.agent_id or self._bus is None:
             return
+        await triage_background.dispatch(self, envelope, target)  # its own batch, claimed apart from task ends
         off = chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
         routed = session_routing.routes(self.agent_id)
         try:
@@ -3122,6 +3126,7 @@ class ManagerAgent:
             session.session_id, self._session_totals, self._pending_switch, self._pending_handoff = previous
             raise
 
+    @cost_manager.maintenance
     async def _handoff(self, switch: SessionSwitch, process: _Process, cancel: TurnCancel) -> str | None:
         """The handoff the running session writes before ``switch``; None when it writes none in time. A stop
         ends it with ``TurnStopped``: the old session and its process stay, and the next turn switches again."""

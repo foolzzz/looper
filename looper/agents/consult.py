@@ -408,12 +408,18 @@ class ConsultService:
             await self._ensure_current(task_id, row, record, "its seat started another run while its session was copied")
             asked = ", ".join(f"#{m['id']}" for m in questions)
             await self._note(task_id, run_id, f"Consulting {seat_name} for question(s) {asked} (read only: {read_only})")
-            if handle is not None:
-                result, started, timed_out = await self._execute_hosted(
-                    handle, task_id, step, run_id, cwd, prompt, system_prompt, launch, limits.consult_timeout_seconds)
-            else:
-                result, started, timed_out = await self._execute(
-                    task_id, step, run_id, command, cwd, prompt, system_prompt, launch, limits.consult_timeout_seconds)
+            from . import admission
+
+            lane = await admission.worker_lane(task_id, {}, role=agent)
+            async with admission.slot(launch.profile.provider.id, lane, owner=run_id,
+                    on_wait=lambda text: self._note(task_id, run_id, text),
+                    draining=lambda: self._drain is not None and self._drain.draining):
+                if handle is not None:
+                    result, started, timed_out = await self._execute_hosted(
+                        handle, task_id, step, run_id, cwd, prompt, system_prompt, launch, limits.consult_timeout_seconds)
+                else:
+                    result, started, timed_out = await self._execute(
+                        task_id, step, run_id, command, cwd, prompt, system_prompt, launch, limits.consult_timeout_seconds)
             wrote = await asyncio.to_thread(_changed, snapshot[2]) if snapshot is not None else []
             denied = len(result.get("permission_denials") or []) if result else 0
             cost = await _run_cost(task_id, run_id)

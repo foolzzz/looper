@@ -6,7 +6,8 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   like the task's cost (``llm_records.task_costs``);
 - ``task_budget_action``: what happens when a task reaches that cap: the task
   fails at once (``fail``, also when unset) or after one more Planner turn that
-  sums up what was done (``wrap_up``);
+  sums up what was done (``wrap_up``); ``ask`` holds new starts for the operator
+  while cost guard enforcement is enabled;
 - ``supervise_interval_seconds``: how often the Planner checks running Workers
   (0 = never), over the ``planner`` agent config;
 - ``review_policy``: ``planner`` (the Planner decides which steps a Reviewer
@@ -171,6 +172,7 @@ class ReviewPolicy(str, Enum):
 class TaskBudgetAction(str, Enum):
     WRAP_UP = "wrap_up"
     FAIL = "fail"
+    ASK = "ask"
 
 
 class StepWorkspaces(str, Enum):

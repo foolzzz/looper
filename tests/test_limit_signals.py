@@ -78,6 +78,20 @@ def test_storage_failure_is_observational(monkeypatch, caplog):
     assert "private payload" not in caplog.text
 
 
+def test_storage_failure_still_wakes_account_admission(monkeypatch):
+    from looper.agents import admission
+
+    monkeypatch.setattr(system_settings, "get_settings", AsyncMock(return_value={limit_signals.KEY: "true"}))
+    monkeypatch.setattr(limit_signals.db_limits, "upsert", AsyncMock(side_effect=ConnectionError()))
+    monkeypatch.setattr(admission, "enabled", lambda: True)
+    observed = AsyncMock()
+    monkeypatch.setattr(admission, "observed", observed)
+    asyncio.run(limit_signals.observe({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "rateLimitType": "five_hour"}}, "account", 1))
+    observed.assert_awaited_once()
+    assert observed.await_args.args[0] == "account"
+
+
 def test_processor_filter_cannot_drop_observations(monkeypatch):
     from looper.agents.claude_cli import ClaudeRunRecorder
     from looper.agents.processor import typed_events

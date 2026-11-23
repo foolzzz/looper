@@ -8,7 +8,7 @@ from tests.test_chat_navigation_browser import dashboard_url  # noqa: F401
 pytestmark = pytest.mark.installed
 ROOT = Path(__file__).resolve().parents[1]
 # The Tasks page's default selection when the address has neither status, group nor schedule.
-DEFAULT_STATUSES = ["init", "running", "waiting", "waiting_user", "pending"]
+DEFAULT_STATUSES = ["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending"]
 
 
 def task(task_id, owner="manager", *, created="2026-10-24T00:00:00Z"):

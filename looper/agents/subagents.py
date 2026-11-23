@@ -208,7 +208,7 @@ class SpawnService:
             if caller.budget_usd is not None and caller.spent_usd is not None:
                 limits.append(caller.budget_usd - caller.spent_usd - usage["parent_committed"])
             if project.get("task_budget_usd") is not None:
-                spent = await conn.fetchval(f"SELECT COALESCE(sum(cost_usd), 0) FROM llm_records WHERE task_id = $1 AND {llm_records.TASK_RUN}", caller.parent.task_id)
+                spent = await conn.fetchval(f"SELECT COALESCE(sum(cost_usd), 0) FROM llm_records WHERE task_id = $1 AND {llm_records.TASK_SPEND}", caller.parent.task_id)
                 limits.append(project["task_budget_usd"] - float(spent) - usage["task_reserved"] - caller.unrecorded_usd)
             budget = min(limits)
             if budget < MIN_RUN_USD - 1e-9:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -247,6 +248,142 @@ def test_draft_storage_failure_does_not_fail_the_closing_task(monkeypatch):
             raise RuntimeError("storage unavailable")
         monkeypatch.setattr(proposals, "propose", unavailable)
         assert await sources.from_planner("task-one", project, [item()], None) is None
+    run_db(test, monkeypatch)
+
+
+async def two_refusals(pool):
+    project = await project_task(pool)
+    await sources.from_planner("task-one", project, [item(content="sk-" + "x" * 30),
+                                                    item("test-check", content="sk-" + "y" * 30)], None)
+    assert await pool.fetchval("SELECT count(*) FROM skill_proposal_events WHERE action = 'refuse'") == 2
+    planner = SimpleNamespace(_skill_proposals=True, _plan=SimpleNamespace(project_id=project))
+    return project, planner
+
+
+def watch_release(monkeypatch, pool, *, fail):
+    """Stand in for the pool ``get_pool()`` returns. ``Pool.execute`` is read-only, so the release
+    statement is the only one this stand-in changes."""
+    from looper.db import connection
+
+    seen = []
+
+    class _Pool:
+        async def execute(self, query, *args, **kwargs):
+            if "told_at = NULL" in str(query):
+                seen.append(query)
+                if fail:
+                    raise ConnectionError("database unreachable")
+            return await pool.execute(query, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(pool, name)
+
+    monkeypatch.setattr(connection, "_pool", _Pool())
+    return seen
+
+
+def planner_for(project, *, enabled):
+    return SimpleNamespace(_skill_proposals=enabled, _plan=SimpleNamespace(project_id=project))
+
+
+@pytest.mark.parametrize("failure", ["planner_turn", "cancelled"])
+def test_failed_release_keeps_the_turns_own_error(monkeypatch, caplog, failure):
+    from looper.agents.tiers.planner import PlannerTurnError
+    from looper.agents.tiers.planner_protocol import TurnKind
+
+    async def test(pool):
+        project, planner = await two_refusals(pool)
+        watch_release(monkeypatch, pool, fail=True)
+        error = PlannerTurnError("x") if failure == "planner_turn" else asyncio.CancelledError()
+        with caplog.at_level(logging.WARNING, logger="looper.agents.skill_proposal_sources"):
+            with pytest.raises(type(error)) as caught:
+                async with sources.plan_message(planner, TurnKind.PLAN, "[PLAN] Check") as sent:
+                    assert sent.count("skill proposal refused") == 2
+                    raise error
+        assert caught.value is error
+        warnings = [record for record in caplog.records if record.levelno == logging.WARNING
+                    and "could not release" in record.getMessage()]
+        assert len(warnings) == 1
+        assert f"project {project}: could not release 2 skill proposal feedback claim(s)" in warnings[0].getMessage()
+        assert warnings[0].exc_info[0] is ConnectionError
+        told = await pool.fetch("SELECT told_at FROM skill_proposal_events ORDER BY id")
+        assert len(told) == 2 and all(row["told_at"] is not None for row in told)
+    run_db(test, monkeypatch)
+
+
+def test_successful_release_clears_the_claim_and_keeps_the_error(monkeypatch):
+    from looper.agents.tiers.planner import PlannerTurnError
+    from looper.agents.tiers.planner_protocol import TurnKind
+
+    async def test(pool):
+        _project, planner = await two_refusals(pool)
+        error = PlannerTurnError("x")
+        with pytest.raises(PlannerTurnError) as caught:
+            async with sources.plan_message(planner, TurnKind.PLAN, "[PLAN] Check") as sent:
+                assert sent.count("skill proposal refused") == 2
+                raise error
+        assert caught.value is error
+        told = await pool.fetch("SELECT told_at FROM skill_proposal_events ORDER BY id")
+        assert len(told) == 2 and all(row["told_at"] is None for row in told)
+    run_db(test, monkeypatch)
+
+
+def test_delivered_feedback_stays_told_when_the_plan_turn_succeeds(monkeypatch):
+    from looper.agents.tiers.planner_protocol import TurnKind
+
+    async def test(pool):
+        _project, planner = await two_refusals(pool)
+        async with sources.plan_message(planner, TurnKind.PLAN, "[PLAN] Check") as sent:
+            assert sent.count("skill proposal refused") == 2
+        told = await pool.fetch("SELECT told_at FROM skill_proposal_events ORDER BY id")
+        assert len(told) == 2 and all(row["told_at"] is not None for row in told)
+    run_db(test, monkeypatch)
+
+
+def test_a_plan_turn_with_nothing_claimed_does_not_release(monkeypatch):
+    from looper.agents.tiers.planner import PlannerTurnError
+    from looper.agents.tiers.planner_protocol import TurnKind
+
+    async def test(pool):
+        project = await project_task(pool)
+        planner = planner_for(project, enabled=True)
+        releases = watch_release(monkeypatch, pool, fail=False)
+        error = PlannerTurnError("x")
+        with pytest.raises(PlannerTurnError) as caught:
+            async with sources.plan_message(planner, TurnKind.PLAN, "[PLAN] Check") as sent:
+                assert sent == "[PLAN] Check"
+                raise error
+        assert caught.value is error
+        assert releases == []
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("kind_name,enabled", [("DECISION", True), ("PLAN", False)])
+def test_non_plan_and_opted_out_turns_do_not_claim_feedback(monkeypatch, kind_name, enabled):
+    from looper.agents.tiers.planner import PlannerTurnError
+    from looper.agents.tiers.planner_protocol import TurnKind
+
+    async def test(pool):
+        project, _planner = await two_refusals(pool)
+        planner = planner_for(project, enabled=enabled)
+        releases = watch_release(monkeypatch, pool, fail=False)
+        notes = []
+        real_note = sources.planner_note
+
+        async def note(*args, **kwargs):
+            notes.append(args)
+            return await real_note(*args, **kwargs)
+
+        monkeypatch.setattr(sources, "planner_note", note)
+        error = PlannerTurnError("x")
+        with pytest.raises(PlannerTurnError) as caught:
+            async with sources.plan_message(planner, getattr(TurnKind, kind_name), "[PLAN] Check") as sent:
+                assert sent == "[PLAN] Check"
+                raise error
+        assert caught.value is error
+        assert notes == [] and releases == []
+        told = await pool.fetch("SELECT told_at FROM skill_proposal_events ORDER BY id")
+        assert len(told) == 2 and all(row["told_at"] is None for row in told)
     run_db(test, monkeypatch)
 
 

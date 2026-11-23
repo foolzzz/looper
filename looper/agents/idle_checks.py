@@ -237,6 +237,7 @@ RULES: dict[str, SectionRule | None] = {
     "ledger": SectionRule(_ledger_due,
                           lambda item: (item["key"], item["since"], bool(item["facts"].get("overdue")))),
     "deliveries": SectionRule(lambda item, now: True, lambda item: (item["key"], item["since"])),
+    "cost": None,  # a pending spend hold already asked the operator to decide; not repeated here
 }
 
 
@@ -429,10 +430,17 @@ def _failed_run(states: Sequence[str]) -> bool:
     return len(states) >= FAILING_RUN and all(state == "failed" for state in states[:FAILING_RUN])
 
 
-async def _last_user_message_at(channel_id: str, chat: str) -> datetime | None:
-    thread = channel_thread_id(channel_id, chat, "manager", "manager")
-    return await connection.get_pool().fetchval(
-        "SELECT max(created_at) FROM chat_messages WHERE session_id = $1 AND role = 'user'", thread)
+async def _last_user_message_at(channel_id: str, sender_id: str) -> datetime | None:
+    # The delivery target is a sender id; Lark stores its DM under a different chat id.
+    try:
+        return await connection.get_pool().fetchval(
+            "SELECT max(m.created_at) FROM chat_messages m "
+            "JOIN chat_direct_threads d USING (session_id) JOIN chat_threads t USING (session_id) "
+            "WHERE d.channel_id = $1 AND d.sender_id = $2 AND m.role = 'user' AND t.manager_id = $3",
+            channel_id, sender_id, MANAGER_ID)
+    except Exception:
+        logger.warning("idle checks: could not read the last user message", exc_info=True)
+        return None
 
 
 async def _remember(check: Mapping[str, Any], text: str, *, failure: str | None = None) -> None:
@@ -466,11 +474,15 @@ async def deliver_result(check: Mapping[str, Any], reply: str, *, post: PostFn, 
         await settle(check_id, "failed", reason="invalid_reply", reply=reply, record_id=record_id)
         return "failed"
     key = f"idle-{check_id}"
+    spoke = await _last_user_message_at(channel_id, chat)
+    if spoke is not None and spoke > check["created_at"]:
+        await settle(check_id, "preempted", record_id=record_id)
+        return "preempted"
     try:
         decided = await delivery.decide(
             delivery.Delivery(delivery.DeliveryKind.IDLE_CHECK, delivery.Urgency.NORMAL, delivery.ChatKind.DIRECT),
             dedupe_key=key, channel_id=channel_id, chat=chat,
-            last_user_message_at=await _last_user_message_at(channel_id, chat), source_ref=str(check_id),
+            last_user_message_at=spoke, source_ref=str(check_id),
             manager_id=check["manager_id"], now=now)
     except Exception:  # not urgent: unlike a gate's reminder, it is not sent without the layer's say
         logger.warning("idle check %s: the delivery decision failed", check_id, exc_info=True)
@@ -482,8 +494,14 @@ async def deliver_result(check: Mapping[str, Any], reply: str, *, post: PostFn, 
     if decided.outcome is not delivery.Outcome.SEND:
         await settle(check_id, "deferred", reply=reply, record_id=record_id)
         return "deferred"
+    spoke = await _last_user_message_at(channel_id, chat)
+    if spoke is not None and spoke > check["created_at"]:
+        await settle(check_id, "preempted", record_id=record_id)
+        return "preempted"
     text = f"{_clip(reply.strip(), REPLY_MAX - len(DETAILS_LINE) - 2)}\n\n{DETAILS_LINE}"
     external: str | None = None
+    if not await store.claim_sending(check_id):
+        return (await store.get(check_id) or {}).get("state", "failed")
     try:
         receipt = await post(channel_id, notify_target(chat), text, idempotency_key=key)
         outcome, external = receipt.result, receipt.external_ids[0] if receipt.external_ids else None
@@ -545,7 +563,16 @@ class IdleCheckService:
         self._logged: dict[Skip, date] = {}
 
     async def recover(self) -> None:
-        """Before bus replay, fail checks the previous process left running. A failed write blocks startup."""
+        """Recover interrupted sends before failing running checks and replaying wakes; writes must succeed."""
+        sending = await store.recover_sending(manager_id=MANAGER_ID)
+        for row in sending:
+            await db_deliveries.insert({
+                "dedupe_key": f"idle-{row['id']}", "source": ProactiveSource.IDLE_CHECK.value,
+                "source_ref": str(row["id"]), "manager_id": row["manager_id"],
+                "channel_id": row["channel_id"], "chat": row["chat"], "chat_kind": "direct",
+                "outcome": "unknown"})
+        if sending:
+            logger.info("idle checks: %d check(s) left sending recovered as uncertain", len(sending))
         if count := await store.settle_running("restart", manager_id=MANAGER_ID):
             logger.info("idle checks: %d check(s) left running by the server before this one failed (restart)", count)
 

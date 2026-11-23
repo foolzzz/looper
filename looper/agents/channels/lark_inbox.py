@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+from enum import Enum
 from pathlib import Path
+from time import time
 from typing import Any
 
 from .lark_cli import RECEIVE_EVENT
@@ -15,11 +17,26 @@ THREAD_MAX_AGE = 7 * 24 * 60 * 60
 BOT_ACTIVITY_MAX_AGE = 7 * 24 * 60 * 60
 
 
+class CatchupState(str, Enum):
+    PENDING = "pending"
+    DROPPED = "dropped"
+
+
+class CatchupDropReason(str, Enum):
+    RETRY_EXHAUSTED = "retry_exhausted"
+    STALE = "stale"
+    BOUNDARY_EXPIRED = "boundary_expired"
+    PAGE_CAP = "page_cap"
+    PAGINATION = "pagination"
+    PERMISSION = "permission"
+
+
 class LarkInbox(SQLiteInbox):
     def _open(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path)
         self._db.execute("PRAGMA synchronous = FULL")
+        self._db.execute("BEGIN")
         self._db.execute("CREATE TABLE IF NOT EXISTS boundary (id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)")
         self._db.execute("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY, message_id TEXT UNIQUE NOT NULL)")
         self._db.execute("CREATE TABLE IF NOT EXISTS catchup_debt (chat_id TEXT PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL)")
@@ -27,6 +44,27 @@ class LarkInbox(SQLiteInbox):
         self._db.execute("CREATE TABLE IF NOT EXISTS thread_activity (chat_id TEXT NOT NULL, thread_id TEXT NOT NULL, "
                          "at REAL NOT NULL, PRIMARY KEY (chat_id, thread_id))")
         self._db.execute("CREATE TABLE IF NOT EXISTS bot_activity (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)")
+        for table in ("catchup_debt", "discovery"):
+            columns = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
+            if "attempts" not in columns:
+                self._db.execute(f"ALTER TABLE {table} ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        self._db.execute("CREATE TABLE IF NOT EXISTS catchup_dropped (chat_id TEXT NOT NULL, start REAL NOT NULL, "
+                         "end REAL NOT NULL, attempts INTEGER NOT NULL, reason TEXT NOT NULL, "
+                         "PRIMARY KEY (chat_id, start, end))")
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(catchup_dropped)")}
+        if "recorded_at" not in columns:
+            self._db.execute("ALTER TABLE catchup_dropped ADD COLUMN recorded_at REAL NOT NULL DEFAULT 0")
+            self._db.execute("UPDATE catchup_dropped SET recorded_at = ?", (time(),))
+        if "thread_id" not in columns:
+            self._db.execute("ALTER TABLE catchup_dropped RENAME TO catchup_dropped_legacy")
+            self._db.execute("CREATE TABLE catchup_dropped (chat_id TEXT NOT NULL, start REAL NOT NULL, "
+                             "end REAL NOT NULL, attempts INTEGER NOT NULL, reason TEXT NOT NULL, "
+                             "recorded_at REAL NOT NULL, thread_id TEXT NOT NULL DEFAULT '', "
+                             "PRIMARY KEY (chat_id, thread_id, start, end, reason))")
+            self._db.execute("INSERT INTO catchup_dropped SELECT *, '' FROM catchup_dropped_legacy")
+            self._db.execute("DROP TABLE catchup_dropped_legacy")
+        self._db.execute("CREATE TABLE IF NOT EXISTS catchup_thread_debt (thread_id TEXT PRIMARY KEY, "
+                         "chat_id TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)")
         self._db.commit()
         row = self._db.execute("SELECT at FROM boundary WHERE id = 1").fetchone()
         self.boundary: float | None = row[0] if row else None
@@ -44,13 +82,35 @@ class LarkInbox(SQLiteInbox):
     @serialized
     def defer_discovery(self, start: float, end: float) -> None:
         with self._db:
-            self._db.execute("INSERT INTO discovery VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            self._db.execute("INSERT INTO discovery (id, start, end) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET "
                              "start = min(start, excluded.start), end = max(end, excluded.end)", (start, end))
 
     @serialized
     def complete_discovery(self) -> None:
         with self._db:
             self._db.execute("DELETE FROM discovery")
+
+    @serialized
+    def clamp_catchup(self, cutoff: float, discovery_reason: CatchupDropReason) -> None:
+        """Expire owed prefixes and advance their cursors in the same transaction."""
+        stale: dict[tuple[str, CatchupDropReason], tuple[float, float]] = {}
+        with self._db:
+            for table, key, chat_column in (("discovery", "id", "''"),
+                                           ("catchup_debt", "chat_id", "chat_id"),
+                                           ("catchup_thread_debt", "thread_id", "chat_id")):
+                rows = self._db.execute(
+                    f"SELECT {key}, {chat_column}, start, end FROM {table} WHERE start < ?", (cutoff,)).fetchall()
+                for identity, chat, start, end in rows:
+                    clamped = min(cutoff, end)
+                    reason = discovery_reason if table == "discovery" else CatchupDropReason.STALE
+                    previous = stale.get((chat, reason), (start, clamped))
+                    stale[chat, reason] = (min(start, previous[0]), max(clamped, previous[1]))
+                    if clamped == end:
+                        self._db.execute(f"DELETE FROM {table} WHERE {key} = ?", (identity,))
+                    else:
+                        self._db.execute(f"UPDATE {table} SET start = ? WHERE {key} = ?", (clamped, identity))
+            for (chat, reason), (start, end) in stale.items():
+                self._drop(chat, start, end, 0, reason)
 
     @serialized
     def debts(self) -> dict[str, tuple[float, float]]:
@@ -61,13 +121,90 @@ class LarkInbox(SQLiteInbox):
     def defer(self, chat_id: str, start: float, end: float) -> None:
         with self._db:
             self._db.execute(
-                "INSERT INTO catchup_debt VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET "
+                "INSERT INTO catchup_debt (chat_id, start, end) VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET "
                 "start = excluded.start, end = excluded.end", (chat_id, start, end))
 
     @serialized
     def complete(self, chat_id: str) -> None:
         with self._db:
             self._db.execute("DELETE FROM catchup_debt WHERE chat_id = ?", (chat_id,))
+
+    @serialized
+    def fail_catchup(self, chat_id: str | None, max_attempts: int,
+                     reason: CatchupDropReason | None = None) -> None:
+        """Count failed passes only; atomically retain exhausted windows for the operator."""
+        table, key, value = ("discovery", "id", 1) if chat_id is None else ("catchup_debt", "chat_id", chat_id)
+        with self._db:
+            self._db.execute(f"UPDATE {table} SET attempts = attempts + 1 WHERE {key} = ?", (value,))
+            row = self._db.execute(f"SELECT start, end, attempts FROM {table} WHERE {key} = ?", (value,)).fetchone()
+            if row is not None and (reason is not None or row[2] >= max_attempts):
+                self._drop(chat_id or "", *row, reason or CatchupDropReason.RETRY_EXHAUSTED)
+                self._db.execute(f"DELETE FROM {table} WHERE {key} = ?", (value,))
+
+    def _drop(self, chat_id: str, start: float, end: float, attempts: int, reason: CatchupDropReason,
+              thread_id: str = "") -> None:
+        # Keep one continuous loss per scope, including prefixes cut off by later retries.
+        while True:
+            rows = self._db.execute(
+                "SELECT rowid, start, end, attempts FROM catchup_dropped WHERE chat_id = ? AND thread_id = ? "
+                "AND reason = ? AND start <= ? AND end >= ?", (chat_id, thread_id, reason.value, end, start)).fetchall()
+            if not rows:
+                break
+            for _, previous_start, previous_end, previous_attempts in rows:
+                start, end = min(start, previous_start), max(end, previous_end)
+                attempts = max(attempts, previous_attempts)
+            self._db.executemany("DELETE FROM catchup_dropped WHERE rowid = ?", [(row[0],) for row in rows])
+        self._db.execute("INSERT OR REPLACE INTO catchup_dropped VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         (chat_id, start, end, attempts, reason.value, time(), thread_id))
+
+    @serialized
+    def drop_window(self, chat_id: str, start: float, end: float, reason: CatchupDropReason) -> None:
+        with self._db:
+            self._drop(chat_id, start, end, 0, reason)
+
+    @serialized
+    def thread_debts(self) -> list[tuple[str, str, float, float]]:
+        return self._db.execute("SELECT thread_id, chat_id, start, end FROM catchup_thread_debt").fetchall()
+
+    @serialized
+    def defer_thread(self, thread_id: str, chat_id: str, start: float, end: float) -> None:
+        with self._db:
+            self._db.execute("INSERT INTO catchup_thread_debt (thread_id, chat_id, start, end) VALUES (?, ?, ?, ?) "
+                             "ON CONFLICT(thread_id) DO UPDATE SET start = min(start, excluded.start), "
+                             "end = max(end, excluded.end)", (thread_id, chat_id, start, end))
+
+    @serialized
+    def settle_thread(self, thread_id: str, max_attempts: int, reason: CatchupDropReason | None = None, *,
+                      failed: bool = False) -> None:
+        with self._db:
+            if failed:
+                self._db.execute("UPDATE catchup_thread_debt SET attempts = attempts + 1 WHERE thread_id = ?", (thread_id,))
+                row = self._db.execute("SELECT chat_id, start, end, attempts FROM catchup_thread_debt WHERE thread_id = ?",
+                                       (thread_id,)).fetchone()
+                if row is None or (reason is None and row[3] < max_attempts):
+                    return
+                self._drop(*row, reason or CatchupDropReason.RETRY_EXHAUSTED, thread_id)
+            self._db.execute("DELETE FROM catchup_thread_debt WHERE thread_id = ?", (thread_id,))
+
+    @serialized
+    def catchup_status(self) -> dict[str, Any]:
+        windows = [{"chat_id": chat, "start": start, "end": end, "attempts": attempts,
+                    "state": CatchupState.PENDING.value, "reason": None, **({"thread_id": thread_id} if thread_id else {})}
+                   for chat, start, end, attempts, thread_id in self._db.execute(
+                       "SELECT chat_id, start, end, attempts, '' AS thread_id FROM catchup_debt UNION ALL "
+                       "SELECT '', start, end, attempts, '' FROM discovery UNION ALL "
+                       "SELECT chat_id, start, end, attempts, thread_id FROM catchup_thread_debt ORDER BY start, end, chat_id")]
+        from ..attention import DELIVERY_WINDOW
+
+        with self._db:
+            self._db.execute("DELETE FROM catchup_dropped WHERE recorded_at < ?", (time() - DELIVERY_WINDOW.total_seconds(),))
+        pending = len(windows)
+        windows.extend({"chat_id": chat, "start": start, "end": end, "attempts": attempts,
+                        "state": CatchupState.DROPPED.value, "reason": reason, "recorded_at": recorded_at,
+                        **({"thread_id": thread_id} if thread_id else {})}
+                       for chat, start, end, attempts, reason, recorded_at, thread_id in self._db.execute(
+                           "SELECT chat_id, start, end, attempts, reason, recorded_at, thread_id FROM catchup_dropped ORDER BY start, end, chat_id"))
+        return {"pending": pending, "dropped": len(windows) - pending, "windows": windows}
 
     @serialized
     def processed(self, message_id: str) -> bool:

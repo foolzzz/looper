@@ -2320,7 +2320,8 @@ Manager tools.
   startup.
 - **Providers** (`llm_providers`) are accounts: `name`, typed `vendor_type`,
   `auth`, `oauth_runtime_type`, `env`, `max_concurrency` (`null` = no limit,
-  stored and checked only), and a separate API key in `llm_provider_secrets`.
+  enforced when `engine.admission.enabled` is on), and a separate API key in
+  `llm_provider_secrets`.
   The API returns the key as `***` or `null`; sending `***` keeps it and
   `null` removes it. The launch path and a model listing load it. Login accounts use their
   runtime's own login and never copy OAuth tokens. Vendor templates suggest
@@ -2872,8 +2873,16 @@ narrowed constraint, so its project page cannot store a project's limit.
 What bounds the load is now each task's limits and how many tasks start.
 Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
 Reviewers at once whatever its tasks; now N running tasks run N Planners and
-up to 16N Workers and 8N Reviewers, and nothing caps the total (an LLM
-provider's `max_concurrency` is stored, not enforced). The converted alarm-like
+up to 16N Workers and 8N Reviewers. By default nothing caps the total.
+With `engine.admission.enabled`, each account's `max_concurrency` also bounds
+Workers, Reviewers, consults, processors and nested runs; `null` is unlimited.
+The account queue uses the shared `Lane` enum, aging and quota freezes, with
+durable state and an operator-only `providers.limits_clear` override. Nested
+runs borrow a running parent's slot. Planner and Manager turns and platform
+explorers are not admitted yet. The switch defaults off and refuses activation
+while failure typing is off. The independent cost guard can still hold runs
+for spending; admission's 95% background pause does not change that policy.
+The converted alarm-like
 project (Planner 3, Worker 8, Reviewer 3) moves from at most 8 Workers and 3
 Reviewers across the project to its parallel schedule's 3 runs × (8, 3): 24
 Workers and 9 Reviewers. Bursts come from several schedules firing in the same
@@ -3195,6 +3204,15 @@ named rules), allow only an `update` once the project has 20 skills, and keep
 the newest pending proposal per name (an older one becomes `superseded`). A
 pending proposal expires after seven days; the operator can restore it, and it
 is checked again.
+
+**Usage.** `project_skills.usage` (`looper/agents/skill_usage.py`; a read, also for an API client and as
+`loopercli project-skills usage`) reports, per project skill and current content hash, the Worker runs and
+attempts of the last 7 days (and the 28 before) that loaded it, how many of their Claude Code streams show a
+`Skill` tool call for it (`project:<name>`, or the bare name when no other skill has it; other runtimes report
+unknown, never 0, and stay out of the rate), and the first-pass rate, cost and control (same-project attempts
+that did not load it) with 95% Wilson intervals; fewer than 20 attempts on a side shows counts only. Without
+`step_attempts` it reports loads and calls only. It also lists review reasons (`never_invoked`, `stale`,
+`divergent`); they change no state and send nothing. The data is observational, not a controlled experiment.
 
 Only the operator's dashboard session confirms
 (`project_skills.proposals.confirm`; an API client may read proposals but not
@@ -4472,7 +4490,7 @@ So:
   usage, held in memory until a run ends, is not known. A second start changes
   nothing.
 - **A task's cost** (`llm_records.task_costs`) is the sum of its Planner's,
-  Workers' and Reviewers' runs, in total and by role, with the run count. It
+  Workers' and Reviewers' runs and its room consults, in total and by role, with the run count. It
   also counts `running` runs (cost not known yet) and `unpriced_runs`
   (ended without a cost). A Manager turn about the task is not part of it.
 - **An agent's usage** (`llm_records.agent_usage`, `POST /api/v1/runs/usage {agent_id, turns?}`) gives its total cost, runs and compactions, its cost
@@ -4480,15 +4498,17 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
-### Cost guard observation
+### Cost guard admission
 
-`cost_guard.mode` defaults to `off`; this first stage accepts only `off` and `observe`.
+`cost_guard.mode` defaults to `off`; it accepts `off`, `observe` and opt-in `enforce`.
 Global and background-role daily caps have no default. Observe for a week before choosing limits;
-the read-only Settings → 花费 page then offers the last 30 days' daily P95 × 1.5 as advice, never an applied cap.
+the Settings → 花费 page then offers the last 30 days' daily P95 × 1.5 as advice, never an applied cap.
 The operator-only `cost_guard.get/update` operations expose this configuration and accounting; updates declare
 confirmation. They are separate from `chat_settings`, add no agent tool, and are available through the generated CLI.
 Configuration export/import includes explicit cost settings, never runtime observations; a client cannot import them.
-Lark and Telegram share the same observed Manager/model-run paths, with no new command, reply or notification.
+Lark and Telegram share the same Manager/model-run paths. Exact operator DM replies continue or stop a spend hold;
+the generated CLI and operator-only `cost_holds.list/decide` provide the same decisions. API requests record `api`
+as their source; they cannot claim `dashboard`.
 
 `agents/cost_guard.py` reserves before every model turn through `ClaudeRunRecorder.start`, including resident
 Manager/Planner turns, Worker/Reviewer runs, processor/leads checks, advisor/judge/outbound checks and room consults.
@@ -4506,8 +4526,27 @@ profile. Record presentation removes these fields. Off performs no admission I/O
 prompts, tools, commands and process signatures retain their previous inputs. A guard error preserves ordinary
 execution. Outbound reservation errors propagate to `review()`'s existing block-on-error path; a successful
 classifier verdict and successful audit write are both still required to allow an action.
-Enforcement, holds, quota deferrals, alerts, unanswered-push pauses and editable dashboard controls follow the
-[cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分). This stage needs no migration.
+Enforce checks task and global daily caps against spent amounts plus reservations. `ask` holds further starts,
+keeps running work and persists `awaiting_budget` across Planner status updates and restarts. `fail` counts
+reservations too, so it can fail the task earlier and stop running Workers; `wrap_up` uses its existing stop path.
+Planner closing turns in stopping/completed/failed states also use admission and are refused only by its verdict.
+Subscription-priced runs gain a reservation-based mid-run soft stop only when their scope chain has a cap;
+without caps the guard adds no soft stop. A configured run cap supplies the reservation; otherwise the estimate
+is the role's 30-day P95 with a floor ($0.50 for task/Manager roles, $0.05 for small background roles).
+The operator's Manager turns still pass a global cap with a daily code-only notice; other senders are refused.
+Spend refusals take precedence over usage-window holds. After spend admission, rejected windows and quota
+failures hold all runs, including operator-started work; 95% utilization holds only background roles and
+schedule firings. Holds end at the reset, or after a cooldown of at most five minutes from the signal when
+reset time is unknown. The operator Manager exception applies only to spend, not rejected windows.
+Background-role and schedule budget enforcement remains inactive.
+
+Existing holds keep their decisions, Needs you cost items, Settings list and 24-hour expiry in every mode,
+including after restart. Continuing wakes the Planner to dispatch the next saved step; stopping and expiry use
+the task stop path with a persisted reason. Startup reads whether hold recovery is needed; after a hold exists,
+recovery stays enabled until restart to avoid racing a new hold commit. Off installations without saved holds
+retain their no-I/O admission, reply-routing and scheduler paths. The `cost_holds` migration also adds the
+project `ask` action. Alerts and unanswered-push pauses follow the
+[cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分).
 
 ### Why a run failed (failure classes)
 
@@ -5040,14 +5079,14 @@ its own refusal text, and its listing's hash is in the process signature. Until 
 conversation, the user's own turns are what keeps it to the session key `main`: it searches, of the default
 Manager's threads without an API client, the dashboard chat, the dashboard's chats with the Planners of the tasks it
 created, and the Lark and Telegram direct chats whose recorded sender is the bot's `operator_sender_id` now. While the
-switch is on, storing a direct chat's user message records who the chat is with (`chat_direct_threads`, the first
-record stays); a group chat, another sender's direct chat, a scenario Manager's or an API client's thread is never
-searched. Candidates come from `idx_chat_messages_search`, a GIN index on the messages' tokens
+switch or idle checks are on, storing a direct chat's user message records who the chat is with
+(`chat_direct_threads`, the first record stays); a group chat, another sender's direct chat, a scenario Manager's or
+an API client's thread is never searched. Candidates come from `idx_chat_messages_search`, a GIN index on the messages' tokens
 (`array_to_tsvector(looper_search_tokens(content))`, built online on upgrade): each word brings at most its 2,000
 newest messages in scope, and only those are read and scored, with JIT off for the query. Every passage it returns is
 fenced (`<untrusted source="chat_history" where=… who=… at=…>`, its own `<untrusted`/`</untrusted` escaped) and goes
 into the leads search's group backstop. Off, the tool list, the prompt, the signature and the command are what they
-were before, and nothing is recorded.
+were before; direct-chat provenance is recorded only if idle checks are on.
 
 **One-time reminders** ([reminders RFC](rfcs/reminders-v0.zh-CN.md)). With `reminders.enabled` on, `current_scope`
 adds the three reminder tools to the default Manager's tools; they are `RestrictedTool`s with `audience` `operator`,
@@ -6336,8 +6375,9 @@ marked as background rather than instructions. Tasks created from the dashboard
 leave `origin_channel_id` empty, as other dashboard-created tasks do.
 
 The one state writer permits `pending → tasked | rejected | expired` and
-`expired → tasked`. Each transition gets one final notice: an edit of the original
-push, falling back to one quoted reply. Either succeeding completes it; type,
+`expired → tasked`. A transition of an intent whose push was delivered (sent, with a
+message id, to the current target chat) gets one final notice: an edit of that push,
+falling back to one quoted reply. An intent whose push never went out gets none. Either succeeding completes it; type,
 sender or chat renames, added evidence and timezone changes do not repeat it.
 The additive `intent_final_notices` migration stores the transition's `handled_at`,
 attempts, fallback post and next attempt, without rewriting old rows. The periodic
@@ -6347,8 +6387,12 @@ never resent; its idempotent edit can still be retried. Exhaustion stops retries
 with `final_notice_retry_exhausted`, visible in the existing attention delivery
 section. `expired → tasked` starts a fresh notice for the new state. The next pass
 also adopts legacy failed final replies, even when their old reply attempts are
-exhausted, into one bounded notice budget. Previously stuck intents expire on
-upgrade, so the operator may receive one delayed expiry reply.
+exhausted, into one bounded notice budget. After the upgrade, pending intents with a
+null `expires_at` that are over 24 hours old expire on the first expiry pass at
+startup or a later one (at most 50 per pass, oldest first); they never had a
+delivered push, so their expiry sends nothing. An intent handled before the upgrade
+whose final edit and fallback reply had failed gets one more bounded notice, so the
+operator may receive one delayed final-state edit or reply.
 Lark post edits use Markdown rich-text posts, matching the original message;
 status-message edits keep their original plain-text format. Delivery claims
 commit before sending; an uncertain result is never resent, while an explicit failure has a bounded
@@ -6524,7 +6568,16 @@ ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
 that stops before the record is `uncertain` on restart, and that recovery
 consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
 insert had not committed is therefore still read once, on the next brief.
-`consumed_until` is the check time, not a watermark. Every section empty means
+`consumed_until` is the check time, not a watermark. With
+`subscriptions.triage.enabled` on, only the brief for `operator_dm_target()`
+adds “进摘要的事件”: up to ten newest owned digest or settled important fallback
+events, plus the remaining count. It uses the same first digest date's local
+midnight as its lower bound. `triage_ids` stores the exact read with the claim;
+`morning_brief_triage` consumes it in the sent/uncertain transaction or recovery.
+Refusals and released claims consume nothing. While triage is enabled, deferred
+`source = triage` rows are excluded from the ordinary deferred-message section.
+Event titles, chat names and summaries lose mention markup and escape Markdown;
+these fields are operator-visible text, never model input. Every section empty means
 nothing is sent. The switch, whether the
 channel is enabled and who the operator is are read again after the summary is
 collected and again immediately before the post. The switch is read again after
@@ -6692,8 +6745,11 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   setting and stops. A tick that decides not to check writes nothing (it counts
   the reason and logs it at DEBUG). The advisory lock covers only "decide,
   insert, publish". Before bus replay starts, checks left `running` by an earlier
-  server fail as `restart`; recovery failure blocks startup.
+  server fail as `restart`; checks left `sending` become `uncertain`, count as
+  mentioned and are never sent again. Recovery records an `unknown` receipt;
+  recovery failure blocks startup.
 - Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
+  `idle_check_sending` adds the in-flight `sending` state without rewriting rows;
   `idle_check_source` adds `idle_check` to the source check of
   `proactive_deliveries`, built from the check's current values, so it composes
   with the morning brief's and triage's widenings.
@@ -6704,8 +6760,9 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   if it is replaced. With all prerequisites on, enabling the switch takes effect
   on the next tick.
 - `ManagerAgent.idle_for()` reads only main's lock, running token, worker and
-  resident. Its clock is `ManagerSession.turn_ended_at`, written by that session's
-  worker (or the message loop for its own turns), falling back to service start.
+  resident. Its clock is `ManagerSession.turn_ended_at`, written when that session
+  handles a user message or runs a background turn, falling back to service start.
+  A wake that runs no turn leaves the clock unchanged.
   Group arrivals can update `last_activity` without resetting main's idle clock.
 - `IDLE_CHECK_DUE` runs on main's background lane through `tiers/background_turn.py`,
   sharing completion token registration, preparation, locking and bounded late
@@ -6717,6 +6774,11 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   acknowledging their wakes. An interrupted running check also records `preempted`
   and leaves one stopped note for the next user turn; it sends nothing. Lark
   `/stop` matches the operator's sender id even though its DM has a different id.
+  A user message in the target direct chat after the check started also voids
+  its delivery as `preempted`, checked before the decision and again before sending.
+  Both channels look up the sender through `chat_direct_threads`, since a Lark DM's
+  chat id differs from its sender id; the same timestamp goes to the delivery layer.
+  Idle checks record this provenance even when session search is off.
 - A sent morning brief suppresses checks for two hours in that same channel and
   direct chat. Real-model idle and concurrent preemption evals remain pending;
   loopback runtimes cover the service and Manager paths.
@@ -7738,7 +7800,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while the session search is in effect, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
+| `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while session search or idle checks are on, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`, `leads_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
@@ -7946,7 +8008,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Tasks**: Task list, newest first, 50 at a time with Load more ("Showing N of M"; the newest page is re-read every 3 s and the older pages loaded stay below it), with project and status filters (several chips at once, listed in the address in chip order, for example `status=init,running,waiting,waiting_user,pending`; with neither `status` nor `group` nor `schedule` the page shows Ready, Running, Waiting, Waiting for you and Pending, and `status=all` shows every task; a single value such as `status=failed` still selects that one filter; `Ready` is ready tasks; `Running` covers tasks whose Planner is planning, executing, verifying or winding down, including the assigned and running statuses; `POST /api/v1/tasks/page` takes `statuses`, one to ten of the same filter names, and returns their union, or `status` for one name, not both; counts stay per filter and count every task under the other filters), time display, each task's cost so far, a "Scheduled" badge linking to the schedule that created the task (with "continues the schedule's Planner session" on the detail page when `continues_schedule_session` is true), Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. On a stopped, failed or cancelled task, Start (here and on its detail page) goes on from its saved plan, and Start over, after an inline confirm, plans it anew (`POST /api/tasks/start` with `start_over`). `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page; `#tasks?group=<group>` lists one task group, shown as a chip that clears it, `#tasks?schedule=<id>` one schedule's tasks, shown as a chip too. With no `status`, a group or a schedule lists every task in it; an explicit `status` still narrows that list. A project link keeps the unfinished default. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|schedules|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then six tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. History lists each saved version (author kind, time, reason) and rolls back by writing that version's content as a new version, after showing the difference and the projects that install the skill. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers, Reviewers and processor, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer, Processor; the processor's row has no harness field and says when its profile cannot run it), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, spend cap and environment (a project sets no concurrency limit), where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Schedules**: a line saying a schedule runs an agent task or shell command of the project, or reads a message stream, on a time rule and starts disabled, New schedule (its Type: Agent task, Command or Subscription, whose form takes the message source, the chats and senders it reads, the look-back, the cap and the cut of the text, the processor's instructions, the quiet word and title, the spend caps and where it pushes), then one collapsible row per schedule. A closed row shows the name, the rule in words, the next run in the schedule's zone (or Disabled), the last run's status and the failures in a row, with the enable switch, Run now and Reset Planner session beside it (outside the row's button); reset asks for confirmation that the next run starts fresh and a run in flight keeps its own session without writing back. Its session status is "Planner session: none yet", or "Planner session: continuing since <time>, last used by run <task name>", with time in the schedule's zone and no session id, also for a parallel schedule. A closed row also shows "Failing" or "No success lately" while an alert is active. An open row edits every field (the gate command and timeout, the daily budget with today's spend, notify and the chat to send to, or Dashboard only, under "Before each run and after"), previews the rule's next 5 fire times as it is typed (an invalid rule says why and disables Save), saves with one Save, deletes after a confirmation, and lists the run history (the same one as a schedule's detail view): 20 runs at a time, newest first, with "Show older runs", the routine skips (nothing new, busy) hidden by a checkbox that is on at first and says how many firings there have been; each run with when it was due (the fire time on hover), how it fired (Scheduled, Catch-up with the missed count, Manual), the status, for a repeated skip ×N and until when (instead of how long it took), how long it took, the cost, the summary or error, a collapsed gate output, a note when the run carries the previous run's input, and its task by title with the task's status, linking to it. A subscription's row shows a Subscription badge instead of the Planner session, and under its last run: where it pushes and when the operator confirmed it, or "Push target not confirmed: output stays on this page" with "Confirm push target…" (the facts the server gives, then Confirm), and its cursor with "Reset cursor…" (a time in the browser's zone, then Reset: the answer says how many events the next run reads); each of its runs adds what it read and made (the outcome, messages read of those in the window, how many were too old or over the cap, the events it covers, and its output folded). `#projects/<id>/schedules/<schedule id>` opens that row, and a task's Scheduled badge links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, always offered with task, running-task and schedule counts. Inline confirmation deletes schedules and their run history, stops running tasks, then removes all tasks and the project; result branches stay. While it runs, the button shows “Stopping and deleting…”. A conflict shows the server's reason and leaves Delete available to retry; success refreshes the task lists.
-- **Task Detail**: Overview (status, phase, times, steps ("n/m done": the accepted steps of those not skipped, then how many are in review and how many skipped; the step list's badges use the Pipeline's names) and the task's cost with its run count; the requirement, with Edit while the task has not ended and its earlier versions under History, then the supplements, each with how it came and whether the Planner has seen it; then Progress: once the task has ended, its final summary (completed) or closing note (failed, stopped) as Markdown, then the Planner's latest progress note (done, now, next, risks, estimate, and when) and the earlier ones under a disclosure; then "Cost by agent and model": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost, and below it (beside it on a very wide screen) the By model table: each model's runs, input, output and cache read and write tokens (compact) and cost ("–" when none of its runs has one), adding up to the task's cost, then the Manager's turns about the task on rows of their own, marked as not counted in the task's cost or its spend cap; a one-line summary of each role's Agent Profile that opens the Agents tab; steps, agent timeline, live activity feed), Pipeline (React Flow: the plan as its dependency graph, each step a node by its label and status, under the steps in its `depends_on` or the Planner, in rows by dependency depth; the steps nothing live depends on lead to the result. Done steps keep their place and edges when the plan changes, so steps a replan or a restart adds hang off them; dropped steps stay as dashed, muted history on the right of their row, with the decision that dropped them in the tooltip, which also has the instruction and the Worker and Reviewer ids), Agents (each role's Agent Profile and the Worker and Reviewer limits, each with where it comes from (a limit: this task, Settings → Roles default or built-in default), changed there until the task completes and read-only after; the roles its Planner defined with their kind and profile, marking one the project no longer allows; and every Worker and Reviewer run of its steps, in plan order, with its role (Worker, Reviewer or the defined role it ran as), the Agent Profile it ran on, where that came from and its status, each linking to its history: `runs.for_task {task_id}`, read again whenever a step changes), Sessions, Conversation
+- **Task Detail**: Overview (status, phase, times, steps ("n/m done": the accepted steps of those not skipped, then how many are in review and how many skipped; the step list's badges use the Pipeline's names) and the task's cost with its run count; the requirement, with Edit while the task has not ended and its earlier versions under History, then the supplements, each with how it came and whether the Planner has seen it; then Progress: once the task has ended, its final summary (completed) or closing note (failed, stopped) as Markdown, then the Planner's latest progress note (done, now, next, risks, estimate, and when) and the earlier ones under a disclosure; then "Cost by agent and model": the Planner's, the Workers' and the Reviewers' runs and cost, and its room consults when it has any, with each one's share, noting runs still running or without a reported cost, and below it (beside it on a very wide screen) the By model table: each model's runs, input, output and cache read and write tokens (compact) and cost ("–" when none of its runs has one), adding up to the task's cost, then the Manager's turns about the task on rows of their own, marked as not counted in the task's cost or its spend cap; a one-line summary of each role's Agent Profile that opens the Agents tab; steps, agent timeline, live activity feed), Pipeline (React Flow: the plan as its dependency graph, each step a node by its label and status, under the steps in its `depends_on` or the Planner, in rows by dependency depth; the steps nothing live depends on lead to the result. Done steps keep their place and edges when the plan changes, so steps a replan or a restart adds hang off them; dropped steps stay as dashed, muted history on the right of their row, with the decision that dropped them in the tooltip, which also has the instruction and the Worker and Reviewer ids), Agents (each role's Agent Profile and the Worker and Reviewer limits, each with where it comes from (a limit: this task, Settings → Roles default or built-in default), changed there until the task completes and read-only after; the roles its Planner defined with their kind and profile, marking one the project no longer allows; and every Worker and Reviewer run of its steps, in plan order, with its role (Worker, Reviewer or the defined role it ran as), the Agent Profile it ran on, where that came from and its status, each linking to its history: `runs.for_task {task_id}`, read again whenever a step changes), Sessions, Conversation
 - **Schedules** (`#schedules`, below User Gates in the sidebar): every project's schedules from `GET /api/schedules`, re-read every 10 s, grouped by project (each group with how many of the project's schedules are on and a link to the project's Schedules tab to add or edit one). A filter bar above it: Project (All, or any project) and Status (All, Enabled, Disabled), which combine and are kept in the address (`#schedules?project=<id>&enabled=true|false`, so a link and a reload keep them; an unknown value is All), filtered in the page; while one is set it says "Showing K of N" with Clear filters, and when nothing matches the list says so, with Clear filters. Each row shows the name (opening its detail view), the rule in words, the next run in the schedule's zone (or Disabled), the last run's status, time and task, "Failing" or "No success lately" while an alert is on, and today's spend (against the daily budget when set); a disabled schedule is dimmed (a dashed edge, a muted name). Beside it, the enable switch (`POST /api/v1/schedule_admin/update` with `schedule_id` and `fields.enabled`: the switch shows the new value while it saves, then "Turned on" or "Turned off"; a refusal puts it back and says why) Run now (its answer, as on the project tab) and Delete schedule, which asks inline first ("Delete <name>? Its tasks stay.", as on the project tab) and takes the row out of the list. Loading, empty and error states, and a failed refresh keeps the last list with the error. **A schedule** (`#schedules/<id>`): back to all schedules; its name, project (a link), rule in words, the switch, Run now, "Edit on the project" (its row on the project's Schedules tab, where it is edited) and Delete schedule (the same inline confirmation; once it is deleted, back to all schedules); the next run, the last run with the alerts, and today's spend against the daily budget; its settings (rule and cron, time zone, work directory, gate and its timeout, notify and to whom, the budgets per run and per day, run timeout, overlap and catch-up, the Agent Profiles it sets, by name) with the requirement folded; and the run history, the same as on the project tab. Re-read every 10 s; an unknown id says it was not found.
 - **Message stream** (`#messages`, below Schedules): each source's state in words (healthy, degraded, stale, off), its counts and its recent passes with their errors, a switch that turns reading on or off, and, with no source, a form for the collector's directory. It also shows searchable chats with include/exclude switches and seven-day event counts, storage and retention stats, and two-step deletion for a message, a sent-time range or a whole chat, with the external copies that remain. It shows counts only, never message text.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`, or `#history?role=<role>` for every recorded run of one role): opened from an Agent Timeline row, Settings → Roles, the Manager install note or the Chat page. The roles are manager, planner, worker, reviewer and processor; `#runs` and `#runs/<role>` redirect here, and a role outside that list opens History with no role filter. A role page lists that role's runs and opens the newest. Its Plugins & skills section shows what the run loaded, and a Runtime catalog skips section lists `metadata.runtime_catalog.skipped` beside it when that list is not empty. One agent's page for the Manager or a Planner starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper supplied (the runtime's built-in system prompt is not included): its title shows the prompt's size, its short sha256, an `isolated` badge and, for replace runs, `replaced default`, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
@@ -8890,14 +8952,17 @@ implementation supplies it and is retested.
   `[event] ready event_key=im.message.receive_v1` (or its first live message),
   a background catch-up lists raw history with `lark-cli api GET
   /open-apis/im/v1/messages --as bot` (chat containers), ascending, from the saved boundary minus
-  10 seconds through the consumer's ready time. It scans explicit channel
-  bindings first, then unbound chats observed by `observe_chat` in the last
+  10 seconds through the current time after discovery and consumer readiness
+  complete, including on retries. Durable processed ids deduplicate overlap.
+  It scans explicit channel bindings first, then unbound chats observed by
+  `observe_chat` in the last
   24 hours when the default Manager accepts unbound chats. At most 100 chats,
   5 pages per chat and 50 messages per page are scanned. Embedded thread replies
   use the same admission path. For groups and topics, a separate root scan reads
   newest first and stops at the first root older than 24 hours, up to 5 pages of
-  50 roots. Reaching this discovery cap logs an INFO count and completes the chat's
-  window. Candidates also include threads this channel handled or sent a message
+  50 roots. Reaching this discovery cap logs an INFO count, records the unscanned
+  window as dropped with `page_cap`, and completes the chat's scan. Candidates also
+  include threads this channel handled or sent a message
   in during the last 7 days, persisted in the inbox with their activity time
   (at most 1,000 entries per channel). These active threads take priority over
   new roots. At most 50 distinct threads per chat are listed, with at most 4
@@ -8905,7 +8970,8 @@ implementation supplies it and is retested.
   stopping at the first reply older than the recovery window; replies are
   admitted oldest first within that thread. A failed thread listing logs its
   thread id and increments `thread_failures`; its already-read pages are still
-  admitted and it does not leave the chat's main window unfinished.
+  admitted. Thread debt is persisted independently, so only that thread retries;
+  a failed thread does not keep the whole chat window owed.
   Recovered messages use the live admission, group bot-mention, routing,
   attachment and disabled-chat
   checks. Known p2p chats participate only when bot identity can resolve their
@@ -8924,25 +8990,59 @@ implementation supplies it and is retested.
   consumer retains the earlier live boundary. Each chat's unfinished recovery
   window is stored separately before scanning, retained on errors or cancellation,
   and merged with that chat's next startup window. Discovery work is also durable
-  until its windows have been assigned to chats. Debt older than 15 minutes is
-  dropped (partially expired windows keep their recent portion), with skipped-window
-  and duration counts in the log. Thread containers use the same raw history API;
+  until its windows have been assigned to chats. While the service runs, unfinished
+  windows retry after 30 seconds, 1 minute, 2 minutes, 5 minutes, then 10 minutes
+  between attempts. Discovery, chat and thread debt are clamped to the most
+  recent 15 minutes before scanning, using the same chat, page, thread and
+  transport limits; unfinished discovery extends through the current time once
+  the consumer is ready. Completed windows
+  cause no retry work. Page caps, non-advancing pagination and permission errors
+  are terminal typed failures: their windows become `dropped` immediately.
+  Other failures exhaust ten attempts, counted durably across restarts, before
+  becoming `dropped` with `reason: retry_exhausted`. Shutdown cancels and joins
+  retries without consuming an attempt for an interrupted request. Pending and
+  dropped windows survive restarts. Catch-up admission in `_handle_lark_event`
+  rejects messages older than 15 minutes after filtering self-sent posts and
+  unmentioned group messages. A remaining message that expires before handling
+  records a visible `stale` dropped window. Admitted
+  messages carry their original send time in the turn's envelope timestamp.
+  `system.status.channels.<channel-id>.catchup` reports `pending`, `dropped` and
+  `windows` (chat id, start/end epoch seconds, state, attempts, reason and the
+  optional thread id and the dropped record's `recorded_at` timestamp); an empty
+  chat id denotes discovery work. Channel health reports the same fields, and
+  system checks show pending windows as warnings and dropped windows as failures.
+  With Needs you enabled, its existing messages section and the operator's `/todo`
+  also list dropped windows so missed messages can be checked and forwarded.
+  Catch-up items in Attention read only `registry.catchup_checks()`, without
+  additional status checks or their PostgreSQL reads. Dropped windows remain visible for
+  `DELIVERY_WINDOW` (72 hours) from `recorded_at`; reads filter expired entries
+  and inbox status refreshes clean them up. There is no acknowledgement control.
+  Thread containers use the same raw history API;
   no message search or search scopes are required. Raw parent/root ids take the
   same gate routing path as live replies.
   After a crash, that last heartbeat is the recovery boundary. A missing
-  boundary initializes the state without replaying history; one older than
-  15 minutes skips the whole window. Individual recovered messages older than
-  15 minutes at handling time are also skipped. Each startup logs one INFO
+  boundary initializes the state without replaying history. A boundary older
+  than 15 minutes records the expired portion as a visible `boundary_expired`
+  dropped window and still discovers the most recent 15 minutes. Pending
+  discovery and assigned chat/thread debt record their expired portions as
+  `stale`, aggregated once per chat in each pass. Expired portions end at the
+  earlier of the cutoff and the owed endpoint. The drop and the advanced start
+  (or removal of a fully expired window) are committed together, so a failed
+  scan or restart cannot record the same expired prefix again.
+  Adjacent or overlapping dropped windows with the same chat, thread and reason
+  are merged, retaining the highest attempt count and the latest recording time.
+  Each startup or retry pass logs one INFO
   `lark_catchup` summary: boundary, expired-window flag, chats scanned, messages
   found, handled, duplicate and too-old skips, failures, `threads_scanned`,
-  `thread_failures` and `thread_roots_capped`. The too-old count covers messages
+  `thread_failures`, `thread_roots_capped`, `pending` and `dropped`. The too-old count covers messages
   older than the recovery start in listed containers, including the first old
   reply that stops a thread listing; root discovery does not count messages.
   Message counts cover
   listed messages only; an expired window is not listed and its message count
   is unknown. A consumer that does not signal readiness within 60 seconds,
-  chat list failures and exhausted chat or thread reply page limits warn without blocking
-  the consumer. This recovery applies to the CLI channel; the bot-token channel
+  chat list failures and terminal chat or thread history failures leave visible
+  pending or dropped state without blocking the consumer. This recovery applies
+  to the CLI channel; the bot-token channel
   is unchanged.
 
   At startup the channel runs `lark-cli

@@ -1634,7 +1634,7 @@ class ClaudeRunRecorder:
 
     async def start(self) -> None:
         from ..db import llm_records
-        from . import cost_guard
+        from . import admission, cost_guard
         from .runtimes.instructions import record as instructions_record
 
         role = getattr(self._launch, "role", None)
@@ -1642,7 +1642,20 @@ class ClaudeRunRecorder:
                                  role.value if role is not None else llm_records.run_kind_of(self._agent_id))
         # Review reservations must persist before classification; recorder errors must not swallow this boundary.
         reservation = await cost_guard.before_run(launch=self._launch, run_kind=kind, task_id=self._task_id,
-                                                  schedule_id=self._schedule_id)
+                                                  schedule_id=self._schedule_id,
+                                                  **({'step_id': self._step_id} if self._step_id is not None and
+                                                     cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE else {}))
+        if (reservation is not None and cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE
+                and reservation.currency is cost_guard.Currency.EQUIVALENT and self._launch is not None
+                and any(scope.limit_usd is not None for scope in reservation.scopes)):
+            from .runtimes.pricing import RunSpend, pricer
+
+            if self._spend is None:
+                price = pricer(self._launch.settings.resolved_model, catalog=self._launch.settings.pricing_catalog)
+                if price is not None:
+                    self._spend = RunSpend(price, self._launch.model, reservation.usd)
+            elif self._spend.cap is None or self._spend.cap > reservation.usd:
+                self._spend.cap = reservation.usd
         self._track(datetime.now(timezone.utc))
         try:
             self._record_id = await llm_records.start_record(
@@ -1654,6 +1667,7 @@ class ClaudeRunRecorder:
                 parent_record_id=self._parent_record_id,
                 metadata={
                     "command": self._command,
+                    **admission.record_metadata(),
                     # What Looper appended (its file holds the same text); Claude Code's own prompt is not included.
                     **(self._system_prompt.record() if self._system_prompt is not None else {}),
                     # The model asked for and where it came from; the variables' names, not their values.
@@ -2045,12 +2059,19 @@ class ClaudeRunRecorder:
         from .llmrec import LlmrecRoute, RouteKind
         from .llmrec.control import controller
 
+        found = None
         if basis is not None:
             result_event, outcome, given = basis
             found = await failures.recorded(self._runtime(), result_event, self._evidence, outcome=outcome, given=given)
             if found is not None:
                 fields.update(failure_class=found.cls.value, failure_cause=found.cause.value,
                               metadata={**(fields.get("metadata") or {}), "failure": found.metadata()})
+
+        from . import admission
+
+        if admission.enabled():
+            await admission.recorded(self._provider().id, self._agent_id, self._record_id, found,
+                                     interrupted=fields.get("status") == "interrupted")
 
         route = self._launch.llmrec if self._launch is not None else None
         owner = controller()

@@ -137,14 +137,22 @@ async def observe(event: Mapping[str, Any], provider_id: str, record_id: int | N
         windows = parse(event)
         if not windows:
             _warn("parse", "ignored provider limit signal without valid windows")
-        for name, fields in windows:
-            await db_limits.upsert(provider_id, name, {**fields, "record_id": record_id})
+        try:
+            for name, fields in windows:
+                await db_limits.upsert(provider_id, name, {**fields, "record_id": record_id})
+        finally:
+            from . import admission
+
+            if admission.enabled():
+                await admission.observed(provider_id, windows, record_id)
     except Exception:
         # No payload or exception text: either may contain provider/account details.
         _warn("write", "could not save provider limit signal")
 
 
 async def limits(provider_id: str | None = None) -> dict[str, Any]:
+    from . import admission
+
     accounts = await profile_registry.list_providers()
     if provider_id is not None:
         accounts = [p for p in accounts if p["id"] == provider_id]
@@ -154,7 +162,7 @@ async def limits(provider_id: str | None = None) -> dict[str, Any]:
     windows = await db_limits.windows(provider_id) if active else []
     usage = await db_limits.usage(provider_id) if active else []
     return {"enabled": active, "providers": [
-        {"provider_id": p["id"], "name": p["name"], "admission": None,
+        {"provider_id": p["id"], "name": p["name"], "admission": await admission.snapshot(p["id"]) if admission.enabled() else None,
          "cost_basis": "api_equivalent" if p["auth"] == "oauth" else "reported",
          "windows": [{k: v.isoformat() if isinstance(v, datetime) else v for k, v in w.items()
                       if k != "provider_id"} for w in windows if w["provider_id"] == p["id"]],
