@@ -1,0 +1,1365 @@
+{
+  "surfaces": {
+    "claude-code/manager": {
+      "argv": [
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ListAgents",
+        "--model",
+        "opus",
+        "--teammate-mode",
+        "in-process"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Billing header",
+          "Identity",
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Billing header": {
+            "owner": "runtime",
+            "note": "billing header (fixed)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Identity": {
+            "owner": "runtime",
+            "note": "identity line (fixed; changes with append vs replace)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "Claude Code's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "main system prompt block",
+            "sections": [
+              [
+                "",
+                "0e7955818616e4d1040baa53ef29c862ee27fc182685f326fe099f81c52aff8f"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "claude-code/planner": {
+      "argv": [
+        "--permission-mode",
+        "manual",
+        "--permission-prompts",
+        "none",
+        "--disallowedTools",
+        "Bash,Edit,Write,NotebookEdit,EnterWorktree",
+        "--allowedTools",
+        "Read(//project/**),Glob(//project/**),Grep(//project/**),Skill,WebFetch,WebSearch",
+        "--disallowedTools",
+        "ListAgents,SendMessage",
+        "--model",
+        "opus"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Billing header",
+          "Identity",
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Billing header": {
+            "owner": "runtime",
+            "note": "billing header (fixed)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Identity": {
+            "owner": "runtime",
+            "note": "identity line (fixed; changes with append vs replace)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "Claude Code's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "main system prompt block",
+            "sections": [
+              [
+                "",
+                "0e7955818616e4d1040baa53ef29c862ee27fc182685f326fe099f81c52aff8f"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "claude-code/worker": {
+      "argv": [
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ListAgents",
+        "--model",
+        "opus",
+        "--teammate-mode",
+        "in-process"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Billing header",
+          "Identity",
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Billing header": {
+            "owner": "runtime",
+            "note": "billing header (fixed)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Identity": {
+            "owner": "runtime",
+            "note": "identity line (fixed; changes with append vs replace)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "Claude Code's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "main system prompt block",
+            "sections": [
+              [
+                "",
+                "0e7955818616e4d1040baa53ef29c862ee27fc182685f326fe099f81c52aff8f"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "codex/manager": {
+      "argv": [
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Base instructions",
+          "Runtime instructions",
+          "Looper instructions",
+          "Environment"
+        ],
+        "each": {
+          "Base instructions": {
+            "owner": "runtime",
+            "note": "base instructions (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Runtime instructions": {
+            "owner": "runtime",
+            "note": "skills/permissions notes (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "AGENTS.md",
+            "sections": [
+              [
+                "",
+                "23415c6491146ed7bfbc01f0b7a6fcdb6fa922c2b3948fa8f53ee85c75490b8b"
+              ]
+            ]
+          },
+          "Environment": {
+            "owner": "runtime",
+            "note": "environment (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "lines",
+        "lines": [
+          "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.",
+          "model_provider = \"looper\"",
+          "# A directory of the project without AGENTS.md: its CLAUDE.md instead.",
+          "project_doc_fallback_filenames = [\"CLAUDE.md\"]",
+          "",
+          "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
+          "[skills]",
+          "include_instructions = false",
+          "",
+          "# No plugin marketplace sync into this home.",
+          "[features]",
+          "plugins = false",
+          "",
+          "# The agent's shell commands do not get the provider's key.",
+          "[shell_environment_policy]",
+          "exclude = [\"LOOPER_PROVIDER_API_KEY\"]",
+          "",
+          "[model_providers.looper]",
+          "name = \"account\"",
+          "base_url = \"https://endpoint.example.invalid/v1\"",
+          "env_key = \"LOOPER_PROVIDER_API_KEY\"",
+          "wire_api = \"responses\""
+        ]
+      }
+    },
+    "codex/planner": {
+      "argv": [
+        "--json",
+        "--skip-git-repo-check",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "-c",
+        "approval_policy=\"never\"",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Base instructions",
+          "Runtime instructions",
+          "Looper instructions",
+          "Environment"
+        ],
+        "each": {
+          "Base instructions": {
+            "owner": "runtime",
+            "note": "base instructions (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Runtime instructions": {
+            "owner": "runtime",
+            "note": "skills/permissions notes (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "AGENTS.md",
+            "sections": [
+              [
+                "",
+                "23415c6491146ed7bfbc01f0b7a6fcdb6fa922c2b3948fa8f53ee85c75490b8b"
+              ]
+            ]
+          },
+          "Environment": {
+            "owner": "runtime",
+            "note": "environment (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "lines",
+        "lines": [
+          "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.",
+          "model_provider = \"looper\"",
+          "# A directory of the project without AGENTS.md: its CLAUDE.md instead.",
+          "project_doc_fallback_filenames = [\"CLAUDE.md\"]",
+          "",
+          "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
+          "[skills]",
+          "include_instructions = false",
+          "",
+          "# No plugin marketplace sync into this home.",
+          "[features]",
+          "plugins = false",
+          "",
+          "# The agent's shell commands do not get the provider's key.",
+          "[shell_environment_policy]",
+          "exclude = [\"LOOPER_PROVIDER_API_KEY\"]",
+          "",
+          "[model_providers.looper]",
+          "name = \"account\"",
+          "base_url = \"https://endpoint.example.invalid/v1\"",
+          "env_key = \"LOOPER_PROVIDER_API_KEY\"",
+          "wire_api = \"responses\""
+        ]
+      }
+    },
+    "codex/worker": {
+      "argv": [
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Base instructions",
+          "Runtime instructions",
+          "Looper instructions",
+          "Environment"
+        ],
+        "each": {
+          "Base instructions": {
+            "owner": "runtime",
+            "note": "base instructions (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Runtime instructions": {
+            "owner": "runtime",
+            "note": "skills/permissions notes (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "AGENTS.md",
+            "sections": [
+              [
+                "",
+                "23415c6491146ed7bfbc01f0b7a6fcdb6fa922c2b3948fa8f53ee85c75490b8b"
+              ]
+            ]
+          },
+          "Environment": {
+            "owner": "runtime",
+            "note": "environment (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "lines",
+        "lines": [
+          "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.",
+          "model_provider = \"looper\"",
+          "# A directory of the project without AGENTS.md: its CLAUDE.md instead.",
+          "project_doc_fallback_filenames = [\"CLAUDE.md\"]",
+          "",
+          "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
+          "[skills]",
+          "include_instructions = false",
+          "",
+          "# No plugin marketplace sync into this home.",
+          "[features]",
+          "plugins = false",
+          "",
+          "# The agent's shell commands do not get the provider's key.",
+          "[shell_environment_policy]",
+          "exclude = [\"LOOPER_PROVIDER_API_KEY\"]",
+          "",
+          "[model_providers.looper]",
+          "name = \"account\"",
+          "base_url = \"https://endpoint.example.invalid/v1\"",
+          "env_key = \"LOOPER_PROVIDER_API_KEY\"",
+          "wire_api = \"responses\""
+        ]
+      }
+    },
+    "coco/manager": {
+      "argv": [
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Base instructions",
+          "Runtime instructions",
+          "Looper instructions",
+          "Environment"
+        ],
+        "each": {
+          "Base instructions": {
+            "owner": "runtime",
+            "note": "base instructions (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Runtime instructions": {
+            "owner": "runtime",
+            "note": "skills/permissions notes (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "AGENTS.md",
+            "sections": [
+              [
+                "",
+                "bfdd9a4d5ae0086eec8190b560f1a38873f9735154afe02cd445d7aa0367dfa1"
+              ]
+            ]
+          },
+          "Environment": {
+            "owner": "runtime",
+            "note": "environment (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "lines",
+        "lines": [
+          "# Written by Looper for its Coco (TRAE CLI) runs. Only this file, AGENTS.md and the auth.json link come from Looper.",
+          "# Coco (TRAE CLI)'s own login: auth.json here links to the operator's login file, never a copy.",
+          "cli_auth_credentials_store = \"file\"",
+          "check_for_update_on_startup = false",
+          "# A directory of the project without AGENTS.md: its CLAUDE.md instead.",
+          "project_doc_fallback_filenames = [\"CLAUDE.md\"]",
+          "",
+          "# Coco (TRAE CLI)'s own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
+          "[skills]",
+          "include_instructions = false",
+          "",
+          "# No plugin marketplace sync and no ChatGPT apps in this home.",
+          "[features]",
+          "plugins = false",
+          "apps = false",
+          "memories = false",
+          "",
+          "# The agent's shell commands get a TRAE_HOME without the login, so a coco command there cannot use it",
+          "# or log it out.",
+          "[shell_environment_policy]",
+          "set = { TRAE_HOME = \"/shell\" }"
+        ]
+      }
+    },
+    "coco/planner": {
+      "argv": [
+        "--json",
+        "--skip-git-repo-check",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "-c",
+        "approval_policy=\"never\"",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Base instructions",
+          "Runtime instructions",
+          "Looper instructions",
+          "Environment"
+        ],
+        "each": {
+          "Base instructions": {
+            "owner": "runtime",
+            "note": "base instructions (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Runtime instructions": {
+            "owner": "runtime",
+            "note": "skills/permissions notes (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "AGENTS.md",
+            "sections": [
+              [
+                "",
+                "bfdd9a4d5ae0086eec8190b560f1a38873f9735154afe02cd445d7aa0367dfa1"
+              ]
+            ]
+          },
+          "Environment": {
+            "owner": "runtime",
+            "note": "environment (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "lines",
+        "lines": [
+          "# Written by Looper for its Coco (TRAE CLI) runs. Only this file, AGENTS.md and the auth.json link come from Looper.",
+          "# Coco (TRAE CLI)'s own login: auth.json here links to the operator's login file, never a copy.",
+          "cli_auth_credentials_store = \"file\"",
+          "check_for_update_on_startup = false",
+          "# A directory of the project without AGENTS.md: its CLAUDE.md instead.",
+          "project_doc_fallback_filenames = [\"CLAUDE.md\"]",
+          "",
+          "# Coco (TRAE CLI)'s own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
+          "[skills]",
+          "include_instructions = false",
+          "",
+          "# No plugin marketplace sync and no ChatGPT apps in this home.",
+          "[features]",
+          "plugins = false",
+          "apps = false",
+          "memories = false",
+          "",
+          "# The agent's shell commands get a TRAE_HOME without the login, so a coco command there cannot use it",
+          "# or log it out.",
+          "[shell_environment_policy]",
+          "set = { TRAE_HOME = \"/shell\" }"
+        ]
+      }
+    },
+    "coco/worker": {
+      "argv": [
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Base instructions",
+          "Runtime instructions",
+          "Looper instructions",
+          "Environment"
+        ],
+        "each": {
+          "Base instructions": {
+            "owner": "runtime",
+            "note": "base instructions (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Runtime instructions": {
+            "owner": "runtime",
+            "note": "skills/permissions notes (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "AGENTS.md",
+            "sections": [
+              [
+                "",
+                "bfdd9a4d5ae0086eec8190b560f1a38873f9735154afe02cd445d7aa0367dfa1"
+              ]
+            ]
+          },
+          "Environment": {
+            "owner": "runtime",
+            "note": "environment (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "lines",
+        "lines": [
+          "# Written by Looper for its Coco (TRAE CLI) runs. Only this file, AGENTS.md and the auth.json link come from Looper.",
+          "# Coco (TRAE CLI)'s own login: auth.json here links to the operator's login file, never a copy.",
+          "cli_auth_credentials_store = \"file\"",
+          "check_for_update_on_startup = false",
+          "# A directory of the project without AGENTS.md: its CLAUDE.md instead.",
+          "project_doc_fallback_filenames = [\"CLAUDE.md\"]",
+          "",
+          "# Coco (TRAE CLI)'s own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
+          "[skills]",
+          "include_instructions = false",
+          "",
+          "# No plugin marketplace sync and no ChatGPT apps in this home.",
+          "[features]",
+          "plugins = false",
+          "apps = false",
+          "memories = false",
+          "",
+          "# The agent's shell commands get a TRAE_HOME without the login, so a coco command there cannot use it",
+          "# or log it out.",
+          "[shell_environment_policy]",
+          "set = { TRAE_HOME = \"/shell\" }"
+        ]
+      }
+    },
+    "omp/manager": {
+      "argv": [
+        "-p",
+        "--mode",
+        "json",
+        "--no-title",
+        "--model",
+        "looper/selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "OMP's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "system prompt file",
+            "sections": [
+              [
+                "",
+                "0e372cc9a0ffaf90e89980d44708010115d4da3a320a8f368e29a60fc41e8575"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "omp/planner": {
+      "argv": [
+        "-p",
+        "--mode",
+        "json",
+        "--no-title",
+        "--tools",
+        "read,glob,grep",
+        "--model",
+        "looper/selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "OMP's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "system prompt file",
+            "sections": [
+              [
+                "",
+                "0e372cc9a0ffaf90e89980d44708010115d4da3a320a8f368e29a60fc41e8575"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "omp/worker": {
+      "argv": [
+        "-p",
+        "--mode",
+        "json",
+        "--no-title",
+        "--model",
+        "looper/selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "OMP's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "system prompt file",
+            "sections": [
+              [
+                "",
+                "0e372cc9a0ffaf90e89980d44708010115d4da3a320a8f368e29a60fc41e8575"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "grok/manager": {
+      "argv": [
+        "--prompt-file",
+        "/dev/stdin",
+        "--output-format",
+        "streaming-messages-json",
+        "--always-approve",
+        "--trust",
+        "--no-auto-update",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "Grok's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "rules/looper.md",
+            "sections": [
+              [
+                "",
+                "ba75bcc5a0f89811d80d81ac15db830c9dfdeb073366ea9b8bfc0f3a0aa3b55b"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "grok/planner": {
+      "argv": [
+        "--prompt-file",
+        "/dev/stdin",
+        "--output-format",
+        "streaming-messages-json",
+        "--always-approve",
+        "--trust",
+        "--no-auto-update",
+        "--tools",
+        "read_file,grep,list_dir",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "Grok's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "rules/looper.md",
+            "sections": [
+              [
+                "",
+                "ba75bcc5a0f89811d80d81ac15db830c9dfdeb073366ea9b8bfc0f3a0aa3b55b"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "grok/worker": {
+      "argv": [
+        "--prompt-file",
+        "/dev/stdin",
+        "--output-format",
+        "streaming-messages-json",
+        "--always-approve",
+        "--trust",
+        "--no-auto-update",
+        "-m",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "Grok's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "rules/looper.md",
+            "sections": [
+              [
+                "",
+                "ba75bcc5a0f89811d80d81ac15db830c9dfdeb073366ea9b8bfc0f3a0aa3b55b"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "pi/manager": {
+      "argv": [
+        "-p",
+        "--mode",
+        "json",
+        "--offline",
+        "--no-approve",
+        "--no-context-files",
+        "--no-extensions",
+        "--no-mcp",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "-e",
+        "<checkout>/looper/agents/runtimes/pi_extension/looper.ts",
+        "--provider",
+        "looper",
+        "--model",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "pi's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "system prompt file",
+            "sections": [
+              [
+                "",
+                "4974d1f5e83a515f1a1ea673c94ef870e06881f7af57b1a331659129bcc62701"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "pi/planner": {
+      "argv": [
+        "-p",
+        "--mode",
+        "json",
+        "--offline",
+        "--no-approve",
+        "--no-context-files",
+        "--no-extensions",
+        "--no-mcp",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "-e",
+        "<checkout>/looper/agents/runtimes/pi_extension/looper.ts",
+        "--tools",
+        "read,grep,find,ls,mcp__looper__*",
+        "--provider",
+        "looper",
+        "--model",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "pi's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "system prompt file",
+            "sections": [
+              [
+                "",
+                "4974d1f5e83a515f1a1ea673c94ef870e06881f7af57b1a331659129bcc62701"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "pi/worker": {
+      "argv": [
+        "-p",
+        "--mode",
+        "json",
+        "--offline",
+        "--no-approve",
+        "--no-context-files",
+        "--no-extensions",
+        "--no-mcp",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "-e",
+        "<checkout>/looper/agents/runtimes/pi_extension/looper.ts",
+        "--provider",
+        "looper",
+        "--model",
+        "selected"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "pi's default prompt (not shown)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "system prompt file",
+            "sections": [
+              [
+                "",
+                "4974d1f5e83a515f1a1ea673c94ef870e06881f7af57b1a331659129bcc62701"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "none"
+      }
+    },
+    "dsh/manager": {
+      "argv": [
+        "--profile",
+        "headless"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "DSH's default prompt (not shown; append only)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "literal system prompt section (order 20000)",
+            "sections": [
+              [
+                "",
+                "0d50fd763e84047d295932406cd207f4f5bc815c1eb3eb42f9ce9cb9c9e04e70"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "items",
+        "items": [
+          "91ce325eedbf0967a718e2a4fb25ef021ad1cf6a17a0497b6df6c79490658ebd",
+          "4958defbf2d862312f0bd67bed68fa4712123149d66cb7b85742b91774018107",
+          "371735e39591335ab37c3d327e42f718666611690d619ba356060b23d930d172",
+          "70e394566f143508cd0286452df2985bf7ff1fab3b92bbd7f2a86049213549c6",
+          "06b20f2a68917d99259aa3967f3d1e3d4b32c03da319bb6b8372387aa07a512a",
+          "b7cdc4b65bc25103ff8932dc82c0b601a0c3d532aaba1fddd0a306ac7f570a7d",
+          "eb47bd2e09064188cd93fa79ae5aa84c1a13c3a7eb5c615a248b0973993ad148",
+          "439e49ed6728c60d7c167ade7a78134b55c3f7f35cb65d0db48bc61786a6f86c",
+          "b1ec6a5a96eaae2eb0171fb79618fdf954a3d174b901072fbe0a5ece2bb73d0a",
+          "59d17faec669bf3b12ebda8b0b49c17b9da98208d817ac3ea91c2b995d22dbea",
+          "8de6941dff480c37299874561106ce92b2fde0a9198789de3e8bf2077404cb01",
+          "ab8e826023c8fe72a7fca3a883d145ca5f64450efede07af54b12650ad179194",
+          "dc7f1d06e94723e05bdf9d575a64122f34817b0b5be58d32a33dfd2f8bdf96d2",
+          "506df9b75ca4f3d2a045aa26269c1b0554ed36561ca5f813fae4d637bc94e1b8",
+          "60554a4a8c4519afe7a4ec1252a67066fd52474f29f3bdf30599bce942e09a25",
+          "ca84a739d5e6b0ace73dbb6c69a5faa94357e3e4736e039091fe3becf10e5499",
+          "dcbfa6c7de347607c2e839ba900993746586c6b58cb70e22a47495aeb7a95994",
+          "b376cd98ce0dd0299b2e1995de33d183fadc3a5f57c4b08b0c39e6ae5a7fb0c5",
+          "ad5c4076502f1f6e4c94f77ff9166daa1bba489e365a47388afc9ea239cad49f",
+          "63f46a40a6b4838ac8b9faaee85e966dbc81a581f779daa88d1d3e3c9d9185fe",
+          "96932061f448683ab699c405c9d1d6ca6050fb140e4f54767dc5b9b52ed2b96f",
+          "1042c624146b53d18d42bcd76396a0dec36383eb0dfe7c002b8c6d36c3c7a067",
+          "1d6078abd0037f246f87362d31bc5724dad5e85df7980d02391fa52192bea1e5",
+          "42ed230d71686029872a75c4113a9b6e8cfd9fa6a9bf5713e93ed2ee0d350f43",
+          "dfa59c87dd40669bc7164d6bfe11c1e1b9c118debca49eb76fee9f190b0d2680",
+          "b26a8a7c6ac48d5285722e42e6f6e606899246850da0d793ad3e530c5f15b772",
+          "954d9fca6b8cfb2ab983ae79f903f24a90ff56b047b1fae6379afb9c6b649b1e"
+        ]
+      }
+    },
+    "dsh/planner": {
+      "argv": [
+        "--profile",
+        "headless"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "DSH's default prompt (not shown; append only)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "literal system prompt section (order 20000)",
+            "sections": [
+              [
+                "",
+                "0d50fd763e84047d295932406cd207f4f5bc815c1eb3eb42f9ce9cb9c9e04e70"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "items",
+        "items": [
+          "91ce325eedbf0967a718e2a4fb25ef021ad1cf6a17a0497b6df6c79490658ebd",
+          "4958defbf2d862312f0bd67bed68fa4712123149d66cb7b85742b91774018107",
+          "371735e39591335ab37c3d327e42f718666611690d619ba356060b23d930d172",
+          "70e394566f143508cd0286452df2985bf7ff1fab3b92bbd7f2a86049213549c6",
+          "06b20f2a68917d99259aa3967f3d1e3d4b32c03da319bb6b8372387aa07a512a",
+          "b7cdc4b65bc25103ff8932dc82c0b601a0c3d532aaba1fddd0a306ac7f570a7d",
+          "eb47bd2e09064188cd93fa79ae5aa84c1a13c3a7eb5c615a248b0973993ad148",
+          "439e49ed6728c60d7c167ade7a78134b55c3f7f35cb65d0db48bc61786a6f86c",
+          "b1ec6a5a96eaae2eb0171fb79618fdf954a3d174b901072fbe0a5ece2bb73d0a",
+          "59d17faec669bf3b12ebda8b0b49c17b9da98208d817ac3ea91c2b995d22dbea",
+          "8de6941dff480c37299874561106ce92b2fde0a9198789de3e8bf2077404cb01",
+          "ab8e826023c8fe72a7fca3a883d145ca5f64450efede07af54b12650ad179194",
+          "dc7f1d06e94723e05bdf9d575a64122f34817b0b5be58d32a33dfd2f8bdf96d2",
+          "506df9b75ca4f3d2a045aa26269c1b0554ed36561ca5f813fae4d637bc94e1b8",
+          "60554a4a8c4519afe7a4ec1252a67066fd52474f29f3bdf30599bce942e09a25",
+          "ca84a739d5e6b0ace73dbb6c69a5faa94357e3e4736e039091fe3becf10e5499",
+          "dcbfa6c7de347607c2e839ba900993746586c6b58cb70e22a47495aeb7a95994",
+          "b376cd98ce0dd0299b2e1995de33d183fadc3a5f57c4b08b0c39e6ae5a7fb0c5",
+          "ad5c4076502f1f6e4c94f77ff9166daa1bba489e365a47388afc9ea239cad49f",
+          "63f46a40a6b4838ac8b9faaee85e966dbc81a581f779daa88d1d3e3c9d9185fe",
+          "96932061f448683ab699c405c9d1d6ca6050fb140e4f54767dc5b9b52ed2b96f",
+          "1042c624146b53d18d42bcd76396a0dec36383eb0dfe7c002b8c6d36c3c7a067",
+          "1d6078abd0037f246f87362d31bc5724dad5e85df7980d02391fa52192bea1e5",
+          "42ed230d71686029872a75c4113a9b6e8cfd9fa6a9bf5713e93ed2ee0d350f43",
+          "dfa59c87dd40669bc7164d6bfe11c1e1b9c118debca49eb76fee9f190b0d2680",
+          "b26a8a7c6ac48d5285722e42e6f6e606899246850da0d793ad3e530c5f15b772",
+          "954d9fca6b8cfb2ab983ae79f903f24a90ff56b047b1fae6379afb9c6b649b1e"
+        ]
+      }
+    },
+    "dsh/worker": {
+      "argv": [
+        "--profile",
+        "headless"
+      ],
+      "tools": [],
+      "prompts": {
+        "order": [
+          "Default prompt",
+          "Looper instructions"
+        ],
+        "each": {
+          "Default prompt": {
+            "owner": "runtime",
+            "note": "DSH's default prompt (not shown; append only)",
+            "sections": [
+              [
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              ]
+            ]
+          },
+          "Looper instructions": {
+            "owner": "looper",
+            "note": "literal system prompt section (order 20000)",
+            "sections": [
+              [
+                "",
+                "0d50fd763e84047d295932406cd207f4f5bc815c1eb3eb42f9ce9cb9c9e04e70"
+              ]
+            ]
+          }
+        }
+      },
+      "config": {
+        "kind": "items",
+        "items": [
+          "91ce325eedbf0967a718e2a4fb25ef021ad1cf6a17a0497b6df6c79490658ebd",
+          "4958defbf2d862312f0bd67bed68fa4712123149d66cb7b85742b91774018107",
+          "371735e39591335ab37c3d327e42f718666611690d619ba356060b23d930d172",
+          "70e394566f143508cd0286452df2985bf7ff1fab3b92bbd7f2a86049213549c6",
+          "06b20f2a68917d99259aa3967f3d1e3d4b32c03da319bb6b8372387aa07a512a",
+          "b7cdc4b65bc25103ff8932dc82c0b601a0c3d532aaba1fddd0a306ac7f570a7d",
+          "eb47bd2e09064188cd93fa79ae5aa84c1a13c3a7eb5c615a248b0973993ad148",
+          "439e49ed6728c60d7c167ade7a78134b55c3f7f35cb65d0db48bc61786a6f86c",
+          "b1ec6a5a96eaae2eb0171fb79618fdf954a3d174b901072fbe0a5ece2bb73d0a",
+          "59d17faec669bf3b12ebda8b0b49c17b9da98208d817ac3ea91c2b995d22dbea",
+          "8de6941dff480c37299874561106ce92b2fde0a9198789de3e8bf2077404cb01",
+          "ab8e826023c8fe72a7fca3a883d145ca5f64450efede07af54b12650ad179194",
+          "dc7f1d06e94723e05bdf9d575a64122f34817b0b5be58d32a33dfd2f8bdf96d2",
+          "506df9b75ca4f3d2a045aa26269c1b0554ed36561ca5f813fae4d637bc94e1b8",
+          "60554a4a8c4519afe7a4ec1252a67066fd52474f29f3bdf30599bce942e09a25",
+          "ca84a739d5e6b0ace73dbb6c69a5faa94357e3e4736e039091fe3becf10e5499",
+          "dcbfa6c7de347607c2e839ba900993746586c6b58cb70e22a47495aeb7a95994",
+          "b376cd98ce0dd0299b2e1995de33d183fadc3a5f57c4b08b0c39e6ae5a7fb0c5",
+          "ad5c4076502f1f6e4c94f77ff9166daa1bba489e365a47388afc9ea239cad49f",
+          "63f46a40a6b4838ac8b9faaee85e966dbc81a581f779daa88d1d3e3c9d9185fe",
+          "96932061f448683ab699c405c9d1d6ca6050fb140e4f54767dc5b9b52ed2b96f",
+          "1042c624146b53d18d42bcd76396a0dec36383eb0dfe7c002b8c6d36c3c7a067",
+          "1d6078abd0037f246f87362d31bc5724dad5e85df7980d02391fa52192bea1e5",
+          "42ed230d71686029872a75c4113a9b6e8cfd9fa6a9bf5713e93ed2ee0d350f43",
+          "dfa59c87dd40669bc7164d6bfe11c1e1b9c118debca49eb76fee9f190b0d2680",
+          "b26a8a7c6ac48d5285722e42e6f6e606899246850da0d793ad3e530c5f15b772",
+          "954d9fca6b8cfb2ab983ae79f903f24a90ff56b047b1fae6379afb9c6b649b1e"
+        ]
+      }
+    }
+  },
+  "read_kinds": [
+    "info",
+    "question",
+    "answer",
+    "interface",
+    "announce",
+    "notice",
+    "escalation"
+  ]
+}

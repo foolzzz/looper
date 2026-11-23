@@ -1,10 +1,10 @@
 """One-shot caller compatibility against pre-refactor main.
 
 The stand-in is a real subprocess: argv, raw stdin, system prompt, complete
-database rows and caller results are compared as serialized bytes. Only clock
-values and test-owned paths are normalized; no prompt or record field is dropped.
-The failure-typing and attempt-attribution migrations add nullable columns. Their
-NULL values are pinned in the expected full rows on the migrated schema;
+database columns captured by the fixtures and caller results are compared as serialized bytes. Only clock
+values and test-owned paths are normalized; no captured prompt or record field is dropped.
+Later migrations may add columns outside the fixtures; the attempt-attribution
+NULL default is additionally pinned in the expected rows on the migrated schema;
 no classification, prompt or launch difference is part of this baseline.
 Set UPDATE_MODEL_CALL_GOLDENS=1 only on the recorded baseline to regenerate.
 """

@@ -141,7 +141,8 @@ def test_update_declares_high_risk_confirmation_without_writing(monkeypatch, mod
     impact = asyncio.run(api_v1.domain_for(operation).impact(
         None, operation, {"project_id": "project-example", "acceptance_checks": mode}, api_v1.OPERATOR, {}))
     assert f"project-example's acceptance_checks to {mode}" in impact
-    assert "after Worker success" in impact and "does not affect decisions" in impact
+    assert "after Worker success" in impact and "Required checks must pass" in impact
+    assert "Disabling checks does not unblock" in impact
     write.assert_not_awaited()
 
 

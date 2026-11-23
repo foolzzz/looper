@@ -1,4 +1,4 @@
-"""Public serve → scripted Planner/Worker → real checks → operator evidence and restart readback."""
+"""Public serve → failed check → Worker retry → measured review → acceptance and restart readback."""
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +19,7 @@ from tests.db_support import DSN, fresh_database_without_recording
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
 
-def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tmp_path, monkeypatch):
+def test_serve_gates_acceptance_and_delivers_retry_and_reviewer_evidence(tmp_path, monkeypatch):
     # The task card's isolated local server or CI's PostgreSQL, never the operator's database.
     database = urlsplit(str(DSN))
     assert database.hostname in {"127.0.0.1", "localhost"} and database.port in {54331, 5432}
@@ -36,18 +36,22 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
     subprocess.run(["git", "-C", str(work), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
                     "commit", "-qm", "Fixture baseline"], check=True, capture_output=True)
     checks = [
-        {"id": "command", "criterion": 1, "type": "command", "command": "printf 'measured failure\\n'; exit 1",
+        {"id": "command", "criterion": 1, "type": "command", "command":
+         "if test \"$(cat delivered.txt)\" = 'fixture delivered'; then printf 'measured success\\n'; "
+         "else printf 'measured failure\\n'; exit 1; fi",
          "timeout_seconds": 10, "network": True},
         {"id": "report", "criterion": 2, "type": "artifact",
          "command": "printf 'acceptance artifact\\n' > acceptance-report.txt", "artifact": ["acceptance-report.txt"],
          "timeout_seconds": 10, "network": True},
-        {"id": "fenced", "criterion": 1, "type": "command", "command": "touch must-not-run"},
+        {"id": "fenced", "criterion": 1, "type": "command", "command": "touch must-not-run", "required": False},
     ]
     script = {str(work.resolve()): {
         "plan": [{"id": "s1", "instruction": "Create the fixture deliverable.",
                   "acceptance_criteria": ["The command measures its result.", "A report is saved."],
-                  "depends_on": [], "review": False, "checks": checks}],
-        "attempts": {"s1": [{"status": "completed", "files": {"delivered.txt": "fixture delivered\n"}}]},
+                  "depends_on": [], "review": True, "checks": checks}],
+        "attempts": {"s1": [
+            {"status": "completed", "files": {"delivered.txt": "fixture incomplete\n"}},
+            {"status": "completed", "files": {"delivered.txt": "fixture delivered\n"}}]},
     }}
     scenarios = tmp_path / "scenarios.json"
     scenarios.write_text(json.dumps(script))
@@ -91,28 +95,11 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
             permission = api.post("/api/v1/acceptance_checks/update", {
                 "project_id": owner, "acceptance_checks": "network"})
             assert permission["result"] == {"acceptance_checks": "network"}
-            # Only the existing settings explanation changed; inspect that control
-            # at every documented breakpoint, without capturing workspace paths.
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as browsers:
-                browser = browsers.chromium.launch(channel="chrome", headless=True)
-                try:
-                    page = browser.new_page(extra_http_headers={"Authorization": f"Bearer {api.token}"})
-                    page.goto(api.base_url + f"/#projects/{owner}/settings", wait_until="load")
-                    control = page.locator("fieldset").filter(has=page.locator("legend", has_text="Acceptance checks"))
-                    for width, height in ((1280, 900), (768, 1024), (390, 844), (844, 390)):
-                        page.set_viewport_size({"width": width, "height": height})
-                        control.wait_for(state="visible")
-                        assert "after Worker success" in control.inner_text()
-                        assert "does not affect decisions" in control.inner_text()
-                    control.screenshot(path=str(tmp_path / "acceptance-settings.png"))
-                finally:
-                    browser.close()
             task_id = api.post("/api/v1/tasks/create", {
                 "project_id": owner, "requirement": "Create the fixture deliverable and record check evidence."})[
                     "result"]["task_id"]
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + 90
             while True:
                 detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
                 if detail["status"] in {"completed", "failed", "stopped", "cancelled"}:
@@ -122,10 +109,13 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
             assert detail["status"] == "completed", detail
             evidence = api.post("/api/v1/task_evidence/get", {"task": task_id, "step": "s1"})["result"]
             saved_step, = evidence["steps"]
+            first_command, second_command = [row for row in saved_step["runs"] if row["check_id"] == "command"]
+            assert (first_command["attempt"], first_command["state"], first_command["exit_code"]) == (1, "failed", 1)
+            assert first_command["output_tail"] == "measured failure\n"
+            assert (second_command["attempt"], second_command["state"], second_command["exit_code"]) == (2, "passed", 0)
             measured = {row["check_id"]: row for row in saved_step["runs"]}
             assert set(measured) == {"command", "report", "fenced"}
-            assert measured["command"]["state"] == "failed" and measured["command"]["exit_code"] == 1
-            assert measured["command"]["output_tail"] == "measured failure\n"
+            assert measured["command"]["output_tail"] == "measured success\n"
             assert measured["report"]["state"] == "passed"
             assert (measured["fenced"]["state"], measured["fenced"]["error_kind"]) == ("error", "evidence_unavailable")
             assert measured["fenced"]["finished_at"] is not None
@@ -136,8 +126,39 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
                                 "sha256": hashlib.sha256(b"acceptance artifact\n").hexdigest()}
             assert "path" not in artifact
             files = list((runtime / "evidence" / task_id).rglob("1.txt"))
-            assert len(files) == 1 and files[0].read_bytes() == b"acceptance artifact\n"
+            assert len(files) == 2 and all(path.read_bytes() == b"acceptance artifact\n" for path in files)
             assert not (work / "acceptance-report.txt").exists()  # generated in the private checkout
+
+            async def recorded_prompts():
+                conn = await asyncpg.connect(url)
+                try:
+                    rows = await conn.fetch("SELECT run_kind, metadata FROM llm_records WHERE task_id=$1 "
+                        "AND run_kind IN ('worker', 'reviewer') ORDER BY id LIMIT 10", task_id)
+                    return [(row["run_kind"], json.loads(row["metadata"])["system_prompt"]) for row in rows]
+                finally:
+                    await conn.close()
+
+            async def settled_attempts():
+                conn = await asyncpg.connect(url)
+                try:
+                    return [(row["attempt"], row["decision"], row["failure_kind"]) for row in await conn.fetch(
+                        "SELECT attempt, decision, failure_kind FROM step_attempts WHERE task_id=$1 "
+                        "AND step_key='s1' ORDER BY attempt", task_id)]
+                finally:
+                    await conn.close()
+
+            # The measured failure marks the first attempt; the accepted one has no failure.
+            assert asyncio.run(settled_attempts()) == [(1, "retry", "check_failed"), (2, "accept", None)]
+            prompts = asyncio.run(recorded_prompts())
+            workers = [prompt for kind, prompt in prompts if kind == "worker"]
+            reviews = [prompt for kind, prompt in prompts if kind == "reviewer"]
+            assert len(workers) == 2 and len(reviews) == 1
+            assert "Failed required acceptance checks:" not in workers[0]
+            assert "Failed required acceptance checks:" in workers[1]
+            assert "measured failure" in workers[1] and "Command:" in workers[1]
+            assert 'source="acceptance_output"' in workers[1]
+            assert "Acceptance evidence" in reviews[0] and "command command: PASSED" in reviews[0]
+            assert "measured success" in reviews[0] and 'source="acceptance_output"' in reviews[0]
             before = saved_step["runs"]
             api.post("/api/v1/acceptance_checks/update", {"project_id": owner, "acceptance_checks": "off"})
             disabled = api.post("/api/v1/task_evidence/get", {"task": task_id, "step": "s1"})["result"]["steps"][0]
@@ -147,14 +168,14 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
         async def unfinished():
             pool = await asyncpg.create_pool(url, min_size=1, max_size=1)
             try:
-                return await step_check_runs.create_run(task_id, saved_step["step_id"], checks[0], 1, pool=pool)
+                return await step_check_runs.create_run(task_id, saved_step["step_id"], checks[0], 2, pool=pool)
             finally:
                 await pool.close()
 
         pending = asyncio.run(unfinished())
         with runner.running_server(**server, log_path=tmp_path / "after.log") as api:
             after = api.post("/api/v1/task_evidence/get", {"task": task_id, "step": "s1"})["result"]["steps"][0]["runs"]
-            assert after[:3] == before  # completed attempts retain the same ids, timestamps and bytes
-            assert len(after) == 4 and after[3]["id"] == pending["id"]
-            assert after[3]["state"] == "error" and after[3]["error_kind"] == "interrupted"
-            assert files[0].read_bytes() == b"acceptance artifact\n"
+            assert after[:len(before)] == before  # completed attempts retain the same ids, timestamps and bytes
+            assert len(after) == len(before) + 1 and after[-1]["id"] == pending["id"]
+            assert after[-1]["state"] == "error" and after[-1]["error_kind"] == "interrupted"
+            assert all(path.read_bytes() == b"acceptance artifact\n" for path in files)

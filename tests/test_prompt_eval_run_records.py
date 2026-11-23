@@ -76,6 +76,8 @@ def test_task_scoring_loads_run_bodies(tmp_path, task_id, missing):
                 result = {"events": []}
             elif path == "/api/v1/tasks/activity":
                 result = {"activity": []}
+            elif path == "/api/v1/metrics/step_attempts":
+                result = {"missing_attempts": 0, "steps": [], "summary": {}}
             elif path == "/api/v1/ops/task_control/cancel":
                 self.cancelled = True
             else:
