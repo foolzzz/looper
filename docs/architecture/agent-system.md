@@ -3196,6 +3196,15 @@ the newest pending proposal per name (an older one becomes `superseded`). A
 pending proposal expires after seven days; the operator can restore it, and it
 is checked again.
 
+**Usage.** `project_skills.usage` (`looper/agents/skill_usage.py`; a read, also for an API client and as
+`loopercli project-skills usage`) reports, per project skill and current content hash, the Worker runs and
+attempts of the last 7 days (and the 28 before) that loaded it, how many of their Claude Code streams show a
+`Skill` tool call for it (`project:<name>`, or the bare name when no other skill has it; other runtimes report
+unknown, never 0, and stay out of the rate), and the first-pass rate, cost and control (same-project attempts
+that did not load it) with 95% Wilson intervals; fewer than 20 attempts on a side shows counts only. Without
+`step_attempts` it reports loads and calls only. It also lists review reasons (`never_invoked`, `stale`,
+`divergent`); they change no state and send nothing. The data is observational, not a controlled experiment.
+
 Only the operator's dashboard session confirms
 (`project_skills.proposals.confirm`; an API client may read proposals but not
 confirm, reject, restore or switch them, and the operation has no `loopercli`

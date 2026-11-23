@@ -1,6 +1,6 @@
 """Project-owned skills; installation switches belong to the catalog domain."""
 
-from .. import catalog, project_skills, skill_lifecycle, skill_proposals, skill_versions
+from .. import catalog, project_skills, skill_lifecycle, skill_proposals, skill_usage, skill_versions
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
@@ -59,6 +59,25 @@ _BUDGET = _object({
 })
 
 
+_USAGE_SUMMARY = "Count how often each project skill was loaded and called, and how its attempts fared."
+_NUM = {"type": ["number", "null"]}
+_INVOKED = _object({"count": _INT, "n": _INT, "unknown": _INT, "rate": _NUM})
+_RATE = _object({"state": _enum("ok", "insufficient"), "value": _NUM, "low": _NUM, "high": _NUM, "n": _INT,
+                 "successes": _INT})
+_AVERAGE = _object({"avg": _NUM, "n": _INT})
+_EFFECT = {**_object({"first_pass": _RATE, "control": _RATE,
+                      "cost": _object({"loaded": _AVERAGE, "control": _AVERAGE})}), "type": ["object", "null"]}
+_USAGE_PERIOD = {
+    "loaded_runs": _INT, "loaded_attempts": {"type": ["integer", "null"]}, "invoked": _INVOKED, "effect": _EFFECT,
+}
+_SPAN = _object({"start": _STR, "end": _STR})
+_USAGE_ROW = _object({
+    "skill_id": _STR, "name": _STR, "sha256": _STR, "lifecycle": _STR, "versions": _array(_INT),
+    **_USAGE_PERIOD, "comparison": _object(_USAGE_PERIOD),
+    "review": _array(_enum(*(reason.value for reason in skill_usage.ReviewReason))),
+    "window": _SPAN, "comparison_window": _SPAN, "coverage_since": {"type": ["string", "null"]}, "note": _STR,
+})
+_USAGE = _object({"skills": _array(_USAGE_ROW)})
 _PROPOSALS = "project_skills.proposals"
 _HASH = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
 _NULL_STR = {"type": ["string", "null"]}
@@ -108,6 +127,14 @@ OPERATIONS = (
         _VERSIONS_SUMMARY + " Each version records the content hash, author kind, reason and time.",
         _object({**_IDS, "from_version": _INT, "to_version": _INT}, ["project_id", "skill_id"], closed=True),
         _VERSIONS, risk="read", level=ActionLevel.INSIDE, operator_only=True,
+    ),
+    Operation(
+        "project_skills.usage", "POST", "/api/v1/project_skills/usage", _USAGE_SUMMARY,
+        _USAGE_SUMMARY + " Per skill and current content hash: runs and attempts that loaded it, the share whose "
+        "stream called it (unknown for runtimes without that event), first-pass rate and cost against attempts "
+        "without it, with 95% intervals; fewer than 20 attempts on a side shows counts only. Observational data, "
+        "not a controlled experiment.",
+        _object({"project_id": _STR}, closed=True), _USAGE, risk="read", level=ActionLevel.INSIDE,
     ),
     Operation(
         "project_skills.deprecate", "POST", "/api/v1/project_skills/deprecate", _DEPRECATE_SUMMARY,
@@ -211,6 +238,8 @@ async def run(server, operation, arguments, principal, headers):
         return await _answer(_proposals(name.rsplit(".", 1)[1], project_id, arguments, principal))
     if name == "project_skills.add":
         return await _answer(project_skills.add_skill(project_id, arguments["skill"]))
+    if name == "project_skills.usage":
+        return await _answer(skill_usage.view(project_id))
     if name == "project_skills.context_budget":
         return await _answer(skill_lifecycle.context_budget(project_id))
     skill_id = arguments["skill_id"]

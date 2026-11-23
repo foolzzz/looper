@@ -2250,6 +2250,53 @@ export async function fetchContextBudget(projectId: string): Promise<ContextBudg
   return result;
 }
 
+/** A rate with its 95% Wilson interval; `insufficient` carries the counts only. */
+export interface SkillRate {
+  state: "ok" | "insufficient";
+  value: number | null;
+  low: number | null;
+  high: number | null;
+  n: number;
+  successes: number;
+}
+
+export interface SkillAverage { avg: number | null; n: number }
+
+export interface SkillUsagePeriod {
+  loaded_runs: number;
+  /** Null where attempts are not recorded here. */
+  loaded_attempts: number | null;
+  /** `unknown` counts attempts whose runtime shows no Skill call; they are not in `n` or `rate`. */
+  invoked: { count: number; n: number; unknown: number; rate: number | null };
+  /** Null where attempts are not recorded here. */
+  effect: { first_pass: SkillRate; control: SkillRate; cost: { loaded: SkillAverage; control: SkillAverage } } | null;
+}
+
+export type SkillReviewReason = "never_invoked" | "stale" | "divergent";
+
+/** How a project skill (by its current content hash) was loaded and called, and how its attempts fared.
+ * Observational data, not a controlled experiment (`note`). */
+export interface SkillUsageRow extends SkillUsagePeriod {
+  skill_id: string;
+  name: string;
+  sha256: string;
+  lifecycle: string;
+  versions: number[];
+  comparison: SkillUsagePeriod;
+  review: SkillReviewReason[];
+  window: { start: string; end: string };
+  comparison_window: { start: string; end: string };
+  /** When the first attempt was recorded; runs before it have no attempt. */
+  coverage_since: string | null;
+  note: string;
+}
+
+export async function fetchSkillUsage(projectId: string): Promise<SkillUsageRow[]> {
+  const result = await callV1<{ skills: SkillUsageRow[] }>("/api/v1/project_skills/usage", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.skills;
+}
+
 export type SkillProposalStatus = "pending" | "confirmed" | "confirmed_edited" | "rejected" | "expired" | "superseded";
 
 /** A drafted skill that changes nothing until the operator confirms it. `diff` is the server's comparison with
