@@ -18,7 +18,7 @@ from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType
 from looper.agents.ops import Turn
 from looper.agents.ops.service import ManagerOps, Platform
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, drop_tables, run_db
 from tests.fake_claude import fake_claude
 from tests.test_outbound_db import ALLOW, BLOCK, _STAND_IN, _isolated, _seen, _setup  # noqa: F401 - the fixture
 
@@ -437,9 +437,10 @@ def test_a_database_from_before_the_mcp_tool_declarations_gets_them() -> None:
         async with fresh_connection(command_timeout=60) as conn:
             await connection.ensure_schema(conn)
             assert "mcp_tool_levels" not in {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
-            await conn.execute("DROP TABLE mcp_tool_levels")
+            restore = await drop_tables(conn, "mcp_tool_levels")
             assert await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
+            await restore()
             assert await conn.fetchval("SELECT to_regclass('mcp_tool_levels') IS NOT NULL")
             assert "mcp_tool_levels" in {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
             assert not await connection.schema_change_pending(conn)

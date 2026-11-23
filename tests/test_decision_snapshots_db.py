@@ -16,7 +16,7 @@ from looper.agents.tiers.decisions import Dispatch
 from looper.agents.tiers.planner import PlanStep, TaskPlan
 from looper.db import connection, decision_snapshots
 from tests.bridge_schema_support import structure, witness
-from tests.db_support import DSN, fresh_connection, run_db
+from tests.db_support import DSN, drop_tables, fresh_connection, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 NOW = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
@@ -28,13 +28,14 @@ def test_the_upgrade_adds_the_table_once_and_matches_fresh():
     async def test():
         async with fresh_connection() as old, fresh_connection() as fresh:
             await connection.ensure_schema(old)
-            await old.execute("DROP TABLE decision_snapshots")
+            restore = await drop_tables(old, "decision_snapshots")
             await old.execute("DELETE FROM schema_migrations WHERE name = 'decision_snapshots'")
             await old.execute(TASK)
             before, shape = await witness(old), await structure(old)
             assert await connection.schema_change_pending(old)
             assert await witness(old) == before and await structure(old) == shape
             await connection.ensure_schema(old)
+            await restore()
             await connection.ensure_schema(fresh)
             assert await structure(old) == await structure(fresh)
             after, shape = await witness(old), await structure(old)

@@ -8,7 +8,7 @@ import pytest
 from looper.db import connection, subscriptions
 from looper.db.manager_events import EventKind, Reason
 from tests.bridge_schema_support import structure, witness
-from tests.db_support import DSN, fresh_schema, run_db
+from tests.db_support import DSN, drop_tables, fresh_schema, run_db
 from tests.subscription_support import SOURCE, source
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
@@ -18,8 +18,8 @@ def test_triage_upgrade_matches_fresh_and_reopen_does_not_replay():
     async def check():
         async with fresh_schema() as pool, fresh_schema() as fresh:
             await connection.ensure_schema(pool)
+            restore = await drop_tables(pool, "triage_event_sources", "triage_events")
             await pool.execute("""
-                DROP TABLE triage_event_sources, triage_events;
                 DROP FUNCTION triage_drop_event();
                 ALTER TABLE subscription_runs DROP COLUMN window_seqs;
                 ALTER TABLE subscriptions DROP CONSTRAINT subscriptions_output_kind_check;
@@ -41,6 +41,7 @@ def test_triage_upgrade_matches_fresh_and_reopen_does_not_replay():
                     assert await connection.schema_change_pending(conn)
                 assert await witness(conn) == before
             await connection.ensure_schema(pool)
+            await restore()
             await connection.ensure_schema(fresh)
             async with pool.acquire() as conn, fresh.acquire() as other:
                 assert await structure(conn) == await structure(other)

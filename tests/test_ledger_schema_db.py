@@ -5,7 +5,7 @@ import pytest
 
 from looper.db import connection
 from tests import ledger_support as sup
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, drop_tables, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -109,10 +109,12 @@ def test_an_open_item_is_not_closed_and_a_closed_one_is(monkeypatch):
 
 def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
     async def check(pool):
-        await pool.execute("DROP TABLE ledger_events, ledger_items; DELETE FROM schema_migrations WHERE name = 'ledger'")
+        restore = await drop_tables(pool, "ledger_events", "ledger_items")
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'ledger'")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
+        await restore()
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         await sup.add_own(pool)

@@ -11,7 +11,7 @@ import pytest
 
 from looper.agents import processor
 from looper.db import connection, subscriptions as db_subs
-from tests.db_support import DSN
+from tests.db_support import DSN, drop_tables
 from tests.subscription_support import (SUBSCRIPTION, UPDATE, add, confirm, cursor, fire,
                                         latest, minutes_ago, scenario, source, started)
 
@@ -350,10 +350,11 @@ def test_upgrade_adds_default_cursor_and_daily_guard_without_changing_existing_c
         async with env.pool.acquire() as conn:
             await conn.execute('ALTER TABLE subscriptions DROP COLUMN "window", DROP COLUMN delivery_policy')
             await conn.execute("ALTER TABLE subscription_runs DROP COLUMN window_mode, DROP COLUMN daily_date")
-            await conn.execute("DROP TABLE subscription_daily_claims")
+            restore = await drop_tables(env.pool, "subscription_daily_claims")
             await conn.execute("DELETE FROM schema_migrations WHERE name = 'subscription_lookback'")
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(env.pool)
+        await restore()
         await connection.ensure_schema(env.pool)
         after = await db_subs.get(sid)
         assert (after["window"], after["delivery_policy"]) == ("cursor", "per_run")

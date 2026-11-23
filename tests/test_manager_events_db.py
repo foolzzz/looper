@@ -16,7 +16,7 @@ from looper.agents.task_notice import (Notice, NotifyChannel, NotifyTarget, Targ
                                        web_end_text)
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.db import connection, manager_events as store, projects, schedules as db_schedules, tasks
-from tests.db_support import DSN, run_db, v1_api
+from tests.db_support import DSN, drop_tables, run_db, v1_api
 from tests.schedule_support import TELEGRAM_CHAT, ScheduleEnv, allow_telegram, run_scheduled, with_sender
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -342,12 +342,14 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
                            "'schedule_notification_events_online')")
         if before == "no_table":  # older than completion events
             # Later derived tables must go too when reconstructing a database from before completion events.
-            await pool.execute("DROP TABLE triage_event_sources, triage_events, manager_events; "
-                               "DELETE FROM schema_migrations WHERE name IN "
+            restore = await drop_tables(pool, "triage_event_sources", "triage_events", "manager_events")
+            await pool.execute("DELETE FROM schema_migrations WHERE name IN "
                                "('manager_events', 'event_triage', 'event_triage_online')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
+        if before == "no_table":
+            await restore()
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")

@@ -5,7 +5,7 @@ import pytest
 
 from looper.db import connection, provider_limits
 from looper.agents import self_check
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, drop_tables, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 NOW = datetime.now(timezone.utc)
@@ -46,10 +46,12 @@ def test_signal_record_reference_survives_record_deletion_as_null():
 
 def test_upgrade_matches_fresh_schema_and_records_its_migration_once():
     async def check(pool):
-        await pool.execute("DROP TABLE provider_limit_windows; DROP INDEX idx_llm_records_provider_day")
+        restore = await drop_tables(pool, "provider_limit_windows")
+        await pool.execute("DROP INDEX idx_llm_records_provider_day")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
+        await restore()
         marker = await pool.fetchrow("SELECT * FROM schema_migrations WHERE name='provider_limit_windows'")
         assert marker is not None
         assert await pool.fetchval("SELECT indisvalid FROM pg_index WHERE indexrelid="

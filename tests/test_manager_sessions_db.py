@@ -4,7 +4,7 @@ import asyncpg
 import pytest
 
 from looper.db import connection, manager_sessions
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, drop_tables, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -57,10 +57,12 @@ def test_the_schema_refuses_a_key_that_does_not_match_the_session(monkeypatch, o
 
 def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch):
     async def check(pool):
-        await pool.execute("DROP TABLE manager_sessions; DELETE FROM schema_migrations WHERE name = 'manager_sessions'")
+        restore = await drop_tables(pool, "manager_sessions")
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'manager_sessions'")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
+        await restore()
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         await manager_sessions.save(_row("oc_synthetic_1"))

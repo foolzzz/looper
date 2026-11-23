@@ -14,7 +14,7 @@ from looper.agents import card_actions
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.ops import Turn
 from looper.agents.ops.service import ManagerOps, Platform, _Pending
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, drop_tables, run_db
 from tests.test_gate_channels_db import _Bus, _Poster, _say, _task_with_gate
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -294,10 +294,12 @@ def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch: pytest.Mon
     from looper.db import connection
 
     async def test(pool: Any) -> None:
-        await pool.execute("DROP TABLE card_actions; DELETE FROM schema_migrations WHERE name = 'card_actions'")
+        restore = await drop_tables(pool, "card_actions")
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'card_actions'")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
+        await restore()
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT to_regclass('card_actions') IS NOT NULL")
