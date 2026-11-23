@@ -1,1 +1,1 @@
-"""Real-mode eval of the processor: one tool-less run over a synthetic batch of chat messages (``__main__``)."""
+"""Tool-less processor, extraction, leads-check and memory-draft evaluations on synthetic inputs."""

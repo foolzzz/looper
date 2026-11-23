@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .memory_draft import CASES as DRAFT_CASES
+
 HERE = Path(__file__).resolve().parents[2]
 SCHEMA = "looper-processor/v1"
 QUIET = "SKIP"
@@ -647,6 +649,35 @@ async def _prepare(args: argparse.Namespace) -> None:
         raise SystemExit(f"the leads check cannot run its profile: {problem}")
 
 
+async def _prepare_drafts(args: argparse.Namespace) -> None:
+    """Select the eval profile for the drafting role in the disposable database."""
+    from evals.prompt_regression import runner
+    from looper.agents import agent_settings
+    from looper.agents.serve import seed_role_configs
+    from looper.db import profile_registry as db_profiles
+
+    await seed_role_configs()
+    if args.register_agent:
+        spec = json.loads(Path(args.register_agent).read_text(encoding="utf-8"))
+        found = next((r for r in await db_profiles.list_profiles() if r["name"] == spec["agent"]["name"]), None)
+        profile_id = found["id"] if found else (await asyncio.to_thread(
+            runner.register_agent, _InProcessApi(asyncio.get_running_loop()), spec))["profile_id"]
+    else:
+        row = next((r for r in await db_profiles.list_profiles() if r["name"] == args.profile), None)
+        if row is None:
+            raise SystemExit(f"no Agent Profile {args.profile!r} in the eval's database")
+        profile_id = row["id"]
+    await agent_settings.update_role("memory_draft", {"profile_id": profile_id})
+
+
+async def _drafts(args: argparse.Namespace, root: Path) -> list[dict[str, Any]]:
+    from .memory_draft import evaluate_case
+
+    return [await evaluate_case(key, rep, root / f"{key}-{rep}", mode=args.mode,
+                                cap_usd=args.budget_usd, claude_bin=args.claude or "claude", timeout_s=args.timeout)
+            for rep in range(1, args.reps + 1) for key in args.cases if key in DRAFT_CASES]
+
+
 async def _record(record_id: int | None, batch: str, texts: list[str] | None = None) -> dict[str, Any]:
     """What the runtime had and did in the run (its init event's tools and MCP servers, its tool calls), and whether
     its record keeps any message of the batch (``text_kept``) anywhere but in the final output (the record's
@@ -688,7 +719,10 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
     await connection.init_pool(database_url, min_size=1, max_size=4)
     try:
         await connection.ensure_schema()
-        await _prepare(args)
+        if any(key not in DRAFT_CASES for key in args.cases) or args.cases_file:
+            await _prepare(args)
+        if any(key in DRAFT_CASES for key in args.cases):
+            await _prepare_drafts(args)
         print("processor runs " + json.dumps(await processor.chosen_profile(), ensure_ascii=False), flush=True)
         from looper.agents.agent_settings import AgentType
         print("leads check runs " + json.dumps(await processor.chosen_profile(role=AgentType.LEADS_CHECK),
@@ -699,6 +733,11 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
             for number, case in enumerate(file_cases, 1):
                 runs.append(await _check_file_case(args, case, number, rep, root))
             for key in args.cases:
+                if key in DRAFT_CASES:
+                    from .memory_draft import evaluate_case
+                    runs.append(await evaluate_case(key, rep, root / f"{key}-{rep}", mode="real",
+                                                    cap_usd=args.budget_usd, claude_bin=args.claude or "claude", timeout_s=args.timeout))
+                    continue
                 if key in EXTRACTION_CASES:
                     runs.append(await _extract(args, key, rep, root))
                     continue
@@ -895,7 +934,7 @@ def table(run: dict[str, Any], base: dict[str, Any] | None) -> str:
         return f"{sum(mine)}/{len(mine)}" if mine else "—"
 
     lines = ["| case | this run |" + (" base |" if base else ""), "|---|---|" + ("---|" if base else "")]
-    every = {**CASES, **EXTRACTION_CASES, **CHECK_CASES}
+    every = {**CASES, **EXTRACTION_CASES, **CHECK_CASES, **DRAFT_CASES}
     lines += [f"| {key}: {every[key]['what']} | {passes(run, key)} |" + (f" {passes(base, key)} |" if base else "")
               for key in every if any(r["case"] == key for r in run["runs"])]
     cost = sum(r["cost_usd"] or 0 for r in run["runs"])
@@ -909,12 +948,14 @@ def table(run: dict[str, Any], base: dict[str, Any] | None) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    chosen = parser.add_mutually_exclusive_group(required=True)
+    chosen = parser.add_mutually_exclusive_group()
+    parser.add_argument("--mode", choices=("fake", "real"), default="real",
+                        help="fake scripts only memory drafting replies; real runs the selected profile")
     chosen.add_argument("--register-agent", help="a runtime/provider/model/agent spec to register and run")
     chosen.add_argument("--profile", help="an Agent Profile of the eval's new database to run")
     parser.add_argument("--reps", type=int, default=1)
     parser.add_argument("--cases", default=None,
-                        help=f"comma-separated, of {', '.join([*CASES, *EXTRACTION_CASES, *CHECK_CASES])} (default: "
+                        help=f"comma-separated, of {', '.join([*CASES, *EXTRACTION_CASES, *CHECK_CASES, *DRAFT_CASES])} (default: "
                              "the digest ones, or none with --cases-file)")
     checker = parser.add_mutually_exclusive_group()
     checker.add_argument("--check-register-agent", help="a spec to register and run as the leads check")
@@ -928,25 +969,35 @@ def main() -> int:
     parser.add_argument("--out", help="the run's JSON; default evals/runs/<time>-processor.json")
     parser.add_argument("--baseline", help="a run's JSON to compare with")
     args = parser.parse_args()
-    if not args.pg_url:
+    if args.mode == "real" and not (args.register_agent or args.profile):
+        parser.error("real mode requires --register-agent or --profile")
+    if args.mode == "real" and not args.pg_url:
         parser.error("give --pg-url or LOOPER_EVAL_DATABASE_URL (a disposable PostgreSQL server)")
     if args.cases is None:
-        args.cases = "" if args.cases_file else ",".join(CASES)
+        args.cases = "memory_draft" if args.mode == "fake" else ("" if args.cases_file else ",".join(CASES))
     args.cases = [key.strip() for key in args.cases.split(",") if key.strip()]
-    known = {**CASES, **EXTRACTION_CASES, **CHECK_CASES}
+    args.cases = [expanded for key in args.cases for expanded in (DRAFT_CASES if key == "memory_draft" else [key])]
+    known = {**CASES, **EXTRACTION_CASES, **CHECK_CASES, **DRAFT_CASES}
     if unknown := [key for key in args.cases if key not in known]:
         parser.error(f"unknown case {unknown[0]!r}; the cases are {', '.join(known)}")
+    if args.mode == "fake" and (args.cases_file or any(key not in DRAFT_CASES for key in args.cases)):
+        parser.error("fake mode accepts only memory_draft cases")
+    if args.reps < 1 or args.budget_usd <= 0 or args.timeout <= 0:
+        parser.error("reps, budget and timeout must be positive")
     if args.cases_file and not Path(args.cases_file).is_file():
         parser.error(f"no cases file {args.cases_file}")
     sys.path.insert(0, str(HERE))
     from evals.prompt_regression import runner
 
-    with runner.fresh_database(args.pg_url) as (database_url, _), \
-            tempfile.TemporaryDirectory(prefix="looper-processor-eval-") as tmp:
-        runs = asyncio.run(evaluate(args, database_url, Path(tmp) / "runtime"))
+    with tempfile.TemporaryDirectory(prefix="looper-processor-eval-") as tmp:
+        if args.mode == "fake":
+            runs = asyncio.run(_drafts(args, Path(tmp)))
+        else:
+            with runner.fresh_database(args.pg_url) as (database_url, _):
+                runs = asyncio.run(evaluate(args, database_url, Path(tmp) / "runtime"))
     commit = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"], capture_output=True,
                             text=True).stdout.strip()
-    run = {"schema": SCHEMA, "commit": commit, "profile": args.profile or args.register_agent,
+    run = {"schema": SCHEMA, "commit": commit, "mode": args.mode, "profile": args.profile or args.register_agent,
            "check_profile": args.check_profile or args.check_register_agent, "reps": args.reps, "runs": runs}
     out = Path(args.out) if args.out else HERE / "evals" / "runs" / time.strftime("%Y%m%d-%H%M%S-processor.json")
     out.parent.mkdir(parents=True, exist_ok=True)
