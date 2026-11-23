@@ -38,14 +38,13 @@ def sections(text: str) -> list[list[str]]:
     return found
 
 
-def assert_frozen(name: str, text: str) -> None:
-    """``text`` keeps every section frozen for ``name``, unchanged and in order; added sections are allowed."""
+def assert_sections(text: str, frozen: list[list[str]], *, label: str) -> None:
+    """``text`` keeps every ``[heading, sha256]`` in ``frozen``, in that order.
+
+    A whole section added between the frozen ones is allowed. A changed byte, a missing section or a reorder fails,
+    naming the section.
+    """
     actual = sections(text)
-    baseline = json.loads(BASELINE.read_text()) if BASELINE.exists() else {}
-    if os.environ.get("UPDATE_PLANNER_SECTIONS") == "1":
-        baseline[name] = actual
-        BASELINE.write_text(json.dumps(baseline, indent=1, sort_keys=True) + "\n")
-    frozen = baseline[name]
     at, problems = 0, []
     for heading, digest in frozen:
         found = next((i for i in range(at, len(actual)) if actual[i][0] == heading), None)
@@ -55,7 +54,17 @@ def assert_frozen(name: str, text: str) -> None:
         if actual[found][1] != digest:
             problems.append(f"changed: {heading or '(start)'}")
         at = found + 1
-    assert not problems, f"{name}: " + "; ".join(problems)
+    assert not problems, f"{label}: " + "; ".join(problems)
+
+
+def assert_frozen(name: str, text: str) -> None:
+    """``text`` keeps every section frozen for ``name``, unchanged and in order; added sections are allowed."""
+    actual = sections(text)
+    baseline = json.loads(BASELINE.read_text()) if BASELINE.exists() else {}
+    if os.environ.get("UPDATE_PLANNER_SECTIONS") == "1":
+        baseline[name] = actual
+        BASELINE.write_text(json.dumps(baseline, indent=1, sort_keys=True) + "\n")
+    assert_sections(text, baseline[name], label=name)
 
 
 def planner_prompt() -> Any:
