@@ -3076,6 +3076,7 @@ class ManagerAgent:
             return previous[0], exc
         self._pending_switch = self._pending_handoff = None
         self._stopped_notes = []
+        if self.ops is not None: self.ops.forget_session(session.key)  # its card-button notes (one wiring line)
         if main:  # another session's /new leaves main's confirmations and remembered leads alone
             if self.ops is not None:
                 self.ops.forget_confirmations()

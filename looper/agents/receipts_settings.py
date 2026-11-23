@@ -9,15 +9,22 @@ from __future__ import annotations
 ENABLED_KEY = "manager.action_receipts.enabled"
 
 _enabled = False
+_generation = 0  # counts the times the switch was turned off: what was queued before is stale
 
 
 def enabled() -> bool:
     return _enabled
 
 
+def generation() -> int:
+    return _generation
+
+
 def set_enabled(value: bool) -> None:
     """Apply a value in memory only (``apply_stored`` and ``update`` use it; tests set it directly)."""
-    global _enabled
+    global _enabled, _generation
+    if _enabled and not value:
+        _generation += 1
     _enabled = value
 
 

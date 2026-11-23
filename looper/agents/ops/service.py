@@ -260,9 +260,11 @@ class ManagerOps:
         # The confirmations a card's button answered (id -> what it did), so a typed confirmation of one is told so.
         self._pressed: OrderedDict[str, str] = OrderedDict()
         # What a card button did, per chat, for the chat's next user turn (``_note_button``).
-        self._button_notes: OrderedDict[tuple[str | None, str | None, str | None], list[tuple[str | None, int, str]]] \
-            = OrderedDict()
-        self._notes_epoch = 0  # bumped when the session is reset: older notes are never told
+        # Per chat: (who pressed, session, that session's generation, the switch's generation, the note).
+        self._button_notes: OrderedDict[tuple[str | None, str | None, str | None],
+                                        list[tuple[str | None, str, int, int, str]]] = OrderedDict()
+        self._session_gen: dict[str, int] = {}  # bumped when a session is reset: its older notes are never told
+        self._chat_sessions: dict[tuple[str | None, str | None, str | None], str] = {}  # the session a chat runs in
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
         # later shell command may run one), and the turns already told the operator of a block.
         from ..outbound_hook import Trusted
@@ -1003,25 +1005,40 @@ class ManagerOps:
         """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the
         operator's card buttons did in this chat since its last one (``_note_button``)."""
         note = self._begin_turn(turn, binding, session_key=session_key)
-        return "\n".join(part for part in (note, *self._take_button_notes(turn)) if part)
+        return "\n".join(part for part in (note, *self._take_button_notes(turn, session_key)) if part)
 
-    def _take_button_notes(self, turn: Turn) -> list[str]:
-        """The notes this chat's card buttons left, for the user turn of the person who pressed (RFC 6.5), once.
-        Never while receipts are off (stale ones are dropped), in a background turn, for another speaker, or from
-        before the session was reset."""
+    def _take_button_notes(self, turn: Turn, session_key: str) -> list[str]:
+        """The notes this chat's card buttons left, for the user turn of the person who pressed, in the session
+        they were left in (RFC 6.5), once. Never while receipts are off or after they were turned off since (stale
+        ones are dropped), in a background turn, for another speaker, or after the session was reset."""
+        if not turn.autonomous:
+            self._chat_sessions[turn.chat_key] = session_key
+            while len(self._chat_sessions) > CONFIRMATION_CHATS:
+                del self._chat_sessions[next(iter(self._chat_sessions))]
         if not receipts_settings.enabled():
             self._button_notes.clear()
             return []
-        entries = [entry for entry in self._button_notes.get(turn.chat_key, []) if entry[1] == self._notes_epoch]
+        live = [entry for entry in self._button_notes.get(turn.chat_key, [])
+                if entry[3] == receipts_settings.generation() and entry[2] == self._session_gen.get(entry[1], 0)]
         if turn.autonomous or turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
             return []
-        mine = [entry for entry in entries if entry[0] == turn.sender]
-        rest = [entry for entry in entries if entry[0] != turn.sender]
+        mine = [entry for entry in live if entry[0] == turn.sender and entry[1] == session_key]
+        rest = [entry for entry in live if entry not in mine]
         if rest:
             self._button_notes[turn.chat_key] = rest
         else:
             self._button_notes.pop(turn.chat_key, None)
-        return [text for _sender, _epoch, text in mine]
+        return [entry[4] for entry in mine]
+
+    def forget_session(self, session_key: str) -> None:
+        """The Manager session ``session_key`` was reset: the card-button notes left in it are never told."""
+        self._session_gen[session_key] = self._session_gen.get(session_key, 0) + 1
+        for chat, entries in list(self._button_notes.items()):
+            kept = [entry for entry in entries if entry[1] != session_key]
+            if kept:
+                self._button_notes[chat] = kept
+            else:
+                del self._button_notes[chat]
 
     def _note_button(self, key: tuple[str | None, str | None, str | None], sender: str | None,
                      confirmation_id: str, what: str) -> None:
@@ -1031,8 +1048,11 @@ class ManagerOps:
             return
         note = (f"[Looper] After your last reply, the operator answered confirmation {confirmation_id} with its "
                 f"card: {what}.")
-        entries = [entry for entry in self._button_notes.pop(key, []) if entry[1] == self._notes_epoch]
-        self._button_notes[key] = [*entries, (sender, self._notes_epoch, note)][-3:]
+        session = self._chat_sessions.get(key, MAIN_SESSION)
+        entries = [entry for entry in self._button_notes.pop(key, [])
+                   if entry[3] == receipts_settings.generation() and entry[2] == self._session_gen.get(entry[1], 0)]
+        entries.append((sender, session, self._session_gen.get(session, 0), receipts_settings.generation(), note))
+        self._button_notes[key] = entries[-3:]
         while len(self._button_notes) > CONFIRMATION_CHATS:
             del self._button_notes[next(iter(self._button_notes))]
 
@@ -1112,7 +1132,6 @@ class ManagerOps:
 
     def forget_confirmations(self) -> None:
         """Drop every waiting confirmation (the Manager's session was reset), and the card-button notes with them."""
-        self._notes_epoch += 1
         self._button_notes.clear()
         for pending in self._pending.values():
             self._lapse(pending)
