@@ -11,11 +11,10 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
-from ..db import connection, schedules as db_schedules, subscriptions as db_subs
-from . import turn_metrics
-from . import leads_model, subscriptions
+from ..db import connection, proactive_deliveries as db_deliveries, schedules as db_schedules, subscriptions as db_subs
+from . import chat_settings, leads_model, proactive_delivery as delivery, subscriptions, turn_metrics
 from .channels.base import PostOutcome
-from .message import builtin_channel_id, parse_channel_id
+from .message import builtin_channel_id, channel_thread_id, parse_channel_id
 from .operator_identity import operator_sender_id
 from .subscription_runs import push_target
 
@@ -206,7 +205,8 @@ class IntentPushService:
         elif row["state"] == "merged" and not any(post["kind"] == "progress" for post in posts):
             parent = await conn.fetchrow("SELECT * FROM intents WHERE id=$1", row["merged_into"])
             push = await conn.fetchrow("SELECT * FROM intent_posts WHERE intent_id=$1 AND kind='push' "
-                                      "AND state='sent' AND external_id IS NOT NULL ORDER BY id DESC LIMIT 1", row["merged_into"])
+                                      "AND ((state='sent' AND external_id IS NOT NULL) OR (state='pending' AND $2)) "
+                                      "ORDER BY id DESC LIMIT 1", row["merged_into"], chat_settings.delivery_enabled())
             if (parent and parent["state"] in ("pending", "tasked") and push
                     and (push["channel_id"], push["chat"]) == target and row["created_at"] >= now-timedelta(hours=24)):
                 text = progress_text(view, await intents.intent_view(parent, db=conn), timezone=timezone)
@@ -255,9 +255,29 @@ class IntentPushService:
                     return
             reply = await conn.fetchval("SELECT external_id FROM intent_posts WHERE intent_id=$1 AND kind='push' "
                                         "AND state='sent' ORDER BY id DESC LIMIT 1", parent_id)
-            if not reply:
-                return
         now = self._clock()
+        decided = None
+        delivery_key = f"intent-{intent['id']}-{post['id']}"
+        # Final edits and their fallback replies report an already handled intent, not a new suggestion.
+        if post["kind"] in ("push", "progress") and chat_settings.delivery_enabled():
+            try:
+                # The unsuffixed bot-owner conversation, as for the native incoming DM.
+                thread = channel_thread_id(post["channel_id"], post["chat"], "manager", "manager")
+                spoke = await conn.fetchval("SELECT max(created_at) FROM chat_messages "
+                                            "WHERE session_id=$1 AND role='user'", thread)
+                # An intent marked urgent is neither a blocking gate nor a user-set reminder.
+                decided = await delivery.decide(
+                    delivery.Delivery(delivery.DeliveryKind.INTENT, delivery.Urgency.NORMAL, delivery.ChatKind.DIRECT),
+                    dedupe_key=delivery_key, channel_id=post["channel_id"], chat=post["chat"],
+                    last_user_message_at=spoke, source_ref=str(intent["id"]), schedule_id=schedule["id"], now=now)
+            except Exception:
+                logger.warning("intent post %s delivery decision failed; waiting to retry", post["id"], exc_info=True)
+                return
+            if decided.outcome is not delivery.Outcome.SEND:
+                return
+        # Record new evidence for the briefing even while its parent is deferred; sending needs its receipt.
+        if post["kind"] in ("progress", "final") and not reply:
+            return
         claimed = await conn.fetchval("UPDATE intent_posts SET state='sending', attempts=attempts+1, updated_at=$2 "
                                       "WHERE id=$1 AND state IN ('pending','failed') AND attempts<$3 RETURNING id",
                                       post["id"], now, db_subs.DELIVERY_ATTEMPTS)
@@ -267,9 +287,9 @@ class IntentPushService:
         try:
             receipt = await self._registry.post(post["channel_id"], push_target(post["channel_id"], post["chat"]),
                                                 post["text"], reply_to=reply,
-                                                idempotency_key=f"intent-{intent['id']}-{post['id']}",
+                                                idempotency_key=delivery_key,
                                                 **turn_metrics.proactive_kwargs(
-                                                    turn_metrics.ProactiveSource.INTENT, intent["id"]))
+                                                    turn_metrics.ProactiveSource.INTENT, str(intent["id"])))
             state = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "failed", PostOutcome.UNKNOWN: "uncertain"}[receipt.result]
             external = receipt.external_ids[0] if receipt.external_ids else None
             error = receipt.error
@@ -277,6 +297,16 @@ class IntentPushService:
             state, error = "uncertain", type(exc).__name__
         await conn.execute("UPDATE intent_posts SET state=$2, external_id=$3, error=$4, updated_at=$5 WHERE id=$1",
                            post["id"], state, external, error, now)
+        if decided is not None:
+            try:
+                # Retries refresh the receipt on the decided row, as the channel metrics do.
+                await db_deliveries.insert({
+                    "dedupe_key": delivery_key, "source": delivery.DeliveryKind.INTENT.value,
+                    "source_ref": str(intent["id"]), "channel_id": post["channel_id"], "chat": post["chat"],
+                    "chat_kind": delivery.ChatKind.DIRECT.value, "external_id": external,
+                    "outcome": {"sent": "sent", "failed": "rejected", "uncertain": "unknown"}[state]})
+            except Exception:
+                logger.warning("intent post %s delivery receipt not recorded", post["id"], exc_info=True)
         if state == "sent":
             parent_id = intent["merged_into"] if post["kind"] == "progress" else intent["id"]
             if post["kind"] in ("push", "progress"):

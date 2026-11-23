@@ -161,7 +161,8 @@ async def enabled(db: Any = None) -> bool:
 
 
 def known_enabled() -> bool:
-    """The switch as this server last read or set it."""
+    """The switch as this server last read or set it: read when it starts (``serve``) and before each Manager turn,
+    set by ``set_enabled``, the only way it changes."""
     return _known
 
 

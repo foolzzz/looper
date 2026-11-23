@@ -43,7 +43,7 @@ from ..db import channel_configs as db_channel_configs, connection as db_connect
 from ..db import message_stream as db_message_stream, projects as db_projects, schedules as db_schedules
 from ..db import subscriptions as db_subs
 from ..db import chat_bindings as db_chat_bindings
-from . import cron, subscriptions
+from . import cron, schedule_throttle, subscriptions
 from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, budget_usd
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from .message import builtin_channel_id
@@ -311,6 +311,8 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
         "notify_format": row.get("notify_format") or NotifyFormat.REPORT.value,
         "user_gates": row.get("user_gates", UserGates.OFF.value),
+        "active_hours": row.get("active_hours"), "idle_only": bool(row.get("idle_only")),
+        "throttle": schedule_throttle.ScheduleThrottle.of(row).view(),
         "notify_target": target, "spent_today_usd": round(spent_today, 6),
         "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at"),
                    "deadline_since": row.get("deadline_alert_at"), "overlap_since": row.get("overlap_alert_at")},
@@ -562,6 +564,7 @@ _PARSERS = {
     "alert_failures_after": _bounded("alert_failures_after", 1, 1000),
     "alert_stale_after_seconds": _bounded("alert_stale_after_seconds", 300, 2592000),
     "alert_overlap_after": _bounded("alert_overlap_after", 0, 10000),
+    "active_hours": schedule_throttle.active_hours, "idle_only": schedule_throttle.idle_only,
 }
 _ACCEPTED = (*(name for name in db_schedules.FIELDS
                 if name not in ("notify_channel", "notify_chat", "run_timeout_mode")),
@@ -1238,11 +1241,14 @@ async def list_notifications(schedule_id: str, query: Mapping[str, str]) -> dict
          "created_at": row["created_at"]} for row in rows]}
 
 
+# The skipped runs the dashboard counts by reason.
+SKIPPED_TODAY = ("skipped_gate", "skipped_overlap", "skipped_missed", "skipped_budget", "skipped_busy")
+
+
 def empty_schedule_overview() -> dict[str, Any]:
     """``schedule_overview``'s shape with nothing in it (a scoped Manager has no schedules)."""
     return {"total": 0, "enabled": 0, "next": [], "failing": [],
-            "skipped_today": {status: 0 for status in ("skipped_gate", "skipped_overlap", "skipped_missed",
-                                                       "skipped_budget")}}
+            "skipped_today": {status: 0 for status in SKIPPED_TODAY}}
 
 
 async def schedule_overview(since: datetime) -> dict[str, Any]:
@@ -1261,6 +1267,5 @@ async def schedule_overview(since: datetime) -> dict[str, Any]:
                      "deadline_since": row["deadline_alert_at"], "overlap_since": row["overlap_alert_at"],
                      "last_success_at": row["last_success_at"], "last_status": row["last_status"]}
                     for row in summary["failing"]],
-        "skipped_today": {status: summary["skipped"].get(status, 0)
-                          for status in ("skipped_gate", "skipped_overlap", "skipped_missed", "skipped_budget")},
+        "skipped_today": {status: summary["skipped"].get(status, 0) for status in SKIPPED_TODAY},
     }
