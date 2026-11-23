@@ -20,6 +20,7 @@ from looper.agents.ops import leads as ops_leads
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.ops import Turn
 from looper.db import connection, message_leads
+from looper.db.migrations import leads_trigram
 from tests import leads_support as sup
 from tests import subscription_support as stream
 from tests.db_support import DSN, run_db, run_with_channel_configs
@@ -177,7 +178,7 @@ def test_pg_trgm_is_created_in_public_on_upgrade_and_a_database_without_it_still
             # Where the extension cannot be created, the start goes on, records the try and searches without it.
             await pool.execute("DROP EXTENSION pg_trgm CASCADE")
             await pool.execute("DELETE FROM schema_migrations WHERE name = 'leads_trigram'")
-            monkeypatch.setattr(connection, "_LEADS_TRIGRAM_DDL",
+            monkeypatch.setattr(leads_trigram, "DDL",
                                 connection._LEADS_TRIGRAM_DDL.replace("pg_trgm", "pg_trgm_not_available"))
             await connection.ensure_schema(pool)
             assert await message_leads.trigram_schema(pool) is None

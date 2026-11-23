@@ -149,7 +149,7 @@ def test_retry_runs_real_adapter_catchup_with_current_bindings(monkeypatch, tmp_
 
         def build(*args, **kwargs):
             adapter = original(*args, **kwargs)
-            adapter._transport = transport
+            adapter._transport.inner = transport  # keep the outbound gate production puts around it
             return adapter
 
         monkeypatch.setattr(serve, "_lark_adapter_from_config", build)
@@ -261,11 +261,13 @@ def test_serve_http_reports_retry_and_recovery(monkeypatch, tmp_path):
 
         def build(*args, **kwargs):
             adapter = original(*args, **kwargs)
-            adapter._transport = transport
+            # Replace the transport inside the outbound gate, as production wraps every Lark transport.
+            adapter._transport.inner = transport
             return adapter
 
         async def wait(delay):
             await resume.wait()
+            await asyncio.sleep(0)  # yield, so shutdown can cancel a retry loop that keeps failing
 
         async def telegram_start(adapter, bus):
             async def send(**kwargs):
