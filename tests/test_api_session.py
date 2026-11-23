@@ -641,3 +641,30 @@ async def test_prompt_is_marked_sent_only_when_the_first_request_goes_out(tmp_pa
             assert result.prompt_sent and fired == ["ok"]
         finally:
             await session.stop()
+
+
+@pytest.mark.parametrize('handed_off', [False, True], ids=['planner', 'manager'])
+@async_test
+async def test_cancel_before_the_first_request_leaves_the_prompt_unsent(handed_off, tmp_path, monkeypatch):
+    from looper.agents.runtimes.api import session as api_session
+
+    cancel, reads = TurnCancel(), []
+    items = api_session.DbTranscript.items
+
+    async def relisting(self):
+        reads.append(1)
+        if len(reads) > 1:  # the loop re-reads the transcript after the session did; a stop lands here
+            cancel.request()
+        return await items(self)
+    monkeypatch.setattr(api_session.DbTranscript, 'items', relisting)
+    if handed_off:
+        cancel.sent()  # the Manager marks its prompt handed over before the turn starts
+    async with FakeModelAPI([]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            result, _ = await turn(session, cancel=cancel)
+            assert len(reads) > 1 and not api.requests and result.stopped == StopMethod.CANCEL
+            # Only a caller that already marked the hand-off (the Manager) sees a sent prompt: as before.
+            assert result.prompt_sent is handed_off
+        finally:
+            await session.stop()
