@@ -32,6 +32,7 @@ from typing import Any
 
 from ..db import manager_events as store, tasks as db_tasks
 from . import chat_settings
+from .turn_metrics import ProactiveSource
 from .links import task_link
 from .channels.base import PostOutcome
 from .message import (AgentAddress, MessageEnvelope, MessageType, channel_address, manager_address,
@@ -423,6 +424,12 @@ async def send_reply(bus: Any, source: AgentAddress, rows: Sequence[Mapping[str,
         return PostOutcome.UNKNOWN, f"{type(exc).__name__}: the channel did not say"
 
 
+def _metrics_metadata(source: ProactiveSource, row: Mapping[str, Any]) -> dict[str, Any]:
+    if not chat_settings.metrics_enabled():
+        return {}
+    return {"proactive": {"source": source.value, "source_ref": row.get("task_id"), "manager_id": row.get("manager_id")}}
+
+
 async def _send_reply(bus: Any, source: AgentAddress, rows: Sequence[Mapping[str, Any]], text: str,
                       metadata: Mapping[str, Any] | None) -> tuple[PostOutcome, str | None]:
     first = _json(rows[0]["fallback"])[0]
@@ -432,7 +439,8 @@ async def _send_reply(bus: Any, source: AgentAddress, rows: Sequence[Mapping[str
         outcome, error = await _publish(bus, MessageEnvelope.create(
             source=source, target=channel_address("web"), message_type=MessageType.AGENT_REPLY,
             payload={"text": text, "chat_session_id": first["thread"]}, correlation_id=first.get("correlation_id") or "",
-            metadata={"origin_channel_id": first.get("origin_channel_id")}))
+            metadata={"origin_channel_id": first.get("origin_channel_id"),
+                      **_metrics_metadata(ProactiveSource.COMPLETION, rows[0])}))
     elif first["via"] == "notice":
         notice = Notice.from_payload(first["notice"])
         if notice is None:
@@ -441,7 +449,8 @@ async def _send_reply(bus: Any, source: AgentAddress, rows: Sequence[Mapping[str
             source=source, target=channel_address(notice.channel.value, notice.channel_id),
             message_type=MessageType.CHAT_NOTICE, payload={**notice.payload(), "text": text},
             correlation_id=f"completion-{rows[0]['id']}",
-            metadata={"origin_channel_id": notice.channel_id, **(metadata or {})}))
+            metadata={"origin_channel_id": notice.channel_id, **(metadata or {}),
+                      **_metrics_metadata(ProactiveSource.COMPLETION, rows[0])}))
     else:
         return PostOutcome.REJECTED, f"a {first['via']} event has no completion turn"
     if outcome is PostOutcome.SENT:
@@ -462,12 +471,14 @@ async def _send_notice(bus: Any, row: Mapping[str, Any]) -> tuple[PostOutcome, s
         return await _publish(bus, MessageEnvelope.create(
             source=source, target=channel_address(notice["channel"], notice["channel_id"]),
             message_type=MessageType.CHAT_NOTICE, payload=notice, correlation_id=f"completion-{row['id']}",
-            metadata={"origin_channel_id": notice["channel_id"]}))
+            metadata={"origin_channel_id": notice["channel_id"],
+                      **_metrics_metadata(ProactiveSource.TASK_NOTICE, row)}))
     if item["via"] == "web_thread":
         return await _publish(bus, MessageEnvelope.create(
             source=source, target=channel_address("web"), message_type=MessageType.AGENT_REPLY,
             payload={"text": item["text"], "chat_session_id": item["thread"]},
-            correlation_id=item.get("correlation_id") or "", metadata={"origin_channel_id": item.get("origin_channel_id")}))
+            correlation_id=item.get("correlation_id") or "", metadata={"origin_channel_id": item.get("origin_channel_id"),
+                      **_metrics_metadata(ProactiveSource.TASK_NOTICE, row)}))
     if item["via"] == "schedule":
         return await _post_schedule(row, item["text"])
     return PostOutcome.REJECTED, f"an unknown notice ({item['via']})"

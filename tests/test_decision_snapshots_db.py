@@ -107,6 +107,12 @@ def test_housekeeping_deletes_snapshots_after_thirty_days_only_while_on(monkeypa
         if on:
             await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true')",
                                decision_snapshots.ENABLED_KEY)
+        from looper.agents import chat_settings
+
+        monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+        await pool.execute("INSERT INTO proactive_deliveries (source, channel_id, chat, chat_kind, outcome, sent_at) "
+                           "VALUES ('gate', 'synthetic-channel', 'synthetic-chat', 'direct', 'sent', $1)",
+                           NOW - timedelta(days=91))
         deleted = []
         prune = decision_snapshots.prune
 
@@ -116,7 +122,9 @@ def test_housekeeping_deletes_snapshots_after_thirty_days_only_while_on(monkeypa
 
         monkeypatch.setattr(decision_snapshots, "prune", counted)
         report = await housekeeping.run_once(tmp_path, NOW, current_runner=None, commands=None)
-        assert "decision snapshots" not in report.failed_steps
+        assert not report.failed_steps
+        assert report.proactive_deliveries == 1
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
         # Off, housekeeping writes nothing to the table: the rows of an earlier window stay with their task.
         assert report.decision_snapshots == (2 if on else 0) and bool(deleted) is on
         assert await pool.fetchval("SELECT count(*) FROM decision_snapshots") == (1 if on else 3)

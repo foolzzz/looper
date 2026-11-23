@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from ..db import connection, proactive_deliveries as db_deliveries, schedules as db_schedules, subscriptions as db_subs
-from . import chat_settings, leads_model, proactive_delivery as delivery, subscriptions
+from . import chat_settings, leads_model, proactive_delivery as delivery, subscriptions, turn_metrics
 from .channels.base import PostOutcome
 from .message import builtin_channel_id, channel_thread_id, parse_channel_id
 from .operator_identity import operator_sender_id
@@ -257,7 +257,7 @@ class IntentPushService:
                                         "AND state='sent' ORDER BY id DESC LIMIT 1", parent_id)
         now = self._clock()
         decided = None
-        delivery_key = f"intent_post:{post['id']}"
+        delivery_key = f"intent-{intent['id']}-{post['id']}"
         # Final edits and their fallback replies report an already handled intent, not a new suggestion.
         if post["kind"] in ("push", "progress") and chat_settings.delivery_enabled():
             try:
@@ -269,7 +269,7 @@ class IntentPushService:
                 decided = await delivery.decide(
                     delivery.Delivery(delivery.DeliveryKind.INTENT, delivery.Urgency.NORMAL, delivery.ChatKind.DIRECT),
                     dedupe_key=delivery_key, channel_id=post["channel_id"], chat=post["chat"],
-                    last_user_message_at=spoke, schedule_id=schedule["id"], now=now)
+                    last_user_message_at=spoke, source_ref=str(intent["id"]), schedule_id=schedule["id"], now=now)
             except Exception:
                 logger.warning("intent post %s delivery decision failed; waiting to retry", post["id"], exc_info=True)
                 return
@@ -287,7 +287,9 @@ class IntentPushService:
         try:
             receipt = await self._registry.post(post["channel_id"], push_target(post["channel_id"], post["chat"]),
                                                 post["text"], reply_to=reply,
-                                                idempotency_key=f"intent-{intent['id']}-{post['id']}")
+                                                idempotency_key=delivery_key,
+                                                **turn_metrics.proactive_kwargs(
+                                                    turn_metrics.ProactiveSource.INTENT, str(intent["id"])))
             state = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "failed", PostOutcome.UNKNOWN: "uncertain"}[receipt.result]
             external = receipt.external_ids[0] if receipt.external_ids else None
             error = receipt.error
@@ -295,12 +297,17 @@ class IntentPushService:
             state, error = "uncertain", type(exc).__name__
         await conn.execute("UPDATE intent_posts SET state=$2, external_id=$3, error=$4, updated_at=$5 WHERE id=$1",
                            post["id"], state, external, error, now)
+        if decided is not None:
+            try:
+                # Retries refresh the receipt on the decided row, as the channel metrics do.
+                await db_deliveries.insert({
+                    "dedupe_key": delivery_key, "source": delivery.DeliveryKind.INTENT.value,
+                    "source_ref": str(intent["id"]), "channel_id": post["channel_id"], "chat": post["chat"],
+                    "chat_kind": delivery.ChatKind.DIRECT.value, "external_id": external,
+                    "outcome": {"sent": "sent", "failed": "rejected", "uncertain": "unknown"}[state]})
+            except Exception:
+                logger.warning("intent post %s delivery receipt not recorded", post["id"], exc_info=True)
         if state == "sent":
-            if decided is not None:
-                try:
-                    await db_deliveries.mark_sent(delivery_key)
-                except Exception:
-                    logger.warning("intent post %s delivery receipt not recorded", post["id"], exc_info=True)
             parent_id = intent["merged_into"] if post["kind"] == "progress" else intent["id"]
             if post["kind"] in ("push", "progress"):
                 await conn.execute("UPDATE intents SET expires_at=$2, updated_at=$3 WHERE id=$1 AND state='pending'",

@@ -35,7 +35,7 @@ def test_delivery_keeps_the_exact_intent_channel_calls(monkeypatch, enabled):
             async def unexpected_decision(*args, **kwargs):
                 pytest.fail("delivery is disabled")
             monkeypatch.setattr(delivery, "decide", unexpected_decision)
-        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         env = await setup(pool, monkeypatch)
         iid = await env.create(created_at=NOW)
         await env.service.run_once()
@@ -57,7 +57,7 @@ def test_delivery_keeps_the_exact_intent_channel_calls(monkeypatch, enabled):
             "SELECT kind,state,attempts,external_id FROM intent_posts ORDER BY id")] == [
                 ("push", "sent", 1, "om_push_1"), ("progress", "sent", 1, "om_push_2"),
                 ("final", "sent", 1, "om_push_3")]
-        decisions = await pool.fetch("SELECT kind,urgency,outcome,sent_at IS NOT NULL AS sent "
+        decisions = await pool.fetch("SELECT source,urgency,decision,sent_at IS NOT NULL AS sent "
                                      "FROM proactive_deliveries ORDER BY id")
         assert [tuple(row) for row in decisions] == ([("intent", "normal", "send", True)] * 2 if enabled else [])
     run_db(check, monkeypatch)
@@ -68,13 +68,13 @@ def test_delivery_keeps_the_exact_intent_channel_calls(monkeypatch, enabled):
 def test_intent_priority_does_not_claim_blocking_or_user_set_urgency(monkeypatch, priority, reason):
     async def check(pool):
         monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
-        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         env = await setup(pool, monkeypatch)
         env.service._clock = lambda: NOW.replace(hour=14)
         await pool.execute("UPDATE intent_type_versions SET priority=$1 WHERE type_key='dev_task'", priority)
         await env.create()
         await env.service.run_once()
-        rows = await pool.fetch("SELECT kind,urgency,chat_kind,reason,counted,sent_at IS NOT NULL "
+        rows = await pool.fetch("SELECT source,urgency,chat_kind,reason,counted,sent_at IS NOT NULL "
                                 "FROM proactive_deliveries")
         assert [tuple(row) for row in rows] == ([] if reason is None else [
             ("intent", "normal", "direct", reason, True, True)])
@@ -86,7 +86,7 @@ def test_intent_priority_does_not_claim_blocking_or_user_set_urgency(monkeypatch
 def test_delivery_defers_or_drops_without_claiming_an_intent_send(monkeypatch, blocked):
     async def check(pool):
         monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
-        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         env = await setup(pool, monkeypatch)
         now = NOW.replace(hour=23 if blocked == "night" else 14)
         env.service._clock = lambda: now
@@ -107,8 +107,8 @@ def test_delivery_defers_or_drops_without_claiming_an_intent_send(monkeypatch, b
         await env.service.run_once()
         assert env.channels.posts == []
         assert [tuple(row) for row in await pool.fetch("SELECT state,attempts FROM intent_posts")] == [("pending", 0)]
-        rows = await pool.fetch("SELECT outcome,reason,counted,digest_date,sent_at FROM proactive_deliveries "
-                                "WHERE kind='intent'")
+        rows = await pool.fetch("SELECT decision,reason,counted,digest_date,sent_at FROM proactive_deliveries "
+                                "WHERE source='intent'")
         expected = {"night": ("digest", "quiet_hours"), "cap": ("digest", "daily_cap"), "drop": ("drop", "silent")}
         assert len(rows) == 1 and tuple(rows[0]) == (*expected[blocked], False,
             None if blocked == "drop" else now.date()+timedelta(days=1), None)
@@ -119,7 +119,7 @@ def test_delivery_defers_or_drops_without_claiming_an_intent_send(monkeypatch, b
 def test_intent_delivery_grace_is_only_for_a_recent_user_in_the_target_chat(monkeypatch, recent):
     async def check(pool):
         monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
-        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         env = await setup(pool, monkeypatch)
         now = NOW.replace(hour=23)
         env.service._clock = lambda: now
@@ -136,23 +136,63 @@ def test_intent_delivery_grace_is_only_for_a_recent_user_in_the_target_chat(monk
     run_db(check, monkeypatch)
 
 
-def test_intent_delivery_retry_keeps_one_decision_and_records_only_a_successful_send(monkeypatch):
+def test_intent_delivery_retry_keeps_one_decision_and_updates_the_receipt(monkeypatch):
     async def check(pool):
         monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
-        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         env = await setup(pool, monkeypatch)
         env.service._clock = lambda: NOW.replace(hour=14)
         await env.create()
         env.channels.outcome = PostOutcome.REJECTED
         await env.service.run_once()
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE sent_at IS NULL") == 1
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE decision='send' AND outcome='rejected'") == 1
         env.channels.outcome = PostOutcome.SENT
         env.service._clock = lambda: NOW.replace(hour=23)
         await env.service.run_once()
         await env.service.run_once()
         assert len(env.channels.posts) == 2 and env.channels.posts[0] == env.channels.posts[1]
-        assert [tuple(row) for row in await pool.fetch("SELECT outcome,counted,sent_at IS NOT NULL "
-                                                      "FROM proactive_deliveries")] == [("send", True, True)]
+        assert [tuple(row) for row in await pool.fetch("SELECT decision,outcome,counted,sent_at IS NOT NULL "
+                                                      "FROM proactive_deliveries")] == [("send", "sent", True, True)]
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("metrics", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_intent_decision_and_channel_retry_share_one_delivery_row(monkeypatch, metrics, enabled):
+    from looper.agents import turn_metrics
+    from looper.agents.channels.registry import ChannelRegistry
+
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, "_delivery_enabled", enabled)
+        monkeypatch.setattr(chat_settings, "_metrics_enabled", metrics)
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
+        env = await setup(pool, monkeypatch)
+        env.service._clock = lambda: NOW.replace(hour=14)
+
+        async def post(target, text, **kwargs):
+            return await env.channels.post("channel-lark", target, text, **kwargs)
+
+        registry = ChannelRegistry(SimpleNamespace())
+        registry._channels["channel-lark"] = SimpleNamespace(post=post)
+        env.service._registry = registry
+        iid = await env.create()
+        env.channels.outcome = PostOutcome.REJECTED
+        for outcome in ("rejected", "sent"):
+            await env.service.run_once()
+            await asyncio.gather(*turn_metrics._pending)
+            rows = await pool.fetch("SELECT * FROM proactive_deliveries")
+            assert len(rows) == int(enabled or metrics)
+            if rows:
+                row = rows[0]
+                pid = await pool.fetchval("SELECT id FROM intent_posts WHERE intent_id=$1", iid)
+                assert (row["dedupe_key"], row["source"], row["source_ref"]) == (
+                    f"intent-{iid}-{pid}", "intent", str(iid))
+                assert (row["decision"], row["counted"]) == (("send", True) if enabled else (None, None))
+                assert row["outcome"] == outcome and row["sent_at"] is not None
+                assert row["external_id"] == ("om_push_2" if outcome == "sent" else None)
+            env.channels.outcome = PostOutcome.SENT
+        assert len(env.channels.posts) == 2 and env.channels.posts[0] == env.channels.posts[1]
+
     run_db(check, monkeypatch)
 
 
@@ -173,7 +213,7 @@ def test_failed_delivery_decision_waits_without_spending_a_send_attempt(monkeypa
 def test_new_evidence_for_a_digested_parent_gets_its_own_digest_decision(monkeypatch):
     async def check(pool):
         monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
-        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         env = await setup(pool, monkeypatch)
         now = NOW.replace(hour=23)
         env.service._clock = lambda: now
@@ -185,8 +225,8 @@ def test_new_evidence_for_a_digested_parent_gets_its_own_digest_decision(monkeyp
         env.service._clock = lambda: now + timedelta(hours=10)
         await env.service.run_once()
         rows = await pool.fetch(
-            "SELECT p.intent_id,p.kind,p.state,p.attempts,p.external_id,d.outcome,d.digest_date,d.sent_at "
-            "FROM intent_posts p JOIN proactive_deliveries d ON d.dedupe_key='intent_post:' || p.id "
+            "SELECT p.intent_id,p.kind,p.state,p.attempts,p.external_id,d.decision,d.digest_date,d.sent_at "
+            "FROM intent_posts p JOIN proactive_deliveries d ON d.dedupe_key='intent-' || p.intent_id || '-' || p.id "
             "ORDER BY p.id")
         assert [tuple(row) for row in rows] == [
             (parent, "push", "pending", 0, None, "digest", now.date()+timedelta(days=1), None),
@@ -204,7 +244,7 @@ def test_new_evidence_for_a_digested_parent_gets_its_own_digest_decision(monkeyp
 def test_progress_waits_for_parent_receipt_in_either_order(monkeypatch, parent_first, enabled):
     async def check(pool):
         monkeypatch.setattr(chat_settings, "_delivery_enabled", enabled)
-        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         env = await setup(pool, monkeypatch)
         env.service._clock = lambda: NOW.replace(hour=14)
         parent = await env.create()
@@ -219,8 +259,8 @@ def test_progress_waits_for_parent_receipt_in_either_order(monkeypatch, parent_f
             assert env.channels.posts == []
             if enabled:
                 rows = await pool.fetch(
-                    "SELECT p.state,p.attempts,d.outcome,d.sent_at FROM intent_posts p "
-                    "JOIN proactive_deliveries d ON d.dedupe_key='intent_post:' || p.id "
+                    "SELECT p.state,p.attempts,d.decision,d.sent_at FROM intent_posts p "
+                    "JOIN proactive_deliveries d ON d.dedupe_key='intent-' || p.intent_id || '-' || p.id "
                     "WHERE p.intent_id=$1", evidence)
                 assert [tuple(row) for row in rows] == [("pending", 0, "send", None)]
             else:
@@ -359,7 +399,7 @@ def test_multi_instance_and_crash_never_resend(monkeypatch):
 def test_delivery_results_and_bounded_retries(monkeypatch, outcome, crash, expected, attempts, enabled):
     async def check(pool):
         monkeypatch.setattr(chat_settings, "_delivery_enabled", enabled)
-        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         env = await setup(pool, monkeypatch)
         env.service._clock = lambda: NOW.replace(hour=14)
         await env.create()
@@ -370,7 +410,8 @@ def test_delivery_results_and_bounded_retries(monkeypatch, outcome, crash, expec
         assert row["state"] == expected and row["attempts"] == attempts
         assert len(env.channels.posts) == attempts
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == int(enabled)
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE sent_at IS NOT NULL") == 0
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE sent_at IS NOT NULL") == int(enabled)
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE outcome='sent'") == 0
     run_db(check, monkeypatch)
 
 
