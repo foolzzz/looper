@@ -331,6 +331,7 @@ _FAILURES: Mapping[CallFailure, Failure] = {
     CallFailure.TIMEOUT: Failure.TIMEOUT, CallFailure.RATE_LIMITED: Failure.RATE_LIMITED,
     CallFailure.BUDGET: Failure.BUDGET, CallFailure.UNAVAILABLE: Failure.UNAVAILABLE,
     CallFailure.REFUSED: Failure.REFUSED, CallFailure.RUNTIME: Failure.RUNTIME, CallFailure.PARSE: Failure.PARSE,
+    CallFailure.BLOCKED: Failure.RUNTIME,
 }
 _FAILURE_REASONS: Mapping[Failure, str] = {
     Failure.NOT_OPERATOR: "Looper does outbound actions only in the operator's own turn",
@@ -364,6 +365,8 @@ async def review(action: Action, asker: Asker, origin: Origin, *, context: Seque
     ``unknown`` action is reviewed."""
     if action.level not in REVIEWED:
         raise ValueError(f"{action.level.value} actions are not reviewed")
+    from .cost_guard import Held
+
     run = _Run()
     if asker.who is not Who.OPERATOR:
         outcome = _blocked(Failure.NOT_OPERATOR)
@@ -372,6 +375,9 @@ async def review(action: Action, asker: Asker, origin: Origin, *, context: Seque
     else:
         try:
             outcome = await _classify(action, asker, origin, context, runtime_root, claude_bin, run)
+        except Held as held:
+            logger.info("outbound review of %s by %s waits for a usage window", action.tool, origin.agent_id)
+            outcome = _blocked(Failure.UNAVAILABLE, str(held))
         except Exception:
             logger.exception("the outbound review of %s by %s could not run", action.tool, origin.agent_id)
             outcome = _blocked(Failure.RUNTIME)

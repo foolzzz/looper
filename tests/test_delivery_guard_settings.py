@@ -135,3 +135,50 @@ def test_update_declares_high_risk_confirmation(settings, value, expected):
         assert f"manager.delivery_guard.enabled to {expected}" in impact
         assert settings == ({}, [])
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("body", [{"session_routing_enabled": True}, {"max_resident": 4}])
+@pytest.mark.usefixtures("clients")
+def test_chat_settings_reject_session_routing_without_writing(tmp_path, monkeypatch, settings, body):
+    from looper.db import manager_actions
+
+    monkeypatch.setattr(manager_actions, "record", AsyncMock(return_value=1))
+
+    async def check():
+        with pytest.raises(ValueError, match="unknown setting"):
+            await chat_settings.update({"stop_enabled": True, **body})
+        assert settings == ({}, [])
+        assert chat_settings.stop_enabled() is False
+        async with _serving(tmp_path) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            for token in (TOKEN, CLIENT_TOKEN):
+                status, _, answer = await _send(server, "POST /api/v1/chat_settings/update", _bearer(token),
+                                                json.dumps({"stop_enabled": True, **body}))
+                assert status == 400 and answer["error"]["code"] == "invalid"
+                assert "unknown setting" in answer["error"]["message"]
+                assert settings == ({}, [])
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("action", ["get", "update"])
+@pytest.mark.usefixtures("clients")
+def test_session_routing_operations_are_operator_only(tmp_path, monkeypatch, settings, action):
+    from looper.agents.action_levels import ActionLevel
+
+    operation = api_v1.find("POST", f"/api/v1/session_routing/{action}")
+    assert operation is not None and operation.operator_only and operation.tool is None
+    assert operation.level is ActionLevel.INSIDE
+    assert operation.risk == ("high" if action == "update" else "read")
+    assert operation.confirms is (action == "update")
+    run = AsyncMock(side_effect=AssertionError("client reached session routing settings"))
+    monkeypatch.setattr(api_v1.domain_for(operation), "run", run)
+
+    async def check():
+        async with _serving(tmp_path) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            status, _, answer = await _send(server, f"POST {operation.path}", _bearer(CLIENT_TOKEN),
+                                            json.dumps({"session_routing_enabled": True} if action == "update" else {}))
+            assert status == 403 and answer["error"]["code"] == "forbidden"
+            run.assert_not_awaited()
+            assert settings[1] == []
+    asyncio.run(check())

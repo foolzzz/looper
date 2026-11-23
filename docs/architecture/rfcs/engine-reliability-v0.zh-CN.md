@@ -513,9 +513,9 @@ ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS fallback_on TEXT[] NOT NULL 
 - **真实路径：** 一次性 `looper serve`（空闲端口、新库、一次性 runtime root），用替身运行时发出 `rate_limit_event` 和 429 结果，验证冻结、探测、解冻和挂起重派；真实额度没法安全地触发，这一点写进 PR 的未测项。
 - **真实评测：** PR4 改了模型可见内容，用真实 Claude CLI 跑一次评测对比（`evals/README.md`）。
 - **开工前验证：**
-  1. processor 的原始输出里有没有 `rate_limit_event`（只留类型化事件，记录里看不到）；
+  1. processor 的原始输出里有没有 `rate_limit_event`（只留类型化事件，记录里看不到）。**PR1 的结论（读代码）：** 记录里看不到是 `processor.typed_events` 只留 `system` 和 `result` 事件；`ClaudeRunRecorder.account()` 在这个过滤之前看到每一个事件，所以只要 Claude Code 发了，失败分型和以后的限流信号都拿得到（有测试）。没有工具的运行里 Claude Code 发不发这条事件，录制样本里没有（样本早于这条事件），需要一次真实运行确认，留给 PR2；
   2. Codex app-server 是否真的发 `account/rateLimits/updated`、`resetsAt` 的单位、`account/rateLimits/read` 能否在不花模型调用的情况下当探测；
-  3. Codex exec 和 Grok 额度用完时的报错文字；
+  3. Codex exec 和 Grok 额度用完时的报错文字。**PR1 的结论（读二进制里的字符串，不触发真实额度）：** codex-cli 0.169.0 的文字是「You've hit your usage limit…」「Quota exceeded. Check your plan and billing details.」「exceeded retry limit, last status: 429 …」「Selected model is at capacity…」「stream disconnected before completion…」，PR1 按这些分类（`signal: text`）。Grok 的二进制和录制样本里没有找到稳定的额度提示，PR1 不为 Grok 分类（`unknown`）；
   4. Claude Code 的 `rateLimitType` 还有哪些值（是否有按模型的窗口）。
 
 ## 15. 维护者的答复（2026-11-20）

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 BUILTIN = {"manager": "replace", "planner": "replace", "worker": "append", "reviewer": "append", "processor": "replace",
            "advisor": "replace", "advice_check": "replace", "leads_check": "replace",
-           "outbound_check": "replace"}
+           "outbound_check": "replace", "explorer": "replace"}
 
 
 async def _profile(name: str, **fields: Any) -> dict[str, Any]:
@@ -26,8 +26,9 @@ async def _profile(name: str, **fields: Any) -> dict[str, Any]:
 
 
 async def _modes() -> dict[str, str]:
+    """The effective mode of each role in ``BUILTIN``; a role added later is not compared here."""
     body = await _ok("GET", "/api/agent-settings")
-    return {role: view["effective"]["system_prompt_mode"] for role, view in body["roles"].items()}
+    return {role: body["roles"][role]["effective"]["system_prompt_mode"] for role in BUILTIN}
 
 
 def test_role_modes_are_the_builtin_ones_until_set_and_unset_by_null(monkeypatch: pytest.MonkeyPatch) -> None:

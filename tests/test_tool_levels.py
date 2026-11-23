@@ -26,12 +26,15 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_projects": "args", "looper_agent_profiles": INSIDE, "looper_models": INSIDE, "looper_providers": MACHINE,
     "looper_catalog": MACHINE, "looper_settings": "args", "looper_schedules": "args", "looper_confirm": INSIDE,
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
+    "looper_skill_propose": INSIDE,
+    "looper_session_search": INSIDE,  # reads earlier conversations stored by Looper
     "looper_reminder_list": INSIDE, "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     "looper_task_pipeline": INSIDE, "looper_gates": "args",
     "looper_task_profiles": INSIDE, "looper_task_roles": INSIDE, "looper_task_profile_set": INSIDE,
     "looper_task_role_set": INSIDE, "looper_task_concurrency": ORIGIN,
     "looper_room_roster": INSIDE, "looper_room_post": INSIDE, "looper_room_inbox": INSIDE, "looper_room_read": INSIDE,
     "looper_room_watch": INSIDE,
+    "looper_agent_spawn": INSIDE, "looper_agent_wait": INSIDE, "looper_agent_cancel": INSIDE,
     "looper_vault_search": INSIDE, "looper_vault_read": INSIDE, "looper_vault_write": MACHINE,
 }
 
@@ -147,6 +150,45 @@ def _operations() -> dict[str, Any]:
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     # Confirmation, including save-and-confirm, and retry can commit to the operator's vault.
     **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
+    "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters
+    "cost_guard.update": INSIDE,  # changes only Looper's observation configuration
+    # Stores permission only; the runner executes checks separately after Worker success.
+    "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
+    "task_evidence.get": INSIDE,  # reads only stored check definitions and measured evidence
+
+    "manager_persona.get": INSIDE,  # reads Looper's stored persona; sends nothing
+    "manager_persona.update": INSIDE,  # changes Looper's stored persona; sends nothing
+    "manager_sessions.list": INSIDE,  # reads the default Manager's stored sessions; sends nothing
+    "manager_sessions.reset": INSIDE,  # clears one Looper session; sends nothing
+    "providers.limits": INSIDE,  # reads stored quota windows and usage
+    "limit_signals_settings.get": INSIDE,  # reads Looper's collection switch
+    "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch
+    "session_routing.get": INSIDE,  # reads Looper's own session routing controls
+    "session_routing.update": INSIDE,  # stores session routing settings; sends no message
+    "outbound_gateway.get": INSIDE,  # reads Looper's own gateway settings
+    "outbound_gateway.update": INSIDE,  # stores gateway settings; sends no message
+    "memory.list": INSIDE,  # reads stored candidates
+    "memory.get": INSIDE,  # reads one stored candidate
+    "memory.settings_get": INSIDE,  # reads and validates Looper's memory settings
+    "memory.settings_put": INSIDE,  # stores settings; writes no vault files and sends nothing
+    "memory.check": INSIDE,  # checks prerequisites without changing files or sending messages
+    "outbound_review.get": INSIDE,  # reads Looper's own review setting
+    "outbound_review.update": INSIDE,  # changes Looper's own review setting
+    "project_skills.context_budget": INSIDE,  # reads the displayed skill-description budget; sends nothing
+    "project_skills.deprecate": INSIDE,  # marks a catalog skill deprecated inside Looper; sends nothing and does not touch installs or files
+    "project_skills.restore": INSIDE,  # marks a catalog skill active inside Looper; sends nothing and does not touch installs or files
+    "project_skills.rollback": INSIDE,  # writes a new stored skill version inside Looper; sends nothing and does not touch the machine outside the catalog
+    "project_skills.usage": INSIDE,  # reads run records and attempts to count a skill's loads and calls; sends nothing
+    "project_skills.versions": INSIDE,  # reads stored skill versions; sends nothing
+    "project_skills.proposals.list": INSIDE,  # reads stored skill proposals; sends nothing
+    "project_skills.proposals.get": INSIDE,  # reads one stored skill proposal and its events; sends nothing
+    "project_skills.proposals.confirm": INSIDE,  # writes a catalog skill version inside Looper from a stored proposal; sends nothing
+    "project_skills.proposals.reject": INSIDE,  # marks a stored proposal rejected; sends nothing
+    "project_skills.proposals.restore": INSIDE,  # marks an expired stored proposal pending; sends nothing
+    "project_skills.proposals.set_mode": INSIDE,  # stores a project's proposal switch; sends nothing
+    "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
+    "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
+
     "manager_chat_bindings.put": EXTERNAL,  # a bound chat's people talk to a Manager, which answers them there
     "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
     # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard

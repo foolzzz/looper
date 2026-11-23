@@ -17,8 +17,13 @@ from .lark_cli import LarkCliError
 from .lark_content import ResourceRef
 
 
+from .lark_transport import LarkTransportKind
+
+
 class BotTransport:
     """Use the open platform for messages and one deduplication set across connections."""
+
+    kind = LarkTransportKind.BOT
 
     def __init__(self, app_id: str, app_secret: str, *, base_url: str | None = None,
                  admit: Callable[[dict[str, Any]], bool] | None = None) -> None:

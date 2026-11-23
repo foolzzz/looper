@@ -16,10 +16,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from . import proc_tree
+from . import failures, proc_tree
 
 if TYPE_CHECKING:
     from .agent_settings import Launch
@@ -58,7 +58,8 @@ class Finished(NamedTuple):
 
 
 async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str, prompt: str, launch: Launch,
-                   timeout: float, what: str, label: str, quiet: bool = False) -> Finished:
+                   timeout: float, what: str, label: str, quiet: bool = False,
+                   on_process: Callable[[asyncio.subprocess.Process], Awaitable[None]] | None = None) -> Finished:
     """Run ``command`` in ``cwd`` with ``prompt`` as its one user turn, recording it with ``recorder`` (already
     started), which is closed however the run ends; ``what`` names the run in its record's errors (``the consult``),
     ``label`` in the log; ``quiet`` keeps what the process wrote out of the record (the module's notes). Raises
@@ -69,7 +70,8 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
                                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                                         stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
-        await recorder.finish(output_text=None, result_event=None, error=f"cannot start {what}: {exc}")
+        await recorder.finish(output_text=None, result_event=None, error=f"cannot start {what}: {exc}",
+                              failure=failures.start_failure(exc))
         raise StartFailed(str(exc)) from None
     recorder.track_pid(lambda: process.pid)
     assert process.stdin is not None and process.stdout is not None and process.stderr is not None
@@ -121,6 +123,8 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
                     process.stdin.close()
 
     async def run() -> None:
+        if on_process is not None:
+            await on_process(process)
         try:
             await runtime.write_turn(process.stdin, prompt)
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
@@ -129,6 +133,7 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
         await process.wait()
 
     error: str | None = None
+    failure: failures.Failure | None = None
     try:
         await asyncio.wait_for(run(), timeout=timeout)
         if blocked is not None:
@@ -137,6 +142,7 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
             error = f"{what} gave no result"
     except asyncio.TimeoutError:
         error = f"{what} ran over {timeout:g} s"
+        failure = failures.TIMED_OUT
         return Finished(None, started, True)
     except BaseException:
         error = f"{what} was stopped"
@@ -154,5 +160,5 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
                 output = output if result is not None and unsuccessful(result) is None else None
             elif error and stderr_tail:
                 error += "\n" + stderr_tail
-            await recorder.finish(output_text=output, result_event=result, error=error)
+            await recorder.finish(output_text=output, result_event=result, error=error, failure=failure)
     return Finished(result, started, False, blocked)

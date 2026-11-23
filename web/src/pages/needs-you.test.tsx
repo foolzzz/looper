@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NeedsYouPage } from "@/pages/needs-you";
-import { fetchAttention, type AttentionSummary } from "@/lib/api-attention";
+import { attentionSettingsGet, fetchAttention, type AttentionSummary } from "@/lib/api-attention";
 import { V1Error } from "@/lib/v1";
 
 vi.mock("@/lib/api-attention", async (original) => ({
-  ...await original<typeof import("@/lib/api-attention")>(), fetchAttention: vi.fn(),
+  ...await original<typeof import("@/lib/api-attention")>(), attentionSettingsGet: vi.fn(), fetchAttention: vi.fn(),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -36,6 +36,7 @@ async function render() {
 }
 
 beforeEach(() => {
+  vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -47,6 +48,19 @@ afterEach(() => {
 });
 
 describe("Needs you page", () => {
+  it("lists spend holds with their cap and a direct link to continue or stop", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "cost", state: "ok", count: 1, error: null, items: [
+        { key: "cost:1", title: "任务花费等你决定", context: "demo", since: null,
+          href: "#settings/cost", ref: "C-1", facts: { currency: "provider_priced_usd", spent_usd: 2, limit_usd: 2 } }] },
+    ] });
+    await render();
+    const section = host.querySelector('section[aria-label="花费等你决定"]')!;
+    expect(section.textContent).toContain("C-1");
+    expect(section.textContent).toContain("$2.00");
+    expect(section.querySelector("a")?.getAttribute("href")).toBe("#settings/cost");
+  });
+
   it("lists what waits, says what could not be read, and folds the empty sections into one line", async () => {
     vi.mocked(fetchAttention).mockResolvedValue(summary);
     await render();
@@ -91,6 +105,23 @@ describe("Needs you page", () => {
     expect(host.textContent).toContain("Nothing waits for you");
   });
 
+  it("shows stopped Lark catch-up with the affected window and recovery action", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "deliveries", state: "ok", count: 1, error: null, items: [
+        { key: "catchup:synthetic", title: "chat-synthetic: 08:00–08:02; retry_exhausted", context: "channel-lark",
+          since: null, href: "#settings/channels", ref: null,
+          facts: { source: "catchup", channel: "lark", state: "dropped",
+            fix: "Check the chat and forward missed messages to Looper." } }] },
+    ] });
+    await render();
+    expect(host.textContent).toContain("Lark catch-up dropped");
+    expect(host.textContent).toContain("Looper never sends these again: check the chat, and resend by hand if it is missing.");
+    expect(host.textContent).toContain("from Lark");
+    expect(host.textContent).toContain("chat-synthetic: 08:00–08:02");
+    expect(host.textContent).toContain("Check the chat and forward missed messages to Looper.");
+    expect(host.querySelector('a[href="#settings/channels"]')).not.toBeNull();
+  });
+
   it("says when the summary is off", async () => {
     vi.mocked(fetchAttention).mockRejectedValue(new V1Error(409, "conflict", "not enabled"));
     await render();
@@ -98,11 +129,14 @@ describe("Needs you page", () => {
     expect(host.querySelector("section")).toBeNull();
   });
 
-  it("shows a failed read with a retry", async () => {
-    vi.mocked(fetchAttention).mockRejectedValueOnce(new Error("network down")).mockResolvedValue(summary);
+  it.each(["settings", "summary"])("shows a failed %s read with a retry", async (source) => {
+    vi.mocked(fetchAttention).mockResolvedValue(summary);
+    if (source === "settings") vi.mocked(attentionSettingsGet).mockRejectedValueOnce(new Error("network down"));
+    else vi.mocked(fetchAttention).mockRejectedValueOnce(new Error("network down"));
     await render();
     const alert = host.querySelector('[role="alert"]')!;
     expect(alert.textContent).toContain("network down");
+    if (source === "settings") expect(fetchAttention).not.toHaveBeenCalled();
     await act(async () => { (alert.querySelector("button") as HTMLButtonElement).click(); });
     expect(host.querySelector('section[aria-label="Gates waiting for your answer"]')).not.toBeNull();
   });

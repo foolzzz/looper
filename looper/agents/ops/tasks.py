@@ -27,7 +27,7 @@ from .. import task_templates, task_workspaces
 from ..managers_api import TaskPolicy
 from ..task_templates import TaskTemplate, TemplateError
 from ..gate_service import origin_chat, post_message as post_gate_message
-from ..message import MessageEnvelope, MessageType, is_lark, planner_address
+from ..message import CancelBy, MessageEnvelope, MessageType, is_lark, planner_address
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError
 from ..projects import edit_requirement, profile_choices, project_name, rename_task, set_task_agents
 from ..projects import add_task_supplement, check_task_control, control_task
@@ -490,7 +490,7 @@ async def _restartable(task_id: str) -> dict[str, Any]:
         raise _request_error(exc) from None
 
 
-async def _control(call: Call) -> dict[str, Any]:
+async def _control(call: Call, *, by: CancelBy = CancelBy.MANAGER) -> dict[str, Any]:
     task_id, action = call.arguments["task_id"], call.arguments["action"]
     if action == "start":
         task = await _task(task_id)
@@ -515,7 +515,7 @@ async def _control(call: Call) -> dict[str, Any]:
                 call.turn.blocks[index] = f"任务已创建：\n{configuration}"
         return {"task_id": task_id, "started": True}
     try:
-        await control_task(task_id, action, call.platform.bus, call.manager_address)
+        await control_task(task_id, action, call.platform.bus, call.manager_address, by=by)
     except RequestError as exc:
         raise _request_error(exc) from None
     if action == "stop":
@@ -550,7 +550,10 @@ async def _instruct(call: Call) -> dict[str, Any]:
                 payload={"task_id": task_id}))
         return supplement_id
 
-    supplement = await add_task_supplement(task_id, call.arguments["text"], via=_via(call.turn), wake=wake)
+    from .service import operator_call
+
+    supplement = await add_task_supplement(task_id, call.arguments["text"], via=_via(call.turn), wake=wake,
+                                           from_operator=await operator_call(call.turn))
     return {"task_id": task_id, "supplement_id": supplement,
             "note": "the task's Planner gets it in its next turn and decides whether to change the plan; every later "
                     "Worker and Reviewer sees it too"}
@@ -654,9 +657,12 @@ async def _gate_reply(call: Call) -> dict[str, Any]:
                   "external_id": str(context.get("message_id") or "") or None}
     has_planner = call.platform.task_router.has_planner(task_id)
     try:
+        from .service import operator_call
+
         posted = await post_gate_message(task_id, label, {"text": text},
                                          has_planner=has_planner, bus=call.platform.bus, source=call.manager_address,
-                                         via=_via(turn), end=bool(arguments.get("end")), origin=origin)
+                                         via=_via(turn), end=bool(arguments.get("end")), origin=origin,
+                                         from_operator=await operator_call(turn))
     except RequestError as exc:
         raise _request_error(exc) from None
     kept = posted["delivered"] == "kept"

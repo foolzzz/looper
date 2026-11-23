@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
-from . import live_runs, proc_tree
+from . import failures, live_runs, proc_tree
 from .live_runs import LiveRun
 from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
 from .system_prompt_mode import SystemPromptMode
@@ -139,7 +139,8 @@ def clear_private_settings(runtime_root: Path) -> int:
 
 
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
-                   settings_dir: Path | None = None, sealed: bool = False) -> list[str]:
+                   settings_dir: Path | None = None, sealed: bool = False,
+                   hooks: dict[str, Any] | None = None) -> list[str]:
     """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
 
     Every agent's command carries them, so the agents cannot diverge. A run
@@ -157,12 +158,17 @@ def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = 
     it carries only a local route token, never an upstream provider credential.
     The result depends only on those values, ``cwd`` and where the operator's
     configuration lives, so a resident agent's command stays the same between turns.
+    ``hooks`` (the outbound review's, ``outbound_hook``) go in the settings, and then no settings file loads:
+    verified against 2.1.329, under ``--setting-sources project`` a ``.claude/settings.json`` the run writes with
+    ``disableAllHooks`` turns them off at once, and under ``--setting-sources ""`` it does not.
     """
     settings: dict[str, Any] = {"autoMemoryEnabled": False,
                                 "claudeMdExcludes": _outside_memory(Path(cwd), repository=not sealed),
                                 "crossSessionInbound": "refuse", **({"disableAllHooks": True} if sealed else {})}
     if env is not None:
         settings["env"] = env
+    if hooks is not None:
+        settings["hooks"] = hooks
     content = json.dumps(settings, ensure_ascii=False, separators=(",", ":"))
     if env is not None:
         if settings_dir is None:
@@ -181,7 +187,7 @@ def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = 
             Path(temporary).unlink(missing_ok=True)
         content = str(target)
     return [
-        "--setting-sources", "" if sealed else "project",
+        "--setting-sources", "" if sealed or hooks is not None else "project",
         "--strict-mcp-config",
         "--settings", content,
     ]
@@ -665,6 +671,7 @@ class _UserTurn:
     capped: CapStop | None = None  # the turn was ended at its soft cap
     stopping: bool = False  # the user's stop was asked of Claude; its next result ends the turn
     answered: bool = False  # its result had come when the stop was asked: that result is a whole turn's
+    result_received: bool = False  # before on_event awaits: its input window has already closed
 
     def starts_with(self, event: dict[str, Any]) -> bool:
         """Claude began this message's turn: its "started" lifecycle event, or its replay."""
@@ -757,6 +764,8 @@ class _Output:
         if turn is not None and turn.started:
             if _is_init(event):
                 turn.session_started = True
+            if event.get("type") == "result":
+                turn.result_received = True
             if not turn.stopping:
                 await turn.on_event(event)  # (R1: a stopped turn's events go nowhere; its result still ends it)
             if event.get("type") == "result":
@@ -1044,7 +1053,8 @@ class ResidentClaude:
         requested, Claude is asked to interrupt the turn with a control
         request and given ``INTERRUPT_GRACE_SEC`` to end it with its result
         (``CONTROL``; the process stays, and what Claude leaves running with
-        the interrupt is its own); else Claude is killed with its tree
+        the interrupt is its own, unless preemption requires this turn's children
+        to be cleaned); else Claude is killed with its tree
         (``KILL``; the turn returns ``user_stop_result``). A turn stopped
         before its message was written writes nothing and leaves the process
         alone. From the request on, the turn's events are not handed to
@@ -1060,14 +1070,26 @@ class ResidentClaude:
         Claude running.
         """
         from .runtimes import StopMethod
-        from .runtimes.cancel import TurnCancel
+        from .runtimes.cancel import StopCleanup, TurnCancel
 
         process, output = self._process, self._output
         assert process is not None and process.stdin is not None and output is not None
         cancel = cancel or TurnCancel.never()
         if cancel.requested:  # stopped before anything was written: the process is untouched
             return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
-        turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag, on_event=on_event,
+        checkpoint: frozenset[int] | None = None
+        checkpoint_taken = False
+
+        async def tracked_event(event: dict[str, Any]) -> None:
+            nonlocal checkpoint, checkpoint_taken
+            if _is_init(event) and not checkpoint_taken:
+                checkpoint_taken = True
+                # Cold-start stdio tools belong to the resident, before this turn's work.
+                checkpoint = await self._tree.checkpoint() if self._tree is not None else None
+            await on_event(event)
+
+        turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag,
+                         on_event=on_event if cancel.cleanup is StopCleanup.NONE else tracked_event,
                          done=asyncio.get_running_loop().create_future(), stop=stop)
         input_lost = False
         self._user_turn, self._cancel, self._interrupting = turn, cancel, None
@@ -1090,6 +1112,11 @@ class ResidentClaude:
             while pending := set(self._ending) - self._background_ending:
                 await asyncio.gather(*(asyncio.shield(task) for task in pending))
             method = await self._stopped_by_user()
+            if method is StopMethod.CONTROL and cancel.cleanup is StopCleanup.REQUIRED:
+                if self._tree is None or not await self._tree.end_since(checkpoint):
+                    logger.warning("%s: cannot isolate the preempted turn's children; killing the resident", self._label)
+                    await self.stop(kill=True)
+                    method = StopMethod.KILL
         except BaseException as exc:
             self._user_turn, self._cancel, self._interrupting = None, None, None
             if output.turn is turn:
@@ -1131,6 +1158,46 @@ class ResidentClaude:
             prompt_sent=sent,
         )
 
+    async def write_mid_turn(self, text: str) -> bool:
+        """Write another input into the current user turn, without starting a new one.
+
+        A prompt queued behind an autonomous turn is not running yet. Give buffered
+        output a chance to close admission before and after writing. If the result races
+        the write, retire this process and let the owner queue the input on a fresh one;
+        the old pipe must never consume it alongside that queued turn.
+        """
+        process, output, turn, cancel = self._process, self._output, self._user_turn, self._cancel
+        def accepting() -> bool:
+            return (process is not None and self._process is process and process.returncode is None
+                    and process.stdin is not None and not process.stdin.is_closing()
+                    and output is not None and not output.ended and not output.discard
+                    and turn is not None and self._user_turn is turn and output.turn is turn
+                    and turn.started and not turn.result_received and not turn.done.done()
+                    and not turn.stopping and cancel is not None and cancel.prompt_sent and not cancel.requested)
+
+        if not accepting():
+            return False
+        # Poll can enqueue a transport callback behind this task's continuation;
+        # that callback in turn wakes the output reader. Let all three stages run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        if not accepting():
+            return False
+        async with asyncio.timeout(5):
+            await write_user_turn(process.stdin, text)
+        # A short write's drain() need not suspend. Observe stdout independently.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        if not accepting():
+            # The write has no acknowledgement tying it to the completed result.
+            # Discard its pipe before the queued owner can send the input again.
+            if self._process is process:
+                await self.stop(kill=True)
+            return False
+        return True
+
     async def _stopped_by_user(self) -> StopMethod | None:
         """How the user's stop of the running turn ended it, once it has (bounded); None when none was asked."""
         from .runtimes import StopMethod
@@ -1144,6 +1211,11 @@ class ResidentClaude:
             return task.result()
         logger.warning("%s: the stopped turn's interrupt did not finish in %.1fs", self._label, bound)
         return StopMethod.KILL
+
+    @property
+    def can_write_mid_turn(self) -> bool:
+        """Only the direct stream-json transport is verified; a keeper's KeptProcess is excluded."""
+        return isinstance(self._process, asyncio.subprocess.Process)
 
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         """A turn's own cost and tokens: its result's running totals less the previous ones."""
@@ -1462,11 +1534,14 @@ class ClaudeRunRecorder:
         run_kind: str | None = None,
         parent_record_id: int | None = None,
         keep_output: bool = True,
+        schedule_id: str | None = None,
+        spend: RunSpend | None = None,
     ) -> None:
         self._agent_id = agent_id
         # What kind of run it is (None: what its agent id says) and the run that started it (``llm_records``).
         self._run_kind = run_kind
         self._parent_record_id = parent_record_id
+        self._schedule_id = schedule_id
         # What the record keeps of each event: the event to store, or None for nothing (None: each one but usage
         # and partial deltas, whole); every event is still counted.
         self._keep = keep
@@ -1502,6 +1577,9 @@ class ClaudeRunRecorder:
         self._context_tokens: int | None = None  # the prompt of the run's latest main-loop request
         self._compactions: list[dict[str, Any]] = []
         self._streamed = Usage()  # the tokens of the run's model requests so far, from its usage events
+        # What its stream said about how it may fail, and what its close classifies (``failures``).
+        self._evidence = failures.Evidence()
+        self._failure_basis: tuple[dict[str, Any] | None, str | None, failures.Failure | None] | None = None
         self._result_only_usage = False  # side requests whose full usage is absent from the request stream
         self._compacting = False  # an unresolved attempt may have made a hidden summary request
         self._started = _clock()
@@ -1520,6 +1598,8 @@ class ClaudeRunRecorder:
 
             self._spend = RunSpend(price, launch.model if launch is not None else "",
                                    launch.max_budget_usd if launch is not None else None)
+        if spend is not None:
+            self._spend = spend
 
     @classmethod
     async def resume(
@@ -1554,8 +1634,28 @@ class ClaudeRunRecorder:
 
     async def start(self) -> None:
         from ..db import llm_records
+        from . import cost_guard
         from .runtimes.instructions import record as instructions_record
 
+        role = getattr(self._launch, "role", None)
+        kind = self._run_kind or ("consult" if getattr(self._launch, "consult", False) else
+                                 role.value if role is not None else llm_records.run_kind_of(self._agent_id))
+        # Review reservations must persist before classification; recorder errors must not swallow this boundary.
+        reservation = await cost_guard.before_run(launch=self._launch, run_kind=kind, task_id=self._task_id,
+                                                  schedule_id=self._schedule_id,
+                                                  **({'step_id': self._step_id} if self._step_id is not None and
+                                                     cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE else {}))
+        if (reservation is not None and cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE
+                and reservation.currency is cost_guard.Currency.EQUIVALENT and self._launch is not None
+                and any(scope.limit_usd is not None for scope in reservation.scopes)):
+            from .runtimes.pricing import RunSpend, pricer
+
+            if self._spend is None:
+                price = pricer(self._launch.settings.resolved_model, catalog=self._launch.settings.pricing_catalog)
+                if price is not None:
+                    self._spend = RunSpend(price, self._launch.model, reservation.usd)
+            elif self._spend.cap is None or self._spend.cap > reservation.usd:
+                self._spend.cap = reservation.usd
         self._track(datetime.now(timezone.utc))
         try:
             self._record_id = await llm_records.start_record(
@@ -1582,6 +1682,7 @@ class ClaudeRunRecorder:
                     **({"pid": self._pid} if self._pid is not None else {}),
                     # A turn Claude ran on its own, answering no user message (input_text says so too).
                     **({"autonomous": True} if self._autonomous else {}),
+                    **(reservation.metadata() if reservation is not None else {}),
                 },
             )
             from .llmrec import LlmrecRoute
@@ -1591,6 +1692,17 @@ class ClaudeRunRecorder:
                 bind(self._launch.llmrec.id, self._record_id)
         except Exception:
             logger.warning("could not open llm record for %s", self._agent_id, exc_info=True)
+            if reservation is not None:
+                await cost_guard.abandon(reservation)
+                if kind == "outbound_check":
+                    raise RuntimeError("the review reservation could not be recorded") from None
+        except BaseException:
+            if reservation is not None:
+                await cost_guard.abandon(reservation)
+            raise
+        else:
+            if reservation is not None:
+                await cost_guard.bind(reservation, self._record_id)
 
     async def __aenter__(self) -> ClaudeRunRecorder:
         if not self._resumed:
@@ -1608,6 +1720,7 @@ class ClaudeRunRecorder:
         """What ``event`` tells the run (its usage, so its cap, its model and session), at once; ``persist`` writes
         it to the record, which may wait on the database. A ``replayed`` event (a resumed run's output read again)
         rebuilds the run's usage but is not new: its tokens are not counted in the run's TPM again."""
+        self._evidence.observe(event)
         self._model_reported = self._runtime().reported_model(event) or self._model_reported
         if event.get("type") == "system" and event.get("subtype") == "status":
             if event.get("status") == "compacting":
@@ -1651,6 +1764,12 @@ class ClaudeRunRecorder:
 
     async def persist(self, event: dict[str, Any]) -> None:
         """Write ``event``, once ``account`` has taken it, to the run's record."""
+        from . import limit_signals
+
+        if event.get("type") in ("rate_limit_event", limit_signals.CODEX_EVENT):
+            await limit_signals.observe(event, self._provider().id, self._record_id)
+        if event.get("type") == limit_signals.CODEX_EVENT:
+            return
         await self._heartbeat()
         if self._record_id is None or event.get("type") in ("usage", "stream_event"):
             return
@@ -1782,13 +1901,16 @@ class ClaudeRunRecorder:
         usage: Usage | None = None,
         outcome: str | None = None,
         status: RecordStatus | None = None,
+        failure: failures.Failure | None = None,
     ) -> None:
         """Close with the run's own ``usage``, or its result totals for a fresh process.
         A whole process inheriting a Claude session uses only its streamed request usage, leaving cost unknown
         when side requests make that stream incomplete.
         ``outcome`` is how a Worker's report or a Reviewer's verdict read (``worker.RunOutcome``); ``status``,
         when given, replaces the one its result gives (``ended_by``, for a run that was stopped). The tool calls
-        the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``.
+        the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``. ``failure`` is
+        why it failed when Looper itself knows (it could not start, it timed out); with failure typing on, a failed
+        run's close records its class (``failures.classify``).
 
         Claude reports the running totals of its session, so a run that is
         one turn of a longer-lived session passes its own share
@@ -1801,6 +1923,7 @@ class ClaudeRunRecorder:
         if self._detached:
             return
         await self._after_run()
+        self._failure_basis = result_event, outcome, failure
         result = result_event or {}
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
         if self._inherited_session:
@@ -1876,6 +1999,12 @@ class ClaudeRunRecorder:
         if self._record_id is None or self._closed:
             return
         self._closed = True
+        from ..db.llm_records import RecordStatus
+
+        # A run that failed, or whose own report says its step failed, gets a failure class; one Looper stopped
+        # does not.
+        basis = (self._failure_basis or (self._result, outcome, None)) \
+            if status is RecordStatus.FAILED or outcome in failures.REPORT_OUTCOMES else None
         if not self._keep_output:
             output_text = None
         from .llmrec.control import release
@@ -1910,7 +2039,7 @@ class ClaudeRunRecorder:
                 "outcome": outcome,
                 **({"metadata": metadata} if metadata else {}),
             }
-            write = asyncio.ensure_future(asyncio.wait_for(self._write_end(fields), CLOSE_TIMEOUT_SEC))
+            write = asyncio.ensure_future(asyncio.wait_for(self._write_end(fields, basis), CLOSE_TIMEOUT_SEC))
         except Exception:  # recording never fails the run; the next start ends the record
             logger.warning("could not close llm record for %s", self._agent_id, exc_info=True)
             return
@@ -1921,11 +2050,20 @@ class ClaudeRunRecorder:
         if not done:
             logger.warning("timed out closing llm record for %s", self._agent_id)
 
-    async def _write_end(self, fields: dict[str, Any]) -> None:
-        """``finish_record``, tried once more after a database error."""
+    async def _write_end(self, fields: dict[str, Any],
+                         basis: tuple[dict[str, Any] | None, str | None, failures.Failure | None] | None = None) -> None:
+        """``finish_record``, tried once more after a database error; a failed run's ``basis`` (its result, outcome
+        and what Looper knows) gives the failure class to record with it, while failure typing is on."""
         from ..db import llm_records
         from .llmrec import LlmrecRoute, RouteKind
         from .llmrec.control import controller
+
+        if basis is not None:
+            result_event, outcome, given = basis
+            found = await failures.recorded(self._runtime(), result_event, self._evidence, outcome=outcome, given=given)
+            if found is not None:
+                fields.update(failure_class=found.cls.value, failure_cause=found.cause.value,
+                              metadata={**(fields.get("metadata") or {}), "failure": found.metadata()})
 
         route = self._launch.llmrec if self._launch is not None else None
         owner = controller()
@@ -1940,6 +2078,10 @@ class ClaudeRunRecorder:
             logger.warning("could not close llm record for %s; trying again", self._agent_id, exc_info=True)
             await asyncio.sleep(_CLOSE_RETRY_SEC)
             await llm_records.finish_record(self._record_id, **fields)
+        from . import cost_guard
+
+        await cost_guard.finish(self._record_id, cost_usd=fields.get("cost_usd"),
+                                cost_source=fields.get("cost_source"))
 
     def _closed_write(self, write: asyncio.Task[None]) -> None:
         _closing.discard(write)

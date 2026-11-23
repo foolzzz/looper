@@ -11,7 +11,7 @@ from typing import Any
 
 from ..db.connection import get_pool
 from ..db.intents import IntentRefused
-from . import gate_routing, intents, leads_model, operator_identity
+from . import card_actions, gate_routing, intents, leads_model, operator_identity
 from .message import MessageEnvelope, is_lark
 from .projects import RequestError
 from .subscriptions import strip_mentions
@@ -45,6 +45,12 @@ def _needs_project(label: str, candidates: list[dict[str, Any]]) -> str:
         return "请到意图页选择项目。"
     names = "  ".join(f"{index}. {strip_mentions(item['name'])}" for index, item in enumerate(candidates, 1))
     return f"项目：这个会话没有绑定项目。候选：{names}\n回复「建 {label} <编号>」"
+
+
+def is_reply(text: str) -> bool:
+    """Whether text has the exact intent reply grammar, without reading or acting on an intent."""
+    text = " ".join(text.split())
+    return bool(_BUILD.fullmatch(text) or _REJECT.fullmatch(text))
 
 
 async def route(envelope: MessageEnvelope, *, platform: Any) -> RouteResult | None:
@@ -98,7 +104,8 @@ async def route(envelope: MessageEnvelope, *, platform: Any) -> RouteResult | No
 
 
 async def _execute(envelope: MessageEnvelope, *, platform: Any, number: int, label: str, build: bool,
-                   argument: str | None, channel: str, context: dict, sender: Any, group: bool) -> str:
+                   argument: str | None, channel: str, context: dict, sender: Any, group: bool,
+                   card_press: card_actions.Press | None = None) -> str:
     via = "dashboard" if channel == "web" else "lark" if is_lark(channel) else "telegram"
     origin = None if channel == "web" else {
         "channel": channel, "channel_id": envelope.source.agent_id,
@@ -109,7 +116,7 @@ async def _execute(envelope: MessageEnvelope, *, platform: Any, number: int, lab
         row = await get_pool().fetchrow("SELECT * FROM intents WHERE id=$1", number)
         if row is None:
             return f"没有 {label} 这条意图。"
-        if build and row["state"] == "tasked":
+        if build and row["state"] == "tasked" and card_press is None:
             try:
                 await intents.resume_start(dict(row), platform=platform)
             except Exception:
@@ -121,9 +128,10 @@ async def _execute(envelope: MessageEnvelope, *, platform: Any, number: int, lab
         if build:
             result = await intents.build(number, via=via, origin=origin,
                 candidate=int(argument) if argument else None, now=datetime.now(timezone.utc),
-                platform=platform)
+                platform=platform, **({"card_press": card_press} if card_press is not None else {}))
             return strip_mentions(f"已建任务 {result['task_id']}：{result['intent']['title']}，已开始。")
-        await intents.reject(number, via=via, reason=argument)
+        await intents.reject(number, via=via, reason=argument,
+                             **({"card_press": card_press} if card_press is not None else {}))
         return f"{label} 已驳回。"
     except intents.NeedsProject as exc:
         return _needs_project(label, exc.candidates)

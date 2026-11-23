@@ -457,6 +457,8 @@ async def test_error_kind_maps_to_safe_user_message(tmp_path, monkeypatch, kind,
         result, _ = await turn(session)
         assert result.result_event['errors'] == [expected]
         assert len(expected) <= 300
+        # The typed kind and status, for the run's failure class (failures.api).
+        assert (result.result_event['error_kind'], result.result_event['error_status']) == (kind.value, status)
     finally:
         await session.stop()
 
@@ -616,5 +618,53 @@ async def test_first_request_context_overflow_retries_only_before_visible_output
                 assert not events
             assert len(api.requests) == 1
             assert session.context_tokens > session.context_limit and session.context_full
+        finally:
+            await session.stop()
+
+
+@async_test
+async def test_prompt_is_marked_sent_only_when_the_first_request_goes_out(tmp_path):
+    class Unavailable(Tools):
+        async def specs(self):
+            raise OpError(ErrorCode.UNAVAILABLE, 'database unavailable')
+
+    async with FakeModelAPI([ResponseScript(events=text_events())]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            failed_cancel, fired = TurnCancel(), []
+            failed_cancel.on_sent(lambda: fired.append("failed"))
+            result, _ = await turn(session, tools=Unavailable(), cancel=failed_cancel)
+            assert result.result_event['is_error'] and not result.prompt_sent and not fired
+            ok_cancel = TurnCancel()
+            ok_cancel.on_sent(lambda: fired.append("ok"))
+            result, _ = await turn(session, cancel=ok_cancel)
+            assert result.prompt_sent and fired == ["ok"]
+        finally:
+            await session.stop()
+
+
+@pytest.mark.parametrize('handed_off', [False, True], ids=['planner', 'manager'])
+@async_test
+async def test_cancel_before_the_first_request_leaves_the_prompt_unsent(handed_off, tmp_path, monkeypatch):
+    from looper.agents.runtimes.api import session as api_session
+
+    cancel, reads = TurnCancel(), []
+    items = api_session.DbTranscript.items
+
+    async def relisting(self):
+        reads.append(1)
+        if len(reads) > 1:  # the loop re-reads the transcript after the session did; a stop lands here
+            cancel.request()
+        return await items(self)
+    monkeypatch.setattr(api_session.DbTranscript, 'items', relisting)
+    if handed_off:
+        cancel.sent()  # the Manager marks its prompt handed over before the turn starts
+    async with FakeModelAPI([]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            result, _ = await turn(session, cancel=cancel)
+            assert len(reads) > 1 and not api.requests and result.stopped == StopMethod.CANCEL
+            # Only a caller that already marked the hand-off (the Manager) sees a sent prompt: as before.
+            assert result.prompt_sent is handed_off
         finally:
             await session.stop()

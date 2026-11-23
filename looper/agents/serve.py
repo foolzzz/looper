@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .llmrec.control import ProxyControl
+    from .managers import ManagerFleet
 
 from .. import ops_config
 from ..ops_config import KeeperMode, OpsConfig
@@ -43,6 +44,7 @@ from .control_plane import ControlPlaneLease, EXIT_LOCK_LOST, LockHeld
 from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
+from .channels.startup import ChannelStartError
 from .channels.base import ChannelAdapter
 from .channels.bots import BOT_TYPES, builtin_env_token, clashes, lark_app_id
 from .channels.lark import LarkChannelAdapter
@@ -61,11 +63,16 @@ from .source_service import SourceService, own_bot_app_ids
 from .intent_push import IntentPushService
 from .memory_write import MemoryWriteService
 from .memory_draft_service import MemoryDraftService
+from .memory_push import MemoryPushService
 from .reminders import ReminderService
+from .idle_checks import IdleCheckService, PostFn
+from .morning_brief import MorningBriefService
+from .metrics_alerts import MetricsAlertService
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
+from .message import MessageType
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerConfig
@@ -73,6 +80,17 @@ from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
 
 logger = logging.getLogger(__name__)
+
+
+async def _prepare_idle_checks(bus: MessageBus, fleet: ManagerFleet, drain: DrainState, *, post: PostFn) -> IdleCheckService:
+    """Recover before bus replay; callbacks also follow a settings-driven Manager replacement."""
+    from .tiers import idle_check_turn
+
+    idle_check_turn.configure(post)
+    service = IdleCheckService(bus, idle_for=lambda: fleet.default.idle_for(),
+                               manager_running=lambda: fleet.is_running("manager"), drain=drain)
+    await service.recover()
+    return service
 
 
 class _SuspendDetector:
@@ -173,7 +191,8 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
                         manager_id: str = "manager",
                         manager_running: Callable[[str], bool] | None = None,
                         same_bot_as: Callable[[str], str | None] | None = None,
-                        resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None) -> LarkChannelAdapter | None:
+                        resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None,
+                        raise_errors: bool = False) -> LarkChannelAdapter | None:
     """The Lark adapter, once lark-cli acts as the bot under the channel's profile and the allowlist was made for
     that app, and ``same_bot_as`` (given the app it acts as) names no running channel of that app; None (logged)
     otherwise."""
@@ -181,12 +200,16 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
 
     if _sender_allowlist(channel_id, "lark", config) is None:
         return None
-    problem, bot = await lark_cli.check(config, fresh=True)
+    problem, bot = await lark_cli.check(config, fresh=True, **({"raise_errors": True} if raise_errors else {}))
     if problem or bot is None:
         logger.error("%s not started: %s", channel_id, problem)
+        if raise_errors:
+            raise ChannelStartError(problem or "the bot identity is unavailable")
         return None
     if same_bot_as is not None and (earlier := same_bot_as(bot.app_id)) is not None:
         logger.error("%s not started: it is the same bot as %s", channel_id, earlier)
+        if raise_errors:
+            raise ChannelStartError(f"it is the same bot as {earlier}")
         return None
     logger.info("%s: bot %s (app %s, lark-cli profile %s)", channel_id, bot.bot_name, bot.app_id, bot.profile)
     return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id, bot_app_id=bot.app_id, channel_id=channel_id,
@@ -197,7 +220,8 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
 async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: Path, *,
                             channel_id: str = "channel-lark_bot", manager_id: str = "manager",
                             manager_running: Callable[[str], bool] | None = None,
-                            resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None) -> LarkChannelAdapter | None:
+                            resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None,
+                            raise_errors: bool = False) -> LarkChannelAdapter | None:
     """Start the bot-token channel only with a valid allowlist and matching app credentials."""
     from ..db.channel_configs import record_rejected
     from .channels import lark_bot_settings
@@ -208,9 +232,12 @@ async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: P
     if allowlist is None:
         return None
     add_secret(secret)
-    problem, bot = await lark_bot_settings.check(config, secret, fresh=True)
+    problem, bot = await lark_bot_settings.check(
+        config, secret, fresh=True, **({"raise_errors": True} if raise_errors else {}))
     if problem or bot is None:
         logger.error("%s not started: %s", channel_id, problem)
+        if raise_errors:
+            raise ChannelStartError(problem or "the bot identity is unavailable")
         return None
     logger.info("%s: bot %s (app %s)", channel_id, bot.app_name, config.get("app_id"))
 
@@ -250,30 +277,49 @@ async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], 
     def same_bot_as(row: dict[str, Any], app_id: str | None) -> str | None:
         return clashes([*started, {**row, "app_id": app_id}]).get(row["channel_id"])
 
-    for row in rows:
-        if row["channel_type"] not in channel_types:
+    for initial in rows:
+        if initial["channel_type"] not in channel_types:
             continue
-        with startup.measure(f"channel:{row['channel_id']}") if startup else contextlib.nullcontext():
+
+        async def start(retry: bool, initial: dict[str, Any] = initial) -> bool:
+            row = initial
+            if retry:
+                from ..db.channel_configs import get_bot_token, get_config
+                current = await get_config(initial["channel_id"])
+                if current is None or not current["enabled"]:
+                    return False
+                config = current.get("config") or {}
+                row = {**current, "config": config, "secret": await get_bot_token(current["channel_id"]) or "",
+                       "env_token": builtin_env_token(config) if current["channel_id"] == "channel-telegram" else "",
+                       "app_id": config.get("app_id") if current["channel_type"] == "lark_bot" else None}
             kwargs: dict[str, Any] = {"channel_id": row["channel_id"], "manager_id": row.get("manager_id") or "manager",
                                       "manager_running": manager_running, "resolve_chat": registry.resolve_chat,
                                       "stop_chat": stop_chat}
             adapter: ChannelAdapter | None
             found: list[str] = []
             if row["channel_type"] == "lark":
-                def lark_same_bot_as(app_id: str, row: dict[str, Any] = row) -> str | None:
+                def lark_same_bot_as(app_id: str) -> str | None:
                     found.append(app_id)
                     return same_bot_as(row, app_id)
 
-                adapter = await _lark_adapter(row["config"], runtime_root, same_bot_as=lark_same_bot_as, **kwargs)
+                adapter = await _lark_adapter(row["config"], runtime_root, same_bot_as=lark_same_bot_as,
+                                              raise_errors=True, **kwargs)
             elif (earlier := same_bot_as(row, row.get("app_id"))) is not None:
                 logger.error("%s not started: it is the same bot as %s", row["channel_id"], earlier)
-                continue
+                raise ChannelStartError(f"it is the same bot as {earlier}")
             elif row["channel_type"] == "telegram":
                 adapter = _telegram_adapter_from_config(row["config"], row["secret"], **kwargs)
             else:
-                adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root, **kwargs)
-            if adapter is not None and await _register_optional_channel(registry, adapter):
-                started.append({**row, "app_id": found[0] if found else row.get("app_id")})
+                adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root,
+                                                  raise_errors=True, **kwargs)
+            if adapter is None:
+                raise ChannelStartError(start_problem(row["channel_type"], row["config"]) or "channel cannot start")
+            await _register_optional_channel(registry, adapter, raise_errors=True)
+            started.append({**row, "app_id": found[0] if found else row.get("app_id")})
+            return True
+
+        with startup.measure(f"channel:{initial['channel_id']}") if startup else contextlib.nullcontext():
+            await registry.start_bot(initial["channel_id"], start)
 
 
 async def seed_channel_configs(pool: Any = None) -> None:
@@ -331,6 +377,7 @@ async def seed_role_configs(pool: Any = None) -> None:
     from .advice import ADVISOR_ROLE_PROMPT, JUDGE_ROLE_PROMPT
     from .advisor import ADVISOR_TIMEOUT_SEC, JUDGE_TIMEOUT_SEC
     from .leads_check import CHECK_TIMEOUT_SEC, LEADS_CHECK_ROLE_PROMPT
+    from .explorer import EXPLORER_MAX_TURNS, EXPLORER_ROLE_PROMPT, EXPLORER_TIMEOUT_SEC
     from .outbound import OUTBOUND_ROLE_PROMPT, REVIEW_TIMEOUT_SEC as OUTBOUND_TIMEOUT_SEC
     from .memory_draft_role import ROLE_PROMPT as MEMORY_DRAFT_ROLE_PROMPT, TIMEOUT_SEC as MEMORY_DRAFT_TIMEOUT_SEC
     from .processor import PROCESSOR_ROLE_PROMPT, PROCESSOR_TIMEOUT_SEC
@@ -401,6 +448,13 @@ async def seed_role_configs(pool: Any = None) -> None:
             "system_prompt": MEMORY_DRAFT_ROLE_PROMPT,
         },
         {
+            "role": "explorer",
+            "display_name": "Explorer",
+            "timeout_seconds": EXPLORER_TIMEOUT_SEC,
+            "max_turns": EXPLORER_MAX_TURNS,
+            "system_prompt": EXPLORER_ROLE_PROMPT,
+        },
+        {
             "role": "outbound_check",
             "display_name": "Outbound check",
             "timeout_seconds": OUTBOUND_TIMEOUT_SEC,  # at most, per review
@@ -411,15 +465,22 @@ async def seed_role_configs(pool: Any = None) -> None:
 
 
 async def _register_optional_channel(
-    registry: ChannelRegistry, adapter: ChannelAdapter
+    registry: ChannelRegistry, adapter: ChannelAdapter, *, raise_errors: bool = False
 ) -> bool:
     """Whether a Settings-enabled channel started; a failure leaves the web dashboard up and its bot unclaimed."""
     try:
         await registry.register(adapter)
+        if raise_errors and not adapter.healthcheck().get("healthy"):
+            raise ChannelStartError("adapter did not start; check its configuration and installed transport")
+    except asyncio.CancelledError:
+        await registry.unregister(adapter.channel_id)
+        raise
     except Exception:
         logger.exception("%s failed to start; continuing without it", adapter.channel_id)
         with contextlib.suppress(Exception):
             await registry.unregister(adapter.channel_id)
+        if raise_errors:
+            raise
         return False
     return True
 
@@ -691,7 +752,7 @@ async def _run_agent_system_watched(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
-    from . import chat_settings, links, operator_notes, projects, scheduler_settings, waits
+    from . import chat_settings, links, operator_notes, persona, projects, scheduler_settings, waits
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
@@ -722,6 +783,7 @@ async def _run_agent_system_watched(
     control = None
     memory_writer: MemoryWriteService | None = None
     memory_drafter: MemoryDraftService | None = None
+    memory_push_service: MemoryPushService | None = None
     mode = ShutdownMode.END_RUNS
     if ops.keeper_mode is KeeperMode.ON:
         with startup.measure("lease"):
@@ -756,6 +818,11 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
+                from . import lanes_settings
+                await lanes_settings.load()
+                await persona.load()
+                from .channels import down_alert_settings
+                await down_alert_settings.load()
             except ValueError as exc:
                 raise StartupCheckFailed(str(exc)) from None
 
@@ -781,6 +848,11 @@ async def _run_agent_system_watched(
             except Exception:
                 logger.exception("could not sweep the agents a previous server left running")
 
+        with startup.measure("acceptance_recovery"):
+            from .acceptance_runner import recover
+
+            await recover(runtime_root)
+
         # Warm the interpreter's snapshot before kept adoption or HTTP startup can need it.
         with startup.measure("code_manifest"):
             from .. import components
@@ -790,15 +862,18 @@ async def _run_agent_system_watched(
         with startup.measure("kept_scan"):
             left_running = await tasks_left_running(pool)
             from . import kept_dirs
+            from .ops.subagents import kept_explorer_records
+            explorer_records = await kept_explorer_records(runtime_root, pool) if lease is not None else {}
             try:
                 scan = await kept_dirs.scan_at_start(runtime_root, epoch=epoch if lease is not None else None,
-                                                     resumable=left_running.resumable, pool=pool)
+                    resumable=left_running.resumable, pool=pool,
+                    **({"reserved_runs": set(explorer_records)} if explorer_records else {}))
             except OSError as exc:
                 raise StartupCheckFailed(f"cannot tell whether kept runs are still running: {exc}") from exc
         # The runs the previous server did not see end: nothing runs yet, so every record still running is one.
         with startup.measure("end_unfinished_records"):
             from ..db.llm_records import end_unfinished_records
-            if unfinished := await end_unfinished_records(pool=pool, keep=scan.record_ids):
+            if unfinished := await end_unfinished_records(pool=pool, keep=[*scan.record_ids, *explorer_records.values()]):
                 logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
 
         with startup.measure("llmrec"):
@@ -898,9 +973,20 @@ async def _run_agent_system_watched(
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
                                   message_backup=db_backup.message_backup_for(ops, runtime_root))
+            from . import cost_guard
+
+            await cost_guard.initialize(day_start=scheduler.day_start, pool=pool)
+            bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
-            from . import advisor_alerts
+            from . import advisor_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
+            # So does the daily note that skill proposals wait for the operator (names and reasons, never content).
+            from . import skill_proposal_notice
+            skill_proposal_notice.configure(registry.notify, dashboard_url=dashboard_url)
+            usage_windows.configure(registry.notify)
+            # So do the outbound review's block notices; its switch is read once here, and kept by its operations.
+            outbound_hook.configure(registry.notify)
+            await outbound_hook.enabled()
             # It notes the user gates that have waited for the user for their project's reminder interval; the courier
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()
@@ -913,6 +999,7 @@ async def _run_agent_system_watched(
             source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
             intent_push_service = IntentPushService(registry, drain=drain)
             memory_writer = MemoryWriteService(runtime_root=runtime_root, drain=drain)
+            memory_push_service = MemoryPushService(registry, drain=drain, dashboard_url=dashboard_url)
             memory_drafter = MemoryDraftService(runtime_root, drain=drain, claude_bin=claude_bin, sender=registry.notify)
             drain.add_source(lambda: {"starting": memory_writer.drain_waiting() + memory_drafter.drain_waiting()})
             reminder_service = ReminderService(registry, drain=drain)
@@ -938,6 +1025,8 @@ async def _run_agent_system_watched(
             from .managers import ManagerFleet
             platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                                 supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
+            from . import cost_holds
+            cost_holds.configure(platform, sender=registry.notify, dashboard_url=dashboard_url)
             tools_ready = asyncio.Event()
             fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                                  url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
@@ -945,7 +1034,12 @@ async def _run_agent_system_watched(
             if ownership is not None:
                 ownership.push_async_callback(fleet.stop)
             task_router.manager_running = fleet.is_running
+            # An idle_only schedule skips a firing while its Manager answers a message.
+            scheduler.manager_busy = lambda manager_id: bool((agent := fleet.get(manager_id)) is not None
+                                                             and agent.busy)
             await fleet.load()
+            morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
+            metrics_alert_service = MetricsAlertService(registry)
             from .completion_service import CompletionService
             completion_service = CompletionService(
                 bus=bus, manager_running=fleet.is_running, drain=drain,
@@ -982,6 +1076,21 @@ async def _run_agent_system_watched(
             room.consults = consults
             planner_ops.room = room
             room_ops = RoomOps(room, url=_local_url(host, port))
+            from .subagents import SpawnService
+            from .ops.subagents import PlannerSubagents, WorkerSubagents
+            explorers = WorkerSubagents(SpawnService(runtime_root, claude_bin=claude_bin,
+                keeper=KeeperSettings(epoch) if lease is not None else None,
+                on_stale=lease.lose if lease is not None else None), room, worker_pool=worker_pool)
+            room_ops.subagents = explorers
+            planner_ops.subagents = PlannerSubagents(explorers)
+            from ..db import tasks as task_rows
+            from ..db.agent_spawns import CancelReason
+
+            async def end_explorers(task_id: str) -> None:
+                # A stopped, cancelled, finished, failed or restarted task ends all its explorers at once.
+                await explorers.service.cascade(task_id=task_id, reason=CancelReason.TASK_ENDED)
+
+            task_rows.task_ended_listeners.append(end_explorers)
             worker_pool.room_ops = room_ops
             for candidate in scan.candidates:
                 if candidate.grant:
@@ -1030,12 +1139,14 @@ async def _run_agent_system_watched(
         # Replayed messages and resumed runs can probe or call platform tools immediately.
         # Listen before starting any of their consumers.
         try:
+            await explorers.start()
             await consults.resume_all()
             # Before any Planner resumes: a consult of the advisor a stopped server left running cannot finish.
             from .advisor import fail_interrupted
 
             if interrupted := await fail_interrupted():
                 logger.warning("%d consult(s) of the advisor were interrupted by the restart and failed", interrupted)
+            idle_check_service = await _prepare_idle_checks(bus, fleet, drain, post=registry.post)
             await supervisor.start_all()
             await fleet.sweep()
             await carry_on_tasks(task_router, left_running)
@@ -1057,7 +1168,11 @@ async def _run_agent_system_watched(
         await intent_push_service.start()
         await memory_writer.start()
         await memory_drafter.start()
+        await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
+        await idle_check_service.start()
+        await morning_brief_service.start()  # idle while the morning brief is off
+        await metrics_alert_service.start()
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
@@ -1096,12 +1211,14 @@ async def _run_agent_system_watched(
                         logger.warning("request recording health check failed", exc_info=True)
 
         proxy_checks = asyncio.create_task(check_recording_proxy(), name="llmrec-health")
+        from .channels.down_alerts import Monitor
+        channel_checks = asyncio.create_task(Monitor(registry).run(), name="channel-health")
         try:
             await stop_event.wait()
         finally:
             proxy_checks.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await proxy_checks
+            channel_checks.cancel()
+            await asyncio.gather(proxy_checks, channel_checks, return_exceptions=True)
 
         # --- Shutdown ---
 
@@ -1111,9 +1228,14 @@ async def _run_agent_system_watched(
                 await advisory_checks
             if mode is ShutdownMode.DETACH_KEPT:
                 await worker_pool.detach_kept(epoch=lease.epoch)
+                await explorers.stop(epoch=lease.epoch)
                 if control is not None:
                     await control.close(handover=True)
+            if end_explorers in task_rows.task_ended_listeners:
+                task_rows.task_ended_listeners.remove(end_explorers)
             logger.info("shutting down agent system...")
+            if mode is not ShutdownMode.DETACH_KEPT:
+                await explorers.stop()
             await consults.stop()
             await gate_reminders.stop()
             # Cancel and reap in-flight wait checks before stopping agents and their bus.
@@ -1122,8 +1244,12 @@ async def _run_agent_system_watched(
             await source_service.stop()
             await intent_push_service.stop()
             await memory_drafter.stop()
+            await memory_push_service.stop()
             await memory_writer.stop()
             await reminder_service.stop()
+            await idle_check_service.stop()
+            await metrics_alert_service.stop()
+            await morning_brief_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()
             await scheduler.stop()
@@ -1161,6 +1287,8 @@ async def _run_agent_system_watched(
         try:
             if memory_drafter is not None:
                 await memory_drafter.stop()
+            if memory_push_service is not None:
+                await memory_push_service.stop()
             if memory_writer is not None:
                 await memory_writer.stop()
             if http_server is not None:
@@ -1181,6 +1309,7 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("cursor_login", "Cursor login"),), (("ttadk", "TTADK"),),
         (("llmrec", "Model request recording"),), (("gateway", "Local gateway"),),
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
+        (("provider_limits", "Provider quotas"),),
     )
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
@@ -1214,6 +1343,7 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_lark_cli, lark_enabled),
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),
+            self_check.provider_limit_checks(),
         )
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])

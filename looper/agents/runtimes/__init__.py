@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
+    from ..failures import Evidence, Failure
     from ..run_usage import Price, Usage
     from .cancel import TurnCancel
     from .instructions import InstructionFile
@@ -156,6 +157,7 @@ class VendorType(str, Enum):
     GROK_LOGIN = "grok-login"
     CURSOR_LOGIN = "cursor-login"
     COCO_LOGIN = "coco-login"
+    ACP_COMMAND = "acp-command"
     CUSTOM = "custom"
 
     @property
@@ -179,6 +181,8 @@ _LOGIN_VENDORS = {
     VendorType.CURSOR_LOGIN: ("cursor-agent", ApiProtocol.OPENAI_RESPONSES),
     # This protocol is used only for pairing, not for requests.
     VendorType.COCO_LOGIN: ("coco", ApiProtocol.OPENAI_RESPONSES),
+    # This protocol is used only for pairing, not for requests.
+    VendorType.ACP_COMMAND: ("acp", ApiProtocol.OPENAI_RESPONSES),
 }
 
 
@@ -256,6 +260,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
     "manager": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "planner": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "worker": frozenset({Capability.RUN}),
+    "explorer": frozenset({Capability.RUN}),
     "reviewer": frozenset({Capability.RUN}),
     "processor": frozenset({Capability.RUN, Capability.NO_TOOLS}),
     # The advisor and its judge run once with no tools, over a request another run wrote (the advisor RFC).
@@ -340,6 +345,18 @@ class ReportsContext(Protocol):
     def context_limit(self) -> int: ...
     @property
     def context_full(self) -> bool: ...
+
+
+@runtime_checkable
+class MidTurnInput(Protocol):
+    """A verified resident transport that can admit input to its running user turn.
+
+    Check ``Capability.MID_TURN_INPUT`` too. False means no input was written;
+    a write failure propagates so the owner can retain the message for a later turn.
+    Keeper- and runner-hosted sessions have not verified this contract.
+    """
+
+    async def write_mid_turn(self, text: str) -> bool: ...
 
 
 class ResidentSession(Protocol):
@@ -457,6 +474,8 @@ class RuntimeAdapter(ABC):
     # Runs and calls tools inside looper serve, with no executable to find or probe.
     in_process: ClassVar[bool] = False
     platform_tools_in_process: ClassVar[bool] = False
+    # Verified to expose only the session's server tools, without file, shell, plugin or subagent access.
+    supports_platform_tools_only: ClassVar[bool] = False
     # Worker, Reviewer and consult runs use hosted_run instead of their own process. Their platform tools
     # are passed in process by the caller, without an MCP entry.
     hosts_runs: ClassVar[bool] = False
@@ -471,6 +490,9 @@ class RuntimeAdapter(ABC):
     # ``Capability``: those are stored with each runtime row (``agent_runtimes.capabilities``, whose CHECK lists them)
     # and stand for a run's stream, as Grok's COMPACTION_EVENTS does while its ACP resident session reports none.
     resident_compaction_events: ClassVar[bool] = False
+    # It runs a hook Looper gives it before each tool call and does not run a call the hook denies
+    # (``Launch.tool_hook``, the outbound review). Not a ``Capability``, like the flag above.
+    tool_hook: ClassVar[bool] = False
     protocols: ClassVar[frozenset[ApiProtocol]]
     # Reachable only through Looper's local translating gateway.
     translated_protocols: ClassVar[frozenset[ApiProtocol]] = frozenset()
@@ -720,6 +742,10 @@ class RuntimeAdapter(ABC):
         """A safe, bounded explanation of a failed run, when the runtime provides one."""
         return None
 
+    def failure_signal(self, result_event: dict[str, Any] | None, evidence: Evidence) -> Failure | None:
+        """Why a run failed, from what its runtime reported (``failures``); None when it does not say."""
+        return None
+
     # --- Its own login ---
 
     # The models the Agent Profile form suggests with the runtime's own login (any model is taken).
@@ -785,6 +811,7 @@ def replace_refusal(adapter: RuntimeAdapter) -> str | None:
 
 
 def _adapters() -> dict[str, RuntimeAdapter]:
+    from .acp import AcpRuntime
     from .api import ApiRuntime
     from .claude_code import ClaudeCodeRuntime
     from .coco import CocoRuntime
@@ -796,7 +823,7 @@ def _adapters() -> dict[str, RuntimeAdapter]:
     from .pi import PiRuntime
 
     return {adapter.type: adapter for adapter in (
-        ClaudeCodeRuntime(), CocoRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), CursorAgentRuntime(), DshRuntime(), PiRuntime(), ApiRuntime())}
+        ClaudeCodeRuntime(), CocoRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), CursorAgentRuntime(), DshRuntime(), PiRuntime(), ApiRuntime(), AcpRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

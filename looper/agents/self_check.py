@@ -565,6 +565,51 @@ LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check
                 "llmrec": llmrec_check, "gateway": gateway_check}
 
 
+async def provider_limit_checks_for_database(database_url: str) -> list[Check]:
+    import asyncpg
+
+    conn = None
+    try:
+        conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
+        return await provider_limit_checks(pool=conn)
+    except (asyncpg.PostgresError, OSError, TimeoutError):
+        return []  # database readiness is reported separately; this probe is advisory
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+async def provider_limit_checks(*, pool=None) -> list[Check]:
+    """One advisory line per enabled account, only while signal collection is enabled. Never calls a model."""
+    from datetime import datetime, timedelta, timezone
+    from ..db import provider_limits, system_settings
+    from ..db.connection import get_pool
+
+    pool = pool or get_pool()
+    setting = await system_settings.get_settings(["engine.limit_signals.enabled"], pool=pool)
+    if setting.get("engine.limit_signals.enabled") != "true":
+        return []
+    rows = await provider_limits.windows(pool=pool)
+    accounts = await pool.fetch("SELECT id,name FROM llm_providers WHERE enabled ORDER BY id")
+    now = datetime.now(timezone.utc)
+    result = []
+    for account in accounts:
+        windows = [row for row in rows if row["provider_id"] == account["id"]]
+        detail, warning = [], not windows
+        for row in windows:
+            value = row["utilization"]
+            stale = row["observed_at"] < now - timedelta(days=1)
+            expired = row["resets_at"] is not None and row["resets_at"] <= now
+            warning |= value is None or value >= .9 or row["status"] != "allowed" or stale or expired
+            amount = "unknown" if value is None else f"{value:.0%} used"
+            state = "; expired" if expired else "; stale" if stale else ""
+            detail.append(f"{row['window_name']}: {amount}{state}")
+        result.append(Check("provider_limits:" + account["id"], account["name"] + " quota",
+                            WARN if warning else OK, "; ".join(detail) or "No quota signal observed",
+                            "Review the account's quota and observation time in Settings → LLM Providers" if warning else ""))
+    return result
+
+
 def check_lark_cli(lark_enabled: bool | None) -> Check:
     """Does the enabled Lark channel have ``lark-cli``? ``None``: whether it is enabled is unknown."""
     if lark_enabled is None:
@@ -804,7 +849,8 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
             await gateway_check(runtime_root=ops.runtime_root, database_url=ops.database_url, cached=False),
             check_lark_cli(facts.lark_enabled),
             pg_dump, git, check_projects_root(ops.projects_root),
-            await check_step_worktrees(facts.worktree_projects)]
+            await check_step_worktrees(facts.worktree_projects),
+            *(await provider_limit_checks_for_database(ops.database_url) if database.status == OK else [])]
 
 
 def format_checks(checks: list[Check]) -> str:

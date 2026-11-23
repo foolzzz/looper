@@ -20,7 +20,7 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
-from .llm_records import TASK_RUN, _TASK_ROLE
+from .llm_records import TASK_SPEND, _SPEND_ROLE
 from . import agent_sessions, subscriptions, tasks
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
@@ -28,7 +28,7 @@ FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max
           "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
           "daily_budget_usd", "notify", "notify_format", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs",
           "kind", "command", "env", "env_file", "success_deadline", "alert_failures_after",
-          "alert_stale_after_seconds", "alert_overlap_after")
+          "alert_stale_after_seconds", "alert_overlap_after", "active_hours", "idle_only")
 
 _JSON_FIELDS = ("template_inputs", "env")
 
@@ -43,7 +43,7 @@ FAILURES = ("failed", "timed_out", "gate_failed", "interrupted")
 # A success or a gate that found nothing to do ends a failure streak and updates last_ok_at.
 OK = (*SUCCESS, "skipped_gate")
 # Runs that ran nothing: they neither carry an unfinished input nor hide one.
-NOTHING_RAN = ("skipped_overlap", "skipped_missed", "skipped_budget")
+NOTHING_RAN = ("skipped_overlap", "skipped_missed", "skipped_budget", "skipped_busy")
 # Firings that created no task; one that repeats the schedule's latest run is counted on it (``count_skip``).
 SKIPPED = ("skipped_gate", *NOTHING_RAN)
 # A run whose input was not done: the next run is given its gate output.
@@ -661,6 +661,22 @@ async def running_runs(*, pool: Db | None = None) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+async def named_running(*, pool: Db | None = None) -> list[dict[str, Any]]:
+    """Running schedule runs with the schedule's name, its timezone and its project's name."""
+    db = pool or get_pool()
+    rows = await db.fetch(
+        """
+        SELECT r.id, r.schedule_id, r.fired_at, s.name, s.timezone, p.name AS project_name
+        FROM schedule_runs r
+        JOIN schedules s ON s.id = r.schedule_id
+        JOIN projects p ON p.id = s.project_id
+        WHERE r.status = 'running'
+        ORDER BY r.fired_at, r.id
+        """,
+    )
+    return [dict(row) for row in rows]
+
+
 async def schedules_with_queued_runs(*, kinds: Sequence[str] | None = None, pool: Db | None = None) -> list[str]:
     db = pool or get_pool()
     rows = await db.fetch(
@@ -703,23 +719,41 @@ async def hand_on(conn: Db, run_ids: Sequence[str]) -> None:
 
 
 async def spent_since(conn: Db, schedule_id: str, since: datetime) -> float:
-    """What the schedule's runs fired since ``since`` cost: each its recorded cost, a running one its task's so
-    far, as ``task_costs`` counts it."""
+    """What the schedule's runs fired since ``since`` cost.
+
+    A running run counts its task so far, as ``task_costs`` does, and a room consult is part of that cost. A
+    finished run counts its recorded cost. When that record is an older settlement and leaves a room consult out,
+    the live task cost is used instead, and it is not added twice when the settlement already includes the consult.
+    A run with no consult keeps its recorded cost.
+    """
     return (await spent_since_each(conn, [schedule_id], since))[schedule_id]
 
 
 async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -> dict[str, float]:
     """``spent_since`` for each of ``schedule_ids``, in one query."""
+    # ``consult.spent > 0`` is the only reason to leave the recorded cost. A run with no consult stays on
+    # COALESCE(snapshot, live), so later non-consult rows do not move a finished run.
+    role = _SPEND_ROLE.replace("agent_id", "l.agent_id")
     rows = await conn.fetch(
         f"""
-        SELECT r.schedule_id, sum(COALESCE(r.cost_usd::numeric,
-                   (SELECT sum(g.cost_usd) FROM (
-                       SELECT round(sum(l.cost_usd::numeric), 6) AS cost_usd
-                       FROM llm_records l WHERE l.task_id = r.task_id
-                       AND {TASK_RUN.replace("agent_id", "l.agent_id")}
-                       GROUP BY {_TASK_ROLE.replace("agent_id", "l.agent_id")}, l.model
-                   ) g))) AS spent
-        FROM schedule_runs r WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
+        SELECT r.schedule_id, sum(
+                   CASE WHEN consult.spent > 0
+                        THEN GREATEST(COALESCE(r.cost_usd::numeric, 0), COALESCE(live.spent, 0))
+                        ELSE COALESCE(r.cost_usd::numeric, live.spent) END) AS spent
+        FROM schedule_runs r
+        LEFT JOIN LATERAL (
+            SELECT sum(g.cost_usd) AS spent FROM (
+                SELECT round(sum(l.cost_usd::numeric), 6) AS cost_usd
+                FROM llm_records l WHERE l.task_id = r.task_id
+                AND {TASK_SPEND.replace("agent_id", "l.agent_id")}
+                GROUP BY {role}, l.model
+            ) g
+        ) live ON true
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(sum(l.cost_usd::numeric), 0) AS spent
+            FROM llm_records l WHERE l.task_id = r.task_id AND ({role}) = 'consult'
+        ) consult ON true
+        WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
         """,
         schedule_ids, since,
     )
@@ -803,6 +837,26 @@ async def list_notifications(schedule_id: str, *, limit: int, pool: Db | None = 
     return [dict(row) for row in rows]
 
 
+async def channel_delivery_streak(channel_id: str, *, success_after: datetime | None = None,
+                                  outcomes: Sequence[tuple[datetime, bool]] = ()) -> dict[str, Any]:
+    """The latest success and first failure after it, across schedules (dashboard-only rows are not sends)."""
+    from ..agents.message import builtin_channel_id
+
+    # Older schedules store a built-in's type; numbered bots already use their channel id.
+    aliases = [channel_id, *(kind for kind in ('telegram', 'lark', 'lark_bot') if builtin_channel_id(kind) == channel_id)]
+    row = await get_pool().fetchrow(
+        "WITH outcomes AS (SELECT status, created_at FROM schedule_notifications WHERE channel = ANY($1::text[]) "
+        "AND status IN ('sent', 'failed') UNION ALL SELECT status, created_at "
+        "FROM unnest($3::timestamptz[], $4::text[]) AS receipts(created_at, status)), "
+        "latest AS (SELECT greatest(max(created_at) FILTER (WHERE status = 'sent'), "
+        "$2::timestamptz) AS success_at FROM outcomes) SELECT success_at, "
+        "(SELECT max(created_at) FROM outcomes WHERE status = 'failed') AS last_failed_at, "
+        "(SELECT min(created_at) FROM outcomes WHERE status = 'failed' "
+        "AND (success_at IS NULL OR created_at > success_at)) AS failed_since FROM latest", aliases, success_after,
+        [at for at, _ in outcomes], ['sent' if success else 'failed' for _, success in outcomes])
+    return dict(row)
+
+
 async def prune_runs(conn: Db, before: datetime) -> int:
     """Delete one batch of expired terminal runs, keeping each schedule's newest runs."""
     from ..agents.housekeeping import KEEP_LATEST_RUNS, PRUNE_BATCH
@@ -862,7 +916,7 @@ async def failing(*, db: Db | None = None) -> list[dict[str, Any]]:
     rows = await db.fetch(
         """
         SELECT s.id, s.name, s.project_id, p.name AS project_name, s.timezone, s.consecutive_failures,
-               s.failures_alert_at, s.stale_alert_at, s.deadline_alert_at, s.overlap_alert_at, s.last_success_at,
+               s.failures_alert_at, s.stale_alert_at, s.deadline_alert_at, s.overlap_alert_at, s.last_success_at, s.last_ok_at,
                (SELECT r.status FROM schedule_runs r WHERE r.schedule_id = s.id AND NOT (r.status = ANY($1::text[]))
                 ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS last_status
         FROM schedules s JOIN projects p ON p.id = s.project_id

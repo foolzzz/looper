@@ -1,0 +1,2 @@
+{"method":"error","params":{"threadId":"00000000-0000-4000-8000-0000000000aa","turnId":"00000000-0000-4000-8000-0000000000bb","willRetry":false,"error":{"message":"You've hit your usage limit. Try again at 8:00 AM.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null}}}
+{"method":"turn/completed","params":{"threadId":"00000000-0000-4000-8000-0000000000aa","turn":{"id":"00000000-0000-4000-8000-0000000000bb","status":"failed","error":{"message":"You've hit your usage limit. Try again at 8:00 AM.","codexErrorInfo":"usageLimitExceeded"}}}}

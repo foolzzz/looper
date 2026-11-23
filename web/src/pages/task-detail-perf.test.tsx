@@ -14,6 +14,8 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   fetchTaskRuns: vi.fn(),
   streamTaskActivity: vi.fn(() => () => {}),
 }));
+// The metrics card reads on its own; these tests count the page's own polls.
+vi.mock("@/components/task-metrics-card", () => ({ TaskMetricsCard: () => null }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 

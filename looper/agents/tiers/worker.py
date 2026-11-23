@@ -47,22 +47,25 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..acp_guards import AcpFallbackError
 from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
-from .. import proc_tree, reported_files, vault
+from .. import attempts, cost_guard, cost_dispatch, failures, outbound_hook, proc_tree, reported_files, vault
+from ...db import tasks as db_tasks
 from .. import keeper, kept_dirs
 from ..keeper.client import KeeperGone
 from ..keeper.protocol import ErrorCode, KeeperError
 from ..kept_run import (AdoptFailure, AdoptOutcome, AdoptResult, AttachError, DetachKind, DetachOutcome,
                         KeptRun, KeptRunState, KeeperLost, KeeperSettings, RunHold)
 from ..ops.vault import run_section
+from ..ops import subagents as subagent_ops
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..operator_notes import notes_note
@@ -294,6 +297,11 @@ def run_outcome(result_event: dict[str, Any] | None, judged: dict[str, Any], *, 
     return RunOutcome.COMPLETED if judged.get("status") == "completed" else RunOutcome.FILES_MISMATCH
 
 
+# A step's run that did not start: its task took in outside content, the outbound review is on, and its runtime has no
+# tool hook (the outbound-review RFC, D13).
+REVIEW_UNSUPPORTED_RUNTIME = "review_unsupported_runtime"
+
+
 def _work_failed(error: str, **extra: Any) -> dict[str, Any]:
     return {"status": "failed", "error": error, "summary": extra.pop("summary", error), **extra}
 
@@ -518,16 +526,23 @@ class ProcessRun:
 
     def __init__(self, runtime: RuntimeAdapter, command: list[str], *, launch: Launch,
                  cwd: str | Path, session_dir: Path | None, label: str, prompt_file: Path | None = None,
-                 max_turns: int = 0) -> None:
+                 max_turns: int = 0, runtime_root: Path | None = None, task_budget_usd: float | None = None) -> None:
+        self._runtime_root, self._task_budget_usd = runtime_root, task_budget_usd
         self._runtime, self._command, self._launch = runtime, command, launch
         self._cwd, self._session_dir, self._label = cwd, session_dir, label
         self._prompt_file, self._max_turns = prompt_file, max_turns
         self.process: asyncio.subprocess.Process | None = None
         self._channel: RunChannel | None = None
         self._ended = False
+        self._acp_policy = None
+        self.launch_record: dict[str, Any] = {}
 
     @property
     def command(self) -> list[str]:
+        if self._runtime.type == "acp":
+            from ..runtimes.acp import record_command
+
+            return record_command(self._command)
         return self._command
 
     @property
@@ -540,9 +555,47 @@ class ProcessRun:
         return self._channel
 
     async def launch(self) -> None:
+        command = self._command
+        if self._runtime.type == "acp":
+            from ..acp_reviewer_settings import read, check_pairing
+            from ..runtimes.acp_policy import prepare_policy, PolicyError
+
+            if self._launch.max_budget_usd is not None or self._task_budget_usd is not None:
+                detail = "acp_reviewer cannot enforce run or task budget caps; remove the cap or choose another runtime"
+                self.launch_record = {"acp_write_policy": {"reason": "budget_cap_unsupported", "detail": detail}}
+                raise RunStartError(detail)
+            try:
+                config = await read()
+                check_pairing(config, self._launch.profile.provider, self._launch.model, self._launch.effort,
+                              profile_effort=self._launch.profile.effort)
+                if config != self._launch.acp_reviewer:
+                    raise ValueError("acp_reviewer settings changed before launch; retry the review")
+                self._launch._check_binding()
+                vault_config, vault_problem = await vault.load()
+                if vault_problem:
+                    raise ValueError(f"acp_reviewer cannot protect the knowledge vault: {vault_problem}")
+                inherited = self._launch.environment()
+                self._acp_policy = await prepare_policy(config.command, cwd=self._cwd,
+                    inspect_roots=(*self._launch.read_dirs, *config.inspect_roots), config_dir=config.config_dir,
+                    runtime_root=self._runtime_root, vault=vault_config.path if vault_config else None)
+                self.launch_record = {"acp_write_policy": self._acp_policy.record}
+                command = self._acp_policy.wrap()
+                environment = self._acp_policy.environment(inherited)
+            except PolicyError as exc:
+                self.launch_record = {"acp_write_policy": exc.record}
+                raise
+            except (ValueError, RuntimeUnsupported) as exc:
+                self.launch_record = {"acp_write_policy": {"reason": "settings_refused", "detail": str(exc)}}
+                raise RunStartError(str(exc)) from exc
+            except Exception as exc:
+                detail = f"acp_reviewer settings unavailable: {type(exc).__name__}"
+                self.launch_record = {"acp_write_policy": {"reason": "settings_unavailable", "detail": detail}}
+                raise RunStartError(detail) from exc
         try:
+            if self._runtime.type != "acp":
+                environment = self._launch.environment()
             self.process = await proc_tree.spawn(
-                *self.command, cwd=self._cwd, env=self._launch.environment(),
+                *command, cwd=self._cwd, env=environment,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         except OSError as exc:
             raise RunStartError(str(exc)) from exc
@@ -557,8 +610,17 @@ class ProcessRun:
     async def end(self) -> None:
         if not self._ended:
             self._ended = True
-            if self.process is not None:
-                await proc_tree.end(self.process, label=self._label)
+            try:
+                if self._runtime.type == "acp" and self._channel is not None:
+                    try:
+                        self._channel.end_input()
+                    except Exception:
+                        logger.warning("%s could not close ACP input", self._label, exc_info=True)
+                if self.process is not None:
+                    await proc_tree.end(self.process, label=self._label)
+            finally:
+                if self._acp_policy is not None:
+                    self._acp_policy.cleanup()
 
     async def wait(self) -> int:
         assert self.process is not None
@@ -630,6 +692,9 @@ class RunContext:
     # The consult of the advisor its Planner took advice from for this attempt (``agent_spawns.id``): its record
     # names it, never the advice, which reaches it only in the Planner's feedback.
     advisor_consult: int | None = None
+    attempt_id: int | None = None
+    run_failure: attempts.RunFailure | None = None
+    outcome: RunOutcome = RunOutcome.RUN_FAILED
 
 
 def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
@@ -1292,7 +1357,7 @@ class WorkerPool:
             task_role = TaskRole.from_payload(manifest.get("task_role"))
             if manifest.get("task_role") is not None and (task_role is None or task_role.kind.agent is not agent):
                 raise ValueError("invalid run task role")
-            record = await db_llm_records.get_record(record_id)
+            record = await db_llm_records.get_record(record_id, include_attempt_id=True)
             if record is None:
                 raise RecordNotResumable(f"record {record_id} does not exist")
             try:
@@ -1328,7 +1393,8 @@ class WorkerPool:
                              run_timeout, started_at, False, command,
                              severity=manifest.get("severity") is True, head=manifest.get("head"),
                              verification=manifest.get("verification"),
-                             verification_source=manifest.get("verification_source"))
+                             verification_source=manifest.get("verification_source"),
+                             attempt_id=record.get("attempt_id"))
             wp = WorkerProcess(worker_id=run_id, task_id=step_id, plan_id=manifest.get("plan_id") or "",
                                role=agent, parent_task_id=task_id, step=manifest.get("step_key") or "",
                                instruction=manifest.get("instruction") or "", task_role=run_role(manifest.get("task_role")),
@@ -1420,7 +1486,16 @@ class WorkerPool:
                            fallbacks: list[dict[str, str]]) -> None:
         async def run() -> dict:
             async with self._record_run(wp.worker_id, recorder):
-                return await self._consume(ctx, handle, recorder, start=ConsumeStart.ADOPTED)
+                if self.room_ops is not None:
+                    self.room_ops.bind_subagents(wp.worker_id, recorder, ctx.launch)
+                try:
+                    return await self._consume(ctx, handle, recorder, start=ConsumeStart.ADOPTED)
+                except asyncio.TimeoutError:
+                    ctx.run_failure = attempts.RunFailure.TIMEOUT
+                    raise
+                finally:
+                    if not ctx.is_verify and handle.state is not KeptRunState.DETACHED:
+                        await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)
 
         await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks, severity=ctx.severity)
 
@@ -1901,11 +1976,13 @@ class WorkerPool:
     async def _end_room_run(self, worker_id: str, task_id: str | None = None, seat: Seat | None = None) -> None:
         if self.room_ops is None:
             return
-        if seat is None and (grant := self.room_ops.export_run(worker_id)) is not None:
+        if seat is None and (grant := self.room_ops.export_run(worker_id)) is not None and grant["room"]:
+            # (a run whose token only serves the outbound review's hook was never in the room)
             task_id = grant["task_id"]
             data = grant["seat"]
             seat = Seat(**{**data, "kind": MemberKind(data["kind"])})
         # Revoke before awaiting presence, which also closes this run's watches.
+        await self.room_ops.end_subagents(worker_id)
         self.room_ops.revoke_run(worker_id)
         if seat is not None:
             try:
@@ -1936,6 +2013,12 @@ class WorkerPool:
                 wp.status = "failed"
                 wp.result = {"status": "failed", "error": str(exc) or "worker timeout"}
                 logger.warning("worker %s timed out on task %s: %s", worker_id, task_id, exc)
+            except cost_guard.Held as exc:
+                await cost_dispatch.window_held(self, wp, reply, exc)
+                return
+            except cost_guard.Denied as exc:
+                await cost_dispatch.refused(self, wp, reply, exc.admission)
+                return
             except Exception as exc:
                 wp.status = "failed"
                 wp.result = {"status": "failed", "error": str(exc)}
@@ -2091,13 +2174,13 @@ class WorkerPool:
             agent, project_id, parent_task_id or None, step_id=payload.get("task_id") or None,
             task_role=(task_role.key, task_role.version) if task_role is not None and parent_task_id else None)
         fallbacks = fallbacks if fallbacks is not None else []
-        while agent_settings.profile_error:
+        while agent_settings.profile_error and agent_settings.profile.runtime.type != "acp":
             next_settings = await self._fallback_profile(agent_settings, agent, fallbacks, "profile_error",
                                                          parent_task_id, worker_id)
             if next_settings is None:
                 break
             agent_settings = next_settings
-        if agent_settings.profile_error:
+        if agent_settings.profile_error and agent_settings.profile.runtime.type != "acp":
             logger.error("worker %s: %s", worker_id, agent_settings.profile_error)
             if parent_task_id:
                 await self._activity(parent_task_id, worker_id, "error", agent_settings.profile_error[:500])
@@ -2122,6 +2205,16 @@ class WorkerPool:
         hosted = profile_runtime is not None and profile_runtime.hosts_runs
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         runtime = launch.runtime
+        acp_settings = None
+        if runtime.type == "acp":
+            from ..acp_reviewer_settings import AcpReviewerSettings, read
+
+            try:
+                acp_settings = await read()
+            except Exception as exc:
+                # Keep a refused launch in the normal run recorder; no command will be spawned.
+                acp_settings = AcpReviewerSettings()
+                agent_settings = replace(agent_settings, profile_error=f"acp_reviewer settings unavailable: {type(exc).__name__}: {exc}")
         if (wp := self._active.get(worker_id)) is not None:
             wp.runtime_id = launch.profile.runtime.id
             wp.runtime_type = launch.profile.runtime.type
@@ -2131,13 +2224,15 @@ class WorkerPool:
         # The task's room and knowledge vault share the run's token and MCP entry.
         execution = ProjectExecution.from_row(project)
         room_on = execution.room_on
+        subagents_on = subagent_ops.worker_enabled(project, is_verify=is_verify)
         vault_config = await vault.for_project(project) if parent_task_id else None
         seat, room_text, vault_text = None, "", ""
-        if self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
+        if runtime.type != "acp" and self.room_ops is not None and parent_task_id and (room_on or vault_config is not None or subagents_on):
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
                 mode = room_input(launch, is_verify=is_verify)
-                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept, mode=mode)
+                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept, mode=mode,
+                                            **({"subagents": True} if subagents_on else {}))
                 if not hosted:
                     library = await self.room_ops.library_with_server(
                         library, self._runtime_root, token, worker_id, reconnect_seconds=120 if kept else None)
@@ -2146,8 +2241,10 @@ class WorkerPool:
                     room_text = room_section(seat, mode)
                 if vault_config is not None:
                     vault_text = run_section(vault_config)
+                if subagents_on:
+                    room_text = "\n\n".join(part for part in (room_text, subagent_ops.WORKER_INSTRUCTIONS) if part)
             except Exception as exc:
-                unavailable = "the task's room" if room_on else "the knowledge vault"
+                unavailable = "the task's room" if room_on else "the knowledge vault" if vault_config else "subagents"
                 logger.warning("worker %s: %s is unavailable", worker_id, unavailable, exc_info=True)
                 self.room_ops.revoke_run(worker_id)
                 seat, token = None, None
@@ -2155,10 +2252,32 @@ class WorkerPool:
                                      f"Warning: {unavailable} is unavailable ({type(exc).__name__}: {exc}); this "
                                      "run goes without it"[:500])
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
+        if runtime.type == "acp":
+            from ..runtimes.acp_policy import report_inspect_roots
+
+            inspect_roots = report_inspect_roots(payload.get("work_result"), work_dir)
+            launch = replace(launch, acp_reviewer=acp_settings, read_dirs=inspect_roots)
         from ..llmrec.control import attach
 
         launch = await attach(launch, agent_id=worker_id, task_id=parent_task_id or None,
                               step_id=payload.get("task_id") or None, cwd=work_dir)
+        if parent_task_id and outbound_hook.known_enabled() and await db_tasks.untrusted_inputs(parent_task_id):
+            # Outside content went into the task: while the review is on, the run's tool calls are checked
+            # (RFC section 6.3), or it does not start; the Planner decides what to do then.
+            if not launch.runtime.tool_hook or self.room_ops is None:
+                problem = (f"This task took in outside content (leads or an intent): while the outbound review is "
+                           f"on, its {agent.value} runs on a runtime with a tool hook, and {launch.runtime.label} "
+                           "has none. Choose a Claude Code profile for it, change the plan, or fail the step.")
+                await self._activity(parent_task_id, worker_id, "error", problem[:500])
+                await self._end_room_run(worker_id)
+                await outbound_hook.notify_unsupported(parent_task_id, worker_id, launch.runtime.label)
+                return _verify_failed(problem) if is_verify else _work_failed(
+                    problem, failure=REVIEW_UNSUPPORTED_RUNTIME)
+            if token is None:
+                token = self.room_ops.issue(parent_task_id, run_seat(payload, is_verify=is_verify, run=worker_id),
+                                            room=False, kept=kept)
+            launch = replace(launch, tool_hook=self.room_ops.tool_hook(token, worker_id, self._runtime_root,
+                                                                       self._config.claude_bin, launch.library))
         background = str((project or {}).get("background") or "")
         if task_role is None:
             system_prompt = build_system_prompt(
@@ -2173,7 +2292,8 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=review_contract(payload.get("severity") is True) if is_verify else work_contract(runtime),
+                contract=(review_contract(payload.get("severity") is True, evidence=bool(payload.get("evidence")))
+                          if is_verify else work_contract(runtime)),
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
@@ -2190,7 +2310,8 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=review_contract(payload.get("severity") is True) if is_verify else work_contract(runtime),
+                contract=(review_contract(payload.get("severity") is True, evidence=bool(payload.get("evidence")))
+                          if is_verify else work_contract(runtime)),
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
@@ -2213,6 +2334,9 @@ class WorkerPool:
         if (in_project := [item for item in library.items if item.scope == "project"]) and parent_task_id:
             await self._activity(parent_task_id, worker_id, "phase",
                                  f"Project installs applied ({items_label(in_project)})")
+        if library.skipped_deprecated and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "phase",
+                                 f"Deprecated skills skipped ({', '.join(library.skipped_deprecated)})")
         if library.error and parent_task_id:
             await self._activity(parent_task_id, worker_id, "error",
                                  f"Warning: {library.error}; this run goes without them"[:500])
@@ -2254,6 +2378,7 @@ class WorkerPool:
                         "plan_id": payload.get("plan_id"), "step_key": payload.get("step_key"),
                         "instruction": payload.get("instruction"), "task_role": payload.get("task_role"),
                         "is_verify": is_verify, "started_at": started_at.isoformat(),
+                        "attempt_id": payload.get("attempt_id"),
                         "severity": payload.get("severity") is True, "head": payload.get("head"),
                         "timeout_s": run_timeout, "max_turns": max_turns, "room_seat": seat is not None,
                         "reply": {"target": {"agent_type": envelope.source.agent_type,
@@ -2272,6 +2397,8 @@ class WorkerPool:
                 else:
                     handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
                                         prompt_file=prompt_file, max_turns=max_turns,
+                                        runtime_root=self._runtime_root,
+                                        task_budget_usd=execution.task_budget_usd if parent_task_id else None,
                                         label=f"worker {worker_id}")
         except (RuntimeUnsupported, OSError) as exc:
             problem = f"Cannot prepare {runtime.label}: {exc}"
@@ -2306,7 +2433,8 @@ class WorkerPool:
                           handle, system_prompt, severity=payload.get("severity") is True, head=payload.get("head"),
                           verification=verification, verification_source=verification_source,
                           advisor_consult=consult if isinstance(consult := payload.get("advisor_consult"), int)
-                          and not isinstance(consult, bool) else None)
+                          and not isinstance(consult, bool) else None,
+                          attempt_id=attempt if type(attempt := payload.get("attempt_id")) is int else None)
 
     async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
                        started_at: datetime | None = None) -> dict[str, Any]:
@@ -2316,8 +2444,11 @@ class WorkerPool:
         verification = None
         verification_ctx = None
         while True:
-            ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
-                                      agent_settings=settings, fallbacks=fallbacks)
+            try:
+                ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
+                                          agent_settings=settings, fallbacks=fallbacks)
+            except AcpFallbackError as exc:
+                return _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
             if isinstance(ctx, dict):
                 result = ctx
                 break
@@ -2328,16 +2459,24 @@ class WorkerPool:
                 if isinstance(ctx.handle, KeptRun):
                     ctx.handle.manifest["verification"] = verification
             timeout = None
+            admission_refused = False
             try:
                 result = await self._execute_once(ctx, fallbacks)
             except asyncio.TimeoutError as exc:
+                ctx.run_failure = attempts.RunFailure.TIMEOUT
                 timeout = exc
+            except (cost_guard.Denied, cost_guard.Held):
+                admission_refused = True
+                raise
             except Exception as exc:
                 if not fallbacks:
                     raise
                 result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
                 break
             finally:
+                if not admission_refused and not is_verify and not (isinstance(ctx.handle, KeptRun)
+                                          and ctx.handle.state is KeptRunState.DETACHED):
+                    await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)
                 if ctx.verification_writes is not None:
                     ctx.verification_writes.close()
             if timeout is None and result.get("failure") in ("verification_changed_code", "verification_unavailable"):
@@ -2348,8 +2487,12 @@ class WorkerPool:
                         raise timeout
                     result = _verify_failed(str(timeout)) if is_verify else _work_failed(str(timeout))
                 break
-            settings = await self._fallback_profile(ctx.launch.settings, ctx.launch.role, fallbacks,
-                                                    ctx.fallback_reason, ctx.parent_task_id, ctx.worker_id)
+            try:
+                settings = await self._fallback_profile(ctx.launch.settings, ctx.launch.role, fallbacks,
+                                                        ctx.fallback_reason, ctx.parent_task_id, ctx.worker_id)
+            except AcpFallbackError as exc:
+                result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
+                break
             if settings is None:
                 if timeout is not None:
                     if not fallbacks:
@@ -2376,6 +2519,8 @@ class WorkerPool:
                                 fallbacks: list[dict[str, str]], reason: str,
                                 task_id: str, worker_id: str) -> AgentSettings | None:
         target = settings.profile.fallback_profile_id
+        if target and settings.profile.runtime.type == "acp":
+            raise AcpFallbackError("ACP Reviewer pilot cannot enter or leave a Profile fallback")
         if not target or len(fallbacks) >= 3 or target in {entry["from"] for entry in fallbacks} \
                 or target == settings.profile.id:
             return None
@@ -2407,6 +2552,12 @@ class WorkerPool:
             pid_of=lambda: handle.pid,
         )
         async with self._record_run(worker_id, recorder):
+            if is_verify:
+                await attempts.link_record(ctx.attempt_id, recorder.record_id)
+            else:
+                await attempts.worker_started(ctx.attempt_id, recorder.record_id, launch.profile.id)
+            if self.room_ops is not None:
+                self.room_ops.bind_subagents(worker_id, recorder, launch)
             if ctx.advisor_consult is not None:
                 await recorder.annotate({"advisor_consult": ctx.advisor_consult})
             if fallbacks:
@@ -2433,6 +2584,8 @@ class WorkerPool:
                 if isinstance(handle, KeptRun):
                     handle.set_record(recorder.record_id)
                 await handle.launch()
+                if runtime.type == "acp":
+                    await recorder.annotate(handle.launch_record)
                 logger.info("%s %s%s run started (pid=%s)", role, worker_id, task_step, handle.pid)
                 wp = self._active.get(worker_id)
                 if wp is not None:
@@ -2444,18 +2597,23 @@ class WorkerPool:
                 await handle.end()
                 error = f"Cannot prepare {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
-                                      outcome=RunOutcome.RUN_FAILED.value)
+                                      outcome=RunOutcome.RUN_FAILED.value, failure=failures.start_failure(exc))
                 result = _verify_failed(error) if is_verify else _work_failed(error)
                 return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except RunStartError as exc:
-                ctx.fallback_reason = "start_error"
+                ctx.fallback_reason = None if runtime.type == "acp" else "start_error"
+                if runtime.type == "acp":
+                    await recorder.annotate(handle.launch_record)
+                    await handle.end()
                 if hosted:
                     await handle.end()
                 logger.error("worker %s failed to start run: %s", worker_id, exc)
                 error = f"Cannot start {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
-                                      outcome=RunOutcome.RUN_FAILED.value)
-                result = {"status": "failed", "error": error}
+                                      outcome=RunOutcome.RUN_FAILED.value, failure=failures.start_failure(exc))
+                result = _verify_failed(error) if is_verify and runtime.type == "acp" else {"status": "failed", "error": error}
+                if runtime.type == "acp":
+                    result["acp_write_policy"] = handle.launch_record.get("acp_write_policy")
                 return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except BaseException as exc:
                 # Launch can fail after it has started a process. Stop it before
@@ -2594,6 +2752,7 @@ class WorkerPool:
                 if blocked := prompt_block(event, work_dir):
                     raise blocked
                 if not replaying and (capped := recorder.cap_stop) is not None:
+                    ctx.run_failure = attempts.RunFailure.RUN_CAP
                     # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
                     # That result is Looper's, not a line the process wrote, so the transcript has to keep it.
                     result_event = capped.result_event
@@ -2781,6 +2940,7 @@ class WorkerPool:
                     if waiting is not None:
                         _cancel_check()
                         if (capped := recorder.cap_stop) is not None:
+                            ctx.run_failure = attempts.RunFailure.RUN_CAP
                             result_event = capped.result_event
                             await recorder.record(result_event)
                             _end_input()
@@ -2849,8 +3009,13 @@ class WorkerPool:
                 await asyncio.wait_for(_read_output(), timeout=max(0, deadline - time.monotonic())
                                        if deadline is not None else None)
                 _end_input()
-                return_code = await asyncio.wait_for(handle.wait(), timeout=max(0, deadline - time.monotonic())
-                                                     if deadline is not None else None)
+                if runtime.type == "acp":
+                    # A v1 prompt response ends the review, not necessarily the CLI process.
+                    await _end_run()
+                    return_code = await handle.wait()
+                else:
+                    return_code = await asyncio.wait_for(handle.wait(), timeout=max(0, deadline - time.monotonic())
+                                                         if deadline is not None else None)
                 waited = True
                 result_ok = (result_event is not None and not result_event.get("is_error")
                              and result_event.get("subtype") == "success")
@@ -2915,14 +3080,15 @@ class WorkerPool:
                         "prompt_blocked": {"reason": exc.reason, "work_dir": exc.work_dir}}
             timed_out = isinstance(exc, asyncio.TimeoutError)
             error = (
-                f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
+                f"{runtime.label if runtime.type == 'acp' else 'Claude'} ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
                 else str(exc) if isinstance(exc, KeeperLost)
                 else f"worker stopped reading Claude: {type(exc).__name__}"
             )
             if waiting is not None:
                 error += f"; the Worker ended while waiting for: {waiting.waiting_for[:200]}"
             await recorder.finish(output_text=None, result_event=result_event, error=error,
-                                  outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc))
+                                  outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc),
+                                  failure=failures.TIMED_OUT if timed_out else None)
             if timed_out:
                 raise asyncio.TimeoutError(error) from exc
             raise
@@ -2931,7 +3097,7 @@ class WorkerPool:
             if check_task is not None:
                 await asyncio.gather(check_task, return_exceptions=True)
             self._inputs.pop(worker_id, None)
-            if not waited or ctx.verification is not None:
+            if not waited or ctx.verification is not None or runtime.type == "acp":
                 # Successful CLIs can leave children behind. End the whole run
                 # before the write monitor drains, including their final writes.
                 await _end_run()
@@ -2939,6 +3105,10 @@ class WorkerPool:
             await _report_finished(finished)
         # The cost is the last result's (the session's totals); the outcome is result_event's.
         recorded = last_result or result_event
+        if (result_event or {}).get("subtype") == "error_max_budget_usd":
+            ctx.run_failure = attempts.RunFailure.RUN_CAP
+        elif result_event is None and return_code != 0:
+            ctx.run_failure = attempts.RunFailure.CRASH
 
         final_text = str((result_event or {}).get("result") or "") or None
         # A successful result decides the outcome even when the process then
@@ -3018,9 +3188,9 @@ class WorkerPool:
         if is_verify and result_event is not None and result_event.get("is_error"):
             error = outcome.get("summary")
         diagnostics = _ReportDiagnostics()
+        ctx.outcome = run_outcome(result_event, outcome, is_verify=is_verify, diagnostics=diagnostics)
         await recorder.finish(output_text=final_text, result_event=recorded, error=error,
-                              outcome=run_outcome(result_event, outcome, is_verify=is_verify,
-                                                  diagnostics=diagnostics).value)
+                              outcome=ctx.outcome.value)
         if diagnostics.repaired:
             await recorder.annotate({"report_repaired": True})
         return outcome
@@ -3143,7 +3313,8 @@ class WorkerPool:
             return review_task_section(requirement=requirement, step=step, instruction=instruction,
                                        acceptance_criteria=acceptance, work_dir=work_dir, supplements=supplements,
                                        workspace=workspace, review_role=task_role.key if task_role else "",
-                                       retry_notes=[str(f) for f in payload.get("feedback") or []])
+                                       retry_notes=[str(f) for f in payload.get("feedback") or []],
+                                       evidence=str(payload.get("evidence") or ""))
         return work_task_section(
             requirement=requirement, step=step, instruction=instruction, acceptance_criteria=acceptance,
             supplements=supplements,

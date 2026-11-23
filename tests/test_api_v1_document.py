@@ -55,6 +55,16 @@ def test_an_operation_does_not_share_its_schema_with_the_tool() -> None:
     assert "action" in gates.schema["properties"] and "action" in gates.schema["required"]
 
 
+def test_lifecycle_schema_values_come_from_the_enum() -> None:
+    from looper.agents.skill_lifecycle import Lifecycle
+    from looper.agents.v1_domains.catalog import CATALOG_ITEM
+    from looper.agents.v1_domains.project_skills import PROJECT_SKILL
+
+    values = [member.value for member in Lifecycle]
+    assert CATALOG_ITEM["properties"]["lifecycle"]["enum"] == values
+    assert PROJECT_SKILL["properties"]["lifecycle"]["enum"] == values
+
+
 def test_summary_and_escalation_note() -> None:
     for op in api_v1.operations():
         assert 0 < len(op.summary) <= 120 and op.description.startswith(op.summary.rstrip("…")), op.operation_id
@@ -202,3 +212,26 @@ def test_error_details_are_optional_and_typed():
     assert details["additionalProperties"] is False and "required" not in details
     assert details["properties"] == {"manager_id": {"type": "string"}, "state": {"type": "string"},
         "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]}}
+
+
+def test_acceptance_permission_has_only_operator_operations():
+    for action in ("get", "update"):
+        operation = api_v1.find("POST", f"/api/v1/acceptance_checks/{action}")
+        assert operation.operator_only and operation.tool is None
+        assert operation.description.startswith(operation.summary)
+    # Permission cannot be smuggled through the agent-writable project patch.
+    patch = api_v1.document()["components"]["schemas"]["ProjectPatch"]
+    assert "acceptance_checks" not in patch["properties"]
+
+
+def test_channel_start_state_is_read_only_and_described():
+    from looper.agents.v1_domains.channel_configs import CHANNEL_CONFIG
+
+    runtime = CHANNEL_CONFIG["properties"]["runtime"]
+    assert runtime["readOnly"] and len(runtime["description"]) <= 120
+    for state in ("starting", "running", "retrying", "failed"):
+        api_v1.validate_arguments(runtime, {"state": state, "last_error": None, "next_attempt_at": None})
+    update = api_v1.find("POST", "/api/v1/channel_configs/update")
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(update.request, {"channel_id": "channel-lark", "fields": {
+            "runtime": {"state": "running", "last_error": None, "next_attempt_at": None}}})

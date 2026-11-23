@@ -600,3 +600,24 @@ def test_post_edit_preserves_the_original_markdown_message_type() -> None:
             assert fake.sent[0]["msg_type"] == fake.sent[1]["msg_type"] == "post"
             assert fake.sent[1]["content"] == {"zh_cn": {"content": [[{"tag": "md", "text": "final"}]]}}
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(('status', 'body', 'headers', 'delay'), [
+    (200, {'code': 99991400}, {'x-ogw-ratelimit-reset': '7'}, 7),
+    (429, {'code': 99991400}, {'x-ogw-ratelimit-reset': '7', 'Retry-After': '3'}, 7),
+    (429, {'code': 99991400}, {'x-ogw-ratelimit-reset': 'invalid', 'Retry-After': '3'}, 3),
+    (429, {'code': 99991400}, {'x-ogw-ratelimit-reset': '86400000', 'Retry-After': '3'}, 3),
+    (429, {'code': 99991400, 'retry_after': 10**1000}, {'Retry-After': '3'}, 3),
+    (429, {'code': 99991400, 'retry_after': True}, {}, None),
+])
+def test_gateway_reset_header_is_retained_on_rate_limit(status, body, headers, delay):
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda request: httpx.Response(status, json=body, headers=headers))) as http:
+            api = LarkApi('synthetic-app', 'synthetic-secret', http=http)
+            api._token = 'synthetic-token'
+            api._refresh_at = float('inf')
+            with pytest.raises(LarkApiError) as caught:
+                await api.call('POST', '/synthetic')
+            assert caught.value.retry_after == delay
+    asyncio.run(run())

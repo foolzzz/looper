@@ -6,6 +6,18 @@ export interface Percentiles {
   p95_ms: number | null;
 }
 
+/** Current queue and breaker state, with delivery outcomes and gateway events over 24 hours. */
+export interface OutboundChannelMetrics {
+  channel_id: string;
+  name: string;
+  queued: number;
+  backoffs_24h: number;
+  breaker_opens_24h: number;
+  failed_24h: Record<string, number>;
+  uncertain_24h: number;
+  breaker_state: "closed" | "open" | "half_open" | null;
+}
+
 /** The answer of `manager_metrics.get` (assistant-layer RFC 4.1.3): the Manager's turns and proactive messages over
  * the last `window_days` days. `enabled` is the metrics switch (Settings → Chat). */
 export interface ManagerMetrics {
@@ -22,6 +34,14 @@ export interface ManagerMetrics {
     /** Messages answered within 30 minutes; null with no message old enough. */
     reply_rate: { all: number | null; by_source: Record<string, number | null> };
   };
+  /** Writes by category (create, update, control, remove, relay) and status (ok, error) over the window; empty while
+   * action receipts are off. Optional while a dashboard connects to a server predating them. */
+  actions?: { by_category: Record<string, Record<string, number>> };
+  /** Optional while a dashboard connects to a server predating outbound measurements. */
+  outbound?: { enabled: false } | OutboundChannelMetrics[];
+  outbound_started_at?: string;
+  /** Backoff and breaker counts have a shorter window after a service restart. */
+  outbound_since_start?: boolean;
 }
 
 export async function fetchManagerMetrics(days: number, signal?: AbortSignal): Promise<ManagerMetrics> {

@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     CHECK (jsonb_typeof(env) = 'array'),
     vendor_type TEXT NOT NULL
     CONSTRAINT llm_providers_vendor_type_check CHECK (vendor_type IN ('glm-bigmodel', 'glm-zai', 'deepseek', 'kimi-moonshot-cn', 'kimi-moonshot',
-                          'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'coco-login', 'custom'))
+                          'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'coco-login', 'acp-command', 'custom'))
     CONSTRAINT llm_providers_check1 CHECK (
         (vendor_type = 'claude-subscription' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
             AND oauth_runtime_type = 'claude-code')
@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS llm_providers (
             AND oauth_runtime_type = 'cursor-agent')
         OR (vendor_type = 'coco-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
             AND oauth_runtime_type = 'coco')
-        OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'coco-login')
+        OR (vendor_type = 'acp-command' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'acp')
+        OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'coco-login', 'acp-command')
             AND auth = 'api_key' AND oauth_runtime_type IS NULL)
     ),
     -- false: its Agent Profiles do not run (refused at launch); nothing else changes.
@@ -698,7 +700,7 @@ CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (pro
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
     role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor',
-                                         'advice_check', 'leads_check', 'outbound_check', 'memory_draft')),
+                                         'advice_check', 'leads_check', 'outbound_check')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
     profile_id      TEXT REFERENCES agent_profiles(id),
@@ -1266,12 +1268,41 @@ CREATE TABLE IF NOT EXISTS llm_records (
     -- of run it is (llm_records.RUN_KINDS; NULL on rows from before it, whose readers take it from their agent id).
     parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     run_kind TEXT CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'consult', 'advisor',
-                                      'advice_check', 'outbound_check', 'memory_draft'))
+                                      'advice_check', 'outbound_check')),
+    -- Why a failed run failed (failures.FailureClass and FailureCause, each cause with its own class), recorded while
+    -- engine.failure_typing is on; NULL for every other run.
+    failure_class TEXT,
+    failure_cause TEXT,
+    CONSTRAINT llm_records_failure_check CHECK ((failure_class IS NULL AND failure_cause IS NULL) OR
+        (failure_class IS NOT NULL AND failure_cause IS NOT NULL AND
+        (failure_class, failure_cause) IN (('quota', 'usage_limit'), ('quota', 'rate_limit'),
+            ('transient', 'connection_failed'), ('transient', 'provider_overloaded'), ('transient', 'start_timeout'),
+            ('environment', 'runtime_missing'), ('environment', 'login'), ('environment', 'tls'),
+            ('environment', 'profile'), ('judgment', 'timeout'), ('judgment', 'context'), ('judgment', 'budget'),
+            ('judgment', 'report'), ('judgment', 'unknown'))))
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_parent ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_llm_records_failures ON llm_records (created_at) WHERE failure_class IS NOT NULL;
+
+-- provider limit windows begin
+CREATE TABLE IF NOT EXISTS provider_limit_windows (
+    provider_id TEXT NOT NULL REFERENCES llm_providers(id) ON DELETE CASCADE,
+    window_name TEXT NOT NULL CHECK (window_name ~ '^[a-z0-9_]{1,40}$'),
+    status TEXT NOT NULL CHECK (status IN ('allowed', 'warning', 'rejected')),
+    utilization DOUBLE PRECISION CHECK (utilization BETWEEN 0 AND 1),
+    resets_at TIMESTAMPTZ,
+    window_minutes INTEGER CHECK (window_minutes > 0),
+    source TEXT NOT NULL CHECK (source IN ('claude_stream', 'codex_app_server', 'api_headers', 'proxy')),
+    record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (provider_id, window_name)
+);
+-- provider limit windows end
+CREATE INDEX IF NOT EXISTS idx_llm_records_provider_day
+    ON llm_records ((metadata->'profile'->'provider'->>'id'), created_at);
 
 -- The run's stream-json events, appended as they arrive.
 CREATE TABLE IF NOT EXISTS llm_record_events (
@@ -1873,6 +1904,30 @@ ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_claim UUID;
 ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT
     REFERENCES manager_events(id) ON DELETE SET NULL;
 -- manager events end
+-- The default Manager's group and other-sender direct-chat sessions (the main one stays in agent_sessions).
+-- manager sessions begin
+CREATE TABLE IF NOT EXISTS manager_sessions (
+    manager_id      TEXT NOT NULL REFERENCES managers(id) ON DELETE CASCADE,
+    session_key     TEXT NOT NULL,
+    kind            TEXT NOT NULL CHECK (kind IN ('group', 'dm')),
+    channel_id      TEXT NOT NULL,
+    chat            TEXT NOT NULL,
+    session_id      TEXT,
+    session_totals  JSONB NOT NULL DEFAULT '{}',
+    runtime_type    TEXT,
+    profile_id      TEXT,
+    provider_id     TEXT,
+    clean_start     BOOLEAN NOT NULL DEFAULT false,
+    pending_handoff TEXT,
+    context_tokens  INTEGER,
+    last_turn_cost_usd DOUBLE PRECISION,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_active_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (manager_id, session_key),
+    CONSTRAINT manager_sessions_key CHECK (session_key = kind || ':' || channel_id || ':' || chat)
+);
+CREATE INDEX IF NOT EXISTS idx_manager_sessions_active ON manager_sessions (manager_id, last_active_at DESC);
+-- manager sessions end
 -- A database that gets the column above later builds this index online (connection.py ``_ONLINE_STEPS``).
 CREATE INDEX IF NOT EXISTS idx_schedule_notifications_manager_event ON schedule_notifications (manager_event_id)
     WHERE manager_event_id IS NOT NULL;
@@ -2091,7 +2146,7 @@ CREATE TABLE IF NOT EXISTS intents (
     merged_into   BIGINT,                              -- its key and its detaching are the intent merges block's
     task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     flagged       BOOLEAN NOT NULL DEFAULT false,      -- one of its sources is in its run's instructions_seen
-    expires_at    TIMESTAMPTZ,                         -- 24 hours after its latest push; NULL while never pushed
+    expires_at    TIMESTAMPTZ,                         -- 24 hours after creation or latest successful push/progress; NULL falls back to creation + 24 hours
     handled_at    TIMESTAMPTZ,
     handled_via   TEXT CHECK (handled_via IN ('dashboard', 'lark', 'telegram', 'system')),
     reject_reason TEXT CHECK (char_length(reject_reason) <= 200),
@@ -2214,7 +2269,7 @@ ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_record_id BIGINT;
 ALTER TABLE agent_setting_layers DROP CONSTRAINT IF EXISTS agent_setting_layers_role_check;
 ALTER TABLE agent_setting_layers ADD CONSTRAINT agent_setting_layers_role_check
     CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check',
-                    'outbound_check', 'memory_draft')) NOT VALID;
+                    'outbound_check')) NOT VALID;
 ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_check_status_check;
 ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_check_status_check
     CHECK (check_status IN ('skipped', 'checked', 'failed')) NOT VALID;
@@ -2296,6 +2351,39 @@ CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_schedule
     ON proactive_deliveries (schedule_id) WHERE schedule_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_decided ON proactive_deliveries (decided_at);
 -- proactive deliveries end
+
+-- channel outbox begin
+CREATE TABLE IF NOT EXISTS channel_outbox (
+    id              BIGSERIAL PRIMARY KEY,
+    channel_id      TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL CHECK (char_length(idempotency_key) BETWEEN 1 AND 50),
+    kind            TEXT NOT NULL CHECK (kind IN ('send', 'reply')),
+    chat            TEXT NOT NULL,
+    reply_to        TEXT,
+    body            JSONB NOT NULL CHECK (jsonb_typeof(body) = 'object'),  -- {"text": ...} or {"markdown": ...}
+    source          TEXT NOT NULL CHECK (source IN ('answer', 'notice', 'progress', 'post', 'notify')),
+    state           TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    error_class     TEXT CHECK (error_class IN ('rate_limited', 'rejected', 'transient', 'unknown')),
+    error           TEXT CHECK (char_length(error) <= 500),
+    external_id     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at         TIMESTAMPTZ,
+    first_possible_at TIMESTAMPTZ,
+    claim_token     UUID,
+    UNIQUE (channel_id, idempotency_key),
+    CONSTRAINT channel_outbox_sent CHECK ((state = 'sent') = (sent_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_channel_outbox_due
+    ON channel_outbox (channel_id, chat, id) WHERE state IN ('pending', 'sending');
+CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created_at);
+ALTER TABLE channel_outbox ADD COLUMN IF NOT EXISTS first_possible_at TIMESTAMPTZ;
+ALTER TABLE channel_outbox ADD COLUMN IF NOT EXISTS claim_token UUID;
+-- Earlier versions did not record attempts separately from claims. Be conservative.
+UPDATE channel_outbox SET first_possible_at=created_at WHERE attempts>0 AND first_possible_at IS NULL;
+-- channel outbox end
 
 -- A window a subscription run did not use: the run is 'skipped' with why (skip_reason: a prompt hook blocked it, or
 -- the processor's reply could not be read when asked twice), and its cursor moves past it, since the same window
@@ -2422,6 +2510,20 @@ CREATE TABLE IF NOT EXISTS card_actions (
 CREATE INDEX IF NOT EXISTS idx_card_actions_open ON card_actions (kind, manager_id, created_at)
     WHERE handled_at IS NULL;
 -- card actions end
+
+-- The operator's declarations of an MCP server's tools (the outbound-review RFC, section 6.2): a tool declared
+-- 'inside' acts only inside Looper and this machine, and the review lets its calls run unchecked; every other tool of
+-- a server other than Looper's own is reviewed. Declarations go with their server. connection.py applies this block
+-- to databases that predate it, so keep it between the markers and idempotent.
+-- mcp tool levels begin
+CREATE TABLE IF NOT EXISTS mcp_tool_levels (
+    item_id    TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+    tool       TEXT NOT NULL CHECK (tool ~ '^[A-Za-z0-9_.-]{1,128}$'),
+    level      TEXT NOT NULL CHECK (level IN ('inside')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (item_id, tool)
+);
+-- mcp tool levels end
 
 -- memory candidates begin
 -- What Looper may remember (memory-write-path RFC, section 4; memory-tiers RFC, section 4.1). A 'vault' row is staged
@@ -2644,23 +2746,6 @@ DROP TRIGGER IF EXISTS projects_memory_lessons_drop ON projects;
 CREATE TRIGGER projects_memory_lessons_drop BEFORE DELETE ON projects
     FOR EACH ROW EXECUTE FUNCTION memory_candidates_project_deleted();
 -- memory candidates end
-
--- memory draft queue begin
--- Persist waits across restarts. Removing either candidate removes only the wait; the seed can be claimed again.
-CREATE TABLE IF NOT EXISTS memory_draft_waits (
-    candidate_id          BIGINT PRIMARY KEY REFERENCES memory_candidates(id) ON DELETE CASCADE,
-    blocking_candidate_id BIGINT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
-    reason                TEXT NOT NULL CHECK (reason IN ('target_busy')),
-    CHECK (candidate_id <> blocking_candidate_id)
-);
--- A single bounded call owns the daily spend allowance. No FK: deleting its seed must not release live spend.
-CREATE TABLE IF NOT EXISTS memory_draft_lease (
-    id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-    token        UUID NOT NULL,
-    candidate_id BIGINT NOT NULL,
-    expires_at   TIMESTAMPTZ NOT NULL
-);
--- memory draft queue end
 
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online

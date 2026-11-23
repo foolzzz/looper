@@ -14,6 +14,7 @@ from looper.db import api_clients, profile_registry as db
 from tests.db_support import DSN, run_db
 from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_operator_auth import TOKEN
+from tests.role_support import RUN_ONLY_ROLES
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -99,7 +100,7 @@ def test_probe_uses_configured_binary_and_persists_capabilities_without_confirma
             assert status == 200 and answer["status"] == "ok", answer
             runtime = answer["result"]["runtime"]
             assert runtime["version"] == "synthetic-1.0" and runtime["capabilities"] == ["run"]
-            assert runtime["roles"] == ["worker", "reviewer"] and runtime["probed_at"]
+            assert runtime["roles"] == RUN_ONLY_ROLES and runtime["probed_at"]
             assert runtime["probe_error"] == "Synthetic probe diagnostic"
             row = await db.get_runtime("rt-claude-code")
             assert row["version"] == runtime["version"] and row["probe_error"] == runtime["probe_error"]

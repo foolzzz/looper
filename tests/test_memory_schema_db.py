@@ -259,7 +259,9 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'memory_candidates')")
-        assert await pool.fetchval("SELECT count(*) FROM pg_trigger WHERE tgname IN "
+        # Other tests' schemas in this database have the same triggers: count this schema's only.
+        assert await pool.fetchval("SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
+                                   "WHERE c.relnamespace = current_schema()::regnamespace AND t.tgname IN "
                                    "('projects_memory_lessons_drop', 'memory_candidate_sources_drop')") == 2
         candidate = await sup.candidate(pool)
         await connection.ensure_schema(pool)  # and a second upgrade changes nothing

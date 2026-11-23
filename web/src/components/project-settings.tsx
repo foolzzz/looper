@@ -7,6 +7,7 @@ import {
   deleteProject, moveProjectDirectory, previewProjectDelete, previewProjectMove, updateProject,
   type Project, type ProjectMovePreview, type ProjectMoveResult, type ProjectUpdate,
 } from "@/lib/api";
+import { SkillProposalsSetting } from "@/components/skill-proposals";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import type { V1PendingConfirmation } from "@/lib/v1";
 import {
@@ -15,6 +16,8 @@ import {
   executionDraft,
   type ExecutionDraft,
 } from "@/components/project-execution";
+
+import { ProjectAcceptanceChecks } from "@/components/project-acceptance-checks";
 
 interface Draft {
   name: string;
@@ -228,6 +231,7 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
         </div>
         <ProjectBackgroundField id={`${id}-background`} value={draft.background} onChange={set("background")} />
         <ProjectExecutionFields idPrefix={id} draft={draft.execution} onChange={set("execution")} />
+        <ProjectAcceptanceChecks key={project.project_id} project={project} />
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {saved && !dirty && (
@@ -254,6 +258,8 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
           </Button>
         </div>
       </form>
+
+      <SkillProposalsSetting key={project.project_id} projectId={project.project_id} initial={project.skill_proposals} />
 
       <ProjectDirectoryMove project={project} projectsRoot={projectsRoot} disabled={busy || dirty} unsaved={dirty} onBusy={setBusy}
         onMoved={(moved) => { setDraft(draftOf(moved)); setSaved(false); }} />

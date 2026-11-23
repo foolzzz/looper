@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 from collections.abc import Sequence
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -19,6 +20,29 @@ import asyncpg
 from .connection import get_pool
 
 Db = asyncpg.Pool | asyncpg.Connection
+
+class EventKind(StrEnum):
+    TASK_END = "task_end"
+    TRIAGE = "triage"
+
+
+class Reason(StrEnum):
+    OFF = "off"
+    GROUP_CHAT = "group_chat"
+    MANAGER_OFF = "manager_off"
+    TURN_FAILED = "turn_failed"
+    TURN_TIMEOUT = "turn_timeout"
+    TURN_STOPPED = "turn_stopped"
+    EMPTY_REPLY = "empty_reply"
+    SEND_FAILED = "send_failed"
+    QUEUE_DEADLINE = "queue_deadline"
+    RESTART = "restart"
+    NO_CHAT = "no_chat"
+    TARGET_CHANGED = "target_changed"
+    MANAGER_SILENT = "manager_silent"
+    DELIVERY_DEFERRED = "delivery_deferred"
+    DAILY_CAP = "daily_cap"
+
 
 RETENTION_DAYS = 30
 # The most events one completion turn tells.
@@ -95,15 +119,23 @@ async def mark_sent(event_id: int, *, pool: Db | None = None) -> None:
         "WHERE id = $1 AND sent_at IS NULL", event_id)
 
 
+async def pending_one(manager_id: str, channel_id: str, chat: str, *, pool: Db | None = None) -> dict[str, Any] | None:
+    """The chat's oldest pending event, unclaimed (what the next completion turn would tell first); None when none."""
+    row = await (pool or get_pool()).fetchrow(
+        "SELECT * FROM manager_events WHERE manager_id = $1 AND channel_id = $2 AND chat = $3 AND state = 'pending' "
+        "ORDER BY id LIMIT 1", manager_id, channel_id, chat)
+    return dict(row) if row is not None else None
+
+
 async def claim(manager_id: str, channel_id: str, chat: str, batch: UUID, *, limit: int = CLAIM_LIMIT,
-                pool: Db | None = None) -> list[dict[str, Any]]:
-    """Take the chat's pending events (the oldest ``limit``) into the completion turn ``batch``; [] when there are
-    none (another caller took them, or they fell back)."""
+                kind: str = EventKind.TASK_END, pool: Db | None = None) -> list[dict[str, Any]]:
+    """Take the chat's pending events of ``kind`` (the oldest ``limit``) into the turn ``batch``; [] when there are
+    none (another caller took them, or they fell back). A task end and a triage event never share a batch."""
     rows = await (pool or get_pool()).fetch(
         "UPDATE manager_events SET state = 'running', batch = $4, started_at = now() WHERE id IN ("
         "SELECT id FROM manager_events WHERE manager_id = $1 AND channel_id = $2 AND chat = $3 AND state = 'pending' "
-        "ORDER BY id LIMIT $5 FOR UPDATE SKIP LOCKED) AND state = 'pending' RETURNING *",
-        manager_id, channel_id, chat, batch, limit)
+        "AND kind = $6 ORDER BY id LIMIT $5 FOR UPDATE SKIP LOCKED) AND state = 'pending' RETURNING *",
+        manager_id, channel_id, chat, batch, limit, str(EventKind(kind).value))
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
@@ -153,10 +185,61 @@ async def fall_back(*, reason: str, batch: UUID | None = None, target: Sequence[
             f"WHERE {where} AND state = ANY(${states_at}::text[]) AND delivery = 'sending'",
             "the reply may have been sent", record_id, *args, list(states))
     rows = await db.fetch(
-        "UPDATE manager_events SET state = 'fallback', reason = $1, finished_at = now(), delivery = 'pending', "
+        "UPDATE manager_events SET state = 'fallback', reason = $1, finished_at = now(), "
+        "delivery = CASE WHEN kind = 'task_end' THEN 'pending' END, "
         "delivery_attempts = 0, delivery_at = NULL, delivery_error = NULL, record_id = COALESCE($2, record_id) "
         f"WHERE {where} AND state = ANY(${states_at}::text[]) RETURNING *", reason, record_id, *args, list(states))
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
+
+
+async def skip_batch(batch: UUID, *, reason: str, record_id: int | None = None,
+                     pool: Db | None = None) -> list[dict[str, Any]]:
+    """The running triage events of ``batch`` need nothing told (the Manager chose silence): ``skipped`` with
+    ``reason``. Moved once: a second caller gets nothing."""
+    rows = await (pool or get_pool()).fetch(
+        "UPDATE manager_events SET state = 'skipped', reason = $2, finished_at = now(), "
+        "record_id = COALESCE($3, record_id) WHERE batch = $1 AND kind = 'triage' AND state = 'running' RETURNING *",
+        batch, reason, record_id)
+    return sorted((dict(row) for row in rows), key=lambda row: row["id"])
+
+
+async def admit_triage_batch(batch: UUID, *, start: datetime, end: datetime, cap: int, now: datetime,
+                             pool: Db | None = None) -> bool:
+    """Take one of the day's triage turns for ``batch``, serially: with fewer than ``cap`` other batches admitted in
+    [``start``, ``end``) the batch is marked admitted (``payload.admitted_at``, persisted, so a replay is admitted
+    again and a concurrent caller sees it); otherwise its running events fall back for ``daily_cap``."""
+    db = pool or get_pool()
+    async with db.acquire() as conn, conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('triage-admit', 0))")
+        if await conn.fetchval("SELECT bool_or(payload ? 'admitted_at') FROM manager_events WHERE batch = $1", batch):
+            return True
+        used = await conn.fetchval(
+            "SELECT count(DISTINCT batch) FROM manager_events WHERE kind = 'triage' AND batch IS NOT NULL "
+            "AND payload ? 'admitted_at' AND (payload->>'admitted_at')::timestamptz >= $1 "
+            "AND (payload->>'admitted_at')::timestamptz < $2", start, end)
+        if used < cap:
+            await conn.execute(
+                "UPDATE manager_events SET payload = payload || jsonb_build_object('admitted_at', $2::text) "
+                "WHERE batch = $1 AND kind = 'triage'", batch, now.isoformat())
+            return True
+        await conn.execute(
+            "UPDATE manager_events SET state = 'fallback', reason = 'daily_cap', finished_at = now(), delivery = NULL "
+            "WHERE batch = $1 AND kind = 'triage' AND state = 'running'", batch)
+        return False
+
+
+async def batch_state(batch: UUID, *, pool: Db | None = None) -> tuple[str, str | None] | None:
+    """The state and reason of the first event of ``batch`` (None for an unknown batch)."""
+    row = await (pool or get_pool()).fetchrow(
+        "SELECT state, reason FROM manager_events WHERE batch = $1 ORDER BY id LIMIT 1", batch)
+    return (row["state"], row["reason"]) if row is not None else None
+
+
+async def reply_open(batch: UUID, *, pool: Db | None = None) -> bool:
+    """Whether ``batch`` is still running with no reply handed to a channel (it may still be told)."""
+    return bool(await (pool or get_pool()).fetchval(
+        "SELECT EXISTS (SELECT 1 FROM manager_events WHERE batch = $1 AND state = 'running' AND delivery IS NULL)",
+        batch))
 
 
 async def claim_deliveries(*, now: datetime | None = None, ids: Sequence[int] | None = None,
@@ -216,7 +299,8 @@ async def recover(manager_id: str, *, pool: Db | None = None) -> int:
         "delivery_error = 'the server stopped while the reply was being sent' "
         "WHERE manager_id = $1 AND state = 'running' AND delivery = 'sending'", manager_id)
     result = await db.execute(
-        "UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now(), delivery = 'pending', "
+        "UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now(), "
+        "delivery = CASE WHEN kind = 'task_end' THEN 'pending' END, "
         "delivery_attempts = 0, delivery_at = NULL WHERE manager_id = $1 AND state = 'running'", manager_id)
     return int(result.split()[-1])
 
@@ -236,7 +320,7 @@ async def expire(now: datetime, *, pool: Db | None = None) -> list[dict[str, Any
     oldest first, for the caller to send their notices."""
     rows = await (pool or get_pool()).fetch(
         "UPDATE manager_events SET state = 'fallback', reason = 'queue_deadline', finished_at = now(), "
-        "delivery = 'pending' WHERE state = 'pending' AND created_at <= $1::timestamptz - make_interval(secs => $2) "
+        "delivery = CASE WHEN kind = 'task_end' THEN 'pending' END WHERE state = 'pending' AND created_at <= $1::timestamptz - make_interval(secs => $2) "
         "RETURNING *",
         now, float(QUEUE_SECONDS))
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
@@ -252,7 +336,8 @@ async def recover_stopped(running: Sequence[str], *, pool: Db | None = None) -> 
         "delivery_error = 'the server stopped while the reply was being sent' "
         "WHERE NOT (manager_id = ANY($1::text[])) AND state = 'running' AND delivery = 'sending'", list(running))
     result = await db.execute(
-        "UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now(), delivery = 'pending', "
+        "UPDATE manager_events SET state = 'fallback', reason = 'restart', finished_at = now(), "
+        "delivery = CASE WHEN kind = 'task_end' THEN 'pending' END, "
         "delivery_attempts = 0, delivery_at = NULL WHERE NOT (manager_id = ANY($1::text[])) AND state = 'running'",
         list(running))
     return int(result.split()[-1])
@@ -294,6 +379,6 @@ async def failing(*, pool: Db | None = None) -> bool:
     feature spends and does not work (the chats still got their notices)."""
     rows = await (pool or get_pool()).fetch(
         "SELECT bool_and(state = 'fallback' AND reason = ANY($2::text[])) AS failed FROM manager_events "
-        "WHERE batch IS NOT NULL GROUP BY batch ORDER BY max(started_at) DESC NULLS LAST LIMIT $1",
+        "WHERE batch IS NOT NULL AND kind = 'task_end' GROUP BY batch ORDER BY max(started_at) DESC NULLS LAST LIMIT $1",
         FAILING_BATCHES, list(FAILING_REASONS))
     return len(rows) == FAILING_BATCHES and all(row["failed"] for row in rows)

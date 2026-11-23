@@ -35,6 +35,9 @@ _TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Planner file edits", "planner_modified_files"),
     ("tokens (prompt / output)", "tokens"),
     ("cost (USD)", "cost_usd"),
+    ("first-pass rate", "first_pass"),
+    ("attempts per passing case", "attempts_per_pass"),
+    ("cost per passing case (USD)", "cost_per_pass"),
 )
 _DIALOG_COLUMNS: tuple[tuple[str, str], ...] = (("success", "success"), ("cost (USD)", "cost_usd"))
 _Z95 = 1.959963984540054  # the standard normal's 97.5% quantile
@@ -125,12 +128,64 @@ def _success(passes: int, scored: int, errors: Mapping[str, int]) -> str:
 def _text(value: Any, key: str) -> str:
     if value is None:
         return "–"
-    if key == "cost_usd":
+    if key in ("cost_usd", "cost_per_pass"):
         return f"{value:.4f}"
     if key == "tokens":
         prompt, output = value
         return f"{prompt / 1000:.0f}k / {output / 1000:.1f}k"
     return f"{value:.1f}"
+
+
+def _scored(group: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [row for row in group if outcome(row) in (Outcome.PASS, Outcome.FAIL)]
+
+
+def _attempt_rows(group: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Scored rows that carry the attempt fields. A row from before them is left out, so it is not a zero."""
+    return [row for row in _scored(group) if "attempts" in row and "first_pass_steps" in row
+            and "accepted_steps" in row]
+
+
+def _first_pass_counts(group: list[Mapping[str, Any]]) -> tuple[int, int] | None:
+    rows = _attempt_rows(group)
+    if not rows:
+        return None
+    return (sum(int(row["first_pass_steps"]) for row in rows),
+            sum(int(row["accepted_steps"]) for row in rows))
+
+
+def _rate_text(passes: int, scored: int) -> str:
+    text = f"{passes}/{scored}"
+    if (interval := wilson(passes, scored)) is None:
+        return text
+    low, high = interval
+    return text + f" ({passes / scored:.0%}, {low * 100:.0f}–{high * 100:.0f}%)"
+
+
+def _passing_mean(group: list[Mapping[str, Any]], key: str) -> float | None:
+    """The mean of ``key`` over passing rows that carry the attempt fields; None when none does."""
+    values = []
+    for row in group:
+        if outcome(row) != Outcome.PASS or "attempts" not in row:
+            continue
+        value = row.get("attempts" if key == "attempts" else "cost_usd")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        values.append(float(value))
+    return sum(values) / len(values) if values else None
+
+
+def _metric_cell(group: list[Mapping[str, Any]], key: str) -> str:
+    if key == "success":
+        return _success(*_tally(group))
+    if key == "first_pass":
+        found = _first_pass_counts(group)
+        return "–" if found is None else _rate_text(*found)
+    if key == "attempts_per_pass":
+        return _text(_passing_mean(group, "attempts"), key)
+    if key == "cost_per_pass":
+        return _text(_passing_mean(group, "cost_usd"), key)
+    return _text(_mean(group, key), key)
 
 
 def _cells(group: list[Mapping[str, Any]] | None, columns: tuple[tuple[str, str], ...]) -> list[str] | None:
@@ -139,7 +194,7 @@ def _cells(group: list[Mapping[str, Any]] | None, columns: tuple[tuple[str, str]
         return None
     if all(outcome(row) == SKIPPED for row in group):
         return [SKIPPED] * len(columns)
-    return [_success(*_tally(group)) if key == "success" else _text(_mean(group, key), key) for _, key in columns]
+    return [_metric_cell(group, key) for _, key in columns]
 
 
 def _changed(old: list[str] | None, new: list[str]) -> list[str]:
@@ -166,6 +221,16 @@ def _total(groups: dict[str, list[Mapping[str, Any]]], columns: tuple[tuple[str,
             if errors:
                 text += " · " + ", ".join(f"{count} {name}" for name, count in sorted(errors.items()))
             cells.append(text)
+            continue
+        if key == "first_pass":
+            counted = [row for group in groups.values() for row in _attempt_rows(group)]
+            cells.append("–" if not counted else _rate_text(
+                sum(int(row["first_pass_steps"]) for row in counted),
+                sum(int(row["accepted_steps"]) for row in counted)))
+            continue
+        if key in ("attempts_per_pass", "cost_per_pass"):
+            pooled = [row for group in groups.values() for row in group]
+            cells.append(_text(_passing_mean(pooled, "attempts" if key == "attempts_per_pass" else "cost_usd"), key))
             continue
         means = [m for group in groups.values() if (m := _mean(group, key)) is not None]
         if not means:
@@ -234,6 +299,50 @@ def _gates_notes(new_groups: dict[str, list[Mapping[str, Any]]],
     return lines
 
 
+def _suite_passes(groups: Mapping[str, list[Mapping[str, Any]]]) -> tuple[int, int]:
+    passes = scored = 0
+    for group in groups.values():
+        passed, count, _ = _tally(group)
+        passes += passed
+        scored += count
+    return passes, scored
+
+
+def _ran(group: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [row for row in group if outcome(row) != SKIPPED]
+
+
+def _regression_notes(new: Mapping[str, Any], base: Mapping[str, Any]) -> list[str]:
+    """Markers a person judges. They name a difference; they do not decide the run."""
+    if "dialogs" in new:
+        return []
+    new_groups, base_groups = _by_id(new), _by_id(base)
+    shared = [task_id for task_id in new_groups if task_id in base_groups]
+    lines = []
+    if shared:
+        before = {task_id: base_groups[task_id] for task_id in shared}
+        after = {task_id: new_groups[task_id] for task_id in shared}
+        old_interval, new_interval = wilson(*_suite_passes(before)), wilson(*_suite_passes(after))
+        if old_interval and new_interval and (old_interval[1] < new_interval[0] or new_interval[1] < old_interval[0]):
+            lines.append("- 回退")
+        regressed = [task_id for task_id in shared
+                     if len(_ran(base_groups[task_id])) >= 2 and len(_ran(new_groups[task_id])) >= 2
+                     and _ran(base_groups[task_id]) and all(outcome(row) == Outcome.PASS for row in _ran(base_groups[task_id]))
+                     and any(outcome(row) == Outcome.FAIL for row in new_groups[task_id])]
+        if regressed:
+            lines.append("- 用例回退: " + ", ".join(regressed))
+        old_cost = _passing_mean([row for task_id in shared for row in base_groups[task_id]], "cost_usd")
+        new_cost = _passing_mean([row for task_id in shared for row in new_groups[task_id]], "cost_usd")
+        old_attempts = _passing_mean([row for task_id in shared for row in base_groups[task_id]], "attempts")
+        new_attempts = _passing_mean([row for task_id in shared for row in new_groups[task_id]], "attempts")
+        cost_up = (old_cost is not None and new_cost is not None
+                   and ((old_cost == 0 and new_cost > 0) or (old_cost > 0 and new_cost + 1e-9 >= old_cost * 1.25)))
+        attempts_up = old_attempts is not None and new_attempts is not None and new_attempts + 1e-9 >= old_attempts + 0.5
+        if cost_up or attempts_up:
+            lines.append("- 代价回退")
+    return lines
+
+
 def _notes(new: Mapping[str, Any], base: Mapping[str, Any] | None) -> list[str]:
     """What the table alone does not say: the tasks whose pass rate moved, the tasks whose user gates differ, the
     single samples, the tasks one side lacks."""
@@ -255,6 +364,8 @@ def _notes(new: Mapping[str, Any], base: Mapping[str, Any] | None) -> list[str]:
         lines.append("- no baseline: " + ", ".join(missing))
     if gone := [task_id for task_id in base_groups if task_id not in new_groups]:
         lines.append("- in the base, not in the new run: " + ", ".join(gone))
+    if base is not None:
+        lines.extend(_regression_notes(new, base))
     return lines
 
 

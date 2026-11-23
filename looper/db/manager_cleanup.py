@@ -46,6 +46,10 @@ async def _transaction(pool: asyncpg.Pool | asyncpg.Connection | None):
             yield conn
 
 
+# The Manager's own runs, and the outbound reviews of its calls (their classifier runs name no task or Manager).
+_OWN_RECORDS = "(agent_id = $1 OR id IN (SELECT record_id FROM outbound_reviews WHERE agent_id = $1))"
+_OWN_RECORDS_R = "(r.agent_id = $1 OR r.id IN (SELECT record_id FROM outbound_reviews WHERE agent_id = $1))"
+
 async def _preview(conn: asyncpg.Connection, manager_id: str, retention_days: int) -> dict[str, Any]:
     row = await conn.fetchrow(
         "SELECT deleted_at, enabled, deleted_at <= transaction_timestamp() - $2::int * interval '1 day' AS old_enough "
@@ -72,8 +76,8 @@ async def _preview(conn: asyncpg.Connection, manager_id: str, retention_days: in
     counts = dict(await conn.fetchrow(
         "SELECT (SELECT count(*) FROM chat_threads WHERE manager_id = $1) AS threads, "
         "(SELECT count(*) FROM chat_messages m JOIN chat_threads t USING (session_id) WHERE t.manager_id = $1) "
-        "AS chat_messages, (SELECT count(*) FROM llm_records WHERE agent_id = $1) AS llm_records, "
-        "(SELECT count(*) FROM llm_record_events e JOIN llm_records r ON r.id = e.record_id WHERE r.agent_id = $1) "
+        f"AS chat_messages, (SELECT count(*) FROM llm_records WHERE {_OWN_RECORDS}) AS llm_records, "
+        f"(SELECT count(*) FROM llm_record_events e JOIN llm_records r ON r.id = e.record_id WHERE {_OWN_RECORDS_R}) "
         "AS llm_record_events, (SELECT count(*) FROM manager_actions WHERE manager_id = $1) AS manager_actions, "
         "(SELECT count(*) FROM llm_requests q JOIN llm_request_routes r ON r.id = q.route_id "
         "WHERE r.agent_id = $1) AS llm_requests",
@@ -116,11 +120,12 @@ async def purge(manager_id: str, retention_days: int = 30, *,
             manager_id)
         await conn.execute("DELETE FROM llm_request_routes WHERE agent_id = $1", manager_id)
         result["counts"]["llm_records"] = await conn.fetchval(
-            "WITH removed AS (DELETE FROM llm_records WHERE agent_id = $1 RETURNING id) SELECT count(*) FROM removed",
+            f"WITH removed AS (DELETE FROM llm_records WHERE {_OWN_RECORDS} RETURNING id) SELECT count(*) FROM removed",
             manager_id)
         result["counts"]["manager_actions"] = await conn.fetchval(
             "WITH removed AS (DELETE FROM manager_actions WHERE manager_id = $1 RETURNING id) "
             "SELECT count(*) FROM removed", manager_id)
         await conn.execute("DELETE FROM manager_events WHERE manager_id = $1", manager_id)
+        await conn.execute("DELETE FROM outbound_reviews WHERE agent_id = $1", manager_id)
         result["purged"] = True
         return result

@@ -18,6 +18,10 @@ class RunStartError(Exception):
     """A run could not start; the message is the reason (no process, no free runner session)."""
 
 
+class RunStartTimeout(RunStartError):
+    """The run's process host did not come up in time (a busy machine): a transient failure."""
+
+
 @dataclass(frozen=True)
 class Fork:
     """A consult's source session and directory, and its own directory for the copy it removes."""

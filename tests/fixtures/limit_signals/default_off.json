@@ -1,0 +1,28 @@
+{
+  "commands": {
+    "order": [
+      "manager",
+      "planner",
+      "worker"
+    ],
+    "each": {
+      "manager": "cbf4d2b9d086adfdf143963b0e088977b52669a4118e1409c7e79b72e424afcd",
+      "planner": "dd0cf346632e793eec34ce88c382d536ff88518d7077cbc210aaf17b8a5a6444",
+      "worker": "cbf4d2b9d086adfdf143963b0e088977b52669a4118e1409c7e79b72e424afcd"
+    }
+  },
+  "records": {
+    "order": [
+      "start_record",
+      "append_events",
+      "finish_record",
+      "touch_record"
+    ],
+    "each": {
+      "start_record": "8dd02930a24bdd9b9f866f1e1583a6ea50d8f9db04328a9be9b7452637b6d99d",
+      "append_events": "bf193238c4c6ba6019209c5e7f0266db5e7175485f64d2940196184bf34837eb",
+      "finish_record": "22926800ed3609df6dab66aa0fd0211c513255083defe6d7083f08e60fbe9c71",
+      "touch_record": "cf373277a5f8b154b7026fb4cf6895a03b58d53379189f5bf9d4aaa21b288343"
+    }
+  }
+}

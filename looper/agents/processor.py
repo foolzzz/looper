@@ -17,7 +17,7 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
 - **Its system prompt replaces the runtime's**, always (``system_prompt_mode_choice``): the profile's custom prompt, the
   role prompt (``role_configs.processor``, ``PROCESSOR_ROLE_PROMPT`` recommended), the instructions, then the reply
   contract with the quiet word (or the caller's own, ``contract``: an extraction's JSON shape). The harness and the boundaries speak of tools and permissions: neither is in it.
-  The batch is the run's one user turn, inside a ``<messages>`` block.
+  The batch is the run's one user turn, inside a ``<messages>`` block (the shared untrusted fence when enabled).
 - **Bounds.** ``single_run.run_once`` with the caller's deadline (lowered by the role's timeout) and per-run cap
   (lowered by the layers' ``run_budget_usd``); its recorded cost is checked against the cap afterwards, and a run
   over it, or whose cost is unknown, gives no reply. A model at provider prices without a full price, or one that
@@ -90,8 +90,12 @@ Code takes your reply as it is: it is the output.
   {quiet_word} and nothing else."""
 
 
-def user_turn(text: str) -> str:
-    """The batch as the run's user turn: in a ``<messages>`` block that nothing in it can close."""
+def user_turn(text: str, *, fence: bool = False) -> str:
+    """The batch as the run's user turn: the shared fence when enabled, otherwise the original ``<messages>`` block."""
+    if fence:
+        from . import untrusted
+
+        return f"{untrusted.LEAD_LINE}\n{untrusted.fence(text, source=untrusted.Source.MESSAGE_STREAM)}"
     body = _MARKER.sub(r"&lt;\1messages&gt;", text)
     return f"{INPUT_LEAD}\n<messages>\n{body}\n</messages>"
 
@@ -404,14 +408,22 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
             return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
         recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
                                      input_text=reference, system_prompt=system_prompt, launch=launch,
-                                     whole_process=True, keep=typed_events)
-        await recorder.start()
+                                     whole_process=True, keep=typed_events, schedule_id=schedule_id)
+        from .cost_guard import Held
+
+        try:
+            await recorder.start()
+        except Held as held:
+            return ProcessorRun(None, failure=ProcessorFailure.FAILED, detail=str(held))
         noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
         if noted:
             await recorder.annotate(noted)
         try:
+            from . import untrusted
+
             finished = await single_run.run_once(
-                recorder, command, cwd=str(directory), prompt=user_turn(input_text), launch=launch, timeout=deadline,
+                recorder, command, cwd=str(directory), prompt=user_turn(input_text, fence=await untrusted.enabled()),
+                launch=launch, timeout=deadline,
                 what=f"the {role.value} run", label=f"{role.value} {agent_id} {run_id}", quiet=True)
         except single_run.StartFailed as exc:
             await recorder.annotate({"processor_failure": ProcessorFailure.FAILED.value})

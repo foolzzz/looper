@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..db import managers as db_managers
-from . import card_actions, chat_settings, completion_events
+from . import card_actions, chat_settings, completion_events, intent_cards, ledger_cards
 from .channels.chat_routing import boundary_log
 from .channels.lark_quote import ReadQuote
 from .bus import MessageBus
@@ -172,6 +172,8 @@ class ManagerFleet:
         default = ManagerDefinition.from_row(default_row) if default_row else default_definition()
         card_actions.install("confirmation", self._press_confirmation)
         card_actions.install("gate", self._press_gate)
+        intent_cards.install(self._platform)
+        ledger_cards.install()
         self._supervisor.register(self._build(default))
         await self._restore(default.id)
         for row in rows:
@@ -236,7 +238,21 @@ class ManagerFleet:
 
     def drain_waiting(self) -> dict[str, Any]:
         return {"manager_turns": [agent.agent_id for agent in self.agents()
-                                  if agent.busy or agent._handling is not None or agent._stop_tasks]}
+                                  if agent.busy or agent._handling is not None or agent._stop_tasks
+                                  or agent._router.pending()]}
+
+    async def require_tool_hooks(self) -> None:
+        """The outbound review was turned on: every Manager's process started without its hook stops."""
+        failures: list[Exception] = []
+        for agent in self.agents():
+            try:
+                await agent.require_tool_hook()
+            except Exception as exc:
+                logger.warning("cannot stop %s's process without the outbound review hook", agent.agent_id,
+                               exc_info=True)
+                failures.append(exc)
+        if failures:
+            raise ExceptionGroup("Manager process cleanup failed while enabling outbound review", failures)
 
     def agents(self) -> list[ManagerAgent]:
         return [self._agents[i] for i in sorted(self._agents, key=lambda i: (i != DEFAULT_MANAGER_ID, i))]
@@ -248,14 +264,15 @@ class ManagerFleet:
                 return agent, token
         return None
 
-    async def stop_chat(self, channel_id: str, chat_id: str, *, via: str) -> ChatStopSummary:
+    async def stop_chat(self, channel_id: str, chat_id: str, *, via: str,
+                        sender_id: str | None = None) -> ChatStopSummary:
         """Stop this bot/chat's live turns, including queued turns, in every owning Manager."""
         if not chat_settings.stop_enabled():
             boundary_log(logger, "chat_stop", channel_id=channel_id, chat_id=chat_id, owners=[],
                          stopped=0, cannot_interrupt=0, failed=0, action="stop", outcome="disabled")
             return ChatStopSummary(state="disabled")
         # Snapshot every owner and its tokens before the first await: a turn may settle or the fleet change.
-        snapshot = [(agent, agent.live_for_chat(channel_id, chat_id)) for agent in self.agents()]
+        snapshot = [(agent, agent.live_for_chat(channel_id, chat_id, sender_id=sender_id)) for agent in self.agents()]
         summary = ChatStopSummary(matched=sum(len(tokens) for _, tokens in snapshot),
                                   managers=sum(bool(tokens) for _, tokens in snapshot))
         for agent, tokens in snapshot:

@@ -4,6 +4,9 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { DashboardGates } from "@/components/dashboard-gates";
+import { StatusCard } from "@/components/status-card";
+import { ManagerSessions } from "@/components/manager-sessions";
+import { TaskQualitySection } from "@/components/task-quality-section";
 import { RunStatusBadge, ScheduleTime } from "@/components/project-schedules";
 import {
   fetchOverview,
@@ -279,6 +282,7 @@ const SKIPPED: { key: keyof OverviewSchedules["skipped_today"]; label: string }[
   { key: "skipped_overlap", label: "previous run still going" },
   { key: "skipped_missed", label: "missed" },
   { key: "skipped_budget", label: "daily budget" },
+  { key: "skipped_busy", label: "Manager busy" },
 ];
 
 const subhead = "text-xs font-medium text-muted-foreground";
@@ -436,6 +440,7 @@ const PROACTIVE_SOURCES: Record<string, string> = {
   task_notice: "task notices", completion: "completion turns", progress: "progress", gate: "gates",
   gate_reminder: "gate reminders", subscription: "subscriptions", intent: "intents", schedule: "schedules",
   advisor_alert: "advisor alerts", autonomous: "autonomous turns", user_reminder: "reminders",
+  idle_check: "idle checks", triage: "event triage",
 };
 const sourceLabel = (source: string) => PROACTIVE_SOURCES[source] ?? source;
 
@@ -491,6 +496,8 @@ function MetricFigures({ metrics }: { metrics: Metrics }) {
         <Stat label="Proactive messages" value={`${perDay.toFixed(1)} / day`}
           detail={`reply rate ${percent(metrics.proactive.reply_rate.all)}`} />
       </div>
+      <OutboundFigures metrics={metrics} />
+      <ActionFigures metrics={metrics} />
       <table className="w-full text-sm">
         <caption className="sr-only">Proactive messages by day</caption>
         <thead>
@@ -518,6 +525,85 @@ function MetricFigures({ metrics }: { metrics: Metrics }) {
         <p className="text-xs text-muted-foreground">
           Replied within 30 minutes: {rates.map(([source, rate]) => `${sourceLabel(source)} ${percent(rate)}`).join(" · ")}
         </p>
+      )}
+    </div>
+  );
+}
+
+const ACTION_CATEGORIES: Record<string, string> = {
+  create: "created", update: "updated", control: "controlled", remove: "removed", relay: "relayed",
+};
+
+/** What the Manager and API clients wrote over the window, by category; failed writes in brackets. Absent while
+ * action receipts are off (no row has a category then). */
+function ActionFigures({ metrics }: { metrics: Metrics }) {
+  const rows = Object.entries(metrics.actions?.by_category ?? {});
+  if (rows.length === 0) return null;
+  const phrase = ([category, byStatus]: [string, Record<string, number>]) => {
+    const failed = byStatus.error ?? 0;
+    return `${ACTION_CATEGORIES[category] ?? category} ${byStatus.ok ?? 0}${failed > 0 ? ` (${failed} failed)` : ""}`;
+  };
+  return (
+    <p aria-label="Writes" className="text-xs text-muted-foreground">
+      Writes: {rows.map(phrase).join(" · ")}
+    </p>
+  );
+}
+
+function OutboundFigures({ metrics }: { metrics: Metrics }) {
+  const channels = metrics.outbound;
+  if (!channels) return null;
+  if (!Array.isArray(channels)) {
+    return (
+      <p aria-label="出站" className="text-sm text-muted-foreground">
+        出站网关未启用。在{" "}
+        <a href="#settings/chat" className={cn("text-primary", linkClass)}>Settings → Chat</a> 中启用。
+      </p>
+    );
+  }
+  return (
+    <div aria-label="出站" className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h3 className="text-xs font-medium text-muted-foreground">出站</h3>
+        <p className="text-xs text-muted-foreground">近 24 小时 · 排队为当前值</p>
+      </div>
+      {metrics.outbound_since_start && metrics.outbound_started_at && (
+        <p className="text-xs text-muted-foreground">
+          退避、熔断：自 <time dateTime={metrics.outbound_started_at}>
+            {new Date(metrics.outbound_started_at).toLocaleString("zh-CN", { hour12: false })}
+          </time> 起（服务启动后）
+        </p>
+      )}
+      {channels.length === 0 ? (
+        <p className="text-sm text-muted-foreground">暂无出站渠道</p>
+      ) : (
+        <ul className="space-y-2">
+          {channels.map((channel) => {
+            const failed = Object.values(channel.failed_24h).reduce((sum, count) => sum + count, 0);
+            const attention = channel.breaker_state === "open" || failed > 0;
+            const state = channel.breaker_state === null ? "未运行" : {
+              closed: "未熔断", open: "已熔断", half_open: "探测中",
+            }[channel.breaker_state];
+            return (
+              <li key={channel.channel_id} className={cn(
+                "flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border px-3 py-2 text-sm",
+                attention ? "border-warning/50" : "border-border",
+              )}>
+                <span className={cn("min-w-0 break-words font-medium", attention && "text-warning")}>
+                  {channel.name}
+                </span>
+                <span className="tabular-nums">排队 {channel.queued}</span>
+                <span className="tabular-nums">退避 {channel.backoffs_24h}</span>
+                <span className="inline-flex items-center gap-1.5 tabular-nums">
+                  熔断 {channel.breaker_opens_24h}
+                  <Badge variant={channel.breaker_state === "open" ? "warning" : "outline"}>{state}</Badge>
+                </span>
+                <span className={cn("tabular-nums", failed > 0 && "text-warning")}>失败 {failed}</span>
+                <span className="tabular-nums">不确定 {channel.uncertain_24h}</span>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );
@@ -573,13 +659,17 @@ function ManagerMetricsSection() {
       {error && !metrics ? null : !metrics ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : !metrics.enabled ? (
-        <p className="text-sm text-muted-foreground">
-          Metrics are off. Turn on “记录管家体验指标” in{" "}
-          <a href="#settings/chat" className={cn("text-primary", linkClass)}>Settings → Chat</a> to start recording.
-        </p>
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Metrics are off. Turn on “记录管家体验指标” in{" "}
+            <a href="#settings/chat" className={cn("text-primary", linkClass)}>Settings → Chat</a> to start recording.
+          </p>
+          <OutboundFigures metrics={metrics} />
+        </div>
       ) : (
         <MetricFigures metrics={metrics} />
       )}
+      <ManagerSessions />
     </Section>
   );
 }
@@ -637,10 +727,12 @@ export function DashboardPage() {
         )}
         <Health unhealthy={overview.health.unhealthy} />
       </div>
+      <StatusCard />
       <TaskCounts tasks={overview.tasks} />
       <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
       <Agents overview={overview} />
       <ManagerMetricsSection />
+      <TaskQualitySection />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
       {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}
       <Spend spend={overview.spend_today} />

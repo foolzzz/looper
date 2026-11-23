@@ -24,6 +24,7 @@ as a task's own choices (``projects.set_task_agents``).
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -43,7 +44,7 @@ from ..db import channel_configs as db_channel_configs, connection as db_connect
 from ..db import message_stream as db_message_stream, projects as db_projects, schedules as db_schedules
 from ..db import subscriptions as db_subs
 from ..db import chat_bindings as db_chat_bindings
-from . import cron, subscriptions
+from . import cron, schedule_throttle, subscriptions
 from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, budget_usd
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from .message import builtin_channel_id
@@ -235,14 +236,31 @@ async def _run_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = 
     return views
 
 
+def _triage_counts(raw: Any) -> dict[str, Any] | None:
+    """Triage's stored counters, or None for a push, leads or intents run (those views stay unchanged)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(raw, Mapping) and "important" in raw:
+        return dict(raw)
+    return None
+
+
 def subscription_run_view(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a subscription run read and made: its window (cursor positions, events in it, selected, dropped as too old
-    or over the cap), the processor's record and its outcome with the output, and why a skipped run skipped it."""
-    return {"from_seq": row["from_seq"], "to_seq": row["to_seq"], "events_in_window": row["events_in_window"],
+    or over the cap), the processor's record and its outcome with the output, and why a skipped run skipped it.
+    A triage run also carries its category counts when they were stored."""
+    view = {"from_seq": row["from_seq"], "to_seq": row["to_seq"], "events_in_window": row["events_in_window"],
             "events_selected": row["events_selected"], "events_too_old": row["events_too_old"],
             "events_over_cap": row["events_over_cap"], "record_id": row["record_id"], "outcome": row["outcome"],
             "output_text": row["output_text"], "notification_id": row["notification_id"],
             "skip_reason": row.get("skip_reason")}
+    counts = _triage_counts(row.get("extract_counts"))
+    if counts is not None:
+        view["extract_counts"] = counts
+    return view
 
 
 def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int | None]:
@@ -272,6 +290,13 @@ def _stale_after_seconds_view(row: Mapping[str, Any], window: timedelta | None) 
                               enabled_at=enabled_at, rule_changed_at=row.get("rule_changed_at"))
     window = deadline - start if deadline is not None and start is not None else STALE_LIMIT
     return int(window.total_seconds())
+
+
+def _usage_hold(schedule_id: str) -> dict[str, Any] | None:
+    """The firing waiting on a usage window, absent once that instant has passed and while the guard is off."""
+    from . import usage_windows
+
+    return usage_windows.schedule_hold(schedule_id, now=_utcnow())
 
 
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
@@ -311,6 +336,8 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
         "notify_format": row.get("notify_format") or NotifyFormat.REPORT.value,
         "user_gates": row.get("user_gates", UserGates.OFF.value),
+        "active_hours": row.get("active_hours"), "idle_only": bool(row.get("idle_only")),
+        "throttle": schedule_throttle.ScheduleThrottle.of(row).view(),
         "notify_target": target, "spent_today_usd": round(spent_today, 6),
         "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at"),
                    "deadline_since": row.get("deadline_alert_at"), "overlap_since": row.get("overlap_alert_at")},
@@ -326,6 +353,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "last_run": last_run,
         **({"subscription": subscriptions.view(row["subscription"])}
            if row.get("kind") == Kind.SUBSCRIPTION.value and row.get("subscription") else {}),
+        **({"usage_hold": usage_hold} if (usage_hold := _usage_hold(row["id"])) else {}),
     }
 
 
@@ -562,6 +590,7 @@ _PARSERS = {
     "alert_failures_after": _bounded("alert_failures_after", 1, 1000),
     "alert_stale_after_seconds": _bounded("alert_stale_after_seconds", 300, 2592000),
     "alert_overlap_after": _bounded("alert_overlap_after", 0, 10000),
+    "active_hours": schedule_throttle.active_hours, "idle_only": schedule_throttle.idle_only,
 }
 _ACCEPTED = (*(name for name in db_schedules.FIELDS
                 if name not in ("notify_channel", "notify_chat", "run_timeout_mode")),
@@ -779,6 +808,7 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     if stream is not None:
         try:
             subscriptions.check_extraction(stream)
+            await subscriptions.check_triage_enabled(stream)
         except ValueError as exc:
             raise RequestError(HTTP_400, str(exc)) from None
         await check_private_target(stream, fields.get("notify_channel"), fields.get("notify_chat"))
@@ -1212,11 +1242,46 @@ def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str
 
 async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None = None,
                   expected_version: str | None = None) -> dict[str, Any]:
-    """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays."""
+    """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays.
+
+    An agent or a command the operator starts is not held for a usage window; the observation still records
+    one, and a hold note already left for the schedule's own firing stays. A subscription is held: its
+    processor would fail the run, so this returns 409 and leaves the cursor where it is. The notice is the
+    same one a firing publishes after it commits. A stale ``expected_version`` is refused before that hold:
+    the row is locked and the version checked, and a mismatch is the configuration conflict, with no notice.
+    """
+    from . import cost_guard
+    from .usage_windows import ScheduleDeferred
+
     try:
-        run_id = await scheduler.run_now(schedule_id, **({"expected_version": expected_version}
-                                                       if expected_version is not None else {}))
+        row = await db_schedules.get_schedule(schedule_id)
+        if row is not None and row["kind"] == "subscription":
+            async with db_connection.transaction() as conn:
+                row = await db_schedules.lock_schedule(conn, schedule_id)
+                if row is not None:
+                    await db_schedules.check_configuration_version(conn, row, expected_version)
+            if row is not None and row["kind"] == "subscription":
+                found = await cost_guard.schedule_enforced_hold(row)
+            else:
+                found = None
+            if found and found[0] is not None:
+                hold, provider_id = found
+                notices: list[tuple[str | None, Any]] = []
+                await scheduler._usage_block(row, scheduler._clock(), notices)
+                if not notices:
+                    notices.append((provider_id, hold))
+                await scheduler._publish_hold_notices(notices)
+                when = hold.until.astimezone().strftime("%H:%M")
+                reason = hold.reason.value
+                raise ScheduleDeferred(
+                    hold.until, reason,
+                    text=(f"usage window on hold until {when} ({reason}); "
+                          "the subscription runs when it lifts"))
+        run_id = await scheduler.run_now(schedule_id, operator=True, **({"expected_version": expected_version}
+                                                                      if expected_version is not None else {}))
     except db_schedules.ConfigurationChanged as exc:
+        raise RequestError(HTTP_409, str(exc)) from None
+    except ScheduleDeferred as exc:
         raise RequestError(HTTP_409, str(exc)) from None
     if run_id is None:
         await _existing(schedule_id)
@@ -1238,11 +1303,14 @@ async def list_notifications(schedule_id: str, query: Mapping[str, str]) -> dict
          "created_at": row["created_at"]} for row in rows]}
 
 
+# The skipped runs the dashboard counts by reason.
+SKIPPED_TODAY = ("skipped_gate", "skipped_overlap", "skipped_missed", "skipped_budget", "skipped_busy")
+
+
 def empty_schedule_overview() -> dict[str, Any]:
     """``schedule_overview``'s shape with nothing in it (a scoped Manager has no schedules)."""
     return {"total": 0, "enabled": 0, "next": [], "failing": [],
-            "skipped_today": {status: 0 for status in ("skipped_gate", "skipped_overlap", "skipped_missed",
-                                                       "skipped_budget")}}
+            "skipped_today": {status: 0 for status in SKIPPED_TODAY}}
 
 
 async def schedule_overview(since: datetime) -> dict[str, Any]:
@@ -1261,6 +1329,5 @@ async def schedule_overview(since: datetime) -> dict[str, Any]:
                      "deadline_since": row["deadline_alert_at"], "overlap_since": row["overlap_alert_at"],
                      "last_success_at": row["last_success_at"], "last_status": row["last_status"]}
                     for row in summary["failing"]],
-        "skipped_today": {status: summary["skipped"].get(status, 0)
-                          for status in ("skipped_gate", "skipped_overlap", "skipped_missed", "skipped_budget")},
+        "skipped_today": {status: summary["skipped"].get(status, 0) for status in SKIPPED_TODAY},
     }

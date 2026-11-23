@@ -30,5 +30,13 @@ def is_help(text: str) -> bool:
     return bool(_HELP.match(text.strip()))
 
 
+# "/status" and Telegram's "/status@bot". Anything after the command, including "/status now", is not one.
+_STATUS = re.compile(r"^/status(?:@\w+)?$", re.IGNORECASE)
+
+
+def is_status(text: str) -> bool:
+    return bool(_STATUS.match(text.strip()))
+
+
 def help_text() -> str:
     return "Looper 命令：\n直接发消息 — 提需求或问问题\n" + "\n".join(f"/{name} — {desc}" for name, desc in available())

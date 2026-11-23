@@ -6,16 +6,28 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
+  fetchSessionRoutingSettings, updateSessionRoutingSettings, type SessionRoutingSettings, type SessionRoutingSettingsUpdate,
+  fetchOutboundGateway, updateOutboundGateway, type OutboundGatewaySettings,
   type CompletionTurns, type ChatSettingsUpdate, type MissingOperatorBot,
   fetchTurnContextSettings, updateTurnContextSettings, type TurnContextSettings, type TurnContextSettingsUpdate,
   fetchManagerMetricsSettings, updateManagerMetricsSettings, type ManagerMetricsSettings,
+  fetchManagerPersona, updateManagerPersona, type ManagerPersona,
 } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
 
 const SELECT = "mt-1 w-full max-w-sm rounded-md border border-input bg-transparent px-3 py-1.5 text-sm text-foreground "
   + "pointer-coarse:h-11 pointer-coarse:text-base focus:outline-none focus:ring-2 focus:ring-primary/50";
+const PERSONA_TOTAL = 600;
+const PERSONA_FIELDS = [
+  { key: "name", label: "名字", placeholder: "管家", limit: 20 },
+  { key: "address", label: "称呼", placeholder: "你", limit: 20 },
+  { key: "tone", label: "语气", placeholder: "简洁、直接", limit: 200 },
+  { key: "notes", label: "补充说明", limit: 400 },
+] as const;
 
 const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转述，直到你在 Settings → Channels 填上『我的 ID』";
+const ROUTING_NOTICE = "这些机器人的私聊暂时留在主会话里，直到你在 Settings → Channels 填上『我的 ID』";
+const MAX_RESIDENT_ERROR = "常驻会话数要是 1 到 16 的整数";
 
 /** Why a completion turn's events got the code notice instead, in words (``manager_events.reason``). */
 const FALLBACK_REASONS: Record<string, string> = {
@@ -31,12 +43,16 @@ const FALLBACK_REASONS: Record<string, string> = {
   target_changed: "the schedule's target changed",
 };
 
-/** Settings → Chat: whether a reply can be stopped (Esc, the Stop button, /stop; experimental, off by default), and
+/** Settings → Chat: whether a reply can be stopped (Esc, the Stop button, /stop; experimental, off by default),
  * whether the Manager tells a direct chat or the dashboard chat that its task ended (off by default), with the last
- * 24 hours of task ends by how they were told. */
+ * 24 hours of task ends by how they were told, and the default Manager's persona (unset until the operator sets it). */
 export function ChatSettingsSection() {
   const id = useId();
   const [settings, setSettings] = useState<ChatSettings | null>(null);
+  const [outbound, setOutbound] = useState<OutboundGatewaySettings | null>(null);
+  const [outboundError, setOutboundError] = useState("");
+  const [outboundAttempt, setOutboundAttempt] = useState(0);
+  const [outboundSaving, setOutboundSaving] = useState(false);
   const [summary, setSummary] = useState<CompletionSummary | null>(null);
   const [summaryError, setSummaryError] = useState("");
   const [error, setError] = useState("");
@@ -49,6 +65,14 @@ export function ChatSettingsSection() {
   const [metricsError, setMetricsError] = useState("");
   const [metricsSaving, setMetricsSaving] = useState(false);
   const [missingBots, setMissingBots] = useState<MissingOperatorBot[]>([]);
+  const [draft, setDraft] = useState<ManagerPersona | null>(null);
+  const [personaError, setPersonaError] = useState("");
+  const [savingPersona, setSavingPersona] = useState(false);
+  const [routing, setRouting] = useState<SessionRoutingSettings | null>(null);
+  const [routingError, setRoutingError] = useState("");
+  const [routingBots, setRoutingBots] = useState<MissingOperatorBot[]>([]);
+  const [residentDraft, setResidentDraft] = useState<string | null>(null);
+  const [residentError, setResidentError] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -58,6 +82,16 @@ export function ChatSettingsSection() {
       }
     }).catch((err: unknown) => {
       if (alive) setError(errorText(err));
+    });
+    fetchManagerPersona().then((value) => {
+      if (alive) setDraft(value);
+    }).catch((err: unknown) => {
+      if (alive) setPersonaError(errorText(err));
+    });
+    fetchSessionRoutingSettings().then((value) => {
+      if (alive) { setRouting(value); setRoutingError(""); }
+    }).catch((err: unknown) => {
+      if (alive) setRoutingError(errorText(err));
     });
     fetchTurnContextSettings().then((value) => {
       if (alive) {
@@ -81,6 +115,16 @@ export function ChatSettingsSection() {
     return () => { alive = false; };
   }, [attempt]);
 
+  useEffect(() => {
+    let alive = true;
+    fetchOutboundGateway().then((value) => {
+      if (alive) { setOutbound(value); setOutboundError(""); }
+    }).catch((err: unknown) => {
+      if (alive) setOutboundError(errorText(err));
+    });
+    return () => { alive = false; };
+  }, [outboundAttempt]);
+
   const save = async (body: ChatSettingsUpdate) => {
     setSaving(true);
     setError("");
@@ -94,6 +138,59 @@ export function ChatSettingsSection() {
       setError(errorText(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const savePersona = async () => {
+    if (!draft) return;
+    setSavingPersona(true);
+    setPersonaError("");
+    try {
+      setDraft(await updateManagerPersona(draft));
+    } catch (err) {
+      setPersonaError(errorText(err));
+    } finally {
+      setSavingPersona(false);
+    }
+  };
+
+  const saveRouting = async (body: SessionRoutingSettingsUpdate) => {
+    setSaving(true);
+    setRoutingError("");
+    try {
+      const next = await updateSessionRoutingSettings(body);
+      setRouting(next);
+      if ("max_resident" in body) setResidentDraft(null);
+      if ("session_routing_enabled" in body) {
+        setRoutingBots(body.session_routing_enabled && next.missing_operator_ids?.length ? next.missing_operator_ids : []);
+      }
+    } catch (err) {
+      setRoutingError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveResident = () => {
+    const text = (residentDraft ?? "").trim();
+    const value = Number(text);
+    if (!/^\d+$/.test(text) || value < 1 || value > 16) {
+      setResidentError(MAX_RESIDENT_ERROR);
+      return;
+    }
+    setResidentError("");
+    void saveRouting({ max_resident: value });
+  };
+
+  const saveOutbound = async (enabled: boolean) => {
+    setOutboundSaving(true);
+    setOutboundError("");
+    try {
+      setOutbound(await updateOutboundGateway({ outbound_enabled: enabled }));
+    } catch (err) {
+      setOutboundError(errorText(err));
+    } finally {
+      setOutboundSaving(false);
     }
   };
 
@@ -177,7 +274,41 @@ export function ChatSettingsSection() {
             <p id={`${id}-ledger-help`} className="text-xs text-muted-foreground">
               默认关闭。打开后开始登记，默认管家得到账本工具；关掉后不再登记，已经记下的还在。
             </p>
-            {missingBots.length > 0 && <LedgerNotice bots={missingBots} />}
+            {missingBots.length > 0 && <BotsNotice text={LEDGER_NOTICE} bots={missingBots} />}
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-routing`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-routing`} type="checkbox" checked={routing?.session_routing_enabled ?? false} disabled={saving || !routing}
+                     aria-describedby={`${id}-routing-help`}
+                     onChange={(event) => void saveRouting({ session_routing_enabled: event.target.checked })} />
+              分会话：群和其他人的私聊各用一个会话
+            </label>
+            <p id={`${id}-routing-help`} className="text-xs text-muted-foreground">
+              默认关闭。只对默认管家生效：打开后每个飞书/Telegram 群和每个其他允许发送者的私聊有自己的会话，与主会话并行运行；关掉后全部回到主会话。
+            </p>
+            {routingError && <p role="alert" className="break-words text-sm text-destructive">{routingError}</p>}
+            {routingBots.length > 0 && <BotsNotice text={ROUTING_NOTICE} bots={routingBots} />}
+            {routing?.session_routing_enabled && (
+              <div className="space-y-1 pt-1">
+                <label htmlFor={`${id}-resident`} className="block text-sm font-medium">常驻会话数</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input id={`${id}-resident`} type="number" inputMode="numeric" min={1} max={16} step={1}
+                         value={residentDraft ?? String(routing.max_resident)} disabled={saving}
+                         aria-describedby={`${id}-resident-help`} aria-invalid={residentError ? true : undefined}
+                         className={SELECT.replace("mt-1 w-full max-w-sm", "w-24") + " tabular-nums"}
+                         onChange={(event) => { setResidentDraft(event.target.value); setResidentError(""); }} />
+                  <Button variant="outline" disabled={saving || residentDraft === null} onClick={saveResident}>Save</Button>
+                  <Button variant="outline" disabled={saving}
+                          onClick={() => { setResidentError(""); void saveRouting({ max_resident: null }); }}>
+                    Restore default
+                  </Button>
+                </div>
+                <p id={`${id}-resident-help`} className="text-xs text-muted-foreground">
+                  1 到 16，默认 2。最多这么多个会话保持进程运行，超出的空闲会话先停掉，下一条消息来时接着聊；1 表示只有主会话常驻。
+                </p>
+                {residentError && <p role="alert" className="text-sm text-destructive">{residentError}</p>}
+              </div>
+            )}
           </div>
           <div className="space-y-1.5">
             <label htmlFor={`${id}-metrics`} className="flex items-center gap-2 text-sm font-medium">
@@ -245,6 +376,23 @@ export function ChatSettingsSection() {
             <p role="alert" className="break-words text-sm text-destructive">每轮上下文设置不可用：{contextError}</p>
             {!context && <Button variant="outline" onClick={() => setAttempt((n) => n + 1)}>重试</Button>}
           </div>}
+          {outbound && <div className="space-y-1.5">
+            <label htmlFor={`${id}-outbound`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-outbound`} type="checkbox" checked={outbound.outbound_enabled} disabled={outboundSaving}
+                     aria-describedby={`${id}-outbound-help`}
+                     onChange={(event) => void saveOutbound(event.target.checked)} />
+              出站统一限流和重试（飞书、Telegram）
+            </label>
+            <p id={`${id}-outbound-help`} className="text-xs text-muted-foreground">
+              默认关闭。当前接入飞书，发送前保存，遇到超时会按幂等键重试；Telegram 将在后续接入。
+            </p>
+          </div>}
+          {outboundError && <div className="space-y-3">
+            <p role="alert" className="break-words text-sm text-destructive">出站设置不可用：{outboundError}</p>
+            <Button variant="outline" disabled={outboundSaving} onClick={() => setOutboundAttempt((n) => n + 1)}>重试出站设置</Button>
+          </div>}
+          <PersonaFields id={id} draft={draft} error={personaError} saving={savingPersona}
+                         onDraft={setDraft} onSave={() => void savePersona()} />
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>
       )}
@@ -252,8 +400,48 @@ export function ChatSettingsSection() {
   );
 }
 
-function LedgerNotice({ bots }: { bots: MissingOperatorBot[] }) {
-  const [before, after] = LEDGER_NOTICE.split("Settings → Channels");
+function PersonaFields({ id, draft, error, saving, onDraft, onSave }: {
+  id: string;
+  draft: ManagerPersona | null;
+  error: string;
+  saving: boolean;
+  onDraft: (value: ManagerPersona) => void;
+  onSave: () => void;
+}) {
+  if (!draft) {
+    return error
+      ? <p role="alert" className="break-words text-sm text-destructive">{error}</p>
+      : <p role="status" className="text-sm text-muted-foreground">Loading…</p>;
+  }
+  const total = PERSONA_FIELDS.reduce((sum, field) => sum + draft[field.key].length, 0);
+  return (
+    <div className="space-y-3 border-t border-border pt-5">
+      <div className="space-y-1">
+        <p className="text-sm font-medium">管家人格</p>
+        <p className="text-xs text-muted-foreground">可保存默认管家的人格设置；目前尚未用于提示词，后续接入后生效。</p>
+      </div>
+      {PERSONA_FIELDS.map((field) => (
+        <div key={field.key} className="space-y-1">
+          <div className="flex items-baseline justify-between gap-3">
+            <label htmlFor={`${id}-persona-${field.key}`} className="text-sm font-medium">{field.label}</label>
+            <span className="text-xs tabular-nums text-muted-foreground">{draft[field.key].length}/{field.limit}</span>
+          </div>
+          <Input id={`${id}-persona-${field.key}`} value={draft[field.key]} maxLength={field.limit}
+                 placeholder={"placeholder" in field ? field.placeholder : undefined} disabled={saving}
+                 onChange={(event) => onDraft({ ...draft, [field.key]: event.target.value })} />
+        </div>
+      ))}
+      <p className={`text-xs tabular-nums ${total > PERSONA_TOTAL ? "text-destructive" : "text-muted-foreground"}`}>
+        合计 {total}/{PERSONA_TOTAL}
+      </p>
+      {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+      <Button type="button" disabled={saving} onClick={onSave}>保存</Button>
+    </div>
+  );
+}
+
+function BotsNotice({ text, bots }: { text: string; bots: MissingOperatorBot[] }) {
+  const [before, after] = text.split("Settings → Channels");
   return (
     <div role="status" className="space-y-1 rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-sm text-foreground">
       <p>

@@ -20,6 +20,7 @@ NOW = datetime.now(timezone.utc)
 @pytest.fixture(autouse=True)
 def no_status_reader(monkeypatch):
     monkeypatch.setattr(attention, "_status_checks", None)  # what a serve elsewhere in this process may have set
+    monkeypatch.setattr(attention, "_catchup_checks", None, raising=False)
 
 
 def section(summary, kind):
@@ -151,6 +152,62 @@ def test_deliveries_lists_what_may_not_have_arrived_in_the_window(monkeypatch):
     run_db(check, monkeypatch, timeout=20)
 
 
+@pytest.mark.parametrize("reader", ["deliveries", "earliest"])
+def test_catchup_without_debt_does_not_rerun_status_or_its_database_reads(monkeypatch, reader):
+    async def check(pool):
+        reads = []
+
+        async def status_checks():
+            reads.append(await pool.fetchval("SELECT 1"))
+            return []
+
+        monkeypatch.setattr(attention, "_status_checks", status_checks)
+        monkeypatch.setattr(attention, "_catchup_checks", lambda: [], raising=False)
+        # Positive control: the configured login reader really executes its PG read.
+        await attention._logins(None)
+        assert reads == [1]
+        reads.clear()
+        if reader == "deliveries":
+            assert await attention._deliveries(None) == ([], 0)
+        else:
+            assert await attention.earliest("deliveries") is None
+        assert reads == []
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_dropped_catchup_windows_stay_in_deliveries_until_recovered(monkeypatch):
+    checks = [
+        {"id": "lark_catchup:channel-lark:chat-pending:100:pending", "status": "warn",
+         "label": "Lark catch-up pending", "detail": "Pending synthetic window", "fix": "Retrying automatically"},
+        {"id": "lark_catchup:channel-lark:chat-dropped:200:dropped", "status": "fail",
+         "label": "Lark catch-up dropped", "detail": "chat-dropped: 1970-01-01T00:03:20Z–00:04:20Z; retry_exhausted",
+         "fix": "Check the chat and forward any missed messages to Looper."},
+    ]
+
+    def read_checks():
+        return checks
+
+    async def check(pool):
+        monkeypatch.setattr(attention, "_catchup_checks", read_checks, raising=False)
+        summary = await attention.collect()
+        deliveries = section(summary, "deliveries")
+        assert deliveries["count"] == 1
+        (item,) = deliveries["items"]
+        assert item["title"] == checks[1]["detail"]
+        assert item["facts"]["source"] == "catchup" and item["facts"]["state"] == "dropped"
+        assert item["facts"]["fix"] == checks[1]["fix"] and item["href"] == "#settings/channels"
+        assert await attention.earliest("deliveries") == item
+        text = attention.summary_text(summary)
+        assert "飞书消息补收失败" in text and "chat-dropped" in text
+        monkeypatch.setattr(attention, "SHOWN", 0)
+        assert section(await attention.collect(), "deliveries")["count"] == 1
+        checks.clear()
+        assert section(await attention.collect(), "deliveries")["count"] == 0
+
+    run_db(check, monkeypatch, timeout=20)
+
+
 def test_confirmations_come_from_each_managers_memory_and_are_unknown_without_them(monkeypatch):
     def ops(*waiting):
         return SimpleNamespace(waiting_confirmations=lambda: list(waiting))
@@ -199,6 +256,21 @@ def test_a_source_that_cannot_be_read_is_an_error_not_an_empty_section(monkeypat
         assert "没能读取" in attention.summary_text(summary)
 
     run_db(check, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize("value", [None, "false", "true"])
+def test_settings_read_on_a_fresh_database_without_operator_identity(monkeypatch, tmp_path, value):
+    async def check(pool):
+        if value is not None:
+            await setting(pool, attention.ENABLED_KEY, value)
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("attention.settings_get")
+            assert status == 200, answer
+            assert answer["result"] == {"enabled": value == "true"}
+            status, answer = await call("attention.settings_get", client=True)
+            assert status == 403, answer
+
+    run_db(check, monkeypatch, timeout=60)
 
 
 def test_the_api_is_the_operators_and_answers_conflict_while_off(monkeypatch, tmp_path):

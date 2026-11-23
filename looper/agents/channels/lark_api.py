@@ -25,6 +25,7 @@ LARK_BASE_URL = "https://open.larksuite.com"
 BASE_URLS = {"feishu": FEISHU_BASE_URL, "lark": LARK_BASE_URL}
 TOKEN_INVALID_CODES = frozenset({99991661, 99991663})
 SCAN_CALLS_MAX = 40
+MAX_RETRY_HINT = 86400  # Reject implausible seconds/epoch/millisecond values.
 
 
 class LarkApiError(LarkCliError):
@@ -33,6 +34,7 @@ class LarkApiError(LarkCliError):
     def __init__(self, message: str, *, code: int | None = None, http_status: int | None = None) -> None:
         super().__init__(f"{message} (code {code})" if code is not None else message, code=code)
         self.http_status = http_status
+        self.retry_after: float | None = None
 
 
 class BotInfo(NamedTuple):
@@ -82,7 +84,7 @@ class LarkApi:
             return await self._http.request(method, self._base_url + path, headers=headers, params=params,
                                             json=body, timeout=20.0)
         except httpx.HTTPError as exc:
-            raise LarkApiError(f"could not reach the Lark platform: {type(exc).__name__}") from None
+            raise LarkApiError(f"could not reach the Lark platform: {type(exc).__name__}") from exc
 
     @staticmethod
     def _json(response: httpx.Response) -> dict[str, Any]:
@@ -121,6 +123,16 @@ class LarkApi:
             token = await self.tenant_token()
             response = await self._request(method, path, params=params, body=body,
                                            headers={"Authorization": f"Bearer {token}"})
+            if response.status_code == 429:
+                try:
+                    answer = self._json(response)
+                except LarkApiError as exc:
+                    error = exc
+                    answer = {}
+                else:
+                    error = self._error(answer, response.status_code, token=token)
+                self._retry_delay(error, response, answer)
+                raise error
             if response.status_code == 401:
                 if self._token == token:
                     self._token = None
@@ -136,9 +148,29 @@ class LarkApi:
                     continue
                 raise error
             if answer.get("code") != 0 or response.is_error:
-                raise self._error(answer, response.status_code, token=token)
+                error = self._error(answer, response.status_code, token=token)
+                self._retry_delay(error, response, answer)
+                raise error
             return answer
         raise AssertionError("unreachable token retry")
+
+    @staticmethod
+    def _retry_delay(error: LarkApiError, response: httpx.Response, answer: dict[str, Any]) -> None:
+        # The gateway may return application throttling (99991400) with HTTP 200. Keep its reset delay
+        # independently of HTTP status; malformed headers must not hide a usable Retry-After.
+        delays = []
+        for raw in (response.headers.get("x-ogw-ratelimit-reset"), response.headers.get("Retry-After"),
+                    answer.get("retry_after")):
+            if isinstance(raw, bool):
+                continue
+            try:
+                delay = float(raw)
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if math.isfinite(delay) and 0 <= delay <= MAX_RETRY_HINT:
+                delays.append(delay)
+        if delays:
+            error.retry_after = max(delays)
 
     @staticmethod
     def _message(text: str | None, markdown: str | None, key: str | None = None) -> dict[str, Any]:

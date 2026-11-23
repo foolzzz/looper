@@ -153,6 +153,9 @@ V1_HEADERS = {"Cache-Control": "no-store"}
 # The Manager's tools (``ops.service``).
 AGENT_API = "/api/agent/v1/"
 _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
+_RE_EVIDENCE = re.compile(r"^/api/v1/evidence/([^/]+)/([^/]+)/([^/]+)$")
+# asyncpg rejects a run id outside signed 64-bit as a database error. Refuse it before querying.
+_INT64_MAX = 2**63 - 1
 
 
 # The largest request body the server reads. The largest legitimate one is a
@@ -290,7 +293,8 @@ class AgentHTTPServer:
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port
         )
-        attention.use_status_checks(self._checks_now)  # the "needs you" logins, as system/status reads them
+        catchup: attention.CatchupChecks | None = getattr(self._channels, "catchup_checks", None)
+        attention.use_status_checks(self._checks_now, catchup=catchup)
         if self._port == 0:
             self._port = self._server.sockets[0].getsockname()[1]
         from .. import _PROCESS_STARTED_AT
@@ -701,7 +705,11 @@ class AgentHTTPServer:
     async def _call_v1(self, principal: api_v1.Principal, session: str, name: str, data: Any,
                        **kwargs: Any) -> dict[str, Any]:
         # Opening chats or granting their Manager all tools also requires operator consent.
-        requires_consent = principal.kind == "client" or name in ("manager_chat_bindings.put", "managers.update")
+        cost_consent = isinstance(data, Mapping) and (
+            (name == "cost_guard.update" and data.get("mode") == "enforce")
+            or (name == "cost_holds.decide" and data.get("new_limit_usd") is not None))
+        requires_consent = cost_consent or principal.kind == "client" or name in (
+            "manager_chat_bindings.put", "managers.update", "memory.settings_put")
         return await self._client_ops.call(principal, session, name, data,
                                           require_confirmation=requires_consent, **kwargs)
 
@@ -768,8 +776,12 @@ class AgentHTTPServer:
             tool = Tool(name=operation.operation_id, description=operation.description, schema=operation.request or {},
                         risk=Risk(operation.risk), run=run,
                         escalate=impact if callable(getattr(domain, "impact", None)) else None)
+            async def level(arguments: Mapping[str, Any]) -> Any:
+                # where the operation's call reaches, for the outbound review (``Operation.level``)
+                return await operation.level_of(arguments) if operation.level_of is not None else operation.level
+
             answer = await self._call_v1(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
-                                         tool.name, data, tool=tool,
+                                         tool.name, data, tool=tool, level_of=level,
                                          validator=getattr(domain, "validate_arguments", api_v1.validate_arguments))
             if answer.get("status") == "error":
                 log_refusal(logger, operation, principal, answer["error"]["code"])
@@ -1027,6 +1039,67 @@ class AgentHTTPServer:
 
     # --- API routing ---
 
+    async def _serve_evidence(self, method: str, task_id: str, run_id: str, index: str,
+                              writer: asyncio.StreamWriter, headers: Mapping[str, str]) -> None:
+        """Bytes of one stored artifact. The path is rebuilt from the run row, never from the URL.
+
+        The operator gate accepts an operator bearer. Bytes need a browser session (`browser=True`),
+        so a token and an API client never receive them.
+        """
+        from . import acceptance_artifacts
+        from ..db import step_check_runs
+
+        if method != "GET":
+            writer.write(_json_response(HTTP_405, {"error": "method not allowed"}))
+            await writer.drain()
+            return
+        if not self._is_operator(headers, browser=True):
+            writer.write(_json_response(HTTP_403, {"error": "operator session required"}))
+            await writer.drain()
+            return
+        try:
+            run_key, artifact_index = int(run_id), int(index)
+        except ValueError:
+            run_key, artifact_index = 0, -1
+        if self._runtime_root is None or not 1 <= run_key <= _INT64_MAX or artifact_index < 0:
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        row = await step_check_runs.get_run(run_key, task_id)
+        artifacts = row.get("artifacts") if row else None
+        artifact = artifacts[artifact_index] if isinstance(artifacts, list) and artifact_index < len(artifacts) else None
+        name = artifact.get("name") if isinstance(artifact, dict) else None
+        mime = acceptance_artifacts.mime_for_name(name) if isinstance(name, str) else None
+        if not isinstance(name, str) or mime is None or row is None:
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        try:
+            data = acceptance_artifacts.read_artifact(
+                self._runtime_root, task_id=row["task_id"], step_id=row["step_id"], attempt=row["attempt"],
+                check_id=row["check_id"], run=row["run"], name=name)
+        except acceptance_artifacts.ArtifactMissing:
+            writer.write(_json_response(HTTP_404, {"error": "file missing"}))
+            await writer.drain()
+            return
+        except (acceptance_artifacts.ArtifactRefused, acceptance_artifacts.ArtifactInvalid, OSError):
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        disposition = acceptance_artifacts.content_disposition(mime, name)
+        head = (
+            f"HTTP/1.1 {HTTP_200}\r\n"
+            f"Content-Type: {mime}\r\n"
+            f"Content-Length: {len(data)}\r\n"
+            f"X-Content-Type-Options: nosniff\r\n"
+            f"Content-Security-Policy: sandbox\r\n"
+            f"Content-Disposition: {disposition}\r\n"
+            f"Cache-Control: no-store\r\n"
+            f"\r\n"
+        )
+        writer.write(head.encode("utf-8") + data)
+        await writer.drain()
+
     async def _route_api(
         self,
         method: str,
@@ -1036,6 +1109,10 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
+        match = _RE_EVIDENCE.fullmatch(path)
+        if match:
+            await self._serve_evidence(method, *match.groups(), writer, headers or {})
+            return
         writer.write(_json_response(HTTP_404, {"error": "not found"}))
         await writer.drain()
 
@@ -1065,16 +1142,25 @@ class AgentHTTPServer:
                                                             "required"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
             try:
-                writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing()}))
+                writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing(
+                    session_key=ops.session_for(authorization))}))
             except OpError as exc:
                 writer.write(_json_response(HTTP_503, {"error": str(exc)}))
+        elif path == f"{AGENT_API}outbound/check" and method == "POST":
+            # The outbound review's hook in the Manager's Claude Code (outbound_hook): its answer for one tool call.
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(payload, session_key=ops.session_for(authorization))))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
             writer.write(_json_response(HTTP_200, await ops.call(
-                m.group(1), arguments, binding=headers.get("x-looper-turn"), call_id=headers.get("x-looper-call"))))
+                m.group(1), arguments, binding=headers.get("x-looper-turn"), call_id=headers.get("x-looper-call"),
+                session_key=ops.session_for(authorization))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()
@@ -1093,6 +1179,13 @@ class AgentHTTPServer:
             writer.write(_json_response(
                 HTTP_503, {"error": "this run is being adopted after a restart; retry shortly"},
                 headers={"Retry-After": "2"}))
+        elif path == f"{AGENT_API}outbound/check" and method == "POST":
+            # The outbound review's hook in a step's run of a task outside content went into (RFC section 6.3).
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(header, payload)))
         elif path == f"{AGENT_API}tools" and method == "GET":
             answer = {"tools": ops.listing(header)}
             if (retry_safety := ops.retry_safety(header)) is not None:
@@ -1103,7 +1196,8 @@ class AgentHTTPServer:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
-            writer.write(_json_response(HTTP_200, await ops.call(header, m.group(1), arguments)))
+            writer.write(_json_response(HTTP_200, await ops.call(
+                header, m.group(1), arguments, call_id=headers.get("x-looper-call"))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()
@@ -1119,13 +1213,17 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_401, {"error": "this Planner's token no longer works: its task ended or "
                                                             "a new Planner took over"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
-            writer.write(_json_response(HTTP_200, {"tools": await ops.listing(header)}))
+            answer = {"tools": await ops.listing(header)}
+            if (retry_safety := await ops.retry_safety(header)) is not None:
+                answer["retry_safety"] = retry_safety
+            writer.write(_json_response(HTTP_200, answer))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
-            writer.write(_json_response(HTTP_200, await ops.call(header, m.group(1), arguments)))
+            writer.write(_json_response(HTTP_200, await ops.call(
+                header, m.group(1), arguments, call_id=headers.get("x-looper-call"))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()
@@ -1239,6 +1337,8 @@ class AgentHTTPServer:
         checks = [now.get(check.get("id"), check) if check.get("id") in now else
                   self._check_results.get(check.get("id"), check) if check.get("id") in self_check.CLAUDE_CHECK_IDS
                   else check for check in self._self_checks]
+        if (registry := getattr(self, "_channels", None)) is not None:
+            checks.extend(registry.start_checks())
         pool = self._worker_pool
         if pool is None or not (status := pool.keeper_status()):
             return checks
@@ -1303,6 +1403,8 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
+        channels: Callable[[], list[dict[str, Any]]] = getattr(getattr(self, "_channels", None), "list_channels", list)
+        status["channels"].update({channel["channel_id"]: channel for channel in channels() if "catchup" in channel})
         if getattr(self, "_startup_steps", None) is not None:
             status["startup_steps"] = dict(self._startup_steps)
         if self._worker_pool is not None and (keepers := self._worker_pool.keeper_status()):
@@ -1339,8 +1441,13 @@ class AgentHTTPServer:
         """Send ``text`` to ``target``: the one way a chat message goes in, for the dashboard and for an API client
         (``client``: its ``id`` and ``name``). Stores it as the Planner's supplement and as the thread's user message
         first; the adapter's answer has the ``correlation_id`` its reply streams under."""
+        from . import status_card
+
+        # An enabled /status to a Manager is not a chat turn: neither the command nor its card is stored.
+        ephemeral = status_card.ephemeral_status(text, target_type=target.agent_type)
+
         async def deliver(supplement_id: int | None) -> dict[str, Any]:
-            if session_id and message_id:
+            if session_id and message_id and not ephemeral:
                 try:
                     from ..db.chat import save_message
                     await save_message(
@@ -1359,6 +1466,7 @@ class AgentHTTPServer:
                 target=target,
                 message_id=message_id or None,
                 supplement_id=supplement_id,
+                persist=not ephemeral,
                 **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id is not None else {}),
                 **({"client": client} if client is not None else {}),
             )
@@ -1366,7 +1474,7 @@ class AgentHTTPServer:
         if target.agent_type == "planner":
             return await projects.add_task_supplement(
                 target.agent_id.removeprefix("planner-"), text, via=projects.VIA_CHAT,
-                wake=deliver, best_effort=True)
+                wake=deliver, best_effort=True, from_operator=client is None)  # the dashboard's, not a client's
         return await deliver(None)
 
     async def _foreign_thread_error(self, owner: str) -> OpError:

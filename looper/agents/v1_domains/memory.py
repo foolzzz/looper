@@ -23,7 +23,10 @@ CANDIDATE = _object(_CANDIDATE_FIELDS, closed=True)
 _SOURCE = _object({"kind": _STR, "source_class": _STR, **dict.fromkeys(
     ("quote", "channel", "chat", "message_id", "said_at", "task_id", "lead"), _NULL_STR)}, closed=True)
 _REVISION = _object({"revision": _INT, "made_by": _STR, "title": _STR, "changes": _array(_OBJ), "diff_stats": _OBJ,
-                     "large_removal": _BOOL, "content_hash": _STR, "created_at": _STR}, closed=True)
+                     "large_removal": _BOOL, "content_hash": _STR, "created_at": _STR,
+                     "diffs": {"type": "object", "additionalProperties": _STR}, "diffs_problem": _NULL_STR},
+                    ["revision", "made_by", "title", "changes", "diff_stats", "large_removal", "content_hash",
+                     "created_at"], closed=True)
 _EVENT = _object({"action": _STR, "actor": _STR, "via": _STR, "revision": _NULL_INT, "content_hash": _NULL_STR,
                   "note": _NULL_STR, "at": _STR}, closed=True)
 DETAIL = _object({**_CANDIDATE_FIELDS, "current": {"anyOf": [_REVISION, {"type": "null"}]},
@@ -57,10 +60,11 @@ _SETTINGS_PUT = _object({
 
 
 def _op(action, summary, details, request, result, *, risk="read", cli=True, audit_operator=True,
-        level=ActionLevel.INSIDE):
+        level=ActionLevel.INSIDE, confirms=False):
     # Candidate state stays inside Looper; confirmation/retry can write the operator's vault on this machine.
     return Operation(f"memory.{action}", "POST", f"/api/v1/memory/{action}", summary, f"{summary} {details}",
-                     request, result, risk=risk, operator_only=True, cli=cli, audit_operator=audit_operator, level=level)
+                     request, result, risk=risk, operator_only=True, cli=cli, audit_operator=audit_operator, level=level,
+                     confirms=confirms)
 
 
 RESULTS = {}
@@ -115,12 +119,19 @@ OPERATIONS = (
         _object({}, closed=True), _VIEW),
     _op("settings_put", "Replace the memory_write setting; a null root alone clears it.",
         "Checked against the knowledge vault, git and the channels; the branch is the main checkout's now.",
-        _SETTINGS_PUT, _VIEW, risk="write"),
+        _SETTINGS_PUT, _VIEW, risk="write", confirms=True),  # high only when it enables or re-targets
     _op("check", "Check what a memory write needs, without changing anything.",
         "The setting, the vault's repository and branch, no operation under way, no ignored memory path, the "
         "worktree folder and the push channel.",
         _object({}, closed=True), _CHECK),
 )
+
+
+async def impact(server, operation, arguments, principal, headers):
+    # Turning writing on, or pointing the pushes at another bot while it is on, is confirmed first (RFC 9.1).
+    if operation.operation_id != "memory.settings_put":
+        return None
+    return await memory_settings.confirmation_impact(arguments, runtime_root=getattr(server, "_runtime_root", None))
 
 
 async def run(server, operation, arguments, principal, headers):

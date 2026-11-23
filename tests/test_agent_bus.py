@@ -415,3 +415,25 @@ class TestWorkerPoolConsumesWork:
         run_worker.assert_awaited_once()
         assert bus.pending_count("w1") == 0
         assert bus.journal.undelivered() == []
+
+
+def test_a_message_handed_on_unsettled_replays_until_it_is_settled(tmp_path: Path) -> None:
+    """``subscribe(settle=False)`` (the Manager's dispatcher): a message read and handed on is not delivered until
+    ``settle_handled``; a restart before then replays it, one settled is not replayed."""
+    async def _run() -> None:
+        bus = MessageBus(tmp_path)
+        await bus.start()
+        first, second = _make_envelope(payload={"text": "first"}), _make_envelope(payload={"text": "second"})
+        await bus.publish(first)
+        await bus.publish(second)
+        reader = bus.subscribe("manager", settle=False)
+        assert [await anext(reader), await anext(reader)] == [first, second]
+        assert bus.journal.undelivered() == [first, second]
+        bus.settle_handled(second)
+        await bus.shutdown()
+        restarted = MessageBus(tmp_path)
+        await restarted.start()
+        assert await restarted.drain_queue("manager") == [first]
+        await restarted.shutdown()
+
+    asyncio.run(_run())

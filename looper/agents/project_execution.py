@@ -6,7 +6,8 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   like the task's cost (``llm_records.task_costs``);
 - ``task_budget_action``: what happens when a task reaches that cap: the task
   fails at once (``fail``, also when unset) or after one more Planner turn that
-  sums up what was done (``wrap_up``);
+  sums up what was done (``wrap_up``); ``ask`` holds new starts for the operator
+  while cost guard enforcement is enabled;
 - ``supervise_interval_seconds``: how often the Planner checks running Workers
   (0 = never), over the ``planner`` agent config;
 - ``review_policy``: ``planner`` (the Planner decides which steps a Reviewer
@@ -41,6 +42,8 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   steps run as (``on``) or not (``off``, also when unset; ``task_roles``);
 - ``dependency_conditions``: whether Planners may compose typed step readiness
   conditions (``on``) or not (``off``, also when unset);
+- ``acceptance_checks``: operator-only permission for Planner check definitions,
+  ``off`` (also NULL), ``local`` or ``network``; omitted from views while off;
 - ``wait_commands``: whether a wait step of the project's Planners may run a
   shell command as its check (``on``) or not (``off``, also when unset;
   ``waits``): the command runs as the server's user;
@@ -76,8 +79,12 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   ``advisor_fallback_profile`` (an Agent Profile's name, unused in the first
   phase); ``advisor_internal_domains`` (at most 20 domains the code checks
   treat as URLs, hosts under them included).
+- ``subagents``: whether Planner and Worker runs have read-only explorer spawn
+  tools (``off`` when unset), with per-explorer/task budgets and per-run/task counts;
+  these five fields are omitted from reads while NULL.
 
-The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
+The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``, except
+operator-only ``acceptance_checks``); this
 module owns their types and validation. Agents read them when a run or turn
 starts, so a change reaches the next one. A project's harness, Agent Profile
 (its model and effort), environment and per-run cap are agent settings: its
@@ -137,6 +144,23 @@ ADVISOR_COUNTS: dict[str, tuple[int, int, None, str]] = {
 ADVISOR_DOMAINS_MAX = 20
 # Every advisor setting of a project; while ``advisor`` is off, what the models are given leaves them out.
 ADVISOR_FIELDS = ("advisor", *ADVISOR_BUDGETS, *ADVISOR_COUNTS, "advisor_fallback_profile", "advisor_internal_domains")
+# Explorer defaults and ranges (platform sub-agents RFC, section 6).
+SUBAGENT_BUDGETS = {
+    "subagent_budget_usd": (0.01, 5.0, 0.50, "what one explorer may spend"),
+    "subagent_task_budget_usd": (0.01, 50.0, 3.0, "what a task's explorers may spend in all"),
+}
+SUBAGENT_COUNTS = {
+    "subagents_per_run": (0, 20, 4, "explorers one run may spawn"),
+    "subagents_per_task": (0, 100, 20, "explorers one task may spawn"),
+}
+SUBAGENT_FIELDS = ("subagents", *SUBAGENT_BUDGETS, *SUBAGENT_COUNTS)
+
+
+def omit_unset_subagents(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep legacy project reads and configuration files unchanged until a new field is set."""
+    return {key: value for key, value in values.items() if key not in SUBAGENT_FIELDS or value is not None}
+
+
 _DOMAIN = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 
 
@@ -148,6 +172,7 @@ class ReviewPolicy(str, Enum):
 class TaskBudgetAction(str, Enum):
     WRAP_UP = "wrap_up"
     FAIL = "fail"
+    ASK = "ask"
 
 
 class StepWorkspaces(str, Enum):
@@ -178,6 +203,12 @@ class PlannerRoles(str, Enum):
 class DependencyConditions(str, Enum):
     OFF = "off"
     ON = "on"
+
+
+class AcceptanceChecksMode(str, Enum):
+    OFF = "off"
+    LOCAL = "local"
+    NETWORK = "network"
 
 
 class WaitCommands(str, Enum):
@@ -225,6 +256,11 @@ class AdvisorLimits:
     consults_per_step: int | None = None
 
 
+class SubagentsMode(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
 class LessonsMode(str, Enum):
     OFF = "off"
     DRAFT = "draft"
@@ -268,6 +304,14 @@ class ProjectExecution:
     advisor_consults_per_step: int | None = None
     advisor_fallback_profile: str | None = None
     advisor_internal_domains: tuple[str, ...] | None = None
+    subagents: SubagentsMode | None = None
+    subagent_budget_usd: float | None = None
+    subagent_task_budget_usd: float | None = None
+    subagents_per_run: int | None = None
+    subagents_per_task: int | None = None
+    acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF
+    # Operator-only platform sub-agents switch (``projects.subagents``); not an execution field, so never in a view.
+    subagents_on: bool = False
 
     def overlaid(self, workflow: Mapping[str, Any] | None) -> ProjectExecution:
         """Apply the immutable task workflow over the project's current settings."""
@@ -391,11 +435,14 @@ class ProjectExecution:
                 values[field] = _parse(field, raw)
             except ValueError as exc:
                 logger.warning("ignoring project %s's %s: %s", (row or {}).get("id"), field, exc)
+        values["acceptance_checks"] = acceptance_checks_mode((row or {}).get("acceptance_checks"))
+        values["subagents_on"] = (row or {}).get("subagents") == "on"
         return cls(**values)
 
     def view(self) -> dict[str, Any]:
-        """The fields for the API: plain JSON values, ``None`` where unset."""
-        return {field: _stored(getattr(self, field)) for field in FIELDS}
+        """Plain JSON fields; unset explorer fields and disabled acceptance checks stay absent."""
+        return omit_unset_subagents({field: _stored(getattr(self, field)) for field in FIELDS}) | (
+            {"acceptance_checks": self.acceptance_checks.value} if self.acceptance_checks is not AcceptanceChecksMode.OFF else {})
 
 
 def execution_fields(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -450,17 +497,20 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, AgentRoom)
     if field == "advisor":
         return _choice(field, raw, AdvisorMode)
-    if field in ADVISOR_BUDGETS:
-        low, high, default, what = ADVISOR_BUDGETS[field]
+    if field == "subagents":
+        return _choice(field, raw, SubagentsMode)
+    if field in ADVISOR_BUDGETS or field in SUBAGENT_BUDGETS:
+        low, high, default, what = (ADVISOR_BUDGETS | SUBAGENT_BUDGETS)[field]
         value = budget_usd(raw, field=field)
         if value is None or not low <= value <= high:
             unset = f"null for {default:g}" if default is not None else "null for no limit"
             raise ValueError(f"{field} ({what}) must be from {low:g} to {high:g} USD, or {unset}")
         return value
-    if field in ADVISOR_COUNTS:
-        low, high, _, what = ADVISOR_COUNTS[field]
+    if field in ADVISOR_COUNTS or field in SUBAGENT_COUNTS:
+        low, high, default, what = (ADVISOR_COUNTS | SUBAGENT_COUNTS)[field]
         if isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high:
-            raise ValueError(f"{field} ({what}) must be a whole number from {low} to {high}, or null for no limit")
+            unset = "no limit" if default is None else str(default)
+            raise ValueError(f"{field} ({what}) must be a whole number from {low} to {high}, or null for {unset}")
         return raw
     if field == "advisor_fallback_profile":
         if not isinstance(raw, str) or not raw.strip() or len(raw.strip()) > 200:
@@ -569,3 +619,13 @@ def _choice(field: str, raw: Any, kind: type[Enum]) -> Any:
     except ValueError:
         choices = ", ".join(str(member.value) for member in kind)
         raise ValueError(f"{field} must be one of {choices}, or null to inherit") from None
+
+
+def acceptance_checks_mode(raw: Any) -> AcceptanceChecksMode:
+    """NULL is the disabled default; explicit inputs must name a typed mode."""
+    if raw is None:
+        return AcceptanceChecksMode.OFF
+    try:
+        return AcceptanceChecksMode(raw)
+    except (ValueError, TypeError):
+        raise ValueError("acceptance_checks must be off, local or network") from None

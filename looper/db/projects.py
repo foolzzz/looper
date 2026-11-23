@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from types import EllipsisType
 from typing import Any
 
@@ -33,6 +33,7 @@ EXECUTION_COLUMNS = (
     "task_workspaces", "operator_notes", "vault", "dependency_conditions",
     "advisor", "advisor_consult_budget_usd", "advisor_budget_usd", "advisor_consults_per_task",
     "advisor_consults_per_step", "advisor_fallback_profile", "advisor_internal_domains",
+    "subagents", "subagent_budget_usd", "subagent_task_budget_usd", "subagents_per_run", "subagents_per_task",
 )
 
 
@@ -139,6 +140,17 @@ async def create_project(
     return dict(row)
 
 
+async def names_of(
+    project_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> dict[str, str]:
+    """Current project names; an empty id set reads nothing, and a missing project is left out."""
+    if not project_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch("SELECT id, name FROM projects WHERE id = ANY($1::text[])", list(project_ids))
+    return {row["id"]: row["name"] for row in rows}
+
+
 async def update_project(
     project_id: str,
     *,
@@ -236,3 +248,10 @@ async def set_allowed_profiles(project_id: str, profile_ids: list[str], *, pool:
                                "AND k.project_id = $1 AND NOT c.profile_id = ANY($2)", project_id, profile_ids)
         await conn.executemany("INSERT INTO project_allowed_profiles (project_id, profile_id) VALUES ($1, $2) "
                                "ON CONFLICT DO NOTHING", [(project_id, profile_id) for profile_id in profile_ids])
+
+
+async def set_acceptance_checks(project_id: str, mode: str | None, *, pool: Any = None) -> bool:
+    """Store the operator's permission separately from agent-writable execution fields; NULL means off."""
+    result = await (pool or get_pool()).execute(
+        "UPDATE projects SET acceptance_checks = $2, updated_at = now() WHERE id = $1", project_id, mode)
+    return result == "UPDATE 1"

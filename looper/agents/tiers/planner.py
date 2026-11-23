@@ -118,6 +118,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
+from . import planner_budget
+from ..acceptance_checks import Check, parse_checks
+from .. import acceptance_decisions
+from ..project_execution import AcceptanceChecksMode
 from ..bus import MessageBus
 from ..supervisor import cancel_and_wait
 from ..kept_run import AdoptOutcome, AdoptResult, RunHold
@@ -132,7 +136,8 @@ from ..claude_cli import (
     exit_note,
 )
 from .. import knowledge as project_knowledge
-from .. import session_switch
+from .. import attempts, failures, session_switch
+from .. import untrusted
 from .. import scheduler_settings
 from ..schedule_session import SessionBound, session_bound
 from ..llmrec import LlmrecRoute, control as llmrec
@@ -156,7 +161,7 @@ from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
 from ..session_switch import SessionSwitch, SwitchReason
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
-from .. import waits
+from .. import subagent_delivery, waits
 from .. import workflow_reporting as workflows
 from ..workflow_reporting import Phase
 from ..waits import (
@@ -204,6 +209,7 @@ from ..message import (
 )
 from . import decisions, journal
 from .plan_view import PLAN_FULL_EVERY_TURNS, PlanItem, PlanShown, render as render_plan_view
+from .. import skill_proposal_sources
 from .conditions import State, StepOutcome, evaluate, leaves, parse as parse_condition, render, to_json
 from .journal import JournalEntry, JournalKind, LearningScope
 from .planner_protocol import (
@@ -486,6 +492,11 @@ class PlanStep:
     # The consult of the advisor whose answer its next attempt follows (the Planner wrote what it took into that
     # attempt's feedback); its Worker's record names it. Not kept over a restart.
     consult: int | None = None
+    # Observation only; never included in the step row, journal, or model context.
+    attempt_id: int | None = None
+    attempt_trigger: attempts.Trigger | None = None
+    attempt_loaded: bool = False
+    checks: tuple[Check, ...] = ()
 
     @property
     def kind(self) -> str:
@@ -676,6 +687,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "kind": step.kind,
         "started_at": step.started_at,
         "difficulty": step.difficulty,
+        **({"checks": [check.row() for check in step.checks]} if step.checks else {}),
     }
 
 
@@ -738,12 +750,12 @@ def _ago(moment: datetime) -> str:
     return f"{int(seconds // 86_400)} d"
 
 
-def _message_line(message: Mapping[str, Any]) -> str:
+def _message_line(message: Mapping[str, Any], *, fenced: bool = False) -> str:
     """A message of a gate's discussion as a turn's message shows it: who (the user's: from where), when, the option
     chosen."""
     role = str(message.get("role") or MessageRole.USER.value)
     where = [str(message.get("via") or "") or "dashboard"] if role == MessageRole.USER.value else []
-    if message.get("author"):
+    if message.get("author") and not fenced:  # a fenced message names its author inside its block
         where.append(str(message["author"]))
     created = message.get("created_at")
     if isinstance(created, datetime):
@@ -753,8 +765,28 @@ def _message_line(message: Mapping[str, Any]) -> str:
     if message.get("kind") == MessageKind.END.value:
         where.append("ended the discussion")
     who = {MessageRole.PLANNER.value: "you", MessageRole.LOOPER.value: "Looper"}.get(role, "")
-    text = journal.kept_text(message.get("text"), MESSAGE_MAX_CHARS).replace("\n", "\n  ")
+    text = journal.kept_text(message.get("text"), MESSAGE_MAX_CHARS)
+    if fenced:  # after the cut, so the block always closes
+        provenance = {"via": str(message.get("via") or ""), "from": str(message.get("author") or "")}
+        text = untrusted.fence(text, source=untrusted.Source.GATE_MESSAGE,
+                               provenance={key: value for key, value in provenance.items() if value})
+    text = text.replace("\n", "\n  ")
     return f"- ({', '.join(filter(None, [who, *where]))}) {text}".rstrip()
+
+
+def _outside_message(message: Mapping[str, Any]) -> bool:
+    """A user's gate message the operator did not write in their own turn (``from_operator`` not TRUE); an empty one
+    (an end of the discussion) too, as its author is outside content as well."""
+    return str(message.get("role") or MessageRole.USER.value) == MessageRole.USER.value \
+        and message.get("from_operator") is not True
+
+
+def _message_lines(messages: Sequence[Mapping[str, Any]], *, fence: bool) -> list[str]:
+    """A gate turn's new messages (``_message_line``); with ``fence`` (the untrusted fence is on), an outside one
+    (``_outside_message``) has its text and author in a ``gate_message`` block, after one lead line."""
+    outside = fence and any(_outside_message(m) for m in messages)
+    return [*([untrusted.LEAD_LINE] if outside else []),
+            *(_message_line(message, fenced=fence and _outside_message(message)) for message in messages)]
 
 
 def _retry_due(gate: Gate, now: datetime) -> bool:
@@ -810,19 +842,21 @@ def _tail_text(text: str, limit: int) -> str:
     return tail[start:].decode("utf-8", errors="ignore")
 
 
-def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int) -> list[str]:
+def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int, *, fence: bool = False) -> list[str]:
     """``messages`` as ``_message_line`` shows them, the newest that fit in ``limit`` characters, oldest first,
-    after a note on how many older ones were left out."""
+    after a note on how many older ones were left out. With ``fence``, an outside one (``_outside_message``) is in a
+    ``gate_message`` block, and one lead line comes before them."""
     shown: list[str] = []
     used = 0
     for message in reversed(messages):
-        line = _message_line(message)
+        line = _message_line(message, fenced=fence and _outside_message(message))
         if used + len(line) > limit:
             break
         shown.insert(0, line)
         used += len(line)
     omitted = len(messages) - len(shown)
-    return ([f"({omitted} older message(s) left out)"] if omitted else []) + shown
+    lead = [untrusted.LEAD_LINE] if fence and any(_outside_message(m) for m in messages[omitted:]) else []
+    return ([f"({omitted} older message(s) left out)"] if omitted else []) + lead + shown
 
 
 def _verdict_reason(verdict: Mapping[str, Any], findings: str, summary: str) -> str:
@@ -951,6 +985,8 @@ class PlannerAgent:
         self._token_files: set[str] = set()
         self._bus: MessageBus | None = None
         self._plan: TaskPlan | None = None
+        # Whether the untrusted fence is on, as last read (each event, and each turn's plan view).
+        self._fence = False
         self._plan_shown: PlanShown | None = None
         self._plan_staged: PlanShown | None = None
         self._plan_compacted = False
@@ -1132,6 +1168,7 @@ class PlannerAgent:
         except asyncio.CancelledError:
             pass
 
+    @planner_budget.event
     async def _handle(self, envelope: MessageEnvelope) -> None:
         try:
             await self._handle_event(envelope)
@@ -1174,6 +1211,9 @@ class PlannerAgent:
                 await self._handle_user_message(envelope)
             case MessageType.TASK_CHANGE | MessageType.GATE_MESSAGE | MessageType.ROOM_MESSAGE | MessageType.WAIT_EVENT:
                 pass  # delivered below, with any other change or message waiting
+            case MessageType.SYSTEM_EVENT if envelope.payload.get("type") in (
+                    "cost_hold_continue", "usage_window_resume"):
+                await planner_budget.resume(self)
             case MessageType.SYSTEM_EVENT:
                 await self._handle_system_event(envelope)
         # Every change waiting reaches Claude once the event's turns are done: one that arrived meanwhile, or
@@ -1253,7 +1293,7 @@ class PlannerAgent:
             review_panel=self._panel_on,
             verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
             work_role=(self._workflow or {}).get("work_role"), advisor=self._execution.advisor_on, advise=advise,
-            answered=answered)
+            answered=answered, acceptance_checks=self._execution.acceptance_checks)
 
     async def _planned(self, plan: TaskPlan, reply: Any, changes: Any, envelope: MessageEnvelope) -> None:
         """Start executing the plan of a PLAN reply."""
@@ -1303,13 +1343,19 @@ class PlannerAgent:
                 )
                 plan.steps.append(step)
                 by_label[spec.id] = step
+                step.attempt_trigger = (attempts.Trigger.FIRST if plan.status == "planning"
+                                        else attempts.Trigger.REPLANNED)
             step.instruction = spec.instruction
             step.acceptance_criteria = list(spec.acceptance_criteria)
+            # Off forbids a checks key, so an omitted key cannot revoke stored definitions.
+            if self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+                step.checks = spec.checks
             # A gate or a wait is never reviewed, whatever the project's review policy.
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
             step.review = (spec.gate is None and spec.wait is None
-                           and (spec.review or (self._execution.review_all and not self._is_verification(step)))
+                           and (spec.review or (self._execution.review_all and not any(c.required for c in spec.checks)
+                                                   and not self._is_verification(step)))
                            and not (self._panel_on and self._is_verification(step)))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             step.difficulty = spec.difficulty if spec.gate is None and spec.wait is None else None
@@ -1517,7 +1563,8 @@ class PlannerAgent:
         kind = request.get("kind") if isinstance(request, Mapping) and isinstance(request.get("kind"), str) else None
         consult.spawn_id = await advisor.open_consult(
             advisor.Brief(self._task_id, step.step_id if step else None, attempt, source, self._last_record_id,
-                          asked=kind, evidence=(await self._evidence(plan, step)).fingerprint()),
+                          asked=kind, evidence=(await self._evidence(plan, step)).fingerprint(),
+                          attempt_id=await self._attempt(step) if step is not None else None),
             budget_usd=spend.consult_usd)
         if not consult.material:
             consult.material = self._plan_material(plan) if step is None else self._advice_material(
@@ -1998,7 +2045,8 @@ class PlannerAgent:
         view = self._checked(plan.view())
         newest = max(int(m["id"]) for m in messages)
         try:
-            reply = await self._ask(TurnKind.GATE, self._gate_message(plan, step, messages, context),
+            reply = await self._ask(TurnKind.GATE, self._gate_message(plan, step, messages, context,
+                                                                      fence=await untrusted.enabled()),
                                     lambda text: parse_gate(text, context, view))
         except PlannerTurnError as exc:
             # The same messages again (an automatic retry) count on; a newer one starts the count again.
@@ -2043,7 +2091,7 @@ class PlannerAgent:
         step.status = gate.state.step_status
         step.result = {"status": GateState.PASSED.value, "summary": conclusion}
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         summary = reply.summary
         how = "the user ended the discussion" if forced else "the Planner closed it"
         change = ", ".join(f"{name} {'+'.join(labels)}" for name, labels in gate.plan_change.items() if labels)
@@ -2051,7 +2099,8 @@ class PlannerAgent:
             f"gate passed ({how}): {len(summary.decisions)} decision(s), {len(summary.assumptions)} assumption(s), "
             f"{len(summary.open)} open; plan: {change or 'unchanged'}", journal.SUMMARY_MAX_CHARS),
             kind=JournalKind.GATE_CLOSED)
-        supplement = JournalEntry(step.step_id, step.label, conclusion, kind=JournalKind.SUPPLEMENT, via="gate")
+        supplement = JournalEntry(step.step_id, step.label, conclusion, kind=JournalKind.SUPPLEMENT,
+                                  via=journal.GATE_VIA)
         at = f"gate {step.label}"
         entries = [supplement, closed]
         added: list[PlanStep] = []
@@ -2245,7 +2294,8 @@ class PlannerAgent:
         context = WaitContext(step.label, trigger, last_open=not others)
         view = self._checked(plan.view())
         try:
-            reply = await self._ask(TurnKind.WAIT, self._wait_message(plan, step, row, context),
+            reply = await self._ask(TurnKind.WAIT, self._wait_message(plan, step, row, context,
+                                                                      fence=await untrusted.enabled()),
                                     lambda text: parse_wait(text, context, view))
         except PlannerTurnError as exc:
             wait.failures += 1
@@ -2268,7 +2318,7 @@ class PlannerAgent:
         now = datetime.now(timezone.utc)
         action = reply.action
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         entries: list[JournalEntry] = []
         if action is WaitAction.EXTEND:
             seconds = int(reply.max_wait_seconds or 0)
@@ -2327,8 +2377,11 @@ class PlannerAgent:
             await self._apply_chat(plan, reply.chat, None, at=f"wait {step.label}")
         await self._settle_plan(plan)
 
-    def _wait_message(self, plan: TaskPlan, step: PlanStep, row: Mapping[str, Any], context: WaitContext) -> str:
-        """A [WAIT] turn's message. Its shape is in the message; the standing reply contract does not gain it."""
+    def _wait_message(self, plan: TaskPlan, step: PlanStep, row: Mapping[str, Any], context: WaitContext, *,
+                      fence: bool = False) -> str:
+        """A [WAIT] turn's message. Its shape is in the message; the standing reply contract does not gain it.
+        With ``fence`` (the untrusted fence is on), a GitHub check's output, which holds other people's comments
+        and reviews, is a ``github`` block."""
         wait = step.wait
         assert wait is not None
         spec = wait.spec
@@ -2340,7 +2393,11 @@ class PlannerAgent:
         if spec.check is not None:
             lines.append(self._check_line(spec, row))
         output = row.get("last_output")
-        if isinstance(output, str) and output:
+        if isinstance(output, str) and output and fence and isinstance(spec.check, waits.GithubPrCheck):
+            lines += [untrusted.LEAD_LINE, "Last output (capped):", untrusted.fence(
+                _tail_text(output, waits.OUTPUT_MAX_BYTES), source=untrusted.Source.GITHUB,
+                provenance={"ref": f"{spec.check.repo}#{spec.check.number}"})]
+        elif isinstance(output, str) and output:
             lines.append("Last output (capped): " + _tail_text(output, waits.OUTPUT_MAX_BYTES))
         error = row.get("last_error")
         if isinstance(error, str) and error:
@@ -2472,6 +2529,7 @@ class PlannerAgent:
                 # The loop drives the gates' and the waits' automatic retries: it keeps going.
                 logger.warning("planner %s: the idle check failed", self.agent_id, exc_info=True)
 
+    @planner_budget.usage_tick
     async def _idle_tick(self) -> None:
         """Post a ``gate_retry`` tick when a gate's or a wait's failed turn is due for its retry, else an ``idle`` one
         when the task has only waited for ``GATE_IDLE_STOP_SEC`` with Claude resident. The tick keeps its name: the
@@ -2517,7 +2575,7 @@ class PlannerAgent:
         a merge that failed gets a new one), else in the task directory; as the current version of its role when
         it has one (the version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
-        if not await self._within_budget(plan):
+        if not await self._within_budget(plan, "worker", step, same_attempt=same_attempt):
             return
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
@@ -2542,7 +2600,20 @@ class PlannerAgent:
             await self._save(plan, step)
             await self._workspace_failed(plan, step, str(exc))
             return
+        if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+            from ..acceptance_context import capture_baseline
+
+            baseline = await capture_baseline(
+                step.workspace.work_dir if step.isolated else plan.work_dir, step.retries + 1, step.result,
+                same_attempt=same_attempt, workspace_base=step.workspace.base_commit if step.isolated else None)
+            step.result = {**(step.result or {}), "acceptance_baseline": baseline.row()}
         await self._save(plan, step)
+        step.attempt_id = await attempts.dispatch_attempt(
+            self._task_id, step.step_id, step.label, trigger=step.attempt_trigger, same_attempt=same_attempt)
+        step.attempt_loaded = True
+        step.attempt_trigger = None
+        if step.consult is not None:
+            await attempts.link_advice(step.attempt_id, step.consult)
         await self._activity("phase", f"Worker dispatched{f' as {task_role.label}' if task_role else ''}: "
                                       f"{step.instruction[:80]}", worker=worker_id)
         if self._is_verification(step):
@@ -2567,7 +2638,7 @@ class PlannerAgent:
                 "step_index": step.index,
                 # The Worker's task section: the task and its supplements, then this step and its retry feedback.
                 "requirement": plan.requirement,
-                "supplements": journal.supplement_texts(plan.journal),
+                "supplements": journal.supplement_texts(plan.journal, fence=self._fence),
                 "step_key": step.label,
                 "instruction": step.instruction,
                 "target_files": step.target_files,
@@ -2575,6 +2646,7 @@ class PlannerAgent:
                 "acceptance_criteria": step.acceptance_criteria,
                 "feedback": list(step.feedback),
                 "attempt": step.retries + 1,
+                "attempt_id": step.attempt_id,
                 **({"verification": True} if self._is_verification(step) else {}),
                 # Its first user turn: what the steps it depends on reported, and the task journal's findings.
                 "dependencies": self._dependency_reports(plan, step),
@@ -2724,6 +2796,8 @@ class PlannerAgent:
         current = step.workspace
         if current is None or current.state not in (StepWorkspaceState.ACTIVE, StepWorkspaceState.MERGING):
             return True
+        if not await acceptance_decisions.resume_merge(self, plan, step, decide=decide):
+            return False
         outcome = await workspaces.merge(current, step_key=step.label, title=_clip(step.instruction, 72),
                                          save=self._save_workspace)
         merged = step.workspace = outcome.workspace
@@ -2828,6 +2902,12 @@ class PlannerAgent:
 
     # --- Results and decisions ---
 
+    async def _attempt(self, step: PlanStep) -> int | None:
+        if not step.attempt_loaded:
+            step.attempt_id = await attempts.resolve_attempt(self._task_id, step.label)
+            step.attempt_loaded = True
+        return step.attempt_id
+
     async def _record_profile_fallbacks(self, plan: TaskPlan, role: str, changes: Sequence[Mapping[str, Any]],
                                        step: PlanStep | None = None) -> None:
         entries = [JournalEntry(step.step_id if step else "", step.label if step else "",
@@ -2847,6 +2927,11 @@ class PlannerAgent:
             return
 
         await self._record_profile_fallbacks(plan, step.role or "worker", result.get("fallback") or [], step)
+        if step.checks and (self._execution.acceptance_checks is not AcceptanceChecksMode.OFF
+                            or (step.result or {}).get("acceptance")):
+            from ..acceptance_context import worker_result
+
+            result = worker_result(result, step.result, step.retries + 1)
         step.result = result
         if blocked := result.get("prompt_blocked"):
             step.status = "failed"
@@ -2874,7 +2959,10 @@ class PlannerAgent:
         """Start the review ``step`` waits for (``review_stage``): the built-in Reviewer's, or that of its review
         role at ``review_position`` (the version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
-        if not await self._within_budget(plan):
+        if not await self._within_budget(plan, "reviewer", step, same_attempt=same_attempt):
+            return
+        evidence = await acceptance_decisions.reviewer_payload(self, plan, step)
+        if evidence is None:
             return
         task_role: TaskRole | None = None
         if (item := self._reviewing_role(step)) is not None:
@@ -2883,7 +2971,7 @@ class PlannerAgent:
                 step.reviewer_id = None
                 await self._role_review_done(plan, step, item, {
                     "passed": False, "summary": (problem := f"Cannot read role {item.role}, which reviews step "
-                                                           f"{step.label}"), "findings": [problem], "learnings": []})
+                                                           f"{step.label}"), "findings": [problem], "learnings": []}, ran=False)
                 return
             item.version = task_role.version
         elif step.review_stage is None:
@@ -2907,10 +2995,12 @@ class PlannerAgent:
                 "parent_task_id": self._task_id,
                 "plan_id": plan.plan_id,
                 "requirement": plan.requirement,
-                "supplements": journal.supplement_texts(plan.journal),
+                "supplements": journal.supplement_texts(plan.journal, fence=self._fence),
                 "step_key": step.label,
                 "instruction": step.instruction,
                 "work_result": step.result or {},
+                **evidence,
+                "attempt_id": await self._attempt(step),
                 "acceptance_criteria": step.acceptance_criteria,
                 # The notes the step was retried with: the Planner's changes to it, which its Worker had too.
                 **({"feedback": list(step.feedback)} if step.feedback else {}),
@@ -2946,7 +3036,7 @@ class PlannerAgent:
         return parse_decision(text, context, view, adjudications=enabled and step.accept_when is not None)
 
     async def _dispatch_review(self, plan: TaskPlan, step: PlanStep, *, same_attempt: bool = False) -> None:
-        if not await self._within_budget(plan):
+        if not await self._within_budget(plan, "reviewer", step, same_attempt=same_attempt):
             return
         target = plan.step(step.reviews)
         # A run that could not be adopted is no longer dispatched. A checkout gate may
@@ -2954,6 +3044,9 @@ class PlannerAgent:
         step.status, step.worker_id, step.reviewer_id = "pending", None, None
         await self._save(plan, step)
         if not await self._prepare_panel_review(plan, target):
+            return
+        evidence = await acceptance_decisions.reviewer_payload(self, plan, target)
+        if evidence is None:
             return
         context = {"work_dir": plan.work_dir}
         head = target.workspace.result_commit if target.workspace is not None else (target.result or {}).get("head")
@@ -2981,14 +3074,15 @@ class PlannerAgent:
         await self._activity("phase", f"Review {step.label} dispatched", worker=step.reviewer_id)
         if step.role and role is None:
             await self._review_done(plan, step, {"passed": False, "findings": [
-                {"severity": "blocking", "where": "", "text": f"Cannot read role {step.role}"}]})
+                {"severity": "blocking", "where": "", "text": f"Cannot read role {step.role}"}]}, ran=False)
             return
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address, target=worker_address(step.reviewer_id), message_type=MessageType.VERIFY_REQUEST,
-            payload={"task_id": step.step_id, "parent_task_id": self._task_id, "plan_id": plan.plan_id,
-                     "requirement": plan.requirement, "supplements": journal.supplement_texts(plan.journal),
+            payload={**evidence, "task_id": step.step_id, "parent_task_id": self._task_id, "plan_id": plan.plan_id,
+                     "requirement": plan.requirement, "supplements": journal.supplement_texts(plan.journal, fence=self._fence),
                      "step_key": target.label, "instruction": target.instruction,
                      "work_result": target.result or {}, "acceptance_criteria": target.acceptance_criteria,
+                     "attempt_id": await self._attempt(target),
                      **({"feedback": list(target.feedback)} if target.feedback else {}), "context": context,
                      "severity": True, "head": head,
                      "worker_id": target.worker_id,
@@ -2996,7 +3090,7 @@ class PlannerAgent:
                      **({"task_role": role.payload()} if role else {})},
             correlation_id=plan.correlation_id, metadata={"origin_channel_id": plan.origin_channel_id}))
 
-    async def _review_done(self, plan: TaskPlan, seat: PlanStep, result: dict[str, Any]) -> None:
+    async def _review_done(self, plan: TaskPlan, seat: PlanStep, result: dict[str, Any], *, ran: bool = True) -> None:
         from .review_panel import blocking, merged
         self._adopted_runs.discard(seat.reviewer_id)
         await self._record_profile_fallbacks(plan, seat.role or "reviewer", result.get("fallback") or [], seat)
@@ -3005,6 +3099,13 @@ class PlannerAgent:
             await self._save(plan, seat)
             raise TurnBlocked(**blocked)
         target = plan.step(seat.reviews)
+        if target.status == "verified" and blocking(result):
+            target.attempt_id = await attempts.dispatch_attempt(
+                self._task_id, target.step_id, target.label, trigger=attempts.Trigger.REOPEN_LATE_REVIEW)
+            target.attempt_loaded = True
+            await attempts.link_review_record(target.attempt_id, self._task_id, seat.reviewer_id)
+        await attempts.review_finished(await self._attempt(target), result.get("passed") is True,
+                                       self._blocking_findings(result.get("findings") or []), ran=ran)
         target.result = {**(target.result or {}), **merged(plan, target)}
         entries = []
         if target.status == "verified":
@@ -3096,6 +3197,7 @@ class PlannerAgent:
                 "passed": passed, "findings": findings, "summary": summary,
                 "learnings": journal.reported_learnings(result.get("learnings"))})
             return
+        await attempts.review_finished(await self._attempt(step), passed, self._blocking_findings(findings))
         step.result = {**(step.result or {}), "verify_passed": passed, "verify_findings": findings,
                        "verify_summary": summary,
                        "verify_learnings": journal.reported_learnings(result.get("learnings"))}
@@ -3117,6 +3219,12 @@ class PlannerAgent:
         await self._decide(plan, step, context, self._review_report(step, result))
 
     @staticmethod
+    def _blocking_findings(findings: Sequence[Any]) -> int:
+        # Legacy built-in reviews use strings, all of which are blocking findings.
+        return sum(isinstance(item, str) or isinstance(item, Mapping) and item.get("severity") == "blocking"
+                   for item in findings)
+
+    @staticmethod
     def _reviewing_role(step: PlanStep) -> StepReviewRole | None:
         """The review role whose review ``step`` waits for; None while it waits for the built-in Reviewer's."""
         position = step.review_position
@@ -3125,11 +3233,13 @@ class PlannerAgent:
         return step.review_roles[position]
 
     async def _role_review_done(self, plan: TaskPlan, step: PlanStep, item: StepReviewRole,
-                                verdict: Mapping[str, Any]) -> None:
+                                verdict: Mapping[str, Any], *, ran: bool = True) -> None:
         """Keep review role ``item``'s ``verdict`` on ``step`` (its review ran, or could not start), then go on: the
         next review role reviews it, unless this one was required and did not pass or was the last; then the
         Planner decides, the step acceptable only when every required review passed."""
         passed = verdict.get("passed") is True
+        await attempts.review_finished(await self._attempt(step), passed,
+                                       self._blocking_findings(verdict.get("findings") or []), required=item.required, ran=ran)
         step.result = {**(step.result or {}), "role_reviews": [
             *_role_reviews(step.result or {}),
             {"role": item.role, "version": item.version, "required": item.required, **verdict}]}
@@ -3222,6 +3332,7 @@ class PlannerAgent:
         report = [*report, *await self._room_lines(step)]
         # Saved with its result and the late messages, so a restart can take the decision again.
         await self._save(plan, step, entries=entries)
+        context = await acceptance_decisions.decision_context(self, plan, step, context)
         for entry in entries:
             if entry.kind is JournalKind.VERIFICATION_ROUND:
                 await self._report_progress(plan, phase=Phase.VERIFICATION_ROUND,
@@ -3261,6 +3372,9 @@ class PlannerAgent:
     async def _undecided(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, exc: Exception) -> None:
         """No valid decision on ``step``'s result came: a mandatory review still runs, else the step's own verdict
         decides."""
+        context = await acceptance_decisions.fallback_context(self, plan, step, context)
+        if context is None:
+            return
         if (((self._execution.review_all or (self._workflow or {}).get("escalate_on_exhaustion")
                 or self._verification_repair_required(plan)) and self._needs_review(step))
                 or step.accept_when is not None) and not context.escalate \
@@ -3278,6 +3392,10 @@ class PlannerAgent:
         if succeeded and not await self._merged(plan, step):
             return
         step.status = "verified" if succeeded else "failed"
+        await attempts.decide_attempt(await self._attempt(step),
+                                      attempts.Decision.ACCEPT if succeeded else attempts.Decision.FAIL,
+                                      record_id=self._last_record_id,
+                                      failure_kind=acceptance_decisions.failure_kind(context))
         await self._activity(
             "error",
             f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
@@ -3292,6 +3410,9 @@ class PlannerAgent:
     ) -> None:
         """Do what a DECISION reply decided: its changes to gates and waits first, then the decision on ``step``
         (``adjudicated_accept``: its turn was offered an accept that downgrades blocking findings)."""
+        reply = await acceptance_decisions.before_decision(self, plan, step, context, reply)
+        if reply is None:
+            return
         await decisions.step_decision(self._task_id, step, context, reply, self._last_record_id,
                                       adjudicated_accept=adjudicated_accept)
         at = f"the decision on step {step.label}"
@@ -3331,8 +3452,12 @@ class PlannerAgent:
         keeps_work = decision is Decision.ACCEPT or (decision is Decision.REPLAN and context.acceptable)
         if keeps_work and not await self._merged(plan, step):
             return  # the decision turn on the failed merge took over
+        if decision in (Decision.ACCEPT, Decision.RETRY, Decision.REPLAN, Decision.FAIL):
+            await attempts.decide_attempt(await self._attempt(step), attempts.Decision(decision.value),
+                                          record_id=self._last_record_id, adjudicated=bool(reply.adjudications),
+                                          failure_kind=acceptance_decisions.failure_kind(context))
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
 
         if self._execution.advisor_on and context.result is ResultKind.WORK and context.succeeded \
                 and not context.review_required and not context.checkpoint and decision is not Decision.REVIEW:
@@ -3352,7 +3477,7 @@ class PlannerAgent:
             if step.accept_when is not None:
                 await self._reset_reviews(plan, step)
             step.retries += 1
-            step.feedback.append(reply.feedback)
+            step.feedback.append(acceptance_decisions.retry_feedback(step, context, reply.feedback))
             step.reviewer_id, step.review_stage, step.review_position = None, None, None
             await self._save(plan, step, entries=[retried])
             await self._dispatch_step(plan, step)
@@ -3442,6 +3567,8 @@ class PlannerAgent:
         project reviews every step."""
         if self._panel_on and self._is_verification(step):
             return False
+        if any(c.required for c in step.checks) and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+            return step.review
         return step.review or (self._execution.review_all and not self._is_verification(step))
 
     def _is_verification(self, step: PlanStep) -> bool:
@@ -3895,6 +4022,8 @@ class PlannerAgent:
         for target in [s for s in again if s.accept_when is not None]:
             await self._reset_reviews(plan, target)
         for step in again:
+            step.attempt_id, step.attempt_trigger = None, attempts.Trigger.RESTART
+            step.attempt_loaded = False
             step.status, step.worker_id, step.reviewer_id = "pending", None, None
             step.review_stage, step.review_position = None, None
             step.started_at = None  # its next dispatch starts it again: the time the task was stopped does not count
@@ -3927,7 +4056,8 @@ class PlannerAgent:
         await self._read_changes(plan, changes)
         view = plan.view()
         try:
-            message = self._restart_message(plan, why, changes, await self._template_lines(plan))
+            message = self._restart_message(plan, why, changes, await self._template_lines(plan),
+                                            fence=await untrusted.enabled())
             reply: ChatReply | None = await self._ask(TurnKind.RESTART, message,
                                                       lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
@@ -3941,7 +4071,7 @@ class PlannerAgent:
             waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
             cancelled = gates_cancelled or waits_cancelled
         if reply is not None and reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         if reply is None or reply.action is ChatAction.NONE:
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
@@ -4009,8 +4139,10 @@ class PlannerAgent:
         if not isinstance(supplement, int):
             # Stored when it was sent (``projects.store_chat_supplement``); one that was not is stored now.
             try:
+                context = envelope.payload.get("channel_context")
                 supplement = await db_changes.add_supplement(
-                    self._task_id, journal.kept_text(text, journal.SUPPLEMENTS_MAX_CHARS), via="chat")
+                    self._task_id, journal.kept_text(text, journal.SUPPLEMENTS_MAX_CHARS), via="chat",
+                    from_operator=not (isinstance(context, dict) and context.get("client")))  # not an API client's
             except Exception:
                 logger.exception("planner %s could not store a chat message as a supplement", self.agent_id)
                 supplement = None
@@ -4060,7 +4192,7 @@ class PlannerAgent:
             return None
         await self._read_changes(plan, changes)
         view = plan.view()
-        message = self._change_message(plan, changes)
+        message = self._change_message(plan, changes, fence=await untrusted.enabled())
         try:
             reply = await self._ask(TurnKind.CHAT, message, lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
@@ -4070,7 +4202,7 @@ class PlannerAgent:
         waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
         cancelled = gates_cancelled or waits_cancelled
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         text = await self._apply_chat(plan, reply, envelope)
         # The answer to a change made on the task page has no chat to go to: the activity keeps it.
         await self._activity("phase", f"Planner answered a change to the task ({reply.action.value}): "
@@ -4134,7 +4266,7 @@ class PlannerAgent:
         waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
         cancelled = gates_cancelled or waits_cancelled
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         await self._activity("phase", f"Planner answered in the room ({reply.action.value}"
                                       f"{'' if posted else ', nothing posted'}): {reply.reply}"[:300])
         if reply.action is not ChatAction.NONE:
@@ -4477,21 +4609,24 @@ class PlannerAgent:
         """
         await self._read_run_deadline()
         run = run or self._turn
-        reply = await run(message)
-        await self._read_roles()  # a role the turn defined counts for its reply
-        try:
-            return parse(reply)
-        except ProtocolError as first:
-            await self._activity("error", f"Planner reply broke the {kind.value} contract ({first}); asking again"[:500])
-            reply = await run(
-                f"[{kind.value}] Your last reply broke the reply contract: {first}\n"
-                f"Answer the same request again. End with exactly one ```json block in the {kind.value} shape."
-            )
-            await self._read_roles()
+        async with skill_proposal_sources.plan_message(self, kind, message) as message:
+            reply = await run(message)
+            await self._read_roles()  # a role the turn defined counts for its reply
             try:
                 return parse(reply)
-            except ProtocolError as second:
-                raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
+            except ProtocolError as first:
+                await attempts.count_contract_rejection(self._last_record_id, kind.value)
+                await self._activity("error", f"Planner reply broke the {kind.value} contract ({first}); asking again"[:500])
+                reply = await run(
+                    f"[{kind.value}] Your last reply broke the reply contract: {first}\n"
+                    f"Answer the same request again. End with exactly one ```json block in the {kind.value} shape."
+                )
+                await self._read_roles()
+                try:
+                    return parse(reply)
+                except ProtocolError as second:
+                    await attempts.count_contract_rejection(self._last_record_id, kind.value)
+                    raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
 
     async def _template_lines(self, plan: TaskPlan) -> list[str]:
         """The project's role templates, one line each, for a turn that plans, where its project lets its Planner
@@ -4530,13 +4665,14 @@ class PlannerAgent:
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
         return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy(),
+                       skill_proposals=getattr(self, "_skill_proposals", False),
                        conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps,
                        review_panel=self._panel_on,
                        verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
                        work_role=(self._workflow or {}).get("work_role"),
                        verification_exhausted=bool(self._plan and self._verification_exhausted(self._plan)),
                        verification_repair_required=bool(self._plan and self._verification_repair_required(self._plan)),
-                       advisor=self._execution.advisor_on)
+                       advisor=self._execution.advisor_on, acceptance_checks=self._execution.acceptance_checks)
 
     def _wait_policy(self) -> WaitPolicy:
         """System limits, command permission, and this event's scheduled-run stop time."""
@@ -4581,6 +4717,7 @@ class PlannerAgent:
             return None
         return TaskRole.from_row(row) if row else None
 
+    @planner_budget.turn
     async def _turn(self, message: str) -> str:
         async with self._turn_lock:
             try:
@@ -4668,7 +4805,8 @@ class PlannerAgent:
             await recorder.start()
             if changes:
                 await recorder.annotate({"fallback_from": changes[-1]["from"], "fallback": changes})
-            await recorder.finish(output_text=None, result_event=None, error=error)
+            await recorder.finish(output_text=None, result_event=None, error=error,
+                                  failure=failures.start_failure(exc))
             raise PlannerTurnError(error) from None
         # The command carries the model, the effort, the installed items' directories (each named by its
         # content's hash) and the knowledge's; the file is named by its content's hash (the knowledge
@@ -4767,7 +4905,8 @@ class PlannerAgent:
                 await recorder.start()
                 if changes:
                     await recorder.annotate({"fallback_from": changes[-1]["from"], "fallback": changes})
-                await recorder.finish(output_text=None, result_event=None, error=error)
+                await recorder.finish(output_text=None, result_event=None, error=error,
+                                      failure=failures.start_failure(exc))
                 raise PlannerTurnError(error) from None
             self._process = process
             details = [f"pid {self._claude.pid}"] if self._claude.pid is not None else []
@@ -4793,6 +4932,7 @@ class PlannerAgent:
         full_reason = ("new session" if brief else "new process" if started_process else
                        "no compaction events" if process.launch.runtime.type == "grok" or
                        Capability.COMPACTION_EVENTS not in process.launch.runtime.capabilities else None)
+        self._fence = await untrusted.enabled()
         text, annotation = self._render_plan_message(plan, message, full_reason=full_reason)
         try:
             return await self._exchange(f"{brief}\n\n{text}" if brief else text, process,
@@ -4859,6 +4999,11 @@ class PlannerAgent:
         started ``resuming``, the session it was told to resume."""
         plan = self._plan
         assert plan is not None
+        # With the room off, finished explorer results ride the next turn (none: no change to the text).
+        note, delivered = await subagent_delivery.planner_turn_note(
+            self._task_id, on=self._room is None and self._execution.subagents_on and not maintenance)
+        text += note
+        turn_kwargs, claimed = subagent_delivery.claim_when_sent(delivered)
         recorder = self._recorder(plan, text, process)
         last_context: int | None = None
         compacted: dict[str, Any] | None = None
@@ -4915,21 +5060,23 @@ class PlannerAgent:
                     launch = process.launch
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=limits)
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
-                                              limit if limit > 0 else None)
+                turn = await asyncio.wait_for(
+                    self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop, **turn_kwargs),
+                    limit if limit > 0 else None)
             except TurnBlocked as exc:
                 await recorder.finish(output_text=None, result_event=None, error=str(exc))
                 raise
             except TimeoutError:
                 # The turn was cancelled, which killed Claude; the next turn resumes the session.
                 error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
-                await recorder.finish(output_text=None, result_event=None, error=error)
+                await recorder.finish(output_text=None, result_event=None, error=error, failure=failures.TIMED_OUT)
                 raise PlannerTurnError(error) from None
             except Exception as exc:
                 error = f"reading Claude failed: {type(exc).__name__}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error) from None
             finally:
+                await claimed()  # the results were claimed the moment the runtime sent the prompt, if it did
                 if self._ops is not None and self._token is not None:
                     self._ops.end_turn(self._token)
 
@@ -5125,6 +5272,7 @@ class PlannerAgent:
         """The resume brief's lines on each waiting gate's discussion so far: what the earlier session had of it
         (the user's messages no turn had come in their [GATE] turn)."""
         lines: list[str] = []
+        fence = await untrusted.enabled()
         for step in plan.waiting_gates():
             gate = step.gate
             assert gate is not None
@@ -5137,7 +5285,7 @@ class PlannerAgent:
             had = [m for m in thread if m.get("role") != MessageRole.USER.value or m["id"] <= gate.delivered_through]
             if any(m.get("role") != MessageRole.LOOPER.value for m in had):
                 lines += ["", f"The discussion so far in gate {step.label} \"{_clip(gate.topic, 200)}\" (your earlier "
-                              "session had it; oldest first):", *_thread_lines(had, THREAD_MAX_CHARS)]
+                              "session had it; oldest first):", *_thread_lines(had, THREAD_MAX_CHARS, fence=fence)]
         return lines
 
     def _resume_brief(self, plan: TaskPlan, gate_threads: Sequence[str] = ()) -> str:
@@ -5225,10 +5373,12 @@ class PlannerAgent:
                 task_id=self._task_id, requirement=plan.requirement, project_name=plan.project_name,
                 project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
                 template=self._template, workflow=self._workflow,
+                checks=self._execution.acceptance_checks is not AcceptanceChecksMode.OFF,
             ),
             contract_name="REPLY_CONTRACT",
             # With its platform tools, how to use them follows the reply contract.
             contract=reply_contract(self._execution.step_retries,
+                                    skill_proposals=getattr(self, "_skill_proposals", False),
                                     roles=self._execution.roles_on,
                                     workflow_roles=bool((self._workflow or {}).get("roles")),
                                     gates=self._gate_policy is GatePolicy.ALLOWED
@@ -5236,9 +5386,10 @@ class PlannerAgent:
                                     room=self._room is not None, wait_commands=self._execution.wait_commands_on,
                                     wait_limits=waits.limits(), conditions=self._execution.conditions_on, review_panel=self._panel_on,
                                     adjudication=self._panel_on and bool((self._workflow or {}).get("adjudication")),
-                                    advisor=self._execution.advisor_on)
+                                    advisor=self._execution.advisor_on, acceptance_checks=self._execution.acceptance_checks)
             + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
-                                         vault=planner_guide(self._vault) if self._vault else "")
+                                         vault=planner_guide(self._vault) if self._vault else "",
+                                         subagents=self._execution.subagents_on)
                if self._ops else ""),
             knowledge=knowledge,
         )
@@ -5269,6 +5420,8 @@ class PlannerAgent:
                 f"- {step.label} [{step.status}] {_clip(step.instruction, 200)} "
                 f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries}{roles})"
             ]
+            if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+                lines.append("  checks: " + json.dumps([check.row() for check in step.checks], ensure_ascii=False))
             summary = _clip((step.result or {}).get("summary"), 200) if step.status == "verified" else ""
             if summary:
                 lines.append(f"  summary: {summary}")
@@ -5307,16 +5460,15 @@ class PlannerAgent:
         when = f", deadline {deadline}" if deadline else ""
         return f"- {step.label} [wait {wait.state.value}: {shown}{when}]"
 
-    @staticmethod
-    def _progress_lines(plan: TaskPlan) -> list[str]:
+    def _progress_lines(self, plan: TaskPlan) -> list[str]:
         """The task journal's "Progress and findings" section, after a blank line; nothing before an entry."""
-        section = journal.planner_section(plan.journal)
+        section = journal.planner_section(plan.journal, fence=self._fence)
         return ["", *section] if section else []
 
     def _plan_message(self, plan: TaskPlan, templates: Sequence[str] = ()) -> str:
         added = journal.supplements(
             plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
-                                "later one changes it)")
+                                "later one changes it)", fence=self._fence)
         # Continuing a stored session, or holding one this run claimed (the first run, or a replacement it
         # still writes). Parallel runs and runs that did not claim leave the message as it was.
         continuing = bool(self._schedule_session_id) and self._schedule_session_id == plan.session_id
@@ -5471,6 +5623,7 @@ class PlannerAgent:
             PLAN_VIEW,
             "",
             *report,
+            *(["", acceptance_decisions.evidence_text(step, context.evidence)] if context.evidence else []),
         ]
         if step.missed_messages:
             lines += ["", "The user sent this to the step's Worker through you; delivery not confirmed; the Worker may already have acted on it:"]
@@ -5492,11 +5645,13 @@ class PlannerAgent:
                       "Any new verification step must depend on a new user gate added in the same reply."]
         lines += self._final_notes(step, context)
         separator = "; " if adjudicated_accept else ", "
-        lines += [*advice, "", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
+        # Without ADVISE on offer (a failed evidence gate removes it), a request-the-advisor hint would mislead.
+        offered = advice if context.evidence is None or Decision.ADVISE in choices else ()
+        lines += [*offered, "", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
         return "\n".join(lines)
 
     def _gate_message(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]],
-                      context: GateContext) -> str:
+                      context: GateContext, *, fence: bool = False) -> str:
         """A GATE turn's message: the gate, its agenda, the user's new messages and the plan as it is (a new
         session's resume brief has the discussion before them)."""
         gate = step.gate
@@ -5509,7 +5664,7 @@ class PlannerAgent:
                  "", "Agenda:", *(item.line() for item in gate.agenda)]
         if gate.findings:
             lines += [f"Your findings so far: {gate.findings}"]
-        lines += ["", "New messages from the user (oldest first):", *(_message_line(m) for m in messages)]
+        lines += ["", "New messages from the user (oldest first):", *_message_lines(messages, fence=fence)]
         if context.forced:
             lines += ["", 'The user ended the discussion and asked you to go on with the current conclusions: reply '
                           'with "gate": "close", and state an assumption for every agenda item still open.']
@@ -5520,12 +5675,12 @@ class PlannerAgent:
         lines += ["", f"Allowed actions: {', '.join(actions)}.", "Reply with the GATE JSON."]
         return "\n".join(lines)
 
-    def _change_message(self, plan: TaskPlan, changes: TaskChanges) -> str:
+    def _change_message(self, plan: TaskPlan, changes: TaskChanges, *, fence: bool = False) -> str:
         """A CHAT turn's message: the task's changes the Planner has not had, and the plan as it is."""
         running = [s for s in plan.steps if s.status == "dispatched"]
         running_text = ", ".join(f"{s.label} ({s.worker_id})" for s in running) or "none"
         actions = ["none", "add_steps", "replan"] + (["forward (to a running step)"] if running else [])
-        lines, progress = self._change_lines(plan, changes)
+        lines, progress = self._change_lines(plan, changes, fence=fence)
         return "\n".join([
             "[CHAT] The task changed.",
             *lines,
@@ -5540,11 +5695,12 @@ class PlannerAgent:
             "Reply with the CHAT JSON.",
         ])
 
-    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges, templates: Sequence[str] = ()) -> str:
+    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges, templates: Sequence[str] = (), *,
+                         fence: bool = False) -> str:
         """A RESTART turn's message: why the task ended, the task's changes the Planner has not had, the plan as
         it is now and the journal."""
         self._plan_shown = None
-        lines, progress = self._change_lines(plan, changes)
+        lines, progress = self._change_lines(plan, changes, fence=fence)
         return "\n".join([
             f"[RESTART] {_sentence(f'The task {why}')} The user restarted it, and it goes on from its plan: the "
             "accepted steps stay done and do not run again; the steps that did not finish are back to not started "
@@ -5565,21 +5721,28 @@ class PlannerAgent:
         ])
 
     @staticmethod
-    def _change_lines(plan: TaskPlan, changes: TaskChanges) -> tuple[list[str], list[str]]:
+    def _change_lines(plan: TaskPlan, changes: TaskChanges, *, fence: bool = False) -> tuple[list[str], list[str]]:
         """The task's changes the Planner has not had, after a blank line each, and the journal's section without
-        them (the supplements given before, and the rest of the journal)."""
+        them (the supplements given before, and the rest of the journal). With ``fence`` (the untrusted fence is
+        on), a supplement the operator did not give in their own turn is a ``supplement`` block."""
         new = {supplement.id for supplement in changes.supplements}
         lines: list[str] = []
         if changes.supplements:
             lines += ["", "The user added to the task (new supplements, oldest first; every message the user sends "
                           "you is one):"]
-            lines += ["- " + supplement.text.strip().replace("\n", "\n  ") for supplement in changes.supplements]
+            outside = [s for s in changes.supplements if fence and s.from_operator is not True]
+            if outside:
+                lines.append(untrusted.LEAD_LINE)
+            lines += ["- " + (untrusted.fence(supplement.text.strip(), source=untrusted.Source.SUPPLEMENT,
+                                              provenance={"via": supplement.via}) if supplement in outside
+                              else supplement.text.strip()).replace("\n", "\n  ")
+                      for supplement in changes.supplements]
         if changes.requirement is not None:
             edit = changes.requirement
             lines += ["", f"The requirement was edited (version {edit.before_version} -> {edit.version}); the Task "
                           "section of your instructions has the new text. What changed:", _requirement_diff(edit)]
         earlier = [entry for entry in plan.journal if entry.id is None or entry.id not in new]
-        return lines, journal.planner_section(earlier)
+        return lines, journal.planner_section(earlier, fence=fence)
 
     # --- Endings ---
 
@@ -5700,6 +5863,7 @@ class PlannerAgent:
                 await self._activity("error", f"Warning: {problem}"[:500])
             try:
                 self._vault_closed = True
+                self._fence = await untrusted.enabled()
                 line = await self._ask(TurnKind.VAULT, self._vault_message(plan, ended, config, rules), parse_vault)
             except PlannerTurnError as exc:
                 await self._activity("error", f"Warning: the Planner's vault closeout failed: {exc}"[:500])
@@ -5726,7 +5890,7 @@ class PlannerAgent:
                 "The vault has no rules file: keep notes short, one topic each, and update a note rather than "
                 "add a near-duplicate."]),
             "",
-            *journal.lessons_journal(plan.journal),
+            *journal.lessons_journal(plan.journal, fence=self._fence),
             "",
             "End your reply with exactly one ```json block, and nothing after it:",
             "```json",
@@ -5747,6 +5911,7 @@ class PlannerAgent:
                                           f"${format_usd(cap)} cap (task_budget_usd)")
             return
         try:
+            self._fence = await untrusted.enabled()
             lessons = await self._ask(TurnKind.LESSONS, self._lessons_message(plan), parse_lessons)
         except PlannerTurnError as exc:
             await self._activity("error", f"Warning: the Planner could not write the task's lessons: {exc}"[:500])
@@ -5776,7 +5941,7 @@ class PlannerAgent:
             "project's knowledge, which later tasks of the project read: the findings, pitfalls, commands and "
             "conventions that will still hold. Leave out what mattered to this task only. Do not change any files.",
             "",
-            *journal.lessons_journal(plan.journal),
+            *journal.lessons_journal(plan.journal, fence=self._fence),
             "",
             f"Write the document in Markdown, at most {journal.LESSONS_MAX_CHARS} characters. End your reply with "
             "exactly one ```json block, and nothing after it:",
@@ -5820,6 +5985,8 @@ class PlannerAgent:
                 "progress": plan.progress_summary(),
                 "summary": summary,
                 "fail_kind": fail_kind.value if fail_kind else None,
+                "outcome_failure_kind": (attempts.TaskFailure.STEPS_FAILED if plan.has_failed else
+                                         attempts.TaskFailure.PLANNER_FAILED).value,
                 **({"process_record": process, "delivery_summary": workflows.process_record_summary(process)}
                    if process is not None else {}),
             },
@@ -5881,6 +6048,7 @@ class PlannerAgent:
         A failed read keeps what the plan last saw: the background is
         guidance, so the task goes on without the newest one.
         """
+        self._fence = await untrusted.enabled()  # what the turns and the Workers' instructions this event fence
         try:
             project = await db_projects.get_task_project(self._task_id)
         except Exception:
@@ -5896,6 +6064,7 @@ class PlannerAgent:
         plan.project_description = str(project.get("description") or "")
         plan.project_background = str(project.get("background") or "")
         plan.project_work_dir = str(project.get("work_dir") or "")
+        self._skill_proposals = project.get("skill_proposals") == "on"
         self._workflow = project.get("task_workflow")
         self._execution = ProjectExecution.from_row(project).overlaid(self._workflow)
         self._template = project.get("task_template")
@@ -5923,7 +6092,7 @@ class PlannerAgent:
 
     # --- The task's spend cap ---
 
-    async def _within_budget(self, plan: TaskPlan) -> bool:
+    async def _within_budget(self, plan: TaskPlan, run_kind="planner", step=None, *, same_attempt=False) -> bool:
         """Whether the task may start another run: False once it has spent its project's task cap.
 
         At the cap the task stops for good (``_stop_at_budget``). Without a
@@ -5931,6 +6100,8 @@ class PlannerAgent:
         Carried-on runs finish under their own caps before task-cap stopping;
         reaching the task cap still blocks every new dispatch.
         """
+        if (gate := await planner_budget.within(self, plan, run_kind, step, same_attempt)) is not None:
+            return gate
         cap = self._execution.task_budget_usd
         if cap is None:
             return True
@@ -6149,6 +6320,9 @@ class PlannerAgent:
                                 **({"waits": wait_rows} if wait_rows else {}))
         except Exception:
             logger.exception("failed to save the plan of task %s", self._task_id)
+        skipped = [step.label for step in unique if step.status == "skipped" and step.kind == "work"]
+        if skipped:
+            await attempts.close_attempts(self._task_id, decision=attempts.Decision.SKIP, step_keys=skipped)
 
     async def _claim_schedule_session(self, plan: TaskPlan) -> None:
         """Only a new non-parallel schedule plan borrows the stored conversation."""
@@ -6313,6 +6487,13 @@ class PlannerAgent:
             if stored is None or stored["plan"]["status"] not in statuses:
                 return
             session = await db_agent_sessions.get_session(self.agent_id) or {}
+            checks = {}
+            if any("checks" in step for step in stored["steps"]):
+                # Existing definitions survive an operator disabling or restricting execution; the runner
+                # checks the current permission before starting anything.
+                checks = {step["id"]: parse_checks(step["checks"], len(step.get("acceptance_criteria") or []),
+                                                  AcceptanceChecksMode.NETWORK)
+                          for step in stored["steps"] if "checks" in step}
         except Exception:
             logger.exception("planner %s cannot read its saved plan", self.agent_id)
             return
@@ -6369,6 +6550,7 @@ class PlannerAgent:
                 wait=wait,
                 started_at=sd.get("started_at"),
                 difficulty=sd.get("difficulty"),
+                checks=checks.get(sd["id"], ()),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:

@@ -19,6 +19,8 @@ failure.
 from __future__ import annotations
 
 import asyncio
+import errno
+import fcntl
 import hashlib
 import json
 import math
@@ -62,9 +64,10 @@ BASELINES_DIR = Path(__file__).resolve().with_name("baselines")
 DEFAULT_OUT_DIR = REPO_ROOT / "evals" / "runs"
 RESERVED_PORT = 8767  # the operator's own server
 RESERVED_DATABASE = "loopx"  # the operator's own database
-# v2: every row has rep and outcome (and error_class and error when it is an error); the run has reps and
-# aborted.
-SCHEMA = "looper-prompt-eval/v2"
+# v3: a task row also carries attempt counts, the cost split and record-backed contract violations.
+# v2 rows still compare; their new cells are absent and render as an en dash, never as 0.
+SCHEMA = "looper-prompt-eval/v3"
+ACCEPTED_TASK_SCHEMAS = frozenset({"looper-prompt-eval/v2", SCHEMA})
 ERROR_TEXT_LIMIT = 300  # characters of an error row's message (and of the reason a run was aborted)
 
 # The server, started the way ``looper serve`` starts it, without depending on the CLI module.
@@ -178,18 +181,41 @@ def fresh_database(admin_url: str, *, keep: bool = False) -> Iterator[tuple[str,
 # Set when a run is interrupted: cases in flight cancel their task and end, so no thread outlives the run.
 INTERRUPTED = threading.Event()
 
+# The server binds its port only at the end of its startup, seconds after free_port() found it free. Meanwhile the
+# kernel can hand a port of its dynamic range (Linux 32768-60999, macOS 49152-65535) to any socket that binds port 0
+# or connects out, so the ports come from below that range; and a lock on the port's byte of a per-user file, held
+# while this process lives, keeps every other free_port() caller (other pytest-xdist workers, other runs) off it.
+_PORTS = range(20000, 32768)
+_PORT_FILE = Path(tempfile.gettempdir()) / f"looper-eval-ports-{os.getuid()}.lock"
 _ISSUED_PORTS: set[int] = set()
 _PORT_LOCK = threading.Lock()
+_port_fd: int | None = None  # never closed: closing any descriptor of the file would drop this process's locks
+
+
+def _claim(port: int) -> bool:
+    """Whether this process now holds ``port``: the port's lock is this process's, and nothing listens on it."""
+    global _port_fd
+    if _port_fd is None:
+        _port_fd = os.open(_PORT_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.lockf(_port_fd, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, port)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", port))
+    except OSError as exc:  # another process holds the lock, or something listens on the port
+        if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EADDRINUSE):
+            raise
+        return False
+    return True
 
 
 def free_port() -> int:
-    """A free port, never one this process handed out before: parallel runs pick theirs before their servers bind."""
-    while True:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-        with _PORT_LOCK:
-            if port != RESERVED_PORT and port not in _ISSUED_PORTS:
+    """A port free now that this process never handed out before and that, while this process lives, neither
+    another free_port() caller on this machine nor the kernel hands to anyone else: parallel runs pick theirs before
+    their servers bind."""
+    with _PORT_LOCK:
+        while True:
+            port = _PORTS[int.from_bytes(os.urandom(2), "big") % len(_PORTS)]
+            if port not in _ISSUED_PORTS and _claim(port):
                 _ISSUED_PORTS.add(port)
                 return port
 
@@ -243,6 +269,18 @@ def planned_runtime_types(*, register: dict[str, Any] | None = None, agent: str 
     return types
 
 
+def claude_version(claude: str | None) -> str | None:
+    """The first line of ``claude --version``, for a real baseline; None when that binary is not used."""
+    if not claude:
+        return None
+    try:
+        done = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    line = (done.stdout or done.stderr).strip().splitlines()
+    return line[0][:200] if line else None
+
+
 def require_claude(mode: str, claude: str | None, runtime_types: Iterable[str]) -> None:
     """Real mode runs the `claude` binary only for Claude Code agents: refuse to start without it then."""
     if mode == "real" and not claude and CLAUDE_CODE in runtime_types:
@@ -281,8 +319,10 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
     return script
 
 
-def install_gh(bin_dir: Path, *, diffs: dict[str, str] | None = None) -> Path:
-    """Shadow gh: simulated PRs read their git refs; other PRs use fixed metadata and diffs."""
+def install_gh(bin_dir: Path, *, diffs: dict[str, str] | None = None,
+               views: dict[str, dict[str, Any]] | None = None) -> Path:
+    """Shadow gh: simulated PRs read their git refs; other PRs use fixed metadata and diffs, and ``views``' fields
+    (such as comments) on top of the fixed metadata."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     script = bin_dir / "gh"
     script.write_text(f"""#!{sys.executable}
@@ -292,6 +332,7 @@ import subprocess
 import sys
 
 diffs = {diffs or {}!r}
+views = json.loads({json.dumps(views or {})!r})
 
 def git(*args):
     return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
@@ -314,7 +355,7 @@ if (len(args) in (5, 7) and args[0] == "pr" and args[2].isdigit()
     pr = fixture(key)
     if len(args) == 7 and args[1] == "view" and args[5] == "--json" and args[6]:
         view = {{"headRefOid": "1" * 40, "state": "OPEN", "comments": [], "reviews": [],
-                 "statusCheckRollup": []}}
+                 "statusCheckRollup": [], **views.get(key, {{}})}}
         if pr:
             head = git("rev-parse", pr["head_ref"])
             view.update(headRefOid=head, baseRefOid=pr["base"],
@@ -331,11 +372,28 @@ sys.exit(1)
     return script
 
 
+def _set_true(database_url: str, key: str) -> None:
+    """The system setting ``key`` is ``true`` in the run's database (read by the server where it is used)."""
+    import asyncio
+
+    import asyncpg
+
+    async def write() -> None:
+        conn = await asyncpg.connect(database_url, timeout=10)
+        try:
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true') "
+                               "ON CONFLICT (key) DO UPDATE SET value = 'true'", key)
+        finally:
+            await conn.close()
+
+    asyncio.run(write())
+
+
 @contextmanager
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, notes_root: Path | None = None,
                    projects_root: Path | None = None,
-                   gh_diffs: dict[str, str] | None = None,
+                   gh_diffs: dict[str, str] | None = None, gh_views: dict[str, dict[str, Any]] | None = None,
                    startup_timeout: float = 90.0, env: dict[str, str] | None = None,
                    pi_runtime: str = "cli", dsh_runtime: str = "cli",
                    keeper_mode: str = "off", port: int | None = None,
@@ -346,7 +404,7 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
     ``reminder_now`` freezes only the reminder tools and delivery clock for a fake reminder dialog."""
     if port == RESERVED_PORT:
         raise EvalError(f"port {RESERVED_PORT} is the operator's own server")
-    install_gh(bin_dir, diffs=gh_diffs)
+    install_gh(bin_dir, diffs=gh_diffs, views=gh_views)
     port = port or free_port()
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
@@ -374,6 +432,9 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
         deadline = time.monotonic() + startup_timeout
         while True:
             if process.poll() is not None:
+                # Where the log is gone with its run (a CI job keeps only the output), say why the server stopped.
+                tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+                print(f"the last lines of {log_path.name}:", *tail, sep="\n", file=sys.stderr)
                 raise EvalError(f"the server exited ({process.returncode}) before it answered; see {log_path.name}")
             try:
                 api.token = operator_auth.read_token(runtime_root)
@@ -607,6 +668,8 @@ def run_task(
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
             api.post("/api/v1/allowed_profiles/replace",
                      {"project_id": created["project_id"], "profile_ids": [chosen_profile_id]})
+        if task.skill_proposals:
+            api.post("/api/v1/project_skills/proposals/set_mode", {"project_id": created["project_id"], "mode": "on"})
         if task.dependency_conditions:
             api.post("/api/v1/project_admin/update", {
                 "project_id": created["project_id"], "fields": {"dependency_conditions": "on"}})["result"]["project"]
@@ -637,6 +700,10 @@ def run_task(
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
         answered: dict[str, int] = {}  # each gate's script entries posted so far
         resumed: dict[str, float] = {}  # each wait resumed by the runner, and when (database clock)
+        replier = api
+        if task.gate_answers_from_client:
+            created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:8]}"})["result"]
+            replier = Api(api.base_url, token=created["token"], timeout=api.timeout)
 
         chat_pending = task.chat is not None
         edit_pending = task.edit_requirement is not None
@@ -659,7 +726,8 @@ def run_task(
                 pass  # the next real gh check sees the fix, just as the dependent Worker will
             elif resume_waits(api, task, task_id, detail, resumed, now=time.time() + clock_offset):
                 pass  # the user resumed a wait; read the Planner's progress at the next poll
-            elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset):
+            elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset,
+                              replier=replier):
                 pass  # the user answered a gate; look again at the next poll
             elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
                 if fake and task.fake.get("wait_for_input"):
@@ -694,6 +762,16 @@ def run_task(
         records = [api.post("/api/v1/runs/get", {"record_id": int(r["id"])})["result"]["record"]
                    for r in sorted(records, key=lambda r: int(r["id"]))]
         events = {int(r["id"]): _all_events(api, int(r["id"])) for r in records if metrics.role(r) != "other"}
+        # One read, bounded by this client's timeout. A failure leaves the attempt fields off the row.
+        try:
+            attempts_view = api.post("/api/v1/metrics/step_attempts", {"task_id": task_id})["result"]
+        except Exception:
+            attempts_view = None
+        if not isinstance(attempts_view, dict):
+            attempts_view = None
+        if task.skill_proposals:
+            detail = {**detail, "skill_proposals": api.post("/api/v1/project_skills/proposals/list",
+                      {"project_id": created["project_id"]})["result"]["proposals"]}
         result = metrics.task_metrics(
             detail=detail,
             activity=_all_activity(api, task_id),
@@ -713,7 +791,9 @@ def run_task(
             vault_dir=vault_dir,
             vault_log=_git_in(vault_dir, "log", "--format=%H%x00%s", "--name-only") if vault_dir else "",
             vault_check=task.vault_check,
+            attempts_view=attempts_view,
         )
+        result.update(metrics.attempt_fields(attempts_view))
         if step_workspaces:
             result["looper_commits"] = looper_commits(work_dir, task_id)
     except Exception as exc:
@@ -759,12 +839,12 @@ def _script(task: EvalTask) -> tuple[str, ...]:
 
 
 def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any], answered: dict[str, int], *,
-                 now: float) -> bool:
+                 now: float, replier: Api | None = None) -> bool:
     """Play the user: post the next entry of ``task``'s gate script (``_script``) in each of the task's gates that
     waits for the user, once it has waited ``gate_reply_after_s`` since it opened; ``END_DISCUSSION`` ends the
     discussion, and so does a gate that asks again after the script ran out (so the task ends instead of waiting
     for its timeout). When requested, the first answer also waits for a recorded Worker run overlapping the
-    open gate. Whether anything was posted."""
+    open gate. ``replier`` posts the answers (default ``api``, the operator). Whether anything was posted."""
     script = _script(task)
     posted = False
     for gate in detail.get("gates") or []:
@@ -785,9 +865,9 @@ def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any],
         entry = script[done] if done < len(script) else END_DISCUSSION
         try:
             if entry == END_DISCUSSION:
-                api.post("/api/v1/ops/gates/end", {"task_id": task_id, "gate": label})
+                (replier or api).post("/api/v1/ops/gates/end", {"task_id": task_id, "gate": label})
             else:
-                api.post("/api/v1/ops/gates/reply", {"task_id": task_id, "gate": label, "text": entry})
+                (replier or api).post("/api/v1/ops/gates/reply", {"task_id": task_id, "gate": label, "text": entry})
         except EvalError:
             continue  # it stopped waiting meanwhile; look again at the next poll
         answered[label] = done + 1
@@ -825,6 +905,8 @@ def effective_user_gates(task: EvalTask, user_gates: str | None) -> str:
 
 
 TASK_SETS: dict[str, tuple[str, ...]] = {
+    # Cases that are likely to fail on the first attempt (task-metrics RFC, section 9.4).
+    "hard": ("hidden_precondition", "rethink_bug", "misleading_error"),
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
@@ -1029,6 +1111,7 @@ def run(
     case_budget_usd: float | None = None,
     pi_runtime: str = "cli",
     dsh_runtime: str = "cli",
+    untrusted_fence: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``), ``jobs`` at a time on the one server
     (each in a project, a working directory and a task of its own); returns the run and the JSON file
@@ -1056,6 +1139,7 @@ def run(
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
     require_claude(mode, real_claude, planned_runtime_types(register=register, agent=agent, model=model))
+    version = claude_version(real_claude)
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1094,9 +1178,12 @@ def run(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
             home=home, notes_root=notes_root, pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
             gh_diffs={pr: diff for task in tasks for pr, diff in task.gh_pr_diffs.items()},
+            gh_views={pr: view for task in tasks for pr, view in task.gh_pr_views.items()},
         ) as api:
-            if any(task.gh_pr_fix_files for task in tasks):
+            if any(task.gh_pr_fix_files or task.gh_pr_views for task in tasks):
                 api.post("/api/v1/wait_settings/update", {"min_check_seconds": 10})
+            if untrusted_fence:
+                _set_true(database_url, "untrusted_fence.enabled")
             if vault_dir is not None:
                 api.post("/api/v1/knowledge_vault/update", {"path": str(vault_dir), "writable": ["codex-mem"],
                                                   "rules_file": "codex-mem/AGENTS.md"})
@@ -1162,10 +1249,12 @@ def run(
             "agent": chosen.get("name"),
             "provider_preset": provider.preset if provider is not None else None,
             "started_at": stamp,
+            "runtime_version": version,
             "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
             "step_workspaces": step_workspaces,
             "user_gates": user_gates,
+            "untrusted_fence": untrusted_fence,
             "reps": reps,
             "stopped_by_cap": stopped,
             "aborted": aborted,
@@ -1356,9 +1445,17 @@ def validate_report(data: Any, *, dialogs: bool | None = None) -> dict[str, Any]
     if not isinstance(data, dict):
         raise EvalError("unsupported report schema: expected a JSON object")
     is_dialogs = "dialogs" in data
-    expected = "looper-manager-dialogs/v2" if (is_dialogs if dialogs is None else dialogs) else SCHEMA
-    if data.get("schema") != expected or (dialogs is not None and is_dialogs != dialogs):
+    if dialogs is not None and is_dialogs != dialogs:
+        expected = "looper-manager-dialogs/v2" if dialogs else SCHEMA
         raise EvalError(f"unsupported report schema {data.get('schema')!r}; expected {expected}")
+    if is_dialogs:
+        if data.get("schema") != "looper-manager-dialogs/v2":
+            raise EvalError(f"unsupported report schema {data.get('schema')!r}; expected looper-manager-dialogs/v2")
+    else:
+        schema = data.get("schema")
+        if not isinstance(schema, str) or schema not in ACCEPTED_TASK_SCHEMAS:
+            accepted = ", ".join(sorted(ACCEPTED_TASK_SCHEMAS))
+            raise EvalError(f"unsupported report schema {schema!r}; expected one of {accepted}")
     return data
 
 

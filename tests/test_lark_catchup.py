@@ -772,19 +772,21 @@ def test_boundary_and_live_receipts_survive_a_new_adapter_object(
     asyncio.run(asyncio.wait_for(run(), 5))
 
 
-def test_expired_boundary_skips_history_entirely(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_expired_boundary_records_drop_and_scans_fresh_tail(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     from looper.agents.channels.lark import _CATCHUP_MAX_AGE
 
     async def run() -> None:
         await seed_boundary(tmp_path, time.time() - _CATCHUP_MAX_AGE - 1)
         transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{"messages": [], "chat_type": "group", "has_more": False}]
         instance = adapter(tmp_path, transport)
         bus = MessageBus(runtime_root=tmp_path)
         try:
             with caplog.at_level("INFO", logger="looper.agents.channels.lark"):
                 await instance.start(bus)
                 await catchup_done(instance, transport)
-            assert transport.list_calls == []
+            assert len(transport.list_calls) == 1
+            assert instance.healthcheck()["catchup"]["windows"][0]["reason"] == "boundary_expired"
             assert bus.journal.undelivered() == []
             assert "boundary_expired=True" in caplog.text
         finally:
@@ -1020,11 +1022,9 @@ def test_failed_chat_debt_survives_live_progress_and_restart(
             assert ("om_retry" in ids) == (elapsed == 120)
             failed_call, good_call = transport.list_calls
             assert good_call["start"] == clock[0] - 40
-            assert failed_call["start"] == (original - 10 if elapsed == 120 else good_call["start"])
+            assert failed_call["start"] == (original - 10 if elapsed < 900 else clock[0] - 40)
             assert (await second._inbox.debts()) == {}
-            if elapsed > 900:
-                assert "debt_windows_dropped=1" in caplog.text
-                assert "oc_failed" in caplog.text
+            assert second.healthcheck()["catchup"]["dropped"] == int(elapsed > 900)
         finally:
             await second.stop()
             await bus.shutdown()
@@ -1077,7 +1077,7 @@ def test_discovery_window_survives_live_checkpoint(tmp_path, monkeypatch, failur
     asyncio.run(asyncio.wait_for(run(), 5))
 
 
-def test_partly_expired_chat_debt_keeps_recent_portion(tmp_path, monkeypatch, caplog):
+def test_old_chat_debt_keeps_only_fresh_window(tmp_path, monkeypatch, caplog):
     from looper.agents.channels.lark_inbox import LarkInbox
 
     async def run():
@@ -1099,8 +1099,7 @@ def test_partly_expired_chat_debt_keeps_recent_portion(tmp_path, monkeypatch, ca
             assert transport.list_calls[0]["start"] == now - 900
             (message,) = bus.journal.undelivered()
             assert message.payload["channel_context"]["message_id"] == "om_debt"
-            assert "debt_windows_dropped=1" in caplog.text
-            assert "skipped_seconds=100" in caplog.text
+            assert instance.healthcheck()["catchup"]["dropped"] == 1
             assert (await instance._inbox.debts()) == {}
         finally:
             await instance.stop()
@@ -1206,7 +1205,7 @@ def test_thread_discovery_bounds_busy_chats_by_age_and_listing_budget(
 
 
 @pytest.mark.parametrize("failure", ["page_error", "page_limit", "cursor"])
-def test_thread_listing_failure_keeps_read_replies_and_completes_chat(
+def test_thread_listing_failure_keeps_read_replies_and_debt(
     tmp_path, caplog, failure,
 ):
     async def run():
@@ -1236,7 +1235,9 @@ def test_thread_listing_failure_keeps_read_replies_and_completes_chat(
             ids = [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()]
             assert "om_synthetic_first" in ids
             assert len(ids) == (5 if failure == "page_limit" else 1)
-            assert (await instance._inbox.debts()) == {}
+            assert await instance._inbox.debts() == {}
+            assert len(await instance._inbox.thread_debts()) == int(failure == "page_error")
+            assert instance.healthcheck()["catchup"]["dropped"] == int(failure != "page_error")
             summary = next(r.message for r in caplog.records if r.message.startswith("lark_catchup "))
             assert "thread_failures=1" in summary and " failures=0" in summary
             assert any("thread=omt_synthetic_partial" in r.message for r in caplog.records if r.levelname == "WARNING")
@@ -1385,3 +1386,856 @@ def test_sent_thread_bookkeeping_failure_does_not_retry_successful_send(monkeypa
         assert len(sends) == 1
 
     asyncio.run(asyncio.wait_for(run(), 5))
+
+
+def test_disabled_outbound_pool_exhaustion_keeps_start_receive_and_catchup_working(tmp_path, monkeypatch):
+    from looper.agents import chat_settings
+    from tests.db_support import run_db
+
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, '_outbound_enabled', False)
+        now = time.time()
+        await seed_boundary(tmp_path, now - 60)
+        transport = HistoryTransport()
+        transport.pages['oc_synthetic_group'] = [{'chat_type': 'group', 'messages': [
+            history_message('om_synthetic_pool_gap', at=now - 30)], 'has_more': False}]
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            async with pool.acquire():
+                # The only connection remains occupied throughout startup and ingress.
+                await asyncio.wait_for(instance.start(bus), .5)
+                await catchup_done(instance, transport)
+                await transport.incoming.put(_event(
+                    chat_id='oc_synthetic_group', chat_type='group', message_id='om_synthetic_pool_live',
+                    content='@HelperBot hello', mentions=[BOT_MENTION]))
+                await asyncio.wait_for(transport.live_handled.wait(), 2)
+                ids = [m.payload['channel_context']['message_id'] for m in bus.journal.undelivered()]
+                assert ids == ['om_synthetic_pool_gap', 'om_synthetic_pool_live']
+                assert (await instance._send_message('oc_synthetic_group', 'hello')).success
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    run_db(check, monkeypatch, max_size=1, timeout=10)
+
+
+def test_disabled_outbound_recovery_failure_adds_no_warning(tmp_path, monkeypatch, caplog):
+    from looper.agents import chat_settings
+    from looper.db import channel_outbox
+
+    async def unavailable(*args):
+        raise OSError('synthetic recovery unavailable')
+
+    async def run():
+        monkeypatch.setattr(chat_settings, '_outbound_enabled', False)
+        monkeypatch.setattr(channel_outbox, 'has_unfinished', unavailable)
+        transport = HistoryTransport()
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            assert not [r for r in caplog.records
+                        if r.name == 'looper.agents.channels.outbound' and r.levelno >= 30]
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["chat", "thread", "discovery"])
+def test_background_retry_finishes_original_window_once(tmp_path, monkeypatch, failure):
+    async def run():
+        clock = [time.time()]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        await seed_boundary(tmp_path, clock[0] - 60)
+        transport = HistoryTransport()
+        page = {"chat_type": "group", "messages": [history_message("om_retry_once", at=clock[0] - 30)],
+                "has_more": False}
+        transport.pages["oc_synthetic_group"] = [page, page]
+        entered, release = asyncio.Event(), asyncio.Event()
+        waits = []
+
+        async def wait(delay):
+            waits.append(delay)
+            entered.set()
+            await release.wait()
+
+        instance = adapter(tmp_path, transport)
+        monkeypatch.setattr(instance, "_catchup_retry_wait", wait)
+        if failure == "chat":
+            transport.pages["oc_synthetic_group"] = [
+                {**page, "has_more": True, "page_token": "next"}, RuntimeError("synthetic timeout"), page]
+        elif failure == "thread":
+            calls = []
+
+            async def replies(thread_id, **kwargs):
+                calls.append(thread_id)
+                if len(calls) == 1:
+                    raise RuntimeError("synthetic thread timeout")
+                return page
+
+            transport.list_thread_messages = replies
+
+            async def roots(chat_id, **kwargs):
+                return {"roots": [{"thread_id": "omt_retry", "create_time": str(int(clock[0] * 1000))}],
+                        "has_more": False}
+
+            transport.list_threads = roots
+        else:
+            calls = []
+
+            async def chats():
+                calls.append(True)
+                if len(calls) == 1:
+                    raise RuntimeError("synthetic discovery timeout")
+                return ["oc_synthetic_group"]
+
+            monkeypatch.setattr(instance, "_catchup_chats", chats)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            await asyncio.wait_for(entered.wait(), 1)
+            assert instance.healthcheck()["catchup"]["pending"] == 1
+            owed = await instance._inbox.debts()
+            clock[0] += 120  # Keep recovered messages within the admission age limit.
+            release.set()
+            await asyncio.wait_for(instance._catchup_retry_task, 2)
+            assert waits == [30]
+            assert instance.healthcheck()["catchup"] == {"pending": 0, "dropped": 0, "windows": []}
+            assert [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()] == ["om_retry_once"]
+            if failure == "thread":
+                assert transport.list_calls == [transport.list_calls[0]]
+                assert owed == {}  # Only the failed thread remains owed.
+            elif failure == "chat":
+                assert transport.list_calls[-1]["start"] == owed["oc_synthetic_group"][0]
+                assert transport.list_calls[-1]["end"] == owed["oc_synthetic_group"][1]
+            else:
+                assert transport.list_calls[-1]["end"] == clock[0]
+        finally:
+            release.set()
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 6))
+
+
+@pytest.mark.parametrize("failure", ["chat", "thread", "discovery"])
+def test_persistent_catchup_failure_is_durable_and_visibly_dropped(tmp_path, monkeypatch, failure):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        await seed_boundary(tmp_path, time.time() - 60)
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [RuntimeError("synthetic timeout") for _ in range(10)]
+        waits = []
+
+        async def wait(delay):
+            waits.append(delay)
+
+        instance = adapter(tmp_path, transport)
+        monkeypatch.setattr(instance, "_catchup_retry_wait", wait)
+        if failure == "discovery":
+            async def chats():
+                raise RuntimeError("synthetic discovery timeout")
+
+            monkeypatch.setattr(instance, "_catchup_chats", chats)
+        elif failure == "thread":
+            transport.pages["oc_synthetic_group"] = [
+                {"chat_type": "group", "messages": [], "has_more": False} for _ in range(10)]
+
+            async def roots(chat_id, **kwargs):
+                return {"roots": [{"thread_id": "omt_failure", "create_time": str(int(time.time() * 1000))}],
+                        "has_more": False}
+
+            async def replies(thread_id, **kwargs):
+                raise RuntimeError("synthetic thread timeout")
+
+            transport.list_threads, transport.list_thread_messages = roots, replies
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            await asyncio.wait_for(instance._catchup_retry_task, 2)
+            health = instance.healthcheck()["catchup"]
+            assert health["pending"] == 0 and health["dropped"] == 1
+            assert health["windows"][0]["state"] == "dropped"
+            assert health["windows"][0]["reason"] == "retry_exhausted"
+            assert health["windows"][0]["attempts"] == 10
+            assert waits == [30, 60, 120, 300, 600, 600, 600, 600, 600]
+            assert len(transport.list_calls) == {"discovery": 0, "thread": 1, "chat": 10}[failure]
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+        inbox = await LarkInbox.open(tmp_path / ".local/lark/channel-lark/inbox.sqlite3")
+        try:
+            assert await inbox.catchup_status() == health
+        finally:
+            await inbox.close()
+
+    asyncio.run(asyncio.wait_for(run(), 6))
+
+
+@pytest.mark.parametrize("during", ["backoff", "request"])
+def test_shutdown_of_background_retry_keeps_window_for_restart(tmp_path, monkeypatch, during):
+    async def run():
+        await seed_boundary(tmp_path, time.time() - 60)
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [RuntimeError("synthetic timeout")]
+        entered = asyncio.Event()
+
+        async def wait(delay):
+            if during == "backoff":
+                entered.set()
+                await asyncio.Event().wait()
+            else:
+                transport.before_list = entered
+                transport.release_list = asyncio.Event()
+
+        instance = adapter(tmp_path, transport)
+        monkeypatch.setattr(instance, "_catchup_retry_wait", wait)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            await asyncio.wait_for(entered.wait(), 1)
+            owed = await instance._inbox.debts()
+            await instance.stop()
+            assert instance._catchup_retry_task.cancelled()
+            await seed_boundary(tmp_path, time.time() - 3600)
+            resumed_transport = HistoryTransport()
+            resumed_transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [
+                history_message("om_after_retry_shutdown", at=owed["oc_synthetic_group"][0] + 20)], "has_more": False}]
+            resumed = adapter(tmp_path, resumed_transport)
+            try:
+                await resumed.start(bus)
+                await catchup_done(resumed, resumed_transport)
+                assert resumed_transport.list_calls[0]["start"] < owed["oc_synthetic_group"][0]
+                assert resumed_transport.list_calls[0]["end"] >= owed["oc_synthetic_group"][1]
+                assert any(w["reason"] == "boundary_expired"
+                           for w in resumed.healthcheck()["catchup"]["windows"])
+                assert resumed.healthcheck()["catchup"]["pending"] == 0
+                assert len(bus.journal.undelivered()) == 1
+            finally:
+                await resumed.stop()
+        finally:
+            if instance._running:
+                await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 6))
+
+
+@pytest.mark.parametrize("existing_gap", [False, True])
+def test_no_catchup_debt_starts_no_retry_or_extra_history(tmp_path, monkeypatch, existing_gap):
+    async def run():
+        if existing_gap:
+            await seed_boundary(tmp_path, time.time() - 60)
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [], "has_more": False}]
+        instance = adapter(tmp_path, transport)
+
+        async def wait(delay):
+            raise AssertionError("no retry should run without debt")
+
+        monkeypatch.setattr(instance, "_catchup_retry_wait", wait)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            assert instance._catchup_retry_task is None
+            assert len(transport.list_calls) == int(existing_gap)
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+def test_legacy_inbox_upgrade_keeps_old_debt_and_attempt_budget(tmp_path):
+    import sqlite3
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE catchup_debt (chat_id TEXT PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL)")
+        db.execute("INSERT INTO catchup_debt VALUES ('chat-synthetic', 100, 200)")
+        db.execute("CREATE TABLE discovery (id INTEGER PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL)")
+        db.execute("INSERT INTO discovery VALUES (1, 100, 200)")
+        db.execute("CREATE TABLE catchup_dropped (chat_id TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL, "
+                   "attempts INTEGER NOT NULL, reason TEXT NOT NULL, PRIMARY KEY (chat_id, start, end))")
+        db.execute("INSERT INTO catchup_dropped VALUES ('chat-dropped', 10, 20, 10, 'retry_exhausted')")
+
+    async def run():
+        for attempt in range(2):
+            inbox = await LarkInbox.open(path)
+            try:
+                status = await inbox.catchup_status()
+                assert status["pending"] == 2 and status["dropped"] == 1
+                assert all(window["attempts"] == attempt for window in status["windows"] if window["state"] == "pending")
+                dropped = next(window for window in status["windows"] if window["state"] == "dropped")
+                assert dropped["reason"] == "retry_exhausted" and dropped["recorded_at"] > 0
+                await inbox.fail_catchup("chat-synthetic", 10)
+                await inbox.fail_catchup(None, 10)
+            finally:
+                await inbox.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["discovery", "consumer"])
+def test_retry_discovery_covers_message_before_consumer_ready(tmp_path, monkeypatch, failure):
+    async def run():
+        now = time.time()
+        clock = [now]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        await seed_boundary(tmp_path, now - 60)
+        transport = HistoryTransport()
+        instance = adapter(tmp_path, transport)
+        calls = 0
+
+        async def discover():
+            nonlocal calls
+            calls += 1
+            if failure == "discovery" and calls == 1:
+                raise TimeoutError("synthetic discovery timeout")
+            return ["oc_synthetic_group"]
+
+        stream_ready = asyncio.Event()
+        original_events = transport.events
+
+        async def events():
+            await stream_ready.wait()
+            async for event in original_events():
+                yield event
+
+        transport.events = events
+        original_wait = transport.consumer_started.wait
+        waited = False
+
+        async def ready():
+            nonlocal waited
+            if failure == "consumer" and not waited:
+                waited = True
+                raise TimeoutError("synthetic consumer readiness timeout")
+            return await original_wait()
+
+        async def retry_wait(delay):
+            clock[0] = now + 20
+            stream_ready.set()
+
+        async def messages(chat_id, *, start, end, page_token=""):
+            transport.list_calls.append({"start": start, "end": end})
+            return {"chat_type": "group", "has_more": False, "messages": [
+                history_message("om_before_consumer_ready", at=now + 10)] if start <= now + 10 <= end else []}
+
+        monkeypatch.setattr(instance, "_catchup_chats", discover)
+        monkeypatch.setattr(instance, "_catchup_retry_wait", retry_wait)
+        monkeypatch.setattr(transport.consumer_started, "wait", ready)
+        transport.list_messages = messages
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await asyncio.wait_for(instance._catchup_task, 2)
+            await asyncio.wait_for(instance._catchup_retry_task, 2)
+            assert [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()] == [
+                "om_before_consumer_ready"]
+            assert transport.list_calls[-1]["end"] == now + 20
+            assert instance.healthcheck()["catchup"]["pending"] == 0
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("elapsed", [100, 3 * 24 * 3600])
+def test_restart_retry_applies_freshness_and_preserves_original_send_time(tmp_path, monkeypatch, elapsed):
+    from datetime import datetime
+
+    async def run():
+        now = time.time()
+        clock = [now]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        await seed_boundary(tmp_path, now - 60)
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [TimeoutError("synthetic outage")]
+        first = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await first.start(bus)
+            await catchup_done(first, transport)
+            await first.stop()
+            clock[0] += elapsed
+            resumed_transport = HistoryTransport()
+            sent = int((now - 30) * 1000) / 1000
+            resumed_transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "has_more": False,
+                "messages": [history_message("om_before_restart", at=sent)]}]
+            resumed = adapter(tmp_path, resumed_transport)
+            try:
+                await resumed.start(bus)
+                await catchup_done(resumed, resumed_transport)
+                turns = bus.journal.undelivered()
+                if elapsed > 900:
+                    assert turns == []
+                    assert any(w["reason"] == "stale" for w in resumed.healthcheck()["catchup"]["windows"])
+                else:
+                    (turn,) = turns
+                    assert datetime.fromisoformat(turn.timestamp.replace("Z", "+00:00")).timestamp() == sent
+            finally:
+                await resumed.stop()
+        finally:
+            if first._running:
+                await first.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scope", ["chat", "thread"])
+@pytest.mark.parametrize("failure", ["page_cap", "pagination", "permission"])
+def test_deterministic_history_failure_drops_only_failed_scope(tmp_path, monkeypatch, scope, failure):
+    from looper.agents.channels.lark_cli import LarkCliError
+
+    async def run():
+        now = time.time()
+        await seed_boundary(tmp_path, now - 60)
+        transport = HistoryTransport()
+        calls = []
+
+        async def listing(container, **kwargs):
+            calls.append(container)
+            if failure == "permission":
+                raise LarkCliError("synthetic permission failure", code=99991672)
+            return {"chat_type": "group", "messages": [], "has_more": True,
+                    "page_token": str(len(calls)) if failure == "page_cap" else "same"}
+
+        async def roots(chat, **kwargs):
+            return {"roots": [{"thread_id": "omt_failed", "create_time": str(int(now * 1000))}],
+                    "has_more": False}
+
+        if scope == "chat":
+            transport.list_messages = listing
+        else:
+            transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "has_more": False,
+                "messages": [history_message("om_healthy_chat", at=now - 10)]}]
+            transport.list_threads, transport.list_thread_messages = roots, listing
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            assert instance.healthcheck()["catchup"]["pending"] == 0
+            assert instance._catchup_retry_task is None
+            assert len(calls) == {"permission": 1, "pagination": 2, "page_cap": 5}[failure]
+            assert instance.healthcheck()["catchup"]["windows"][0]["reason"] == failure
+            if scope == "thread":
+                assert len(bus.journal.undelivered()) == 1
+                assert await instance._inbox.debts() == {}
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_expired_outage_is_visible_and_recent_tail_is_still_discovered(tmp_path, monkeypatch):
+    async def run():
+        now = time.time()
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
+        await seed_boundary(tmp_path, now - 3600)
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "has_more": False,
+            "messages": [history_message("om_recent_tail", at=now - 10)]}]
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            assert len(bus.journal.undelivered()) == 1
+            dropped = instance.healthcheck()["catchup"]["windows"]
+            assert any(w["reason"] == "boundary_expired" and w["end"] == now - 900 for w in dropped)
+            assert transport.list_calls[0]["start"] == now - 900
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_dropped_windows_expire_from_cached_health_and_durable_store(tmp_path, monkeypatch):
+    from looper.agents.attention import DELIVERY_WINDOW
+    from looper.agents.channels.lark_inbox import CatchupDropReason, LarkInbox
+
+    async def run():
+        now = time.time()
+        clock = [now]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        monkeypatch.setattr("looper.agents.channels.lark_inbox.time", lambda: clock[0])
+        inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        try:
+            # A newly discovered old window must remain visible for the delivery retention period.
+            await inbox.drop_window("oc_old_window", now - 10 * 86400, now - 9 * 86400, CatchupDropReason.STALE)
+            instance = adapter(tmp_path, HistoryTransport())
+            instance._catchup_status = await inbox.catchup_status()
+            assert instance.healthcheck()["catchup"]["dropped"] == 1
+            clock[0] += DELIVERY_WINDOW.total_seconds() + 1
+            assert instance.healthcheck()["catchup"]["dropped"] == 0
+            assert await inbox.catchup_status() == {"pending": 0, "dropped": 0, "windows": []}
+        finally:
+            await inbox.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("age", [899, 900, 901])
+def test_catchup_admission_guard_enforces_age_at_handling_time(tmp_path, monkeypatch, age):
+    from datetime import datetime
+    from looper.agents.channels.lark import _HistoryTime
+    from looper.agents.channels.lark_inbox import LarkInbox, history_event
+
+    async def run():
+        now = int(time.time())
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
+        bus = MessageBus(runtime_root=tmp_path)
+        instance = adapter(tmp_path, HistoryTransport())
+        instance._bus = bus
+        instance._inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        event = history_event(history_message("om_age_guard", at=now - age), "oc_synthetic_group", "group")
+        event["_catchup_created_at"] = _HistoryTime(now - age)
+        try:
+            outcome = await instance._handle_lark_event(event)
+            assert outcome == ("handled" if age <= 900 else "too_old")
+            if age <= 900:
+                (turn,) = bus.journal.undelivered()
+                assert datetime.fromisoformat(turn.timestamp).timestamp() == now - age
+            else:
+                assert bus.journal.undelivered() == []
+                assert (await instance._inbox.catchup_status())["dropped"] == 1
+            assert await instance._handle_lark_event(event) == "duplicate"
+        finally:
+            await instance._inbox.close()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_restart_scans_existing_thread_debt_once_per_pass(tmp_path, monkeypatch):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        now = time.time()
+        await seed_boundary(tmp_path, now - 30)
+        inbox = await LarkInbox.open(tmp_path / ".local/lark/channel-lark/inbox.sqlite3")
+        await inbox.defer_thread("omt_restart_retry", "oc_synthetic_group", now - 60, now - 10)
+        await inbox.close()
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [], "has_more": False}]
+        calls = []
+
+        async def roots(chat, **kwargs):
+            return {"roots": [{"thread_id": "omt_restart_retry", "create_time": str(int(now * 1000))}],
+                    "has_more": False}
+
+        async def replies(thread, **kwargs):
+            calls.append(thread)
+            raise TimeoutError("synthetic thread timeout")
+
+        transport.list_threads, transport.list_thread_messages = roots, replies
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            assert calls == ["omt_restart_retry"]
+            assert await instance._inbox.debts() == {}
+            (pending,) = instance.healthcheck()["catchup"]["windows"]
+            assert pending["thread_id"] == "omt_restart_retry" and pending["attempts"] == 1
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scope", ["chat", "thread", "both"])
+def test_ancient_debt_cannot_crowd_out_recent_mention(tmp_path, monkeypatch, scope):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        now = int(time.time())
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
+        transport = HistoryTransport()
+        transport.consumer_started.set()
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        instance._bus = bus
+        instance._inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        chat = "oc_synthetic_group"
+        await instance._inbox.defer_discovery(now - 60, now)
+        if scope in {"chat", "both"}:
+            await instance._inbox.defer(chat, now - 3 * 86400, now)
+        if scope in {"thread", "both"}:
+            await instance._inbox.defer_thread("omt_ancient", chat, now - 3 * 86400, now)
+        calls = []
+
+        async def messages(chat_id, *, start, end, page_token=""):
+            calls.append(start)
+            # Ascending history fills the page budget before reaching today's mention.
+            ancient = start < now - 900
+            return {"chat_type": "group", "messages": [history_message(
+                "om_ancient_chatter" if ancient else "om_recent_mention",
+                at=now - 3 * 86400 if ancient else now - 30, mentioned=not ancient)],
+                "has_more": ancient, "page_token": page_token + "next"}
+
+        async def replies(thread_id, *, page_token=""):
+            (debt,) = await instance._inbox.thread_debts()
+            return await messages(chat, start=debt[2], end=debt[3], page_token=page_token)
+
+        transport.list_messages, transport.list_thread_messages = messages, replies
+        try:
+            await instance._catch_up(None)
+            assert [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()] == [
+                "om_recent_mention"]
+            assert now - 900 in calls and all(start >= now - 900 for start in calls)
+            health = instance.healthcheck()["catchup"]
+            assert health["pending"] == 0 and health["dropped"] == 1
+            (drop,) = health["windows"]
+            assert (drop["chat_id"], drop["start"], drop["end"], drop["reason"]) == (
+                chat, now - 3 * 86400, now - 900, "stale")
+        finally:
+            await instance._inbox.close()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["own", "unmentioned", "mentioned"])
+def test_stale_message_guard_ignores_unaddressed_messages_without_drops(tmp_path, monkeypatch, kind):
+    from looper.agents.channels.lark import _HistoryTime
+    from looper.agents.channels.lark_inbox import LarkInbox, history_event
+
+    async def run():
+        now = int(time.time())
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
+        bus = MessageBus(runtime_root=tmp_path)
+        instance = adapter(tmp_path, HistoryTransport())
+        instance._bus = bus
+        instance._inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        message = history_message("om_stale_filtered", at=now - 1000, mentioned=kind != "unmentioned")
+        if kind == "own":
+            message["sender"] = {"id": BOT_ID, "sender_type": "app"}
+        event = history_event(message, "oc_synthetic_group", "group")
+        event["_catchup_created_at"] = _HistoryTime(now - 1000)
+        try:
+            assert await instance._handle_lark_event(event) == ("too_old" if kind == "mentioned" else "ignored")
+            assert bus.journal.undelivered() == []
+            assert (await instance._inbox.catchup_status())["dropped"] == (1 if kind == "mentioned" else 0)
+            assert await instance._handle_lark_event(event) == "duplicate"
+        finally:
+            await instance._inbox.close()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_cutoff_mention_expiring_while_consumer_starts_is_visible(tmp_path, monkeypatch):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        now = int(time.time())
+        clock = [now]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        transport = HistoryTransport()
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        instance._bus = bus
+        instance._inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        await instance._inbox.defer_discovery(now - 900, now)
+
+        async def ready():
+            clock[0] += 30
+            transport.consumer_started.set()
+
+        monkeypatch.setattr(transport.consumer_started, "wait", ready)
+        transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "has_more": False,
+            "messages": [history_message("om_cutoff_late_consumer", at=now - 895)]}]
+        try:
+            await instance._catch_up(None)
+            assert transport.list_calls[0]["start"] == now - 900
+            assert transport.list_calls[0]["end"] == now + 30
+            assert bus.journal.undelivered() == []
+            health = instance.healthcheck()["catchup"]
+            assert health["pending"] == 0 and health["dropped"] == 1
+            (drop,) = health["windows"]
+            assert (drop["chat_id"], drop["reason"], drop["start"], drop["end"]) == (
+                "oc_synthetic_group", "stale", now - 895, now - 895)
+            assert await instance._inbox.processed("om_cutoff_late_consumer")
+            await instance._catch_up(None)
+            assert instance.healthcheck()["catchup"]["dropped"] == 1
+        finally:
+            await instance._inbox.close()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("chat,reason,intervals,expected", [
+    ("oc_drop", "stale", [(20, 30)], [(10, 30)]),
+    ("oc_drop", "stale", [(0, 10)], [(0, 20)]),
+    ("oc_drop", "stale", [(15, 25)], [(10, 25)]),
+    ("oc_drop", "stale", [(30, 40), (20, 30)], [(10, 40)]),
+    ("oc_drop", "stale", [(21, 30)], [(10, 20), (21, 30)]),
+    ("oc_other", "stale", [(20, 30)], [(10, 20), (20, 30)]),
+    ("oc_drop", "permission", [(20, 30)], [(10, 20), (20, 30)]),
+])
+def test_drop_windows_merge_only_contiguous_ranges_for_same_scope(tmp_path, chat, reason, intervals, expected):
+    from looper.agents.channels.lark_inbox import CatchupDropReason, LarkInbox
+
+    async def run():
+        inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        try:
+            await inbox.defer("oc_drop", 10, 20)
+            await inbox.fail_catchup("oc_drop", 1, CatchupDropReason.STALE)
+            for start, end in intervals:
+                await inbox.drop_window(chat, start, end, CatchupDropReason(reason))
+            health = await inbox.catchup_status()
+            assert health["pending"] == 0 and health["dropped"] == len(expected)
+            assert [(w["start"], w["end"]) for w in health["windows"]] == expected
+            assert health["windows"][0]["attempts"] == 1
+            assert health["windows"][0]["chat_id"] == "oc_drop"
+            assert health["windows"][0]["reason"] == "stale"
+        finally:
+            await inbox.close()
+
+    asyncio.run(run())
+
+
+def test_long_outage_with_failing_discovery_coalesces_expired_prefixes(tmp_path, monkeypatch):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        now = int(time.time())
+        clock = [now]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        transport = HistoryTransport()
+        instance = adapter(tmp_path, transport)
+        path = tmp_path / "inbox.sqlite3"
+        instance._inbox = await LarkInbox.open(path)
+        await instance._inbox.defer_discovery(now - 1200, now)
+        calls = 0
+
+        async def fail():
+            nonlocal calls
+            calls += 1
+            raise TimeoutError("synthetic discovery timeout")
+
+        monkeypatch.setattr(instance, "_catchup_chats", fail)
+        try:
+            for elapsed in (0, 30, 90, 210, 510, 1110):
+                clock[0] = now + elapsed
+                await instance._catch_up(None)
+                await instance._inbox.close()
+                instance._inbox = await LarkInbox.open(path)
+            health = await instance._inbox.catchup_status()
+            assert calls == 5
+            assert health["pending"] == 0 and health["dropped"] == 1
+            (drop,) = health["windows"]
+            assert (drop["chat_id"], drop["reason"], drop["start"], drop["end"]) == (
+                "", "stale", now - 1200, now)
+        finally:
+            await instance._inbox.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scope", ["discovery", "chat", "thread"])
+def test_failing_short_window_expires_once_and_persists_clamp(tmp_path, monkeypatch, scope):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        now = int(time.time())
+        clock = [now]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        transport = HistoryTransport()
+        transport.consumer_started.set()
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        instance._bus = bus
+        path = tmp_path / "inbox.sqlite3"
+        instance._inbox = await LarkInbox.open(path)
+        if scope == "discovery":
+            await instance._inbox.defer_discovery(now - 70, now)
+        elif scope == "chat":
+            await instance._inbox.defer("oc_synthetic_group", now - 70, now)
+        else:
+            await instance._inbox.defer_thread("omt_short", "oc_synthetic_group", now - 70, now)
+
+        async def fail(*args, **kwargs):
+            raise TimeoutError("synthetic persistent timeout")
+
+        monkeypatch.setattr(instance, "_catchup_chats", fail)
+        transport.list_messages = transport.list_thread_messages = fail
+        try:
+            for elapsed in (0, 30, 90, 210, 510, 1110, 1710, 2310, 2910, 3510):
+                clock[0] = now + elapsed
+                await instance._catch_up(None)
+                # Reopen to verify the durable state, including removal of fully stale work.
+                await instance._inbox.close()
+                instance._inbox = await LarkInbox.open(path)
+                health = await instance._inbox.catchup_status()
+                if elapsed >= 1110:
+                    assert health["pending"] == 0 and health["dropped"] == 1
+                    (drop,) = health["windows"]
+                    assert (drop["start"], drop["end"], drop["reason"]) == (now - 70, now, "stale")
+        finally:
+            await instance._inbox.close()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scope", ["discovery", "chat", "thread"])
+def test_partial_debt_clamp_survives_failed_scan_and_reopen(tmp_path, monkeypatch, scope):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        now = int(time.time())
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
+        transport = HistoryTransport()
+        transport.consumer_started.set()
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        instance._bus = bus
+        path = tmp_path / "inbox.sqlite3"
+        instance._inbox = await LarkInbox.open(path)
+        if scope == "discovery":
+            await instance._inbox.defer_discovery(now - 1000, now - 60)
+        elif scope == "chat":
+            await instance._inbox.defer("oc_synthetic_group", now - 1000, now - 60)
+        else:
+            await instance._inbox.defer_thread("omt_partial", "oc_synthetic_group", now - 1000, now - 60)
+
+        async def fail(*args, **kwargs):
+            raise TimeoutError("synthetic persistent timeout")
+
+        monkeypatch.setattr(instance, "_catchup_chats", fail)
+        transport.list_messages = transport.list_thread_messages = fail
+        try:
+            for attempt in (1, 2):
+                await instance._catch_up(None)
+                await instance._inbox.close()
+                instance._inbox = await LarkInbox.open(path)
+                health = await instance._inbox.catchup_status()
+                assert health["pending"] == 1 and health["dropped"] == 1
+                pending, dropped = health["windows"]
+                assert (pending["start"], pending["end"], pending["attempts"]) == (now - 900, now - 60, attempt)
+                assert (dropped["start"], dropped["end"], dropped["reason"]) == (now - 1000, now - 900, "stale")
+        finally:
+            await instance._inbox.close()
+            await bus.shutdown()
+
+    asyncio.run(run())

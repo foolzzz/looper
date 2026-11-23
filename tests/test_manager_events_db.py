@@ -1,6 +1,7 @@
 """Completion events: a task's end is recorded where its code notice is made, and nothing sent changes."""
 
 import asyncio
+import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ from looper.agents.task_notice import (Notice, NotifyChannel, NotifyTarget, Targ
                                        web_end_text)
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.db import connection, manager_events as store, projects, schedules as db_schedules, tasks
-from tests.db_support import DSN, run_db, v1_api
+from tests.db_support import DSN, dropped_tables, run_db, v1_api
 from tests.schedule_support import TELEGRAM_CHAT, ScheduleEnv, allow_telegram, run_scheduled, with_sender
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -326,7 +327,8 @@ def test_an_event_is_unique_by_its_dedupe_key_and_goes_with_its_task(monkeypatch
 
 FRESH_INDEX = None
 HAS_EVENT_COLUMN = ("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = "
-                    "'schedule_notifications' AND column_name = 'manager_event_id')")
+                    "'schedule_notifications' AND column_name = 'manager_event_id' "
+                    "AND table_schema = current_schema())")
 
 
 @pytest.mark.parametrize("before", ["no_table", "no_column"])
@@ -334,23 +336,31 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
     async def check(pool):
         global FRESH_INDEX
         FRESH_INDEX = await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = "
-                                          "'idx_schedule_notifications_manager_event'")
+                                          "'idx_schedule_notifications_manager_event' AND schemaname = current_schema()")
         assert FRESH_INDEX and "WHERE (manager_event_id IS NOT NULL)" in FRESH_INDEX
         await pool.execute("ALTER TABLE schedule_notifications DROP COLUMN manager_event_id; "
                            "DELETE FROM schema_migrations WHERE name IN ('schedule_notification_events', "
                            "'schedule_notification_events_online')")
-        if before == "no_table":  # older than completion events
-            await pool.execute("DROP TABLE manager_events; DELETE FROM schema_migrations WHERE name = 'manager_events'")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
+        # Older than completion events: later derived tables must go too when reconstructing such a database.
+        older = before == "no_table"
+        async with (dropped_tables(pool, "triage_event_sources", "triage_events", "manager_events") if older
+                    else contextlib.nullcontext()):
+            if older:
+                await pool.execute("DELETE FROM schema_migrations WHERE name IN "
+                                   "('manager_events', 'event_triage', 'event_triage_online')")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
         assert await pool.fetchval(HAS_EVENT_COLUMN)
+        assert await pool.fetchval("SELECT convalidated FROM pg_constraint "
+                                   "WHERE conrelid = to_regclass('triage_events') "
+                                   "AND conname = 'triage_events_manager_event_id_fkey'")
         # The outbox's new foreign key is indexed (built online), as a new database has it.
         assert await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = "
-                                   "'idx_schedule_notifications_manager_event'") == FRESH_INDEX
+                                   "'idx_schedule_notifications_manager_event' AND schemaname = current_schema()") == FRESH_INDEX
 
     run_db(check, monkeypatch, timeout=30)
 
@@ -440,7 +450,7 @@ def test_a_hanging_database_call_does_not_hold_back_the_notice(monkeypatch, tmp_
 def test_the_foreign_keys_that_are_cleared_or_cascaded_have_indexes(monkeypatch):
     async def check(pool):
         found = {row["indexname"] for row in await pool.fetch(
-            "SELECT indexname FROM pg_indexes WHERE tablename = 'manager_events'")}
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'manager_events' AND schemaname = current_schema()")}
         assert {"idx_manager_events_task", "idx_manager_events_schedule_run", "idx_manager_events_record"} <= found
 
     run_db(check, monkeypatch, timeout=30)
@@ -485,6 +495,7 @@ def test_a_database_whose_events_predate_the_new_reasons_and_delivery_gets_them_
         _, constraints = await _events_shape(pool)
         assert {c["conname"] for c in constraints if not c["convalidated"]} == {
             "manager_events_reason_check", "manager_events_delivery_check",
+            "manager_events_kind_check", "manager_events_task",
             "schedule_notifications_manager_event_id_fkey"}
         await connection.ensure_schema(pool)  # the next start validates them after its commit
         assert await _events_shape(pool) == fresh

@@ -364,6 +364,37 @@ async def read(config: VaultConfig, path: str) -> dict:
     return await asyncio.to_thread(read_file)
 
 
+async def model_result(config: VaultConfig, result: dict[str, Any]) -> dict[str, Any]:
+    """Fence imported inbox/ material only at model boundaries; filesystem reads and callers' backstops keep
+    the original text. Both task and Manager vault tools use this boundary."""
+    from . import untrusted
+
+    if not await untrusted.enabled():
+        return result
+    fenced = False
+
+    def note(item: dict[str, Any], field: str) -> dict[str, Any]:
+        nonlocal fenced
+        relative = _relative(config, item["path"], what="path")
+        resolved = (config.path / relative).resolve().relative_to(config.path)
+        # A trusted-looking alias can point into inbox; inbox aliases pointing out remain untrusted too.
+        if not any(path.parts[0].casefold() == "inbox" for path in (relative, resolved)):
+            return item
+        fenced = True
+        return {**item, "path": untrusted.fence(item["path"], source=untrusted.Source.INBOX),
+                field: untrusted.fence(item[field], source=untrusted.Source.INBOX,
+                                       provenance={"path": item["path"]})}
+
+    if "results" in result:
+        result = {**result, "results": [note(item, "snippet") for item in result["results"]]}
+    else:
+        result = note(result, "content")
+    if fenced:
+        result = {**result, "notice": f"{result['notice']} {untrusted.LEAD_LINE}" if result.get("notice")
+                  else untrusted.LEAD_LINE}
+    return result
+
+
 async def rules_text(config: VaultConfig) -> tuple[str | None, str | None]:
     if not config.rules_file:
         return None, None

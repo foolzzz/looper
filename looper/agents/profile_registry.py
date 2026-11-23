@@ -207,6 +207,8 @@ BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
                                       BUILTIN_PROVIDER, "claude-haiku-5-5"),
     "memory_draft": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
                                        BUILTIN_PROVIDER, "claude-sonnet-5-5"),
+    "explorer": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
+                                   BUILTIN_PROVIDER, "claude-sonnet-5-5"),
     "outbound_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
                                          BUILTIN_PROVIDER, "claude-sonnet-5-5"),
 })
@@ -402,6 +404,8 @@ class ResolvedModel:
     async def check_available_runtime(self, runtime: RuntimeSpec, effort: str | None = None) -> None:
         """Save-time pairing check; reads use only the structural ``check_runtime`` rules."""
         self.check_runtime(runtime, effort)
+        if runtime.type == "acp":
+            await check_acp_pairing(runtime, self.binding_provider(), self.model.name, effort)
         if runtime.type == "coco":
             from .runtimes.coco import model_problem, native_executable
 
@@ -772,6 +776,19 @@ def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str
         raise RegistryError(str(exc), field=exc.field) from None
 
 
+async def check_acp_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str,
+                            effort: str | None = None, *, pool: Any = None) -> None:
+    """Check the operator's current command identity at asynchronous selection boundaries."""
+    if runtime.type != "acp":
+        return
+    from . import acp_reviewer_settings
+
+    try:
+        acp_reviewer_settings.check_pairing(await acp_reviewer_settings.read(pool=pool), provider, model, effort)
+    except ValueError as exc:
+        raise RegistryError(str(exc)) from None
+
+
 def default_agent_teams(runtime: RuntimeSpec) -> bool:
     """Whether a profile of ``runtime`` that does not say has agent teams: on for Claude Code, whose feature they are,
     off for any other runtime."""
@@ -828,6 +845,10 @@ def check_roles(profile: AgentProfile | LegacyAgentProfile, roles: Iterable[str]
             raise RegistryError(
                 f"Agent Profile {profile.name!r} cannot run the {role}: its runtime {profile.runtime.name!r} "
                 f"({label}) lacks {_listed(missing)}, which a {role} needs ({_listed(needs)})")
+        if role == "explorer" and (adapter is None or
+                adapter.read_only_for(profile.runtime.capabilities) is runtimes.ReadOnly.CHECK):
+            raise RegistryError(f"Agent Profile {profile.name!r} cannot run the explorer: "
+                                "its runtime cannot enforce read-only exploration")
 
 
 # The roles a layer of each scope, or a task's choice, selects a profile for.
@@ -845,6 +866,9 @@ async def check_selection(profile_id: str, roles: Iterable[str], *, pool: Any = 
     if profile.runtime.type not in runtimes.ADAPTERS:
         raise RegistryError(f"Agent Profile {profile.name!r} runs on a {profile.runtime.type!r} runtime, which this "
                             "version cannot run")
+    if profile.runtime.type == "acp":
+        resolved = ResolvedAgentProfile.from_row(row)
+        await check_acp_pairing(profile.runtime, resolved.provider, resolved.model, profile.effort, pool=pool)
     check_roles(profile, roles)
     return profile
 
@@ -1014,12 +1038,14 @@ def model_view(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def vendor_types_view() -> list[dict[str, Any]]:
+def vendor_types_view(*, include_acp: bool = False) -> list[dict[str, Any]]:
     """Creation suggestions only: no saved model or account is resolved from presets."""
     from .provider_presets import vendor_defaults
 
     result = []
     for vendor in VendorType:
+        if vendor is VendorType.ACP_COMMAND and not include_acp:
+            continue
         defaults = vendor_defaults(vendor, provider_id="draft")
         adapter = runtimes.ADAPTERS.get(vendor.oauth_runtime_type or "")
         models = [{"name": m.name, "protocol": m.protocol.value,
@@ -1225,24 +1251,35 @@ async def registry_view(*, server_claude: str = "claude", manager_id: str | None
 
     from .runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES, PRICES_AS_OF
 
+    from . import acp_reviewer_settings
+
+    acp = await acp_reviewer_settings.read()
+    await acp_reviewer_settings.ensure_registered(acp)
     uses = await db.profile_usage(manager_id=manager_id)
     providers = await db.list_providers()
     logins = await _logins(providers)
     models = await db.list_models()
-    runtime_rows = await db.list_runtimes()
-    runtime_types = [type_view(a) for a in runtimes.ADAPTERS.values()]
+    runtime_rows = [row for row in await db.list_runtimes() if row["type"] != "acp" or acp.ready]
+    runtime_types = [type_view(a) for a in runtimes.ADAPTERS.values() if a.type != "acp" or acp.ready]
     for view in runtime_types:
         if view["in_process"] and not any(r["id"] == view["runtime_id"] for r in runtime_rows):
             # Failed package detection leaves no registered runtime; keep its diagnosis visible to the operator.
             probe = await _probe(view["type"], "", server_claude)
             view["probe_error"] = probe["probe_error"]
+    profiles = []
+    for row in await db.list_profiles():
+        profile = profile_view(row, uses.get(row["id"], NOT_USED), models)
+        if row["runtime_type"] == "acp" and not acp.ready:
+            profile["roles"] = []
+            profile["warnings"].append("acp_reviewer.enabled is off; this pilot Profile cannot be selected")
+        profiles.append(profile)
     return {
         "runtime_types": runtime_types,
         "runtimes": [runtime_view(r, server_claude=server_claude) for r in runtime_rows],
         "providers": [provider_view(r, logins) for r in providers],
-        "profiles": [profile_view(r, uses.get(r["id"], NOT_USED), models) for r in await db.list_profiles()],
+        "profiles": profiles,
         "models": [model_view(r) for r in models],
-        "vendor_types": vendor_types_view(),
+        "vendor_types": vendor_types_view(include_acp=acp.ready),
         "prices": {"as_of": PRICES_AS_OF, "sources": list(PRICE_SOURCES),
                    "models": {name: price.view() for name, price in BUILTIN_PRICES.items()}},
         "limits": _limits(),
@@ -1339,7 +1376,7 @@ async def register_found_runtimes() -> list[str]:
         await db.refresh_builtin_capabilities(builtin_runtime_id(owned), sorted(c.value for c in owned.capabilities))
     pairs = [(adapter, launcher) for adapter in runtimes.ADAPTERS.values()
              for launcher in sorted(adapter.launchers, key=lambda item: item.value)
-             if not (adapter is runtimes.CLAUDE_CODE and launcher is Launcher.NATIVE)]
+             if adapter.type != "acp" and not (adapter is runtimes.CLAUDE_CODE and launcher is Launcher.NATIVE)]
     rows = await asyncio.gather(*(_detected_runtime(adapter, launcher) for adapter, launcher in pairs))
     found = []
     for (adapter, launcher), row in zip(pairs, rows):
@@ -1677,12 +1714,24 @@ async def list_models(*, provider_id: str | None = None, runtime_id: str | None 
     from ..db import profile_registry as db
 
     runtime = runtime_spec(await _existing_runtime(runtime_id)) if runtime_id is not None else None
+    acp = None
+    if runtime is not None and runtime.type == "acp":
+        from . import acp_reviewer_settings
+
+        try:
+            acp = await acp_reviewer_settings.read()
+            acp.require_ready()
+        except ValueError as exc:
+            raise RegistryError(str(exc)) from None
     models = []
     for row in await db.list_models(provider_id=provider_id):
         if runtime is not None:
             try:
-                _resolved_model(row).check_runtime(runtime)
-            except RegistryError:
+                resolved = _resolved_model(row)
+                resolved.check_runtime(runtime)
+                if acp is not None:
+                    acp_reviewer_settings.check_pairing(acp, resolved.binding_provider(), resolved.model.name)
+            except (RegistryError, ValueError):
                 continue
         models.append(model_view(row))
     return {"models": models}
@@ -1839,6 +1888,13 @@ async def _parts(runtime_id: Any, model_id: Any, conn: Any) -> tuple[RuntimeSpec
     runtime = await db.get_runtime(runtime_id, pool=conn) if isinstance(runtime_id, str) else None
     if runtime is None:
         raise RegistryError(f"no runtime {runtime_id!r}: give the runtime_id of a registered runtime")
+    if runtime["type"] == "acp":
+        from . import acp_reviewer_settings
+
+        try:
+            (await acp_reviewer_settings.read(pool=conn)).require_ready()
+        except ValueError as exc:
+            raise RegistryError(str(exc)) from None
     row = await db.lock_model(conn, model_id) if isinstance(model_id, str) else None
     if row is None:
         raise RegistryError(f"no model {model_id!r}: give the model_id of a registered model")
@@ -1864,6 +1920,8 @@ async def _check_fallbacks(conn: Any, candidate: AgentProfile) -> None:
             target = profiles.get(target_id)
             if target is None:
                 raise RegistryError(f"no fallback Agent Profile {target_id!r}")
+            if "acp" in (current.runtime.type, target.runtime.type):
+                raise RegistryError("ACP Reviewer pilot cannot enter or leave a Profile fallback")
             # The processor checks its fallback when it launches, as it does an inherited profile.
             check_roles(target, [role for role in servable_roles(current.runtime.capabilities, current.runtime.type)
                                  if role in runtimes.TOOL_ROLES])

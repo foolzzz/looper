@@ -33,6 +33,7 @@ STATUS: dict[ErrorCode, str] = {
     ErrorCode.INVALID: "400 Bad Request",
     ErrorCode.UNAUTHORIZED: "401 Unauthorized",
     ErrorCode.FORBIDDEN: "403 Forbidden",
+    ErrorCode.BLOCKED: "403 Forbidden",
     ErrorCode.NOT_FOUND: "404 Not Found",
     ErrorCode.CONFLICT: "409 Conflict",
     ErrorCode.EXPIRED: "410 Gone",
@@ -245,6 +246,8 @@ RESULTS: dict[str, dict[str, Any]] = {
         "workflow": {"type": ["object", "null"]},
         "waits": _array(), "roles": _array(), "supplements": _array(), "latest_progress": _NULL_STR,
         "result": _NULL_STR, "cost_usd": {"type": ["number", "null"]}, "concurrency": _OBJ, "gates": _array(),
+        "cost_by_role": _object({role: _object({"cost_usd": {"type": "number"}, "runs": _INT})
+                                 for role in ("planner", "worker", "reviewer", "explorer")}),
     }, [*_LISTED, "phase", "work_dir", "requirement", "steps", "waits", "supplements", "latest_progress", "result",
         "cost_usd", "concurrency"]),
     "task_pipeline": _object({

@@ -83,6 +83,7 @@ from .runtimes import TOOL_ROLES as TOOL_ROLE_NAMES, ApiProtocol, AuthKind, Capa
 from .system_prompt_mode import SystemPromptMode, system_prompt_mode
 
 if TYPE_CHECKING:
+    from .acp_reviewer_settings import AcpReviewerSettings
     from .runtimes import RuntimeAdapter
     from .runtimes.pricing import PriceSnapshot
 
@@ -153,6 +154,7 @@ class AgentType(str, Enum):
     LEADS_CHECK = "leads_check"
     OUTBOUND_CHECK = "outbound_check"
     MEMORY_DRAFT = "memory_draft"
+    EXPLORER = "explorer"
 
 
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
@@ -188,6 +190,7 @@ BUILTIN_SYSTEM_PROMPT_MODE = {
     AgentType.LEADS_CHECK: SystemPromptMode.REPLACE,
     AgentType.OUTBOUND_CHECK: SystemPromptMode.REPLACE,
     AgentType.MEMORY_DRAFT: SystemPromptMode.REPLACE,
+    AgentType.EXPLORER: SystemPromptMode.REPLACE,
 }
 
 
@@ -658,7 +661,7 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
     agent = AgentType(role) if role is not None else None
     harness = BUILTIN_SETTINGS.harness
     chosen, chosen_source = builtin_profile(agent.value if agent else None), Layer.BUILTIN
-    budget, budget_source = None, Layer.BUILTIN
+    budget, budget_source = (.50 if agent is AgentType.EXPLORER else None), Layer.BUILTIN
     env: dict[str, tuple[str, Layer]] = {}
     boundaries = layers.get((Layer.SYSTEM, None), EMPTY_LAYER).boundaries
     mode = role_system_prompt_mode(agent, layers)
@@ -672,9 +675,12 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
         if text is not None and not (layer is Layer.SYSTEM and _is_builtin_harness(text)):
             in_project = project_id if layer in (Layer.PROJECT, Layer.ROLE_PROJECT) else None
             harness = Harness(text, layer, in_project, from_role)
-        if values.profile is not None:
+        # Explorers have their own profile and cap; shared task defaults must
+        # not silently replace the deliberately cheaper built-in model.
+        own_explorer_layer = agent is not AgentType.EXPLORER or layer_role is AgentType.EXPLORER
+        if values.profile is not None and own_explorer_layer:
             chosen, chosen_source = values.profile, layer
-        if values.run_budget_usd is not None:
+        if values.run_budget_usd is not None and own_explorer_layer:
             budget, budget_source = values.run_budget_usd, layer
         for key, value in values.env:
             if value is None:
@@ -805,7 +811,7 @@ async def load_agent_settings(
         if row is None:
             raise SettingsError(f"the run's Agent Profile {profile_id!r} no longer exists")
         settings = replace(settings, profile=_stored_profile(row), profile_error=None, pricing_catalog=())
-    elif settings.profile_source is Layer.BUILTIN and AgentType(role) in SPAWN_ROLES:
+    elif settings.profile_source is Layer.BUILTIN and AgentType(role) in (*SPAWN_ROLES, AgentType.EXPLORER):
         # A spawned role's own built-in profile, seeded with the schema; without it the role does not run (another
         # model in its place would not be the one chosen for it).
         builtin = builtin_profile(AgentType(role).value)
@@ -834,6 +840,10 @@ async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSe
     from ..db import profile_registry
 
     target = settings.profile.fallback_profile_id
+    if target and settings.profile.runtime.type == "acp":
+        from .acp_guards import AcpFallbackError
+
+        raise AcpFallbackError("ACP Reviewer pilot cannot enter or leave a Profile fallback")
     if not target:
         return None
     try:
@@ -843,7 +853,12 @@ async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSe
         return None
     if row is None:
         return None
-    return await _check_profile_settings(replace(settings, profile=_stored_profile(row),
+    profile = _stored_profile(row)
+    if "acp" in (settings.profile.runtime.type, profile.runtime.type):
+        from .acp_guards import AcpFallbackError
+
+        raise AcpFallbackError("ACP Reviewer pilot cannot enter or leave a Profile fallback")
+    return await _check_profile_settings(replace(settings, profile=profile,
                                                  profile_error=None, pricing_catalog=()), role)
 
 
@@ -951,12 +966,16 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
 class Access(str, Enum):
     """What a run may do (the advisor RFC, section 6). ``full``: every tool; ``read_only``: no change to files (a
     Planner's); ``consult``: only the reading tools, in a resumed fork of a seat's session (an agent room consult);
-    ``advisor``: no tool at all, its system prompt replaced (an advisor's, a judge's or an outbound review's run)."""
+    ``explore``: fresh local reading tools without MCP, web or child agents;
+    ``advisor``: no tool at all, its system prompt replaced (an advisor's, a judge's or an outbound review's run);
+    ``platform_tools``: only session-bound server tools, with no local tools or installed capabilities."""
 
     FULL = "full"
     READ_ONLY = "read_only"
     CONSULT = "consult"
+    EXPLORE = "explore"
     ADVISOR = "advisor"
+    PLATFORM_TOOLS = "platform_tools"  # routed Manager: only the session-bound server tools, no local tools
 
 
 @dataclass(frozen=True)
@@ -976,6 +995,26 @@ class Launch:
     # Additional directories a read-only run may inspect, such as its steps' isolated worktrees.
     read_dirs: tuple[str, ...] = ()
     llmrec: LlmrecRoute | LlmrecSkip | None = None
+    # The outbound review's PreToolUse hook (``outbound_hook.ToolHook``) on a runtime with one; None: no hook.
+    tool_hook: Any = None
+    # Frozen only for ACP; existing launch signatures and records do not include it.
+    acp_reviewer: AcpReviewerSettings | None = None
+
+    def __post_init__(self) -> None:
+        if self.explore:
+            from .runtimes import RuntimeUnsupported
+
+            if self.read_only_mode is ReadOnly.CHECK:
+                raise RuntimeUnsupported(f"{self.runtime.label} cannot launch a read-only explorer")
+            # Explorer authority is independent of the parent's catalog and mounts.
+            object.__setattr__(self, "library", EMPTY_LIBRARY)
+            object.__setattr__(self, "knowledge", replace(self.knowledge, add_dirs=()))
+            object.__setattr__(self, "read_dirs", ())
+
+    @property
+    def explore(self) -> bool:
+        """A fresh local-reading run, without MCP, web tools or native children."""
+        return self.access_level is Access.EXPLORE
 
     @property
     def access_level(self) -> Access:
@@ -983,6 +1022,8 @@ class Launch:
         full)."""
         if self.access is not None:
             return self.access
+        if self.role is AgentType.EXPLORER:
+            return Access.EXPLORE
         return Access.READ_ONLY if self.role is AgentType.PLANNER else Access.FULL
 
     @property
@@ -1014,7 +1055,11 @@ class Launch:
         work in parallel through Looper's Workers, whose steps Looper tracks, which teammates would bypass. A run
         with no tools (``no_tools``) has none either."""
         return (self.profile.agent_teams and self.role is not AgentType.PLANNER and not self.read_only
-                and not self.no_tools)
+                and not self.no_tools and not self.platform_tools_only)
+
+    @property
+    def platform_tools_only(self) -> bool:
+        return self.access_level is Access.PLATFORM_TOOLS
 
     @property
     def no_tools(self) -> bool:
@@ -1027,7 +1072,7 @@ class Launch:
         """Whether the run must not change files: every access level but ``full``. A Planner plans and decides, and
         gives every change to a Worker; its runtime refuses the tools and commands that would change files where it
         can, and otherwise the Planner checks its task directory after each turn (``RuntimeAdapter.read_only``)."""
-        return self.access_level is not Access.FULL
+        return self.access_level not in (Access.FULL, Access.PLATFORM_TOOLS)
 
     @property
     def read_only_mode(self) -> ReadOnly:
@@ -1038,7 +1083,7 @@ class Launch:
     def steers(self) -> bool:
         """Whether the run is driven through its runtime's steering protocol (the probed capability of the
         registered runtime), so the Planner's messages reach it while it works."""
-        return Capability.STEER in self.profile.runtime.capabilities
+        return not self.explore and Capability.STEER in self.profile.runtime.capabilities
 
     @property
     def model(self) -> str:
@@ -1103,8 +1148,22 @@ class Launch:
     def _check_binding(self) -> None:
         from .runtimes import RuntimeUnsupported
 
+        if self.platform_tools_only and not self.runtime.supports_platform_tools_only:
+            raise RuntimeUnsupported(f"{self.runtime.label} cannot restrict a routed Manager session to platform tools")
         if self.settings.profile_error:
             raise RuntimeUnsupported(self.settings.profile_error)
+        if self.profile.runtime.type == "acp":
+            from .acp_reviewer_settings import check_pairing
+
+            if self.role is not AgentType.REVIEWER or self.consult:
+                raise RuntimeUnsupported("ACP Reviewer pilot runs only the Reviewer role")
+            if self.acp_reviewer is None:
+                raise RuntimeUnsupported("acp_reviewer launch settings are missing")
+            try:
+                check_pairing(self.acp_reviewer, self.profile.provider, self.model, self.effort,
+                              profile_effort=self.profile.effort)
+            except ValueError as exc:
+                raise RuntimeUnsupported(str(exc)) from exc
         if isinstance(self.profile, ResolvedAgentProfile):
             self.profile.resolved_model.check_runtime(self.profile.runtime, self.profile.effort)
 
@@ -1193,6 +1252,8 @@ class Launch:
         }
         if self.read_only:
             record["read_only"] = self.read_only_mode.value  # how it is kept from changing files
+        if self.explore:
+            record["access"] = self.access_level.value
         if self.env:
             record["env"] = {
                 "sha256": self.env_sha256,
@@ -1224,6 +1285,12 @@ class Launch:
         if self.profile.runtime.launcher is Launcher.TTADK and self.runtime.ttadk_tool is not None:
             if note := ttadk.launch_note(self.profile.runtime.executable or "ttadk", self.runtime.ttadk_tool):
                 record["ttadk_check"] = note
+        if self.profile.runtime.type == "acp" and self.acp_reviewer is not None:
+            from .runtimes.acp import record_command
+
+            config = self.acp_reviewer
+            record["acp_command"] = {"argv": record_command(config.command), "account": config.account,
+                "model": config.model, "config_dir_is_scratch": not bool(config.config_dir)}
         return {**record, **self.runtime.launch_record(self)}
 
 

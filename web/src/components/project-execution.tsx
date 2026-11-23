@@ -4,6 +4,19 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { ADVISOR_LIMITS, ROOM_LIMITS } from "@/lib/room";
 
+const SUBAGENT_LIMITS = [
+  { field: "subagent_budget_usd", label: "Budget per sub-agent (USD)", min: 0.01, max: 5, fallback: "0.50", help: "Inherits the Explorer role's budget, then 0.50 USD." },
+  { field: "subagent_task_budget_usd", label: "Sub-agent budget per task (USD)", min: 0.01, max: 50, fallback: "3.00", help: "Total explorer spend in one task." },
+  { field: "subagents_per_run", label: "Sub-agents per run", min: 0, max: 20, fallback: "4", help: "How many one Planner turn or Worker run may spawn." },
+  { field: "subagents_per_task", label: "Sub-agents per task", min: 0, max: 100, fallback: "20", help: "How many the task may spawn in all." },
+] as const;
+function limitError(value: string | undefined, min: number, max: number) {
+  if (!value?.trim()) return "";
+  const number = Number(value);
+  return !Number.isFinite(number) || number < min || number > max || (Number.isInteger(min) && !Number.isInteger(number))
+    ? `Use ${min}–${max}${Number.isInteger(min) ? " whole sub-agents" : " USD"}, or leave empty for the default.` : "";
+}
+
 /** The execution settings as the editor holds them: text, "" = inherit; a list is one item per line. */
 export type ExecutionDraft = Record<keyof ProjectExecution, string>;
 
@@ -29,12 +42,15 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "agent_room",
   "vault",
   ...ROOM_LIMITS.map((limit) => limit.field),
+  "subagents",
+  ...SUBAGENT_LIMITS.map((limit) => limit.field),
   "advisor",
   ...ADVISOR_LIMITS.map((limit) => limit.field),
   "advisor_fallback_profile",
   "advisor_internal_domains",
 ];
 const NUMBERS = new Set<keyof ProjectExecution>([
+  ...SUBAGENT_LIMITS.map((limit) => limit.field),
   "task_budget_usd",
   "supervise_interval_seconds",
   "max_step_retries",
@@ -132,6 +148,7 @@ export function ProjectExecutionFields({
             <option value="">Inherit: fail the task at once</option>
             <option value="fail">Fail the task at once</option>
             <option value="wrap_up">Let the Planner wrap up, then fail</option>
+            <option value="ask">先问你继续还是停（花费守卫启用限制时生效）</option>
           </select>
         </div>
         <div className="space-y-1">
@@ -405,6 +422,28 @@ export function ProjectExecutionFields({
                 </p>
               </div>
             ))}
+          </div>
+        </fieldset>
+        <fieldset className="rounded-md border border-border px-3 py-3 sm:col-span-2">
+          <legend className="px-1 text-xs font-medium text-muted-foreground">Sub-agents</legend>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground">Off by default. When on, the Planner and Workers get spawn tools; explorers are read-only and cost money.</p>
+            <Switch label="Sub-agents" checked={draft.subagents === "on"}
+              onChange={(checked) => onChange({ ...draft, subagents: checked ? "on" : "off" })} />
+          </div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {SUBAGENT_LIMITS.map(({ field, label: text, min, max, fallback, help }) => {
+              const error = limitError(draft[field], min, max);
+              return <div key={field} className="space-y-1">
+                {label(field, text)}
+                <Input id={`${idPrefix}-${field}`} value={draft[field] ?? ""} onChange={set(field)}
+                  inputMode={Number.isInteger(min) ? "numeric" : "decimal"} aria-invalid={!!error}
+                  aria-describedby={`${idPrefix}-${field}-help${error ? ` ${idPrefix}-${field}-error` : ""}`}
+                  placeholder={`${fallback} (${min}–${max})`} />
+                <p id={`${idPrefix}-${field}-help`} className="text-xs text-muted-foreground">{help}</p>
+                {error && <p id={`${idPrefix}-${field}-error`} role="alert" className="text-xs text-destructive">{error}</p>}
+              </div>;
+            })}
           </div>
         </fieldset>
         <div className="space-y-1">

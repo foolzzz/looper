@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping, Sequence
+import logging
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -14,6 +15,8 @@ import asyncpg
 
 from . import journal as db_journal
 from .connection import get_pool
+
+logger = logging.getLogger(__name__)
 
 # A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
 # (``start_ready_task``); a server start never resumes it.
@@ -43,6 +46,7 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
     "stopping": TaskGroup.IN_PROGRESS,
     # What the Planner reports while a user gate of the plan waits for the user (other steps may run meanwhile).
     "waiting_user": TaskGroup.NEEDS_YOU,
+    "awaiting_budget": TaskGroup.NEEDS_YOU,
     # No gate waits: a wait step holds the task and no step is running (plan-wait-step RFC, D8).
     "waiting": TaskGroup.IN_PROGRESS,
     # Started, its Planner starting (it used to wait here for room under its project's Planner limit).
@@ -76,7 +80,7 @@ STATUS_FILTERS: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "running": tuple(status for status, group in STATUS_GROUPS.items()
                      if group is TaskGroup.IN_PROGRESS and status not in ("waiting", "pending")),
     **{status: (status,) for status in (
-        READY, "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+        READY, "waiting", "waiting_user", "awaiting_budget", "pending", "completed", "failed", "cancelled", "stopped",
     )},
 })
 
@@ -318,6 +322,19 @@ async def names_and_projects_of(
                                           requirement=row["requirement"], task_id=row["id"])} for row in rows}
 
 
+# Called with a task's id when it leaves the active statuses or is reset for a restart (the server registers the
+# explorer cascade here); a failing listener never blocks the status change.
+task_ended_listeners: list[Callable[[str], Awaitable[None]]] = []
+
+
+async def _task_ended(task_id: str) -> None:
+    for listener in list(task_ended_listeners):
+        try:
+            await listener(task_id)
+        except Exception:
+            logger.warning("task %s: a task-end listener failed", task_id, exc_info=True)
+
+
 async def update_task_status(
     task_id: str,
     status: str,
@@ -354,6 +371,8 @@ async def update_task_status(
         attempt_ended_at,
         json.dumps(process_record, ensure_ascii=False) if process_record is not None else None,
     )
+    if status in ("completed", "failed", "cancelled", "stopped"):
+        await _task_ended(task_id)
 
 
 async def update_task_phase(
@@ -420,12 +439,14 @@ def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """A ``task_steps`` row as the plan and the task page read it: ``result`` and ``review_roles`` decoded, the array
     columns as lists."""
     step = dict(row)
-    for name in ("result", "review_roles", "ready_when", "accept_when"):
+    for name in ("result", "review_roles", "ready_when", "accept_when", "checks"):
         if isinstance(step.get(name), str):
             step[name] = json.loads(step[name])
     for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
                  "missed_messages"):
         step[name] = list(step.get(name) or [])
+    if not step.get("checks"):
+        step.pop("checks", None)
     return step
 
 
@@ -509,13 +530,14 @@ async def reset_task_for_restart(
     result = await pool.execute(
         """
         UPDATE tasks
-        SET status = 'pending', phase = 'pending',
+        SET status = 'pending', phase = 'pending', run_no = run_no + 1,
             error = NULL, completed_at = NULL, attempt_ended_at = NULL, fail_kind = NULL,
             result_summary = NULL, process_record = NULL, updated_at = now()
         WHERE id = $1
         """,
         task_id,
     )
+    await _task_ended(task_id)  # the previous attempt's explorers end with it, however briefly it is `pending`
     return result == "UPDATE 1"
 
 
@@ -548,16 +570,28 @@ async def mark_orphaned_tasks_stopped(
 ) -> int:
     """Mark the tasks a previous server left running as stopped, except ``keep`` (resumed instead)."""
     pool = pool or get_pool()
-    result = await pool.execute(
+    rows = await pool.fetch(
         """
         UPDATE tasks
         SET status = 'stopped', updated_at = now(), attempt_ended_at = now()
         WHERE status = ANY($1::text[]) AND completed_at IS NULL AND NOT (id = ANY($2::text[]))
+        RETURNING id
         """,
         list(ACTIVE_STATUSES), list(keep or []),
     )
-    count = int(result.split()[-1]) if result else 0
-    return count
+    from . import step_attempts, task_outcomes
+
+    task_ids = [row["id"] for row in rows]
+    if task_ids:
+        try:
+            await step_attempts.close_attempts_batch(task_ids, "task_ended", "stopped", pool=pool)
+        except Exception:
+            logger.exception("Failed to close orphaned task attempts")
+        try:
+            await task_outcomes.record_outcomes(task_ids, "stopped", "restart", pool=pool)
+        except Exception:
+            logger.exception("Failed to record orphaned task outcomes")
+    return len(rows)
 
 
 async def set_task_title(task_id: str, title: Any, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:
@@ -751,3 +785,21 @@ async def status_counts(*, manager_id: str | None = None, project_ids: Sequence[
         manager_id, project_ids,
     )
     return [dict(r) for r in rows]
+
+
+UNTRUSTED_SOURCES = ("leads", "intent")
+
+
+async def mark_untrusted(task_id: str, source: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
+    """Note that outside content (``source``: leads or an intent) went into the task; a mark is never removed."""
+    if source not in UNTRUSTED_SOURCES:
+        raise ValueError(f"untrusted input is one of {', '.join(UNTRUSTED_SOURCES)}")
+    pool = pool or get_pool()
+    await pool.execute("UPDATE tasks SET untrusted_inputs = untrusted_inputs || ARRAY[$2]::text[] "
+                       "WHERE id = $1 AND NOT ($2 = ANY(untrusted_inputs))", task_id, source)
+
+
+async def untrusted_inputs(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> tuple[str, ...]:
+    """The outside content that went into the task (``mark_untrusted``); none for a task that is gone."""
+    pool = pool or get_pool()
+    return tuple(await pool.fetchval("SELECT untrusted_inputs FROM tasks WHERE id = $1", task_id) or ())

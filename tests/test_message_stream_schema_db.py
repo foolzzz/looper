@@ -6,7 +6,7 @@ import pytest
 from looper.db import connection
 from tests import memory_support as memory
 from tests.bridge_schema_support import structure
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, dropped_tables, fresh_connection, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -52,24 +52,32 @@ def test_an_event_is_unique_per_source_and_goes_with_its_source(monkeypatch):
 
 
 def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
+    # The old stream predates explorer's widening of the same role constraint.
+    modules = connection._MIGRATIONS
+    monkeypatch.setattr(connection, "_MIGRATIONS", tuple(
+        migration for migration in modules if migration.name != "platform_subagents"))
     # A database older than the stream is older than the leads and intents made from it too, and than the memory
-    # candidates that point at leads.
+    # candidates that point at leads and triage events that point at stream runs.
     leads = ("intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
              "intent_type_projects", "intent_type_versions", "intent_types", "message_lead_people",
              "message_lead_sources", "message_leads")
-    tables = (*leads, "subscription_deliveries", "subscription_runs", "subscription_daily_claims", "subscriptions",
+    tables = ("triage_event_sources", "triage_events", *leads, "subscription_deliveries", "subscription_runs", "subscription_daily_claims", "subscriptions",
               "source_deletions", "source_events", "source_runs", "source_threads", "source_people", "source_chats",
               "event_sources")
 
     async def check(pool):
-        async with pool.acquire() as conn:
-            expected = await structure(conn)
-        await pool.execute(memory.DROP_MEMORY + "; ".join(f"DROP TABLE {table}" for table in tables)
-                           + "; DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions', "
-                           "'subscription_rules', 'subscription_lookback', 'message_leads')")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
+        monkeypatch.setattr(connection, "_MIGRATIONS", modules)
+        async with fresh_connection() as fresh:
+            await connection.ensure_schema(fresh)
+            expected = await structure(fresh)
+        await pool.execute(memory.DROP_MEMORY + "DROP FUNCTION triage_drop_event() CASCADE")
+        async with dropped_tables(pool, *tables):
+            await pool.execute("DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions', "
+                               "'subscription_rules', 'subscription_lookback', 'message_leads', 'event_triage', "
+                               "'event_triage_online')")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
             assert await structure(conn) == expected
@@ -83,7 +91,7 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
 def test_deleting_a_run_does_not_scan_the_events(monkeypatch):
     async def check(pool):
         index = await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE tablename = 'source_events' "
-                                    "AND indexdef LIKE '%(run_id)%'")
+                                    "AND indexdef LIKE '%(run_id)%' AND schemaname = current_schema()")
         assert index and "WHERE" in index
 
     run_db(check, monkeypatch, timeout=20)
@@ -91,19 +99,20 @@ def test_deleting_a_run_does_not_scan_the_events(monkeypatch):
 
 def test_existing_stream_gets_deletion_and_retention_schema(monkeypatch):
     async def check(pool):
-        await pool.execute("DROP TABLE source_deletions; ALTER TABLE event_sources DROP COLUMN retention_last_at; "
-                           "ALTER TABLE source_runs DROP COLUMN IF EXISTS skipped_by_deletion; "
-                           "DELETE FROM schema_migrations WHERE name = 'message_stream_deletions'")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        async with pool.acquire() as conn, conn.transaction():
-            await connection.ensure_schema(conn)
-            assert not await connection.schema_change_pending(conn)
-            locks = await conn.fetch(
-                "SELECT mode FROM pg_locks WHERE pid = pg_backend_pid() "
-                "AND relation = 'source_events'::regclass AND granted")
-            assert not {row["mode"] for row in locks} & {
-                "ShareLock", "ShareRowExclusiveLock", "ExclusiveLock", "AccessExclusiveLock"}
+        async with dropped_tables(pool, "source_deletions"):
+            await pool.execute("ALTER TABLE event_sources DROP COLUMN retention_last_at; "
+                               "ALTER TABLE source_runs DROP COLUMN IF EXISTS skipped_by_deletion; "
+                               "DELETE FROM schema_migrations WHERE name = 'message_stream_deletions'")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            async with pool.acquire() as conn, conn.transaction():
+                await connection.ensure_schema(conn)
+                assert not await connection.schema_change_pending(conn)
+                locks = await conn.fetch(
+                    "SELECT mode FROM pg_locks WHERE pid = pg_backend_pid() "
+                    "AND relation = 'source_events'::regclass AND granted")
+                assert not {row["mode"] for row in locks} & {
+                    "ShareLock", "ShareRowExclusiveLock", "ExclusiveLock", "AccessExclusiveLock"}
         await source(pool)
         assert await pool.fetchval("SELECT retention_last_at FROM event_sources") is None
         await pool.execute("INSERT INTO source_runs (source_id, mode, trigger, status) "

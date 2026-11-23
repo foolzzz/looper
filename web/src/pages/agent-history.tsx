@@ -1066,6 +1066,32 @@ function RunUsage({ record }: { record: RunRecord }) {
 
 type RunRecord = LlmRecord | LlmRecordSummary;
 
+/** A failed run's class and cause ("quota · usage limit"); null for a run without one. */
+function failureLabel(record: Pick<RunRecord, "failure_class" | "failure_cause">): string | null {
+  if (!record.failure_class) return null;
+  return [record.failure_class, record.failure_cause?.replaceAll("_", " ")].filter(Boolean).join(" · ");
+}
+
+const FAILURE_MEANING: Record<string, string> = {
+  quota: "its account's limit was reached",
+  transient: "a passing fault",
+  environment: "something on this machine or account needs fixing",
+  judgment: "needs a judgment",
+};
+
+function FailureLine({ record }: { record: RunRecord }) {
+  const label = failureLabel(record);
+  if (!label || !record.failure_class) return null;
+  const failure = record.metadata?.failure;
+  return (
+    <p className="text-xs text-muted-foreground">
+      Failure: {label} ({FAILURE_MEANING[record.failure_class]})
+      {failure?.resets_at && <> · the limit resets {formatDateTime(failure.resets_at)}</>}
+      {failure?.signal === "text" && <> · read from the runtime's error text</>}
+    </p>
+  );
+}
+
 export function RunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOpen: boolean }) {
   return initial.metadata?.session_reset ? (
     <SessionResetCard record={initial} />
@@ -1197,6 +1223,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOp
           {record.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
           {record.status}
         </Badge>
+        {failureLabel(record) && <Badge variant="outline" title="Why the run failed">{failureLabel(record)}</Badge>}
         <span className="text-muted-foreground">{formatMs(duration)}</span>
         {runProfile(record) && <span className="font-mono text-muted-foreground">{runProfile(record)?.name}</span>}
         {record.model && <span className="text-muted-foreground">{record.model}</span>}
@@ -1227,6 +1254,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOp
             <Button variant="outline" size="sm" className="min-h-11" onClick={() => void loadDetails()}>Retry</Button>
           </div>}
           {record.error && <p className="text-xs text-destructive">Error: {record.error}</p>}
+          <FailureLine record={record} />
           <LaunchCommand record={record} />
           <SystemPrompt record={record} />
           <LoadedLibrary record={record} />

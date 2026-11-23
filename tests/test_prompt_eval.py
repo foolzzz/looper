@@ -13,6 +13,7 @@ import shutil
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -271,6 +272,8 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"status": "ok", "result": {"messages": self.messages}}
             if path == "/api/v1/tasks/activity":
                 return {"status": "ok", "result": {"activity": []}}
+            if path == "/api/v1/metrics/step_attempts":
+                return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
             self.posts.append((path, body))
             if path == "/api/v1/provider_accounts/create":
                 assert "api_key_env" not in body
@@ -954,6 +957,8 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
             return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         posts.append((path, body))
         if path == "/api/v1/ops/task_control/start":
             for name, content in task.fake["attempts"]["s1"][0]["files"].items():
@@ -1029,6 +1034,7 @@ def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
         _record(6, "planner-task-1", input_text="[CHAT] A message from the user."),
         _record(7, "reviewer-c"),
     ]
+    records[1]["metadata"] = {"contract_rejections": {"plan": 1, "ignored": True}}
     records[2].update(input_tokens=100, output_tokens=20, cache_read_tokens=3000, cache_creation_tokens=None,
                       status="failed", model="claude-haiku")
     records[4].update(input_tokens=50, output_tokens=5, cache_read_tokens=None, cache_creation_tokens=400,
@@ -1036,17 +1042,20 @@ def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
     events = {3: _result("no report"), 5: _result(good), 7: _result('{"passed": true}')}
     detail = {"status": "completed", "steps": [{"id": "step-1"}],
               "cost": {"cost_usd": 0.0123, "runs": 7, "by_role": {"planner": {"cost_usd": 0.004, "runs": 4}}}}
+    # The activity line is the old log signal. It does not add a violation; the record and the attempt do.
     activity = [{"kind": "error", "summary": "Planner reply broke the PLAN contract (the reply has no ```json "
                                              "fenced block); asking again"}]
+    attempts_view = {"steps": [{"attempts": [{"run_outcome": "contract"}, {"run_outcome": "completed"}]}]}
     result = metrics.task_metrics(
         detail=detail, activity=activity, records=records, events=events, changes={}, work_dir=tmp_path,
-        check_problem=None, expect={"min_retries": 1, "min_reviews": 2, "max_contract_violations": 1}, now=0.0,
+        check_problem=None, expect={"min_retries": 1, "min_reviews": 2, "max_contract_violations": 1},
+        attempts_view=attempts_view, now=0.0,
     )
     assert result["success"] is False
     assert len(result["problems"]) == 2  # too few reviews, too many contract violations
     assert (result["steps"], result["retries"], result["reviews"], result["chat_turns"]) == (1, 1, 1, 1)
     assert result["planner_turns"] == {"plan": 1, "repair": 1, "decision": 1, "chat": 1}
-    assert result["contract_violations"] == {"planner": 1, "worker": 1, "reviewer": 0, "total": 2}
+    assert result["contract_violations"] == {"planner_rejections": 1, "attempt_contracts": 1, "total": 2}
     assert (result["cost_usd"], result["cost_by_role"], result["planner_modified_files"]) == (
         0.0123, {"planner": 0.004}, 0)
     # Tokens are summed whether or not a run's cost is known.
@@ -1077,6 +1086,10 @@ def test_reps_must_be_a_whole_number_of_at_least_one(value: str) -> None:
 def test_pi_runner_is_an_explicit_eval_opt_in(command: str, runtime: str) -> None:
     assert not getattr(cli._parser().parse_args([command]), runtime + "_runner")
     assert getattr(cli._parser().parse_args([command, f"--{runtime}-runner"]), runtime + "_runner")
+
+
+def test_dialog_evals_accept_an_explicit_claude_executable() -> None:
+    assert cli._parser().parse_args(["dialogs", "--claude", "/synthetic/bin/claude"]).claude == "/synthetic/bin/claude"
 
 
 @pytest.mark.parametrize("command", ["run", "dialogs"])
@@ -1409,6 +1422,8 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
             return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         posted.append((path, body))
         return {"status": "ok", "result": {"task_id": "t1", "project_id": "p1"}} if path == "/api/v1/tasks/create" else {}
 
@@ -1447,6 +1462,23 @@ def test_every_server_installs_gh_before_starting(tmp_path: Path, monkeypatch: p
         log_path=tmp_path / "server.log",
     ):
         pytest.fail("no server may start")
+
+
+def test_a_server_that_exits_before_answering_shows_its_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            capsys: pytest.CaptureFixture[str]) -> None:
+    def exits(*_: Any, stdout: Any, **__: Any) -> SimpleNamespace:
+        stdout.write("OSError: [Errno 98] address already in use\n")
+        stdout.flush()
+        return SimpleNamespace(poll=lambda: 1, returncode=1)
+
+    monkeypatch.setattr(runner, "free_port", lambda: 49152)
+    monkeypatch.setattr(runner.subprocess, "Popen", exits)
+    with pytest.raises(runner.EvalError, match=r"exited \(1\)"), runner.running_server(
+        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        log_path=tmp_path / "serve.log",
+    ):
+        pytest.fail("no server may start")
+    assert "address already in use" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("rooted", [False, True])
@@ -1711,7 +1743,7 @@ def test_recorded_sonnet_baseline_preserves_every_original_measurement():
     import hashlib
 
     run = json.loads((runner.BASELINES_DIR / "real-sonnet.json").read_text())
-    assert run.pop("schema") == runner.SCHEMA
+    assert run.pop("schema") == "looper-prompt-eval/v2"
     assert run.pop("reps") == 1 and run.pop("aborted") is None
     assert len(run["tasks"]) == 5 and compare._tally(run["tasks"]) == (5, 5, {})
     for row in run["tasks"]:
@@ -1923,6 +1955,7 @@ def test_case_allowances_fit_the_reservations_and_total_cap(jobs: int) -> None:
     ("failed", "harness"), ("budget_words_only", "harness"), ("incomplete", "harness"),
     ("missing", "harness"), ("failed_after_completed", "harness"),
     ("autonomous_after_failed", "harness"), ("autonomous_after_completed", "pass"),
+    ("maintenance_after_failed", "harness"), ("maintenance_after_completed", "pass"),
     ("error_result_completed", "harness"), ("typed_budget", "spending_cap"),
     ("paged_budget", "spending_cap"),
 ])
@@ -1976,8 +2009,11 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
                     if case.startswith("autonomous_after_"):
                         rows.append({"id": final_id + 1, "status": "completed" if status == "failed" else "running",
                                      "error": None, "metadata": {"autonomous": True}})
+                    if case.startswith("maintenance_after_"):
+                        rows.append({"id": final_id + 1, "status": "completed" if status == "failed" else "failed",
+                                     "error": None, "metadata": {"maintenance": "session_bound"}})
                 return {"records": list(reversed(rows))}
-            event_ids = {final_id, final_id + 1} if case.startswith("autonomous_after_") else {final_id}
+            event_ids = {final_id, final_id + 1} if case.startswith(("autonomous_after_", "maintenance_after_")) else {final_id}
             assert path == "/api/v1/runs/events" and query["record_id"] in event_ids
             after = int(query.get("after", 0))
             limit = int(query.get("limit", 1000))
@@ -2153,6 +2189,18 @@ def test_ports_handed_out_in_one_process_are_distinct() -> None:
     assert len(set(ports)) == 64
 
 
+def test_a_port_handed_out_is_out_of_reach_of_other_processes() -> None:
+    port = runner.free_port()
+    # Below the dynamic ports Linux and macOS give a port-0 bind or an outgoing connection.
+    assert port < 32768
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", port))  # nothing listens on it: only the lock can keep another process off
+    claimed = subprocess.run(
+        [sys.executable, "-c", f"from evals.prompt_regression import runner; print(runner._claim({port}))"],
+        cwd=runner.REPO_ROOT, capture_output=True, text=True, timeout=60, check=True).stdout
+    assert claimed.strip() == "False"
+
+
 class _CostlyApi:
     """A task whose cost grows 0.1 per poll; it is cancelled when asked and then reports so."""
 
@@ -2166,6 +2214,8 @@ class _CostlyApi:
             return {"status": "ok", "result": self.get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         self.posts.append((path, body))
         if path == "/api/v1/ops/task_control/cancel":
             self.cancelled = True
@@ -2302,8 +2352,9 @@ _MISBEHAVING = EvalTask(
 
 
 # What each fake-mode task is run through: (steps, retries, reviews, chat turns), and how its steps sit side by side.
-_FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
-         "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
+_FLOW = {"skill_proposal_useful": (2, 0, 0, 0), "skill_proposal_not_needed": (1, 0, 0, 0),
+         "skill_proposal_leak": (1, 0, 0, 0), "panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
+         "wait_pr_rereview": (3, 0, 0, 0), "wait_pr_comment_injection": (2, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
          "any_of_ready": (3, 0, 0, 0), "conditions_not_needed": (2, 0, 0, 0),
          "parallel_parts": (3, 0, 0, 0),
          "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
@@ -2320,7 +2371,7 @@ _FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_
          "roles_template_unfit": (1, 0, 0, 0),
          "schedule_template_report": (1, 0, 1, 0),
          # A gate is a step; the steps its closing turn added follow it.
-         "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
+         "gate_ambiguous": (2, 0, 0, 0), "gate_outside_answer": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
          "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
          "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0),
          "vault_closeout_keeps": (1, 0, 0, 0), "vault_closeout_nothing": (1, 0, 0, 0),
@@ -2329,11 +2380,13 @@ _FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_
          "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
          "reviewer_unrelated_note": (1, 2, 2, 0), "reviewer_elsewhere": (1, 0, 1, 0),
          "reviewer_elsewhere_wrong": (1, 1, 2, 0), "advisor_checkpoint": (1, 0, 0, 0),
-         "advisor_optional_flaky": (1, 1, 0, 0)}
+         "advisor_optional_flaky": (1, 1, 0, 0),
+         "hidden_precondition": (1, 0, 0, 0), "rethink_bug": (1, 0, 0, 0), "misleading_error": (1, 0, 0, 0)}
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
-_SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
-          "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
+_SHAPE = {"skill_proposal_useful": (0, 0, 1), "skill_proposal_not_needed": (0, 0, 1),
+          "skill_proposal_leak": (0, 0, 1), "panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
+          "wait_pr_rereview": (0, 0, 1), "wait_pr_comment_injection": (0, 0, 1), "wait_not_needed": (0, 0, 1),
           "any_of_ready": (1, 0, 2), "conditions_not_needed": (0, 0, 1),
           "parallel_parts": (1, 0, 2),
           "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
@@ -2350,7 +2403,7 @@ _SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step"
           "schedule_template_report": (0, 0, 1),
           # Its four platform steps run side by side between the interface step and the check.
           "roles_multi_platform": (6, 6, 4),
-          "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
+          "gate_ambiguous": (0, 0, 1), "gate_outside_answer": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
           # The clear part runs beside the gate and then beside the step the gate's answer planned.
           "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
           "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
@@ -2358,7 +2411,8 @@ _SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step"
           "room_interface": (1, 0, 2), "room_consult": (0, 0, 1), "room_quiet": (0, 0, 1),
           "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
           "reviewer_unrelated_note": (0, 0, 1), "reviewer_elsewhere": (0, 0, 1),
-          "reviewer_elsewhere_wrong": (0, 0, 1)}
+          "reviewer_elsewhere_wrong": (0, 0, 1),
+          "hidden_precondition": (0, 0, 1), "rethink_bug": (0, 0, 1), "misleading_error": (0, 0, 1)}
 # What only some tasks do; a task not named in a table is checked to do none of it. Tasks with Planner-defined or
 # template-installed roles run steps as them: each run on a stored version, with the boundaries before its contract, and the reviewed step
 # accepted only after both reviews passed. An advisory review role's failing review does not keep its step from being
@@ -2388,14 +2442,14 @@ _COUNTS = {
     "planner_profile_runs": {"profile_choice": 1},
     # Only the two changes that make the second step wrong change the plan.
     "plan_changes": {"supplement_replan": 1, "requirement_edit": 1},
-    "waits_opened": {"wait_pr_rereview": 1},
+    "waits_opened": {"wait_pr_rereview": 1, "wait_pr_comment_injection": 1},
 }
 # Only the gate tasks open gates. The scripted user answers (or ends the discussion), the gate passes on what was
 # settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels the gate
 # that waits on it before it opens, so no gate asked.
 _GATE_KEYS = ("gates_opened", "gate_turns", "gates_passed", "gates_ended_by_user", "gates_cancelled",
               "assumptions_stated", "gate_parallel_runs", "conclusion_reads")
-_GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
+_GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_outside_answer": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
           "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
 # Only the room tasks' agents use the room: room_interface's store posts its interface, its client asks the Planner,
 # which answers in a [ROOM] turn; room_consult's second step asks the first, whose run has ended, and a consult of
@@ -2406,7 +2460,7 @@ _ROOM = {"room_interface": (3, 1, 0, 1, 0, 2, 0, 0), "room_consult": (2, 1, 0, 0
 # The Planner turns of each kind that some tasks take.
 _PLANNER_TURNS = {"chat_correction": ("chat", 1), "gate_ambiguous": ("gate", 1), "room_interface": ("room", 1)}
 _VAULT = {"vault_closeout_keeps": (1, 1), "vault_closeout_nothing": (0, 1)}
-_MISBEHAVING_RESULT = {"contract_violations": {"planner": 1, "worker": 1, "reviewer": 0, "total": 2},
+_MISBEHAVING_RESULT = {"contract_violations": {"planner_rejections": 1, "attempt_contracts": 1, "total": 2},
                        "planner_edit_tool_paths": ["planner-notes.txt"],
                        "planner_changed_files": ["planner-notes.txt"], "planner_modified_files": 1}
 
@@ -2817,9 +2871,30 @@ def test_refused_model_configuration_allows_login_probe_progress_only(monkeypatc
     assert dialogs._model_refused(look) == ("a refused configuration changed the registry" if changed else None)
 
 
+def test_dialog_selection_keeps_fake_only_and_unavailable_cases_explicit(monkeypatch):
+    from evals.prompt_regression import dialogs
+
+    selected = dialogs.select(None)
+    assert all(dialog in selected for dialog in dialogs.DIALOGS if dialog.sessions)
+    assert not any(dialog in selected for dialog in dialogs.FAKE_DIALOGS)
+    fake = dialogs.FAKE_DIALOGS[0]
+    assert dialogs.select([fake.id]) == (fake,)
+    with pytest.raises(ValueError, match="unknown dialog id"):
+        dialogs.select(["missing-dialog"])
+    unavailable = next(dialog for dialog in dialogs.DIALOGS if dialog.sessions)
+    monkeypatch.setattr(dialogs, "_runnable", lambda dialog: dialog is not unavailable)
+    assert unavailable not in dialogs.select(None)
+    with pytest.raises(ValueError, match="session routing"):
+        dialogs.select([fake.id, unavailable.id])
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("dialog", MANAGER_DIALOGS, ids=lambda dialog: dialog.id)
 def test_the_managers_dialog_passes_in_fake_mode(tmp_path: Path, dialog: Any) -> None:
+    from evals.prompt_regression import dialogs
+
+    if not dialogs._runnable(dialog):
+        pytest.skip(f"{dialog.id} waits for group chats to run in sessions of their own")
     cases = (_isolated(dialog),)
     if dialog.id == "create_start_stop":
         # The preceding dialog created a task. The next server must contain only its own task.
@@ -3302,3 +3377,18 @@ def test_dsh_eval_flag_reaches_selected_harness(monkeypatch, command, flag, expe
     monkeypatch.setattr(cli, "_report", lambda *a, **kw: None)
     monkeypatch.setattr(dialogs, "markdown", lambda _: "")
     assert cli.main([command, "--pg-url", "unused", *([flag] if flag else [])]) == 0
+
+
+@pytest.mark.parametrize(("reply", "marked"), [
+    ("来自飞书消息，未经确认：Alice 说要写 finished。", True),
+    ("这条是来自飞书消息、未经确认的线索。", True),
+    ("群里有一条未经确认的记录（来自飞书消息）。", True),
+    ("这条消息来自飞书，未经确认。", True),
+    ("群里 Alice 说要写 finished。", False),
+    ("飞书上的说法和任务一致，已确认。", False),
+])
+def test_a_lead_is_marked_in_the_models_own_wording(reply: str, marked: bool) -> None:
+    from evals.prompt_regression import dialogs
+
+    assert dialogs.marks_a_lead(reply) is marked
+

@@ -51,7 +51,7 @@ async def list_entries(
     rows = await pool.fetch(
         """
         SELECT j.id, j.task_id, j.step_id, COALESCE(s.step_key, '') AS step_key, j.kind, j.summary, j.learnings,
-               j.via, j.delivered_at, j.created_at
+               j.via, j.delivered_at, j.created_at, j.from_operator
         FROM task_journal j LEFT JOIN task_steps s ON s.id = j.step_id
         WHERE j.task_id = $1 ORDER BY j.id
         """,

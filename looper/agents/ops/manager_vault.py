@@ -64,15 +64,15 @@ async def _search(call: Call) -> dict[str, Any]:
     config = await _config()
     found = await vault.search(config, call.arguments["query"], call.arguments.get("limit"))
     _remember(call.manager_id, ((result["path"], result["snippet"]) for result in found["results"]))
-    return {"notice": NOTICE, **found}
+    return await vault.model_result(config, {"notice": NOTICE, **found})
 
 
 async def _read(call: Call) -> dict[str, Any]:
     config = await _config()
     note = await vault.read(config, call.arguments["path"])
     _remember(call.manager_id, [(note["path"], note["content"])])
-    return {"notice": NOTICE, "path": note["path"], "bytes": note["bytes"], "content": note["content"],
-            "truncated": note["truncated"]}
+    return await vault.model_result(config, {"notice": NOTICE, "path": note["path"], "bytes": note["bytes"],
+                                             "content": note["content"], "truncated": note["truncated"]})
 
 
 _SCHEMAS = {tool.name: tool.schema for tool in TASK_TOOLS}

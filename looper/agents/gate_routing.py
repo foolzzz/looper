@@ -31,7 +31,7 @@ from typing import Any
 
 from ..db import user_gates as db_user_gates
 from .bus import MessageBus
-from .gate_service import HTTP_409, origin_chat, post_message, receipt, task_name
+from .gate_service import HTTP_409, origin_chat, post_message, receipt, sender_is_operator, task_name
 from .message import AgentAddress, MessageEnvelope, is_lark
 from .projects import RequestError
 from .user_gates import MESSAGE_MAX_CHARS, GateState
@@ -128,7 +128,9 @@ async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus,
         try:
             posted = await post_message(task_id, label, {"text": "" if end else text},
                                         has_planner=has_planner(task_id), bus=bus, source=source, via=channel,
-                                        end=end, origin=origin)
+                                        end=end, origin=origin, from_operator=await sender_is_operator(
+                                            channel_id, channel, group=_group(channel, context),
+                                            sender=str(context.get("sender_id") or context.get("user_id") or "")))
         except RequestError as exc:
             if exc.status != HTTP_409:
                 logger.info("a %s reply to gate %s of task %s was refused: %s", channel, label, task_id, exc)

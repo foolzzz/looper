@@ -50,6 +50,7 @@ import {
   type TaskRole,
 } from "@/lib/api";
 import { subscriptionPreset, type SubscriptionPresetFields } from "@/lib/api-leads";
+import { callV1 } from "@/lib/v1";
 import { roleLabel } from "@/lib/runtime-catalog";
 import {
   scheduleNotifyOptions,
@@ -130,6 +131,26 @@ function formatInZone(iso: string | null, timeZone?: string): string {
     formats.set(timeZone ?? "", format);
   }
   return format.format(date);
+}
+
+/** A usage-window wait in the schedule's own zone. */
+export function usageWindowWait(until: string, timeZone?: string): string {
+  return `Waiting for a usage window until ${formatInZone(until, timeZone)}`;
+}
+
+/** The schedules list's next-run line. Null when the caller shows "Next" plus the schedule's own time.
+ * A disabled schedule stays labeled Disabled when it is also waiting. */
+export function listNextRun(schedule: {
+  enabled: boolean;
+  timezone?: string;
+  next_fire_at?: string | null;
+  usage_hold?: { until: string } | null;
+}): string | null {
+  const hold = schedule.usage_hold ? usageWindowWait(schedule.usage_hold.until, schedule.timezone) : null;
+  if (!schedule.enabled) return hold ? `Disabled · ${hold}` : "Disabled";
+  if (hold) return hold;
+  if (!schedule.next_fire_at) return "No next run";
+  return null;
 }
 
 /** A `<time>` in a schedule's zone (see `formatInZone`). */
@@ -295,10 +316,10 @@ function isDirectChat(chat: string): boolean {
   return /^(?:ou_[0-9A-Za-z]+|[1-9][0-9]{0,19})$/.test(chat);
 }
 
-type OutputKind = "" | "push" | "leads" | "intents";
+type OutputKind = "" | "push" | "leads" | "intents" | "triage";
 
 function outputKindOf(value: string | undefined): OutputKind {
-  return value === "push" || value === "leads" || value === "intents" ? value : "";
+  return value === "push" || value === "leads" || value === "intents" || value === "triage" ? value : "";
 }
 
 function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
@@ -1507,7 +1528,7 @@ function subDraftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): SubD
   };
 }
 
-/** Fill a new subscription from a preset. An intents preset drops a group target: it only pushes to a direct chat. */
+/** Fill a new subscription from a preset, keeping only targets supported by its output kind. */
 function draftFromPreset(current: SubDraft, fields: SubscriptionPresetFields): SubDraft {
   const sub = fields.subscription;
   const chat = current.notifyTarget.includes("\n") ? current.notifyTarget.slice(current.notifyTarget.indexOf("\n") + 1) : "";
@@ -1519,7 +1540,7 @@ function draftFromPreset(current: SubDraft, fields: SubscriptionPresetFields): S
     ...(sub.exclude_mentions_me === undefined ? {} : { excludeMe: sub.exclude_mentions_me }),
     history: sub.include_history, maxAge: String(sub.max_age_minutes), maxEvents: String(sub.max_events),
     textChars: String(sub.text_max_chars), quiet: sub.quiet_word, header: sub.output_header, outputKind: sub.output_kind,
-    notifyTarget: sub.output_kind === "intents" && chat && !isDirectChat(chat) ? "" : current.notifyTarget,
+    notifyTarget: sub.output_kind === "triage" || (sub.output_kind === "intents" && chat && !isDirectChat(chat)) ? "" : current.notifyTarget,
   };
 }
 
@@ -1573,6 +1594,15 @@ function SubscriptionForm({
   onTask?: () => void;
 }) {
   const [draft, setDraft] = useState(() => subDraftOf(schedule, limits));
+  const [triageEnabled, setTriageEnabled] = useState(false);
+  useEffect(() => {
+    if (schedule) return;
+    let alive = true;
+    callV1<{ enabled: boolean }>("/api/v1/triage_settings/get", {}).then((result) => {
+      if (alive) setTriageEnabled(!("status" in result) && result.enabled);
+    }).catch(() => { if (alive) setTriageEnabled(false); });
+    return () => { alive = false; };
+  }, [schedule]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -1600,7 +1630,7 @@ function SubscriptionForm({
   const targets = limits.notify_targets;
   const shownTargets = draft.outputKind === "intents" ? targets.filter((target) => isDirectChat(target.chat)) : targets;
   const gone = draft.notifyTarget && !shownTargets.some((t) => targetKey(t) === draft.notifyTarget) ? targetOf(draft.notifyTarget) : null;
-  const applyPreset = async (outputKind: "leads" | "intents") => {
+  const applyPreset = async (outputKind: "leads" | "intents" | "triage") => {
     setBusy(true);
     setError("");
     try {
@@ -1650,6 +1680,7 @@ function SubscriptionForm({
         <div className="flex flex-wrap gap-2">
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("leads")}>消息线索</Button>
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("intents")}>意图识别</Button>
+          {triageEnabled && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("triage")}>事件分流</Button>}
         </div>
       )}
       <div className="grid gap-3 sm:grid-cols-2">
@@ -1691,6 +1722,9 @@ function SubscriptionForm({
 
       <fieldset className="space-y-2 border-t border-border pt-4">
         <legend className={cn(LABEL, "mb-1")}>What a run reads</legend>
+        {draft.outputKind === "triage" ? (
+          <p className="text-xs text-muted-foreground">固定范围：私聊、@你的消息、你自己发的消息和已登记的告警机器人；不读导入历史和 Looper 自己的应用。</p>
+        ) : <>
         <div className="flex flex-wrap gap-x-5 gap-y-1">
           {CHAT_KIND_OPTIONS.map((option) => (
             <label key={option.value} className="flex min-h-11 items-center gap-2 text-xs sm:min-h-0">
@@ -1711,20 +1745,22 @@ function SubscriptionForm({
             <input type="checkbox" className="h-4 w-4 accent-primary" checked={draft.history}
               onChange={(e) => set("history", e.target.checked)} />Include history and imports</label>
         </div>
+        </>}
         <div className="grid gap-3 sm:grid-cols-3">
           {([["maxAge", "Look back (minutes)", "Older messages are dropped and counted."], ["maxEvents", "Newest messages (at most)", "More are cut, oldest first."],
             ["textChars", "Characters per message", "Each message is cut to this many."]] as const).map(([key, label, hint]) => (
             <div key={key} className="space-y-1">
-              <label htmlFor={id(key)} className={LABEL}>{label}</label>
+              <label htmlFor={id(key)} className={LABEL}>{key === "maxEvents" && draft.outputKind === "triage" ? "每次最多消息数" : label}</label>
               <Input id={id(key)} inputMode="numeric" value={draft[key]} onChange={(e) => set(key, e.target.value)} />
-              <p className="text-xs text-muted-foreground">{hint}</p>
+              <p className="text-xs text-muted-foreground">{key === "maxEvents" && draft.outputKind === "triage" ? "按最旧消息优先读取，读不完的下一次继续。" : hint}</p>
             </div>))}
         </div>
       </fieldset>
 
       <fieldset className="space-y-2 border-t border-border pt-4">
-        <legend className={cn(LABEL, "mb-1")}>What it pushes</legend>
+        <legend className={cn(LABEL, "mb-1")}>{draft.outputKind === "triage" ? "结果与预算" : "What it pushes"}</legend>
         <div className="grid gap-3 sm:grid-cols-2">
+          {draft.outputKind !== "triage" && <>
           <div className="space-y-1">
             <label htmlFor={id("quiet")} className={LABEL}>Quiet word</label>
             <Input id={id("quiet")} value={draft.quiet} onChange={(e) => set("quiet", e.target.value)} spellCheck={false} />
@@ -1735,6 +1771,7 @@ function SubscriptionForm({
             <Input id={id("header")} value={draft.header} onChange={(e) => set("header", e.target.value)} />
             <p className="text-xs text-muted-foreground">Written above the reply; @ marks in the reply are removed.</p>
           </div>
+          </>}
           <div className="space-y-1">
             <label htmlFor={id("budget")} className={LABEL}>Spend cap per run (USD) *</label>
             <Input id={id("budget")} inputMode="decimal" value={draft.budget} onChange={(e) => set("budget", e.target.value)} />
@@ -1744,6 +1781,7 @@ function SubscriptionForm({
             <Input id={id("daily")} inputMode="decimal" value={draft.dailyBudget} onChange={(e) => set("dailyBudget", e.target.value)} placeholder="No daily cap" />
           </div>
           <div className="space-y-1">
+            {draft.outputKind === "triage" ? <p className="text-xs text-muted-foreground">结果仅存储，暂不发送；重要事件等待管家交接，摘要等待晨报接入。</p> : <>
             <label htmlFor={id("target")} className={LABEL}>Push to</label>
             <select id={id("target")} value={draft.notifyTarget} onChange={(e) => set("notifyTarget", e.target.value)} className={SELECT}>
               <option value="">Dashboard only</option>
@@ -1756,6 +1794,7 @@ function SubscriptionForm({
               A direct chat or a bound group. Changing it, the rule or the zone, or turning the subscription on, asks you to
               confirm before anything is pushed; until then the output stays on this page.
             </p>
+            </>}
           </div>
           <Choices name={id("notify")} legend="Failures" value={draft.notify} onChange={(value) => set("notify", value)}
             options={scheduleNotifyOptions("agent", 3).filter((option) => option.value !== "always")} />
@@ -1810,6 +1849,7 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
   const [error, setError] = useState("");
   const [moved, setMoved] = useState("");
   if (!sub) return null;
+  const triage = sub.output_kind === "triage";
   const target = schedule.notify_target;
   const close = () => { setPanel(""); setError(""); };
   const openConfirm = async () => {
@@ -1845,7 +1885,10 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
   return (
     <div className="basis-full space-y-2 text-xs">
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
-        {target ? (sub.target_confirmed_at
+        {triage ? (sub.target_confirmed_at
+          ? <><CheckCircle2 className="h-3.5 w-3.5 text-success" aria-hidden="true" />事件分流已确认：结果仅存储，暂不发送。</>
+          : <><AlertCircle className="h-3.5 w-3.5 text-warning" aria-hidden="true" /><span className="text-warning">事件分流尚未确认：确认后才读取消息。</span></>)
+          : target ? (sub.target_confirmed_at
           ? <><CheckCircle2 className="h-3.5 w-3.5 text-success" aria-hidden="true" />Pushes to {target.channel} · {target.chat}, confirmed {formatInZone(sub.target_confirmed_at, schedule.timezone)}</>
           : <><AlertCircle className="h-3.5 w-3.5 text-warning" aria-hidden="true" /><span className="text-warning">Push target not confirmed: output stays on this page.</span></>)
           : "Dashboard only: nothing is pushed."}
@@ -1855,14 +1898,14 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
         {!!sub.uncertain_deliveries && <span className="text-warning" role="status">
           {sub.uncertain_deliveries} message{sub.uncertain_deliveries === 1 ? "" : "s"} of the last 7 days may not have been sent
           (cut off while sending; never sent again)</span>}
-        {target && !sub.target_confirmed_at && panel !== "confirm" && (
-          <Button type="button" variant="outline" size="sm" onClick={openConfirm} className="h-11 sm:h-7">Confirm push target…</Button>)}
+        {(triage || target) && !sub.target_confirmed_at && panel !== "confirm" && (
+          <Button type="button" variant="outline" size="sm" onClick={openConfirm} className="h-11 sm:h-7">{triage ? "确认事件分流…" : "Confirm push target…"}</Button>)}
         {panel !== "reset" && <Button type="button" variant="ghost" size="sm" onClick={() => { setPanel("reset"); setMoved(""); }} className="h-11 sm:h-7">Reset cursor…</Button>}
       </p>
       {moved && <p role="status" className="text-muted-foreground">{moved}</p>}
       {panel === "confirm" && (
         <section role="group" aria-labelledby={`${id}-confirm`} className="space-y-2 rounded-md border border-warning/50 bg-muted/20 p-3">
-          <h4 id={`${id}-confirm`} className="font-semibold">Confirm the push target</h4>
+          <h4 id={`${id}-confirm`} className="font-semibold">{triage ? "确认事件分流" : "Confirm the push target"}</h4>
           {text == null && !error ? <Loader2 className="h-4 w-4 animate-spin" aria-label="Loading" />
             : <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">{text}</pre>}
           {error && <p role="alert" className="text-destructive">{error}</p>}
@@ -1897,11 +1940,18 @@ const SKIP_LABELS: Record<NonNullable<SubscriptionRunInfo["skip_reason"]>, strin
   blocked_by_hook: "a prompt hook blocked it", invalid_reply: "its reply could not be read, twice",
 };
 
+function triageCountLine(counts: NonNullable<SubscriptionRunInfo["extract_counts"]>): string | null {
+  if (typeof counts.important !== "number") return null;
+  const dropped = counts.dropped ? Object.values(counts.dropped).reduce((sum, value) => sum + value, 0) : 0;
+  return `important ${counts.important} · digest ${counts.digest ?? 0} · ignore ${counts.ignore ?? 0} · uncited ${counts.uncited ?? 0} · raised ${counts.raised ?? 0} · dropped ${dropped}`;
+}
+
 /** What a subscription run read and made, under its line of the history. */
 function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
   const sub = run.subscription;
   if (!sub) return null;
   const dropped = [sub.events_too_old && `${sub.events_too_old} too old`, sub.events_over_cap && `${sub.events_over_cap} over the cap`].filter(Boolean);
+  const counts = sub.extract_counts ? triageCountLine(sub.extract_counts) : null;
   return (
     <div className="min-w-0 text-xs sm:basis-full">
       <p className="text-muted-foreground">
@@ -1910,6 +1960,7 @@ function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
         {" · "}events {sub.from_seq + 1}–{sub.to_seq}
         {sub.deliveries && sub.deliveries.length > 0 && ` · messages: ${sub.deliveries.map((d) => `${d.segment} ${d.state}`).join(", ")}`}
       </p>
+      {counts && <p className="text-muted-foreground">{counts}</p>}
       {sub.output_text && (
         <details className="mt-1">
           <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">Output</summary>
@@ -2135,7 +2186,7 @@ function CommandRun({ run, timeZone, linked }: { run: ScheduleRunInfo; timeZone:
     ["Scheduled", formatInZone(run.scheduled_for, timeZone)],
     ["Started", formatInZone(run.started_at, timeZone)],
     ["Finished", formatInZone(run.finished_at, timeZone)],
-    ["Duration", !run.started_at || ["skipped_overlap", "skipped_missed", "skipped_gate", "skipped_budget"].includes(run.status) ? "—" : durationText(run) ?? "—"],
+    ["Duration", !run.started_at || ["skipped_overlap", "skipped_missed", "skipped_gate", "skipped_budget", "skipped_busy"].includes(run.status) ? "—" : durationText(run) ?? "—"],
     ["Trigger", triggerText(run)],
   ] as const;
   return (
@@ -2598,11 +2649,16 @@ export function ProjectSchedulesSection({
             const sid = schedule.schedule_id;
             const state = row(sid);
             const enabled = switching[sid] ?? schedule.enabled;
-            const next = schedule.enabled
-              ? schedule.next_fire_at
+            const hold = schedule.usage_hold
+              ? usageWindowWait(schedule.usage_hold.until, schedule.timezone)
+              : null;
+            const next = !schedule.enabled
+              ? hold ? `Disabled · ${hold}` : "Disabled"
+              : hold
+              ? hold
+              : schedule.next_fire_at
                 ? `next ${formatInZone(schedule.next_fire_at, schedule.timezone)}`
-                : "no next run"
-              : "Disabled";
+                : "no next run";
             return (
               <CollapsibleRow
                 key={sid}

@@ -232,7 +232,7 @@ ManagerOps.call / 客户端工具 / PlannerOps.call:
 
 - **做法：** 审查打开时，Looper 在给 Claude Code 的 `--settings` JSON 里加一个 PreToolUse 钩子：一条命令，把 `tool_name` 和 `tool_input` 交给 Looper 的 `/api/agent/v1/outbound/check`（用这次运行自己的本地令牌）。Looper 判定级别后：既不是 external、也不是要审查的 unknown（Shell，按 D12 的范围）就立刻放行；否则审查，拦截时钩子返回 deny 和理由，Claude Code 不执行这次调用，模型看到理由。
 - **级别从哪来：**
-  - **外部 MCP 工具：** 操作者在安装 MCP 服务器时声明它的工具级别（目录项的类型化字段，默认 `inside`；可以按工具覆盖）。只按声明的类型判断。
+  - **外部 MCP 工具：** 默认 `unknown`，要审查；只有操作者按工具声明为 `inside` 的（类型化的声明 `mcp_tool_levels`，按服务器的目录项和完整的工具名）才直接放行。工具名只对这次运行加载的服务器解析，能解析成不止一个、或一个都解析不到的，一律 `unknown`。代价：没声明的只读 MCP 工具在操作者的回合里每次多 3–7 秒、约 $0.003，其他回合直接拦截。
   - **Shell（`Bash`、`Monitor`）：** 一条命令会不会对外，没有类型可看，按 D5 也不能按命令里的子串判断，所以交给分类器：它先判断这次调用是否作用到本机以外，只在本机的直接放行。范围按 D12：Manager 的每次 Shell 调用；带线索的任务里 Worker、Reviewer 的 Shell 调用（第 6.3 节）。其他运行的 Shell 调用钩子直接放行，不调用分类器。
 - **实测和要求：** 钩子在 Looper 的权限模式下拦得住 Shell、外部 MCP 和子 agent 的调用，但超时或出错时会放行，而且读项目设置时模型能写设置文件把它关掉。据此的要求（失败即拦截的包装、审查打开时不读项目设置、保护 Looper 自己的文件）见第 17.1 节。
 - **其他运行时（D13）：** DSH、Pi 的运行器可以在执行内置工具前做同样的检查（第 17.2 节验证前不算支持）；Codex、OMP、Cursor、Grok 没有拦截点。「有拦截点」是运行时的类型化能力（`ROLE_CAPABILITIES` 里加一项 `tool_hook`），不按运行时名字判断。
@@ -358,7 +358,7 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (cre
 | `untrusted_fence.enabled` | 系统设置 | `false` | 打开围栏（第 8 节） |
 | `outbound_check` 的角色设置 | Settings → Roles | 种子 Profile、角色提示词、超时 30 秒 | 同 `advice_check` |
 | vault 的不可信目录 | vault 设置 | `["inbox"]`（只在围栏打开时生效） | 第 8.2 节 |
-| MCP 服务器的工具级别 | 目录项字段 | `inside` | 第 6.2 节 |
+| MCP 服务器的工具级别 | `mcp_tool_levels`（按工具声明） | 没有声明：`unknown`，要审查 | 第 6.2 节 |
 
 **关闭时逐字节不变**（D4），用测试守住：
 
@@ -407,7 +407,7 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (cre
 ## 14. 花费
 
 - **实测**（PR3 的 `evals/outbound_check.py`，真实 Claude Code、种子 `claude-sonnet-5-5`，10 个合成用例跑 3 轮共 30 次）：每次审查中位数 $0.0027、均值 $0.0044、最多 $0.0145；耗时中位数 3.6 秒、P90 6.6 秒、最长 10.6 秒。最贵最慢的是模型拒绝判断、由回退模型作答的那一例（`refused`，照样拦截）；有判定的审查均值 $0.0033、最长 6.6 秒。第一层的对外动作很少，每天几次，可以忽略。
-- **第二层（D12）：** 外部 MCP 里声明为 external 的工具很少。Manager 的每次 Shell 调用，按一个活跃的 Manager 每天几十到上百次、每次约 $0.003–0.0045 推算，每天约 $0.1–0.5，每次调用多 3–7 秒。带线索的任务里，Worker、Reviewer 的每次 Shell 调用都审，一个任务几十到几百次，**推测**每个任务 $0.1–1.5、总耗时多几分钟到几十分钟；这类任务不多，评测时实测并在开关的说明里写明。
+- **第二层（D12）：** 外部 MCP 工具没声明为 `inside` 的都审查，操作者把常用的只读工具声明为 `inside` 后，这部分很少。Manager 的每次 Shell 调用，按一个活跃的 Manager 每天几十到上百次、每次约 $0.003–0.0045 推算，每天约 $0.1–0.5，每次调用多 3–7 秒。带线索的任务里，Worker、Reviewer 的每次 Shell 调用都审，一个任务几十到几百次，**推测**每个任务 $0.1–1.5、总耗时多几分钟到几十分钟；这类任务不多，评测时实测并在开关的说明里写明。
 - **钩子本身：** 实测每次调用多 20–90 毫秒（第 17.1 节），相对分类器可以忽略。
 - 第二层按上面的单次实测推算；Manager 钩子接入后再按真实调用量实测替换。
 

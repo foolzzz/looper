@@ -1,0 +1,92 @@
+"""The default Manager's group (``group:``) and other-sender direct-chat (``dm:``) sessions (``manager_sessions``).
+
+The ``main`` session stays in ``agent_sessions``. A row is keyed by ``(manager_id, session_key)`` where
+``session_key`` is ``kind:channel_id:chat``; it stores the Claude session and its running totals the way
+``agent_sessions`` does.
+"""
+
+from __future__ import annotations
+
+import builtins
+import json
+from collections.abc import Mapping
+from typing import Any
+
+import asyncpg
+
+from .connection import get_pool
+
+_COLUMNS = ("manager_id, session_key, kind, channel_id, chat, session_id, session_totals, runtime_type, "
+            "profile_id, provider_id, clean_start, pending_handoff, context_tokens, last_turn_cost_usd, "
+            "created_at, last_active_at")
+
+
+def _row(record: asyncpg.Record) -> dict[str, Any]:
+    row = dict(record)
+    totals = row["session_totals"]
+    row["session_totals"] = json.loads(totals) if isinstance(totals, str) else dict(totals or {})
+    return row
+
+
+async def get(
+    manager_id: str, session_key: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> dict[str, Any] | None:
+    """The stored session of ``session_key``; None when there is none."""
+    pool = pool or get_pool()
+    record = await pool.fetchrow(
+        f"SELECT {_COLUMNS} FROM manager_sessions WHERE manager_id = $1 AND session_key = $2",
+        manager_id, session_key)
+    return None if record is None else _row(record)
+
+
+async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
+    """Insert or replace a session. ``context_tokens`` and ``last_turn_cost_usd`` are kept when ``row`` omits them."""
+    pool = pool or get_pool()
+    await pool.execute(
+        """
+        INSERT INTO manager_sessions (manager_id, session_key, kind, channel_id, chat, session_id, session_totals,
+                                      runtime_type, profile_id, provider_id, clean_start, pending_handoff,
+                                      context_tokens, last_turn_cost_usd, last_active_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, now())
+        ON CONFLICT (manager_id, session_key) DO UPDATE
+        SET kind = EXCLUDED.kind, channel_id = EXCLUDED.channel_id, chat = EXCLUDED.chat,
+            session_id = EXCLUDED.session_id, session_totals = EXCLUDED.session_totals,
+            runtime_type = EXCLUDED.runtime_type, profile_id = EXCLUDED.profile_id,
+            provider_id = EXCLUDED.provider_id, clean_start = EXCLUDED.clean_start,
+            pending_handoff = EXCLUDED.pending_handoff,
+            context_tokens = COALESCE(EXCLUDED.context_tokens, manager_sessions.context_tokens),
+            last_turn_cost_usd = COALESCE(EXCLUDED.last_turn_cost_usd, manager_sessions.last_turn_cost_usd),
+            last_active_at = now()
+        """,
+        row["manager_id"], row["session_key"], row["kind"], row["channel_id"], row["chat"], row["session_id"],
+        json.dumps(dict(row["session_totals"])), row["runtime_type"], row["profile_id"], row["provider_id"],
+        row["clean_start"], row["pending_handoff"], row.get("context_tokens"), row.get("last_turn_cost_usd"),
+    )
+
+
+async def touch(
+    manager_id: str, session_key: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> None:
+    """Mark the session as active now."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE manager_sessions SET last_active_at = now() "
+                       "WHERE manager_id = $1 AND session_key = $2", manager_id, session_key)
+
+
+async def list(
+    manager_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> builtins.list[dict[str, Any]]:
+    """The Manager's sessions, the most recently active first."""
+    pool = pool or get_pool()
+    records = await pool.fetch(
+        f"SELECT {_COLUMNS} FROM manager_sessions WHERE manager_id = $1 ORDER BY last_active_at DESC, session_key",
+        manager_id)
+    return [_row(r) for r in records]
+
+
+async def delete(
+    manager_id: str, session_key: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> None:
+    pool = pool or get_pool()
+    await pool.execute("DELETE FROM manager_sessions WHERE manager_id = $1 AND session_key = $2",
+                       manager_id, session_key)

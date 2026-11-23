@@ -35,6 +35,8 @@ def normalize_record_metadata(metadata: Any) -> Any:
 
     if not isinstance(metadata, dict):
         return metadata
+    metadata = {key: value for key, value in metadata.items()
+                if key not in ("reservation", "cost_guard", "cost_guard_schedule_id")}
     def obj(value):
         return value if isinstance(value, dict) else {}
 
@@ -84,8 +86,8 @@ def normalize_record_metadata(metadata: Any) -> Any:
                 "error": library.get("error"), "project_error": project.get("error")}}}
 
 
-# The run tree's columns, which no record view shows yet.
-_UNVIEWED = ("parent_record_id", "run_kind")
+# Internal run attribution, which existing record views do not expose.
+_UNVIEWED = ("parent_record_id", "run_kind", "attempt_id")
 
 
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
@@ -106,7 +108,7 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
 # have no run_kind (its migration rewrites no row), and readers take theirs from these too (``RUN_KIND``). An agent
 # id none of them matches has no kind.
 RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check",
-             "outbound_check", "memory_draft")
+             "outbound_check", "explorer", "leads_check", "memory_draft")
 _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     # (kind, exact ids, id prefixes)
     ("manager", ("manager",), ("manager-",)),
@@ -114,6 +116,7 @@ _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("worker", (), ("worker-",)),
     ("reviewer", (), ("reviewer-",)),
     ("processor", (), ("processor:",)),
+    ("leads_check", (), ("leads_check:",)),
     ("consult", (), ("consult-",)),
 )
 
@@ -299,12 +302,15 @@ async def finish_record(
     cost_source: str | None = None,
     outcome: str | None = None,
     metadata: dict[str, Any] | None = None,
+    failure_class: str | None = None,
+    failure_cause: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
     """Close a record with the run's outcome, its own usage and cost (and where the cost comes from), its final
     context and its compactions; a Worker's or Reviewer's run also keeps how its report or verdict read
     (``metadata.outcome``, ``worker.RunOutcome``), and ``metadata``'s keys are added to the record's (a run's
-    refused tool calls, ``permission_denials``)."""
+    refused tool calls, ``permission_denials``). A failed run's class and cause (``failures``) are NULL while
+    failure typing is off."""
     pool = pool or get_pool()
     await pool.execute(
         """
@@ -330,14 +336,16 @@ async def finish_record(
                                          ELSE jsonb_build_object('outcome', $17::text) END
                                  || COALESCE($18::jsonb, '{}'::jsonb) END,
             finished_at = now(),
-            last_output_at = COALESCE(last_output_at, now())
+            last_output_at = COALESCE(last_output_at, now()),
+            failure_class = $19,
+            failure_cause = $20
         WHERE id = $1
         """,
         record_id, status, output_text, output_text[:500] if output_text else None,
         session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
         cache_read_tokens, cache_creation_tokens, context_tokens,
         json.dumps(compactions) if compactions is not None else None, cost_source, outcome,
-        json.dumps(metadata, ensure_ascii=False) if metadata else None,
+        json.dumps(metadata, ensure_ascii=False) if metadata else None, failure_class, failure_cause,
     )
 
 
@@ -347,6 +355,22 @@ async def add_metadata(record_id: int, metadata: dict[str, Any], *, pool: asyncp
     await pool.execute(
         "UPDATE llm_records SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1",
         record_id, json.dumps(metadata, ensure_ascii=False),
+    )
+
+
+async def increment_contract_rejections(
+    record_id: int, contract_kind: str, *, pool: asyncpg.Pool | None = None,
+) -> None:
+    """Count a parser rejection on its turn, atomically and without retaining the rejected reply."""
+    pool = pool or get_pool()
+    await pool.execute(
+        """UPDATE llm_records
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+               'contract_rejections', COALESCE(metadata->'contract_rejections', '{}'::jsonb)
+               || jsonb_build_object($2::text,
+                   COALESCE((metadata->'contract_rejections'->>$2::text)::integer, 0) + 1))
+           WHERE id = $1""",
+        record_id, contract_kind,
     )
 
 
@@ -391,12 +415,20 @@ _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
 # Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
 _PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check', 'outbound_check', 'memory_draft')"
+_ROLE_BRANCHES = " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES)
 _TASK_ROLE = (
-    f"CASE WHEN {_PLANNER_SPAWNS} THEN 'planner' "
-    + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
+    f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
+    f"{_ROLE_BRANCHES} END"
 )
 # A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
+# The same runs, plus a room consult. The consult branch is before the id prefixes, so an explicit consult kind
+# wins over an agent id that also matches a role prefix. Run listings stay on ``TASK_RUN``.
+_SPEND_ROLE = (
+    f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
+    f"WHEN {RUN_KIND} = 'consult' THEN 'consult' {_ROLE_BRANCHES} END"
+)
+TASK_SPEND = f"{_SPEND_ROLE} IS NOT NULL"
 
 
 async def manager_spend(
@@ -411,14 +443,21 @@ async def manager_spend(
     result = {m: {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0} for m in manager_ids}
     if not result:
         return result
+    # A Manager's runs, and the outbound reviews of its calls that no task owns (``outbound_reviews.record_id``).
     rows = await pool.fetch(
         """
         SELECT agent_id,
                COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $2), 0)::float8 AS today_usd,
                COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $3), 0)::float8 AS last_7d_usd,
                count(*) FILTER (WHERE created_at >= $2) AS runs_today
-        FROM llm_records
-        WHERE agent_id = ANY($1::text[]) AND created_at >= LEAST($2, $3)
+        FROM (
+            SELECT agent_id, cost_usd, created_at FROM llm_records WHERE agent_id = ANY($1::text[])
+            UNION ALL
+            SELECT o.agent_id, r.cost_usd, r.created_at FROM outbound_reviews o JOIN llm_records r ON r.id = o.record_id
+            WHERE o.agent_id = ANY($1::text[]) AND o.task_id IS NULL
+              AND o.created_at >= LEAST($2::timestamptz, $3::timestamptz)
+        ) runs
+        WHERE created_at >= LEAST($2, $3)
         GROUP BY agent_id
         """,
         list(result), since, datetime.now(timezone.utc) - timedelta(days=7),
@@ -543,7 +582,7 @@ async def list_records(
             COALESCE(char_length(output_text), 0) AS output_chars,
             input_tokens, output_tokens, duration_ms, model, error, metadata, created_at, status,
             cost_usd, finished_at, last_output_at, cache_read_tokens, cache_creation_tokens,
-            context_tokens, compactions, cost_source
+            context_tokens, compactions, cost_source, failure_class, failure_cause
             FROM llm_records {where} ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}""",
         *params,
     )
@@ -561,13 +600,18 @@ async def list_records(
 async def get_record(
     record_id: int,
     *,
+    include_attempt_id: bool = False,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, Any] | None:
+    """Read an existing record view; only internal run recovery opts into attempt attribution."""
     pool = pool or get_pool()
     row = await pool.fetchrow("SELECT * FROM llm_records WHERE id = $1", record_id)
     if row is None:
         return None
-    return _row_to_dict(row)
+    record = _row_to_dict(row)
+    if include_attempt_id:
+        record["attempt_id"] = row["attempt_id"]
+    return record
 
 
 # A run with a runtime's own login (a subscription: Claude Code's, priced by Claude Code; Codex's, priced by Looper
@@ -586,7 +630,7 @@ async def task_costs(
     *,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs, in total and by role.
+    """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs and its room consults, in total and by role.
 
     Every given task id gets an entry. ``runs`` counts every run; ``running``
     those still going, whose cost is not known yet; ``unpriced_runs`` the
@@ -607,7 +651,7 @@ async def task_costs(
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"""
-        SELECT task_id, CASE WHEN {_ROLE_FILTERS['manager']} THEN 'manager' ELSE {_TASK_ROLE} END AS role,
+        SELECT task_id, CASE WHEN {_ROLE_FILTERS['manager']} THEN 'manager' ELSE {_SPEND_ROLE} END AS role,
                model, count(*) AS runs,
                count(*) FILTER (WHERE status = 'running') AS running,
                count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
@@ -626,15 +670,25 @@ async def task_costs(
                COALESCE(sum(cache_read_tokens) FILTER (WHERE {_CACHE_USAGE_REPORTED}), 0)::bigint AS cache_hit_read_tokens,
                round(sum(cost_usd::numeric), 6) AS cost_usd
         FROM llm_records
-        WHERE task_id = ANY($1::text[]) AND ({_TASK_ROLE} IS NOT NULL OR {_ROLE_FILTERS['manager']})
+        WHERE task_id = ANY($1::text[]) AND ({TASK_SPEND} OR {_ROLE_FILTERS['manager']})
         GROUP BY 1, 2, 3
         """,
         task_ids, RecordStatus.INTERRUPTED.value,
     )
+    # An unused/off project keeps its existing response shape. Historical
+    # explorer spend remains visible if an operator later disables the project.
+    explorer_tasks = {row["task_id"] for row in rows if row["role"] == "explorer"}
+    explorer_tasks.update(row["id"] for row in await pool.fetch(
+        "SELECT t.id FROM tasks t JOIN projects p ON p.id=t.project_id "
+        "WHERE t.id=ANY($1::text[]) AND p.subagents='on'", task_ids))
+    # Consult is a key only for a task that has consult rows, not for every task.
+    consult_tasks = {row["task_id"] for row in rows if row["role"] == "consult"}
     costs = {
         task_id: {"cost_usd": Decimal(0), "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
                   "provider_price_runs": 0, "by_role": {role: {"cost_usd": Decimal(0), "runs": 0}
-                                                      for role in TASK_ROLES},
+                                                      for role in TASK_ROLES
+                                                      + (("explorer",) if task_id in explorer_tasks else ())
+                                                      + (("consult",) if task_id in consult_tasks else ())},
                   "by_model": {}, "manager_by_model": {}}
         for task_id in task_ids
     }
@@ -691,14 +745,15 @@ async def role_runs(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[d
     return [dict(row) for row in rows]
 
 
-# ``_TASK_ROLE`` and ``EQUIVALENT`` of the runs ``r`` of a query that joins their tasks ``t``.
-_RUN_TASK_ROLE = _TASK_ROLE.replace("agent_id", "r.agent_id")
+# ``_SPEND_ROLE`` and ``EQUIVALENT`` of the runs ``r`` of a query that joins their tasks ``t``.
+_RUN_SPEND_ROLE = _SPEND_ROLE.replace("agent_id", "r.agent_id")
 _RUN_EQUIVALENT = EQUIVALENT.replace("metadata", "r.metadata")
-# The runs started in [$1, $2) (a NULL bound is none) and, with $3, those of the tasks of project $3 that make up their
-# cost (``task_costs``).
+# The runs started in [$1, $2) (a NULL bound is none). With $3, only the runs of project $3's tasks that make up
+# their cost, room consults included, the same way ``task_costs`` counts them. A null project does not filter by
+# role, so that total already includes room consults and the Manager.
 _IN_RANGE = (
     "($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) "
-    f"AND ($3::text IS NULL OR (t.project_id = $3 AND {_RUN_TASK_ROLE} IS NOT NULL))"
+    f"AND ($3::text IS NULL OR (t.project_id = $3 AND {_RUN_SPEND_ROLE} IS NOT NULL))"
 )
 _SPEND = f"""count(*) AS runs,
                count(*) FILTER (WHERE r.status = 'running') AS running,
@@ -711,9 +766,10 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
                       manager_id: str | None = None, project_ids: Sequence[str] | None = None,
                       pool: asyncpg.Pool | None = None) -> dict[str, Any]:
     """What every agent's runs started at or after ``since`` (and before ``until``; None for no bound) cost, the
-    Manager's included, split by basis; with ``project_id``, only the runs of that project's tasks that make up
-    their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them); with ``manager_id``, only
-    the runs of that Manager and of its tasks.
+    Manager's included, split by basis. With no ``project_id`` every run in the window is counted, so room consults
+    are already in that total. With ``project_id``, only the runs of that project's tasks that make up their cost,
+    room consults included, the same way ``task_costs`` counts them. With ``manager_id``, only the runs of that
+    Manager and of its tasks.
 
     ``provider_priced_usd`` is money: runs with an API key, at their
     provider's prices (Claude Code's figure for Anthropic's API, Looper's for
@@ -740,8 +796,9 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
 async def task_spend(since: datetime | None, until: datetime | None = None, *, project_id: str | None = None,
                      manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """What each task's runs started in [``since``, ``until``) cost (None for no bound), split by basis as
-    ``spend_since`` splits it, most first: the runs that make up a task's cost (``task_costs``), of the tasks of
-    ``project_id`` only when it is given, of the tasks of ``manager_id`` only when that is. Each row has the task's ``name`` and its ``project_id`` and
+    ``spend_since`` splits it, most first: the runs that make up a task's cost, room consults included, the same
+    way ``task_costs`` counts them, of the tasks of ``project_id`` only when it is given, of the tasks of
+    ``manager_id`` only when that is. Each row has the task's ``name`` and its ``project_id`` and
     ``project_name`` now."""
     from .tasks import task_name
 
@@ -751,7 +808,7 @@ async def task_spend(since: datetime | None, until: datetime | None = None, *, p
         f"""
         SELECT r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name AS project_name, {_SPEND}
         FROM llm_records r JOIN tasks t ON t.id = r.task_id LEFT JOIN projects p ON p.id = t.project_id
-        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL{by_manager}
+        WHERE {_IN_RANGE} AND {_RUN_SPEND_ROLE} IS NOT NULL{by_manager}
         GROUP BY r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name
         ORDER BY sum(r.cost_usd) DESC NULLS LAST, r.task_id
         """,
@@ -761,6 +818,30 @@ async def task_spend(since: datetime | None, until: datetime | None = None, *, p
                                                           requirement=row["requirement"], task_id=row["task_id"]),
              **{key: row[key] for key in row.keys() if key not in ("task_id", "title", "goal_id", "requirement")}}
             for row in rows]
+
+
+async def failure_stats(since: datetime, *, pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+    """The runs classified since ``since`` (``failures``): counted by UTC day, run kind, runtime, class and cause; by
+    class; and, of the Workers' and Reviewers' runs (a step's failures, which go to its Planner), how many were not a
+    judgment."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"""SELECT (created_at AT TIME ZONE 'UTC')::date AS day, {RUN_KIND} AS run_kind,
+                   COALESCE(metadata->'profile', metadata->'agent')->'runtime'->>'type' AS runtime,
+                   failure_class, failure_cause, count(*) AS runs
+            FROM llm_records WHERE failure_class IS NOT NULL AND created_at >= $1
+            GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5""", since)
+    from ..agents.failures import FailureClass
+
+    by_class = {cls.value: 0 for cls in FailureClass}
+    steps = {"failed": 0, "not_judgment": 0}
+    for row in rows:
+        by_class[row["failure_class"]] += row["runs"]
+        if row["run_kind"] in ("worker", "reviewer"):
+            steps["failed"] += row["runs"]
+            steps["not_judgment"] += row["runs"] if row["failure_class"] != "judgment" else 0
+    return {"runs": sum(by_class.values()), "by_class": by_class, "steps": steps,
+            "rows": [{**dict(row), "day": row["day"].isoformat()} for row in rows]}
 
 
 async def agent_usage(

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .. import step_workspaces, task_workspaces
+from .. import attempts, step_workspaces, task_workspaces
 from ..room import remove_run_sessions
 from ..kept_run import AdoptResult, RunHold
 from ..broadcast import Broadcaster
@@ -40,6 +40,7 @@ from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
     AgentAddress,
+    CancelBy,
     MessageEnvelope,
     MessageType,
     RestartMode,
@@ -105,6 +106,7 @@ class Task:
             goal_id=row.get("goal_id") or "",
             work_dir=row.get("work_dir") or "",
             project_id=row["project_id"],
+            status=row.get("status", "pending"),
             correlation_id=row.get("correlation_id") or "",
             origin_channel_id=row.get("origin_channel_id") or "",
             notify=NotifyTarget.from_columns(row),
@@ -405,7 +407,8 @@ class TaskRouter:
             task.work_dir = work_dir
             if "work_dir" in envelope.payload:
                 envelope = replace(envelope, payload={**envelope.payload, "work_dir": work_dir})
-        task.status = "assigned"
+        held_at_budget = task.status == "awaiting_budget"
+        task.status = "awaiting_budget" if held_at_budget else "assigned"
         planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root, claude_bin=self._claude_bin,
                                ops=self.planner_ops, adopter=self.adopter)
         task.planner_id = planner.agent_id
@@ -417,11 +420,11 @@ class TaskRouter:
             logger.info("task %s: dropped %d message(s) its earlier Planner left unread", task.task_id, len(stale))
 
         await planner.start(self._bus)
-        task.status = "running"
+        task.status = "awaiting_budget" if held_at_budget else "running"
 
         try:
             await db_tasks.update_task_status(
-                task.task_id, "running", planner_id=planner.agent_id,
+                task.task_id, task.status, planner_id=planner.agent_id,
             )
         except Exception:
             logger.exception("failed to persist assign for task %s", task.task_id)
@@ -462,7 +465,8 @@ class TaskRouter:
         await self._handle_planner_status(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.GOAL_STATUS,
             payload={"task_id": task.task_id, "goal_id": task.goal_id, "status": "failed",
-                     "summary": f"The task could not start: {problem}"},
+                     "summary": f"The task could not start: {problem}",
+                     "outcome_failure_kind": attempts.TaskFailure.ERROR.value},
             correlation_id=envelope.correlation_id, metadata=envelope.metadata,
         ))
 
@@ -508,6 +512,8 @@ class TaskRouter:
         if not task or ends_task(task.status):
             return  # an ended task's notice is its last message (``task_notice``)
 
+        if task.status == "awaiting_budget" and not ends_task(status):
+            status = "awaiting_budget"
         summary = envelope.payload.get("summary") or None
         branch_line = await self._finish_workspace(task) if status == "completed" else None
         fail_kind = envelope.payload.get("fail_kind") if status == "failed" else None
@@ -552,6 +558,20 @@ class TaskRouter:
         ))
 
         if ends_task(status):
+            budget = fail_kind == db_tasks.FailKind.TASK_BUDGET.value
+            await attempts.close_attempts(
+                task_id, failure_kind=attempts.FailureKind.TASK_BUDGET if budget else
+                attempts.FailureKind.STOPPED if status in ("stopped", "cancelled") else None)
+            outcome_failure = None
+            if status == "failed":
+                try:
+                    outcome_failure = attempts.TaskFailure(envelope.payload.get("outcome_failure_kind"))
+                except (TypeError, ValueError):
+                    outcome_failure = attempts.TaskFailure.PLANNER_FAILED
+            await attempts.record_outcome(
+                task_id, attempts.TaskOutcome(status),
+                attempts.StopCause.TASK_BUDGET if budget else attempts.StopCause.PLANNER_END,
+                attempts.TaskFailure.TASK_BUDGET if budget else outcome_failure)
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
 
@@ -601,6 +621,13 @@ class TaskRouter:
             return
 
         task.status = "cancelled"
+        from .. import cost_guard
+        await cost_guard.release_queued(task_id)
+        await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
+        await attempts.record_outcome(
+            task_id, attempts.TaskOutcome.CANCELLED,
+            attempts.StopCause.MANAGER_CANCEL if envelope.metadata.get("cancel_by") == CancelBy.MANAGER else
+            attempts.StopCause.USER_CANCEL)
         planner = self._planners.get(task_id)
         if planner:
             await self._bus.publish(MessageEnvelope.create(
@@ -616,9 +643,13 @@ class TaskRouter:
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
         task = self._tasks.get(task_id)
+        from .. import cost_guard
+        await cost_guard.release_queued(task_id)
+        await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
+        await attempts.record_outcome(task_id, attempts.TaskOutcome.STOPPED, attempts.StopCause.USER_STOP)
         if not task:
             try:
-                await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id))
+                await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id, envelope.payload.get("stop_note")))
             except Exception:
                 logger.exception("failed to mark orphan task %s stopped", task_id)
             await self._task_ended(task_id, "stopped")
@@ -636,7 +667,7 @@ class TaskRouter:
             ))
 
         try:
-            await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id))
+            await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id, envelope.payload.get("stop_note")))
         except Exception:
             logger.exception("failed to persist stop for task %s", task_id)
 
@@ -654,9 +685,9 @@ class TaskRouter:
         self._tasks.pop(task_id, None)
 
     @staticmethod
-    async def _stop_note(task_id: str) -> str:
+    async def _stop_note(task_id: str, reason: str | None = None) -> str:
         """A stopped task's closing note, from its saved plan: what its steps delivered and what is not done."""
-        why = "The task was stopped before it finished."
+        why = reason or "The task was stopped before it finished."
         try:
             saved = await db_plans.load(task_id)
         except Exception:
@@ -717,6 +748,7 @@ class TaskRouter:
                     logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
                 # And the sessions its runs kept for the room (its room goes with the steps).
                 await asyncio.to_thread(remove_run_sessions, self._runtime_root, task_id)
+            await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
             try:
                 if not await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over):
                     return
@@ -757,6 +789,9 @@ class TaskRouter:
             task.status = "completed"
 
         if task:
+            await attempts.close_attempts(
+                task_id, failure_kind=attempts.FailureKind.STOPPED if task.status in ("stopped", "cancelled") else None)
+            await attempts.record_outcome(task_id, attempts.TaskOutcome(task.status), attempts.StopCause.TEARDOWN)
             try:
                 await db_tasks.update_task_status(task_id, task.status)
             except Exception:
@@ -767,6 +802,9 @@ class TaskRouter:
             self._broadcaster.close_task(task_id)
 
     async def _task_ended(self, task_id: str, status: str) -> None:
+        from .. import cost_guard
+
+        await cost_guard.release_queued(task_id)
         if self._on_task_end is None:
             return
         try:

@@ -254,7 +254,7 @@ describe("Agent Profiles", () => {
     expect(option.textContent).toContain(reason);
   });
 
-  it("re-reads pending startup checks and shows failures without a reload, then stops", async () => {
+  it("re-reads pending startup checks and shows failures without a reload, then slows down", async () => {
     vi.useFakeTimers();
     let checks = [{ id: "claude_cli", label: "Claude Code CLI", status: "pending", detail: "Checking…", fix: "Install Claude Code" }];
     const fetcher = vi.fn(async () => Response.json({ status: "ok", result: { checks } }));
@@ -288,6 +288,28 @@ describe("Agent Profiles", () => {
     expect(fetcher).toHaveBeenCalledTimes(3);
     await act(async () => root.render(null));
     await act(async () => vi.advanceTimersByTimeAsync(6000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("shows a channel outage without a reload and clears its banner after recovery", async () => {
+    vi.useFakeTimers();
+    let checks: { id: string; label: string; status: string; detail: string; fix: string }[] = [];
+    const fetcher = vi.fn(async () => Response.json({ status: "ok", result: { checks } }));
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<ClaudeCheckBanner />));
+    expect(container.innerHTML).toBe("");
+    checks = [{ id: "channel_down:channel-lark", label: "Channel channel-lark", status: "fail",
+      detail: "Down for 11 minutes (not running)", fix: "Check Settings → Channels and the channel transport." }];
+    await act(async () => vi.advanceTimersByTimeAsync(30000));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Down for 11 minutes");
+    expect(container.textContent).toContain(checks[0].fix);
+    expect(container.textContent).not.toContain("Agents cannot run");
+    expect(container.textContent).not.toContain("then restart");
+    checks = [];
+    await act(async () => vi.advanceTimersByTimeAsync(30000));
+    expect(container.innerHTML).toBe("");
+    await act(async () => root.render(null));
+    await act(async () => vi.advanceTimersByTimeAsync(30000));
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
 

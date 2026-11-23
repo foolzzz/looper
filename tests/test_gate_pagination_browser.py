@@ -87,6 +87,10 @@ def dashboard(static_dashboard):
                 result = {"projects": []}
             elif path in ("/api/v1/system/overview", "/api/v1/system/status"):
                 result = {}
+            elif path == "/api/v1/intents/settings_get":
+                result = {"enabled": False, "subscriptions": []}
+            elif path == "/api/v1/attention/settings_get":
+                result = {"enabled": False}
             elif path in ("/api/v1/operator_chat/targets", "/api/v1/operator_chat/sessions",
                           "/api/v1/operator_chat/messages", "/api/v1/roles/list",
                           "/api/v1/manager_session/get", "/api/v1/chat_settings/get"):

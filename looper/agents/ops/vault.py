@@ -79,9 +79,9 @@ class VaultUsage:
 async def run_tool(config: VaultConfig, name: str, arguments: Mapping[str, Any], *, task_id: str, who: str,
                    worker: str, usage: VaultUsage) -> dict:
     if name == SEARCH:
-        return await vault.search(config, arguments["query"], arguments.get("limit"))
+        return await vault.model_result(config, await vault.search(config, arguments["query"], arguments.get("limit")))
     if name == READ:
-        return await vault.read(config, arguments["path"])
+        return await vault.model_result(config, await vault.read(config, arguments["path"]))
     if name != WRITE:
         raise OpError(ErrorCode.INVALID, f"no vault tool {name!r}")
     content = arguments["content"]

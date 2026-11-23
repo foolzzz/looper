@@ -7,6 +7,7 @@ import pytest
 from looper.agents import agent_settings
 from looper.agents.serve import seed_role_configs
 from looper.db import connection, llm_records, role_configs
+from looper.db.migrations import memory_draft_role
 from tests.db_support import DSN, fresh_schema
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -26,8 +27,8 @@ def test_drafting_checks_upgrade_online_and_seed_the_role(monkeypatch):
                 choices = ", ".join(f"'{value}'" for value in values if value != "memory_draft")
                 await pool.execute(f"ALTER TABLE {table} DROP CONSTRAINT {constraint}, "
                                    f"ADD CONSTRAINT {constraint} CHECK ({column} IN ({choices}))")
-            statements = await connection._memory_draft_ddl(pool)
-            assert len(statements) == 2 and all(sql.endswith("NOT VALID") for sql in statements)
+            statements = await memory_draft_role.statements(pool)
+            assert len(statements) == 2 and all("NOT VALID" in sql for sql in statements)
             # The real startup applies the widening and validates after its schema transaction commits.
             await connection.ensure_schema(pool)
             checks = await pool.fetch("SELECT convalidated, pg_get_constraintdef(oid) AS definition FROM pg_constraint "
@@ -43,7 +44,7 @@ def test_drafting_checks_upgrade_online_and_seed_the_role(monkeypatch):
             await pool.execute("INSERT INTO agent_setting_layers (scope, role) VALUES ('role', 'memory_draft')")
             resolved = await agent_settings.load_agent_settings(agent_settings.AgentType.MEMORY_DRAFT)
             assert resolved.profile.name == "claude-code/sonnet-5-5"
-            assert not await connection._memory_draft_ddl(pool)
+            assert not await memory_draft_role.statements(pool)
 
     asyncio.run(check())
 

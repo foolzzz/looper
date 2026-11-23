@@ -25,7 +25,7 @@ from ...db import llm_records as db_llm_records, projects as db_projects, manage
 from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..model_names import MODEL_NAME_SCHEMA
-from ..project_execution import ADVISOR_FIELDS
+from ..project_execution import ADVISOR_FIELDS, SUBAGENT_FIELDS
 from ..projects import RequestError, project_name
 from ..llmrec.dialects import ChatDialect
 from ..runtimes import ApiProtocol, AuthKind, VendorType
@@ -132,9 +132,12 @@ def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 def _model_project(view: Mapping[str, Any]) -> dict[str, Any]:
     """A project as the Manager's tool gives it: without the advisor's settings while its switch is off, so the
     model sees what it saw before the advisor (the advisor RFC, section 13)."""
-    if view.get("advisor") == "on":
-        return dict(view)
-    return {key: value for key, value in view.items() if key not in ADVISOR_FIELDS}
+    hidden = set()
+    if view.get("advisor") != "on":
+        hidden.update(ADVISOR_FIELDS)
+    if view.get("subagents") != "on":
+        hidden.update(SUBAGENT_FIELDS)
+    return {key: value for key, value in view.items() if key not in hidden}
 
 
 async def _projects(call: Call) -> dict[str, Any]:
@@ -369,6 +372,17 @@ async def _profiles(call: Call) -> dict[str, Any]:
         _required(arguments, action, "profile")
         profile = _profile(registry, arguments["profile"])
     if action in ("create", "update"):
+        from ..acp_guards import AcpSelectionError, refuse_type
+
+        try:
+            if action == "update":
+                refuse_type(profile["runtime_type"], "looper_agent_profiles")
+            if arguments.get("runtime"):
+                runtime = by_id_or_name(registry["runtimes"], arguments["runtime"], id_key="runtime_id",
+                                        what="runtime", keys=("name", "type"))
+                refuse_type(runtime["type"], "looper_agent_profiles")
+        except AcpSelectionError as exc:
+            raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
         fields = {**_given(arguments, ("name", "effort", "agent_teams", "web_search", "custom_prompt", "fallback_profile_id"),
                           clears=("effort", "fallback_profile_id")),
                   **await _profile_parts(registry, arguments)}
@@ -816,7 +830,7 @@ TOOLS: tuple[Tool, ...] = (
                 "action": {"type": "string", "enum": ["list", "register", "update"]},
                 "provider": {"type": "string", "minLength": 1, "description": "Account id or name (update)."},
                 "name": {"type": "string", "minLength": 1},
-                "vendor_type": {"type": "string", "enum": [v.value for v in VendorType]},
+                "vendor_type": {"type": "string", "enum": [v.value for v in VendorType if v.value != "acp-command"]},
                 # Structured arrays are checked by the shared HTTP registry, beyond check_arguments' subset.
                 "endpoints": {"oneOf": [{"type": "array", "items": _PROVIDER_ENDPOINT}]},
                 "env": {"oneOf": [{"type": "array", "items": {

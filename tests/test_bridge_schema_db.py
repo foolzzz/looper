@@ -111,6 +111,11 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     assert after[table] == expected
                 elif table == "agent_runtimes":
                     assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
+                elif table == "library_items":
+                    # Machine imports have no project-skill version; every historical field stays intact.
+                    # The lifecycle column arrives as active on every existing row.
+                    assert after[table] == [
+                        {**r, "skill_version": None, "lifecycle": "active"} for r in before[table]]
                 elif table == "agent_profiles":
                     # The advisor's, its judge's and the leads check's built-in profiles are added as a fresh
                     # database has them.
@@ -122,30 +127,17 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                 elif table == "task_user_gates":
                     # Existing gates retain their discussion purpose and every historical field.
                     assert after[table] == [{**r, "purpose": "discussion"} for r in before[table]]
+                elif table == "role_configs":
+                    assert [row for row in after[table] if row["role"] != "explorer"] == before[table]
+                    explorer = [row for row in after[table] if row["role"] == "explorer"]
+                    assert len(explorer) == 1
+                    assert explorer[0]["max_turns"] == 40 and explorer[0]["timeout_seconds"] == 300
                 elif table == "sequence_state":
                     # New audit tables add unused sequences; historical values must survive.
-                    assert after[table] == sorted(
-                        [*before[table], {"sequencename": "project_activity_seq_seq", "last_value": None},
-                         {"sequencename": "llm_requests_id_seq", "last_value": None},
-                         {"sequencename": "source_events_seq_seq", "last_value": None},
-                         {"sequencename": "source_deletions_id_seq", "last_value": None},
-                         {"sequencename": "source_runs_id_seq", "last_value": None},
-                         {"sequencename": "ledger_events_id_seq", "last_value": None},
-                         {"sequencename": "ledger_items_id_seq", "last_value": None},
-                         {"sequencename": "manager_events_id_seq", "last_value": None},
-                         {"sequencename": "agent_spawns_id_seq", "last_value": None},
-                         {"sequencename": "decision_snapshots_id_seq", "last_value": None},
-                         {"sequencename": "message_leads_id_seq", "last_value": None},
-                         {"sequencename": "intents_id_seq", "last_value": None},
-                         {"sequencename": "proactive_deliveries_id_seq", "last_value": None},
-                         {"sequencename": "intent_posts_id_seq", "last_value": None},
-                         {"sequencename": "outbound_reviews_id_seq", "last_value": None},
-                         {"sequencename": "memory_candidates_id_seq", "last_value": None},
-                         {"sequencename": "memory_candidate_events_id_seq", "last_value": None},
-                         {"sequencename": "memory_candidate_sources_id_seq", "last_value": None},
-                         {"sequencename": "memory_posts_id_seq", "last_value": None},
-                         {"sequencename": "reminders_id_seq", "last_value": None}],
-                        key=lambda row: row["sequencename"])
+                    historical = {row["sequencename"] for row in before[table]}
+                    added = [row for row in fresh_rows[table] if row["sequencename"] not in historical]
+                    assert all(row["last_value"] is None for row in added)
+                    assert after[table] == sorted([*before[table], *added], key=lambda row: row["sequencename"])
                 elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
                     # New builtins and additive defaults must leave every historical field intact.
                     key = "id" if table == "llm_providers" else "provider_id"
@@ -184,16 +176,19 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert sessions["manager-bridge"]["session_totals"] == original["manager-bridge"]["session_totals"]
             assert sessions["manager-bridge"]["pending_handoff"] == "Keep the handoff"
             for key in ("manager-empty", "manager-codex", "manager-provider"):
-                assert sessions[key] == original[key]
+                assert sessions[key] == {**original[key], "leads_session_id": None, "context_tokens": None, "last_turn_cost_usd": None}  # no leads search marked it
             for row in after["channel_configs"]:
                 assert json.loads(row["config"])["allowed_user_ids"] == ["7", "8"]
             metadata = json.loads(after["llm_records"][0]["metadata"])
             assert metadata["agent"] == metadata["profile"] == {"name": "Original evidence"}
             assert metadata["accounting_basis"] == "subscription_equivalent"
-            assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
+            # A message from before the column: not known whether the operator wrote it.
+            assert after["task_user_gate_messages"] == [{**r, "from_operator": None}
+                                                        for r in before["task_user_gate_messages"]]
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
-            assert {"schedule_user_gates", "command_schedules", "runtime_launcher", "proactive_deliveries"} <= {
+            assert {"schedule_user_gates", "command_schedules", "runtime_launcher", "proactive_deliveries",
+                    "channel_outbox"} <= {
                 r["name"] for r in after["schema_migrations"]}
             assert await conn.fetchval("SELECT planner_session_runtime FROM schedules") == "claude-code"
             # Added snapshot and command metadata preserve every historical run field.
@@ -251,7 +246,8 @@ def test_deleted_custom_bot_preserves_gate_posts_and_reply_identity(bridge_sourc
             await connection.ensure_schema(conn)
             after = await witness(conn)
             assert after["task_user_gate_posts"] == before["task_user_gate_posts"]
-            assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
+            assert after["task_user_gate_messages"] == [{**r, "from_operator": None}
+                                                        for r in before["task_user_gate_messages"]]
             gate = await user_gates.find_reference("telegram", "7", ["11"],
                                                   channel_id="channel-telegram-201", pool=conn)
             assert gate is not None and gate["step_id"] == "step-bridge"
@@ -481,8 +477,10 @@ def test_unusual_rows_warn_and_keep_bridge_reading(bridge_source, caplog, damage
             if table == "tasks":
                 assert json.loads(after[0]["config"]) == {}
             elif table == "llm_records":
-                # The run tree's columns are added and no row is rewritten: older rows have no kind and no parent.
-                assert after == [{**r, "parent_record_id": None, "run_kind": None} for r in before]
+                # The run tree's and the failure classes' columns are added and no row is rewritten: older rows have
+                # no kind, no parent and no failure class.
+                assert after == [{**r, "parent_record_id": None, "run_kind": None, "failure_class": None,
+                                  "failure_cause": None, "attempt_id": None} for r in before]
             else:
                 assert after == before
             assert any(r.levelname == "WARNING" and identity in r.message for r in caplog.records)

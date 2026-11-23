@@ -113,6 +113,24 @@ def test_preview_project_uses_project_harness_and_background_without_writes(monk
     assert any("Project harness" in (b["text"] or "") for b in result["blocks"])
 
 
+@pytest.mark.parametrize("mode", [None, "off", "local", "network"])
+def test_planner_preview_uses_project_acceptance_permission(monkeypatch, mode):
+    from looper.agents.project_execution import AcceptanceChecksMode
+    from looper.agents.system_prompt import sha256_text
+    from looper.agents.tiers.planner_protocol import reply_contract
+
+    module, profile, _ = _dependencies(monkeypatch, role="planner")
+    monkeypatch.setattr(module.db_projects, "get_project", AsyncMock(return_value={
+        "id": "proj-demo", "name": "Demo", "acceptance_checks": mode}))
+    monkeypatch.setattr(module.db_documents, "list_documents", AsyncMock(return_value=[]))
+    result = asyncio.run(module.preview(profile.id, "planner", "proj-demo"))
+    contract = reply_contract(acceptance_checks=AcceptanceChecksMode(mode or "off"))
+    assert result["prompt_layers"]["contract"]["sha256"] == sha256_text(contract)
+    assert any(contract in (block["text"] or "") for block in result["blocks"])
+    if mode in (None, "off"):
+        assert contract.encode() == reply_contract().encode()
+
+
 def test_preview_manager_has_no_project_context(monkeypatch):
     module, profile, loader = _dependencies(monkeypatch)
     get_project = AsyncMock()
@@ -416,3 +434,16 @@ def test_preview_path_knowledge_reuses_launch_index(monkeypatch, tmp_path, store
     assert not any("knowledge is omitted" in note for note in result["notes"])
     if stored_kind:
         assert any("doc-2" in note and "Stored guide" in note and "omitted" in note for note in result["notes"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_manager_preview_tracks_the_turn_context_contract(monkeypatch, enabled):
+    from looper.agents import chat_settings
+    from looper.agents.turn_context import TURN_CONTEXT_CONTRACT
+
+    module, profile, _ = _dependencies(monkeypatch, role="manager")
+    monkeypatch.setattr(chat_settings, "_turn_context_enabled", enabled)
+    result = asyncio.run(module.preview(profile.id, "manager"))
+    assert result["prompt_layers"]["contract"]["name"] == (
+        "TOOLS_CONTRACT+TURN_CONTEXT_CONTRACT" if enabled else "TOOLS_CONTRACT")
+    assert any(TURN_CONTEXT_CONTRACT in (block["text"] or "") for block in result["blocks"]) is enabled

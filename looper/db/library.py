@@ -20,7 +20,8 @@ from .connection import get_pool
 # An MCP server's configuration comes with its item, but of its environment and headers only the names: the
 # values are secrets and are read by get_mcp_server(s) alone.
 _ITEM_COLUMNS = (
-    "i.id, i.kind, i.name, i.origin, i.owner_project_id, p.name AS owner_project_name, i.description, i.source, "
+    "i.id, i.kind, i.name, i.origin, i.owner_project_id, p.name AS owner_project_name, i.description, i.lifecycle, "
+    "i.source, "
     "i.version, i.sha256, i.size_bytes, i.file_count, i.modified, i.imported_at, i.updated_at, "
     "m.transport AS mcp_transport, m.command AS mcp_command, m.args AS mcp_args, m.url AS mcp_url, "
     "ARRAY(SELECT k FROM jsonb_object_keys(m.env) k ORDER BY k COLLATE \"C\") AS mcp_env_keys, "
@@ -392,14 +393,26 @@ async def insert_owned_skill(
 
 async def update_owned_skill(
     conn: asyncpg.Connection, item_id: str, *, name: str, description: str, file: Mapping[str, Any], sha256: str,
+    skill_version: int | None = None,
 ) -> dict[str, Any]:
-    """Replace a project-authored skill's name, description and SKILL.md; returns the item."""
+    """Replace a project-authored skill's name, description and SKILL.md; returns the item.
+
+    ``skill_version`` moves the current-version pointer in this same UPDATE.
+    """
     content = str(file["content"])
-    await conn.execute(
-        "UPDATE library_items SET name = $2, description = $3, sha256 = $4, size_bytes = $5, updated_at = now() "
-        "WHERE id = $1",
-        item_id, name, description, sha256, len(content.encode("utf-8")),
-    )
+    size = len(content.encode("utf-8"))
+    if skill_version is None:
+        await conn.execute(
+            "UPDATE library_items SET name = $2, description = $3, sha256 = $4, size_bytes = $5, updated_at = now() "
+            "WHERE id = $1",
+            item_id, name, description, sha256, size,
+        )
+    else:
+        await conn.execute(
+            "UPDATE library_items SET name = $2, description = $3, sha256 = $4, size_bytes = $5, "
+            "skill_version = $6, updated_at = now() WHERE id = $1",
+            item_id, name, description, sha256, size, skill_version,
+        )
     await conn.execute("DELETE FROM library_files WHERE item_id = $1", item_id)
     await conn.execute(
         "INSERT INTO library_files (item_id, path, content, sha256, executable) VALUES ($1, $2, $3, $4, false)",
@@ -496,7 +509,7 @@ async def list_role_items(project_id: str | None, item_ids: Sequence[str] = (), 
     shaped as ``list_installed`` rows; only those of ``item_ids`` when given."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, i.description, s.scope "
+        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, i.description, i.lifecycle, s.scope "
         "FROM library_installs s JOIN library_items i ON i.id = s.item_id "
         "WHERE s.enabled AND 'task_role' = ANY(s.roles) AND (s.scope = 'global' OR s.project_id = $1) "
         f"AND (cardinality($2::text[]) = 0 OR i.id = ANY($2::text[])) ORDER BY {_BY_NAME}, s.scope",
@@ -510,13 +523,13 @@ async def list_installed(role: str, project_id: str | None, *, pool: Executor | 
     the project.
 
     Each row is an install with its item's ``id``, ``kind``, ``name``,
-    ``origin``, ``owner_project_id`` and ``sha256``: plugins first, then by
-    name, the global install before the project's. An item installed in both
-    places has two rows.
+    ``origin``, ``owner_project_id``, ``sha256``, ``description`` and
+    ``lifecycle``: plugins first, then by name, the global install before the
+    project's. An item installed in both places has two rows.
     """
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, s.scope "
+        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, i.description, i.lifecycle, s.scope "
         "FROM library_installs s JOIN library_items i ON i.id = s.item_id "
         "WHERE s.enabled AND $1 = ANY(s.roles) AND (s.scope = 'global' OR s.project_id = $2) "
         f"ORDER BY {_BY_NAME}, s.scope",

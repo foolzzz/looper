@@ -170,7 +170,7 @@ def _bridge(url: str, source: Path) -> dict:
 def _state(url: str, *, rows: bool = False) -> dict[str, object]:
     async def read() -> dict[str, object]:
         import asyncpg
-        from looper.db.connection import SCHEMA_PATH, schema_fingerprint
+        from looper.db import connection, migrations
         conn = await asyncpg.connect(url)
         try:
             if rows:
@@ -181,7 +181,8 @@ def _state(url: str, *, rows: bool = False) -> dict[str, object]:
                     "WHERE conrelid = 'task_user_gate_posts'::regclass AND contype = 'u' "
                     "AND pg_get_constraintdef(oid) = 'UNIQUE (channel, chat, external_id)')"),
                 "current": await conn.fetchval("SELECT sha256 FROM schema_fingerprint")
-                == schema_fingerprint(SCHEMA_PATH.read_text(encoding="utf-8")),
+                == connection.schema_fingerprint(migrations.schema_sql(
+                    connection.SCHEMA_PATH.read_text(encoding="utf-8"), connection._MIGRATIONS)),
             }
         finally:
             await conn.close()

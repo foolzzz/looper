@@ -45,6 +45,51 @@ export interface SelfCheck {
   fix: string;
 }
 
+export interface ProviderLimitWindow {
+  window_name: string;
+  status: "allowed" | "warning" | "rejected";
+  utilization: number | null;
+  resets_at: string | null;
+  window_minutes: number | null;
+  source: string;
+  record_id: number | null;
+  observed_at: string;
+}
+
+export interface ProviderDailyUsage {
+  day: string;
+  runs: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  cache_creation_input_tokens: number | null;
+  cost_usd: number | null;
+  quota_failures: number | null;
+}
+
+export interface ProviderLimits {
+  enabled: boolean;
+  providers: {
+    provider_id: string;
+    name: string;
+    cost_basis: "api_equivalent" | "reported";
+    windows: ProviderLimitWindow[];
+    usage: ProviderDailyUsage[];
+    admission: null;
+  }[];
+}
+
+export async function fetchProviderLimits(providerId: string, signal?: AbortSignal): Promise<ProviderLimits> {
+  const result = await callV1<ProviderLimits>("/api/v1/providers/limits", { provider_id: providerId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export function updateLimitSignalsSettings(enabled: boolean, confirmation?: V1PendingConfirmation) {
+  return confirmation ? confirmV1<{ enabled: boolean }>(confirmation.confirmation_id, confirmation.session)
+    : callV1<{ enabled: boolean }>("/api/v1/limit_signals_settings/update", { enabled });
+}
+
 /** A ready task's status: created (from the dashboard or by the Manager) and never started. */
 export const READY_STATUS = "init";
 export const READY_LABEL = "Ready — not started";
@@ -76,6 +121,10 @@ export interface TaskInfo {
   manager_id?: string;
   manager_name?: string | null;
   continues_schedule_session: boolean;
+  /** Required checks whose current evidence failed. Present only on an attention row, and only when one did. */
+  failed_checks?: string[];
+  /** The step database id of the first of `failed_checks`, so the row can open that card. */
+  failed_check_step?: string;
 }
 
 /** The agents that work on one task; their runs make up its cost. */
@@ -116,7 +165,10 @@ export interface TaskCost {
   equivalent_runs?: number;
   /** Runs Looper priced at their provider's prices. */
   provider_price_runs?: number;
-  by_role: Record<TaskRole, { cost_usd: number; runs: number }>;
+  by_role: Record<TaskRole, { cost_usd: number; runs: number }> & {
+    explorer?: { cost_usd: number; runs: number };
+    consult?: { cost_usd: number; runs: number };
+  };
   by_model: TaskModelCost[];
   /** The Manager's turns about the task, by model; not in cost_usd or the spend cap. */
   manager_by_model: TaskModelCost[];
@@ -134,7 +186,7 @@ export interface ProjectExecution {
   /** The most one task may spend over all its runs. */
   task_budget_usd: number | null;
   /** At the task cap: fail at once (also when null) or after the Planner sums up. */
-  task_budget_action: "wrap_up" | "fail" | null;
+  task_budget_action: "wrap_up" | "fail" | "ask" | null;
   /** How often the Planner checks running Workers; 0 = never. */
   supervise_interval_seconds: number | null;
   /** "planner": the Planner decides which steps are reviewed; "all": every step is. */
@@ -186,6 +238,11 @@ export interface ProjectExecution {
   room_consult_budget_usd: number | null;
   room_consult_timeout_seconds: number | null;
   room_consults_per_task: number | null;
+  subagents?: "off" | "on" | null;
+  subagent_budget_usd?: number | null;
+  subagent_task_budget_usd?: number | null;
+  subagents_per_run?: number | null;
+  subagents_per_task?: number | null;
   advisor: "off" | "on" | null;
   advisor_consult_budget_usd: number | null;
   advisor_budget_usd: number | null;
@@ -198,7 +255,12 @@ export interface ProjectExecution {
 }
 
 /** A group of tasks with an optional default work directory and background. */
+export type AcceptanceChecksMode = "off" | "local" | "network";
+export interface AcceptanceChecksSettings { acceptance_checks: AcceptanceChecksMode }
+
 export interface Project extends ProjectExecution {
+  /** Omitted while off; permission is changed only through acceptance_checks operations. */
+  acceptance_checks?: "local" | "network";
   project_id: string;
   name: string;
   description: string;
@@ -213,6 +275,8 @@ export interface Project extends ProjectExecution {
   active_count: number;
   /** Its schedules; a project with any cannot be deleted. */
   schedule_count: number;
+  /** Present only while agents may propose skills for the operator to confirm; absent means off. */
+  skill_proposals?: "on";
 }
 
 export interface ChatSendResponse {
@@ -411,7 +475,7 @@ export interface OverviewSchedules {
     last_status: ScheduleRunStatus | null;
   })[];
   /** Runs since the server's local midnight. */
-  skipped_today: Record<"skipped_gate" | "skipped_overlap" | "skipped_missed" | "skipped_budget", number>;
+  skipped_today: Record<"skipped_gate" | "skipped_overlap" | "skipped_missed" | "skipped_budget" | "skipped_busy", number>;
 }
 
 export async function fetchOverview(): Promise<Overview> {
@@ -565,7 +629,7 @@ export interface ChatSettings {
   completion_turns: CompletionTurns;
   /** Whether the ledger records what waits, what was decided and who does what. Off by default. */
   ledger_enabled: boolean;
-  /** Bots with no operator id, returned when enabling the ledger. */
+  /** Present when an update turns the ledger on: bots with no operator id. */
   missing_operator_ids?: MissingOperatorBot[];
 }
 
@@ -573,6 +637,33 @@ export interface ChatSettingsUpdate {
   stop_enabled?: boolean | null;
   completion_turns?: CompletionTurns | null;
   ledger_enabled?: boolean | null;
+}
+
+/** Operator-only session routing controls, independent of client chat settings. */
+export interface SessionRoutingSettings {
+  /** Whether the default Manager gives each group and each other sender's direct chat a session of its own. Off by default. */
+  session_routing_enabled: boolean;
+  /** How many sessions keep a process running (1..16, default 2). */
+  max_resident: number;
+  /** Present when an update turns session routing on: bots with no operator id. Empty when every bot has one. */
+  missing_operator_ids?: MissingOperatorBot[];
+}
+
+export interface SessionRoutingSettingsUpdate {
+  session_routing_enabled?: boolean | null;
+  max_resident?: number | null;
+}
+
+export async function fetchSessionRoutingSettings(): Promise<SessionRoutingSettings> {
+  const result = await callV1<SessionRoutingSettings>("/api/v1/session_routing/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateSessionRoutingSettings(body: SessionRoutingSettingsUpdate): Promise<SessionRoutingSettings> {
+  const result = await callV1<SessionRoutingSettings>("/api/v1/session_routing/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Operator-only turn-context settings; independent of client chat controls. */
@@ -646,6 +737,49 @@ export async function fetchManagerMetricsSettings(): Promise<ManagerMetricsSetti
 
 export async function updateManagerMetricsSettings(body: { enabled: boolean | null }): Promise<ManagerMetricsSettings> {
   const result = await callV1<ManagerMetricsSettings>("/api/v1/manager_metrics_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Operator-only shared outbound gateway controls; separate from chat settings. */
+export interface OutboundGatewaySettings {
+  outbound_enabled: boolean;
+  send_qps: number;
+  write_qps: number;
+  edit_interval_seconds: number;
+  max_in_flight: number;
+}
+
+export async function fetchOutboundGateway(): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateOutboundGateway(
+  body: { [K in keyof OutboundGatewaySettings]?: OutboundGatewaySettings[K] | null },
+): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** The default Manager's persona (Settings → Chat). Empty strings are unset. */
+export interface ManagerPersona {
+  name: string;
+  address: string;
+  tone: string;
+  notes: string;
+}
+
+export async function fetchManagerPersona(): Promise<ManagerPersona> {
+  const result = await callV1<ManagerPersona>("/api/v1/manager_persona/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateManagerPersona(body: ManagerPersona): Promise<ManagerPersona> {
+  const result = await callV1<ManagerPersona>("/api/v1/manager_persona/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
@@ -1131,6 +1265,20 @@ export async function fetchProjects(): Promise<Project[]> {
   return (await fetchProjectsList()).projects;
 }
 
+export async function fetchAcceptanceChecks(projectId: string): Promise<AcceptanceChecksSettings> {
+  const result = await callV1<AcceptanceChecksSettings>("/api/v1/acceptance_checks/get", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateAcceptanceChecks(projectId: string, mode: AcceptanceChecksMode): Promise<AcceptanceChecksSettings> {
+  const result = await callV1<AcceptanceChecksSettings>("/api/v1/acceptance_checks/update",
+    { project_id: projectId, acceptance_checks: mode });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  notifyProjectsChanged();
+  return result;
+}
+
 export async function createProject(fields: NewProjectFields): Promise<Project> {
   const result = await callV1<{ project: Project }>("/api/v1/project_admin/create", fields);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
@@ -1227,7 +1375,8 @@ export type ScheduleRunStatus =
   | "skipped_missed"
   | "skipped_gate"
   | "gate_failed"
-  | "skipped_budget";
+  | "skipped_budget"
+  | "skipped_busy";
 export type ScheduleNotifyFormat = "report" | "deliverable";
 /** "failures": failed runs and the two alerts with their recoveries; "alerts": the alerts and their recoveries
  * only; "always": every run that ran a task, and the alerts; "never": nothing is sent. */
@@ -1261,7 +1410,7 @@ export interface SubscriptionInfo {
   quiet_word: string;
   output_header: string;
   /** What a run writes. Absent on older answers: a push. */
-  output_kind?: "push" | "leads" | "intents";
+  output_kind?: "push" | "leads" | "intents" | "triage";
   render?: "lines_v1" | "lines_v2";
   /** Selection rules (set through the API); empty: the filter above. */
   rules?: { name: string; label: string; never_quiet: boolean }[];
@@ -1302,6 +1451,16 @@ export interface SubscriptionRunInfo {
   skip_reason?: "blocked_by_hook" | "invalid_reply" | null;
   /** Each message of its push: pending, sending, sent, failed or uncertain. */
   deliveries?: { segment: number; state: string; attempts: number; error: string | null }[];
+  /** Present on a triage run: category counts for that window. Absent on push, leads and intents runs. */
+  extract_counts?: {
+    important: number;
+    digest: number;
+    ignore: number;
+    uncited: number;
+    raised: number;
+    none?: boolean;
+    dropped?: Record<string, number>;
+  } | null;
 }
 
 /** One firing of a schedule (or a "Run now"), and the task it started. */
@@ -1354,6 +1513,10 @@ export interface ScheduleInfo {
   env: Record<string, string>;
   env_file: string | null;
   success_deadline: string | null;
+  /** HH:MM-HH:MM in the schedule's timezone: firings outside it do not happen; null: all day. */
+  active_hours?: string | null;
+  /** A firing is skipped (skipped_busy) while the schedule's Manager answers a message. */
+  idle_only?: boolean;
   alert_policy: {
     failures_after: { value: number; default: boolean };
     stale_after_seconds: { value: number | null; default: boolean };
@@ -1403,6 +1566,8 @@ export interface ScheduleInfo {
   enabled: boolean;
   /** Null while disabled. */
   next_fire_at: string | null;
+  /** Set while a firing waits for a usage window. The instant is the stored reset or cooldown, not a locale clock. */
+  usage_hold?: { until: string; reason: string; reset_known: boolean; window: string | null };
   last_fired_at: string | null;
   last_success_at: string | null;
   consecutive_failures: number;
@@ -1909,6 +2074,8 @@ export interface ProjectSkill {
   size_bytes: number;
   created_at: string;
   updated_at: string;
+  /** active: new runs load it. deprecated: new runs skip it. The install switch is separate. */
+  lifecycle: "active" | "deprecated";
 }
 
 export interface SkillCaps {
@@ -1976,6 +2143,236 @@ export async function deleteProjectSkill(
     "/api/v1/project_skills/delete", { project_id: projectId, skill_id: skillId });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
+}
+
+export type SkillAuthorKind = "operator" | "proposal" | "rollback";
+
+/** One saved version of a project skill. The list leaves out the body. */
+export interface SkillVersion {
+  version: number;
+  name: string;
+  description: string;
+  sha256: string;
+  author_kind: SkillAuthorKind;
+  author_ref: string | null;
+  reason: string;
+  created_at: string;
+}
+
+/** The difference between two versions: names, descriptions, and a unified diff of the bodies. */
+export interface SkillVersionDiff {
+  from_version: number;
+  to_version: number;
+  name: { from: string; to: string };
+  description: { from: string; to: string };
+  content: string;
+}
+
+export interface SkillVersions {
+  skill_id: string;
+  current_version: number | null;
+  versions: SkillVersion[];
+  affected_projects: { project_id: string; project_name: string }[];
+  diff: SkillVersionDiff | null;
+}
+
+/** List one project skill's versions. Pass both ends of a range to also get their difference. */
+export async function fetchSkillVersions(
+  projectId: string,
+  skillId: string,
+  range?: { fromVersion: number; toVersion: number },
+): Promise<SkillVersions> {
+  const result = await callV1<SkillVersions>("/api/v1/project_skills/versions", {
+    project_id: projectId,
+    skill_id: skillId,
+    ...(range ? { from_version: range.fromVersion, to_version: range.toVersion } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export interface ProjectSkillRollback extends ProjectInstalls {
+  skill: ProjectSkill;
+  version: number;
+  affected_projects: SkillVersions["affected_projects"];
+}
+
+/** Write a new version whose content is an older version's. Answers with the project's installs. */
+export async function rollbackProjectSkill(
+  projectId: string,
+  skillId: string,
+  version: number,
+): Promise<ProjectSkillRollback> {
+  const result = await callV1<ProjectSkillRollback>(
+    "/api/v1/project_skills/rollback", { project_id: projectId, skill_id: skillId, version });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export interface SkillLifecycleChange extends ProjectInstalls {
+  skill: ProjectSkill;
+  affected_projects: SkillVersions["affected_projects"];
+}
+
+/** Mark a project skill deprecated. New runs skip it; installs, versions and files stay. The reason is not stored on the skill; it is kept only in the operator action record. */
+export async function deprecateProjectSkill(
+  projectId: string,
+  skillId: string,
+  reason?: string,
+): Promise<SkillLifecycleChange> {
+  const result = await callV1<SkillLifecycleChange>("/api/v1/project_skills/deprecate", {
+    project_id: projectId, skill_id: skillId, ...(reason ? { reason } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Mark a deprecated project skill active so new runs load it again. */
+export async function restoreProjectSkill(projectId: string, skillId: string): Promise<SkillLifecycleChange> {
+  const result = await callV1<SkillLifecycleChange>("/api/v1/project_skills/restore", {
+    project_id: projectId, skill_id: skillId,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Characters of skill name plus description a new run of each role would list. A display threshold, not a cap. */
+export interface ContextBudget {
+  limit: number;
+  roles: Record<"planner" | "worker" | "reviewer", { chars: number; skills: number; over: boolean }>;
+  /** Plugin-bundled skills are left out of v0. */
+  counts_plugin_skills: false;
+}
+
+export async function fetchContextBudget(projectId: string): Promise<ContextBudget> {
+  const result = await callV1<ContextBudget>("/api/v1/project_skills/context_budget", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** A rate with its 95% Wilson interval; `insufficient` carries the counts only. */
+export interface SkillRate {
+  state: "ok" | "insufficient";
+  value: number | null;
+  low: number | null;
+  high: number | null;
+  n: number;
+  successes: number;
+}
+
+export interface SkillAverage { avg: number | null; n: number }
+
+export interface SkillUsagePeriod {
+  loaded_runs: number;
+  /** Null where attempts are not recorded here. */
+  loaded_attempts: number | null;
+  /** `unknown` counts attempts whose runtime shows no Skill call; they are not in `n` or `rate`. */
+  invoked: { count: number; n: number; unknown: number; rate: number | null };
+  /** Null where attempts are not recorded here. */
+  effect: { first_pass: SkillRate; control: SkillRate; cost: { loaded: SkillAverage; control: SkillAverage } } | null;
+}
+
+export type SkillReviewReason = "never_invoked" | "stale" | "divergent";
+
+/** How a project skill (by its current content hash) was loaded and called, and how its attempts fared.
+ * Observational data, not a controlled experiment (`note`). */
+export interface SkillUsageRow extends SkillUsagePeriod {
+  skill_id: string;
+  name: string;
+  sha256: string;
+  lifecycle: string;
+  versions: number[];
+  comparison: SkillUsagePeriod;
+  review: SkillReviewReason[];
+  window: { start: string; end: string };
+  comparison_window: { start: string; end: string };
+  /** When the first attempt was recorded; runs before it have no attempt. */
+  coverage_since: string | null;
+  note: string;
+}
+
+export async function fetchSkillUsage(projectId: string): Promise<SkillUsageRow[]> {
+  const result = await callV1<{ skills: SkillUsageRow[] }>("/api/v1/project_skills/usage", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.skills;
+}
+
+export type SkillProposalStatus = "pending" | "confirmed" | "confirmed_edited" | "rejected" | "expired" | "superseded";
+
+/** A drafted skill that changes nothing until the operator confirms it. `diff` is the server's comparison with
+ * the skill's current version (an update only). */
+export interface SkillProposal {
+  proposal_id: number;
+  project_id: string;
+  action: "create" | "update";
+  skill_id: string | null;
+  name: string;
+  description: string;
+  why: string;
+  evidence: { task: string; step?: string }[];
+  proposer: string;
+  status: SkillProposalStatus;
+  /** The hash of what is shown; Confirm names it, and the server refuses another. */
+  content_sha256: string;
+  base_sha256: string | null;
+  content: string;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  decision_note: string | null;
+  current: { name: string; description: string; sha256: string } | null;
+  diff: { name: { from: string; to: string }; description: { from: string; to: string }; content: string } | null;
+  /** An update whose skill changed since it was drafted: confirming supersedes it and writes nothing. */
+  stale: boolean;
+  affected_projects: { project_id: string; project_name: string }[];
+}
+
+export interface SkillProposalList {
+  mode: "off" | "on";
+  proposals: SkillProposal[];
+}
+
+export async function fetchSkillProposals(projectId: string): Promise<SkillProposalList> {
+  const result = await callV1<SkillProposalList>("/api/v1/project_skills/proposals/list", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Confirm the proposal whose content hash the operator saw. With `fields`, the operator's edit is what is written. */
+export async function confirmSkillProposal(
+  projectId: string,
+  proposalId: number,
+  contentSha256: string,
+  fields?: { name?: string; description?: string; content?: string },
+): Promise<{ proposal: SkillProposal; version: number | null }> {
+  const result = await callV1<{ proposal: SkillProposal; version: number | null }>(
+    "/api/v1/project_skills/proposals/confirm",
+    { project_id: projectId, proposal_id: proposalId, content_sha256: contentSha256, ...(fields ? { fields } : {}) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function rejectSkillProposal(projectId: string, proposalId: number, reason?: string): Promise<SkillProposal> {
+  const result = await callV1<{ proposal: SkillProposal }>("/api/v1/project_skills/proposals/reject", {
+    project_id: projectId, proposal_id: proposalId, ...(reason ? { reason } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.proposal;
+}
+
+export async function restoreSkillProposal(projectId: string, proposalId: number): Promise<SkillProposal> {
+  const result = await callV1<{ proposal: SkillProposal }>("/api/v1/project_skills/proposals/restore", {
+    project_id: projectId, proposal_id: proposalId,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.proposal;
+}
+
+export async function setSkillProposalMode(projectId: string, mode: "off" | "on"): Promise<"off" | "on"> {
+  const result = await callV1<{ project_id: string; mode: "off" | "on" }>(
+    "/api/v1/project_skills/proposals/set_mode", { project_id: projectId, mode });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.mode;
 }
 
 export async function updateTaskConfig(
@@ -2733,6 +3130,19 @@ export interface JournalEntry {
   created_at: string;
 }
 
+/** One acceptance check bound to a criterion (1-based). Omitted on a step that has none. */
+export interface AcceptanceCheck {
+  id: string;
+  criterion: number;
+  type: "command" | "artifact";
+  command: string;
+  timeout_seconds: number;
+  required: boolean;
+  network: boolean;
+  protect: string[];
+  artifact?: string[];
+}
+
 /** A review role a step names. */
 export interface StepReviewRole {
   role: string;
@@ -2757,6 +3167,8 @@ export interface TaskStep {
   instruction: string;
   /** How to tell the step is done, as the Planner wrote it; checked by its Worker and its Reviewer. */
   acceptance_criteria: string[];
+  /** Omitted when the step has none, so a task without checks stays as it was. */
+  checks?: AcceptanceCheck[];
   target_files: string[];
   /** The ids of the steps it needs before it starts. */
   depends_on: string[];
@@ -2872,7 +3284,7 @@ export async function fetchTaskConversation(
 /** One run of a task as `runs.for_task` answers: no prompts, metadata body or events. */
 export interface TaskRunRow {
   id: number;
-  role: TaskRole;
+  role: TaskRole | "explorer";
   agent_id: string;
   step_id: string | null;
   status: LlmRecord["status"];
@@ -2893,6 +3305,38 @@ export async function fetchTaskRuns(taskId: string, signal?: AbortSignal): Promi
   const result = await callV1<{ runs: TaskRunRow[] }>("/api/v1/runs/for_task", { task_id: taskId }, { signal });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.runs;
+}
+
+export interface RunTreeCost {
+  subscription_usd: number | null;
+  api_usd: number | null;
+}
+export interface RunTreeNode {
+  id: number;
+  kind: string;
+  parent_record_id: number | null;
+  spawner: { role: string | null; seat: string | null };
+  reason: string;
+  model: string | null;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  own_cost: RunTreeCost;
+  subtree_cost: RunTreeCost;
+  result_summary: string | null;
+  result_verified: boolean | null;
+  failure_class: string | null;
+  failure_cause: string | null;
+  state: string | null;
+  delivery: string | null;
+  cancel_reason: string | null;
+  parent_spend_known: boolean | null;
+  wait_intervals: { started_at: string; ended_at: string | null }[];
+}
+export async function fetchRunTree(taskId: string, signal?: AbortSignal): Promise<{ task_id: string; nodes: RunTreeNode[] }> {
+  const result = await callV1<{ task_id: string; nodes: RunTreeNode[] }>("/api/v1/runs/tree", { task_id: taskId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export function streamTaskActivity(
@@ -2998,6 +3442,9 @@ export interface ProjectInstructionFile {
   error?: string;
 }
 
+/** quota: wait for the reset; transient: try again later; environment: someone must fix it; judgment: the rest. */
+export type FailureClass = "quota" | "transient" | "environment" | "judgment";
+
 export interface LlmRecord {
   id: number;
   agent_id: string;
@@ -3027,7 +3474,13 @@ export interface LlmRecord {
   duration_ms: number | null;
   model: string | null;
   error: string | null;
+  /** Why a failed run failed, recorded while failure typing (`engine.failure_typing`) is on; null otherwise. */
+  failure_class?: FailureClass | null;
+  failure_cause?: string | null;
   metadata: {
+    /** Beside the failure class: whether a typed field or the runtime's error text told it, and when a used-up
+     * window resets. */
+    failure?: { signal: "typed" | "text"; resets_at?: string };
     llmrec?: { state: string; reason?: string; detail?: string; route_id?: string };
     ttadk_check?: string;
     command?: string[];
@@ -3351,6 +3804,28 @@ export const previewMessageStreamDeletion = async (fields: MessageStreamDeletion
 };
 export const deleteMessageStream = (fields: MessageStreamDeletion & { confirmation_token: string }, session: string) =>
   messageStreamOperation<{ source_id: string; deleted: number; deletion_id: number }>("delete", fields, undefined, session);
+
+export interface TriageWhy {
+  case: "triage_off" | "out_of_scope" | "not_yet" | "skipped" | "event" | "uncited" | "unknown";
+  cause?: "disabled" | "no_subscription";
+  rule?: "chat_excluded" | "imported_history" | "own_app" | "sender_kind";
+  next_run_at?: string | null;
+  cursor_seq?: number;
+  skip_reason?: string;
+  run_id?: string;
+  event_id?: string;
+  category?: "important" | "digest" | "ignore";
+  reason?: string;
+  reason_kind?: "model" | "uncited" | "raised";
+  handling?: string;
+  checked?: string[];
+}
+
+export async function triageWhy(message: string): Promise<TriageWhy> {
+  const result = await callV1<TriageWhy>("/api/v1/triage/why", { message });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
 
 export interface LlmrecSettingsUpdate {
   enabled?: boolean;
@@ -4284,6 +4759,8 @@ export interface CatalogItem {
   modified: boolean;
   imported_at: string;
   updated_at: string;
+  /** Missing means active. deprecated: a new run skips the skill. Not the install's enabled switch. */
+  lifecycle?: "active" | "deprecated";
   /** An MCP server's configuration, its env and header values masked; null for a plugin or a skill. */
   mcp: McpConfig | null;
   /** Global and project installs. */

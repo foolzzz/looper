@@ -52,7 +52,8 @@ def test_role_list_get_update_and_recommended_prompt_reset(tmp_path, monkeypatch
         async with _configured(tmp_path) as server:
             status, body = await _post(server, "roles/list")
             configs = _result("roles.list", body)["configs"]
-            assert status == 200 and {r["role"] for r in configs} == {"manager", "planner", "worker", "reviewer"}
+            # Each existing role is listed; a role added later may be listed too.
+            assert status == 200 and {"manager", "planner", "worker", "reviewer", "explorer"} <= {r["role"] for r in configs}
             status, body = await _post(server, "roles/update", {"role": "worker", "fields": {
                 "system_prompt": "Edited example", "extra_args": {"flag": True}, "metadata": {"origin": "test"}}})
             assert status == 200 and _result("roles.update", body)["system_prompt"] == "Edited example"

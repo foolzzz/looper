@@ -736,7 +736,8 @@ def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkey
                "name": "sonnet", "protocol": "anthropic-messages"},
               {"model_id": "model-chat", "provider_id": "prov-test", "provider_name": "Claude account",
                "name": "sonnet", "protocol": "openai-chat"}]
-    profile = {"profile_id": "agent-test", "name": "recipe", "runtime_name": "Claude", "provider": provider,
+    profile = {"profile_id": "agent-test", "name": "recipe", "runtime_name": "Claude", "runtime_type": "claude-code",
+               "provider": provider,
                "model_id": "model-sonnet", "model": {k: v for k, v in models[0].items() if k != "provider_name"},
                "effort": "high", "model_path": "direct", "agent_teams": False, "custom_prompt": "Be concise.",
                "roles": ["manager", "planner", "worker", "reviewer"], "builtin": False,
@@ -909,16 +910,19 @@ def test_publish_binding_writes_atomically_with_mode_0600(tmp_path: Path) -> Non
     bare.publish_binding("b1")  # no file configured: nothing to write
 
 
-def test_the_binding_file_is_the_main_sessions_and_another_session_has_none(tmp_path: Path) -> None:
+def test_each_session_has_its_own_binding_file_and_main_keeps_its_own(tmp_path: Path) -> None:
+    import hashlib
+
     path = tmp_path / ".local" / "manager-turn.json"
     ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok", turn_file=path)
-    assert ops.turn_file_for("main") == path
+    group = "group:channel-lark-1:oc_synthetic_1"
+    own = (tmp_path / ".local" / "manager-sessions" / hashlib.sha256(group.encode()).hexdigest()[:12]
+           / ".local" / "manager-turn.json")
+    assert ops.turn_file_for("main") == path and ops.turn_file_for(group) == own
     assert ops.server_config(session_key="main") == ops.server_config()
-    for call in (lambda: ops.publish_binding("b1", session_key="group:lark:chat-1"),
-                 lambda: ops.server_config(session_key="group:lark:chat-1")):
-        with pytest.raises(ValueError, match="no session"):
-            call()
-    assert not path.exists()
+    assert ops.server_config(session_key=group)["env"]["LOOPER_AGENT_TURN_FILE"] == str(own)
+    ops.publish_binding("b1", session_key=group)
+    assert json.loads(own.read_text())["turn"] == "b1" and not path.exists()
 
 
 def test_a_token_of_no_fleet_manager_leaves_the_default_managers_turn_alone() -> None:

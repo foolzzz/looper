@@ -43,6 +43,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .. import child_env
+from . import session_routing
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,17 @@ def reclaim_sessions(runtime_root: Path, *, saved: Iterable[tuple[str, str | Non
     return removed
 
 
+async def _manager_session_labels() -> list[tuple[str, str | None]]:
+    """The resident labels of the default Manager's group and direct-chat sessions with a saved session
+    (``manager_sessions``), whose session directories are kept like main's."""
+    from ..db import manager_sessions
+    from .managers_api import DEFAULT_MANAGER_ID
+    from .session_routing import SessionKey, SessionKind, resident_label
+
+    return [(resident_label(DEFAULT_MANAGER_ID, SessionKey(SessionKind(row["kind"]), row["channel_id"], row["chat"])),
+             row["runtime_type"]) for row in await manager_sessions.list(DEFAULT_MANAGER_ID) if row["session_id"]]
+
+
 async def reclaim_unused(runtime_root: Path) -> list[Path]:
     """Remove the copies under ``runtime_root`` that neither the current content nor a running process uses, and
     the session directories of agents whose saved session is not of their runtime type. A live task's persisted
@@ -227,6 +239,8 @@ async def reclaim_unused(runtime_root: Path) -> list[Path]:
         saved += [(f"planner-schedule-{row['id']}", row["planner_session_runtime"])
                   for row in await schedules.list_schedules() if row["planner_session_id"]]
         saved += await tasks.live_planner_session_labels()
+        if session_routing.routing_enabled():
+            saved += await _manager_session_labels()
         lines = command_lines()
         removed = reclaim(runtime_root, keep=keep, command_lines=lines)
         removed += reclaim_sessions(runtime_root, saved=saved, command_lines=lines)

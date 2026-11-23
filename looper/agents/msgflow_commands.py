@@ -17,11 +17,14 @@ failure stops it there.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 IMPORT_MAX_DAYS = 3650
+OK, USAGE, TRIAGE_OFF, NOT_FOUND, NO_DATABASE = 0, 2, 3, 5, 6
 
 
 def format_report(report: Any, *, days: int, dry_run: bool, per_file: bool = False) -> str:
@@ -171,7 +174,8 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
     from datetime import datetime, timedelta, timezone
 
     from ..db import connection, subscriptions as db_subs, system_settings
-    from . import extraction, leads_model, processor
+    from . import extraction, leads_model, model_call, processor
+    from .agent_settings import AgentType
     from .source_service import own_bot_app_ids
 
     pool = await connection.init_pool(database_url, min_size=1, max_size=4)
@@ -259,13 +263,14 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
                          "events": len(found.rows), "context": found.context, "known": found.known}
 
             async def ask(reminder: str, budget: float, timeout_s: float) -> processor.ProcessorRun:
-                return await processor.run(
+                return model_call.processor_result(await model_call.call(model_call.ProcessorCall(
                     owner=f"{sid}:backfill",
                     instructions=schedule["requirement"] + (f"\n\n{reminder}" if reminder else ""),
                     input_text=found.text, input_ref=reference, quiet_word=extraction.QUIET_WORD, budget_usd=budget,
                     timeout_s=timeout_s, runtime_root=runtime_root, claude_bin=claude_bin,
                     project_id=schedule["project_id"], schedule_id=sid, contract=extraction.LEADS_CONTRACT,
-                    metadata={"backfill": {**reference, "reminded": bool(reminder)}})
+                    metadata={"backfill": {**reference, "reminded": bool(reminder)}},
+                    role=AgentType.PROCESSOR), parse=str))
 
             asked = await extraction.ask(
                 ask, lambda reply: extraction.parse(
@@ -337,7 +342,51 @@ def leads_backfill(args: Any, load_ops: Any) -> int:
     return code
 
 
+async def _why(database_url: str, ref: str, *, as_json: bool) -> tuple[int, str]:
+    import asyncpg
+
+    from ..db.connection import close_pool, init_pool
+    from .triage_why import (
+        AmbiguousMessage, Case, MessageNotFound, UnusableRef, format_lines, why,
+    )
+
+    try:
+        pool = await init_pool(database_url, min_size=1, max_size=2)
+    except (OSError, asyncpg.PostgresError, TimeoutError, ValueError) as error:
+        return NO_DATABASE, f"cannot reach the database: {error}"
+    try:
+        if not await pool.fetchval("SELECT to_regclass('source_events') IS NOT NULL"):
+            return NO_DATABASE, "the database has no message stream tables yet: start `looper serve` once to upgrade it"
+        try:
+            answer = await why(pool, ref, now=datetime.now(timezone.utc))
+        except UnusableRef:
+            return USAGE, "消息引用无法识别：需要飞书消息 ID、消息链接或数字 seq"
+        except MessageNotFound:
+            return NOT_FOUND, "没有这条消息"
+        except AmbiguousMessage:
+            return USAGE, "这个消息 ID 存在于多个来源，请改用 seq"
+        text = (json.dumps(answer.as_dict(), ensure_ascii=False, indent=2) if as_json
+                else "\n".join(format_lines(answer)))
+        return (TRIAGE_OFF if answer.case is Case.TRIAGE_OFF else OK), text
+    except (OSError, asyncpg.PostgresError, TimeoutError) as error:
+        return NO_DATABASE, f"the database failed: {error}"
+    finally:
+        await close_pool()
+
+
+def why_message(args: Any, load_ops: Any) -> int:
+    """Answer from the database directly, including while ``looper serve`` is stopped."""
+    ops = load_ops(args)
+    if ops is None:
+        return NO_DATABASE
+    code, text = asyncio.run(_why(ops.database_url, args.message, as_json=args.json))
+    print(text, file=sys.stderr if code not in (OK, TRIAGE_OFF) else sys.stdout)
+    return code
+
+
 def run(args: Any, load_ops: Any) -> int:
+    if args.msgflow_command == "why":
+        return why_message(args, load_ops)
     if args.msgflow_command == "delete":
         ops = load_ops(args)
         if ops is None:

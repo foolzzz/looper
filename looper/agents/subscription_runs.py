@@ -34,11 +34,13 @@ from typing import Any
 
 import asyncpg
 
-from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import turn_metrics
-from . import cron, extraction, processor, subscription_rules, subscriptions
+from ..db import (connection as db_connection, proactive_deliveries as db_deliveries,
+                  schedules as db_schedules, subscriptions as db_subs)
+from . import (chat_settings, cron, extraction, model_call, proactive_delivery as delivery, processor,
+               subscription_rules, subscriptions, turn_metrics)
+from .agent_settings import AgentType
 from .channels.base import PostOutcome
-from .message import builtin_channel_id
+from .message import MessageEnvelope, builtin_channel_id, channel_thread_id, is_lark, parse_channel_id
 from .task_notice import NotifyTarget, TargetKind
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,24 @@ class SubscriptionRuns:
         self._claude_bin = claude_bin
         self.instance = instance_token()
         self.active: set[str] = set()  # runs this process is executing
+        self._recent_lark_users: dict[tuple[str, str], datetime] = {}
+
+    def observe_user(self, envelope: MessageEnvelope) -> None:
+        """Lark DM targets are user ids, while their saved histories use native chat ids."""
+        if (not chat_settings.delivery_enabled() or envelope.source.agent_type != "channel"
+                or envelope.target.agent_type != "manager"):
+            return
+        channel = parse_channel_id(envelope.source.agent_id)
+        context = envelope.payload.get("channel_context") or {}
+        if (channel is None or not is_lark(channel.channel_type) or not isinstance(context, dict)
+                or context.get("chat_type") != "p2p"
+                or not context.get("sender_id")):
+            return
+        now = self._clock()
+        self._recent_lark_users = {key: at for key, at in self._recent_lark_users.items()
+                                   if now - at <= delivery.DEFAULT_RECENT_REPLY}
+        self._recent_lark_users[(envelope.source.agent_id, context["sender_id"])] = datetime.fromisoformat(
+            envelope.timestamp)
 
     def day_start(self, now: datetime) -> datetime:
         """The start of ``now``'s day, as the daily budget counts it."""
@@ -105,6 +125,11 @@ class SubscriptionRuns:
         extraction's (``extraction.plan``) may also be a skip (``skip_reason``): turned off or not confirmed, the
         cursor stays."""
         sub = schedule["subscription"]
+        if subscriptions.output_kind(sub) == "triage":
+            from . import triage_settings
+
+            if not await triage_settings.enabled(conn):
+                return {"skip_reason": triage_settings.TURNED_OFF}
         if subscriptions.is_extraction(sub):
             return await extraction.plan(conn, schedule, now=now, own_apps=await self._own_apps())
         to_seq = await db_subs.committed_seq(conn, sub["source_id"])
@@ -174,6 +199,11 @@ class SubscriptionRuns:
         stream = await db_subs.get_run(run_id)
         if run is None or schedule is None or stream is None or run["status"] != db_schedules.RUNNING:
             return False
+        if run["fired_at"] is None:
+            # Without the original age cutoff, a recovered attempt cannot reproduce its planned window.
+            await self._end(run_id, status="cancelled", outcome="failed",
+                            error="the run has no firing time; the next run reads its window again")
+            return False
         if subscriptions.is_extraction(schedule["subscription"]):
             pool = db_connection.get_pool()
             snapshot = run.get("execution_snapshot") or {}
@@ -209,12 +239,13 @@ class SubscriptionRuns:
                    else processor.PROCESSOR_TIMEOUT_SEC)
         reference = {"kind": "subscription_window", "schedule_id": schedule["id"], "run_id": run_id,
                      "from_seq": stream["from_seq"], "to_seq": stream["to_seq"], "events": len(picked["rows"])}
-        result = await processor.run(
+        result = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
             owner=schedule["id"], instructions=schedule["requirement"], input_text=text, input_ref=reference,
             quiet_word=sub["quiet_word"], budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout),
             runtime_root=self._runtime_root, claude_bin=self._claude_bin, project_id=schedule["project_id"],
             schedule_id=schedule["id"],
-            metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(text)}})
+            metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(text)}},
+            role=AgentType.PROCESSOR), parse=str))
         await db_subs.update_run(pool, run_id, record_id=result.record_id, events_selected=len(picked["rows"]))
         if result.failure is processor.ProcessorFailure.BLOCKED:
             # Blocked every time it is sent: kept, the window would be sent again, and blocked, with every run after.
@@ -297,6 +328,31 @@ class SubscriptionRuns:
             return "its push target is no longer allowed or bound"
         return None
 
+    async def _delivery_decision(self, run_id: str, channel: str, chat: str) -> delivery.Decision:
+        """One decision and one daily slot for the whole digest, shared by its segments and their retries."""
+        from .schedules import notify_target_kind
+
+        pool = db_connection.get_pool()
+        channel_id = builtin_channel_id(channel)
+        routing = await pool.fetchrow(
+            "SELECT c.manager_id AS owner, coalesce(b.manager_id, c.manager_id) AS manager "
+            "FROM channel_configs c LEFT JOIN manager_chat_bindings b "
+            "ON b.channel_id = c.channel_id AND b.chat_id = $2 WHERE c.channel_id = $1", channel_id, chat)
+        session = channel_thread_id(channel_id, chat, routing["manager"], routing["owner"])
+        last_user = await pool.fetchval(
+            "SELECT created_at FROM chat_messages WHERE session_id = $1 AND role = 'user' "
+            "ORDER BY created_at DESC LIMIT 1", session)
+        observed = self._recent_lark_users.get((channel_id, chat))
+        if observed is not None and (last_user is None or observed > last_user):
+            last_user = observed
+        schedule_id = (await db_schedules.get_run(run_id))["schedule_id"]
+        chat_kind = (delivery.ChatKind.GROUP if await notify_target_kind(channel, chat) == "group"
+                     else delivery.ChatKind.DIRECT)
+        return await delivery.decide(
+            delivery.Delivery(delivery.DeliveryKind.SUBSCRIPTION, delivery.Urgency.DIGEST, chat_kind),
+            dedupe_key=f"subscription_run:{run_id}", channel_id=channel_id, chat=chat,
+            last_user_message_at=last_user, schedule_id=schedule_id, now=self._clock())
+
     async def _push(self, run_id: str) -> None:
         """Push the run's saved output a message at a time (module notes): each is claimed (``sending``, committed)
         before the channel is asked and is never sent again unless the channel answered that it did not send it; one
@@ -305,6 +361,7 @@ class SubscriptionRuns:
         await db_subs.settle_sending(run_id)
         channel, chat = stream["target_channel"], stream["target_chat"]
         refused: str | None = None
+        decided: delivery.Decision | None = None
         for first in await db_subs.list_deliveries(run_id):
             segment = first["segment"]
             while True:
@@ -315,6 +372,12 @@ class SubscriptionRuns:
                     await asyncio.sleep(RETRY_DELAY_SECONDS)
                 if (refused := await self._refusal(run_id)) is not None:
                     break
+                if decided is None and chat_settings.delivery_enabled():
+                    decided = await self._delivery_decision(run_id, channel, chat)
+                    if decided.outcome is not delivery.Outcome.SEND:
+                        refused = f"delivery {decided.outcome.value}: {decided.reason.value}"
+                        logger.info("subscription run %s: %s", run_id, refused)
+                        break
                 if not await db_subs.claim_segment(run_id, segment):
                     break
                 try:
@@ -324,7 +387,8 @@ class SubscriptionRuns:
                                                  idempotency_key=subscriptions.idempotency_keys(
                                                      run_id, segment)[segment - 1],
                                                  **turn_metrics.proactive_kwargs(
-                                                     turn_metrics.ProactiveSource.SUBSCRIPTION, run_id))
+                                                     turn_metrics.ProactiveSource.SUBSCRIPTION, run_id,
+                                                     dedupe_key=f"subscription_run:{run_id}" if decided is not None else None))
                 except _NoPoster:
                     await db_subs.mark_segment(run_id, segment, "failed", error="this server cannot send messages")
                 except Exception as exc:  # whether the channel sent it is not known: it is not sent again
@@ -333,6 +397,14 @@ class SubscriptionRuns:
                 else:
                     if receipt.result is PostOutcome.SENT:
                         await db_subs.mark_segment(run_id, segment, "sent", external_ids=receipt.external_ids)
+                        if decided is not None:
+                            try:
+                                await db_deliveries.record_receipt(
+                                    f"subscription_run:{run_id}", "sent",
+                                    receipt.external_ids[0] if receipt.external_ids else None)
+                            except Exception:
+                                # The channel took it: a failed metrics receipt cannot undo or repeat that send.
+                                logger.exception("subscription run %s: delivery receipt was not recorded", run_id)
                     elif receipt.result is PostOutcome.REJECTED:  # the platform said no: asking again is safe
                         await db_subs.mark_segment(run_id, segment, "failed", error=receipt.error or "not sent")
                     else:  # it may have been accepted (a lost answer): it is never sent again

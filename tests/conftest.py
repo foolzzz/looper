@@ -508,12 +508,21 @@ def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test starts with stopping a reply off, its default (``chat_settings``), whatever an earlier one set."""
-    from looper.agents import chat_settings
+    """Every test starts with the chat's settings at their defaults (``chat_settings``: stopping a reply, completion
+    turns, the delivery layer and the morning brief off), whatever an earlier one set."""
+    from looper.agents import chat_settings, persona
 
     monkeypatch.setattr(chat_settings, "_stop_enabled", chat_settings.DEFAULT_STOP_ENABLED)
     monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.DEFAULT_COMPLETION_TURNS)
     monkeypatch.setattr(chat_settings, "_metrics_enabled", chat_settings.DEFAULT_METRICS_ENABLED)
+    monkeypatch.setattr(chat_settings, "_delivery_enabled", chat_settings.DEFAULT_DELIVERY_ENABLED)
+    monkeypatch.setattr(chat_settings, "_morning_brief_enabled", chat_settings.DEFAULT_MORNING_BRIEF_ENABLED)
+    monkeypatch.setattr(chat_settings, "_morning_brief_time", chat_settings.DEFAULT_MORNING_BRIEF_TIME)
+    monkeypatch.setattr(persona, "_current", persona.Persona())
+    monkeypatch.setattr(persona, "_warned", None)
+    monkeypatch.setattr(chat_settings, "_turn_context_enabled", False)
+    monkeypatch.setattr(chat_settings, "_timezone", None)
+    monkeypatch.setattr(chat_settings, "_reply_language", "zh-CN")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -961,16 +970,17 @@ def current_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     begin, call = ManagerOps.begin_turn, ManagerOps.call
     bound: dict[int, str | None] = {}
 
-    def begin_turn(self, turn, binding=None):  # type: ignore[no-untyped-def]
+    def begin_turn(self, turn, binding=None, *, session_key="main"):  # type: ignore[no-untyped-def]
         binding = binding or f"test-{id(turn)}"
         bound[id(self)] = binding
-        return begin(self, turn, binding)
+        return begin(self, turn, binding, session_key=session_key)
 
-    async def bound_call(self, name, raw, *, binding=None, call_id=None):  # type: ignore[no-untyped-def]
+    async def bound_call(self, name, raw, *, binding=None, call_id=None, session_key=None):  # type: ignore[no-untyped-def]
         if binding is None and bound.get(id(self)) and isinstance(raw, dict):
             # As the bridge would: the running turn's stream showed this call (matters to a resident runtime's turn).
             self.expect(bound[id(self)], name, raw)
-        return await call(self, name, raw, binding=binding or bound.get(id(self)), call_id=call_id)
+        return await call(self, name, raw, binding=binding or bound.get(id(self)), call_id=call_id,
+                          session_key=session_key)
 
     monkeypatch.setattr(ManagerOps, "begin_turn", begin_turn)
     monkeypatch.setattr(ManagerOps, "call", bound_call)

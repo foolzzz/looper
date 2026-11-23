@@ -19,7 +19,7 @@ from . import keeper, proc_tree
 from .agent_settings import AgentType
 from .keeper.client import KeeperClient, KeeperGone
 from .keeper.protocol import ErrorCode, KeeperError, MAX_STDIN_BYTES, Stream
-from .runtimes.channel import RunStartError
+from .runtimes.channel import RunStartError, RunStartTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -439,7 +439,7 @@ class KeptRun:
                     break
                 except OSError:
                     if asyncio.get_running_loop().time() >= deadline:
-                        raise RunStartError("keeper did not open its control socket within 10 s") from None
+                        raise RunStartTimeout("keeper did not open its control socket within 10 s") from None
                     await asyncio.sleep(0.05)
             self._check_launch()
             result = await self._client.initialize(epoch=self._epoch, looper_version=looper.__version__)

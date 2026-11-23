@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { badTaskLimit, changedTaskLimits, createTaskLimits, taskLimitsDraft, taskLimitsOf } from "@/lib/schedules";
+import {
+  RUN_STATUS, badTaskLimit, changedTaskLimits, createTaskLimits, runNotice, taskLimitsDraft, taskLimitsOf,
+} from "@/lib/schedules";
+import type { ScheduleRunInfo } from "@/lib/api";
 
 // The form's text, as the API takes it.
 const typed = (worker: string, reviewer: string) => taskLimitsOf({ worker, reviewer });
@@ -41,5 +44,14 @@ describe("badTaskLimit", () => {
     ["four", true],
   ])("judges %j against 1..64: bad %s", (text, bad) => {
     expect(badTaskLimit(typed(text, "").worker, 64)).toBe(bad);
+  });
+});
+
+describe("a firing skipped while the Manager answers", () => {
+  it("says so in the run list and in the notice", () => {
+    expect(RUN_STATUS.skipped_busy).toEqual({ label: "Skipped: Manager busy", variant: "outline" });
+    const run = { status: "skipped_busy", error: "its Manager was answering a message (idle_only)" } as ScheduleRunInfo;
+    expect(runNotice(run)).toEqual({ text: "Skipped: its Manager was answering a message (runs only when idle)",
+                                     tone: "warn" });
   });
 });

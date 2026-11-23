@@ -159,6 +159,9 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path) -> dict[str, A
             try:
                 await connection.ensure_schema(pool)
                 await seed_channel_configs(pool)
+                if args.untrusted_fence:
+                    await pool.execute("INSERT INTO system_settings (key, value) VALUES ('untrusted_fence.enabled', "
+                                       "'true')")
                 await pool.execute("UPDATE channel_configs SET enabled=TRUE, config=$1::jsonb "
                                    "WHERE channel_id='channel-lark'", json.dumps({
                                        "profile": "cli_main", "allowed_open_ids": [stand_in.OPEN_ID],
@@ -253,6 +256,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--out", help="the run's JSON; default evals/runs/<time>-lark-quote-<mode>.json")
     parser.add_argument("--baseline", help="a run's JSON to compare with")
+    parser.add_argument("--untrusted-fence", action="store_true",
+                        help="turn untrusted_fence.enabled on in each rep's database (outside content fenced)")
     args = parser.parse_args()
     if not args.pg_url:
         parser.error("give --pg-url or LOOPER_EVAL_DATABASE_URL (a disposable PostgreSQL server)")
@@ -291,7 +296,8 @@ def main() -> int:
     commit = subprocess.run(["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"], capture_output=True,
                             text=True).stdout.strip()
     run = {"schema": SCHEMA, "commit": commit, "mode": args.mode, "model": args.model if args.mode == "real" else None, "agent": args.agent or ((args.spec or {}).get("agent") or {}).get("name"),
-           "manager_model": args.manager_model, "manager_effort": args.manager_effort, "reps": reps}
+           "manager_model": args.manager_model, "manager_effort": args.manager_effort,
+           "untrusted_fence": args.untrusted_fence, "reps": reps}
     out = Path(args.out) if args.out else HERE / "evals" / "runs" / time.strftime(f"%Y%m%d-%H%M%S-lark-quote-{args.mode}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -11,7 +11,8 @@
 - ``settings``: the system and role layers of the agent settings (a layer
   names its Agent Profile, ``profile``), and each role's prompt (``null`` while
   it follows the recommended one), timeout and enabled flag. Effort belongs to
-  the Agent Profile; concurrency limits belong to current role layers;
+  the Agent Profile; concurrency limits belong to current role layers.
+  ``settings.system`` carries ``manager.persona`` when that persona is set;
 - ``channels``: each chat channel's configuration;
 - ``managers`` (v4 only): live scenario definitions and task templates, with
   immutable Manager ids, natural profile/project references and no machine paths;
@@ -126,7 +127,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "channels",
+SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "settings.system", "settings.cost_guard", "settings.manager_lanes", "channels",
             "catalog", "installs", "workflows",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
@@ -137,6 +138,8 @@ _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_p
                     "notify", "notify_format", "user_gates")
 _COMMAND_FIELDS = ("command", "env", "env_file")
 _ALERT_FIELDS = ("success_deadline", "alert_failures_after", "alert_stale_after_seconds", "alert_overlap_after")
+# The throttle fields: in the file only when set (a schedule without them exports as before).
+_THROTTLE_FIELDS = ("active_hours", "idle_only")
 _AGENT_SCHEDULE_FIELDS = ("requirement", "gate_command", "gate_timeout_seconds", "run_budget_usd",
                           "daily_budget_usd", "user_gates")
 
@@ -441,6 +444,12 @@ async def stored_chat_settings(conn: Any) -> dict[str, bool]:
     return {"metrics_enabled": value == "true"} if value in ("true", "false") else {}
 
 
+async def stored_cost_guard_settings(conn: Any) -> dict[str, Any]:
+    from .cost_guard_settings import portable
+
+    return await portable(conn)
+
+
 def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> dict[str, Any]:
     """A schedule as the file holds it: no enabled flag, runs or counters, and no directory (``repoint`` when it had
     one of its own)."""
@@ -456,6 +465,7 @@ def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> 
         for name in (*_AGENT_SCHEDULE_FIELDS, "profiles", "task_limits"):
             entry.pop(name)
     entry.update({name: row[name] for name in _ALERT_FIELDS if row.get(name) is not None})
+    entry.update({name: row[name] for name in _THROTTLE_FIELDS if row.get(name)})
     if row.get("template_key"):
         entry["template_key"] = row["template_key"]
         entry["template_inputs"] = dict(row.get("template_inputs") or {})
@@ -501,6 +511,7 @@ async def export_chunks(
     from .. import __version__
     from ..db import config_transfer as db
     from ..db.projects import EXECUTION_COLUMNS
+    from .project_execution import omit_unset_subagents
     from ..db import workflows as db_workflows
 
     summary = summary if summary is not None else ExportSummary()
@@ -556,13 +567,28 @@ async def export_chunks(
         summary.counts["manager.installs"] = len(manager_installs)
     if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
         head["settings"]["scheduler"] = scheduler
+    from . import persona
+
+    if system := await persona.export_value(conn):  # unset or unreadable: the key stays absent
+        head["settings"]["system"] = {persona.PERSONA_KEY: system}
+        summary.counts["settings.system"] = 1
     if chat := await stored_chat_settings(conn):
         head["settings"]["chat"] = chat
+    if cost_guard := await stored_cost_guard_settings(conn):
+        head["settings"]["cost_guard"] = cost_guard
+    from . import lanes_settings
+
+    if manager_lanes := await lanes_settings.portable(conn):
+        head["settings"]["manager_lanes"] = manager_lanes
+        if manager_lanes["enabled"]:
+            summary.counts["settings.manager_lanes"] = len(manager_lanes)
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
                            "models": len(head["models"]), "profiles": len(head["profiles"]),
                            "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]),
-                           "settings.scheduler": len(scheduler), "settings.chat": len(chat), "channels": len(channels),
+                           "settings.scheduler": len(scheduler), "settings.chat": len(chat),
+                           "settings.cost_guard": len(cost_guard),
+                           "channels": len(channels),
                            "installs": len(head["installs"])})
     summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
@@ -592,7 +618,9 @@ async def export_chunks(
             entry = {
                 "name": project["name"], "description": project["description"], "background": project["background"],
                 "default_workflow": project["default_workflow"],
-                "execution": {column: project[column] for column in EXECUTION_COLUMNS},
+                "execution": omit_unset_subagents({column: project[column] for column in EXECUTION_COLUMNS}) | (
+                    {"acceptance_checks": project["acceptance_checks"]} if project.get("acceptance_checks") else {}),
+                **({"skill_proposals": project["skill_proposals"]} if project.get("skill_proposals") else {}),
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
                 "items": owned,
@@ -706,8 +734,14 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
             raise ConfigFileError(f"settings.{section} must be a JSON list")
     if not isinstance(data.get("settings", {}).get("scheduler", {}), dict):
         raise ConfigFileError("settings.scheduler must be a JSON object")
+    if not isinstance(data.get("settings", {}).get("system", {}), dict):
+        raise ConfigFileError("settings.system must be a JSON object")
     if not isinstance(data.get("settings", {}).get("chat", {}), dict):
         raise ConfigFileError("settings.chat must be a JSON object")
+    if not isinstance(data.get("settings", {}).get("cost_guard", {}), dict):
+        raise ConfigFileError("settings.cost_guard must be a JSON object")
+    if not isinstance(data.get("settings", {}).get("manager_lanes", {}), dict):
+        raise ConfigFileError("settings.manager_lanes must be a JSON object")
     _check_retired_fields(data.get("settings", {}).get("layers", []), "settings.layers", ("model", "effort"))
     _check_retired_fields(data.get("providers", []), "providers", ("protocols", "base_url", "models"))
     for index, project in enumerate(data.get("projects", [])):
@@ -1162,6 +1196,36 @@ class _Importer:
         self.blocked_models: set[tuple[str, str, str]] = set()
         self.blocked_profiles: set[str] = set()
         self.seen_registry: dict[str, set[Any]] = defaultdict(set)
+        self.acp_profiles = {name for name, (_, spec) in self.profiles.items() if spec.runtime.type == "acp"}
+        self.acp_role_templates: set[tuple[str, str]] = set()
+
+    def block_acp_profiles(self, data: Mapping[str, Any]) -> None:
+        """Identify forward references before any profile or fallback can be written."""
+        runtime_names = {"acp", *(name for name, (_, spec) in self.runtimes.items() if spec.type == "acp")}
+        runtime_names.update(entry["name"].strip() for entry in data.get("runtimes", [])
+                             if isinstance(entry, Mapping) and entry.get("type") == "acp"
+                             and isinstance(entry.get("name"), str))
+        entries = [entry for entry in data.get("profiles", []) if isinstance(entry, Mapping)
+                   and isinstance(entry.get("name"), str)]
+        self.acp_profiles.update(entry["name"].strip() for entry in entries
+                                 if isinstance(entry.get("runtime"), str) and entry["runtime"] in runtime_names)
+        # Overlay the file before checking existing chains too; clearing a regular Profile's invalid fallback
+        # repairs the chain, while a new reference to a stored hop into ACP must still be skipped.
+        fallbacks = {**self.profile_fallbacks,
+                     **{entry["name"].strip(): entry.get("fallback") for entry in entries}}
+        while True:
+            blocked = {name for name, fallback in fallbacks.items()
+                       if isinstance(fallback, str) and fallback in self.acp_profiles}
+            if blocked <= self.acp_profiles:
+                break
+            self.acp_profiles.update(blocked)
+
+    def _refuses_acp(self, name: Any) -> bool:
+        return isinstance(name, str) and name in self.acp_profiles
+
+    def _check_acp_reference(self, name: Any) -> None:
+        if self._refuses_acp(name):
+            raise _Skip(f"ACP Reviewer pilot Profile {name!r} and its fallback selections cannot be imported")
 
     def _profile_spec(self, profile_id: str, name: str, runtime: str, model_key: tuple[str, str, str],
                       effort: str | None, agent_teams: bool, custom_prompt: str = "", *, web_search: bool = True) -> Any:
@@ -1226,6 +1290,8 @@ class _Importer:
             try:
                 name = label = entry_name(entry.get("name"), "runtime")
                 runtime = adapter(entry.get("type") if isinstance(entry.get("type"), str) else "")
+                if runtime.type == "acp":
+                    raise _Skip("ACP Reviewer pilot runtimes are registered only through operator settings")
                 try:
                     launcher = Launcher(entry.get("launcher", "native"))
                 except (TypeError, ValueError):
@@ -1428,6 +1494,7 @@ class _Importer:
                 raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
             name = label = entry_name(entry.get("name"), "Agent Profile")
             self._unique("profiles", name)
+            self._check_acp_reference(name)
             fallback = entry_name(entry["fallback"], "fallback Agent Profile") if entry.get("fallback") is not None else None
             runtime = _string(entry.get("runtime"), "runtime", required=True)
             if runtime in self.blocked_runtimes or runtime not in self.runtimes:
@@ -1469,6 +1536,8 @@ class _Importer:
         from .profile_registry import RegistryError, check_roles, servable_roles
 
         for source in self.profiles:
+            if self._refuses_acp(source):
+                continue
             seen = {source}
             current = source
             hops = 0
@@ -1510,6 +1579,7 @@ class _Importer:
 
         if name is None:
             return None
+        self._check_acp_reference(name)
         if name in self.blocked_profiles or name not in self.profiles:
             raise _Skip(f"no valid Agent Profile {name!r} here or in the file")
         profile_id, spec = self.profiles[name]
@@ -1626,6 +1696,34 @@ class _Importer:
         for name in sorted(set(entry) - set(scheduler_settings.FIELDS)):
             self.record("settings.scheduler", name, Action.SKIPPED, reason="unknown scheduler setting")
 
+    async def system(self, entry: Any) -> None:
+        """``manager.persona`` from the file. An empty value clears it; a refused value or unknown key is skipped."""
+        from . import persona
+
+        try:
+            entry = _mapping(entry, "system settings")
+        except _Skip as exc:
+            self.record("settings.system", "system", Action.SKIPPED, reason=str(exc))
+            return
+        if "manager.persona" in entry:
+            current = await persona.export_value(self.conn)
+            try:
+                raw = entry["manager.persona"]
+                if not isinstance(raw, Mapping):
+                    raise ValueError("manager.persona must be a JSON object")
+                parsed = persona.checked(raw)
+            except ValueError as exc:
+                self.record("settings.system", persona.PERSONA_KEY, Action.SKIPPED, reason=str(exc))
+            else:
+                new = persona.payload(parsed) or None
+                if not (current is None and new is None):
+                    action = self.outcome("settings.system", persona.PERSONA_KEY, current,
+                                          () if current == new else ("manager.persona",))
+                    if self.apply and action in (Action.ADDED, Action.CHANGED):
+                        await persona.write(parsed, conn=self.conn)
+        for name in sorted(set(entry) - {"manager.persona"}):
+            self.record("settings.system", name, Action.SKIPPED, reason="unknown system setting")
+
     async def chat(self, entry: Any) -> None:
         from . import chat_settings
 
@@ -1645,6 +1743,11 @@ class _Importer:
                 await self.conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) "
                     "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
                     chat_settings.METRICS_ENABLED_KEY, "true" if value else "false")
+
+    async def cost_guard(self, entry: Any) -> None:
+        from .cost_guard_settings import import_into
+
+        await import_into(self, entry)
 
     async def channel(self, entry: Any) -> None:
         from .channels.allowlist import AllowlistError, normalized_config
@@ -1895,6 +1998,7 @@ class _Importer:
             def profile(name: str | None, role: str) -> str | None:
                 if name is None:
                     return None
+                self._check_acp_reference(name)
                 if name in self.blocked_profiles or name not in self.profiles:
                     self.plan.notes.append(f"workflow {key}: no valid Agent Profile {name!r}; imported without it")
                     return None
@@ -1933,7 +2037,7 @@ class _Importer:
     async def project(self, entry: Mapping[str, Any]) -> str | None:
         """Add or update a project's own fields; its id (``new:...`` in a preview), or None when skipped."""
         from ..db.projects import EXECUTION_COLUMNS
-        from .project_execution import execution_fields
+        from .project_execution import execution_fields, acceptance_checks_mode, AcceptanceChecksMode
         from .projects import RequestError, _create_project_row, project_background, project_name, project_work_dir
 
         raw_name = entry.get("name") if isinstance(entry, Mapping) else None
@@ -1944,6 +2048,8 @@ class _Importer:
                 background = project_background(entry.get("background", ""))
                 execution = execution_fields({column: _mapping(entry.get("execution", {}), "execution").get(column)
                                               for column in EXECUTION_COLUMNS})
+                mode = acceptance_checks_mode(_mapping(entry.get("execution", {}), "execution").get("acceptance_checks"))
+                acceptance = None if mode is AcceptanceChecksMode.OFF else mode.value
             except ValueError as exc:
                 raise _Skip(str(exc)) from None
             if name.lower() in self.seen_projects:
@@ -1960,6 +2066,8 @@ class _Importer:
             self.record("projects", str(raw_name), Action.SKIPPED, reason=str(exc))
             return None
         row = self.target.projects.get(name.lower())
+        if "acceptance_checks" in entry.get("execution", {}):
+            values["acceptance_checks"] = acceptance
         if row is None:
             try:
                 values["work_dir"] = project_work_dir(entry.get("work_dir", ""))
@@ -1984,6 +2092,8 @@ class _Importer:
 
             await update_project(row["id"], description=values["description"], background=background,
                                  execution=execution, default_workflow=default, pool=self.conn)
+        if self.apply and action in (Action.ADDED, Action.CHANGED) and "acceptance_checks" in values:
+            await self.conn.execute("UPDATE projects SET acceptance_checks = $2 WHERE id = $1", project_id, acceptance)
         self.project_ids[name.lower()] = project_id
         self.project_values[project_id] = {**(row or {}), "id": project_id, "name": name, **values}
         from .project_execution import ProjectExecution
@@ -2077,6 +2187,12 @@ class _Importer:
                     items.append(item_id)
             profile_id = None
             if profile is not None:
+                if self._refuses_acp(profile):
+                    self.invalid_role_templates.add((project_id, key))
+                    self.acp_role_templates.add((project_id, key))
+                    self.record(section, f"{label}{key}", Action.SKIPPED,
+                                reason=f"ACP Reviewer pilot Profile {profile!r} cannot be imported into a role template")
+                    continue
                 if profile in self.blocked_profiles:
                     self.invalid_role_templates.add((project_id, key))
                     self.record(section, f"{label}{key}", Action.SKIPPED,
@@ -2111,6 +2227,8 @@ class _Importer:
 
         if name is None:
             return None
+        if self._refuses_acp(name):
+            raise ConfigFileError(f"ACP Reviewer pilot Profile {name!r} cannot be imported into a task template")
         if not isinstance(name, str) or name in self.blocked_profiles or name not in self.profiles:
             raise ConfigFileError(f"{role}: no valid Agent Profile {name!r} here or in the file; import it first")
         identity, spec = self.profiles[name]
@@ -2216,6 +2334,18 @@ class _Importer:
                     raw_profiles = template.get("profiles", {})
                     if not isinstance(raw_profiles, Mapping):
                         raise ConfigFileError(f"{identity}/{key}: profiles must be an object")
+                    role_refs = template.get("role_templates", [])
+                    if not isinstance(role_refs, list):
+                        raise ConfigFileError(f"{identity}/{key}: role_templates must be a list")
+                    acp_role_template = next((role_key for role_key in role_refs if isinstance(role_key, str)
+                                              and ((project_id, role_key) in self.acp_role_templates
+                                              or self._refuses_acp(profile_names.get(
+                                                  self.role_template_values.get(project_id, {}).get(role_key, {}).get("profile_id"))))), None)
+                    acp_profile = next((profile for profile in raw_profiles.values() if self._refuses_acp(profile)), None)
+                    if acp_profile is not None or acp_role_template is not None:
+                        self.record("manager.templates", f"{identity}/{key}", Action.SKIPPED,
+                                    reason="ACP Reviewer pilot Profile selections cannot be imported into a task template")
+                        continue
                     profiles = {}
                     for role, profile in raw_profiles.items():
                         if role not in ("planner", "worker", "reviewer") or not isinstance(profile, str):
@@ -2368,6 +2498,8 @@ class _Importer:
             spec = specs.get(identity)
             if spec is None or spec.runtime.type not in runtimes.ADAPTERS:
                 raise RegistryError(f"no selectable Agent Profile {identity!r} here or in the file")
+            if spec.runtime.type == "acp":
+                raise RegistryError("ACP Reviewer pilot Profile selections cannot be imported into a schedule")
             check_roles(spec, (role,))
 
         for role, identity in fixed_profiles(template, profiles).items():
@@ -2402,7 +2534,7 @@ class _Importer:
         from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 
         entry = _mapping(entry, "a schedule")
-        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS,
+        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS, *_THROTTLE_FIELDS,
                                       "notify_target", "profiles", "task_limits", "repoint", "manager",
                                       "template_key", "template_inputs"})
         if unknown:
@@ -2433,7 +2565,7 @@ class _Importer:
                         continue
                 if name not in ("cron", "timezone", "run_timeout_seconds"):
                     values[name] = schedules._PARSERS[name](entry.get(name, defaults.get(name)))
-            for name in (*_COMMAND_FIELDS, *_ALERT_FIELDS):
+            for name in (*_COMMAND_FIELDS, *_ALERT_FIELDS, *_THROTTLE_FIELDS):
                 if name in _COMMAND_FIELDS and kind == "agent" and name not in entry:
                     continue
                 raw = entry.get(name)
@@ -2467,6 +2599,7 @@ class _Importer:
             if role not in TASK_PROFILE_ROLES:
                 raise _Skip(f"profiles: a schedule chooses the Agent Profile of its {', '.join(TASK_PROFILE_ROLES)} "
                             f"only, not {role!r}")
+            self._check_acp_reference(name)
             if not isinstance(name, str) or name in self.blocked_profiles or name not in self.profiles:
                 raise _Skip(f"profiles.{role}: no Agent Profile {name!r} here or in the file")
             profile_id, spec = self.profiles[name]
@@ -2549,7 +2682,7 @@ class _Importer:
             current = None
             if row is not None:
                 current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS,
-                                                        "run_timeout_mode", "notify_channel",
+                                                        *_THROTTLE_FIELDS, "run_timeout_mode", "notify_channel",
                                                         "notify_chat", "manager_id", "template_key", "template_inputs")}
                 current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
                 current["task_limits"] = dict(row["task_limits"])
@@ -2660,6 +2793,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
             # Resolve the projected dependencies and reject the complete graph before any import writes.
             await import_config(conn, data, apply=False)
     importer = _Importer(conn, await _Target.read(conn), apply, created_directories)
+    importer.block_acp_profiles(data)
     importer.imported_managers = {entry.get("id") for entry in data.get("managers", [])
                                   if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)}
     for entry in data.get("runtimes", []):
@@ -2684,8 +2818,16 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         await importer.role(entry)
     if "scheduler" in settings:
         await importer.scheduler(settings["scheduler"])
+    if "system" in settings:
+        await importer.system(settings["system"])
     if "chat" in settings:
         await importer.chat(settings["chat"])
+    if "cost_guard" in settings:
+        await importer.cost_guard(settings["cost_guard"])
+    if "manager_lanes" in settings:
+        from . import lanes_settings
+
+        await lanes_settings.import_into(importer, settings["manager_lanes"])
     for entry in data.get("catalog", []):
         await importer.item(entry, None)
 

@@ -67,10 +67,15 @@ class _Stale(_Session):
         return self.started
 
 
-def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any) -> _Session:
+def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any,
+           monkeypatch: pytest.MonkeyPatch) -> _Session:
     """The state in which a turn reaches the step ``name``."""
     match name:
-        case "tool_listing":
+        case "resident_admission":  # only with session routing on
+            from looper.agents import session_routing
+
+            monkeypatch.setattr(session_routing, "_routing_enabled", True)
+        case "tool_listing" | "outbound_review":  # a Manager without ops reads neither
             _with_ops(manager)
         case "switch_session":
             manager._session_loaded = True
@@ -95,7 +100,7 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
         with tempfile.TemporaryDirectory() as tmp:
             session = _Session(hold=False)
             manager, bus, queue = _manager(Path(tmp), session)
-            _setup(name, manager, session, agent_db)
+            _setup(name, manager, session, agent_db, monkeypatch)
             hold = hold_at(monkeypatch, name)
             envelope = _web("/todo" if name == "attention_enabled" else "你好")  # only /todo reads that setting
             if name == "read_quote":  # only a message that quotes another reads it
@@ -128,28 +133,33 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
     asyncio.run(run())
 
 
-def test_a_stop_while_request_recording_attaches_ends_preparation(
-    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("component, operation, phase", [
+    ("llmrec", "attach", TurnPhase.PREPARING),
+    ("manager_budget", "prepare", TurnPhase.PREPARING),
+    ("manager_budget", "annotate", TurnPhase.STARTING),
+])
+def test_a_stop_while_turn_metadata_attaches_ends_preparation(
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, component: str, operation: str, phase: TurnPhase,
 ) -> None:
     async def run() -> None:
         session = _Session(hold=False)
         manager, bus, queue = _manager(tmp_path, session)
         attaching, cancelled = asyncio.Event(), asyncio.Event()
 
-        async def attach(launch: Any, **kwargs: Any) -> Any:
+        async def attach(*args: Any, **kwargs: Any) -> Any:
             attaching.set()
             try:
                 await asyncio.Event().wait()
             finally:
                 cancelled.set()
 
-        monkeypatch.setattr(manager_module.llmrec, "attach", attach)
+        monkeypatch.setattr(getattr(manager_module, component), operation, attach)
         envelope = _web("你好")
         handling = asyncio.create_task(manager._handle(envelope))
         try:
             await asyncio.wait_for(attaching.wait(), 5)
             token = manager.turn_for(envelope.message_id)
-            assert token is not None and token.phase is TurnPhase.PREPARING
+            assert token is not None and token.phase is phase
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
             await asyncio.wait_for(asyncio.shield(handling), 2)
             assert cancelled.is_set()
@@ -180,7 +190,10 @@ while not os.path.exists('spawn'):
     time.sleep(0.01)
 child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-open('child.pid', 'w').write(str(child.pid))
+# Renamed into place: the test reads the file as soon as it exists.
+with open('child.pid.tmp', 'w') as pending:
+    pending.write(str(child.pid))
+os.replace('child.pid.tmp', 'child.pid')
 sys.stdin.read()
 """)
 

@@ -11,7 +11,7 @@ from looper.db import connection
 from tests import leads_support as sup
 from tests import memory_support as memory
 from tests import subscription_support as stream
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, dropped_tables, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -101,7 +101,8 @@ def test_the_extraction_switch_the_output_kinds_and_the_builtin_types(monkeypatc
         await pool.execute("UPDATE source_chats SET extraction = 'excluded', extraction_excluded_at = now() "
                            "WHERE chat_id = 'oc_release'")
         checks = {row["conname"]: row["def"] for row in await pool.fetch(
-            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = ANY($1::text[])",
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = ANY($1::text[]) "
+            "AND connamespace = current_schema()::regnamespace",
             ["subscriptions_output_kind_check", "subscription_runs_outcome_check"])}
         assert all(word in checks["subscriptions_output_kind_check"] for word in ("'push'", "'leads'", "'intents'"))
         assert "'extracted'" in checks["subscription_runs_outcome_check"]
@@ -119,19 +120,26 @@ def test_the_extraction_switch_the_output_kinds_and_the_builtin_types(monkeypatc
 
 def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
     async def check(pool):
-        await pool.execute(
-            memory.DROP_MEMORY +  # memory candidates point at leads: a database without leads predates them too
-            "DROP TABLE intent_posts, intent_sources, intents, intent_alert_senders, message_chat_projects, "
-            "intent_type_projects, intent_type_versions, intent_types, message_lead_people, message_lead_sources, "
-            "message_leads; ALTER TABLE source_chats DROP CONSTRAINT source_chats_extraction_check, "
-            "DROP COLUMN extraction, DROP COLUMN extraction_excluded_at; "
-            "ALTER TABLE subscription_runs DROP CONSTRAINT subscription_runs_extract_counts_check, "
-            "DROP COLUMN extract_counts; DELETE FROM schema_migrations WHERE name = 'message_leads'")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
+        # Memory candidates point at leads: a database without leads predates them too.
+        await pool.execute(memory.DROP_MEMORY)
+        async with dropped_tables(
+                pool, "intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
+                "intent_type_projects", "intent_type_versions", "intent_types", "message_lead_people",
+                "message_lead_sources", "message_leads"):
+            await pool.execute(
+                "ALTER TABLE source_chats DROP CONSTRAINT source_chats_extraction_check, "
+                "DROP COLUMN extraction, DROP COLUMN extraction_excluded_at; "
+                "ALTER TABLE subscription_runs DROP CONSTRAINT subscription_runs_extract_counts_check, "
+                "DROP COLUMN extract_counts; DELETE FROM schema_migrations WHERE name = 'message_leads'")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
+        # The later final-notice table stayed and has both its keys into the recreated intent posts back.
+        assert await pool.fetchval("SELECT count(*) FROM pg_constraint WHERE contype = 'f' "
+                                   "AND conrelid = 'intent_final_notices'::regclass "
+                                   "AND confrelid = 'intent_posts'::regclass") == 2
         (seq,) = await _events(pool, "ship friday")
         await sup.lead(pool, [seq])
         await connection.ensure_schema(pool)  # and a second upgrade changes nothing
@@ -192,6 +200,14 @@ def test_a_fresh_database_ends_with_the_leads_check_constraints_validated(monkey
 
 
 def test_a_database_without_the_leads_check_gets_it_unvalidated_then_validated_online_once(monkeypatch):
+    # Replay the released leads-check migration before explorer widened the role catalog.
+    # Rolling back only that shared constraint does not recreate explorer's historical predecessor.
+    for name in ("_MIGRATIONS", "_PENDING_MIGRATIONS"):
+        monkeypatch.setattr(connection, name, tuple(m for m in getattr(connection, name)
+                                                   if m.name != "platform_subagents"))
+    monkeypatch.setattr(connection, "_ONLINE_STEPS", tuple(step for step in connection._ONLINE_STEPS
+                                                         if step.migration != "platform_subagents"))
+
     async def stopped(conn):
         return None
 
@@ -392,7 +408,8 @@ def test_an_intent_merged_into_a_deleted_one_is_pending_again_whatever_deletes_i
                                    [target, same_message]) == 0
         assert await pool.fetchval("SELECT state FROM intents WHERE id = $1", elsewhere) == "pending"
         # The key itself never cascades: without the trigger, deleting a merge target fails instead.
-        assert await pool.fetchval("SELECT confdeltype FROM pg_constraint WHERE conname = 'intents_merged_into_fkey'") in ("a", b"a")
+        assert await pool.fetchval("SELECT confdeltype FROM pg_constraint WHERE conname = 'intents_merged_into_fkey' "
+                                   "AND connamespace = current_schema()::regnamespace") in ("a", b"a")
 
     run_db(check, monkeypatch, timeout=20)
 

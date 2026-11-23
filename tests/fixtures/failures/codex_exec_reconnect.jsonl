@@ -1,0 +1,9 @@
+{"type":"system","runtime":"codex","subtype":"init","session_id":"00000000-0000-4000-8000-000000000001"}
+{"type":"system","subtype":"codex_error","session_id":"00000000-0000-4000-8000-000000000001","message":"Reconnecting... 1/5 (workspace routing discovery timed out)"}
+{"type":"system","subtype":"codex_error","session_id":"00000000-0000-4000-8000-000000000001","message":"Reconnecting... 2/5 (workspace routing discovery timed out)"}
+{"type":"system","subtype":"codex_error","session_id":"00000000-0000-4000-8000-000000000001","message":"Reconnecting... 3/5 (workspace routing discovery timed out)"}
+{"type":"system","subtype":"codex_error","session_id":"00000000-0000-4000-8000-000000000001","message":"Reconnecting... 4/5 (workspace routing discovery timed out)"}
+{"type":"system","subtype":"codex_error","session_id":"00000000-0000-4000-8000-000000000001","message":"Reconnecting... 5/5 (workspace routing discovery timed out)"}
+{"type":"system","subtype":"codex_warning","session_id":"00000000-0000-4000-8000-000000000001","message":"Falling back from WebSockets to HTTPS transport. workspace routing discovery timed out"}
+{"type":"system","subtype":"codex_error","session_id":"00000000-0000-4000-8000-000000000001","message":"workspace routing discovery timed out"}
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","session_id":"00000000-0000-4000-8000-000000000001","errors":["workspace routing discovery timed out"]}

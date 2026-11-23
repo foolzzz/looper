@@ -3,7 +3,8 @@ import { AlertTriangle, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection, type AttentionSummary,
+  attentionSettingsGet, fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection,
+  type AttentionSummary,
 } from "@/lib/api-attention";
 import { channelLabel } from "@/lib/chat-channels";
 import { sinceText } from "@/lib/gates";
@@ -25,10 +26,12 @@ const TITLES: Record<AttentionKind, string> = {
   intents: "Intents 意图",
   ledger: "Ledger items waiting for you",
   deliveries: "Messages that may not have arrived",
+  cost: "花费等你决定",
 };
 
 /** What to do about a section, said once under its heading. */
 const HOW: Partial<Record<AttentionKind, string>> = {
+  cost: "在花费设置中提高上限并继续，或停下；也可在私聊回复「继续」或「停」。",
   gates: "Answer on the task's page, or with /gates in your chat.",
   confirmations: "Reply 确认 in the chat that asked, before it lapses; anything else drops it.",
   intents: "Build or reject each one on the Intents page, or reply 建 / 驳回 with its number in your chat.",
@@ -42,6 +45,7 @@ const ALERTS: Record<string, string> = {
 const LEDGER_KINDS: Record<string, string> = { pending: "to-do", decision: "decision to confirm", work_item: "work item" };
 const DELIVERY_SOURCES: Record<string, string> = {
   subscription: "Subscription push", intent: "Intent message", task_end: "Task end notice",
+  catchup: "Lark catch-up dropped",
 };
 
 const text = (value: unknown) => (typeof value === "string" ? value : "");
@@ -73,9 +77,13 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
     case "ledger":
       return { line: parts(ref, LEDGER_KINDS[text(facts.kind)] ?? text(facts.kind)),
         badges: facts.overdue === true ? ["overdue"] : [] };
+    case "cost":
+      return { line: parts(ref, context, facts.currency === "equivalent_usd" ? "等价花费" : "真钱",
+        `已花及预留 $${count(facts.spent_usd).toFixed(2)} / 上限 $${count(facts.limit_usd).toFixed(2)}`), badges: [] };
     case "deliveries":
       return { line: parts(DELIVERY_SOURCES[text(facts.source)] ?? text(facts.source), ref,
-        text(facts.channel) && `to ${channelLabel(text(facts.channel))}`), badges: [] };
+        text(facts.channel) && `${facts.source === "catchup" ? "from" : "to"} ${channelLabel(text(facts.channel))}`,
+        text(facts.fix)), badges: [] };
   }
 }
 
@@ -139,23 +147,31 @@ function Section({ section }: { section: AttentionSection }) {
   );
 }
 
-/** `#todo`: everything that waits for the operator, from `attention.summary`. Only reachable while it is on. */
+/** `#todo`: everything that waits for the operator, from `attention.summary`, while the setting is on. */
 export function NeedsYouPage() {
   const [summary, setSummary] = useState<AttentionSummary | null>(null);
   const [error, setError] = useState("");
   const [off, setOff] = useState(false);
   const latest = useRef(0);
 
-  const read = useCallback((signal?: AbortSignal) => {
+  const read = useCallback(async (signal?: AbortSignal) => {
     const seq = ++latest.current;
-    return fetchAttention(signal).then(
-      (next) => { if (seq === latest.current) { setSummary(next); setError(""); setOff(false); } },
-      (err) => {
-        if (seq !== latest.current || signal?.aborted) return;
-        if (isAttentionOff(err)) setOff(true);
-        else setError(errorText(err));
-      },
-    );
+    try {
+      const settings = await attentionSettingsGet();
+      if (seq !== latest.current || signal?.aborted) return;
+      if (!settings.enabled) {
+        setSummary(null); setError(""); setOff(true);
+        return;
+      }
+      const next = await fetchAttention(signal);
+      if (seq !== latest.current || signal?.aborted) return;
+      setSummary(next); setError(""); setOff(false);
+    } catch (err) {
+      if (seq !== latest.current || signal?.aborted) return;
+      // The setting can also turn off between these two reads.
+      if (isAttentionOff(err)) { setSummary(null); setError(""); setOff(true); }
+      else setError(errorText(err));
+    }
   }, []);
 
   useEffect(() => startPolling((signal) => read(signal), REFRESH_MS), [read]);

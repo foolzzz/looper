@@ -8,13 +8,14 @@ import logging
 import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
 
 import asyncpg
 
-from looper.agents.model_names import MODEL_MAX_CHARS, MODEL_NAME_PATTERN
+from looper.agents.model_names import MODEL_NAME_PATTERN
 
+from . import migrations
+from .migrations import OnlineStep as _OnlineStep
 from .timing import record_query
 
 logger = logging.getLogger(__name__)
@@ -70,11 +71,15 @@ def fence() -> None:
         _pool.terminate()
 
 
+class PoolNotInitializedError(RuntimeError):
+    """No database pool has been opened in this process."""
+
+
 def get_pool() -> asyncpg.Pool:
     if _fenced:
         raise RuntimeError(_FENCED_MESSAGE)
     if _pool is None:
-        raise RuntimeError("database pool not initialised — call init_pool() first")
+        raise PoolNotInitializedError("database pool not initialised — call init_pool() first")
     return _pool
 
 
@@ -159,7 +164,9 @@ _STEP_DIFFICULTY = "step_difficulty"
 _ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
+_CHANNEL_OUTBOX = "channel_outbox"
 _LEDGER = "ledger"
+_MANAGER_SESSIONS = "manager_sessions"
 _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
@@ -172,11 +179,10 @@ _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
-_MEMORY_CANDIDATES = "memory_candidates"
-_MEMORY_DRAFT = "memory_draft_role"
-_MEMORY_DRAFT_QUEUE = "memory_draft_queue"
 _CARD_ACTIONS = "card_actions"
 
+_MEMORY_CANDIDATES = "memory_candidates"
+_PROVIDER_LIMIT_WINDOWS = "provider_limit_windows"
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
 _UNCERTAIN_DELIVERY_INDEXES = (
@@ -185,6 +191,8 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
 _REMINDERS = "reminders"
+_MCP_TOOL_LEVELS = "mcp_tool_levels"
+_FAILURE_TYPING = "failure_typing"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -276,6 +284,7 @@ _SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
 _PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
+_MANAGER_SESSIONS_BLOCK = re.compile(r"-- manager sessions begin\n(.*?)-- manager sessions end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 _DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
 
@@ -310,9 +319,21 @@ def _decision_snapshots_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its decision snapshots block")
     return found.group(1)
+
+
+_MCP_TOOL_LEVELS_BLOCK = re.compile(r"-- mcp tool levels begin\n(.*?)-- mcp tool levels end", re.S)
+
+
+def _mcp_tool_levels_ddl() -> str:
+    """The MCP tool declarations as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _MCP_TOOL_LEVELS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its mcp tool levels block")
+    return found.group(1)
+
+
 _OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
 _MEMORY_CANDIDATES_BLOCK = re.compile(r"-- memory candidates begin\n(.*?)-- memory candidates end", re.S)
-_MEMORY_DRAFT_QUEUE_BLOCK = re.compile(r"-- memory draft queue begin\n(.*?)-- memory draft queue end", re.S)
 
 
 def _memory_candidates_ddl() -> str:
@@ -322,18 +343,6 @@ def _memory_candidates_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its memory candidates block")
     return found.group(1)
-
-
-def _memory_draft_queue_ddl() -> str:
-    found = _MEMORY_DRAFT_QUEUE_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
-    if found is None:
-        raise RuntimeError("schema.sql lost its memory draft queue block")
-    return found.group(1)
-
-
-async def _memory_draft_queue_pending(conn: asyncpg.Connection) -> bool:
-    return not await conn.fetchval("SELECT to_regclass('memory_draft_waits') IS NOT NULL "
-                                   "AND to_regclass('memory_draft_lease') IS NOT NULL")
 
 
 # The checks that list the classifier: (table, constraint).
@@ -369,28 +378,6 @@ async def _outbound_reviews_ddl(conn: asyncpg.Connection) -> list[str]:
                                if await _lacks_outbound_check(conn, table, constraint)]
 
 
-async def _memory_draft_ddl(conn: asyncpg.Connection) -> list[str]:
-    """Widen only the role and run-kind checks, without scanning under the schema transaction's locks."""
-    from .llm_records import RUN_KINDS
-    from ..agents.agent_settings import AgentType
-
-    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MEMORY_DRAFT):
-        return []
-    statements = []
-    for table, constraint, column, values in (
-        ("llm_records", "llm_records_run_kind_check", "run_kind", RUN_KINDS),
-        ("agent_setting_layers", "agent_setting_layers_role_check", "role", tuple(role.value for role in AgentType)),
-    ):
-        lacks = await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass($1) AND conname = $2 "
-            "AND strpos(pg_get_constraintdef(oid), $3) = 0)", table, constraint, "'memory_draft'")
-        if lacks:
-            choices = ", ".join(f"'{value}'" for value in values)
-            statements.append(f"ALTER TABLE {table} DROP CONSTRAINT {constraint}, ADD CONSTRAINT {constraint} "
-                              f"CHECK ({column} IN ({choices})) NOT VALID")
-    return statements
-
-
 def _run_tree_ddl() -> tuple[str, ...]:
     """The run tree columns of llm_records, as schema.sql defines them, added without a scan or a rewrite: llm_records
     is large, and these statements hold its ACCESS EXCLUSIVE lock until the schema transaction commits. No older row
@@ -408,65 +395,22 @@ def _run_tree_ddl() -> tuple[str, ...]:
     )
 
 
-@dataclass(frozen=True)
-class _OnlineStep:
-    """What a migration finishes after the schema transaction commits, taking no lock that stops reads or writes: it
-    validates its NOT VALID constraints (SHARE UPDATE EXCLUSIVE) and builds its indexes concurrently (an index a
-    stopped build left INVALID, or one of an older definition under the same name, is dropped and built again; a
-    valid one that is what the step builds is kept). It runs once ``migration``'s marker is there and until its own
-    ``marker`` is: a start stopped halfway resumes it, and a finished one never runs it again."""
+def _failure_typing_ddl() -> tuple[str, ...]:
+    """The failure columns of llm_records, as schema.sql defines them, added without a scan or a rewrite (as the run
+    tree's are): every older row is NULL, so the check holds; it comes NOT VALID and is validated, and the index
+    built, in ``_ONLINE_STEPS``."""
+    from ..agents.failures import check_sql
 
-    migration: str
-    marker: str
-    validate: tuple[tuple[str, str], ...] = ()  # (table, constraint)
-    indexes: tuple[tuple[str, str], ...] = ()  # (name, what follows the name in CREATE INDEX)
-
-
-_ONLINE_STEPS = (
-    _OnlineStep(_RUN_TREE, "run_tree_online",
-                validate=(("llm_records", "llm_records_run_kind_check"),
-                          ("llm_records", "llm_records_parent_record_id_fkey")),
-                indexes=(("idx_llm_records_parent",
-                          "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL"),)),
-    _OnlineStep(_STEP_DIFFICULTY, "step_difficulty_online",
-                validate=(("task_steps", "task_steps_difficulty_check"),)),
-    # The outbox can be large: its new foreign key is validated, and its index (for ON DELETE SET NULL) built,
-    # without blocking writes.
-    _OnlineStep(_SCHEDULE_NOTIFICATION_EVENTS, _SCHEDULE_NOTIFICATION_EVENTS_ONLINE,
-                validate=(("schedule_notifications", "schedule_notifications_manager_event_id_fkey"),),
-                indexes=(("idx_schedule_notifications_manager_event",
-                          "ON schedule_notifications (manager_event_id) WHERE manager_event_id IS NOT NULL"),)),
-    _OnlineStep(_MANAGER_EVENT_REASONS_MIGRATION, "manager_event_reasons_online",
-                validate=(("manager_events", "manager_events_reason_check"),)),
-    _OnlineStep(_MANAGER_EVENT_DELIVERY, "manager_event_delivery_online",
-                validate=(("manager_events", "manager_events_delivery_check"),)),
-    # The leads check block adds these NOT VALID (a fresh database validates them as it is created).
-    _OnlineStep(_LEADS_CHECK, _LEADS_CHECK_ONLINE,
-                validate=(("agent_setting_layers", "agent_setting_layers_role_check"),
-                          ("subscription_runs", "subscription_runs_check_status_check"),
-                          ("schedule_notifications", "schedule_notifications_kind_check"),
-                          *((table, f"{table}_{name}") for table in ("message_leads", "intents")
-                            for name in ("state_check", "check_verdict_check", "check_reason_check",
-                                         "check_record_id_fkey", "dropped")))),
-    _OnlineStep(_RUN_SKIPS, _RUN_SKIPS_ONLINE,
-                validate=(*(("subscription_runs", f"subscription_runs_{name}")
-                            for name in ("outcome_check", "skip_reason_check", "skipped")),
-                          ("schedule_notifications", "schedule_notifications_kind_check"))),
-    _OnlineStep(_MID_TURN_INPUT, "mid_turn_input_online",
-                validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
-    _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
-                validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
-    _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
-    _OnlineStep(_MEMORY_DRAFT, "memory_draft_role_online", validate=_OUTBOUND_CHECKS),
-    # The delivery tables can be large: their partial indexes are built without blocking writes.
-    _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
-)
+    return (
+        "ALTER TABLE llm_records ADD COLUMN failure_class TEXT, ADD COLUMN failure_cause TEXT",
+        f"ALTER TABLE llm_records ADD CONSTRAINT llm_records_failure_check CHECK ({check_sql()}) NOT VALID",
+    )
 
 
 _INDEX_PROBE = "looper_index_probe"
 
 
-async def _index_kept(conn: asyncpg.Connection, name: str, definition: str) -> bool:
+async def _index_kept(conn: asyncpg.Connection, name: str, definition: str, *, unique: bool = False) -> bool:
     """Whether the index ``name`` is there, valid and the same as ``definition`` (``ON <table> ...``) would build.
     The comparison is PostgreSQL's own text of each (``pg_get_indexdef`` from ``USING`` on, uniqueness too): the
     definition is built on an empty copy of its table in a transaction that is rolled back, so nothing is scanned
@@ -482,7 +426,8 @@ async def _index_kept(conn: asyncpg.Connection, name: str, definition: str) -> b
     await probe.start()
     try:
         await conn.execute(f"CREATE TEMP TABLE {_INDEX_PROBE} (LIKE {table.group(1)})")
-        await conn.execute(f"CREATE INDEX {_INDEX_PROBE}_index ON {_INDEX_PROBE} {definition[table.end():]}")
+        await conn.execute(f"CREATE {'UNIQUE ' if unique else ''}INDEX {_INDEX_PROBE}_index "
+                           f"ON {_INDEX_PROBE} {definition[table.end():]}")
         wanted = await conn.fetchval("SELECT pg_get_indexdef(to_regclass($1))", f"{_INDEX_PROBE}_index")
     finally:
         await probe.rollback()
@@ -522,13 +467,15 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
                 continue
             for table, constraint in step.validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
-            for name, definition in step.indexes:
+            indexes = [(name, definition, False) for name, definition in step.indexes]
+            indexes.extend((name, definition, True) for name, definition in step.unique_indexes)
+            for name, definition, unique in indexes:
                 # Kept only when it is valid and is the index the step builds: one a stopped build left INVALID,
                 # or an older definition under the same name, is dropped and built again.
-                if await _index_kept(conn, name, definition):
+                if await _index_kept(conn, name, definition, unique=unique):
                     continue
                 await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-                await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
+                await conn.execute(f"CREATE {'UNIQUE ' if unique else ''}INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _ONLINE_LOCK)
@@ -635,6 +582,14 @@ def _proactive_deliveries_ddl() -> str:
     found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its proactive deliveries block")
+    return found.group(1)
+
+
+def _manager_sessions_ddl() -> str:
+    """The Manager session table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _MANAGER_SESSIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its manager sessions block")
     return found.group(1)
 
 
@@ -989,6 +944,10 @@ async def _run_tree_pending(conn: asyncpg.Connection) -> bool:
     return await _column_pending(conn, _RUN_TREE, "llm_records", "run_kind")
 
 
+async def _failure_typing_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _FAILURE_TYPING, "llm_records", "failure_class")
+
+
 async def _step_difficulty_pending(conn: asyncpg.Connection) -> bool:
     return await _column_pending(conn, _STEP_DIFFICULTY, "task_steps", "difficulty")
 
@@ -1003,6 +962,26 @@ async def _decision_snapshots_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _DECISION_SNAPSHOTS):
         return False
     return not await conn.fetchval("SELECT to_regclass('decision_snapshots') IS NOT NULL")
+
+
+async def _mcp_tool_levels_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MCP_TOOL_LEVELS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('mcp_tool_levels') IS NOT NULL")
+
+
+async def _provider_limit_windows_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", _PROVIDER_LIMIT_WINDOWS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('provider_limit_windows') IS NOT NULL")
+
+
+def _provider_limit_windows_ddl() -> str:
+    found = re.search(r"-- provider limit windows begin\n(.*?)-- provider limit windows end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its provider limit windows block")
+    return found.group(1)
 
 
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
@@ -1077,6 +1056,21 @@ CREATE TABLE IF NOT EXISTS subscription_daily_claims (
     PRIMARY KEY (schedule_id, local_date)
 );
 """
+
+
+async def _channel_outbox_pending(conn: asyncpg.Connection) -> bool:
+    return not await conn.fetchval("""
+        SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('channel_outbox')
+                       AND attname='claim_token' AND NOT attisdropped)
+        """)
+
+
+def _channel_outbox_ddl() -> str:
+    found = re.search(r"-- channel outbox begin\n(.*?)-- channel outbox end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its channel outbox block")
+    return found.group(1)
 
 
 async def _ledger_pending(conn: asyncpg.Connection) -> bool:
@@ -1186,6 +1180,12 @@ async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
         return False
     return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
+
+
+async def _manager_sessions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_SESSIONS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('manager_sessions') IS NOT NULL")
 
 
 async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
@@ -1487,7 +1487,7 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
     from .bridge_upgrade import BASELINE, upgrade_from_bridge
 
     pool = pool or get_pool()
-    sql = SCHEMA_PATH.read_text(encoding="utf-8")
+    sql = migrations.schema_sql(SCHEMA_PATH.read_text(encoding="utf-8"), _MIGRATIONS)
     async with _connection(pool) as conn, conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
         state = await _classify_schema(conn, sql)
@@ -1495,331 +1495,8 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute(sql)
         elif state == "bridge":
             await upgrade_from_bridge(conn)
-        if await _model_name_parameters_pending(conn):
-            # Use the application's grammar rather than maintaining a second
-            # regex in SQL. NOT VALID preserves historical malformed names on
-            # upgrade; all new inserts/updates still enforce the new grammar.
-            pattern = MODEL_NAME_PATTERN.replace("'", "''")
-            for field in ("name", "background_model"):
-                constraint = f"llm_models_{field}_check"
-                check = f"length({field}) BETWEEN 1 AND {MODEL_MAX_CHARS} AND {field} ~ '{pattern}'"
-                await conn.execute(f"ALTER TABLE llm_models DROP CONSTRAINT {constraint}, "
-                    f"ADD CONSTRAINT {constraint} CHECK ({check}) NOT VALID")
-                # Clean upgrades must have the same validated catalog as fresh databases.
-                if state == "empty" or not await conn.fetchval(
-                    f"SELECT EXISTS (SELECT 1 FROM llm_models WHERE NOT ({check}))"
-                ):
-                    await conn.execute(f"ALTER TABLE llm_models VALIDATE CONSTRAINT {constraint}")
-            if state != "empty":
-                await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MODEL_NAME_PARAMETERS)
-        # One additive upgrade for a baseline that predates schedules.user_gates,
-        # including the bridge. An empty database already has the column from
-        # schema.sql and records only post_bridge_baseline. Once this marker is
-        # recorded, reopening never tries to repair a missing column.
-        if await _schedule_user_gates_pending(conn):
-            await conn.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS user_gates "
-                               "TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on'))")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_USER_GATES)
-        if await _profile_fallback_pending(conn):
-            await conn.execute("ALTER TABLE agent_profiles ADD COLUMN fallback_profile_id TEXT "
-                               "REFERENCES agent_profiles(id) ON DELETE RESTRICT")
-            # Use the fresh schema's canonical check so upgraded catalogs match it.
-            constraint = re.search(
-                r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
-            ).group(1)
-            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
-            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check "
-                               + constraint)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROFILE_FALLBACK)
-        if await _profile_web_search_pending(conn):
-            await conn.execute("ALTER TABLE agent_profiles ADD COLUMN web_search BOOLEAN NOT NULL DEFAULT true")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROFILE_WEB_SEARCH)
-        if await _cursor_login_pending(conn):
-            await conn.execute(_CURSOR_LOGIN_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CURSOR_LOGIN)
-        if await _coco_login_pending(conn):
-            await conn.execute(_COCO_LOGIN_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _COCO_LOGIN)
-        if await _runtime_launcher_pending(conn):
-            await conn.execute("ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS launcher "
-                               "TEXT NOT NULL DEFAULT 'native' CHECK (launcher IN ('native', 'ttadk'))")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _RUNTIME_LAUNCHER)
-        if await _command_schedules_pending(conn):
-            for ddl in _COMMAND_SCHEDULES_DDL:
-                await conn.execute(ddl)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _COMMAND_SCHEDULES)
-        if await _schedule_notify_format_pending(conn):
-            await conn.execute("ALTER TABLE schedules ADD COLUMN notify_format TEXT NOT NULL DEFAULT 'report' "
-                               "CHECK (notify_format IN ('report', 'deliverable'))")
-            await conn.execute("ALTER TABLE schedules ADD CONSTRAINT schedules_command_notify_format_check "
-                               "CHECK (kind <> 'command' OR notify_format = 'report')")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFY_FORMAT)
-        if await _task_process_record_pending(conn):
-            await conn.execute("ALTER TABLE tasks ADD COLUMN process_record JSONB "
-                               "CHECK (jsonb_typeof(process_record) = 'object')")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_PROCESS_RECORD)
-        if await _task_reply_route_pending(conn):
-            await conn.execute("ALTER TABLE tasks ADD COLUMN origin_reply_route JSONB "
-                               "CHECK (jsonb_typeof(origin_reply_route) = 'object')")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_REPLY_ROUTE)
-        if await _manager_scope_projects_pending(conn):
-            for ddl in _MANAGER_SCOPE_PROJECTS_DDL:
-                await conn.execute(ddl)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_SCOPE_PROJECTS)
-        if await _schedule_missed_since_pending(conn):
-            await conn.execute("ALTER TABLE schedule_runs ADD COLUMN missed_since TIMESTAMPTZ")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_MISSED_SINCE)
-        if await _schedule_deferred_by_drain_pending(conn):
-            await conn.execute("ALTER TABLE schedule_runs ADD COLUMN deferred_by_drain BOOLEAN NOT NULL DEFAULT false")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_DEFERRED_BY_DRAIN)
-        if await _task_chat_group_pending(conn):
-            await conn.execute("ALTER TABLE tasks ADD COLUMN chat_group BOOLEAN NOT NULL DEFAULT false")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_CHAT_GROUP)
-        if await _processor_role_pending(conn):
-            await conn.execute(_PROCESSOR_ROLE_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROCESSOR_ROLE)
-        if await _headless_compaction_pending(conn):
-            await conn.execute(_HEADLESS_COMPACTION_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _HEADLESS_COMPACTION)
-        if await _mid_turn_input_pending(conn):
-            await conn.execute(_MID_TURN_INPUT_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MID_TURN_INPUT)
-        if await _advisor_roles_pending(conn):
-            await conn.execute(_ADVISOR_ROLES_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _ADVISOR_ROLES)
-        if await _project_advisor_pending(conn):
-            await conn.execute(_PROJECT_ADVISOR_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ADVISOR)
-        if await _llm_requests_pending(conn):
-            await conn.execute(_LLM_REQUESTS_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS)
-        if await _llm_requests_translation_pending(conn):
-            await conn.execute("ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS translation JSONB")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS_TRANSLATION)
-        if await _llm_models_chat_dialect_pending(conn):
-            await conn.execute("ALTER TABLE llm_models ADD COLUMN chat_dialect TEXT "
-                               "CHECK (chat_dialect IS NULL OR protocol = 'openai-chat')")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_MODELS_CHAT_DIALECT)
-        if await _llm_requests_stored_bytes_pending(conn):
-            for table in ("llm_requests", "llm_request_parts"):
-                await conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS stored_bytes BIGINT")
-                await conn.execute(f"UPDATE {table} AS row SET stored_bytes = octet_length(row::text) "
-                                   "WHERE stored_bytes IS NULL")
-                await conn.execute(f"ALTER TABLE {table} ALTER COLUMN stored_bytes SET DEFAULT 0, "
-                                   "ALTER COLUMN stored_bytes SET NOT NULL")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS_STORED_BYTES)
-        if await _gateway_aliases_pending(conn):
-            await conn.execute(_GATEWAY_ALIASES_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _GATEWAY_ALIASES)
-        if await _message_stream_pending(conn):
-            await conn.execute(_message_stream_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM)
-        if await _message_stream_deletions_pending(conn):
-            await conn.execute("ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS retention_last_at TIMESTAMPTZ")
-            await conn.execute("ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS skipped_by_deletion "
-                               "BIGINT NOT NULL DEFAULT 0")
-            await conn.execute(_source_deletions_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_STREAM_DELETIONS)
-        if await _subscriptions_pending(conn):
-            await conn.execute(_subscriptions_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTIONS)
-        if await _subscription_rules_pending(conn):
-            await conn.execute(_SUBSCRIPTION_RULES_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_RULES)
-        if await _subscription_lookback_pending(conn):
-            await conn.execute(_SUBSCRIPTION_LOOKBACK_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_LOOKBACK)
-        if await _ledger_pending(conn):
-            await conn.execute(_ledger_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
-        if await _card_actions_pending(conn):
-            await conn.execute(_card_actions_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CARD_ACTIONS)
-        if await _manager_events_pending(conn):
-            await conn.execute(_manager_events_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
-            # The block added the outbox's column too: its index is built online, as for a later database.
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFICATION_EVENTS)
-        if await _schedule_notification_events_pending(conn):
-            await conn.execute("ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT, "
-                               "ADD CONSTRAINT schedule_notifications_manager_event_id_fkey FOREIGN KEY "
-                               "(manager_event_id) REFERENCES manager_events(id) ON DELETE SET NULL NOT VALID")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFICATION_EVENTS)
-        if await _manager_event_reasons_pending(conn):
-            reasons = ", ".join(f"'{reason}'" for reason in _MANAGER_EVENT_REASONS)
-            # NOT VALID: no scan under this transaction's lock; the online step validates it after the commit.
-            await conn.execute("ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check, ADD CONSTRAINT "
-                               f"manager_events_reason_check CHECK (reason IN ({reasons})) NOT VALID")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_REASONS_MIGRATION)
-        if await _manager_event_delivery_pending(conn):
-            await conn.execute(
-                "ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery TEXT, ADD COLUMN IF NOT EXISTS "
-                "delivery_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS delivery_at TIMESTAMPTZ, "
-                "ADD COLUMN IF NOT EXISTS delivery_error TEXT, ADD COLUMN IF NOT EXISTS delivery_claim UUID, "
-                "ADD CONSTRAINT manager_events_delivery_check CHECK (delivery IN ('pending', 'sending', 'sent', "
-                "'failed', 'uncertain')) NOT VALID")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_DELIVERY)
-        if await _run_tree_pending(conn):
-            for ddl in _run_tree_ddl():
-                await conn.execute(ddl)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _RUN_TREE)
-        if await _step_difficulty_pending(conn):
-            await conn.execute("ALTER TABLE task_steps ADD COLUMN difficulty TEXT")
-            await conn.execute("ALTER TABLE task_steps ADD CONSTRAINT task_steps_difficulty_check "
-                               "CHECK (difficulty IN ('routine', 'hard', 'critical')) NOT VALID")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _STEP_DIFFICULTY)
-        if await _agent_spawns_pending(conn):
-            await conn.execute(_agent_spawns_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _AGENT_SPAWNS)
-        if await _decision_snapshots_pending(conn):
-            await conn.execute(_decision_snapshots_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _DECISION_SNAPSHOTS)
-        if await _project_activity_pending(conn):
-            await conn.execute(_PROJECT_ACTIVITY_DDL)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
-        if await _chat_binding_senders_pending(conn):
-            await conn.execute("ALTER TABLE manager_chat_bindings ADD COLUMN allowed_senders TEXT[] NOT NULL "
-                               "DEFAULT '{}' CONSTRAINT manager_chat_bindings_allowed_senders_check "
-                               "CHECK (cardinality(allowed_senders) <= 100)")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_BINDING_SENDERS)
-        if await _chat_binding_sender_policy_pending(conn):
-            await conn.execute("ALTER TABLE manager_chat_bindings ADD COLUMN sender_policy TEXT NOT NULL "
-                               "DEFAULT 'listed' CHECK (sender_policy IN ('listed', 'chat'))")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_BINDING_SENDER_POLICY)
-        if await _provider_enabled_pending(conn):
-            await conn.execute("ALTER TABLE llm_providers ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_ENABLED)
-        if await _dependency_conditions_pending(conn):
-            await conn.execute("ALTER TABLE task_steps ADD COLUMN ready_when JSONB")
-            await conn.execute("ALTER TABLE projects ADD COLUMN dependency_conditions TEXT "
-                               "CHECK (dependency_conditions IN ('off', 'on'))")
-            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
-            # Freeze this upgrade's constraint in the same order as the fresh schema.
-            await conn.execute("""ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-                'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
-                'session_switch', 'handoff', 'progress', 'profile_choice', 'profile_fallback', 'concurrency_change',
-                'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
-                'wait_opened', 'wait_extended', 'wait_closed', 'condition_blocked'))""")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _DEPENDENCY_CONDITIONS)
-        if await _workflows_pending(conn):
-            await conn.execute("""CREATE TABLE workflows (
-                key TEXT PRIMARY KEY CHECK (key ~ '^[a-z][a-z0-9_-]{0,31}$' AND key <> 'none'),
-                name TEXT NOT NULL CHECK (btrim(name) <> '' AND length(name) <= 60),
-                description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 300),
-                definition JSONB NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
-                CREATE UNIQUE INDEX workflows_name_key ON workflows (lower(btrim(name)));
-                ALTER TABLE projects ADD COLUMN default_workflow TEXT REFERENCES workflows(key) ON DELETE SET NULL;
-                ALTER TABLE tasks ADD COLUMN workflow JSONB;
-                ALTER TABLE task_roles DROP CONSTRAINT task_roles_via_check;
-                ALTER TABLE task_roles ADD CONSTRAINT task_roles_via_check
-                    CHECK (via IN ('planner', 'user', 'template', 'workflow'));""")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _WORKFLOWS)
-        if await _review_panel_pending(conn):
-            await conn.execute("ALTER TABLE task_steps ADD COLUMN accept_when JSONB, ADD COLUMN reviews TEXT")
-            await conn.execute("ALTER TABLE task_steps DROP CONSTRAINT task_steps_kind_check")
-            await conn.execute("ALTER TABLE task_steps ADD CONSTRAINT task_steps_kind_check "
-                               "CHECK (kind IN ('work', 'gate', 'wait', 'review'))")
-            constraint = re.search(
-                r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
-            ).group(1)
-            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
-            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check " + constraint)
-            # Released workflow presets allowed panels without distinct runtimes. Bring those presets
-            # under the panel invariant before readers validate them; existing task snapshots stay fixed.
-            await conn.execute("UPDATE workflows SET definition = jsonb_set(definition, "
-                               "'{distinct_reviewer_runtime}', 'true'::jsonb) "
-                               "WHERE jsonb_typeof(definition->'review_panel') = 'object' "
-                               "AND definition->'distinct_reviewer_runtime' IS DISTINCT FROM 'true'::jsonb")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REVIEW_PANEL)
-        if await _workflow_rules_pending(conn):
-            constraint = re.search(
-                r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
-            ).group(1)
-            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
-            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check " + constraint)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _WORKFLOW_RULES)
-        if await _gate_purpose_pending(conn):
-            await conn.execute("ALTER TABLE task_user_gates ADD COLUMN purpose TEXT NOT NULL DEFAULT 'discussion' "
-                               "CHECK (purpose IN ('discussion', 'exhaustion', 'verification_exhaustion'))")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _GATE_PURPOSE)
-        if await _verification_paths_pending(conn):
-            await conn.execute("ALTER TABLE projects ADD COLUMN verification_paths TEXT[] "
-                               "CHECK (cardinality(verification_paths) <= 20)")
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _VERIFICATION_PATHS)
-        # After every table its keys point at.
-        if await _message_leads_pending(conn):
-            await conn.execute(_message_leads_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MESSAGE_LEADS)
-        if await _intent_merges_pending(conn):
-            await conn.execute(_intent_merges_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
-                               _INTENT_MERGES)
-        if await _leads_check_pending(conn):
-            await conn.execute(_leads_check_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
-                               _LEADS_CHECK)
-            # Its constraints are NOT VALID again: the online step validates them after this commits.
-            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
-        elif state == "empty":
-            # schema.sql ran the block, so its constraints are NOT VALID here too: on tables just created, validating
-            # them now scans nothing, and a fresh database keeps recording only its baseline.
-            for table, constraint in _leads_check_step().validate:
-                await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
-        elif await _leads_check_unvalidated(conn):
-            # The block ran outside a migration (schema.sql applied by hand): validated after commit, as an upgrade.
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
-                               _LEADS_CHECK)
-            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _LEADS_CHECK_ONLINE)
-        # After the leads block, which writes the outcomes' constraint without 'skipped'; validated as the leads
-        # check's is.
-        if await _run_skips_pending(conn):
-            await conn.execute(_run_skips_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _RUN_SKIPS)
-            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _RUN_SKIPS_ONLINE)
-        elif state == "empty":
-            for table, constraint in _online_step(_RUN_SKIPS).validate:
-                await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
-        elif await _unvalidated(conn, _RUN_SKIPS):
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _RUN_SKIPS)
-            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _RUN_SKIPS_ONLINE)
-        if await _schedule_session_bounds_pending(conn):
-            await conn.execute("""
-                ALTER TABLE schedules
-                  ADD COLUMN planner_session_context_tokens BIGINT CHECK (planner_session_context_tokens >= 0),
-                  ADD COLUMN planner_session_run_cost_usd DOUBLE PRECISION CHECK (planner_session_run_cost_usd >= 0);
-                ALTER TABLE schedule_runs
-                  ADD COLUMN planner_context_tokens BIGINT CHECK (planner_context_tokens >= 0),
-                  ADD COLUMN planner_cost_usd DOUBLE PRECISION CHECK (planner_cost_usd >= 0),
-                  ADD COLUMN planner_session_action TEXT CHECK (planner_session_action IN ('compacted', 'rotated')),
-                  ADD COLUMN planner_session_reason TEXT CHECK (planner_session_reason IN ('context', 'cost')),
-                  ADD COLUMN planner_session_before_tokens BIGINT CHECK (planner_session_before_tokens >= 0),
-                  ADD COLUMN planner_session_after_tokens BIGINT CHECK (planner_session_after_tokens >= 0),
-                  ADD COLUMN failure_kind TEXT CHECK (failure_kind IN ('task_budget'));
-            """)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_SESSION_BOUNDS)
-        if await _outbound_reviews_pending(conn):
-            for ddl in await _outbound_reviews_ddl(conn):
-                await conn.execute(ddl)
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
-        for ddl in await _memory_draft_ddl(conn):
-            await conn.execute(ddl)
-        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _MEMORY_DRAFT)
-        # After every table its keys point at (projects, managers, manager_actions, task_journal, message_leads).
-        if await _memory_candidates_pending(conn):
-            await conn.execute(_memory_candidates_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MEMORY_CANDIDATES)
-        if await _memory_draft_queue_pending(conn):
-            await conn.execute(_memory_draft_queue_ddl())
-        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _MEMORY_DRAFT_QUEUE)
-        if await _uncertain_deliveries_pending(conn):
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
-        if await _reminders_pending(conn):
-            await conn.execute(_reminders_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REMINDERS)
-        if await _proactive_deliveries_pending(conn):
-            await conn.execute(_proactive_deliveries_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
+        for migration in _MIGRATIONS:
+            await migration.apply(conn, sql=sql, state=state)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1848,48 +1525,20 @@ async def _connection(pool: asyncpg.Pool | asyncpg.Connection) -> AsyncIterator[
 
 async def schema_change_pending(conn: asyncpg.Connection) -> bool:
     """Read-only admission and backup decision, before ensure_schema rechecks under its write lock."""
-    sql = SCHEMA_PATH.read_text(encoding="utf-8")
+    sql = migrations.schema_sql(SCHEMA_PATH.read_text(encoding="utf-8"), _MIGRATIONS)
     async with conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
         state = await _classify_schema(conn, sql)
-        return state == "bridge" or (state == "current" and (
-            await _schedule_user_gates_pending(conn) or await _schedule_notify_format_pending(conn)
-            or await _schedule_session_bounds_pending(conn)
-            or await _cursor_login_pending(conn)
-            or await _model_name_parameters_pending(conn)
-            or await _coco_login_pending(conn)
-            or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)
-            or await _profile_web_search_pending(conn)
-            or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
-            or await _task_process_record_pending(conn)
-            or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
-            or await _project_activity_pending(conn) or await _message_stream_pending(conn)
-            or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
-            or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
-            or await _ledger_pending(conn) or await _card_actions_pending(conn)
-            or await _proactive_deliveries_pending(conn)
-            or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
-            or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
-            or await _message_leads_pending(conn)
-            or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
-            or await _run_skips_pending(conn)
-            or await _outbound_reviews_pending(conn) or await _memory_candidates_pending(conn)
-            or bool(await _memory_draft_ddl(conn))
-            or await _memory_draft_queue_pending(conn)
-            or await _uncertain_deliveries_pending(conn)
-            or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
-            or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
-            or await _decision_snapshots_pending(conn)
-            or await _project_advisor_pending(conn)
-            or await _llm_requests_pending(conn)
-            or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
-            or await _llm_requests_stored_bytes_pending(conn)
-            or await _chat_binding_senders_pending(conn) or await _chat_binding_sender_policy_pending(conn)
-            or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)
-            or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
-            or await _review_panel_pending(conn)
-            or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
-            or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
-            or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
-            or await _mid_turn_input_pending(conn)
-            or await _reminders_pending(conn)))
+        if state == "bridge":
+            return True
+        if state == "current":
+            for migration in _PENDING_MIGRATIONS:
+                if await migration.pending(conn):
+                    return True
+        return False
+
+
+# Discover after the legacy helpers are defined. New migrations need no edits here.
+_MIGRATIONS = migrations.discover()
+_PENDING_MIGRATIONS = migrations.pending_migrations(_MIGRATIONS)
+_ONLINE_STEPS = migrations.online_steps(_MIGRATIONS)

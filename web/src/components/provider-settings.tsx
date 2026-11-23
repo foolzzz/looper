@@ -17,6 +17,7 @@ import { useRegistry } from "@/lib/use-registry";
 import { useSettingsTarget } from "@/lib/settings-target";
 import { ProviderModelPicker } from "@/components/provider-model-picker";
 import { ModelsSection } from "@/components/model-settings";
+import { ProviderQuota } from "@/components/provider-quota";
 
 const usedBy = (count: number) =>
   count === 0 ? `no ${AGENT_PROFILE.plural}` : `used by ${count} ${count === 1 ? AGENT_PROFILE.name : AGENT_PROFILE.plural}`;
@@ -339,6 +340,7 @@ function LoginLine({ provider, label }: { provider: Provider; label: string }) {
 function ProviderRow({ provider, registry }: { provider: Provider; registry: Registry }) {
   const [editing, setEditing] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [quota, setQuota] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const toggle = useAction();
   const setEnabled = (enabled: boolean) => {
@@ -381,6 +383,8 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
             onClick={() => setFetching(!fetching)}>Fetch models</Button>}
           <Button type="button" size="sm" variant="ghost" aria-label={`Models for provider ${provider.name}`}
             aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>Models</Button>
+          <Button type="button" size="sm" variant="ghost" aria-label={`Quota for provider ${provider.name}`}
+            aria-expanded={quota} onClick={() => setQuota(!quota)}>Quota</Button>
           {!provider.builtin && (
             <EditDelete what="provider" name={provider.name} editing={editing} busy={action.busy} onEdit={() => setEditing(!editing)} onDelete={remove} />
           )}
@@ -404,6 +408,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
           )}
           {fetching && <div className={EDIT_BOX}><ProviderModelPicker provider={provider} registry={registry} onDone={() => setFetching(false)} /></div>}
           {expanded && <div className="pt-2"><ModelsSection provider={provider} registry={registry} /></div>}
+          {quota && <ProviderQuota providerId={provider.provider_id} />}
         </>
       }
     >

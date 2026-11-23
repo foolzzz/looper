@@ -32,6 +32,7 @@ def test_doctor_passes_without_claude_when_no_profile_uses_it(tmp_path, monkeypa
     ok = self_check.Check("unrelated", "Unrelated", self_check.OK, "ready")
     monkeypatch.setenv("PATH", "/nonexistent")
     monkeypatch.setattr(self_check, "check_database", AsyncMock(return_value=ok))
+    monkeypatch.setattr(self_check, "provider_limit_checks_for_database", AsyncMock(return_value=[]))
     for name in ("check_codex_login", "check_grok_login", "check_cursor_login", "check_coco_login",
                  "check_git", "check_lark_cli", "check_projects_root"):
         monkeypatch.setattr(self_check, name, lambda *args: ok)

@@ -177,10 +177,11 @@ class ApiSession:
         if cancel.requested:
             return stopped_before_request()
 
-        def failed(message, *, session_started=True):
+        def failed(message, *, session_started=True, typed=None):
             return claude_cli.ResidentTurn(
                 {"type": "result", "subtype": "error_during_execution", "is_error": True,
-                 "errors": [message], "num_turns": 0},
+                 "errors": [message], "num_turns": 0,
+                 **({"error_kind": typed.error_kind.value, "error_status": typed.error_status} if typed else {})},
                 session_started=session_started, usage=Usage(), prompt_sent=False)
 
         if self._tools is None:
@@ -276,7 +277,7 @@ class ApiSession:
             if result.first_request_failed and not initialized:
                 # Only retry before any output is visible; streamed text must not be shown twice.
                 self._session = sid
-                return failed(_error_message(result, model), session_started=False)
+                return failed(_error_message(result, model), session_started=False, typed=result)
         if not cancel.requested:
             await init()
         complete = all(r.usage.complete for r in result.requests)
@@ -292,7 +293,10 @@ class ApiSession:
             event.update(subtype="error_max_turns", is_error=True, errors=[
                 "the turn made 30 model requests, the most a turn may make; it stopped there, and what its tool calls did was not undone"])
         elif result.outcome is Outcome.FAILED:
-            event.update(subtype="error_during_execution", is_error=True, errors=[_error_message(result, model)])
+            # The typed error kind and status, for the failure's class (``failures.api``).
+            event.update(subtype="error_during_execution", is_error=True, errors=[_error_message(result, model)],
+                         error_kind=result.error_kind.value if result.error_kind is not None else None,
+                         error_status=result.error_status)
         elif result.outcome is Outcome.CAPPED:
             cap = stop()
             event.update(cap.result_event)
@@ -314,7 +318,7 @@ class ApiSession:
         # An interrupted first request created no durable history to resume, even if init was not observed.
         self._session = (None if result.outcome is Outcome.CANCELLED and result.first_request_failed and not history
                          else sid)
-        return claude_cli.ResidentTurn(event, session_started=True, usage=usage, prompt_sent=True,
+        return claude_cli.ResidentTurn(event, session_started=True, usage=usage, prompt_sent=cancel.prompt_sent,
                                        usage_complete=complete,
                                        stopped=StopMethod.CANCEL if result.outcome is Outcome.CANCELLED or cancel.requested else None)
 

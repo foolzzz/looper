@@ -66,7 +66,7 @@ class _World:
                     platform=SimpleNamespace(managers="the fleet", task_router=SimpleNamespace(
                         has_planner=lambda task_id: True)),
                     tools_problem=AsyncMock(return_value=None), asks_in=lambda message_id: False,
-                    begin_turn=lambda turn, binding=None: "", publish_binding=lambda binding, **_: None,
+                    begin_turn=lambda turn, binding=None, **_: "", publish_binding=lambda binding, **_: None,
                     end_turn=lambda turn: None, library_with_server=AsyncMock(side_effect=lambda library, root, **_: library),
                     current_scope=AsyncMock(return_value=DEFAULT_SCOPE), current_listing=AsyncMock(return_value=[]))
                 base = {"chat_id": "ou_me", "chat_type": "p2p", "sender_id": "ou_me", "message_id": "om_9"} \

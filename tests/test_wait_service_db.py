@@ -677,7 +677,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
     import looper.db as db
     from looper import components
     from looper.agents import (
-        consult, managers, operator_auth, operator_notes, proc_tree, profile_registry, read_only_copies, room,
+        consult, cost_guard, managers, operator_auth, operator_notes, proc_tree, profile_registry, read_only_copies, room,
         scheduler_settings, serve, step_workspaces, task_workspaces,
     )
     from looper.agents.ops import planner as planner_ops, room as room_ops, service as manager_ops
@@ -703,9 +703,12 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
             return SimpleNamespace(start=start, stop=stop, start_all=start, stop_all=stop,
                                    register=MagicMock(), resume_all=AsyncMock(), notify=AsyncMock(),
                                    post=AsyncMock(), post_card=AsyncMock(), read_quote=AsyncMock(),
-                                   task_ended=AsyncMock(), list_channels=lambda: [])
+                                   task_ended=AsyncMock(), list_channels=lambda: [],
+                                   observe_user=MagicMock())
 
-        bus = SimpleNamespace(shutdown=AsyncMock(), queue_ids=lambda: [])
+        bus = SimpleNamespace(shutdown=AsyncMock(), queue_ids=lambda: [],
+                              subscribe_topic=lambda *args, **kwargs: None,
+                              unsubscribe_topic=lambda *args, **kwargs: None)
         router = SimpleNamespace(has_planner=lambda task_id: task_id == "task-active")
         for name in ("Broadcaster", "ManagerConfig", "WorkerConfig"):
             monkeypatch.setattr(serve, name, MagicMock())
@@ -722,6 +725,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
             if name == "ChannelRegistry":
                 value.register = AsyncMock()
                 value.prepare_stop_all = MagicMock(side_effect=lambda: events.append("registry.prepare_stop_all"))
+            if name == "Scheduler":
+                value.day_start = lambda now: now
             if name == "WorkerPool":
                 value.set_candidates = MagicMock()
                 value._ended_at_start = {}
@@ -761,7 +766,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
             (task_workspaces, "sweep", 0), (codex_login, "inspect_at_start", None),
             (grok_login, "inspect_at_start", None), (read_only_copies, "reclaim_unused", None),
             (db_room, "tasks_keeping_sessions", []), (channel_configs, "get_config", None),
-            (serve, "carry_on_tasks", None),
+            (serve, "carry_on_tasks", None), (cost_guard, "initialize", None),
         ):
             monkeypatch.setattr(module, name, AsyncMock(return_value=result))
         monkeypatch.setattr(room, "sweep_run_sessions", lambda *args: None)

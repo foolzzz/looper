@@ -15,22 +15,24 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...db import manager_actions as db_actions, projects as db_projects, tasks as db_tasks, user_gates as db_user_gates
-from .. import gate_service, projects
+from .. import gate_service, projects, receipts, receipts_settings
 from ..managers_api import DEFAULT_MANAGER_ID
-from ..message import channel_address
+from ..message import CancelBy, channel_address
 from ..tiers.journal import clip
 from ..user_gates import MESSAGE_MAX_CHARS
 from . import API_CHANNEL, Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
 from .config import answered
 from .service import (CONFIRM_TOOL, CONFIRMATION_CHATS, CONFIRMATION_SECONDS, MANAGER_TOOLS, Platform, _created_task,
                       _error, _plain)
-from .tasks import TASKS_LISTED, TASKS_SEARCHED, _TASK_ID, _gate_listed, _group, _task_argument, _via, task_workflow_tool
+from .tasks import (TASKS_LISTED, TASKS_SEARCHED, _TASK_ID, _control, _gate_listed, _group, _task_argument, _via,
+                    task_workflow_tool)
 
 if TYPE_CHECKING:
     from ..api_v1 import Principal
@@ -100,10 +102,13 @@ async def _gates(call: Call) -> dict[str, Any]:
     end = action == "end"
     data = ({"text": arguments.get("text") or ""} if end else
             {key: arguments[key] for key in ("text", "agenda_item", "option") if arguments.get(key) is not None})
+    from .service import operator_call
+
     return await answered(gate_service.post_message(
         task_id, label, data, has_planner=call.platform.task_router.has_planner(task_id), bus=call.platform.bus,
         source=call.manager_address if call.turn.client_id else channel_address("web"),
-        via=_via(call.turn) if call.turn.client_id else gate_service.VIA_DASHBOARD, end=end))
+        via=_via(call.turn) if call.turn.client_id else gate_service.VIA_DASHBOARD, end=end,
+        from_operator=await operator_call(call.turn)))
 
 
 GATES_TOOL = Tool(
@@ -164,8 +169,13 @@ def _client_tasks(original: Tool) -> Tool:
     return replace(original, schema=schema, run=run)
 
 
+async def _client_control(call: Call) -> dict[str, Any]:
+    return await _control(call, by=CancelBy.USER)
+
+
 CLIENT_TOOLS: tuple[Tool, ...] = (*(_client_tasks(t) if t.name == "looper_tasks" else
-                                  task_workflow_tool(t, None) if t.name == "looper_task_create" else t
+                                  task_workflow_tool(t, None) if t.name == "looper_task_create" else
+                                  replace(t, run=_client_control) if t.name == "looper_task_control" else t
                                   for t in MANAGER_TOOLS if t.name not in MANAGER_ONLY), PIPELINE_TOOL,
                                   GATES_TOOL)
 
@@ -197,8 +207,11 @@ class ClientOps:
 
     async def call(self, principal: Principal, session: str, name: str, raw: Any, *,
                    tool: Tool | None = None, validator: Callable[[Mapping[str, Any], Any], dict[str, Any]] = check_arguments,
-                   require_confirmation: bool = True) -> dict[str, Any]:
-        """Run one operation for ``principal``; the protocol's answer (``ok``, ``needs_confirmation`` or ``error``)."""
+                   require_confirmation: bool = True,
+                   level_of: Callable[[Mapping[str, Any]], Awaitable[Any]] | None = None) -> dict[str, Any]:
+        """Run one operation for ``principal``; the protocol's answer (``ok``, ``needs_confirmation`` or ``error``).
+        ``level_of`` is where an ``/api/v1`` operation's call reaches (``Operation.level``); a client tool's is its
+        own (``ops.levels``)."""
         if not SESSION.fullmatch(session):
             return _error(ErrorCode.INVALID, "X-Looper-Session: 1–64 of letters, digits, '.', '_', ':' or '-'")
         tool = tool or self.tools.get(name)
@@ -210,11 +223,15 @@ class ClientOps:
         turn = self._turn(principal, session)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        watch = receipts.Watch()
         try:
             arguments = validator(tool.schema, raw)
             risk = tool.risk_of(arguments)
+            if principal.kind != "operator" and risk is not Risk.READ \
+                    and (blocked := await self._outbound_check(principal, turn, tool, arguments, risk, level_of)):
+                return blocked
             call = Call(arguments, turn, self._platform)
-            impact = await tool.escalate(call) if tool.escalate is not None else None
+            impact = await receipts.escalate(tool, call, watch)
             if impact is not None:
                 risk = Risk.HIGH
             if impact is not None and require_confirmation:
@@ -222,23 +239,25 @@ class ClientOps:
                 await self._record(turn, tool, arguments, risk, "needs_confirmation", confirmation_id=pending.id)
                 return {"status": "needs_confirmation", "confirmation_id": pending.id,
                         "expires_in_seconds": CONFIRMATION_SECONDS, "impact": impact}
-            result = await self._run(tool, call)
+            result = await self._run(tool, call, watch)
         except OpError as exc:
+            _refused(watch, turn, tool, arguments, exc)
             await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
-                               result={"message": str(exc)})
+                               result={"message": str(exc)}, watch=watch)
             answer = _error(exc.code, str(exc))
             if exc.details is not None:
                 answer["error"]["details"] = exc.details
             if exc.field is not None:
                 answer["error"]["field"] = exc.field
-            return answer
+            return _with_notes(answer, turn)
         except Exception as exc:
             logger.exception("an API client's call of %s failed", name)
+            _refused(watch, turn, tool, arguments, OpError(ErrorCode.UNAVAILABLE, "unavailable"))
             await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.UNAVAILABLE.value,
-                               result={"message": f"{type(exc).__name__}: {exc}"})
-            return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); try "
-                                                 "again later")
-        await self._record(turn, tool, arguments, risk, "ok", result=result)
+                               result={"message": f"{type(exc).__name__}: {exc}"}, watch=watch)
+            return _with_notes(_error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: "
+                                                             f"{exc}); try again later"), turn)
+        await self._record(turn, tool, arguments, risk, "ok", result=result, watch=watch)
         return _ok(result, turn)
 
     async def confirm(self, principal: Principal, session: str, confirmation_id: str) -> dict[str, Any]:
@@ -251,34 +270,81 @@ class ClientOps:
             return _error(ErrorCode.NOT_FOUND, f"no operation waits for confirmation {confirmation_id} for this "
                                                "client and session; call the operation again")
         del self._pending[key]
-        if self._clock() - pending.at > CONFIRMATION_SECONDS:
-            return _error(ErrorCode.EXPIRED, f"confirmation {confirmation_id} lapsed after "
-                                             f"{CONFIRMATION_SECONDS // 60} minutes; call the operation again")
         turn = self._turn(principal, session)
+        watch = receipts.Watch()
+        if self._clock() - pending.at > CONFIRMATION_SECONDS:
+            expired = OpError(ErrorCode.EXPIRED, f"confirmation {confirmation_id} lapsed after "
+                                                 f"{CONFIRMATION_SECONDS // 60} minutes; call the operation again")
+            _refused(watch, turn, pending.tool, pending.arguments, expired)
+            if watch.receipt is not None:  # the receipt is the one thing this exit adds to the trail
+                await self._record(turn, pending.tool, pending.arguments, Risk.HIGH, "error", error_code="expired",
+                                   result={"message": str(expired)}, confirmation_id=pending.id, watch=watch)
+            return _with_notes(_error(expired.code, str(expired)), turn)
         tool, arguments = pending.tool, pending.arguments
         try:
-            result = await self._run(tool, Call(arguments, turn, self._platform, confirmation=pending.confirmation))
+            result = await self._run(tool, Call(arguments, turn, self._platform, confirmation=pending.confirmation),
+                                     watch)
         except OpError as exc:
+            _refused(watch, turn, tool, arguments, exc)
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=exc.code.value,
-                               result={"message": str(exc)}, confirmation_id=pending.id)
+                               result={"message": str(exc)}, confirmation_id=pending.id, watch=watch)
             answer = _error(exc.code, str(exc))
             if exc.details is not None:
                 answer["error"]["details"] = exc.details
             if exc.field is not None:
                 answer["error"]["field"] = exc.field
-            return answer
+            return _with_notes(answer, turn)
         except Exception as exc:
             logger.exception("an API client's confirmed call of %s failed", tool.name)
+            _refused(watch, turn, tool, arguments, OpError(ErrorCode.UNAVAILABLE, "unavailable"))
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=ErrorCode.UNAVAILABLE.value,
-                               result={"message": f"{type(exc).__name__}: {exc}"}, confirmation_id=pending.id)
-            return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); call "
-                                                 "the operation again later")
-        await self._record(turn, tool, arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
+                               result={"message": f"{type(exc).__name__}: {exc}"}, confirmation_id=pending.id,
+                               watch=watch)
+            return _with_notes(_error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: "
+                                                             f"{exc}); call the operation again later"), turn)
+        await self._record(turn, tool, arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id,
+                           watch=watch)
         return _ok(result, turn)
 
+    async def _outbound_check(self, principal: Principal, turn: Turn, tool: Tool, arguments: Mapping[str, Any],
+                              risk: Risk, level_of: Callable[[Mapping[str, Any]], Awaitable[Any]] | None
+                              ) -> dict[str, Any] | None:
+        """The ``blocked`` answer when the outbound review stops an API client's call (``ops.review``): a client is
+        never the operator, so code blocks every ``external`` call it makes (RFC D17); None while the review is off or
+        for any other call. The operator's own calls are not reviewed (RFC section 6.1)."""
+        from .. import outbound, outbound_hook
+        from ...db import outbound_reviews
+        from . import levels, review as layer_one
+
+        if not outbound_hook.known_enabled():  # read at startup, set by its switch
+            return None
+        level = await level_of(arguments) if level_of is not None else await levels.level_of(tool, arguments, turn)
+        if level not in outbound.REVIEWED:
+            return None
+        action = await layer_one.action_of(tool.name, arguments, level)
+        checked = await outbound.review(
+            action, outbound.Asker(outbound.Who.ALLOWLISTED_PERSON, API_CHANNEL),
+            outbound.Origin(f"client:{principal.client_id}", outbound.Source.TOOL, channel=API_CHANNEL,
+                            chat=turn.chat), runtime_root=self._platform.runtime_root or Path.cwd())
+        if checked.allowed:
+            return None
+        message = outbound_hook.BLOCKED_MESSAGE.format(reason=checked.reason.rstrip("."))
+        action_id = await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.BLOCKED.value,
+                                       result={"message": message})
+        if action_id is not None and checked.review_id is not None:
+            try:
+                await outbound_reviews.link_action(checked.review_id, action_id)
+            except Exception:
+                logger.warning("cannot link outbound review %s to its call", checked.review_id, exc_info=True)
+        await outbound_hook.notify_blocked(f"client {principal.client_name or principal.client_id}", tool.name,
+                                           action.target, checked.reason, checked.review_id)
+        return _error(ErrorCode.BLOCKED, message)
+
     @staticmethod
-    async def _run(tool: Tool, call: Call) -> Any:
-        result = _plain(await tool.run(call))
+    async def _run(tool: Tool, call: Call, watch: receipts.Watch | None = None) -> Any:
+        answer = await (receipts.run_watched(tool, call, watch) if watch is not None and receipts_settings.enabled()
+                        else tool.run(call))
+        result = _plain(answer)
         if isinstance(result, dict):
             result.pop("shown_to_user", None)  # for the Manager's reply; a client has none
         return result
@@ -296,18 +362,32 @@ class ClientOps:
         return pending
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
-                      error_code: str | None = None, result: Any = None, confirmation_id: str | None = None) -> None:
+                      error_code: str | None = None, result: Any = None,
+                      confirmation_id: str | None = None, watch: receipts.Watch | None = None) -> int | None:
         if risk is Risk.READ:  # a read is not in the trail
             return
         try:
-            await db_actions.record(
+            return await db_actions.record(
                 channel=API_CHANNEL, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
                 confirmation_id=confirmation_id, task_id=tool.task_id(arguments) or _created_task(result),
-                manager_id=DEFAULT_MANAGER_ID, client_id=turn.client_id,
+                manager_id=DEFAULT_MANAGER_ID, client_id=turn.client_id, **receipts.row_fields(watch),
             )
         except Exception:
             logger.warning("could not record an API client's call of %s", tool.name, exc_info=True)
+
+
+def _refused(watch: receipts.Watch, turn: Turn, tool: Tool, arguments: Mapping[str, Any], error: OpError) -> None:
+    """With receipts on, the failed-write receipt of a call that ended in ``error`` before it produced one."""
+    if receipts_settings.enabled() and watch.receipt is None:
+        receipts.record_refusal(watch, turn, tool.name, arguments, error)
+
+
+def _with_notes(answer: dict[str, Any], turn: Turn) -> dict[str, Any]:
+    """An error answer with the turn's lines (the receipt) in ``notes`` while receipts are on; as it was when off."""
+    if receipts_settings.enabled() and turn.blocks:
+        answer["notes"] = list(turn.blocks)
+    return answer
 
 
 def _ok(result: Any, turn: Turn) -> dict[str, Any]:

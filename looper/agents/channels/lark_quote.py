@@ -322,13 +322,20 @@ def _note(quote: Quote) -> str:
     return "the message this one replies to" + (f": {what}" if what else "")
 
 
-def section(found: Sequence[Quote]) -> list[str]:
-    """The quotes, after the user's words in the Manager's turn."""
+def section(found: Sequence[Quote], *, fence: bool = False) -> list[str]:
+    """The quotes, after the user's words in the Manager's turn; with ``fence`` (the untrusted fence is on), each in
+    an ``<untrusted source="quote">`` block instead of ``<lark_quote>``."""
+    from .. import untrusted
+
     if not found:
         return []
     lines = [INTRO]
     for quote in found:
         attributes = {"id": quote.message_id, "type": quote.message_type, "from": quote.sender, "note": _note(quote)}
+        if fence:
+            lines.append(untrusted.fence("\n".join(quote.lines), source=untrusted.Source.QUOTE, provenance={
+                ("ref" if key == "id" else key): value for key, value in attributes.items() if value}))
+            continue
         shown = " ".join(f'{key}="{_attribute(value)}"' for key, value in attributes.items() if value)
         lines += [f"<lark_quote {shown}>", *quote.lines, "</lark_quote>"]
     return lines

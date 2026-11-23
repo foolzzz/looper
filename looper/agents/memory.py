@@ -91,4 +91,12 @@ async def list_view(*, state: str = "open", kind: str | None = None, limit: int 
 
 async def get_view(candidate: str, *, db: Any = None) -> dict[str, Any] | None:
     found = await db_memory.get(model.parse_id(candidate), db=db)
-    return detail_view(found) if found is not None else None
+    if found is None:
+        return None
+    view = detail_view(found)
+    if view["current"] is not None:
+        # Additive: what the page shows per file, made from the vault as it is now (memory_diff).
+        from . import memory_diff
+        diffs, problem = await memory_diff.revision_diffs(view["state"], view["current"]["changes"], db)
+        view["current"] = {**view["current"], "diffs": diffs, "diffs_problem": problem}
+    return view

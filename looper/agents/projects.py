@@ -40,7 +40,7 @@ from .agent_settings import CONCURRENCY_MAX, PLANNER_CHOICE_ROLES, TASK_LIMIT_RO
 from .agent_settings import concurrency, index_layers, task_agents_view
 from .agent_settings import TASK_ROLES, AgentSettings, Layer, resolve, resolve_task_concurrency
 from .bus import MessageBus
-from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, RestartMode, planner_address
+from .message import CancelBy, TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, RestartMode, planner_address
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, TaskWorkspaces, execution_fields
 from .project_execution import LessonsMode, ReviewPolicy, TaskBudgetAction, format_usd
 from .step_workspaces import _size_text as size_text
@@ -150,6 +150,8 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "task_count": row.get("task_count", 0),
         "active_count": row.get("active_count", 0),
         "schedule_count": row.get("schedule_count", 0),
+        # Only a project that switched skill proposals on shows the key; every other view is as before.
+        **({"skill_proposals": row["skill_proposals"]} if row.get("skill_proposals") else {}),
     }
 
 
@@ -504,7 +506,9 @@ async def delete_task(task_id: str, runtime_root: Path | None, *,
         await task_workspaces.finish(task_id, deleted=True, pool=conn)
         await db_tasks.delete_task(task_id, pool=conn)
     if runtime_root is not None:
+        from .acceptance_artifacts import remove_task as remove_evidence
         from .room import remove_run_sessions
+        await asyncio.to_thread(remove_evidence, runtime_root, task_id)
         await asyncio.to_thread(remove_run_sessions, runtime_root, task_id)
     if task_router is not None:
         task_router.forget_task(task_id)
@@ -817,8 +821,30 @@ async def list_tasks_page(
             # What the task's Planner, Workers and Reviewers spent so far.
             "cost": costs.get(t.get("id", "")),
         })
+    await _attach_failed_checks(result)
     return {"tasks": result, "next_before": tasks[-1]["id"] if len(page) > limit else None, "counts": counts,
             "hidden_scheduled": hidden}
+
+
+async def _attach_failed_checks(rows: list[dict[str, Any]]) -> None:
+    """Name the required checks that failed, on attention rows only, and only when there is one.
+
+    One query covers the page. The keys stay off every other row, so a list with no such failure
+    is unchanged. The compact Manager list never reaches here.
+    """
+    attention = [row["task_id"] for row in rows
+                 if row.get("group") == db_tasks.TaskGroup.ATTENTION.value and row.get("task_id")]
+    if not attention:
+        return
+    from ..db import step_check_runs
+
+    found = await step_check_runs.failed_required_current(attention)
+    for row in rows:
+        items = found.get(row["task_id"])
+        if not items:
+            continue
+        row["failed_checks"] = [item["check_id"] for item in items]
+        row["failed_check_step"] = items[0]["step_id"]
 
 
 async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list[dict[str, Any]]:
@@ -993,7 +1019,7 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         "journal": raw.get("journal", []),
         # The Planner's progress notes (journal kind progress), newest first: done, now, next, risks, estimate, at.
         "progress": progress_notes(raw.get("journal", [])),
-        # What the task's Planner, Workers and Reviewers spent: the total, by role, and the run count.
+        # What the task spent: the total, by role (room consults included), and the run count.
         "cost": cost,
     }
 
@@ -1081,6 +1107,9 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
         "result": clip(result or task.get("error") or "", 1_000) or None,
         **({"process_record": process_record_text(task["process_record"])} if task.get("process_record") else {}),
         "cost_usd": (cost or {}).get("cost_usd"),
+        # Historical explorer spend stays visible after the project switch is turned off.
+        **({"cost_by_role": cost["by_role"]}
+           if cost and cost.get("by_role", {}).get("explorer", {}).get("runs", 0) else {}),
         # How many of its Workers and Reviewers run at once, with the source; its own limits (task).
         "concurrency": {role: view["concurrency"] for role, view in agents["roles"].items()
                         if "concurrency" in view},
@@ -1185,7 +1214,8 @@ async def check_task_control(task_id: str, action: str) -> dict[str, Any]:
     return task
 
 
-async def control_task(task_id: str, action: str, bus: MessageBus, source: AgentAddress) -> None:
+async def control_task(task_id: str, action: str, bus: MessageBus, source: AgentAddress, *,
+                       by: CancelBy = CancelBy.USER) -> None:
     """Check a stop, cancel or restart and send it once to the TaskRouter."""
     await check_task_control(task_id, action)
     message_type = {"stop": MessageType.TASK_STOP, "cancel": MessageType.TASK_CANCEL,
@@ -1195,6 +1225,7 @@ async def control_task(task_id: str, action: str, bus: MessageBus, source: Agent
         payload["mode"] = (RestartMode.START_OVER if action == "start_over" else RestartMode.CONTINUE).value
     await bus.publish(MessageEnvelope.create(
         source=source, target=TASK_ROUTER_ADDRESS, message_type=message_type, payload=payload,
+        metadata={"cancel_by": by.value} if action == "cancel" else None,
     ))
 
 
@@ -1210,6 +1241,7 @@ AGENTS_EDITABLE_STATUSES = (*EDITABLE_STATUSES, *db_tasks.RESTARTABLE_STATUSES)
 
 async def add_task_supplement(
     task_id: str, text: str, *, via: str, wake: Callable[[int | None], Awaitable[Any]], best_effort: bool = False,
+    from_operator: bool | None = None,
 ) -> Any:
     """Store a supplement before waking its Planner through the entry's existing delivery protocol.
 
@@ -1221,7 +1253,8 @@ async def add_task_supplement(
 
     supplement_id = None
     try:
-        supplement_id = await task_changes.add_supplement(task_id, kept_text(text, SUPPLEMENTS_MAX_CHARS), via=via)
+        supplement_id = await task_changes.add_supplement(task_id, kept_text(text, SUPPLEMENTS_MAX_CHARS), via=via,
+                                                          from_operator=from_operator)
     except Exception:
         if not best_effort:
             raise
@@ -1336,6 +1369,7 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
     profile id (None: drop the task's choice, only when ``clearing``); each one registered and able to run its role.
     400 otherwise."""
     from ..db import profile_registry as db_profiles
+    from .acp_guards import refuse_profile
     from .profile_registry import RegistryError, check_selection
 
     if not raw:
@@ -1364,6 +1398,7 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
             names = ", ".join(str(p["name"]) for p in registered[:20])
             raise RequestError(HTTP_400, f"{field}.{role}: no Agent Profile {wanted!r}; registered: {names}")
         try:
+            await refuse_profile(match["id"], "task profile choices", pool=pool)
             await check_selection(match["id"], [role], pool=pool)
         except RegistryError as exc:
             raise RequestError(HTTP_400, f"{field}.{role}: {exc}") from None
@@ -1386,9 +1421,9 @@ async def choosable_profiles(project_id: str | None, *,
 
     listed = await db_projects.allowed_profiles(project_id, pool=pool) if project_id else []
     if listed:
-        return listed, True
+        return [row for row in listed if row["runtime_type"] != "acp"], True
     return [row for row in await db_profiles.list_profiles(pool=pool)
-            if set(servable_roles((profile := AgentProfile.from_row(row)).runtime.capabilities,
+            if row["runtime_type"] != "acp" and set(servable_roles((profile := AgentProfile.from_row(row)).runtime.capabilities,
                                   profile.runtime.type)) & set(_CHOOSABLE)], False
 
 

@@ -28,11 +28,25 @@ so every release carries one, built from its tag. Users upgrade by running
      uv run --extra test python examples/release/release-readiness-doc-smoke.py --release-notes docs/releases/vX.Y.Z.md "${surfaces[@]}"
      ```
 
-2. **Tag.** After the pull request merges, tag the merge commit and push the
-   tag:
+2. **Tag.** After the pull request merges, tag the commit this release ships
+   and push the tag. When nothing merged into `main` between the scope freeze
+   and that merge, tag the merge commit:
 
    ```bash
    git tag -a vX.Y.Z -m "Looper vX.Y.Z" <merge commit> && git push origin vX.Y.Z
+   ```
+
+   When `main` received other merges after the freeze, tag the release pull
+   request's own head commit (the freeze plus the version bump and notes)
+   instead, so the shipped code matches the release notes. v2.15.25 was tagged
+   that way. That commit is an ancestor of `main` once the pull request
+   merges, which the release workflow's
+   `git merge-base --is-ancestor "$TAG" origin/main` check accepts. The
+   release notes then name the pull requests merged after the freeze, which
+   ship in the next release.
+
+   ```bash
+   git tag -a vX.Y.Z -m "Looper vX.Y.Z" <release head> && git push origin vX.Y.Z
    ```
 
 3. **The workflow** then:

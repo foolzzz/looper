@@ -1,3 +1,4 @@
+import { CostGuardSettingsSection } from "@/components/cost-guard-settings";
 import { WorkflowsSection } from "@/components/workflows";
 import { LlmrecSettingsSection } from "@/components/llmrec-settings";
 import { GatewaySettingsSection } from "@/components/gateway-settings";
@@ -11,7 +12,9 @@ import { ManagersSection } from "@/components/managers-settings";
 import { ProvidersSection } from "@/components/provider-settings";
 import { RolesSection } from "@/components/role-settings";
 import { RuntimesSection } from "@/components/runtime-cards";
+import { AcpReviewerSettingsSection } from "@/components/acp-reviewer-settings";
 import { SchedulerSection } from "@/components/scheduler-settings";
+import { MemorySettingsSection } from "@/components/memory-settings";
 import { VaultSettingsSection } from "@/components/vault-settings";
 import {
   AGENT_PROFILE,
@@ -43,6 +46,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "Connect external messaging platforms. Each channel's card says where its credential comes from; saved " +
     "bot connection, credential and allowlist changes take effect after the server restarts. Chat bindings and Only bound chats apply immediately. Channels admit listed senders by default; a Lark chat binding can admit everyone in that chat. Each Manager can have its own bots; a bot's Manager is set when it is added.",
   chat: "How the chat with the Manager behaves, on the dashboard and on the channels.",
+  cost: "真钱、订阅等价花费和在跑运行的预留分开观察。默认关闭；执行模式按金额上限和用量窗口决定是否暂缓。",
   scheduler:
     "System-wide limits of schedules: how close two fires may be, and the run timeout of schedules that follow the default.",
   vault:
@@ -52,7 +56,8 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
   gateway: "Let Anthropic clients on this machine use your OpenAI Chat Completions models through local aliases.",
   transfer:
     "One file with the role settings, the providers and Agent Profiles, the catalog with its files and MCP servers, " +
-    "global installs, channels, scenario Managers, their task templates and the scheduler's settings.",
+    "global installs, channels, scenario Managers, their task templates, the scheduler's settings and the " +
+    "default Manager's persona.",
 };
 
 /** One Settings page (#settings/<page>[/<sub>]); the sidebar's Settings group lists them. */
@@ -68,7 +73,7 @@ export function SettingsPage({ sub }: { sub: string }) {
         {page !== "roles" && <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{DESCRIPTIONS[page]}</p>}
       </div>
       {page === "providers" && <ProvidersSection adding={inner === "new"} />}
-      {page === "runtimes" && <RuntimesSection />}
+      {page === "runtimes" && <><AcpReviewerSettingsSection /><RuntimesSection /></>}
       {page === AGENT_PROFILE.slug && <AgentProfilesSection />}
       {page === "roles" && <RolesSection sub={inner} />}
       {page === "workflows" && <WorkflowsSection />}
@@ -77,8 +82,9 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "catalog" && <CatalogCard />}
       {page === "channels" && <ChannelsSection />}
       {page === "chat" && <ChatSettingsSection />}
+      {page === "cost" && <CostGuardSettingsSection />}
       {page === "scheduler" && <SchedulerSection />}
-      {page === "vault" && <VaultSettingsSection />}
+      {page === "vault" && <><VaultSettingsSection /><MemorySettingsSection /></>}
       {page === "recording" && <LlmrecSettingsSection />}
       {page === "gateway" && <GatewaySettingsSection />}
       {page === "transfer" && <ConfigTransferCard />}

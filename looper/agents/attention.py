@@ -9,8 +9,7 @@ The sections, in this order (``KINDS``):
 
 - ``gates``: user gates waiting for the operator's answer (``gate_service.list_gates``, ``waiting_on=user``);
 - ``confirmations``: a Manager's operation waiting for the operator's word in a chat
-  (``ManagerOps.waiting_confirmations``: they live in memory, so a restart drops them, and the operator is asked
-  again);
+  (``card_actions.pending_confirmations``: durable card rows while cards are on, otherwise Manager memory);
 - ``schedules``: failing schedules, as the dashboard's Schedules card lists them (``db.schedules.failing``);
 - ``logins``: a runtime login an Agent Profile uses, or the Claude Code CLI or login, failing, as the HTTP server's
   status checks report them now (``use_status_checks``);
@@ -18,7 +17,8 @@ The sections, in this order (``KINDS``):
 - ``ledger``: the ledger's own open items that wait for the user (a to-do, a decision to confirm, anything overdue),
   while the ledger is on;
 - ``deliveries``: messages of the last ``DELIVERY_WINDOW`` that may not have arrived (``uncertain``: never sent
-  again, so the operator checks).
+  again, so the operator checks), and persisted dropped Lark catch-up windows;
+- ``cost``: pending spend holds, while the cost guard enforces limits.
 
 A section is ``ok`` (read; possibly empty), ``error`` (its source could not be read: never shown as empty) or
 ``unknown`` (this caller cannot read it, e.g. ``logins`` without a status reader). A feature that is off leaves its
@@ -40,19 +40,20 @@ from urllib.parse import urlencode
 
 from ..db import attention as store, ledger as db_ledger, schedules as db_schedules, tasks as db_tasks
 from ..db import system_settings as db_settings
-from . import gate_routing, gate_service, leads_model, operator_identity
+from . import card_actions, gate_routing, gate_service, leads_model, operator_identity
 from .message import MessageEnvelope, is_lark, parse_channel_id
 
 logger = logging.getLogger(__name__)
 
 ENABLED_KEY = "attention.enabled"
-KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries")
+KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries", "cost")
 SHOWN = 20
 DELIVERY_WINDOW = timedelta(hours=72)
 # The checks the dashboard's banner shows as a login that fails (web/src/components/claude-check-banner.tsx).
 LOGIN_CHECKS = ("codex_login", "coco_login", "grok_login", "cursor_login", "ttadk")
 
 StatusChecks = Callable[[], Awaitable[Sequence[Mapping[str, Any]]]]
+CatchupChecks = Callable[[], Sequence[Mapping[str, Any]]]
 
 
 class NotRead(Enum):
@@ -65,6 +66,7 @@ class NotRead(Enum):
 
 Read = tuple[list[dict[str, Any]], int] | NotRead
 _status_checks: StatusChecks | None = None
+_catchup_checks: CatchupChecks | None = None
 
 
 async def enabled() -> bool:
@@ -72,13 +74,15 @@ async def enabled() -> bool:
     return (await db_settings.get_settings([ENABLED_KEY])).get(ENABLED_KEY) == "true"
 
 
-def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None) -> None:
+def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None,
+                      catchup: CatchupChecks | None = None) -> None:
     """Where ``logins`` is read from: the HTTP server's startup checks with the logins read now, set while it runs
     (``AgentHTTPServer.start``). None: ``logins`` is ``unknown``; with ``owner``, only if ``owner`` is the reader
-    (a server that stops clears its own, never a newer one's)."""
-    global _status_checks
+    (a server that stops clears its own, never a newer one's). ``catchup`` reads only the registry's cached windows."""
+    global _status_checks, _catchup_checks
     if owner is None or _status_checks == owner:
         _status_checks = read
+        _catchup_checks = catchup
 
 
 def _item(key: str, title: str, *, context: str = "", since: datetime | None = None, href: str | None = None,
@@ -93,32 +97,42 @@ def _task_name(row: Mapping[str, Any], task_id: str) -> str:
                               task_id=task_id)
 
 
+def _gate_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _item(f"gate:{row['gate']['step_id']}", row["gate"]["topic"],
+                 context=row["task"]["name"], since=row["gate"]["opened_at"],
+                 href=f"#tasks/{row['task']['task_id']}?gate={row['gate']['step']}",
+                 step=row["gate"]["step"], questions=row["agenda_open"])
+
+
 async def _gates(_: Any) -> Read:
     listed = await gate_service.list_gates({"state": "open", "waiting_on": "user", "limit": str(SHOWN)})
-    items = [_item(f"gate:{row['gate']['step_id']}", row["gate"]["topic"],
-                   context=row["task"]["name"], since=row["gate"]["opened_at"],
-                   href=f"#tasks/{row['task']['task_id']}?gate={row['gate']['step']}",
-                   step=row["gate"]["step"], questions=row["agenda_open"])
-             for row in listed["gates"]]
-    return items, listed["total"]
+    return [_gate_item(row) for row in listed["gates"]], listed["total"]
+
+
+async def _confirmation_items(managers: Any) -> list[dict[str, Any]] | None:
+    waiting = await card_actions.pending_confirmations(managers)
+    if waiting is None:
+        return None
+    now = datetime.now(timezone.utc)
+    items = []
+    names = {agent.agent_id: getattr(agent, "name", None) or agent.agent_id
+             for agent in managers.agents()} if managers is not None else {}
+    for row in waiting:
+        manager_id = row["manager_id"]
+        items.append(_item(
+            f"confirmation:{row['confirmation_id']}", row["impact"] or row["tool"],
+            context=names.get(manager_id, manager_id), since=now - timedelta(seconds=row["waited_seconds"]),
+            href=_chat_href(manager_id, row["chat"]) if row["channel"] == "web" else None,
+            ref=row["confirmation_id"], tool=row["tool"], channel=row["channel"],
+            expires_in_seconds=row["expires_in_seconds"]))
+    items.sort(key=lambda item: item["since"])
+    return items
 
 
 async def _confirmations(managers: Any) -> Read:
-    if managers is None:
+    items = await _confirmation_items(managers)
+    if items is None:
         return NotRead.UNKNOWN
-    now = datetime.now(timezone.utc)
-    items = []
-    for agent in managers.agents():
-        ops = managers.ops(agent.agent_id)
-        for waiting in ops.waiting_confirmations() if ops is not None else ():
-            items.append(_item(
-                f"confirmation:{waiting['confirmation_id']}", waiting["impact"] or waiting["tool"],
-                context=getattr(agent, "name", None) or agent.agent_id,
-                since=now - timedelta(seconds=waiting["waited_seconds"]),
-                href=_chat_href(agent.agent_id, waiting["chat"]) if waiting["channel"] == "web" else None,
-                ref=waiting["confirmation_id"], tool=waiting["tool"], channel=waiting["channel"],
-                expires_in_seconds=waiting["expires_in_seconds"]))
-    items.sort(key=lambda item: item["since"])
     return items[:SHOWN], len(items)
 
 
@@ -134,49 +148,64 @@ _SCHEDULE_ALERTS = (("failures", "failures_alert_at"), ("stale", "stale_alert_at
                     ("deadline", "deadline_alert_at"), ("overlap", "overlap_alert_at"))
 
 
-async def _schedules(_: Any) -> Read:
-    rows = await db_schedules.failing()
+def _schedule_items(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     items = []
     for row in rows:
         alerts = [name for name, column in _SCHEDULE_ALERTS if row[column] is not None]
         since = min((row[column] for _, column in _SCHEDULE_ALERTS if row[column] is not None), default=None)
         items.append(_item(f"schedule:{row['id']}", row["name"], context=row["project_name"], since=since,
                            href=f"#schedules/{row['id']}", failures=row["consecutive_failures"], alerts=alerts,
-                           last_status=row["last_status"]))
+                           last_status=row["last_status"], last_ok_at=row.get("last_ok_at")))
+    return items
+
+
+async def _schedules(_: Any) -> Read:
+    items = _schedule_items(await db_schedules.failing())
     return items[:SHOWN], len(items)
+
+
+def _login_failing(checks: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [check for check in checks
+            if (str(check.get("id", "")).startswith("claude_") or check.get("id") in LOGIN_CHECKS)
+            and check.get("status") == "fail"]
+
+
+def _login_items(checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [_item(f"login:{check['id']}", str(check.get("label") or check["id"]), href="#settings/runtimes",
+                  detail=str(check.get("detail") or ""), fix=str(check.get("fix") or ""))
+            for check in _login_failing(checks)]
 
 
 async def _logins(_: Any) -> Read:
     if _status_checks is None:
         return NotRead.UNKNOWN
-    failing = [check for check in await _status_checks()
-               if (str(check.get("id", "")).startswith("claude_") or check.get("id") in LOGIN_CHECKS)
-               and check.get("status") == "fail"]
-    items = [_item(f"login:{check['id']}", str(check.get("label") or check["id"]), href="#settings/runtimes",
-                   detail=str(check.get("detail") or ""), fix=str(check.get("fix") or ""))
-             for check in failing]
+    items = _login_items(await _status_checks())
     return items[:SHOWN], len(items)
+
+
+def _intent_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _item(f"intent:{row['id']}", row["title"], context=row["type_name"], since=row["created_at"],
+                 href="#intents", ref=leads_model.format_intent_id(row["id"]), priority=row["priority"],
+                 confidence=row["confidence"], expires_at=row["expires_at"])
 
 
 async def _intents(_: Any) -> Read:
     if not await leads_model.intents_enabled():
         return NotRead.OFF
     rows, count = await store.pending_intents(SHOWN)
-    items = [_item(f"intent:{row['id']}", row["title"], context=row["type_name"], since=row["created_at"],
-                   href="#intents", ref=leads_model.format_intent_id(row["id"]), priority=row["priority"],
-                   confidence=row["confidence"], expires_at=row["expires_at"])
-             for row in rows]
-    return items, count
+    return [_intent_item(row) for row in rows], count
+
+
+def _ledger_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _item(f"ledger:{row['id']}", row["title"], since=row["created_at"], ref=db_ledger.format_id(row["id"]),
+                 kind=row["kind"], due_at=row["due_at"], overdue=row["overdue"])
 
 
 async def _ledger(_: Any) -> Read:
     if not await db_ledger.enabled():
         return NotRead.OFF
     rows, count = await store.ledger_waiting(SHOWN)
-    items = [_item(f"ledger:{row['id']}", row["title"], since=row["created_at"], ref=db_ledger.format_id(row["id"]),
-                   kind=row["kind"], due_at=row["due_at"], overdue=row["overdue"])
-             for row in rows]
-    return items, count
+    return [_ledger_item(row) for row in rows], count
 
 
 def _channel_type(channel: str | None) -> str | None:
@@ -188,25 +217,131 @@ def _channel_type(channel: str | None) -> str | None:
 _DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "task_end": "#tasks/{ref}"}
 
 
+def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    title = _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"]
+    if row.get("reason") == "final_notice_retry_exhausted":
+        title += "（最终状态通知重试已耗尽）"
+    return _item(f"delivery:{row['source']}:{row['key']}",
+                 title, since=row["at"],
+                 href=_DELIVERY_HREF[row["source"]].format(ref=row["ref"]),
+                 ref=leads_model.format_intent_id(int(row["ref"])) if row["source"] == "intent" else None,
+                 source=row["source"], channel=_channel_type(row["channel"]),
+                 **({"reason": row["reason"]} if row.get("reason") else {}))
+
+
 async def _deliveries(_: Any) -> Read:
     rows, count = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW, SHOWN)
-    items = [_item(f"delivery:{row['source']}:{row['key']}",
-                   _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"], since=row["at"],
-                   href=_DELIVERY_HREF[row["source"]].format(ref=row["ref"]),
-                   ref=leads_model.format_intent_id(int(row["ref"])) if row["source"] == "intent" else None,
-                   source=row["source"], channel=_channel_type(row["channel"]))
-             for row in rows]
-    return items, count
+    catchup = await _catchup_items()
+    return [*catchup, *(_delivery_item(row) for row in rows)][:SHOWN], count + len(catchup)
+
+
+async def _catchup_items() -> list[dict[str, Any]]:
+    if _catchup_checks is None:
+        return []
+    return [_item(check["id"], str(check["detail"]), context=str(check["label"]), href="#settings/channels",
+                  source="catchup", channel="lark", state="dropped", fix=str(check["fix"]))
+            for check in _catchup_checks()
+            if str(check.get("id", "")).startswith("lark_catchup:") and check.get("status") == "fail"]
+
+
+def _cost_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    label = "任务花费" if row["scope"] == "task" else "全局当天花费"
+    return _item(f"cost:{row['id']}", f"{label}等你决定", context=row["scope_ref"], since=row["created_at"],
+                 href="#settings/cost", ref=f"C-{row['id']}", currency=row["currency"],
+                 limit_usd=row["limit_usd"], spent_usd=row["spent_usd"])
+
+
+async def _cost(_: Any) -> Read:
+    from . import cost_holds as service
+
+    if not service.needs_service():
+        return NotRead.OFF
+    from ..db import cost_holds
+
+    rows = await cost_holds.list_pending()
+    return [_cost_item(row) for row in rows[:SHOWN]], len(rows)
+
+
+async def _earliest_cost(_: Any) -> dict[str, Any] | None:
+    read = await _cost(None)
+    return _oldest(read[0]) if isinstance(read, tuple) else None
+
+
+def _oldest(items: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The earliest item by ``since``; the first when none is dated (logins have no clock)."""
+    dated = [item for item in items if isinstance(item.get("since"), datetime)]
+    if dated:
+        return dict(min(dated, key=lambda item: item["since"]))
+    return dict(items[0]) if items else None
+
+
+async def _earliest_gates(_: Any) -> dict[str, Any] | None:
+    from ..db import user_gates as db_user_gates
+
+    # The list page is newest-opened first and capped. The card's earliest is the oldest user-waiting gate.
+    rows = await db_user_gates.list_gates(state="open")
+    waiting = [gate_service._listed_view(row) for row in rows]
+    waiting = [row for row in waiting if row["gate"]["waiting_on"] == "user"]
+    return _oldest([_gate_item(row) for row in waiting])
+
+
+async def _earliest_confirmations(managers: Any) -> dict[str, Any] | None:
+    items = await _confirmation_items(managers)
+    return _oldest(items) if items is not None else None
+
+
+async def _earliest_schedules(_: Any) -> dict[str, Any] | None:
+    return _oldest(_schedule_items(await db_schedules.failing()))
+
+
+async def _earliest_logins(_: Any) -> dict[str, Any] | None:
+    if _status_checks is None:
+        return None
+    return _oldest(_login_items(await _status_checks()))
+
+
+async def _earliest_intents(_: Any) -> dict[str, Any] | None:
+    if not await leads_model.intents_enabled():
+        return None
+    row = await store.earliest_pending_intent()
+    return None if row is None else _intent_item(row)
+
+
+async def _earliest_ledger(_: Any) -> dict[str, Any] | None:
+    if not await db_ledger.enabled():
+        return None
+    row = await store.earliest_ledger_item()
+    return None if row is None else _ledger_item(row)
+
+
+async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
+    row = await store.earliest_uncertain_delivery(datetime.now(timezone.utc) - DELIVERY_WINDOW)
+    return _oldest([*([] if row is None else [_delivery_item(row)]), *await _catchup_items()])
 
 
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
-            "intents": _intents, "ledger": _ledger, "deliveries": _deliveries}
+            "intents": _intents, "ledger": _ledger, "deliveries": _deliveries, "cost": _cost}
+_EARLIEST = {"gates": _earliest_gates, "confirmations": _earliest_confirmations, "schedules": _earliest_schedules,
+             "logins": _earliest_logins, "intents": _earliest_intents, "ledger": _earliest_ledger,
+             "deliveries": _earliest_deliveries, "cost": _earliest_cost}
+
+
+async def earliest(kind: str, *, managers: Any = None) -> dict[str, Any] | None:
+    """The oldest item of one kind, from its own read.
+
+    ``collect`` keeps at most ``SHOWN`` items and several kinds are ordered by urgency, so the oldest can be
+    missing from that list. This does not change the list ``/todo`` shows.
+    """
+    reader = _EARLIEST.get(kind)
+    if reader is None:
+        return None
+    return await reader(managers)
 
 
 async def collect(*, managers: Any = None) -> dict[str, Any]:
     """The summary now: every section in ``KINDS`` order (a feature that is off leaves its own out) and ``total``,
-    the count of what the readable sections hold. ``managers`` is the Manager fleet, whose confirmations wait in
-    memory; without it ``confirmations`` is ``unknown``."""
+    the count of what the readable sections hold. Confirmations use durable cards when enabled, supplemented
+    by the Manager fleet's memory; without either source the section is ``unknown``."""
     sections = []
     for kind in KINDS:
         try:
@@ -235,13 +370,14 @@ FORBIDDEN = "「需要你处理」只给你本人看：在你和机器人的私�
 NOTHING = "现在没有需要你处理的事。"
 _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的操作", "schedules": "失败的定时任务",
            "logins": "登录失效", "intents": "待处理的意图", "ledger": "账本里等你的事",
-           "deliveries": "可能没送到的消息"}
+           "deliveries": "可能没送到的消息", "cost": "花费等你决定"}
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠"}
 _LEDGER_KINDS = {"pending": "待办", "decision": "待确认的决定", "work_item": "在做的事"}
-_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知"}
+_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知", "catchup": "飞书消息补收失败"}
 _HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
           "confirmations": "在提问的那个聊天里回复「确认」，或回复别的放弃。",
+          "cost": "回复「继续 {ref} <新上限美元>」提高上限并继续，或「停 {ref}」。",
           "intents": "回复「建 {ref}」建任务，「驳回 {ref}」驳回。"}
 
 
@@ -287,9 +423,14 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
         return f"- {title}：{facts['detail']}" + (f"。修复：{facts['fix']}" if facts["fix"] else "")
     if kind == "intents":
         return f"- {item['ref']} {title}（{context}" + ("，紧急" if facts["priority"] == "urgent" else "") + "）"
+    if kind == "cost":
+        money = "等价花费" if facts["currency"] == "equivalent_usd" else "真钱"
+        return f"- {item['ref']} {title}（{context}；{money} ${facts['spent_usd']:.2f} / 上限 ${facts['limit_usd']:.2f}）"
     if kind == "ledger":
         label = "已过期" if facts["overdue"] else _LEDGER_KINDS[facts["kind"]]
         return f"- {item['ref']} {title}（{label}）"
+    if kind == "deliveries" and facts["source"] == "catchup":
+        return f"- {_DELIVERY_SOURCES['catchup']}：{title}。{_plain(facts['fix'])}"
     where = _CHANNELS.get(facts["channel"] or "", facts["channel"] or "")
     return (f"- {_DELIVERY_SOURCES[facts['source']]}：{title}" + (f"（{item['ref']}）" if item["ref"] else "")
             + (f"，{where}" if where else "") + (f"，{waited}前" if waited else ""))

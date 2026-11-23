@@ -7,12 +7,13 @@ to bridge between channel-native events and the internal MessageEnvelope format.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from ..bus import MessageBus
-from ..message import MessageEnvelope
+from ..message import MessageEnvelope, MessageType
 from ..task_notice import NotifyTarget
 
 
@@ -75,6 +76,25 @@ class ChannelAdapter(ABC):
     logic — only protocol translation.
     """
 
+    delivery_observer: Callable[[bool], None] | None = None
+
+    def record_delivery(self, success: bool) -> None:
+        if self.delivery_observer is not None:
+            self.delivery_observer(success)
+
+    def record_envelope_delivery(self, envelope: MessageEnvelope, receipt: DeliveryReceipt) -> None:
+        from .status_line import StatusKind, status_kind
+
+        # Phase updates and empty replies can succeed without sending anything. They cannot prove recovery.
+        if receipt.failure is DeliveryFailure.NO_CHAT:
+            return
+        if envelope.message_type is MessageType.STATUS_UPDATE:
+            if status_kind(envelope.payload) is not StatusKind.PROGRESS:
+                return
+        elif envelope.message_type is not MessageType.CHAT_NOTICE and not envelope.payload.get('text'):
+            return
+        self.record_delivery(receipt.success)
+
     @property
     @abstractmethod
     def channel_type(self) -> str:
@@ -105,8 +125,8 @@ class ChannelAdapter(ABC):
         """Send a message from the system to the user through this channel."""
         ...
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
-        """Send ``text``, unprompted, to ``chat``: a schedule's message, or a task's end (``task_notice``)."""
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
+        """Send ``text`` unprompted. A capable channel deduplicates caller retries by ``idempotency_key``."""
         return DeliveryReceipt(channel=self.channel_type, success=False,
                                error=f"the {self.channel_type} channel cannot send notifications")
 
@@ -124,6 +144,10 @@ class ChannelAdapter(ABC):
         """Post ``card`` (``card_actions.Card``) like ``post``, with its buttons where this channel has them; a
         channel without buttons posts its text."""
         return await self.post(target, card.text, reply_to=reply_to, idempotency_key=idempotency_key)
+
+    async def edit_card(self, target: NotifyTarget, external_id: str, card: Any) -> PostReceipt:
+        """Update an existing card, removing its buttons when settled; text-only channels edit its text."""
+        return await self.edit(target, external_id, card.text)
 
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         """Edit a bot's own message when this channel supports it."""

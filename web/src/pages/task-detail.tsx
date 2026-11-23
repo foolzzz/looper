@@ -13,6 +13,7 @@ import {
   Bot,
   User,
   GitBranch,
+  Network,
   Play,
   Pause,
   Settings2,
@@ -35,6 +36,7 @@ import { ClampedText } from "@/components/clamped-text";
 import { Markdown } from "@/components/markdown";
 import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref, runRoleLabel } from "@/pages/agent-history";
+import { RunTree } from "@/components/run-tree";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { CheckpointUnfinished, StepConsults } from "@/components/task-advice";
 import { CHECKPOINT_UNFINISHED, type ConsultTone, consultCard, consultLabel, consultPlaces, consultResult, consultTone,
@@ -44,12 +46,14 @@ import { TaskRoleEditor } from "@/components/role-editor";
 import { RoleStatsLine } from "@/components/role-stats";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
 import { NodeCards } from "@/components/pipeline-node-card";
+import { stepsNeedEvidence, useStepEvidence } from "@/lib/evidence";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
 import { TaskWaits, WaitBadge } from "@/components/task-waits";
 import { WAIT_STATES, waitAnchor } from "@/lib/waits";
 import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { TaskRoomTab } from "@/components/task-room";
+import { TaskMetricsCard } from "@/components/task-metrics-card";
 import { TabStrip } from "@/components/tab-strip";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
 import { useEventWindow } from "@/lib/use-event-window";
@@ -111,8 +115,8 @@ import {
   type AdvisorConsult,
 } from "@/lib/api";
 
-export type Tab = "overview" | "pipeline" | "room" | "agents" | "sessions" | "conversation";
-export const TASK_TABS: readonly Tab[] = ["overview", "pipeline", "room", "agents", "sessions", "conversation"];
+export type Tab = "overview" | "pipeline" | "room" | "agents" | "run-tree" | "sessions" | "conversation";
+export const TASK_TABS: readonly Tab[] = ["overview", "pipeline", "room", "agents", "run-tree", "sessions", "conversation"];
 
 /** The tab an address names; an unknown or missing one is the Overview. */
 export function parseTab(value: string | null | undefined): Tab {
@@ -182,6 +186,8 @@ function taskStatusBadge(status: string) {
       return <Badge variant="outline" className="text-sm">Cancelled</Badge>;
     case "pending":
       return <Badge variant="warning" className="text-sm">Pending</Badge>;
+    case "awaiting_budget":
+      return <Badge variant="warning" className="text-sm">等你决定花费</Badge>;
     case "waiting_user":
       return <Badge variant="warning" className="text-sm">Waiting for you</Badge>;
     case READY_STATUS:
@@ -914,6 +920,13 @@ function OverviewTab({
       <TaskProgress task={task} />
 
       <TaskProcessRecord task={task} />
+
+      <TaskMetricsCard
+        taskId={task.task_id}
+        status={task.status}
+        active={isActive}
+        revision={`${task.status}|${task.cost?.runs ?? 0}|${steps.map((s) => `${s.status}${s.retries}`).join(",")}`}
+      />
 
       {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
 
@@ -1928,7 +1941,10 @@ function PipelineMeasurements({ nodes }: { nodes: Node[] }) {
  * it on the Overview tab (`onOpenGate`). Done steps keep their place and edges when the plan changes; dropped ones
  * stay, dashed and muted, as history. Each node has a card of its details (`NodeCards`); the dropped steps are
  * hidden unless the viewer shows them, and the graph can go full screen (`PipelineToolbar`). */
-function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskRuns | null; onOpenGate: (step: TaskStep) => void }) {
+function PipelineTab({ task, runs, onOpenGate, pinned }: {
+  task: TaskDetail; runs: TaskRuns | null; onOpenGate: (step: TaskStep) => void; pinned?: string | null;
+}) {
+  const evidence = useStepEvidence(task.task_id, stepsNeedEvidence(task.steps || []), task.status, task.steps || []);
   const [hideSkipped, setHideSkipped] = useState(storedHideSkipped);
   const container = useRef<HTMLDivElement>(null);
   const [full, toggleFull] = useFullScreen(container);
@@ -2069,7 +2085,9 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
       // Its seats' messages in the task's room (keyed as the room keys its seats).
       const room = task.room?.by_step[step.step_key || step.id];
       const note = [unfinished.has(step.id) ? CHECKPOINT_UNFINISHED : "", advisory ? "建议" : "",
-                    step.retries ? `retry ${step.retries}` : "", roomNote(room)].filter(Boolean).join(" · ");
+                    step.retries ? `retry ${step.retries}` : "", roomNote(room),
+                    runs?.explorers?.filter((run) => run.record.metadata?.step_id === step.id).length
+                      ? `${runs.explorers.filter((run) => run.record.metadata?.step_id === step.id).length} explorers` : ""].filter(Boolean).join(" · ");
       ns.push({
         id: step.id,
         position,
@@ -2079,7 +2097,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
       });
       const card = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
                                     skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id), room,
-                                    runs: runs ?? undefined });
+                                    runs: runs ?? undefined, evidence });
       cards[step.id] = unfinished.has(step.id) ? { ...card, sections: [{ kind: "text", title: CHECKPOINT_UNFINISHED,
         tone: "destructive", text: "Its checkpoint consult of the advisor ended without an answer; the step went on without it." },
         ...card.sections] } : card;
@@ -2098,7 +2116,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
       es.push({ id: `end:${step.id}`, source: step.accept_when ? `${step.id}:a0` : step.id, target: "result", style: edgeStyle(true) });
     }
     return { nodes: described(ns), edges: es, rows: depth + 3, cards, skipped };
-  }, [task, runs, hideSkipped, onOpenGate]);
+  }, [task, runs, hideSkipped, onOpenGate, evidence]);
   const changeHideSkipped = (hide: boolean) => {
     setHideSkipped(hide);
     storeHideSkipped(hide);
@@ -2135,7 +2153,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
         <Background color="var(--color-border)" gap={20} />
         <Controls showInteractive={false} fitViewOptions={{ minZoom }} />
         <PipelineMeasurements nodes={nodes} />
-        <NodeCards cards={cards} />
+        <NodeCards cards={cards} pinned={pinned} />
         <PipelineToolbar skipped={skipped} hideSkipped={hideSkipped} onHideSkipped={changeHideSkipped}
                          full={full !== "off"} onToggleFull={toggleFull} />
       </ReactFlow>
@@ -2244,6 +2262,8 @@ interface TaskDetailPageProps {
   gateStep?: string | null;
   /** The tab the address names; with `onTab`, the page shows it and changes it through the address. */
   tab?: string | null;
+  /** A step database id: the Pipeline opens that step's card. */
+  focusStep?: string | null;
   onTab?: (tab: Tab) => void;
   /** The Room tab's filters the address names, and how it changes them (with `onTab`). */
   roomFilter?: string | null;
@@ -2261,7 +2281,7 @@ export function TaskDetailRoute(props: TaskDetailPageProps) {
   return <TaskDetailPage key={props.taskId} {...props} />;
 }
 
-function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, roomRole, onRoomFilter, onBack }: TaskDetailPageProps) {
+function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roomFilter, roomRole, onRoomFilter, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const taskRuns = useTaskRuns(task);
   const [error, setError] = useState("");
@@ -2365,6 +2385,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
     { id: "pipeline", label: "Pipeline", icon: GitBranch },
     { id: "room", label: "Room", icon: MessagesSquare },
     { id: "agents", label: "Agents", icon: Bot },
+    { id: "run-tree", label: "Run tree", icon: Network },
     { id: "sessions", label: "Sessions", icon: Terminal },
     { id: "conversation", label: "Conversation", icon: MessageSquare },
   ];
@@ -2498,6 +2519,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
               onClick={() => setTab(id)}
               className={cn(
                 "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors pointer-coarse:min-h-11",
+                id === "run-tree" && "shrink-0 whitespace-nowrap",
                 tab === id
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -2539,7 +2561,10 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
             onGateShown={gateShown}
           />
         )}
-        {task && tab === "pipeline" && <PipelineTab task={task} runs={taskRuns.runs} onOpenGate={openGate} />}
+        {task && tab === "run-tree" && <RunTree taskId={taskId} refreshKey={`${task.status}:${task.cost?.runs}:${task.cost?.running}`} />}
+        {task && tab === "pipeline" && (
+          <PipelineTab task={task} runs={taskRuns.runs} onOpenGate={openGate} pinned={focusStep} />
+        )}
         {task && tab === "room" && <TaskRoomTab key={`${task.task_id}:${runs}`} task={task} filter={roomFilter} role={roomRole} onFilter={onRoomFilter} />}
         {task && tab === "agents" && (
           <TaskAgentsTab task={task} runs={taskRuns.runs} runsError={taskRuns.error} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />

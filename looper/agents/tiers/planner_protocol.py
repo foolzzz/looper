@@ -44,8 +44,15 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
+from ..acceptance_checks import Check, PROTOCOL_SECTION, parse_checks
+from ..acceptance_gate import Gate
+from ..project_execution import AcceptanceChecksMode
 from ..project_execution import DEFAULT_STEP_RETRIES
 from ..task_roles import RoleKind
+from ..project_skills import CONTENT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS
+from ..skill_proposals import (
+    Action as SkillProposalAction, EVIDENCE_ID_MAX_CHARS, EVIDENCE_MAX, ProposalResult, Refusal, WHY_MAX_CHARS,
+)
 from ..user_gates import (
     ANSWER_MAX_CHARS,
     FINDINGS_MAX_CHARS,
@@ -143,6 +150,7 @@ class Decision(str, Enum):
     ACCEPT = "accept"
     REVIEW = "review"
     RETRY = "retry"
+    RECHECK = "recheck"
     REPLAN = "replan"
     FAIL = "fail"
     # With the advisor on (the advisor RFC, section 11): ask it, and, after a checkpoint's answer, start the step.
@@ -201,6 +209,7 @@ class StepSpec:
     wait: WaitSpec | None = None
     ready_when: Condition | None = None
     difficulty: str | None = None  # a work step's, with the advisor on: routine, hard or critical
+    checks: tuple[Check, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -286,6 +295,35 @@ class FinalSummary:
 
 
 @dataclass(frozen=True)
+class SkillEvidence:
+    """A proposal's task and optional step; ownership is checked by ``propose``."""
+
+    task: str
+    step: str | None = None
+
+
+@dataclass(frozen=True)
+class SkillProposal:
+    """A closing turn's draft, with structural checks only."""
+
+    action: SkillProposalAction
+    name: str
+    description: str
+    content: str
+    why: str
+    skill: str | None = None
+    evidence: tuple[SkillEvidence, ...] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        value = {key: val for key, val in asdict(self).items() if val is not None}
+        value["action"] = self.action.value
+        if self.evidence is not None:
+            value["evidence"] = [{key: val for key, val in asdict(entry).items() if val is not None}
+                                 for entry in self.evidence]
+        return value
+
+
+@dataclass(frozen=True)
 class DecisionReply:
     decision: Decision
     reason: str
@@ -300,6 +338,7 @@ class DecisionReply:
     advice_request: Mapping[str, Any] | None = None  # advise only: the request, checked when it is sent
     advice_bindings: Any = None  # advise only: what the request's aliases stand for, kept local
     adoption: Mapping[str, Any] | None = None  # the decision after the advisor's answer: what it takes of it
+    skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -313,6 +352,7 @@ class ChatReply:
     gates: tuple[GateChange, ...] = ()  # applied before the action
     final: FinalSummary | None = None  # only when its cancels leave no step open and it adds none
     waits: tuple[WaitChange, ...] = ()
+    skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -334,6 +374,7 @@ class GateReply:
     chat: ChatReply
     summary: GateSummary | None = None  # close only
     final: FinalSummary | None = None  # only when closing the gate completes the task
+    skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -355,6 +396,7 @@ class WaitReply:
     resolution: str = ""
     reason: str = ""
     final: FinalSummary | None = None
+    skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -403,6 +445,8 @@ class PlanView:
     verification_exhausted: bool = False
     verification_repair_required: bool = False
     advisor: bool = False  # the project consults the advisor: steps may say their difficulty, decisions advise
+    acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF
+    skill_proposals: bool = False  # only the completing reply may carry drafts
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
@@ -434,14 +478,23 @@ class DecisionContext:
     advise: bool = False
     checkpoint: bool = False
     answered: bool = False
+    evidence: Gate | None = None
 
     @property
     def acceptable(self) -> bool:
+        if self.evidence is not None and not self.evidence.passed:
+            return False
         if self.result is ResultKind.REVIEW:
             return self.succeeded
         return self.succeeded and not self.review_required
 
     def allowed(self) -> tuple[Decision, ...]:
+        if self.evidence is not None and not self.evidence.passed:
+            allowed = [Decision.RETRY] if self.retries < self.max_retries else []
+            # A budget error means the step's whole checking budget is spent: another run would only repeat it.
+            if self.evidence.errored and self.evidence.rechecks_used < 2 and not self.evidence.budget_spent:
+                allowed.append(Decision.RECHECK)
+            return (*allowed, Decision.REPLAN, Decision.FAIL)
         if self.checkpoint:
             return (Decision.PROCEED, Decision.REPLAN, Decision.FAIL) if self.answered else (Decision.ADVISE,)
         if self.escalate or self.verification_repair_required:
@@ -496,7 +549,8 @@ def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy(),
                conditions: bool = False, isolate_steps: bool = False, review_panel: bool = False,
                verification_role: str | None = None, work_role: str | None = None, advisor: bool = False,
-               advise: bool = False, answered: bool = False) -> PlanReply:
+               advise: bool = False, answered: bool = False,
+               acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF) -> PlanReply:
     """A PLAN reply. With the advisor on, ``advise`` lets it ask the advisor instead
     (``{"advise": {"advice_request": ..., "advice_bindings": ...}}``), and after its answer (``answered``) the plan
     must carry ``advice_adoption``."""
@@ -516,28 +570,32 @@ def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
             raise ProtocolError('this plan follows the advisor\'s answer, so it must carry "advice_adoption": which '
                                 "points you take, how far, for which steps and why")
         adoption = parse_adoption(data["advice_adoption"])
-    steps = _step_list(data.get("steps"), "steps", conditions=conditions, review_panel=review_panel, advisor=advisor)
+    steps = _step_list(data.get("steps"), "steps", conditions=conditions, review_panel=review_panel, advisor=advisor,
+                       acceptance_checks=acceptance_checks)
     if not steps:
         raise ProtocolError("steps must list at least one step")
     steps = _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
                                                wait_policy=wait_policy, conditions=conditions,
                                                isolate_steps=isolate_steps, review_panel=review_panel,
                                                verification_role=verification_role,
-                                               work_role=work_role, advisor=advisor), replace_pending=True)
+                                               work_role=work_role, advisor=advisor,
+                                               acceptance_checks=acceptance_checks), replace_pending=True)
     return PlanReply(steps, adoption=adoption)
 
 
-def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjudications: bool = False) -> DecisionReply:
+def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjudications: bool = False,
+                   skill_proposals: bool = False) -> DecisionReply:
     data = extract_reply(text)
+    proposal_keys = {"skill_proposals"} if skill_proposals or plan.skill_proposals else set()
     judgments = data.pop("adjudications", ()) if adjudications else ()
     advisor_keys = {"advice_request", "advice_bindings", "advice_adoption"} if plan.advisor else set()
-    _only_keys(data, {"decision", "reason", "feedback", "steps", "summary", "progress", "final", "gates", "waits",
+    _only_keys(data, {"decision", "reason", "feedback", "steps", "summary", "progress", "final", "gates", "waits", *proposal_keys,
                       *advisor_keys}, "the DECISION reply")
     raw = data.get("decision")
     known = [d for d in Decision if plan.advisor or d not in ADVISOR_DECISIONS]
     decision = next((d for d in known if d.value == raw), None)
     if decision is None:
-        choices = ", ".join(d.value for d in known)
+        choices = ", ".join(d.value for d in known if d is not Decision.RECHECK or d in context.allowed())
         raise ProtocolError(f"decision must be one of {choices}; got {raw!r}")
     reason = _optional_text(data, "reason")
     summary = _optional_text(data, "summary")
@@ -559,6 +617,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjud
     elif "advice_adoption" in data:
         raise ProtocolError("advice_adoption only follows the advisor's answer")
     if decision is Decision.ADVISE:
+        _skill_proposals(data, False)
         if not isinstance(data.get("advice_request"), dict):
             raise ProtocolError('advise needs "advice_request": the request, an object in the AdviceRequest v1 shape')
         progress = _progress(data)
@@ -577,7 +636,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjud
         reason = _required_text(data, "reason")
     elif decision is Decision.REPLAN:
         steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions, review_panel=plan.review_panel,
-                           advisor=plan.advisor)
+                           advisor=plan.advisor, acceptance_checks=plan.acceptance_checks)
         if not steps and not context.acceptable:
             raise ProtocolError(
                 f"step {context.step} cannot be accepted, so a replan must list the steps that replace it"
@@ -600,7 +659,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjud
                             + ", ".join(FINAL_FIELDS))
     # Only the decision that completes the task keeps a final summary.
     return DecisionReply(decision, reason, feedback, steps, summary, progress, final if completes else None, gates, waits,
-                         tuple(judgments), adoption=adoption)
+                         tuple(judgments), adoption=adoption, skill_proposals=_skill_proposals(data, completes))
 
 
 def parse_adoption(raw: Any) -> dict[str, Any]:
@@ -705,11 +764,12 @@ def parse_handoff(text: str) -> str:
     return kept_text(_required_text(data, "handoff"), HANDOFF_MAX_CHARS)
 
 
-def parse_chat(text: str, plan: PlanView) -> ChatReply:
+def parse_chat(text: str, plan: PlanView, *, skill_proposals: bool = False) -> ChatReply:
     """A CHAT (or RESTART) reply: its gate and wait changes, then its action on the plan they leave. One whose cancels leave
     no step open and that adds none completes the task, so it must carry ``final``."""
     data = extract_reply(text)
-    _only_keys(data, {"reply", "action", "step", "text", "steps", "stop", "gates", "waits", "final"}, "the CHAT reply")
+    proposal_keys = {"skill_proposals"} if skill_proposals or plan.skill_proposals else set()
+    _only_keys(data, {"reply", "action", "step", "text", "steps", "stop", "gates", "waits", "final", *proposal_keys}, "the CHAT reply")
     gates = _gate_changes(data, plan)
     waits = _wait_changes(data, plan)
     after = _after_waits(_after_gates(plan, gates), waits)
@@ -723,13 +783,15 @@ def parse_chat(text: str, plan: PlanView) -> ChatReply:
         raise ProtocolError("these cancels leave no step open, so the reply completes the task: add the steps the "
                             'answer decides, or carry "final": ' + ", ".join(FINAL_FIELDS))
     # Only the reply that completes the task keeps a final summary.
-    return replace(chat, gates=gates, waits=waits, final=final if completes else None)
+    return replace(chat, gates=gates, waits=waits, final=final if completes else None,
+                   skill_proposals=_skill_proposals(data, completes))
 
 
-def parse_gate(text: str, context: GateContext, plan: PlanView) -> GateReply:
+def parse_gate(text: str, context: GateContext, plan: PlanView, *, skill_proposals: bool = False) -> GateReply:
     """A [GATE] reply about ``context``'s gate: its whole agenda, whether it closes, and a CHAT action."""
     data = extract_reply(text)
-    _only_keys(data, {"reply", "gate", "agenda", "summary", "action", "step", "text", "steps", "stop", "final"},
+    proposal_keys = {"skill_proposals"} if skill_proposals or plan.skill_proposals else set()
+    _only_keys(data, {"reply", "gate", "agenda", "summary", "action", "step", "text", "steps", "stop", "final", *proposal_keys},
                "the GATE reply")
     raw = data.get("gate")
     try:
@@ -765,13 +827,14 @@ def parse_gate(text: str, context: GateContext, plan: PlanView) -> GateReply:
     if completes and final is None:
         raise ProtocolError('closing this gate without adding steps completes the task, so the reply must carry '
                             '"final": ' + ", ".join(FINAL_FIELDS))
-    return GateReply(verdict, agenda, chat, summary, final if completes else None)
+    return GateReply(verdict, agenda, chat, summary, final if completes else None, _skill_proposals(data, completes))
 
 
-def parse_wait(text: str, context: WaitContext, plan: PlanView) -> WaitReply:
+def parse_wait(text: str, context: WaitContext, plan: PlanView, *, skill_proposals: bool = False) -> WaitReply:
     """A [WAIT] reply about ``context``'s wait: extend, proceed or fail, and a CHAT action."""
     data = extract_reply(text)
-    _only_keys(data, {"reply", "wait", "action", "step", "text", "steps", "stop", "final"}, "the WAIT reply")
+    proposal_keys = {"skill_proposals"} if skill_proposals or plan.skill_proposals else set()
+    _only_keys(data, {"reply", "wait", "action", "step", "text", "steps", "stop", "final", *proposal_keys}, "the WAIT reply")
     raw = data.get("wait")
     if not isinstance(raw, dict):
         raise ProtocolError("wait must be an object")
@@ -807,7 +870,7 @@ def parse_wait(text: str, context: WaitContext, plan: PlanView) -> WaitReply:
                             '"final": ' + ", ".join(FINAL_FIELDS))
     if final is not None and not completes:
         raise ProtocolError('final is only for proceeding when this wait is the last open step and no steps are added')
-    return WaitReply(action, chat, seconds, resolution, reason, final)
+    return WaitReply(action, chat, seconds, resolution, reason, final, _skill_proposals(data, completes))
 
 
 def _wait_completes(plan: PlanView, context: WaitContext, action: WaitAction, chat: ChatReply) -> bool:
@@ -862,13 +925,13 @@ def _chat_action(data: Mapping[str, Any], plan: PlanView) -> ChatReply:
         text_out = _required_text(data, "text")
     elif action is ChatAction.ADD_STEPS:
         steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions, review_panel=plan.review_panel,
-                           advisor=plan.advisor)
+                           advisor=plan.advisor, acceptance_checks=plan.acceptance_checks)
         if not steps:
             raise ProtocolError("add_steps must list at least one step")
         steps = _check_new_steps(steps, plan, replace_pending=False)
     elif action is ChatAction.REPLAN:
         steps = _step_list(data.get("steps", []), "steps", conditions=plan.conditions, review_panel=plan.review_panel,
-                           advisor=plan.advisor)
+                           advisor=plan.advisor, acceptance_checks=plan.acceptance_checks)
         stop = _stop_list(data.get("stop", []), plan)
         after = plan
         for label in stop:
@@ -962,7 +1025,11 @@ def _refusal(decision: Decision, context: DecisionContext) -> str:
     allowed = ", ".join(d.value for d in context.allowed())
     if context.adjudication_findings:
         allowed = "; ".join([ADJUDICATED_ACCEPT, *(d.value for d in context.allowed())])
-    if context.verification_repair_required:
+    if context.evidence is not None and not context.evidence.passed:
+        why = "required acceptance evidence has not passed on the current version"
+    elif decision is Decision.RECHECK:
+        why = "recheck needs a required check error and fewer than two rechecks"
+    elif context.verification_repair_required:
         why = "verification_changed_code requires a replan with a reviewed non-verification repair"
     elif context.checkpoint:
         why = (f"step {context.step} has the advisor's review of its plan: proceed, replan or fail" if context.answered
@@ -1163,22 +1230,32 @@ def _find_cycle(graph: Mapping[str, Iterable[str]]) -> list[str] | None:
 
 
 def _step_list(value: Any, field: str, *, conditions: bool = False, review_panel: bool = False,
-               advisor: bool = False) -> tuple[StepSpec, ...]:
+               advisor: bool = False, acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF) -> tuple[StepSpec, ...]:
     if not isinstance(value, list):
         raise ProtocolError(f"{field} must be a list of steps")
     if review_panel and any(isinstance(item, dict) and "review_roles" in item for item in value):
         raise ProtocolError("the workflow fixes the review panel")
-    return tuple(_step(item, i, conditions=conditions, advisor=advisor) for i, item in enumerate(value))
+    return tuple(_step(item, i, conditions=conditions, advisor=advisor, acceptance_checks=acceptance_checks)
+                 for i, item in enumerate(value))
 
 
-def _step(value: Any, index: int, *, conditions: bool = False, advisor: bool = False) -> StepSpec:
+def _step(value: Any, index: int, *, conditions: bool = False, advisor: bool = False,
+          acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF) -> StepSpec:
     where = f"steps[{index}]"
     if not isinstance(value, dict):
         raise ProtocolError(f"{where} must be an object")
+    if "checks" in value:
+        if acceptance_checks is AcceptanceChecksMode.OFF:
+            raise ProtocolError(f"{where}.checks: acceptance_checks is off; enable it in the project's "
+                                "Settings → Execution, or omit checks")
+        if value.get("kind", WORK_KIND) != WORK_KIND:
+            raise ProtocolError(f"{where}.checks is only allowed on work steps")
     if "ready_when" in value and not conditions:
         raise ProtocolError(f"{where}.ready_when: dependency_conditions is off for this project; "
                             "omit ready_when or enable dependency conditions")
     optional = {"ready_when"} if conditions else set()
+    if acceptance_checks is not AcceptanceChecksMode.OFF:
+        optional.add("checks")
     kind = value.get("kind", WORK_KIND)
     if kind == GATE_KIND:
         return _gate_step(value, where, optional)
@@ -1217,10 +1294,14 @@ def _step(value: Any, index: int, *, conditions: bool = False, advisor: bool = F
     role = value.get("role")
     if role is not None and (not isinstance(role, str) or not role):
         raise ProtocolError(f"{where}.role must be a role's id")
+    try:
+        checks = parse_checks(value["checks"], len(criteria), acceptance_checks) if "checks" in value else ()
+    except ValueError as exc:
+        raise ProtocolError(f"{where}.{exc}") from None
     return StepSpec(step_id, instruction.strip(), tuple(c.strip() for c in criteria), tuple(depends_on), review,
                     role=role, ready_when=ready_when,
                     review_roles=_review_roles(value.get("review_roles"), f"{where}.review_roles"),
-                    difficulty=difficulty)
+                    difficulty=difficulty, checks=checks)
 
 
 def _ready_when(value: Mapping[str, Any], depends_on: list[str], where: str) -> Condition | None:
@@ -1569,6 +1650,59 @@ def _after_gates(plan: PlanView, changes: tuple[GateChange, ...]) -> PlanView:
     gates = {label: replace(gate, state=GateState.CANCELLED) if label in cancelled else gate
              for label, gate in plan.gates.items()}
     return replace(plan, started=started, pending=pending, done=plan.done | cancelled, gates=gates)
+
+
+def _skill_proposals(data: Mapping[str, Any], completes: bool) -> tuple[SkillProposal | ProposalResult, ...]:
+    if "skill_proposals" not in data:
+        return ()
+    if not completes:
+        raise ProtocolError("skill_proposals is only for a reply that completes the task")
+    try:
+        return _checked_skill_proposals(data["skill_proposals"])
+    except ProtocolError:
+        # Draft shape errors must not discard an otherwise valid final summary or quote model input.
+        return (ProposalResult(None, Refusal.SHAPE, Refusal.SHAPE.explanation),)
+
+
+def _checked_skill_proposals(raw: Any) -> tuple[SkillProposal, ...]:
+    if not isinstance(raw, list) or len(raw) > 2:
+        raise ProtocolError("skill_proposals must be a list of at most 2 proposals")
+    proposals = []
+    for index, item in enumerate(raw):
+        where = f"skill_proposals[{index}]"
+        if not isinstance(item, dict):
+            raise ProtocolError(f"{where} must be an object")
+        _only_keys(item, {"action", "name", "description", "content", "why", "skill", "evidence"}, where)
+        try:
+            action = SkillProposalAction(item.get("action"))
+        except (ValueError, TypeError):
+            raise ProtocolError(f"{where}.action must be create or update") from None
+        values = {key: _limited_text(item, key, limit, where, required=True) for key, limit in (
+            ("name", NAME_MAX_CHARS), ("description", DESCRIPTION_MAX_CHARS), ("why", WHY_MAX_CHARS))}
+        content = _required_text(item, "content")
+        if len(content.encode("utf-8")) > CONTENT_MAX_BYTES:
+            raise ProtocolError(f"{where}.content has at most {CONTENT_MAX_BYTES} bytes")
+        skill = None
+        if action is SkillProposalAction.UPDATE:
+            skill = _limited_text(item, "skill", NAME_MAX_CHARS, where, required=True)
+        elif "skill" in item:
+            raise ProtocolError(f"{where}.skill is only for an update")
+        evidence = None
+        if "evidence" in item:
+            entries = item["evidence"]
+            if not isinstance(entries, list) or not 1 <= len(entries) <= EVIDENCE_MAX:
+                raise ProtocolError(f"{where}.evidence must be a list of 1 to {EVIDENCE_MAX} entries")
+            evidence_items = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ProtocolError(f"{where}.evidence entries must be objects")
+                _only_keys(entry, {"task", "step"}, f"{where}.evidence")
+                task = _limited_text(entry, "task", EVIDENCE_ID_MAX_CHARS, where, required=True)
+                step = _limited_text(entry, "step", EVIDENCE_ID_MAX_CHARS, where, required=True) if "step" in entry else None
+                evidence_items.append(SkillEvidence(task, step))
+            evidence = tuple(evidence_items)
+        proposals.append(SkillProposal(action, content=content, skill=skill, evidence=evidence, **values))
+    return tuple(proposals)
 
 
 def _only_keys(data: Mapping[str, Any], allowed: Iterable[str], where: str) -> None:
@@ -1930,7 +2064,8 @@ ADJUDICATION_RULES = (
 def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False,
                    room: bool = False, wait_commands: bool = False, wait_limits: WaitLimits = WaitLimits(),
                    conditions: bool = False, workflow_roles: bool = False, review_panel: bool = False, adjudication: bool = False,
-                   advisor: bool = False) -> str:
+                   advisor: bool = False, acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF,
+                   skill_proposals: bool = False) -> str:
     """The reply contract for a project whose steps may be retried ``max_retries`` times; with ``roles``, whose
     Planners may define the roles their steps run as; with ``gates``, for a task that may open user gates or has
     one that is not closed; with ``room``, whose agents share a room. Waits use ``wait_limits``;
@@ -1961,6 +2096,21 @@ def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = Fal
         contract = contract.replace('"reason" is optional for the other decisions.\n',
                                     _ADVISOR_DECISIONS + '"reason" is optional for the other decisions.\n', 1)
         contract += "\n" + _ADVISOR_SECTION
+    if acceptance_checks is not AcceptanceChecksMode.OFF:
+        contract += PROTOCOL_SECTION
+    if skill_proposals:
+        proposal_rules = """A reply that completes the task (the one carrying final) may also carry skill_proposals: a list
+of at most 2 objects per task {"action": "create" or "update", "name": "slug", "description": "...",
+"content": "full SKILL.md body without frontmatter", "why": "...", "evidence": [{"task": "t-...", "step": "s2"}]}.
+An update also names the existing skill in "skill". Name/skill: at most 64 characters; description: 1024;
+content: 65536 UTF-8 bytes; why: 500 characters. Evidence, if supplied, has 1 to 5 entries naming tasks
+and optional steps (identifiers at most 64 characters) that exist in this project; otherwise the current
+task's steps provide the evidence.
+Propose only when a procedure was used or rediscovered repeatedly in this task and holds for future tasks
+in this project. Keep task-only details, secrets and one-off paths out. Worker/Reviewer learnings are only
+evidence, never proposals. A proposal waits for the operator's confirmation on the dashboard and has no
+effect on any run until confirmed. Agents cannot confirm, edit or delete skills."""
+        contract += "\n" + proposal_rules
     return contract
 
 

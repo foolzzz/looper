@@ -29,10 +29,23 @@ to its run (``gate_env`` tells it which run). Otherwise it creates the task (the
 code-written run context, ``run_context``; its profile overrides and task
 limits; its own spend cap) and starts it at once with ``TASK_START``: enabling
 the schedule was the approval (D6). "Run now" is the same firing with
-``trigger`` manual, leaving ``next_fire_at`` alone.
+``trigger`` manual, leaving ``next_fire_at`` alone. A manual run is never
+throttled. An operator's Run now of an agent or a command is not held for a
+usage window (the observation still records one). A subscription the operator
+starts is refused by ``schedules.run_now`` while its processor would be held.
+A subscription's own catch-up still waits.
+
+Throttle fields (``schedule_throttle``): a scheduled or catch-up firing whose fire time or now is outside the
+schedule's ``active_hours`` does not happen (no run; ``next_fire_at`` moves on, as if the rule had not fired), and
+one of an ``idle_only`` schedule while its Manager answers a message (``manager_busy``) is ``skipped_busy``.
 
 Before the task (S2): a schedule with a ``daily_budget_usd`` whose runs fired
 since the server's local midnight cost that much records ``skipped_budget``.
+A usage-window hold, when cost guard enforcement is on, leaves this firing due
+(``last_fired_at`` and ``next_fire_at`` unchanged, no skipped fire, a
+subscription cursor unmoved). While it lasts, another pass records and logs the
+hold only when ``until`` changes. When the hold lifts, the latest occurrence
+fires on time (``scheduled``, not catch-up).
 A schedule with a ``gate_command`` records the run ``gating`` and runs the
 gate outside the transaction (``schedule_gate``): a failure or timeout is
 ``gate_failed`` (a failure); nothing printed is ``skipped_gate``, unless the
@@ -73,6 +86,7 @@ from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lo
 from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .schedule_gate import GateResult, run_gate
+from .schedule_throttle import ScheduleThrottle
 from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
 from . import subscriptions
@@ -244,6 +258,7 @@ _STATUS_WORDS = {
     "completed": "完成", "failed": "失败", "stopped": "已停止", "cancelled": "已取消", "timed_out": "超时被停止",
     "skipped_overlap": "跳过（上一次运行还没结束）", "skipped_missed": "跳过（错过了触发时刻）",
     "gate_failed": "前置检查失败", "skipped_gate": "跳过（前置检查没有输出）", "skipped_budget": "跳过（已到每日花费上限）",
+    "skipped_busy": "跳过（管家正在回复消息）",
 }
 _TRIGGER_WORDS = {Trigger.SCHEDULED: "按时触发", Trigger.CATCH_UP: "补跑", Trigger.MANUAL: "手动「立即运行」"}
 
@@ -416,6 +431,15 @@ class _DrainBegan(Exception):
     """A drain began while an agent firing's transaction was open: the firing rolls back and is done after the drain."""
 
 
+class _UsageWindowHeld(Exception):
+    """This firing waits for a usage window. Nothing starts, and a subscription cursor stays where it is."""
+
+    def __init__(self, until: datetime, reason: str):
+        self.until = until
+        self.reason = reason
+        super().__init__(reason)
+
+
 class Scheduler:
     """Fires due schedules every ``tick_seconds``; started and stopped with the server. ``sender`` sends the
     schedules' messages (None: they are recorded only), their links starting with ``dashboard_url`` (``links``);
@@ -455,9 +479,15 @@ class Scheduler:
         self._subscriptions = SubscriptionRuns(poster=poster, own_apps=own_apps or no_apps, runtime_root=runtime_root,
                                                clock=clock, claude_bin=claude_bin, day_start=self.day_start)
         self._catch_ups: dict[str, int] = {}  # an extraction's catch-up firings in a row, by schedule
+        # Whether a Manager (by id) answers a message now: an ``idle_only`` schedule of its skips the firing. Set by
+        # ``looper serve`` once the Managers run; until then none is.
+        self.manager_busy: Callable[[str], bool] = lambda manager_id: False
 
     def drain_waiting(self) -> dict[str, int]:
         return {"gates": self._gates, "starting": self._starting}
+
+    def observe_user(self, envelope: MessageEnvelope) -> None:
+        self._subscriptions.observe_user(envelope)
 
     @contextmanager
     def _admit_start(self, kind: str = "agent") -> Iterator[bool]:
@@ -576,6 +606,9 @@ class Scheduler:
         """One pass: finish ended runs, stop timed-out ones, start queued ones, fire due schedules, and start the
         stale alerts that are due. When a daily message backup is configured, start one that is due."""
         now = self._clock()
+        from .cost_guard import refresh_day
+
+        await refresh_day()
         await self._settle_running(now)
         kinds = ("command",) if self._drain is not None and self._drain.draining else None
         for schedule_id in await db_schedules.schedules_with_queued_runs(kinds=kinds):
@@ -642,9 +675,51 @@ class Scheduler:
 
     # --- Firing ---
 
+    async def _usage_block(self, schedule: Mapping[str, Any], now: datetime,
+                           notices: list[tuple[str | None, Any]]) -> _UsageWindowHeld | None:
+        """The enforced usage-window hold, or None. A command is never held.
+
+        Window reads stay outside the admission lock. The schedule is noted, and a notice appended to
+        ``notices``, only when ``until`` is new. The caller sends that list after its own transaction commits
+        and leaves the row due. A rollback drops the list with the firing.
+        """
+        if schedule["kind"] == "command":
+            return None
+        from . import usage_windows
+        from .cost_guard import observe_schedule, schedule_enforced_hold
+
+        found = await schedule_enforced_hold(schedule)
+        if not found or found[0] is None:
+            return None
+        hold, provider_id = found
+        noted = usage_windows.schedule_hold(schedule["id"], now=now)
+        if noted is None or noted["until"] != hold.until.isoformat():
+            admission = await observe_schedule(schedule)
+            if admission is not None and admission.until is not None:
+                usage_windows.note_schedule(
+                    schedule["id"], until=admission.until, reason=admission.reason or hold.reason.value,
+                    reset_known=admission.reset_known, window=admission.window)
+                notices.append((admission.provider_id or provider_id, usage_windows.Hold(
+                    admission.until,
+                    usage_windows.HoldReason(admission.reason or hold.reason.value),
+                    admission.reset_known, admission.window)))
+                logger.info("schedule %s waits for a usage window until %s (%s)", schedule["id"],
+                            admission.until.isoformat(), admission.reason)
+        return _UsageWindowHeld(hold.until, hold.reason.value)
+
+    async def _publish_hold_notices(self, notices: list[tuple[str | None, Any]]) -> None:
+        """Send this firing's hold notices. The caller does this only after its transaction has committed."""
+        if not notices:
+            return
+        from . import usage_windows
+
+        for provider_id, hold in notices:
+            await usage_windows.notify_hold(provider_id, hold)
+
     async def _fire_due(self, now: datetime, *, kinds: Sequence[str] | None = None) -> None:
         handled: list[str] = []
         while True:
+            notices: list[tuple[str | None, Any]] = []
             with ExitStack() as firing_guard:
                 launched: _Launched | None = None
                 schedule: dict[str, Any] | None = None
@@ -659,7 +734,7 @@ class Scheduler:
                         handled.append(schedule["id"])
                         if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
                             continue
-                        launched = await self._fire_schedule(conn, schedule, now)
+                        launched = await self._fire_schedule(conn, schedule, now, notices)
                         self._check_still_admitted(schedule)
                 except _DrainBegan:
                     logger.info("schedule %s: a drain began while it fired; rolled back, it stays due", schedule["id"])
@@ -667,15 +742,16 @@ class Scheduler:
                 except Exception:
                     if schedule is None:
                         raise  # the database itself failed: the next pass tries again
-                    # Rolled back: this schedule is due again next pass; the others go on now.
+                    # Rolled back: this firing's notices go with it. The schedule is due again next pass.
                     logger.exception("could not fire schedule %s", schedule["id"])
                     continue
+                await self._publish_hold_notices(notices)
                 if launched is not None:
                     await self._defer_start(schedule, launched)
                     await self._follow(schedule, launched)
 
     async def _fire_schedule(self, conn: asyncpg.Connection, schedule: dict[str, Any],
-                             now: datetime) -> _Launched | None:
+                             now: datetime, notices: list[tuple[str | None, Any]]) -> _Launched | None:
         """Handle a due schedule whose row ``conn`` holds."""
         try:
             rule, tz = cron.parse(schedule["cron"]), cron.zone(schedule["timezone"])
@@ -694,8 +770,22 @@ class Scheduler:
             await db_schedules.update_schedule(conn, schedule["id"], {"next_fire_at": next_at})
             return None
         firing = decision.firing
+        throttle = ScheduleThrottle.of(schedule)
+        if not (throttle.in_effect(firing.scheduled_for) and throttle.in_effect(now)):
+            # Outside its active hours the schedule is not in effect: as if its rule had not fired.
+            await db_schedules.update_schedule(conn, schedule["id"], {"next_fire_at": next_at})
+            return None
+        # A hold leaves the row due, so a late firing is not skipped and is not replayed as catch-up.
+        released = False
+        if await self._usage_block(schedule, now, notices) is not None:
+            return None
+        from . import usage_windows
+        if usage_windows.noted_schedule(schedule["id"]) is not None:
+            usage_windows.clear_schedule(schedule["id"])
+            firing = Firing(Trigger.SCHEDULED, firing.scheduled_for)
+            released = True
         await db_schedules.set_fired(conn, schedule["id"], last_fired_at=firing.scheduled_for, next_fire_at=next_at)
-        if decision.action is Action.SKIP:
+        if decision.action is Action.SKIP and not released:
             await self._skip(
                 conn, "skipped_missed", now,
                 {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
@@ -706,14 +796,34 @@ class Scheduler:
                       "minutes ago (catch-up: skip)",
             )
             return None
-        return await self._fire(conn, schedule, firing, now)
+        if throttle.idle_only and self.manager_busy(schedule.get("manager_id") or "manager"):
+            await self._skip(
+                conn, "skipped_busy", now,
+                {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
+                 "trigger": firing.trigger.value, "missed": firing.missed, "missed_since": firing.missed_since,
+                 "created_at": now},
+                kind=schedule["kind"], fired_at=now,
+                error="its Manager was answering a message (idle_only); the next firing tries again")
+            return None
+        try:
+            return await self._fire(conn, schedule, firing, now, notices=notices)
+        except _UsageWindowHeld:
+            # The in-memory row still has the timestamps from before this firing. Put those back in this transaction.
+            await db_schedules.set_fired(conn, schedule["id"], last_fired_at=schedule["last_fired_at"],
+                                        next_fire_at=schedule["next_fire_at"])
+            return None
 
     async def run_now(self, schedule_id: str, *, expected_version: str | None = None,
-                      only_enabled: bool = False) -> str | None:
+                      only_enabled: bool = False, operator: bool = False) -> str | None:
         """Fire a schedule now, enabled or not (``trigger`` manual), or with ``only_enabled`` only while it is (checked
         with its row locked); None if unknown, not enabled then, or admission is refused. Its ``next_fire_at`` stays.
-        A gate runs in the background: the run is ``gating`` until it ends."""
+        A gate runs in the background: the run is ``gating`` until it ends. ``operator`` records a usage-window hold
+        and still starts an agent or a command. A subscription the operator starts is refused by ``schedules.run_now``;
+        a subscription's catch-up leaves ``operator`` false and can wait here. A hold commits nothing and its notice
+        goes out after that commit. Any other failure rolls the firing back and sends nothing."""
         now = self._clock()
+        notices: list[tuple[str | None, Any]] = []
+        held: _UsageWindowHeld | None = None
         with ExitStack() as firing_guard:
             try:
                 async with db_connection.transaction() as conn:
@@ -724,10 +834,20 @@ class Scheduler:
                             or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
                             or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                         return None
-                    launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
-                    self._check_still_admitted(schedule)
+                    try:
+                        launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now,
+                                                    operator=operator, notices=notices)
+                    except _UsageWindowHeld as exc:
+                        held = exc
+                    else:
+                        self._check_still_admitted(schedule)
             except _DrainBegan:
                 return None
+            await self._publish_hold_notices(notices)
+            if held is not None:
+                from .usage_windows import ScheduleDeferred
+
+                raise ScheduleDeferred(held.until, held.reason) from None
             await self._defer_start(schedule, launched)
             await self._follow(schedule, launched)
             return launched.run_id
@@ -763,7 +883,8 @@ class Scheduler:
         )
 
     async def _fire(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing,
-                    now: datetime) -> _Launched:
+                    now: datetime, *, notices: list[tuple[str | None, Any]],
+                    operator: bool = False) -> _Launched:
         """One firing, the schedule's row held: after the overlap check, a queued or skipped run, or the run
         launched (``_launch``)."""
         common = {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
@@ -781,7 +902,8 @@ class Scheduler:
             running = sum(run["status"] == db_schedules.RUNNING for run in open_runs)
             free = gating is None and running < schedule["max_parallel_runs"]
             if free and not (queued is not None and queued["deferred_by_drain"]):
-                return await self._launch(conn, schedule, firing, now, common=common)
+                return await self._launch(conn, schedule, firing, now, common=common, operator=operator,
+                                          notices=notices)
             reason = ("the previous run is still checking its gate" if gating
                       else "an earlier firing that a drain deferred starts first" if free
                       else f"{running} runs are in progress, the most this schedule runs at once (max_parallel_runs)")
@@ -801,7 +923,7 @@ class Scheduler:
                       else f"the previous run ({busy}) is still in progress" if own_runs
                       else f"the previous run's task ({busy}) is still in progress")
             return await self._skip_overlap(conn, schedule, now, common, reason, open_runs)
-        return await self._launch(conn, schedule, firing, now, common=common)
+        return await self._launch(conn, schedule, firing, now, common=common, operator=operator, notices=notices)
 
     async def _skip_overlap(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], now: datetime,
                             common: Mapping[str, Any], reason: str, open_runs: Sequence[Mapping[str, Any]]) -> _Launched:
@@ -837,14 +959,30 @@ class Scheduler:
         return datetime.combine(local.date(), datetime.min.time(), tzinfo=self._day_zone)
 
     async def _launch(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
-                      common: Mapping[str, Any] | None = None, run_id: str | None = None) -> _Launched:
-        """A firing past the overlap check: skipped at the daily budget, gating, or its task created."""
+                      notices: list[tuple[str | None, Any]], common: Mapping[str, Any] | None = None,
+                      run_id: str | None = None, operator: bool = False) -> _Launched:
+        """A firing past the overlap check: skipped at the daily budget, gating, or its task created.
+
+        ``operator`` records a usage-window hold and still starts. It does not clear a note left for the
+        schedule's own firing, so that page keeps showing the wait.
+        """
         if schedule["kind"] == "command":
             return await self._start_command(conn, schedule, firing, now, common=common, run_id=run_id)
         subscription = schedule["kind"] == "subscription"
         if not subscription and await db_schedules.owner_error(conn, schedule["manager_id"],
                                                                 template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
+        from . import usage_windows
+        from .cost_guard import observe_schedule
+
+        if operator:
+            await observe_schedule(schedule, operator=True)
+        else:
+            held = await self._usage_block(schedule, now, notices)
+            if held is not None:
+                raise held
+            usage_windows.clear_schedule(schedule["id"])
+            await observe_schedule(schedule)
         budget = schedule["daily_budget_usd"]
         if budget is not None:
             spent = await db_schedules.spent_since(conn, schedule["id"], self.day_start(now))
@@ -925,7 +1063,13 @@ class Scheduler:
         # leads or intents turned off meanwhile, ends the series.
         if more and fired < CATCH_UP_MAX and await extraction_on(run_id):
             self._catch_ups[schedule_id] = fired + 1
-            if await self.run_now(schedule_id, only_enabled=True) is None:
+            from .usage_windows import ScheduleDeferred
+
+            try:
+                started = await self.run_now(schedule_id, only_enabled=True)
+            except ScheduleDeferred:
+                started = None
+            if started is None:
                 self._catch_ups.pop(schedule_id, None)
 
     async def _start_command(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], firing: Firing,
@@ -1202,6 +1346,8 @@ class Scheduler:
     async def _start_queued(self, schedule_id: str) -> None:
         """Start a queued run when overlap permits; a drain-deferred parallel gate needs only a free slot."""
         now = self._clock()
+        notices: list[tuple[str | None, Any]] = []
+        held = False
         with ExitStack() as firing_guard:
             try:
                 async with db_connection.transaction() as conn:
@@ -1225,9 +1371,19 @@ class Scheduler:
                         return
                     firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"],
                                     missed_since=run["missed_since"])
-                    launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])
-                    self._check_still_admitted(schedule)
+                    # A subscription catch-up is manual and already in ``_catch_ups``. An operator's queued run is not.
+                    operator = firing.trigger is Trigger.MANUAL and schedule_id not in self._catch_ups
+                    try:
+                        launched = await self._launch(conn, schedule, firing, now, run_id=run["id"],
+                                                      operator=operator, notices=notices)
+                    except _UsageWindowHeld:
+                        held = True
+                    else:
+                        self._check_still_admitted(schedule)
             except _DrainBegan:
+                return
+            await self._publish_hold_notices(notices)
+            if held:
                 return
             await self._defer_start(schedule, launched)
             started = await self._follow(schedule, launched)

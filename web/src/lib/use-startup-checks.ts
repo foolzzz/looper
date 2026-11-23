@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { fetchStatus, type SelfCheck } from "@/lib/api";
 
-/** Re-read incomplete startup checks without overlapping requests or polling after unmount. */
-export function useStartupChecks(): SelfCheck[] | undefined {
+/** Re-read incomplete startup checks, and optionally live problems, without overlapping requests. */
+export function useStartupChecks(refreshMs?: number): SelfCheck[] | undefined {
   const [checks, setChecks] = useState<SelfCheck[]>();
   useEffect(() => {
     const controller = new AbortController();
@@ -19,13 +19,14 @@ export function useStartupChecks(): SelfCheck[] | undefined {
         if (!latest) setChecks([]);
       }
       // A transient read error must not strand a previously pending check.
-      if (latest?.some((check) => check.status === "pending")) timer = setTimeout(read, 3000);
+      const delay = latest?.some((check) => check.status === "pending") ? 3000 : refreshMs;
+      if (delay !== undefined) timer = setTimeout(read, delay);
     };
     void read();
     return () => {
       controller.abort();
       clearTimeout(timer);
     };
-  }, []);
+  }, [refreshMs]);
   return checks;
 }

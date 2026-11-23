@@ -5,12 +5,13 @@ import { useStartupChecks } from "@/lib/use-startup-checks";
 /** The checks of the runtimes' own logins Agent Profiles may use. */
 const LOGIN_CHECKS = ["codex_login", "coco_login", "grok_login", "cursor_login", "ttadk"];
 
-const shown = (c: SelfCheck) => (c.id.startsWith("claude_") || LOGIN_CHECKS.includes(c.id)) && c.status === "fail";
+const shown = (c: SelfCheck) =>
+  (c.id.startsWith("claude_") || c.id.startsWith("channel_down:") || LOGIN_CHECKS.includes(c.id)) && c.status === "fail";
 
 /** Says, on every page, when the server started without the Claude Code CLI or its login, or when a runtime
- * login or launcher an Agent Profile uses cannot run. */
+ * login or launcher an Agent Profile uses cannot run, or a channel has a sustained outage. */
 export function ClaudeCheckBanner() {
-  const problems = (useStartupChecks() ?? []).filter(shown);
+  const problems = (useStartupChecks(30_000) ?? []).filter(shown);
 
   if (problems.length === 0) return null;
   return (
@@ -22,7 +23,9 @@ export function ClaudeCheckBanner() {
             <span className="font-medium text-destructive">
               {c.label}: {c.detail}.
             </span>{" "}
-            {LOGIN_CHECKS.includes(c.id) ? (
+            {c.id.startsWith("channel_down:") ? (
+              <>To fix: {c.fix}</>
+            ) : LOGIN_CHECKS.includes(c.id) ? (
               <>Agent Profiles with the {c.label} cannot run until this is fixed. To fix: {c.fix}.</>
             ) : (
               <>

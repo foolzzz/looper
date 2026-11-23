@@ -34,6 +34,7 @@ from typing import Any
 from .. import vault
 from ..vault import VaultConfig
 from . import vault as vault_ops
+from . import subagents as subagent_ops
 from .vault import TOOL_NAMES as VAULT_TOOL_NAMES, VaultUsage
 from ..room import POSTABLE, MemberKind, MessageKind, RoomInput, RoomService, Seat
 from . import ErrorCode, OpError, RetrySafety, Risk, Tool, check_arguments
@@ -102,7 +103,9 @@ TOOLS: tuple[Tool, ...] = (
         description="Earlier room messages you can see, newest first, marking nothing read: by kind, from (a seat "
                     "or role), about (a message id: its whole thread), unanswered questions, before (a message id).",
         schema={"type": "object", "additionalProperties": False, "properties": {
-            "kind": {"type": "string", "enum": [k.value for k in MessageKind]},
+            "kind": {"type": "string", "enum": [k.value for k in (MessageKind.INFO, MessageKind.QUESTION, MessageKind.ANSWER,
+                                                      MessageKind.INTERFACE, MessageKind.ANNOUNCE, MessageKind.NOTICE,
+                                                      MessageKind.ESCALATION)]},
             "from": {"type": "string"},
             "about": {"type": "integer", "minimum": 1},
             "unanswered": {"type": "boolean"},
@@ -201,6 +204,8 @@ def validate_grant(record: Any, *, run_id: str, task_id: str) -> None:
         raise ValueError("invalid run grant seat kind") from exc
     if type(record.get("room")) is not bool:
         raise ValueError("invalid run grant room flag")
+    if "subagents" in record and type(record["subagents"]) is not bool:
+        raise ValueError("invalid run grant subagents flag")
     try:
         RoomInput(record.get("mode", RoomInput.PULL))
     except (ValueError, TypeError) as exc:
@@ -225,6 +230,7 @@ class _Grant:
     usage: VaultUsage = field(default_factory=VaultUsage)
     state: GrantState = GrantState.ACTIVE
     kept: bool = False
+    subagents: bool = False
 
 
 class RoomOps:
@@ -233,14 +239,21 @@ class RoomOps:
         self._url = url.rstrip("/")
         self._grants: dict[str, _Grant] = {}  # a token's hash -> what it is good for
         self._files: dict[str, set[str]] = {}  # a run -> the MCP configuration files that carry its token
+        self.subagents: subagent_ops.WorkerSubagents | None = None
+        # A run whose calls the outbound review's hook checks -> where its reviews run, the files it wrote last, and
+        # whether the operator was told of a block (once a run).
+        self._reviews: dict[str, tuple[Path, str, Any]] = {}
+        self._writes: dict[str, list[Any]] = {}
+        self._notified: set[str] = set()
 
     # --- Tokens ---
 
     def issue(self, task_id: str, seat: Seat, *, room: bool = True, vault: VaultConfig | None = None,
-              kept: bool = False, mode: RoomInput = RoomInput.PULL) -> str:
+              kept: bool = False, mode: RoomInput = RoomInput.PULL, subagents: bool = False) -> str:
         """A new token for ``seat``'s run in ``task_id``."""
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
         self._grants[_digest(token)] = _Grant(task_id, seat, room=room, kept=kept, mode=mode,
+                                               subagents=subagents and seat.kind is MemberKind.WORK,
                                                vault_tools=vault_ops.tools_for(vault) if vault else ())
         return token
 
@@ -248,6 +261,9 @@ class RoomOps:
         """``run`` ended: its tokens stop working and the files that carry them go."""
         for digest in [d for d, grant in self._grants.items() if grant.seat.run == run]:
             del self._grants[digest]
+        self._reviews.pop(run, None)
+        self._writes.pop(run, None)
+        self._notified.discard(run)
         for path in self._files.pop(run, set()):
             Path(path).unlink(missing_ok=True)
 
@@ -258,7 +274,8 @@ class RoomOps:
                 return {"format": 1, "digest": digest, "task_id": grant.task_id,
                         "seat": asdict(grant.seat), "room": grant.room, "mode": grant.mode.value,
                         "vault_tools": [tool.name for tool in grant.vault_tools],
-                        "mcp_files": sorted(self._files.get(run, ()))}
+                        "mcp_files": sorted(self._files.get(run, ())),
+                        **({"subagents": True} if grant.subagents else {})}
         return None
 
     def import_pending(self, record: dict) -> None:
@@ -270,6 +287,7 @@ class RoomOps:
         validate_grant(record, run_id=run, task_id=record.get("task_id"))
         seat = Seat(**{**record["seat"], "kind": MemberKind(record["seat"]["kind"])})
         grant = _Grant(record["task_id"], seat, room=record["room"], mode=RoomInput(record.get("mode", RoomInput.PULL)),
+                       subagents=record.get("subagents", False) and seat.kind is MemberKind.WORK,
                        vault_tools=tuple(tool for tool in vault_ops.TOOLS if tool.name in record["vault_tools"]),
                        state=GrantState.PENDING_ADOPTION, kept=True)
         self._grants[record["digest"]] = grant
@@ -292,6 +310,21 @@ class RoomOps:
     def authorized(self, header: str | None) -> bool:
         return self._grant(header) is not None
 
+    def bind_subagents(self, run: str, recorder: Any, launch: Any) -> None:
+        grant = next((g for g in self._grants.values() if g.seat.run == run and g.subagents), None)
+        if grant is not None and self.subagents is not None:
+            self.subagents.bind(grant.task_id, grant.seat, recorder, launch)
+
+    async def end_subagents(self, run: str) -> None:
+        if self.subagents is None:
+            return
+        # No new call can enter while the per-run admission lock drains.
+        self.revoke_run(run)
+        try:
+            await self.subagents.end(run)
+        except Exception:
+            logger.exception("worker %s explorer cancellation deferred to recovery", run)
+
     def grant_state(self, header: str | None) -> GrantState | None:
         grant = self._grant(header)
         return grant.state if grant is not None else None
@@ -303,7 +336,8 @@ class RoomOps:
         if grant is None:
             return []
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
-        listed = [tool.listing() for tool in (*room_tools, *grant.vault_tools)]
+        agent_tools = subagent_ops.TOOLS if grant.subagents else ()
+        listed = [tool.listing() for tool in (*room_tools, *grant.vault_tools, *agent_tools)]
         if grant.mode is not RoomInput.PULL:
             for tool in listed:
                 if tool["name"] == INBOX:
@@ -331,14 +365,19 @@ class RoomOps:
         if grant is None or not grant.kept:
             return None
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
-        safety = {**RETRY_SAFETY, **vault_ops.RETRY_SAFETY}
+        agent_tools = subagent_ops.TOOLS if grant.subagents else ()
+        safety = {**RETRY_SAFETY, **vault_ops.RETRY_SAFETY, **subagent_ops.RETRY_SAFETY}
         return {tool.name: safety.get(tool.name, RetrySafety.NOT_RETRYABLE).value
-                for tool in (*room_tools, *grant.vault_tools)}
+                for tool in (*room_tools, *grant.vault_tools, *agent_tools)}
 
-    async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
+    async def call(self, header: str | None, name: str, raw: Any, *, call_id: str | None = None) -> dict[str, Any]:
         grant = self._grant(header)
         if grant is None:
             return _error(ErrorCode.FORBIDDEN, "this run's token no longer works: its run ended")
+        if name in subagent_ops.TOOL_NAMES and grant.subagents:
+            if grant.state is not GrantState.ACTIVE or self.subagents is None:
+                return _error(ErrorCode.UNAVAILABLE, "this run's explorer tools are awaiting adoption")
+            return await self.subagents.call(grant.task_id, grant.seat, name, raw, call_id=call_id)
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
         tools = {tool.name: tool for tool in (*room_tools, *grant.vault_tools)}
         tool = tools.get(name)
@@ -387,6 +426,60 @@ class RoomOps:
         return {"status": "ok", "result": json.loads(json.dumps(result, ensure_ascii=False, default=str))}
 
     # --- A run's MCP entry ---
+
+    # --- The outbound review's hook in a step's run of a task outside content went into (RFC section 6.3) ---
+
+    def tool_hook(self, token: str, run: str, runtime_root: Path, claude_bin: str, library: Any = None) -> Any:
+        """The PreToolUse hook (``outbound_hook.ToolHook``) for the run holding ``token``; its config goes when the
+        run ends. Its reviews run under ``runtime_root`` with ``claude_bin``, and its MCP tool names stand for the
+        servers ``library`` loads and the tools of its grant (``outbound_hook.Trusted``)."""
+        from .. import outbound_hook
+
+        hook = outbound_hook.write_hook(runtime_root, f"run-{run}", url=self._url, token=token)
+        self._files.setdefault(run, set()).add(str(runtime_root.absolute() / ".local" / "outbound-hook" /
+                                                   f"run-{run}.json"))
+        grant = self._grants.get(_digest(token))
+        tools = (*(tools_for(grant.seat.kind) if grant.room else ()), *grant.vault_tools) if grant else ()
+        self._reviews[run] = (runtime_root, claude_bin,
+                              outbound_hook.Trusted.of(library, [tool.name for tool in tools]))
+        return hook
+
+    async def check_outbound(self, header: str | None, payload: Any) -> dict[str, Any]:
+        """The hook's answer for one tool call of the run holding ``header``'s token (``outbound_hook.answer``), as
+        its task's: a call of a run whose token no longer works, or that goes wrong, is blocked."""
+        from .. import outbound_hook
+
+        grant = self._grant(header)
+        if grant is None or grant.state is not GrantState.ACTIVE or grant.seat.run not in self._reviews:
+            return {"decision": "block", "message": outbound_hook.BLOCKED_MESSAGE.format(
+                reason="this run's token no longer works")}
+        run, task_id = grant.seat.run, grant.task_id
+        runtime_root, claude_bin, trusted = self._reviews[run]
+        writes = self._writes.setdefault(run, [])
+
+        async def place() -> Any:
+            return await outbound_hook.task_placed(task_id)
+
+        try:
+            answer, review = await outbound_hook.answer(payload, agent_id=f"run-{run}", place=place,
+                                                        writes=list(writes[-outbound_hook.CONTENT_TOOLS_KEPT:]),
+                                                        runtime_root=runtime_root, claude_bin=claude_bin,
+                                                        trusted=trusted, task_id=task_id)
+        except Exception:
+            logger.exception("the outbound check of a call of run %s failed", run)
+            return {"decision": "block", "message": outbound_hook.BLOCKED_MESSAGE.format(
+                reason="the check could not run")}
+        if answer["decision"] == "allow":
+            if (write := outbound_hook.write_of(payload)) is not None:
+                writes.append(write)
+                del writes[:-outbound_hook.CONTENT_TOOLS_KEPT]
+        elif review is not None and run not in self._notified:  # once a run
+            self._notified.add(run)
+            data = payload if isinstance(payload, Mapping) else {}
+            tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
+            await outbound_hook.notify_blocked(f"run {run} of task {task_id}", str(data.get("tool_name") or ""),
+                                               str(tool_input.get("command") or ""), review.reason, review.review_id)
+        return answer
 
     async def library_with_server(self, library: Any, runtime_root: Path, token: str, run: str, *,
                                   reconnect_seconds: int | None = None) -> Any:

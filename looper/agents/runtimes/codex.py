@@ -86,6 +86,7 @@ from .pricing import usage_event
 if TYPE_CHECKING:
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
+    from ..failures import Evidence, Failure
     from ..library import AgentLibrary
     from .channel import RunChannel
 
@@ -258,6 +259,8 @@ class CodexRuntime(RuntimeAdapter):
         return [
             "--json", "--skip-git-repo-check", *permissions,
             *binding.args,
+            *(["-c", 'web_search="disabled"', "-c", "agents.enabled=false",
+               "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false"] if launch.explore else []),
             *(arg for directory in dict.fromkeys(mounts) for arg in ("--add-dir", directory)),
         ]
 
@@ -395,6 +398,11 @@ class CodexRuntime(RuntimeAdapter):
         """Codex reports tokens only: the run's ``usage`` as priced from its ``modelUsage`` at the provider's prices
         (``cost_source``, ``Launch.price``)."""
         return RunCost(usage, self.cost_source(provider))
+
+    def failure_signal(self, result_event: dict[str, Any] | None, evidence: Evidence) -> Failure | None:
+        from .. import failures
+
+        return failures.codex(result_event, evidence)
 
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         """Why Looper stopped the run at its per-run soft cap; Codex has no spend cap of its own."""
@@ -596,6 +604,11 @@ def _instruction_lines() -> list[str]:
 def _with_mcp(lines: list[str], launch: Launch) -> str:
     from ..agent_settings import AgentType
 
+    if launch.explore:
+        lines.insert(0, 'web_search = "disabled"')
+        features = lines.index("[features]")
+        lines[features + 1:features + 1] = ["multi_agent = false", "multi_agent_v2 = false"]
+        lines += ["", "[agents]", "enabled = false"]
     for name, table in mcp_servers(launch.library)[0]:
         if launch.role is AgentType.PLANNER:
             # With approvals never asked, Codex refuses every MCP tool call unless its server is approved (seen
@@ -920,10 +933,14 @@ class CodexStream:
         if kind in ("turn.failed", "thread.failed"):
             error = raw.get("error")
             message = str(error.get("message") if isinstance(error, Mapping) else error or "the turn failed")
+            info = {"codex_error_info": error["codex_error_info"]} \
+                if isinstance(error, Mapping) and error.get("codex_error_info") is not None else {}
             return [{"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "",
-                     **self._base(), "errors": [message]}]
+                     **self._base(), "errors": [message], **info}]
         if kind == "error":
-            return [{"type": "system", "subtype": "codex_error", **self._base(), "message": str(raw.get("message"))}]
+            info = {key: raw[key] for key in ("codex_error_info", "will_retry") if key in raw}
+            return [{"type": "system", "subtype": "codex_error", **self._base(), "message": str(raw.get("message")),
+                     **info}]
         return [{"type": "system", "subtype": "codex_event", **self._base(), "event": dict(raw)}]
 
     def _item(self, item: Mapping[str, Any], *, completed: bool) -> list[dict[str, Any]]:

@@ -1,8 +1,8 @@
 """A run's access level (``agent_settings.Access``): what each level makes of a launch, and the command lines of every
 role and runtime, which stay as they were before the level replaced ``Launch.consult``.
 
-The digest below was computed on ``main`` before the access level existed; a change to it is a change to some agent's
-command line, which this refactor must not make.
+Each recorded command is frozen on its own (``fixtures/launch_access_commands.json``, the bytes of ``_command_lines``
+on main 961070ce4). A runtime added to the matrix is not compared. A change to a recorded command fails.
 """
 
 from __future__ import annotations
@@ -21,11 +21,17 @@ import pytest
 import looper
 from looper.agents.agent_settings import Access, AgentSettings, AgentType, Launch
 from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec, builtin_resolved_profile
-from looper.agents.runtimes import ADAPTERS, ApiProtocol, AuthKind, RuntimeUnsupported, adapter
+from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, adapter
 from tests.runtime_model_helpers import resolved_profile
 
-# sha256 of ``_command_lines`` on main 961070ce4, before the access level (the same on macOS and Linux).
-COMMAND_LINES_SHA256 = "73e7b9e04fd07ff27d649609434cfe7754dc0e85d680f6fd6f124838a74f2183"
+# Keep the historical snapshot's runtime set fixed; later adapters have their own launch tests.
+BASELINE_RUNTIMES = ("api", "claude-code", "coco", "codex", "cursor-agent", "dsh", "grok", "omp", "pi")
+_COMMANDS = Path(__file__).parent / "fixtures" / "launch_access_commands.json"
+
+
+def _sha(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
 
 ROLES = (AgentType.MANAGER, AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER, AgentType.PROCESSOR)
 
@@ -115,7 +121,7 @@ def _command_lines(root: Path) -> dict[str, Any]:
     cwd = root / "work"
     cwd.mkdir(exist_ok=True)
     seen: dict[str, Any] = {}
-    for runtime in sorted(ADAPTERS):
+    for runtime in BASELINE_RUNTIMES:
         for name, launch in _launches(runtime).items():
             run = launch.runtime
             seen[f"{runtime}/{name}"] = _normalized({
@@ -145,9 +151,9 @@ def fixed_root() -> Any:
 
 def test_every_role_and_runtime_keeps_its_command_line(fixed_root: Path) -> None:
     lines = _command_lines(fixed_root)
-    assert len(lines) == len(ADAPTERS) * (len(ROLES) + 2)
-    digest = hashlib.sha256(json.dumps(lines, sort_keys=True).encode()).hexdigest()
-    assert digest == COMMAND_LINES_SHA256, json.dumps(lines, sort_keys=True, indent=1)[:4000]
+    frozen = json.loads(_COMMANDS.read_text())
+    assert [key for key in lines if key in frozen["each"]] == frozen["order"]
+    assert {key: _sha(lines[key]) if key in lines else None for key in frozen["each"]} == frozen["each"]
 
 
 @pytest.mark.parametrize(("role", "access", "level"), [
@@ -161,12 +167,16 @@ def test_every_role_and_runtime_keeps_its_command_line(fixed_root: Path) -> None
     (AgentType.REVIEWER, Access.CONSULT, Access.CONSULT),
     (None, Access.ADVISOR, Access.ADVISOR),
     (AgentType.WORKER, Access.READ_ONLY, Access.READ_ONLY),
+    (AgentType.MANAGER, Access.PLATFORM_TOOLS, Access.PLATFORM_TOOLS),
+    (AgentType.EXPLORER, None, Access.EXPLORE),
+    (AgentType.WORKER, Access.EXPLORE, Access.EXPLORE),
 ])
 def test_a_launch_has_its_roles_access_level_unless_it_names_one(role: AgentType | None, access: Access | None,
                                                                  level: Access) -> None:
     launch = Launch(AgentSettings(profile=builtin_resolved_profile()), role=role, access=access)
     assert launch.access_level is level
-    assert launch.read_only is (level is not Access.FULL)
+    assert launch.read_only is (level not in (Access.FULL, Access.PLATFORM_TOOLS))
+    assert launch.platform_tools_only is (level is Access.PLATFORM_TOOLS)
     assert launch.consult is (level is Access.CONSULT)
     assert launch.no_tools is (level is Access.ADVISOR or role is AgentType.PROCESSOR)
 
@@ -188,3 +198,23 @@ def test_an_advisor_launch_has_no_tool_and_replaces_its_system_prompt(fixed_root
     for flag in ("--dangerously-skip-permissions", "--replay-user-messages", "--append-system-prompt-file",
                  "--teammate-mode", "--plugin-dir", "--add-dir"):
         assert flag not in argv
+
+
+def test_a_runtime_without_verified_platform_only_tools_refuses_the_launch() -> None:
+    launch = Launch(AgentSettings(profile=_profile("codex")), role=AgentType.MANAGER)
+    assert launch.environment()  # the regular operator path remains available
+    with pytest.raises(RuntimeUnsupported, match="platform tools"):
+        replace(launch, access=Access.PLATFORM_TOOLS).environment()
+
+
+@pytest.mark.parametrize("access", [Access.PLATFORM_TOOLS, Access.EXPLORE])
+def test_restricted_launches_stay_sealed_and_keep_the_tool_hook(access: Access, fixed_root: Path) -> None:
+    from looper.agents.outbound_hook import ToolHook
+
+    hook = ToolHook("synthetic-hook-command")
+    launch = Launch(AgentSettings(profile=builtin_resolved_profile()), access=access, tool_hook=hook)
+    argv = launch.runtime.isolation_args(fixed_root, launch=launch)
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert settings["hooks"] == hook.settings()
+    assert launch.read_only is (access is Access.EXPLORE)
