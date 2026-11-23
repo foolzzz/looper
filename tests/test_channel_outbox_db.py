@@ -101,7 +101,8 @@ def test_upgrade_adds_terminal_time_without_retimestamping_legacy_outcomes(monke
         await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
-        assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name='channel_outbox'") == 1
+        assert await pool.fetchval(
+            "SELECT count(*) FROM schema_migrations WHERE name='channel_outbox_terminal_at'") == 1
     run_db(check, monkeypatch)
 
 
