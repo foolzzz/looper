@@ -301,9 +301,12 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
   commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
   path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
-  Admission lets OS read callbacks and the output reader run, then rechecks before and after writing,
-  even when a short line's drain returns immediately. A failed or late write queues the message.
-  If a result arrives after the write, the resident process is retired before queue
+  A typed input phase closes admission when top-level model generation begins, before event callbacks;
+  a completed assistant tool call reopens the tool-wait window. Subagent generation does not close that window.
+  Each addition carries a UUID. Writing stdin or receiving a queued lifecycle is not acceptance: the resident
+  waits for its native replay within the original turn, or its UUID in that turn's result, before confirming
+  the merge. A failed or late write queues the message. If the result excludes an unconfirmed addition,
+  subsequent output is discarded and the resident process is retired before queue
   fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
   merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
   path. The original tool binding stays in place. The final reply goes to
