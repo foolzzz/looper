@@ -1,0 +1,77 @@
+"""A new migration file supplies fresh and upgrade paths without shared edits."""
+
+import asyncio
+import sys
+
+import pytest
+
+from looper.db import bridge_upgrade, connection, migrations
+from tests.bridge_schema_support import structure, witness
+from tests.db_support import DSN, fresh_connection
+
+pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
+
+
+_NEW_MIGRATION = '''\
+name = "registry_example_items"
+order = 10000
+pending_order = 10000
+fresh_ddl = "CREATE TABLE IF NOT EXISTS registry_example_items (id BIGSERIAL PRIMARY KEY, note TEXT NOT NULL DEFAULT '');"
+
+
+async def pending(conn):
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", name):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('registry_example_items') IS NOT NULL")
+
+
+async def apply(conn, *, sql, state):
+    if await pending(conn):
+        await conn.execute(fresh_ddl)
+        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+'''
+
+
+def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, monkeypatch):
+    module_name = "registry_test_example_items"
+    (tmp_path / f"{module_name}.py").write_text(_NEW_MIGRATION)
+    monkeypatch.setattr(migrations, "__path__", [*migrations.__path__, str(tmp_path)])
+
+    async def test():
+        async with fresh_connection() as upgraded, fresh_connection() as fresh:
+            # This installation was initialized before the new file was shipped.
+            await connection.ensure_schema(upgraded)
+            assert not await connection.schema_change_pending(upgraded)
+            assert not await upgraded.fetchval("SELECT to_regclass('registry_example_items') IS NOT NULL")
+            before, shape = await witness(upgraded), await structure(upgraded)
+
+            discovered = migrations.discover()
+            assert [migration.name for migration in discovered][-1] == "registry_example_items"
+            monkeypatch.setattr(connection, "_MIGRATIONS", discovered)
+            monkeypatch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(discovered))
+            monkeypatch.setattr(connection, "_ONLINE_STEPS", migrations.online_steps(discovered))
+
+            # Backup admission discovers the addition but changes neither rows nor catalog.
+            assert await connection.schema_change_pending(upgraded)
+            assert await witness(upgraded) == before
+            assert await structure(upgraded) == shape
+            await connection.ensure_schema(upgraded)
+            await connection.ensure_schema(fresh)
+            assert await structure(upgraded) == await structure(fresh)
+            assert {row["name"] for row in await upgraded.fetch("SELECT name FROM schema_migrations")} == {
+                bridge_upgrade.BASELINE, "registry_example_items"}
+            assert {row["name"] for row in await fresh.fetch("SELECT name FROM schema_migrations")} == {
+                bridge_upgrade.BASELINE}
+
+            for conn in (upgraded, fresh):
+                assert await conn.fetchval("INSERT INTO registry_example_items (note) VALUES ('kept') RETURNING id") == 1
+                saved = await witness(conn)
+                assert not await connection.schema_change_pending(conn)
+                await connection.ensure_schema(conn)
+                assert await witness(conn) == saved
+                assert not await connection.schema_change_pending(conn)
+
+    try:
+        asyncio.run(asyncio.wait_for(test(), 30))
+    finally:
+        sys.modules.pop(f"{migrations.__name__}.{module_name}", None)
