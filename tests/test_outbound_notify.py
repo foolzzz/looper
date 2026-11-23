@@ -97,9 +97,11 @@ def test_disabled_lark_starts_without_outbox_database(monkeypatch, tmp_path, fai
             assert adapter._channel_outbox._task is None
             receipt = await adapter.notify('oc_synthetic', 'hello')
             assert receipt.success
-            assert len(transport.calls) == 1
+            assert transport.calls == [('send', {'chat_id': 'oc_synthetic', 'text': 'hello'})]
+            # Disabled startup schedules recovery without waiting for the database.
             await asyncio.wait_for(adapter._channel_outbox._recovery_task, 1)
             probe.assert_awaited_once_with('channel-lark_bot')
+            assert adapter._channel_outbox._task is None
         finally:
             await adapter.stop()
         assert transport.closed
