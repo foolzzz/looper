@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -248,3 +248,37 @@ def test_a_button_losing_to_typed_build_never_retries_start(monkeypatch, tmp_pat
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 1
         assert env.platform.bus.publish.await_count == 1
     run_db(check, monkeypatch, max_size=5)
+
+
+@pytest.mark.parametrize("channel", ["lark_bot", "telegram"])
+@pytest.mark.parametrize("retry", [False, True])
+def test_expiry_updates_the_original_card_once_after_delivery_recovers(monkeypatch, tmp_path, channel, retry):
+    async def check(pool):
+        env = await seed(pool, monkeypatch, tmp_path, channel=channel)
+        await env.service.run_once()
+        original = env.card_posts[0][2]
+        await pool.execute("UPDATE intents SET expires_at=$1 WHERE id=$2", NOW-timedelta(seconds=1), env.iid)
+        if retry:
+            env.registry.edit_card.return_value = PostReceipt(False, outcome=PostOutcome.REJECTED)
+            env.registry.post = AsyncMock(return_value=PostReceipt(False, outcome=PostOutcome.REJECTED))
+        await env.service.expire()
+        assert await pool.fetchval("SELECT state FROM intents WHERE id=$1", env.iid) == "expired"
+        if retry:
+            assert await pool.fetchval("SELECT state FROM intent_final_notices") == "pending"
+            await env.service.run_once()
+            assert env.registry.edit_card.await_count == 1
+            env.registry.edit_card.return_value = PostReceipt(True)
+            env.service._clock = lambda: NOW+timedelta(seconds=intent_push.FINAL_RETRY_SECONDS)
+            await env.service.run_once()
+        await env.service.run_once()
+        env.registry.edit.assert_not_awaited()
+        assert env.registry.edit_card.await_count == (2 if retry else 1)
+        for call in env.registry.edit_card.await_args_list:
+            assert call.args[:3] == (env.channel_id, intent_push.push_target(env.channel_id, env.sender), "17")
+            card = call.args[-1]
+            assert card.text.startswith("⌛") and not card.buttons
+        assert len(env.card_posts) == 1 and env.posts == []
+        assert await pool.fetchval("SELECT count(*) FROM card_actions") == 1
+        assert await db_cards.get(original.token) is not None
+        assert await pool.fetchval("SELECT state FROM intent_final_notices") == "sent"
+    run_db(check, monkeypatch)
