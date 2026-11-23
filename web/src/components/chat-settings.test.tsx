@@ -154,7 +154,7 @@ describe("Chat settings", () => {
     const name = container.querySelector('input[placeholder="管家"]') as HTMLInputElement;
     expect(container.textContent).toContain("管家人格");
     expect(container.textContent).toContain("合计 0/600");
-    expect(container.textContent).toContain("只作用于默认管家；改了以后下一轮生效。群里只用名字和称呼。");
+    expect(container.textContent).toContain("可保存默认管家的人格设置；目前尚未用于提示词，后续接入后生效。");
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "管家");
       name.dispatchEvent(new Event("input", { bubbles: true }));

@@ -183,7 +183,7 @@ function PersonaFields({ id, draft, error, saving, onDraft, onSave }: {
     <div className="space-y-3 border-t border-border pt-5">
       <div className="space-y-1">
         <p className="text-sm font-medium">管家人格</p>
-        <p className="text-xs text-muted-foreground">只作用于默认管家；改了以后下一轮生效。群里只用名字和称呼。</p>
+        <p className="text-xs text-muted-foreground">可保存默认管家的人格设置；目前尚未用于提示词，后续接入后生效。</p>
       </div>
       {PERSONA_FIELDS.map((field) => (
         <div key={field.key} className="space-y-1">

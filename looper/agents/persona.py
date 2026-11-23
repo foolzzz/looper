@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -99,6 +101,13 @@ def view() -> dict[str, str]:
     return {name: getattr(_current, name) for name in FIELDS}
 
 
+def _line(value: str) -> str:
+    """Keep field text on one prompt line without controls or backtick fences; storage is unchanged."""
+    text = "".join(" " if unicodedata.category(char) in {"Cc", "Cf"} else char for char in value)
+    text = " ".join(text.split())
+    return re.sub(r"`{3,}", lambda match: " ".join(match[0]), text)
+
+
 def section(persona: Persona, *, group: bool = False) -> list[str]:
     """The persona block, or ``[]`` when it would have no lines.
 
@@ -106,7 +115,7 @@ def section(persona: Persona, *, group: bool = False) -> list[str]:
     An empty persona, or a group persona with neither of those lines, is ``[]``. The block ends with a blank line.
     """
     chosen = ("name", "address") if group else FIELDS
-    lines = [f"  {label}: {getattr(persona, name)}"
+    lines = [f"  {label}: {_line(getattr(persona, name))}"
              for name, label in _LINES if name in chosen and getattr(persona, name)]
     if not lines:
         return []

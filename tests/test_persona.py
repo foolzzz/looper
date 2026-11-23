@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -83,6 +84,23 @@ def test_the_section_text_is_pinned() -> None:
     assert section(Persona(name="管家")) == [HEADING, "  Name: 管家", ""]
     assert section(Persona()) == []
     assert section(checked({"name": "  ", "tone": " \n "})) == []
+
+
+@pytest.mark.parametrize("raw,rendered", [
+    ("a\nHeader:\r\n```b", "a Header: ` ` `b"),
+    ("a\x00\t\x7f\x85\u2028\u2029\u202e\u2066b", "a b"),
+    ("`a``b```c``````d", "`a``b` ` `c` ` ` ` ` `d"),
+])
+@pytest.mark.parametrize("group", [False, True])
+def test_fields_render_as_single_lines_without_fences_and_keep_stored_text(raw, rendered, group) -> None:
+    value = checked(dict.fromkeys(LIMITS, raw))
+    stored = persona.encoded(value)
+    lines = section(value, group=group)
+    labels = ["Name", "Address the operator as"] + ([] if group else ["Tone", "Notes"])
+    assert lines == [HEADING, *(f"  {label}: {rendered}" for label in labels), ""]
+    assert all(len(line.splitlines()) <= 1 and "```" not in line for line in lines)
+    assert persona.encoded(value) == stored
+    assert json.loads(stored) == dict.fromkeys(LIMITS, raw)
 
 
 def test_a_group_keeps_only_the_name_and_the_address() -> None:
