@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from looper.agents import session_budget
+from looper.agents import chat_settings, session_budget, turn_metrics
 from looper.agents.claude_cli import ClaudeRunRecorder
 from looper.agents.runtimes.pricing import ModelPrice
 from looper.agents.tiers import manager_budget
@@ -61,6 +61,77 @@ def test_native_budget_error_uses_the_same_fixed_reply(monkeypatch, tmp_path):
             assert await chat.ask() == [session_budget.over_cap_reply(4)]
             assert not chat.manager._claude.started
             assert await pool.fetchval("SELECT session_id FROM agent_sessions WHERE agent_id='manager'")
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("budget", [None, 4])
+def test_native_cap_keeps_over_cap_metrics_with_budget_on_or_off(monkeypatch, tmp_path, budget):
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+        await session_budget.update({"turn_budget_usd": budget})
+        async with manager(pool, tmp_path, monkeypatch, context=100, budget_error=True) as chat:
+            replies = await chat.ask()
+            await asyncio.gather(*turn_metrics._pending)
+            if budget is None:
+                assert replies[0].startswith("Manager 出错，没能完成这次回复：")
+            else:
+                assert replies == [session_budget.over_cap_reply(budget)]
+            metadata = json.loads(await pool.fetchval("SELECT metadata FROM llm_records ORDER BY id DESC LIMIT 1"))
+            assert metadata["turn_metrics"]["delivery"] == "over_cap"
+            assert not chat.manager._claude.started
+            assert not chat.manager._turn_lock.locked()
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_reply_metrics_finish_before_budget_maintenance_releases_the_lock(monkeypatch, tmp_path):
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+        await session_budget.update({"turn_budget_usd": 4})
+        async with manager(pool, tmp_path, monkeypatch, context=100) as chat:
+            writing, release, written = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            annotate = ClaudeRunRecorder.annotate
+            bound = chat.manager._bound_session
+
+            async def slow_metrics(recorder, metadata):
+                if "turn_metrics" in metadata:
+                    writing.set()
+                    await release.wait()
+                    assert chat.manager._turn_lock.locked()
+                await annotate(recorder, metadata)
+                if "turn_metrics" in metadata:
+                    written.set()
+
+            async def after_metrics(session):
+                assert written.is_set()
+                assert session.turn_lock.locked()
+                await bound(session)
+
+            monkeypatch.setattr(ClaudeRunRecorder, "annotate", slow_metrics)
+            monkeypatch.setattr(chat.manager, "_bound_session", after_metrics)
+            reply = asyncio.create_task(chat.ask())
+            await writing.wait()
+            try:
+                assert chat.manager._turn_lock.locked()
+                assert not reply.done()
+            finally:
+                release.set()
+                await asyncio.gather(reply, *turn_metrics._pending)
+            assert reply.result() == ["answer"]
+            assert not chat.manager._turn_lock.locked()
+            metadata = json.loads(await pool.fetchval("SELECT metadata FROM llm_records ORDER BY id DESC LIMIT 1"))
+            assert metadata["turn_metrics"]["delivery"] == "reply"
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("compact,rotated", [("success", False), ("missing", True)])
+def test_native_cap_compacts_before_stopping_the_process(monkeypatch, tmp_path, compact, rotated):
+    async def check(pool):
+        await session_budget.update({"turn_budget_usd": 4})
+        async with manager(pool, tmp_path, monkeypatch, budget_error=True, compact=compact) as chat:
+            assert await chat.ask() == [session_budget.over_cap_reply(4)]
+            assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE input_text='/compact'") == 1
+            assert (chat.manager._pending_switch is not None) is rotated
+            assert not chat.manager._claude.started
     run_db(check, monkeypatch, timeout=30)
 
 

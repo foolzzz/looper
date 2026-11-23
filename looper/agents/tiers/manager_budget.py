@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 from ...db import agent_sessions, connection
 from .. import scheduler_settings, session_budget as policy, session_switch
 from ..claude_cli import ClaudeRunRecorder
-from ..delivery_guard import OverCap
 from ..run_usage import compaction
 from ..runtimes import Capability
 from ..runtimes.cancel import TurnCancel
@@ -40,6 +39,7 @@ class BudgetTurn:
     spend: RunSpend | None
     recorder: ClaudeRunRecorder | None = None
     switch: session_switch.SessionSwitch | None = None
+    over_cap: bool = False
 
 
 @dataclass
@@ -103,9 +103,13 @@ def after_reply(method: Any) -> Any:
                         if delivered and not budget.token.cancel.requested and not budget.token.abandoned:
                             await manager._bound_session(session)
                     finally:
-                        if session.lock_owner is budget.token:
-                            session.lock_owner = None
-                            session.turn_lock.release()
+                        try:
+                            if budget.over_cap:
+                                await session.claude.stop()
+                        finally:
+                            if session.lock_owner is budget.token:
+                                session.lock_owner = None
+                                session.turn_lock.release()
             finally:
                 _reply_scope.reset(context)
     return wrapped
@@ -146,20 +150,20 @@ async def annotate(session: ManagerSession, recorder: ClaudeRunRecorder) -> None
 
 
 def cap_reply(session: ManagerSession, exc: Exception) -> str | None:
+    from .manager import OverCap
+
     return policy.over_cap_reply(session.budget.usd) if session.budget is not None and isinstance(exc, OverCap) else None
-
-
-def raise_over_cap(session: ManagerSession, error: str) -> None:
-    if session.budget is not None:
-        raise OverCap(error)
-    raise RuntimeError(error)
 
 
 async def completion_reply(manager: ManagerAgent, token: TurnToken, prepared: Prepared) -> str:
     """A completion turn stopped at the same cap delivers the fixed reply through its normal channel path."""
+    from .manager import OverCap
+
     try:
         return await manager._run_prepared(token, prepared)
     except OverCap:
+        if prepared.session.budget is None:
+            raise
         return policy.over_cap_reply(prepared.session.budget.usd)
 
 

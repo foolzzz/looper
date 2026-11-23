@@ -35,7 +35,8 @@ for line in sys.stdin:
         usage = {{}}
     print(json.dumps({{'type':'assistant','message':{{'id':str(os.getpid()) + str(cost), 'model':'sonnet', 'content':[{{'type':'text','text':answer}}], 'usage':usage}}}}), flush=True)
     cost += {cost!r}
-    print(json.dumps({{'type':'result','subtype':'error_max_budget_usd' if {budget_error!r} else 'success', 'is_error':{budget_error!r}, 'session_id':'budget-session','result':answer,'total_cost_usd':cost, 'usage':usage}}), flush=True)
+    over_cap = {budget_error!r} and text != '/compact'
+    print(json.dumps({{'type':'result','subtype':'error_max_budget_usd' if over_cap else 'success', 'is_error':over_cap, 'session_id':'budget-session','result':answer,'total_cost_usd':cost, 'usage':usage}}), flush=True)
 ''')
     bus = MessageBus(runtime_root=root)
     instance = ManagerAgent(config=ManagerConfig(claude_bin=executable, work_dir=root), runtime_root=root)
