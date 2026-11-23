@@ -1,0 +1,101 @@
+{
+  "execution": {
+    "task_budget_usd": null,
+    "task_budget_action": null,
+    "supervise_interval_seconds": null,
+    "review_policy": null,
+    "distill_lessons": "off",
+    "step_workspaces": null,
+    "workspace_links": null,
+    "verification_paths": null,
+    "max_step_retries": null,
+    "planner_roles": null,
+    "wait_commands": null,
+    "role_text_max_chars": null,
+    "user_gates": null,
+    "gate_reminder_hours": null,
+    "agent_room": null,
+    "room_post_per_minute": null,
+    "room_broadcasts_per_run": null,
+    "room_message_max_chars": null,
+    "room_messages_per_task": null,
+    "room_ping_pong_rounds": null,
+    "room_wait_max_seconds": null,
+    "room_consult_budget_usd": null,
+    "room_consult_timeout_seconds": null,
+    "room_consults_per_task": null,
+    "task_workspaces": null,
+    "operator_notes": null,
+    "vault": null,
+    "dependency_conditions": null,
+    "advisor": null,
+    "advisor_consult_budget_usd": null,
+    "advisor_budget_usd": null,
+    "advisor_consults_per_task": null,
+    "advisor_consults_per_step": null,
+    "advisor_fallback_profile": null,
+    "advisor_internal_domains": null
+  },
+  "manager_project_tool": {
+    "name": "looper_projects",
+    "description": "Projects: list; get one; create (name, and the work_dir and background the user gave; never pick a directory); update its name, work_dir, background or dependency_conditions (a work_dir change asks the user first when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, stopping its running tasks first (the user confirms first); move its directory and files to an absolute to path (omit to to use the configured projects root). Move asks the user first, rewrites command and agent schedule directories, preserves the old path with a symbolic link unless link_old is false, and refuses running tasks, commands or gates without interrupting them. dependency_conditions enables composed step readiness conditions (AND, OR and k-of).",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete",
+            "move"
+          ]
+        },
+        "project": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The project (get, update, delete, move)."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "create: its name; update: its new name."
+        },
+        "work_dir": {
+          "type": "string",
+          "description": "Its default absolute directory; '' for none."
+        },
+        "background": {
+          "type": "string",
+          "description": "What its agents should know."
+        },
+        "dependency_conditions": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "on",
+            "off",
+            null
+          ],
+          "description": "update: enable, disable or inherit step readiness conditions."
+        },
+        "to": {
+          "type": "string",
+          "description": "move: absolute destination; omit for projects root / safe project name."
+        },
+        "link_old": {
+          "type": "boolean",
+          "description": "move: retain the old path as a symbolic link (default true)."
+        }
+      }
+    }
+  }
+}
