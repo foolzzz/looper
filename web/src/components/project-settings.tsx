@@ -16,6 +16,8 @@ import {
   type ExecutionDraft,
 } from "@/components/project-execution";
 
+import { ProjectAcceptanceChecks } from "@/components/project-acceptance-checks";
+
 interface Draft {
   name: string;
   workDir: string;
@@ -228,6 +230,7 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
         </div>
         <ProjectBackgroundField id={`${id}-background`} value={draft.background} onChange={set("background")} />
         <ProjectExecutionFields idPrefix={id} draft={draft.execution} onChange={set("execution")} />
+        <ProjectAcceptanceChecks key={project.project_id} project={project} />
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {saved && !dirty && (

@@ -9,7 +9,8 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason='LOOPER_TEST_DATABASE_URL is not set')
 
 
-def test_observe_three_concurrent_runs_survive_restart_and_settle_to_recorded_costs(monkeypatch):
+@pytest.mark.parametrize('run_kind', ['worker', 'explorer'])
+def test_observe_three_concurrent_runs_survive_restart_and_settle_to_recorded_costs(monkeypatch, run_kind):
     async def body(pool):
         # Real rows, including the task's effective cap, drive admission; no mocked accounting totals.
         await pool.execute("INSERT INTO projects (id, name, task_budget_usd) VALUES ('project-cost', 'Cost sample', 2)")
@@ -19,10 +20,11 @@ def test_observe_three_concurrent_runs_survive_restart_and_settle_to_recorded_co
         await g.rebuild()
         admissions = []
         for _ in range(3):
-            scopes = g.scopes(cg.RunKind.WORKER, 'task-cost', None, cg.Currency.PROVIDER)
-            admission = await g.admit(cg.RunKind.WORKER, scopes, cg.Currency.PROVIDER, 1)
-            row_id = await llm_records.start_record(agent_id='worker-cost', task_id='task-cost',
-                                                    metadata=admission.reservation.metadata(), pool=pool)
+            scopes = g.scopes(cg.RunKind(run_kind), 'task-cost', None, cg.Currency.PROVIDER)
+            admission = await g.admit(cg.RunKind(run_kind), scopes, cg.Currency.PROVIDER, 1)
+            row_id = await llm_records.start_record(
+                agent_id=run_kind + '-cost', run_kind=run_kind, task_id='task-cost',
+                metadata=admission.reservation.metadata(), pool=pool)
             g.bind(admission.reservation, row_id)
             admissions.append((admission, row_id))
         assert [ad.would for ad, _ in admissions] == [cg.Decision.ADMIT, cg.Decision.ADMIT, cg.Decision.ASK]
@@ -40,13 +42,14 @@ def test_observe_three_concurrent_runs_survive_restart_and_settle_to_recorded_co
         task = next(c for c in restarted.snapshot()['counters'] if c['scope'] == 'task')
         assert task['reserved_usd'] == 0 and task['spent_usd'] == float(totals['cost_usd']) == .75
         # A subscription sample remains separate both before the run and after rebuilding actual costs.
-        row_id = await llm_records.start_record(agent_id='worker-cost', task_id='task-cost', metadata={
-            'profile': {'provider': {'auth': 'oauth'}}}, pool=pool)
+        row_id = await llm_records.start_record(
+            agent_id=run_kind + '-cost', run_kind=run_kind, task_id='task-cost',
+            metadata={'profile': {'provider': {'auth': 'oauth'}}}, pool=pool)
         await llm_records.finish_record(row_id, status='completed', cost_usd=.1, pool=pool)
         await restarted.rebuild()
         counters = [c for c in restarted.snapshot()['counters'] if c['scope'] == 'task']
         assert {c['currency']: c['spent_usd'] for c in counters} == {'provider_priced_usd': .75, 'equivalent_usd': .1}
-        assert restarted.estimate(cg.RunKind.WORKER, cg.Currency.EQUIVALENT, None)[1] is cg.EstimateSource.FLOOR
+        assert restarted.estimate(cg.RunKind(run_kind), cg.Currency.EQUIVALENT, None)[1] is cg.EstimateSource.FLOOR
     run_db(body, monkeypatch, timeout=30)
 
 

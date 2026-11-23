@@ -113,6 +113,24 @@ def test_preview_project_uses_project_harness_and_background_without_writes(monk
     assert any("Project harness" in (b["text"] or "") for b in result["blocks"])
 
 
+@pytest.mark.parametrize("mode", [None, "off", "local", "network"])
+def test_planner_preview_uses_project_acceptance_permission(monkeypatch, mode):
+    from looper.agents.project_execution import AcceptanceChecksMode
+    from looper.agents.system_prompt import sha256_text
+    from looper.agents.tiers.planner_protocol import reply_contract
+
+    module, profile, _ = _dependencies(monkeypatch, role="planner")
+    monkeypatch.setattr(module.db_projects, "get_project", AsyncMock(return_value={
+        "id": "proj-demo", "name": "Demo", "acceptance_checks": mode}))
+    monkeypatch.setattr(module.db_documents, "list_documents", AsyncMock(return_value=[]))
+    result = asyncio.run(module.preview(profile.id, "planner", "proj-demo"))
+    contract = reply_contract(acceptance_checks=AcceptanceChecksMode(mode or "off"))
+    assert result["prompt_layers"]["contract"]["sha256"] == sha256_text(contract)
+    assert any(contract in (block["text"] or "") for block in result["blocks"])
+    if mode in (None, "off"):
+        assert contract.encode() == reply_contract().encode()
+
+
 def test_preview_manager_has_no_project_context(monkeypatch):
     module, profile, loader = _dependencies(monkeypatch)
     get_project = AsyncMock()

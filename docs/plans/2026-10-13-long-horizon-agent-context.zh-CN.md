@@ -47,6 +47,7 @@
 | M5 | 项目执行配置 | ✅ 已交付（looper #37） | M2 |
 | M6 | prompt 回归评测 | ✅ 已交付（looper #36） | M1 |
 | M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #45） | M2、M5 |
+| 事件分流 v0 | [RFC](../architecture/rfcs/event-triage-v0.zh-CN.md) 的表、类型、只读访问器与独立操作者开关 | 基础层已实现，默认关闭；分流运行、why 入口、管家交接与晨报仍待后续 PR | M7a，#1482 |
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ✅ 已交付（looper #46） | M7a |
 | M7c | 及时沉淀：日志记失败与重试、决策理由、用户指令、会话切换；换 agent 前的交接摘要和新会话的续接简报；Manager 续接；项目经验随时进草稿 | ✅ 已交付（looper #66） | M7b、M9a |
 | M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付（looper #48） | M1.6、M4 |
@@ -982,11 +983,14 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，项目开关仍默认关且没有启用入口；验证见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。下一步按 RFC PR2 接 Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消；规划者入口、运行树界面和账号准入分别留给后续 PR。
+- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审；关闭状态按 `main` 对照约定、prompt 和步骤行。下一阶段增加执行器、证据表与只读接口、私有检出及写保护、限制和重启恢复；本阶段不执行检查，不改变决策。
+
 - **助理每轮上下文接线**：类型化分类、渲染、操作者设置入口和 ops 说话人授权检查已实现；Manager 接线尚未完成，开关默认关，暂不注入上下文或契约。接线后补回合 prompt 关闭基准、渠道真实链路与时间/身份评测（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
 
 - **引擎可靠性：用量和限流信号**（[RFC](../architecture/rfcs/engine-reliability-v0.zh-CN.md)）：本分支实现默认关闭的 Claude Code / Codex app-server 窗口采集、账号七天用量、只读 `providers.limits`、额度块和自检；独立服务用替身事件验证，真实额度耗尽与重置未测。准入、冻结、失败处理和降级仍待后续实现。
 
-- **助理层第 3 期：空闲检查、车道与插话、动作类别与回执、状态卡**（[RFC](../architecture/rfcs/assistant-phase3-v0.zh-CN.md)，决定已定，只有文档；维护者 2026-11-22 的答复是 D24–D35）：四项各一个默认关闭的开关；PR 顺序和依赖见 RFC 第 12 节，3.6a、3.7a、3.5a、3.5b 可以先做（会话路由 #1518 已合入），空闲检查要在车道之后才能打开。
+- **助理层第 3 期：空闲检查、车道与插话、动作类别与回执、状态卡**（[RFC](../architecture/rfcs/assistant-phase3-v0.zh-CN.md)，决定已定；维护者 2026-11-22 的答复是 D24–D35）：本分支已实现 3.6a 的 `ActionCategory`、`ActionKind`、`TOOL_ACTIONS` 和写动作完整性测试，只有声明，不改变运行行为；运行时回执、开关和存储仍归 3.6b。其余按 RFC 第 12 节推进：3.7a、3.5a、3.5b 可以先做（会话路由 #1518 已合入），空闲检查要在车道之后才能打开。
 
 - **流程预设的后续入口**：任务模板引用流程、定时任务选择流程；当前模板和定时任务仍不采用项目默认流程。
 
@@ -1061,6 +1065,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 触屏上翻看消息历史（现在只有键盘的 ↑、↓）。
 
 ### 5.4 验证缺口
+
+- **卡片按钮的意图 / 账本接入**（默认关）：复用 `card_actions` 的记录、会话 / 消息绑定和 1.5 秒授权期限；Needs-you 的操作确认也从共享入口读取。真实飞书 / Telegram 回调尚未验证；真实模型评测尚未获批，只跑 fake-mode。获批后在开关打开时跑 assistant experience 的 identity，以及 Manager 的 `ledger_tools`、`confirm_create_start`、`cancel_confirmation` 对话：Sonnet 两次，Opus xhigh Manager 一次；预计合计 $1–3，属估算，不是实测费用或执行授权。
 
 - **LLM 模型层（已随 2.13 发布；凭据和基线缺口仍在）**：2026-10-20 的前序演练（当时的 `tests/test_llm_registry_rehearsal_db.py`，本二进制不再包含该文件）复用 patched-v2 固定种子，在独立 disposable 源库和模板克隆迁移库验证 count-only dry-run、事务迁移及新连接二次 schema 初始化；20/20 profiles 映射、unresolved/binding/pricing mismatch 均为 0，全部引用层、静态 launch 输入、固定 usage 费用和历史聚合相等，坏引用阻止且事务回滚。dry-run 的 `models_after=27` 仅计转换模型，正常启动额外补齐 11 个内置登录模型（总计 38），测试单独核对新增项；本种子的未知厂商账户保持分离，账户合并及会话重映射由独立 apply/pinned 测试覆盖。同日的恢复演练（当时的 `tests/test_llm_registry_recovery_db.py`，本二进制不再包含该文件）已用真实完整备份恢复第三个 disposable 库，并核对结构/约束/序列、全部行、旧入口绑定/价格夹具和历史费用；固定旧源码最小回移 version=2 guard 的独立入口在 v3 库任何 DDL 前拒绝，提交后的新写入保留在迁移后库，禁止绕过备份或原地反向迁移。仍需待发布旧补丁制品验证、新旧服务副本上真实 CLI 启动/计价/会话续接对照；不能在新 schema 上直接启动未带门禁的旧版。新增迁移后服务 smoke 已在真实 `serve` 上用脚本 CLI 验证 Manager/HTTP 读回及重启续接，并运行浏览器检查迁移 profiles 和未知价提示、保留截图；选择式真实 CLI 入口把显式组合先写入 v2 再迁移，四种 CLI 已安装但本卡无独立凭据，真实请求和 Manager haiku/opus xhigh 两档 comparison 均记为未测，候选版本全量评测亦未运行。这些数字是前序证据，不是本二进制仍在执行的 v2→v3 迁移。当前只接受 `looper-config/v4`；空库记 `post_bridge_baseline`，当前库不重放初始化 DDL，精确的 v2.13.165 桥接库只走一次 `upgrade_from_bridge`。退役的 provider `protocols`/`base_url`/`models` 和层上的 `model`/`effort` 在导入时直接拒绝。真实 CLI 凭据、haiku/opus xhigh dialogs 对照仍未测；五任务、一次重复的 Sonnet 基线不是完整基线，对话基线仍缺。不能把模型层写成已无缺口。详见 [评测说明](../../evals/README.md)。
 

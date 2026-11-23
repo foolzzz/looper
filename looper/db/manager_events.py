@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 from collections.abc import Sequence
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -19,6 +20,27 @@ import asyncpg
 from .connection import get_pool
 
 Db = asyncpg.Pool | asyncpg.Connection
+
+class EventKind(StrEnum):
+    TASK_END = "task_end"
+    TRIAGE = "triage"
+
+
+class Reason(StrEnum):
+    OFF = "off"
+    GROUP_CHAT = "group_chat"
+    MANAGER_OFF = "manager_off"
+    TURN_FAILED = "turn_failed"
+    TURN_TIMEOUT = "turn_timeout"
+    TURN_STOPPED = "turn_stopped"
+    EMPTY_REPLY = "empty_reply"
+    SEND_FAILED = "send_failed"
+    QUEUE_DEADLINE = "queue_deadline"
+    RESTART = "restart"
+    NO_CHAT = "no_chat"
+    TARGET_CHANGED = "target_changed"
+    MANAGER_SILENT = "manager_silent"
+
 
 RETENTION_DAYS = 30
 # The most events one completion turn tells.

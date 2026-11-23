@@ -9,8 +9,7 @@ The sections, in this order (``KINDS``):
 
 - ``gates``: user gates waiting for the operator's answer (``gate_service.list_gates``, ``waiting_on=user``);
 - ``confirmations``: a Manager's operation waiting for the operator's word in a chat
-  (``ManagerOps.waiting_confirmations``: they live in memory, so a restart drops them, and the operator is asked
-  again);
+  (``card_actions.pending_confirmations``: durable card rows while cards are on, otherwise Manager memory);
 - ``schedules``: failing schedules, as the dashboard's Schedules card lists them (``db.schedules.failing``);
 - ``logins``: a runtime login an Agent Profile uses, or the Claude Code CLI or login, failing, as the HTTP server's
   status checks report them now (``use_status_checks``);
@@ -40,7 +39,7 @@ from urllib.parse import urlencode
 
 from ..db import attention as store, ledger as db_ledger, schedules as db_schedules, tasks as db_tasks
 from ..db import system_settings as db_settings
-from . import gate_routing, gate_service, leads_model, operator_identity
+from . import card_actions, gate_routing, gate_service, leads_model, operator_identity
 from .message import MessageEnvelope, is_lark, parse_channel_id
 
 logger = logging.getLogger(__name__)
@@ -104,20 +103,21 @@ async def _gates(_: Any) -> Read:
 
 
 async def _confirmations(managers: Any) -> Read:
-    if managers is None:
+    waiting = await card_actions.pending_confirmations(managers)
+    if waiting is None:
         return NotRead.UNKNOWN
     now = datetime.now(timezone.utc)
     items = []
-    for agent in managers.agents():
-        ops = managers.ops(agent.agent_id)
-        for waiting in ops.waiting_confirmations() if ops is not None else ():
-            items.append(_item(
-                f"confirmation:{waiting['confirmation_id']}", waiting["impact"] or waiting["tool"],
-                context=getattr(agent, "name", None) or agent.agent_id,
-                since=now - timedelta(seconds=waiting["waited_seconds"]),
-                href=_chat_href(agent.agent_id, waiting["chat"]) if waiting["channel"] == "web" else None,
-                ref=waiting["confirmation_id"], tool=waiting["tool"], channel=waiting["channel"],
-                expires_in_seconds=waiting["expires_in_seconds"]))
+    names = {agent.agent_id: getattr(agent, "name", None) or agent.agent_id
+             for agent in managers.agents()} if managers is not None else {}
+    for row in waiting:
+        manager_id = row["manager_id"]
+        items.append(_item(
+            f"confirmation:{row['confirmation_id']}", row["impact"] or row["tool"],
+            context=names.get(manager_id, manager_id), since=now - timedelta(seconds=row["waited_seconds"]),
+            href=_chat_href(manager_id, row["chat"]) if row["channel"] == "web" else None,
+            ref=row["confirmation_id"], tool=row["tool"], channel=row["channel"],
+            expires_in_seconds=row["expires_in_seconds"]))
     items.sort(key=lambda item: item["since"])
     return items[:SHOWN], len(items)
 

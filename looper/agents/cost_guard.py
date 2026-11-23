@@ -31,6 +31,7 @@ class RunKind(str, Enum):
     MANAGER = 'manager'
     PLANNER = 'planner'
     WORKER = 'worker'
+    EXPLORER = 'explorer'
     REVIEWER = 'reviewer'
     PROCESSOR = 'processor'
     LEADS_CHECK = 'leads_check'

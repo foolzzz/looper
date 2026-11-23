@@ -416,3 +416,34 @@ def test_telegram_a_card_is_bound_to_the_chat_and_message_the_send_answered(
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=55, chat_id=4243))
     assert asyncio.run(adapter.post_card(NotifyTarget(TargetKind.CHAT, "99"), CARD)).external_ids == ("55",)
     assert bound == [("tok", "55", "4243")]
+
+
+def test_lark_edit_card_keeps_the_interactive_format_and_removes_buttons(tmp_path: Path) -> None:
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+
+    async def main() -> None:
+        async with FakeLarkPlatform() as fake:
+            adapter = make_adapter({"app_id": fake.app_id}, "test-secret", runtime_root=tmp_path,
+                                   allowlist=SenderAllowlist("channel-lark_bot", frozenset({ASKER})),
+                                   on_rejected=None, bot_open_id=fake.bot["open_id"], base_url=fake.base_url)
+            try:
+                target = NotifyTarget(TargetKind.CHAT, "oc_dm")
+                posted = await adapter.post_card(target, CARD)
+                assert (await adapter.edit_card(target, posted.external_ids[0], card_actions.Card("已处理"))).success
+                sent, edited = fake.sent
+                assert sent["msg_type"] == "interactive" and edited["kind"] == "update"
+                assert edited["parent"] == posted.external_ids[0]
+                assert edited["content"] == card_actions.lark_card(card_actions.Card("已处理"))
+            finally:
+                await adapter._transport.aclose()
+
+    asyncio.run(main())
+
+
+def test_telegram_edit_card_explicitly_clears_the_inline_keyboard(tmp_path: Path) -> None:
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+
+    adapter, bot = _telegram(tmp_path)
+    assert asyncio.run(adapter.edit_card(NotifyTarget(TargetKind.CHAT, "99"), "55",
+                                         card_actions.Card("已处理"))).success
+    bot.edit_message_text.assert_awaited_once_with(chat_id=99, message_id=55, text="已处理", reply_markup=None)

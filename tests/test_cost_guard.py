@@ -156,7 +156,8 @@ def test_observe_rebuild_and_context_failures_return_without_reserving(monkeypat
     asyncio.run(check())
 
 
-def test_admission_reads_new_task_cap_and_observes_a_profile_switch_in_its_new_currency(monkeypatch):
+@pytest.mark.parametrize('run_kind', ['worker', 'explorer'])
+def test_admission_reads_new_task_cap_and_observes_a_profile_switch_in_its_new_currency(monkeypatch, run_kind):
     async def check():
         g = guard(monkeypatch)
         monkeypatch.setattr(cg, '_guard', g)
@@ -164,10 +165,10 @@ def test_admission_reads_new_task_cap_and_observes_a_profile_switch_in_its_new_c
             'tasks': {'task-new': {'cap': .5, 'schedule_id': None}}, 'schedules': {}}))
         await g.rebuild()
         launch = SimpleNamespace(profile=SimpleNamespace(provider=SimpleNamespace(auth='api_key')), max_budget_usd=1)
-        first = await cg.before_run(launch=launch, run_kind='worker', task_id='task-new')
+        first = await cg.before_run(launch=launch, run_kind=run_kind, task_id='task-new')
         assert first.observation['decision'] == 'ask'
         launch.profile.provider.auth = 'oauth'
-        second = await cg.before_run(launch=launch, run_kind='worker', task_id='task-new')
+        second = await cg.before_run(launch=launch, run_kind=run_kind, task_id='task-new')
         assert first.currency is cg.Currency.PROVIDER and second.currency is cg.Currency.EQUIVALENT
         assert len([c for c in g.snapshot()['counters'] if c['scope'] == 'global_day']) == 2
     asyncio.run(check())

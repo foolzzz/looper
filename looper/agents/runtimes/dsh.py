@@ -525,7 +525,7 @@ class DshRuntime(RuntimeAdapter):
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
-                         read_only=launch.read_only, consult=launch.consult)
+                         read_only=launch.read_only, consult=launch.consult or launch.explore)
         catalog = materialize(launch.library, launch.profile.runtime.executable or self.default_executable)
         # The configured model, kept verbatim: the patch carries only the normalized API model, and usage is priced
         # by the configured one (``deepseek-v4-pro[1m]`` can cost differently from ``deepseek-v4-pro``).
@@ -741,6 +741,8 @@ class DshChannel:
 
 
 def _web_search(launch: Launch) -> bool:
+    if launch.explore:
+        return False
     search = dict(launch.env).get("DSH_ALLOW_WEB_SEARCH", "false")
     if search not in ("true", "false"):
         raise RuntimeUnsupported("DSH_ALLOW_WEB_SEARCH must be true or false")
@@ -750,7 +752,7 @@ def _web_search(launch: Launch) -> bool:
 def _root_only_consult(launch: Launch) -> bool:
     from ..library import EMPTY_LIBRARY
 
-    return launch.consult and launch.library == EMPTY_LIBRARY
+    return (launch.consult or launch.explore) and launch.library == EMPTY_LIBRARY
 
 
 def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
@@ -770,7 +772,7 @@ def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
         "approval": {"policy": "never"},
         "skill-filesystem": {"includeDefaultRoots": False, "customSkillDirs": list(catalog.skill_dirs), "watch": False},
         "session-telemetry-otel": {"mode": "DISABLED"},
-        "tool-web": {"fetch": True, "search": search, "searchTimeoutMs": 60000, "fetchTimeoutMs": 30000,
+        "tool-web": {"fetch": not launch.explore, "search": search, "searchTimeoutMs": 60000, "fetchTimeoutMs": 30000,
                      "fetchMaxOutputChars": 200000, "searchMaxQueries": 4, "searchMaxResults": 8},
         "compaction-basic": {"auto": True, "thresholdRatio": .8, "headroomTokens": 65536,
                              "retainRatio": .16, "maxTokens": 65536, "compactionRetries": 1,
@@ -970,7 +972,7 @@ def _bootstrap_files(executable: str, text: str, launch: Launch) -> dict[str, st
         raise RuntimeUnsupported("DSH bootstrap requires an installed executable") from None
     module = Path(__file__).with_name("dsh_bootstrap.mjs").resolve().as_uri()
     mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
-                     read_only=launch.read_only, consult=launch.consult)
+                     read_only=launch.read_only, consult=launch.consult or launch.explore)
     options = json.dumps({"executable": str(anchor), "text": text,
                           "mcp": mcp.servers if mcp else [], "readOnly": launch.read_only,
                           "omissions": mcp.omissions if mcp else []},
@@ -1131,7 +1133,7 @@ def _launch_environment(launch: Launch) -> dict[str, str]:
     binding = bind_provider(launch.profile.provider, launch.model, launch.effort)
     visible = _external_environment({**child_env.inherited(), **dict(launch.env)})
     mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
-                     read_only=launch.read_only, consult=launch.consult)
+                     read_only=launch.read_only, consult=launch.consult or launch.explore)
     return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
             **(mcp.env if mcp else {})}
 

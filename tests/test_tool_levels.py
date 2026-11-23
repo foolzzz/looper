@@ -147,6 +147,9 @@ def _operations() -> dict[str, Any]:
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters
     "cost_guard.update": INSIDE,  # changes only Looper's observation configuration
+    # Stores protocol permission only; no check runs in this stage.
+    "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
+
     "providers.limits": INSIDE,  # reads stored quota windows and usage
     "limit_signals_settings.get": INSIDE,  # reads Looper's collection switch
     "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch
@@ -163,6 +166,7 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "outbound_review.update": INSIDE,  # changes Looper's own review setting
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
     "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
+
     "manager_chat_bindings.put": EXTERNAL,  # a bound chat's people talk to a Manager, which answers them there
     "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
     # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard

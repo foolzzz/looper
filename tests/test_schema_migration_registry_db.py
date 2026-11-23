@@ -75,3 +75,28 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
         asyncio.run(asyncio.wait_for(test(), 30))
     finally:
         sys.modules.pop(f"{migrations.__name__}.{module_name}", None)
+
+
+@pytest.mark.parametrize("migration_name,rollback", [
+    ("mcp_tool_levels", "DROP TABLE mcp_tool_levels CASCADE"),
+    ("failure_typing", "ALTER TABLE llm_records DROP COLUMN failure_class, DROP COLUMN failure_cause"),
+    ("memory_candidates", "DROP TABLE memory_candidates, memory_candidate_revisions, memory_candidate_events, "
+                          "memory_candidate_sources, memory_posts, memory_tombstones CASCADE"),
+    ("channel_outbox", "DROP TABLE channel_outbox CASCADE"),
+    ("manager_sessions", "DROP TABLE manager_sessions CASCADE"),
+    ("provider_limit_windows", "DROP TABLE provider_limit_windows CASCADE"),
+])
+def test_merged_migrations_remain_discoverable_and_upgrade(migration_name, rollback):
+    async def test():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute(rollback)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1)",
+                               [migration_name, f"{migration_name}_online"])
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert not await connection.schema_change_pending(conn)
+            assert await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)",
+                                       migration_name)
+
+    asyncio.run(test())

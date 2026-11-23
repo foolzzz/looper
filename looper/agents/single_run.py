@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import failures, proc_tree
@@ -58,7 +58,8 @@ class Finished(NamedTuple):
 
 
 async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str, prompt: str, launch: Launch,
-                   timeout: float, what: str, label: str, quiet: bool = False) -> Finished:
+                   timeout: float, what: str, label: str, quiet: bool = False,
+                   on_process: Callable[[asyncio.subprocess.Process], Awaitable[None]] | None = None) -> Finished:
     """Run ``command`` in ``cwd`` with ``prompt`` as its one user turn, recording it with ``recorder`` (already
     started), which is closed however the run ends; ``what`` names the run in its record's errors (``the consult``),
     ``label`` in the log; ``quiet`` keeps what the process wrote out of the record (the module's notes). Raises
@@ -122,6 +123,8 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
                     process.stdin.close()
 
     async def run() -> None:
+        if on_process is not None:
+            await on_process(process)
         try:
             await runtime.write_turn(process.stdin, prompt)
         except (BrokenPipeError, ConnectionResetError, RuntimeError):

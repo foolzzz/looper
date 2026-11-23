@@ -259,6 +259,8 @@ class CodexRuntime(RuntimeAdapter):
         return [
             "--json", "--skip-git-repo-check", *permissions,
             *binding.args,
+            *(["-c", 'web_search="disabled"', "-c", "agents.enabled=false",
+               "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false"] if launch.explore else []),
             *(arg for directory in dict.fromkeys(mounts) for arg in ("--add-dir", directory)),
         ]
 
@@ -602,6 +604,11 @@ def _instruction_lines() -> list[str]:
 def _with_mcp(lines: list[str], launch: Launch) -> str:
     from ..agent_settings import AgentType
 
+    if launch.explore:
+        lines.insert(0, 'web_search = "disabled"')
+        features = lines.index("[features]")
+        lines[features + 1:features + 1] = ["multi_agent = false", "multi_agent_v2 = false"]
+        lines += ["", "[agents]", "enabled = false"]
     for name, table in mcp_servers(launch.library)[0]:
         if launch.role is AgentType.PLANNER:
             # With approvals never asked, Codex refuses every MCP tool call unless its server is approved (seen

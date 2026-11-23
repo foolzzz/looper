@@ -689,6 +689,18 @@ class LarkChannelAdapter(ChannelAdapter):
         # was sent, and replies to it just cannot be routed when its id was not given.
         return PostReceipt(True, external_ids=(message_id,) if message_id else ())
 
+    async def edit_card(self, target: NotifyTarget, external_id: str, card: Any) -> PostReceipt:
+        """Update an interactive card through the same guarded writer as a callback's update."""
+        if self._cards is None:
+            return await self.edit(target, external_id, card.text)
+        content = card_actions.lark_card(replace(card, text=files.redact(card.text, self._runtime_root)))
+        try:
+            await self._cards.update(external_id, content)
+        except LarkCliError as exc:
+            return PostReceipt(False, error=str(exc),
+                               outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
+        return PostReceipt(True, external_ids=(external_id,))
+
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         text = files.redact(text, self._runtime_root)
         try:
