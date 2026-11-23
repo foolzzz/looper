@@ -603,3 +603,244 @@ def test_expired_then_tasked_edits_once_per_transition(monkeypatch, tmp_path):
         await env.service.run_once()
         assert processed == []
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_failed_push_expires_from_creation_even_without_a_receipt(monkeypatch, legacy):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create(created_at=NOW)
+        env.channels.outcome = PostOutcome.REJECTED
+        if legacy:
+            await pool.execute("INSERT INTO intent_posts(intent_id,kind,channel_id,chat,text,state,attempts) "
+                               "VALUES($1,'push','channel-lark',$2,'Synthetic','failed',3)", iid, DM)
+        else:
+            await env.service.run_once()
+            assert await pool.fetchval("SELECT expires_at FROM intents WHERE id=$1", iid) == NOW+timedelta(hours=24)
+        env.service._clock = lambda: NOW+timedelta(hours=24, seconds=1)
+        await env.service.expire()
+        assert await pool.fetchval("SELECT state FROM intents WHERE id=$1", iid) == "expired"
+        assert env.channels.edits == []
+        assert len(env.channels.posts) == (0 if legacy else 1)
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("recovery", ["edit", "reply", "exhausted", "unknown"])
+def test_final_notice_retries_with_backoff_and_reports_exhaustion(monkeypatch, legacy, recovery):
+    from looper.agents import attention
+
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create(created_at=NOW)
+        await env.service.run_once()
+        await pool.execute("UPDATE intents SET expires_at=$1 WHERE id=$2", NOW-timedelta(seconds=1), iid)
+        env.channels.edit_ok = False
+        env.channels.outcome = PostOutcome.UNKNOWN if recovery == "unknown" else PostOutcome.REJECTED
+        await env.service.expire()
+        if legacy:
+            # The released writer marked the push edited even when both calls failed, then exhausted replies.
+            await pool.execute("DELETE FROM intent_final_notices")
+            await pool.execute("UPDATE intent_posts SET edited_at=$1 WHERE kind='push'", NOW)
+            await pool.execute("UPDATE intent_posts SET attempts=3 WHERE kind='final'")
+            await env.service.run_once()
+        attempts = 1
+        while attempts < 3:
+            job = await pool.fetchrow("SELECT * FROM intent_final_notices")
+            assert job["state"] == "pending" and job["attempts"] == attempts
+            assert job["next_attempt_at"]-job["updated_at"] == timedelta(seconds=30*2**(attempts-1))
+            posts, edits = len(env.channels.posts), len(env.channels.edits)
+            # A fresh instance must honor the persisted backoff too.
+            env.service = intent_push.IntentPushService(env.channels, clock=lambda: job["next_attempt_at"]-timedelta(microseconds=1))
+            await env.service.run_once()
+            assert (len(env.channels.posts), len(env.channels.edits)) == (posts, edits)
+            env.service._clock = lambda: job["next_attempt_at"]
+            if recovery == "edit":
+                env.channels.edit_ok = True
+            elif recovery == "reply":
+                env.channels.outcome = PostOutcome.SENT
+            await env.service.run_once()
+            attempts += 1
+            if recovery in ("edit", "reply"):
+                break
+        job = await pool.fetchrow("SELECT * FROM intent_final_notices")
+        assert job["state"] == ("sent" if recovery in ("edit", "reply") else "failed")
+        assert job["failure_reason"] == (None if job["state"] == "sent" else "final_notice_retry_exhausted")
+        if recovery == "unknown":
+            # Edits are idempotent; an uncertain fallback reply must never be sent twice.
+            assert len(env.channels.posts) == 2
+        posts, edits = len(env.channels.posts), len(env.channels.edits)
+        env.service._clock = lambda: NOW+timedelta(days=2)
+        await env.service.run_once()
+        assert (len(env.channels.posts), len(env.channels.edits)) == (posts, edits)
+        summary = await attention.collect()
+        problems = next(s for s in summary["sections"] if s["kind"] == "deliveries")["items"]
+        failures = [p for p in problems if p["facts"].get("reason") == "final_notice_retry_exhausted"]
+        assert len(failures) == int(job["state"] == "failed")
+        if failures:
+            assert failures[0]["ref"] == f"I-{iid:04d}" and failures[0]["href"] == "#intents"
+            assert "重试" in failures[0]["title"]  # visible on the existing dashboard too
+            assert "重试" in attention.summary_text(summary)
+        assert all(not target.group and target.id == DM for _, target, *_ in env.channels.posts+env.channels.edits)
+    run_db(check, monkeypatch)
+
+
+def test_final_notice_migration_is_additive_and_idempotent(monkeypatch):
+    from looper.db import connection
+    from looper.db.migrations import intent_final_notices as migration
+
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create(created_at=NOW)
+        env.channels.outcome = PostOutcome.REJECTED
+        await env.service.run_once()
+        await pool.execute("UPDATE intents SET expires_at=NULL WHERE id=$1", iid)
+        before = [dict(r) for r in await pool.fetch("SELECT * FROM intents")]
+        posts = [dict(r) for r in await pool.fetch("SELECT * FROM intent_posts")]
+        await pool.execute("DROP TABLE intent_final_notices")
+        assert await migration.pending(pool)
+        await connection.ensure_schema(pool)
+        await connection.ensure_schema(pool)
+        assert not await migration.pending(pool)
+        assert [dict(r) for r in await pool.fetch("SELECT * FROM intents")] == before
+        assert [dict(r) for r in await pool.fetch("SELECT * FROM intent_posts")] == posts
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("blocked", ["off", "unconfirmed", "group"])
+def test_final_notice_retry_rechecks_the_operator_dm_guard(monkeypatch, blocked):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create(created_at=NOW)
+        await env.service.run_once()
+        env.channels.edit_ok = False
+        env.channels.outcome = PostOutcome.REJECTED
+        await pool.execute("UPDATE intents SET expires_at=$1 WHERE id=$2", NOW-timedelta(seconds=1), iid)
+        await env.service.expire()
+        if blocked == "off":
+            await pool.execute("DELETE FROM system_settings WHERE key='intents.enabled'")
+        elif blocked == "unconfirmed":
+            await pool.execute("UPDATE subscriptions SET target_confirmed_at=NULL")
+        else:
+            await pool.execute("UPDATE schedules SET notify_chat=$1", GROUP)
+        env.service._clock = lambda: NOW+timedelta(hours=1)
+        await env.service.run_once()
+        assert len(env.channels.edits) == 1 and len(env.channels.posts) == 2
+        assert await pool.fetchval("SELECT attempts FROM intent_final_notices") == 1
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_new_transition_does_not_retry_the_old_expiry_reply(monkeypatch, legacy):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create(created_at=NOW)
+        await env.service.run_once()
+        env.channels.edit_ok = False
+        env.channels.outcome = PostOutcome.REJECTED
+        await pool.execute("UPDATE intents SET expires_at=$1 WHERE id=$2", NOW-timedelta(seconds=1), iid)
+        await env.service.expire()
+        if legacy:
+            await pool.execute("DELETE FROM intent_final_notices")
+            await pool.execute("UPDATE intent_posts SET edited_at=$1 WHERE kind='push'", NOW)
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement) VALUES('task-final','project-push','Synthetic')")
+        async with pool.acquire() as conn, conn.transaction():
+            await store.transition(conn, iid, "tasked", via="dashboard", now=NOW+timedelta(hours=1), task_id="task-final")
+        env.service._clock = lambda: NOW+timedelta(hours=1)
+        env.channels.outcome = PostOutcome.SENT
+        await env.service.run_once()
+        assert env.channels.posts[-1][2].startswith("✅")
+        posts, edits = len(env.channels.posts), len(env.channels.edits)
+        env.service._clock = lambda: NOW+timedelta(hours=2)
+        await env.service.run_once()
+        assert (len(env.channels.posts), len(env.channels.edits)) == (posts, edits)
+        assert await pool.fetchval("SELECT count(*) FROM intent_posts WHERE kind='final' AND state='sent'") == 1
+    run_db(check, monkeypatch)
+
+
+def test_successful_legacy_transition_does_not_revive_an_older_failed_reply(monkeypatch):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create(created_at=NOW)
+        await env.service.run_once()
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement) VALUES('task-final','project-push','Synthetic')")
+        async with pool.acquire() as conn, conn.transaction():
+            await store.transition(conn, iid, "tasked", via="dashboard", now=NOW+timedelta(hours=1), task_id="task-final")
+        await pool.execute("UPDATE intent_posts SET edited_at=$1 WHERE kind='push'", NOW+timedelta(hours=1))
+        await pool.execute("INSERT INTO intent_posts(intent_id,kind,channel_id,chat,text,state,attempts,updated_at) "
+                           "VALUES($1,'final','channel-lark',$2,'Synthetic old expiry','failed',3,$3)", iid, DM, NOW)
+        env.service._clock = lambda: NOW+timedelta(hours=2)
+        await env.service.run_once()
+        assert len(env.channels.posts) == 1 and env.channels.edits == []
+        assert await pool.fetchval("SELECT count(*) FROM intent_final_notices") == 0
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("guard", ["before_processing", "before_edit"])
+@pytest.mark.parametrize("attempts,delay", [(0, 30), (2, 60), (6, 300)])
+def test_invalid_final_notice_target_defers_without_spending_attempts(monkeypatch, guard, attempts, delay):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create(created_at=NOW)
+        await env.service.run_once()
+        async with pool.acquire() as conn, conn.transaction():
+            await store.transition(conn, iid, "rejected", via="dashboard", now=NOW)
+        await pool.execute("INSERT INTO intent_final_notices(push_id,handled_at,attempts,next_attempt_at,updated_at) "
+                           "SELECT id,$1,$2,$1,$1 FROM intent_posts WHERE intent_id=$3", NOW, attempts, iid)
+        original = intent_push.target_for
+        calls = 0
+        async def invalid(schedule):
+            nonlocal calls
+            calls += 1
+            return await original(schedule) if guard == "before_edit" and calls == 1 else None
+        monkeypatch.setattr(intent_push, "target_for", invalid)
+        await env.service.run_once()
+        notice = await pool.fetchrow("SELECT * FROM intent_final_notices")
+        assert notice["next_attempt_at"] == NOW+timedelta(seconds=delay)
+        assert notice["state"] == "pending" and notice["attempts"] == attempts
+        assert len(env.channels.posts) == 1 and env.channels.edits == []
+        # A restarted poller must not select the blocked notice on every ten-second tick.
+        service = intent_push.IntentPushService(env.channels, clock=lambda: NOW+timedelta(seconds=10))
+        calls = 0
+        await service.run_once()
+        assert calls == 0
+        service._clock = lambda: notice["next_attempt_at"]
+        monkeypatch.setattr(intent_push, "target_for", original)
+        await service.run_once()
+        assert await pool.fetchval("SELECT state FROM intent_final_notices") == ("sent" if attempts < 3 else "failed")
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("phase", ["push", "final"])
+def test_push_backlog_drains_oldest_first_over_passes(monkeypatch, phase):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        ids = [await env.create(created_at=NOW) for _ in range(51)]
+        if phase == "final":
+            await env.service.run_once()
+            await env.service.run_once()
+            await pool.execute("UPDATE intents SET state='rejected',handled_at=$1,handled_via='dashboard'", NOW)
+        for count in (50, 51):
+            await env.service.run_once()
+            if phase == "push":
+                done = await pool.fetch("SELECT intent_id FROM intent_posts WHERE kind='push' ORDER BY intent_id")
+                assert len(env.channels.posts) == count
+            else:
+                done = await pool.fetch("SELECT intent_id FROM intent_posts WHERE edited_at IS NOT NULL ORDER BY intent_id")
+                assert len(env.channels.edits) == count
+            assert [row["intent_id"] for row in done] == ids[:count]
+        await env.service.run_once()
+        assert len(env.channels.posts if phase == "push" else env.channels.edits) == 51
+    run_db(check, monkeypatch)
+
+
+def test_expiry_backlog_drains_oldest_first_over_passes(monkeypatch):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        ids = [await env.create(created_at=NOW-timedelta(days=2)) for _ in range(51)]
+        for count in (50, 51, 51):
+            await env.service.expire()
+            done = await pool.fetch("SELECT id FROM intents WHERE state='expired' ORDER BY id")
+            assert [row["id"] for row in done] == ids[:count]
+        assert env.channels.posts == [] and env.channels.edits == []
+    run_db(check, monkeypatch)

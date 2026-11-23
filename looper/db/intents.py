@@ -3,9 +3,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from .connection import get_pool
+
+
+class FinalNoticeFailure(StrEnum):
+    RETRY_EXHAUSTED = "final_notice_retry_exhausted"
 
 
 class IntentRefused(Exception):
