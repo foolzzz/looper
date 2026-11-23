@@ -16,12 +16,12 @@ OPERATIONS = (
               level=ActionLevel.INSIDE),  # reads only Looper's project configuration
     Operation("acceptance_checks.update", "POST", "/api/v1/acceptance_checks/update",
               "Set a project's acceptance check permission.",
-              "Set a project's acceptance check permission. Stores definitions only; no check is executed yet. "
-              "Future commands run as the server user and can read its files; local denies network, "
+              "Set a project's acceptance check permission. Runs checks after Worker success and stores evidence; "
+              "evidence does not affect decisions yet. Commands run as the server user and can read its files; local denies network, "
               "network permits it only when a check requests it. A private checkout is not a sandbox.",
               _object({"project_id": _STR, "acceptance_checks": MODE}, closed=True), VIEW,
               risk="high", confirms=True, operator_only=True,
-              level=ActionLevel.INSIDE),  # changes Looper's protocol permission; executes nothing
+              level=ActionLevel.INSIDE),  # changes stored permission; checks execute separately after Worker success
 )
 
 
@@ -29,7 +29,7 @@ async def impact(server, operation, arguments, principal, headers):
     if operation.operation_id != "acceptance_checks.update":
         return None
     return (f"Set project {arguments['project_id']}'s acceptance_checks to {arguments['acceptance_checks']}? "
-            "This stores the project's check permission; no check is executed yet. Future commands run as the "
+            "This permits checks after Worker success; evidence does not affect decisions yet. Commands run as the "
             "server user and can read its files; network mode permits network only when a check requests it.")
 
 

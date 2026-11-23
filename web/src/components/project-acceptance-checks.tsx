@@ -49,8 +49,8 @@ export function ProjectAcceptanceChecks({ project }: { project: Project }) {
           <option value="network">Network — only when a check requests it</option>
         </select>
         <p id={`${id}-help`} className="text-xs text-muted-foreground">
-          Allows the Planner to define command and artifact checks. This release stores definitions and does not execute checks.
-          When execution is available, commands run as the server&apos;s user and can read that user&apos;s files;
+          Runs command and artifact checks after Worker success and stores evidence. Evidence does not affect decisions yet.
+          Commands run as the server&apos;s user and can read that user&apos;s files;
           a private checkout is not a sandbox. Local denies network access. Network permits it only for checks that explicitly request it.
         </p>
       </div>

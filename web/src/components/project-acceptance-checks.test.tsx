@@ -41,7 +41,8 @@ describe("project acceptance checks", () => {
     expect(select().value).toBe("off");
     expect(save().disabled).toBe(true);
     expect(fetcher).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("does not execute checks");
+    expect(container.textContent).toContain("after Worker success");
+    expect(container.textContent).toContain("does not affect decisions");
     expect(container.textContent).toContain("server's user");
     expect(container.textContent).toContain("not a sandbox");
     expect(container.querySelector("label")?.htmlFor).toBe(select().id);

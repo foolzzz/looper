@@ -809,6 +809,11 @@ async def _run_agent_system_watched(
             except Exception:
                 logger.exception("could not sweep the agents a previous server left running")
 
+        with startup.measure("acceptance_recovery"):
+            from .acceptance_runner import recover
+
+            await recover(runtime_root)
+
         # Warm the interpreter's snapshot before kept adoption or HTTP startup can need it.
         with startup.measure("code_manifest"):
             from .. import components

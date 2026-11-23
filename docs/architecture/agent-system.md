@@ -3184,12 +3184,61 @@ including from Project → Settings. It is separate from agent-writable executio
 fields and chat settings. Configuration imports require operator identity to
 set it; omission preserves the target permission. With it enabled, Planner work steps may carry typed
 `command` or `artifact` checks bound to a criterion; definitions persist in
-`task_steps.checks` through plan edits and restarts. This stage stores definitions
-only: it executes no checks and adds no evidence or decision gate. Empty checks
+`task_steps.checks` through plan edits and restarts. After a successful Worker,
+the Planner runs checks before asking for its decision and stores append-only
+`step_check_runs` evidence. This stage does not change decisions or Reviewer prompts.
+The operator-only `task_evidence.get` operation (also available through `loopercli`)
+accepts `task` and optional `step`, returning definitions and all evidence attempts,
+including history retained after disabling checks; artifact bytes and storage paths
+are excluded. No evidence tool is added to the Manager or Planner.
+
+Git checks reuse the verification runner's private checkout, runtime-path copying
+and kernel write notifications. Writing existing code, even restoring its bytes,
+records `error: changed_code`; the private baseline is restored and discarded.
+Protected paths touched by a check remain listed even if it restores their bytes.
+Non-Git directories run in place with `guarded: false` (report only). Protected paths
+are compared with the server-recorded step start commit; changed paths produce a
+failed row. Missing write monitoring or evidence storage prevents execution.
+
+Local checks on macOS use `sandbox-exec -p
+'(version 1)(allow default)(deny network*)(deny job-creation)' /bin/sh -c <check>`.
+Before execution, a fixed probe must prove both launch and network denial; missing
+or ineffective facilities record `error: sandbox_unavailable`, with no unsandboxed
+fallback. DNS, loopback and pathname Unix sockets are denied; file IO and pipes
+remain available. Linux uses `unshare -rn --` with the same fail-closed preflight
+and a distinct network-namespace check; this path has not been verified on Linux.
+Only a check requesting `network: true` in a `network` project bypasses that launcher.
+Commands receive an OS-only subset of `child_env.inherited()`, without runtime
+credentials, proxies or SSH agents. This is not a file sandbox: commands retain the
+service user's file access.
+
+The runner allows two checks service-wide, a cumulative 900 seconds per step
+attempt, and a 16 MiB output read limit; commands have their declared timeout
+(default 300 seconds, maximum 1800). Output stores a redacted 4000-character tail,
+captured byte count and SHA-256; activities contain status and exit code only.
+Artifacts are content-typed PNG/JPEG/WebP/UTF-8 text/JSON, at most three files of
+2 MiB each. Files live under the runtime's `evidence/` tree, are deleted with the
+task, and are pruned oldest-round-first above 50 MiB per task while rows remain.
+At startup, after orphan processes are swept, running evidence becomes
+`error: interrupted`; resuming a saved Worker-success decision reruns only
+interrupted or missing checks. Completed checks are not repeated for that attempt.
+The current project permission is checked before every new check, including after
+waiting for concurrency. Disabling it prevents new launches and retains history.
+Unexpected execution or preflight exceptions settle their row as
+`error: evidence_unavailable` before propagating. An uncertain terminal database
+write remains unfinished and cannot be skipped as completed in the same process.
+Exhausting the remaining step budget records `error: budget`; a command's own
+timeout records `error: timeout`. A saved network check refused after a downgrade
+to `local` records `error: could_not_start`, without launching it.
+
+Empty checks
 and the disabled permission are omitted from existing responses and exports;
-while off, Planner contracts and prompts remain byte-identical. See the
+while off, Planner contracts and prompts remain byte-identical, including plan
+views of previously enabled projects with saved checks. Definitions remain in
+the database for operator evidence reads. See the
 [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
-and 13, for the protocol and subsequent stages.
+and 13, for the protocol and subsequent stages (decision gates, Reviewer evidence,
+artifact downloads and task-page evidence are still pending).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it

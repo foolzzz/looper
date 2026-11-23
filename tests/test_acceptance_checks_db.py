@@ -66,6 +66,8 @@ def test_definitions_survive_planner_restart_and_replan_without_execution(tmp_pa
         restored = PlannerAgent(task_id="task-checks", runtime_root=tmp_path)
         await restored._load_plan()
         assert restored._plan.steps[0].checks == specs[0].checks
+        enabled_view = "\n".join(restored._plan_lines(restored._plan))
+        assert '"command": "touch should-not-exist"' in enabled_view
         detail = await tasks.get_task_with_steps("task-checks", pool=pool)
         assert detail["steps"][0]["checks"][0]["command"] == "touch should-not-exist"
         assert not (tmp_path / "should-not-exist").exists()
@@ -78,8 +80,14 @@ def test_definitions_survive_planner_restart_and_replan_without_execution(tmp_pa
         saved = (await plans.load("task-checks", pool=pool))["steps"][0]
         assert saved["instruction"] == raw["instruction"]
         assert saved["checks"] == [check.row() for check in specs[0].checks]
-        view = "\n".join(restored._plan_lines(restored._plan))
-        assert json.loads(view.split("  checks: ", 1)[1]) == saved["checks"]
+        # Disabling hides stored commands both in the live plan and after restart.
+        for restarted in (False, True):
+            if restarted:
+                restored = PlannerAgent(task_id="task-checks", runtime_root=tmp_path)
+                await restored._load_plan()
+            view = "\n".join(restored._plan_lines(restored._plan))
+            assert "  checks: " not in view and "touch should-not-exist" not in view
+            assert restored._plan.steps[0].checks == specs[0].checks
         assert not (tmp_path / "should-not-exist").exists()
         # While enabled, omitting checks replaces the definitions with an empty set.
         await projects.set_acceptance_checks(project["id"], "local", pool=pool)
@@ -92,13 +100,13 @@ def test_definitions_survive_planner_restart_and_replan_without_execution(tmp_pa
 
 @pytest.mark.parametrize("mode,checks,restores", [
     ("network", [{"id": "c1", "criterion": 1, "type": "command", "command": "true", "network": True}], True),
-    ("local", [{"id": "c1", "criterion": 1, "type": "command", "command": "true", "network": True}], False),
-    (None, [{"id": "c1", "criterion": 1, "type": "command", "command": "true"}], False),
+    ("local", [{"id": "c1", "criterion": 1, "type": "command", "command": "true", "network": True}], True),
+    (None, [{"id": "c1", "criterion": 1, "type": "command", "command": "true"}], True),
     (None, [], True),
     ("local", {"corrupt": "not a check list"}, False),
 ])
-def test_restore_validates_saved_checks_against_current_permission(tmp_path, monkeypatch, caplog,
-                                                                 mode, checks, restores):
+def test_restore_validates_saved_structure_independently_of_current_permission(tmp_path, monkeypatch, caplog,
+                                                                             mode, checks, restores):
     async def run(pool):
         project = await projects.create_project(name="Restore example", pool=pool)
         await projects.set_acceptance_checks(project["id"], mode, pool=pool)
@@ -111,7 +119,8 @@ def test_restore_validates_saved_checks_against_current_permission(tmp_path, mon
         assert (agent._plan is not None) is restores
         if restores:
             assert [check.row() for check in agent._plan.steps[0].checks] == (
-                [{**checks[0], "timeout_seconds": 300, "required": True, "protect": []}] if checks else [])
+                [{"network": False, **checks[0], "timeout_seconds": 300, "required": True, "protect": []}]
+                if checks else [])
         else:
             assert "cannot read its saved plan" in caplog.text
         # Invalid definitions stay stored for operator recovery; restore never rewrites them.
@@ -132,7 +141,7 @@ def test_update_declares_high_risk_confirmation_without_writing(monkeypatch, mod
     impact = asyncio.run(api_v1.domain_for(operation).impact(
         None, operation, {"project_id": "project-example", "acceptance_checks": mode}, api_v1.OPERATOR, {}))
     assert f"project-example's acceptance_checks to {mode}" in impact
-    assert "no check is executed yet" in impact
+    assert "after Worker success" in impact and "does not affect decisions" in impact
     write.assert_not_awaited()
 
 
