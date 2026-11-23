@@ -190,7 +190,9 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
         <span className="text-muted-foreground">
-          {schedule.enabled ? (
+          {schedule.usage_hold ? (
+            <>Waiting for a usage window until {schedule.usage_hold.until}</>
+          ) : schedule.enabled ? (
             schedule.next_fire_at ? (
               <>
                 Next{" "}

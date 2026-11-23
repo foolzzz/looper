@@ -181,8 +181,16 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
     async def booked(done: Execution) -> None:
         await _book(spawn_id, done)
 
-    done = await call(ChildCall(child, _parent(brief), settings, cap_usd, runtime_root, claude_bin,
-                                on_record=started, on_result=booked), parse=parse)
+    from .cost_guard import Held
+
+    try:
+        done = await call(ChildCall(child, _parent(brief), settings, cap_usd, runtime_root, claude_bin,
+                                    on_record=started, on_result=booked), parse=parse)
+    except Held as held:
+        # A usage window is not a runtime error: do not start the run again, and return no advice.
+        failed = CallFailed(execution=Execution(None, failure=CallFailure.UNAVAILABLE, reason=str(held)),
+                            failure=CallFailure.UNAVAILABLE, reason=str(held))
+        return failed, 0.0
     spent = done.cost_usd or 0.0
     left = _time_left(deadline)
     if (isinstance(done, CallFailed) and done.failure is CallFailure.RUNTIME

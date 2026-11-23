@@ -274,6 +274,13 @@ def _stale_after_seconds_view(row: Mapping[str, Any], window: timedelta | None) 
     return int(window.total_seconds())
 
 
+def _usage_hold(schedule_id: str) -> dict[str, Any] | None:
+    """The firing waiting on a usage window, absent once that instant has passed and while the guard is off."""
+    from . import usage_windows
+
+    return usage_windows.schedule_hold(schedule_id, now=_utcnow())
+
+
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
                   spent_today: float = 0.0, default_timeout: int | None = None) -> dict[str, Any]:
     """``default_timeout``: the system default run timeout, for a schedule that follows it."""
@@ -328,6 +335,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "last_run": last_run,
         **({"subscription": subscriptions.view(row["subscription"])}
            if row.get("kind") == Kind.SUBSCRIPTION.value and row.get("subscription") else {}),
+        **({"usage_hold": usage_hold} if (usage_hold := _usage_hold(row["id"])) else {}),
     }
 
 
@@ -1216,10 +1224,14 @@ def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str
 async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None = None,
                   expected_version: str | None = None) -> dict[str, Any]:
     """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays."""
+    from .usage_windows import ScheduleDeferred
+
     try:
         run_id = await scheduler.run_now(schedule_id, **({"expected_version": expected_version}
                                                        if expected_version is not None else {}))
     except db_schedules.ConfigurationChanged as exc:
+        raise RequestError(HTTP_409, str(exc)) from None
+    except ScheduleDeferred as exc:
         raise RequestError(HTTP_409, str(exc)) from None
     if run_id is None:
         await _existing(schedule_id)

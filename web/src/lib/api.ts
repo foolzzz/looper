@@ -1542,6 +1542,8 @@ export interface ScheduleInfo {
   enabled: boolean;
   /** Null while disabled. */
   next_fire_at: string | null;
+  /** Set while a firing waits for a usage window. The instant is the stored reset or cooldown, not a locale clock. */
+  usage_hold?: { until: string; reason: string; reset_known: boolean; window: string | null };
   last_fired_at: string | null;
   last_success_at: string | null;
   consecutive_failures: number;

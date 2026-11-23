@@ -61,6 +61,7 @@ const byLowerName = (a: { name: string }, b: { name: string }) => a.name.toLower
 
 /** When it runs next, in its own zone; a disabled one does not. */
 function NextRun({ schedule }: { schedule: ScheduleInfo }) {
+  if (schedule.usage_hold) return <span>Waiting for a usage window until {schedule.usage_hold.until}</span>;
   if (!schedule.enabled) return <span>Disabled</span>;
   if (!schedule.next_fire_at) return <span>No next run</span>;
   return (

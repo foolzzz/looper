@@ -38,6 +38,9 @@ manual run is never throttled.
 
 Before the task (S2): a schedule with a ``daily_budget_usd`` whose runs fired
 since the server's local midnight cost that much records ``skipped_budget``.
+A usage-window hold, when cost guard enforcement is on, puts this firing back
+(``last_fired_at`` and ``next_fire_at`` unchanged, no run, a subscription cursor
+unmoved) until that instant; the next pass admits it again.
 A schedule with a ``gate_command`` records the run ``gating`` and runs the
 gate outside the transaction (``schedule_gate``): a failure or timeout is
 ``gate_failed`` (a failure); nothing printed is ``skipped_gate``, unless the
@@ -423,6 +426,15 @@ class _DrainBegan(Exception):
     """A drain began while an agent firing's transaction was open: the firing rolls back and is done after the drain."""
 
 
+class _UsageWindowHeld(Exception):
+    """This firing waits for a usage window. Nothing starts, and a subscription cursor stays where it is."""
+
+    def __init__(self, until: datetime, reason: str):
+        self.until = until
+        self.reason = reason
+        super().__init__(reason)
+
+
 class Scheduler:
     """Fires due schedules every ``tick_seconds``; started and stopped with the server. ``sender`` sends the
     schedules' messages (None: they are recorded only), their links starting with ``dashboard_url`` (``links``);
@@ -736,7 +748,13 @@ class Scheduler:
                 kind=schedule["kind"], fired_at=now,
                 error="its Manager was answering a message (idle_only); the next firing tries again")
             return None
-        return await self._fire(conn, schedule, firing, now)
+        try:
+            return await self._fire(conn, schedule, firing, now)
+        except _UsageWindowHeld:
+            # The in-memory row still has the timestamps from before this firing. Put those back in this transaction.
+            await db_schedules.set_fired(conn, schedule["id"], last_fired_at=schedule["last_fired_at"],
+                                        next_fire_at=schedule["next_fire_at"])
+            return None
 
     async def run_now(self, schedule_id: str, *, expected_version: str | None = None,
                       only_enabled: bool = False) -> str | None:
@@ -758,6 +776,10 @@ class Scheduler:
                     self._check_still_admitted(schedule)
             except _DrainBegan:
                 return None
+            except _UsageWindowHeld as held:
+                from .usage_windows import ScheduleDeferred
+
+                raise ScheduleDeferred(held.until, held.reason) from None
             await self._defer_start(schedule, launched)
             await self._follow(schedule, launched)
             return launched.run_id
@@ -875,9 +897,20 @@ class Scheduler:
         if not subscription and await db_schedules.owner_error(conn, schedule["manager_id"],
                                                                 template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
-        from .cost_guard import observe_schedule
+        from . import usage_windows
+        from .cost_guard import Decision, observe_schedule
 
-        await observe_schedule(schedule)
+        admission = await observe_schedule(schedule)
+        if admission is not None and admission.decision is Decision.HOLD and admission.until is not None:
+            usage_windows.note_schedule(schedule["id"], until=admission.until, reason=admission.reason or "",
+                                       reset_known=admission.reset_known, window=admission.window)
+            await usage_windows.notify_hold(admission.provider_id, usage_windows.Hold(
+                admission.until, usage_windows.HoldReason(admission.reason or usage_windows.HoldReason.REJECTED),
+                admission.reset_known, admission.window))
+            logger.info("schedule %s waits for a usage window until %s (%s)", schedule["id"],
+                        admission.until.isoformat(), admission.reason)
+            raise _UsageWindowHeld(admission.until, admission.reason or "")
+        usage_windows.clear_schedule(schedule["id"])
         budget = schedule["daily_budget_usd"]
         if budget is not None:
             spent = await db_schedules.spent_since(conn, schedule["id"], self.day_start(now))
@@ -958,7 +991,13 @@ class Scheduler:
         # leads or intents turned off meanwhile, ends the series.
         if more and fired < CATCH_UP_MAX and await extraction_on(run_id):
             self._catch_ups[schedule_id] = fired + 1
-            if await self.run_now(schedule_id, only_enabled=True) is None:
+            from .usage_windows import ScheduleDeferred
+
+            try:
+                started = await self.run_now(schedule_id, only_enabled=True)
+            except ScheduleDeferred:
+                started = None
+            if started is None:
                 self._catch_ups.pop(schedule_id, None)
 
     async def _start_command(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], firing: Firing,
@@ -1261,6 +1300,8 @@ class Scheduler:
                     launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])
                     self._check_still_admitted(schedule)
             except _DrainBegan:
+                return
+            except _UsageWindowHeld:
                 return
             await self._defer_start(schedule, launched)
             started = await self._follow(schedule, launched)

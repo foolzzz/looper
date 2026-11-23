@@ -2598,7 +2598,9 @@ export function ProjectSchedulesSection({
             const sid = schedule.schedule_id;
             const state = row(sid);
             const enabled = switching[sid] ?? schedule.enabled;
-            const next = schedule.enabled
+            const next = schedule.usage_hold
+              ? `Waiting for a usage window until ${schedule.usage_hold.until}`
+              : schedule.enabled
               ? schedule.next_fire_at
                 ? `next ${formatInZone(schedule.next_fire_at, schedule.timezone)}`
                 : "no next run"

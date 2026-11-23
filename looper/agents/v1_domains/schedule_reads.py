@@ -94,9 +94,12 @@ SCHEDULE_WITHOUT_LAST_RUN = _object({key: value for key, value in _SCHEDULE_FIEL
                                     if key not in {"manager_id", "manager_name"}})
 SCHEDULE = _object({**_SCHEDULE_FIELDS, "last_run": _nullable(RUN)})
 # Full schedule projections include availability; compact tool results may omit it.
+_USAGE_HOLD = _object({"until": _STR, "reason": _STR, "reset_known": _BOOL, "window": _NULL_STR},
+                      ["until", "reason", "reset_known"], closed=True)
 for _schema in (SCHEDULE_WITHOUT_LAST_RUN, SCHEDULE):
     _schema["properties"]["notify_target_available"] = _BOOL
-    _schema["required"] = [name for name in _schema["required"] if name != "subscription"]
+    _schema["properties"]["usage_hold"] = _USAGE_HOLD
+    _schema["required"] = [name for name in _schema["required"] if name not in ("subscription", "usage_hold")]
 SCHEDULE_LIMITS = _object({
     **dict.fromkeys(("name_max_chars", "requirement_max_chars", "min_interval_seconds",
                      "min_interval_gated_seconds", "run_timeout_max_seconds", "gate_command_max_chars",
