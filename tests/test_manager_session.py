@@ -7,6 +7,7 @@ import asyncio
 import contextvars
 import json
 import sys
+from collections import deque
 from dataclasses import fields
 from pathlib import Path
 
@@ -35,7 +36,9 @@ def test_a_new_manager_has_only_main_with_the_old_defaults(tmp_path: Path) -> No
         "session_profile": None, "session_provider": None, "process": None, "pending_switch": None,
         "pending_handoff": None, "clean_start": False, "session_loaded": False, "state_shown": None,
         "state_lost": "no whole block yet", "state_generation": 0, "stopped_notes": [], "lock_owner": None,
+        "turns_ended": deque(maxlen=16),
         "running_token": None, "research": None, "agent_settings": None, "last_activity": 7.0, "budget": None}
+    assert main.turns_ended.maxlen == 16
     assert not main.lifecycle_gate.locked() and main.lifecycle_gate is not main.turn_lock
 
 
@@ -57,6 +60,8 @@ def test_the_old_names_read_and_write_the_session_the_context_sets(tmp_path: Pat
         main, "s-main", main.turn_lock, shown_main)
     assert (group.session_id, group.state_shown) == ("s-group", shown_group)
     assert main.turn_lock is not group.turn_lock
+    assert main.turns_ended is not group.turns_ended
+    assert main.turns_ended.maxlen == 16 and group.turns_ended.maxlen == 16
 
     # Nothing set here: every old name still kept is main's field.
     assert manager._current.get() is None and manager._session_now() is main

@@ -94,7 +94,8 @@ def test_manager_turn_records_delivery(delivery, channel, replayed, disable_mid,
             assert reply[-1].payload["text"] == "hello"
             return
         metrics = metadata["turn_metrics"]
-        assert set(metrics) == {"v", "origin", "chat", "received_at", "ack", "ack_ms", "first_reply_ms", "tool_calls", "delivery", "replayed"}
+        assert set(metrics) == {"v", "origin", "chat", "received_at", "ack", "ack_ms", "first_reply_ms", "tool_calls", "delivery", "replayed", "queued_behind"}
+        assert metrics["queued_behind"] == "none"
         assert metrics["delivery"] == delivery
         assert metrics["chat"] == ("dashboard" if channel == "web" else "direct")
         assert metrics["ack"] == {"web":"status", "lark":"reaction", "lark_pending":"pending", "lark_none":"none"}[channel]

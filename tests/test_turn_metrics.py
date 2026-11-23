@@ -33,6 +33,82 @@ def test_turn_metadata_contract():
         'delivery': 'reply', 'replayed': True}
 
 
+def test_queued_behind_counts_turns_that_ended_at_or_after_arrival():
+    from looper.agents.ops import TurnOrigin
+    from looper.agents.turn_metrics import QueuedBehind, queued_behind
+    received = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    user, completion, own = TurnOrigin.USER, TurnOrigin.COMPLETION, TurnOrigin.OWN
+
+    def ended(*pairs: tuple[TurnOrigin, float]) -> list[tuple[TurnOrigin, datetime]]:
+        return [(origin, received + timedelta(seconds=delta)) for origin, delta in pairs]
+
+    cases = [
+        ([], QueuedBehind.NONE),
+        (ended((user, -1), (completion, -1)), QueuedBehind.NONE),
+        (ended((user, 1)), QueuedBehind.USER),
+        (ended((completion, 1)), QueuedBehind.BACKGROUND),
+        (ended((user, 1), (completion, 1)), QueuedBehind.BACKGROUND),
+        (ended((user, 0)), QueuedBehind.USER),
+        (ended((completion, 0)), QueuedBehind.BACKGROUND),
+        (ended((own, 1)), QueuedBehind.BACKGROUND),
+        (ended((completion, -1), (user, 1)), QueuedBehind.USER),
+    ]
+    for entries, expected in cases:
+        assert queued_behind(entries, received) is expected
+
+
+def test_queued_behind_is_appended_last_and_a_completion_record_omits_it():
+    from looper.agents.ops import TurnOrigin
+    from looper.agents.turn_metrics import AckKind, ChatKind, QueuedBehind, TurnDelivery, TurnTimes
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    times = TurnTimes(now, ack_at=now, ack=AckKind.NONE, first_reply_at=now, chat=ChatKind.DASHBOARD,
+                      queued_behind=QueuedBehind.USER)
+    metadata = times.to_metadata(TurnDelivery.REPLY, TurnOrigin.USER, False)
+    assert list(metadata) == ['v', 'origin', 'chat', 'received_at', 'ack', 'ack_ms', 'first_reply_ms',
+                              'tool_calls', 'delivery', 'replayed', 'queued_behind']
+    assert metadata['queued_behind'] == 'user'
+    times.queued_behind = QueuedBehind.BACKGROUND
+    assert times.to_metadata(TurnDelivery.FAILED, TurnOrigin.COMPLETION, False) == {
+        'origin': 'completion', 'tool_calls': 0, 'delivery': 'failed'}
+
+
+def test_note_lock_end_appends_once_for_the_owner_while_metrics_are_on(monkeypatch):
+    from types import SimpleNamespace
+    from collections import deque
+    from looper.agents import chat_settings, turn_metrics
+    from looper.agents.ops import TurnOrigin
+    monkeypatch.setattr(chat_settings, '_metrics_enabled', True)
+    token = SimpleNamespace()
+    session = SimpleNamespace(lock_owner=token, turns_ended=deque(maxlen=16))
+    turn_metrics.note_lock_end(session, token, TurnOrigin.USER)
+    recorded = session.turns_ended[0]
+    turn_metrics.note_lock_end(session, token, TurnOrigin.COMPLETION)
+    assert list(session.turns_ended) == [recorded]
+    assert recorded[0] is TurnOrigin.USER
+    assert token._queued_end_noted is True
+
+
+def test_note_lock_end_leaves_the_token_alone_when_metrics_are_off_or_it_does_not_own_the_lock(monkeypatch):
+    from types import SimpleNamespace
+    from collections import deque
+    from looper.agents import chat_settings, turn_metrics
+    from looper.agents.ops import TurnOrigin
+
+    class Untouched:
+        __slots__ = ()
+
+    token = Untouched()
+    session = SimpleNamespace(lock_owner=token, turns_ended=deque(maxlen=16))
+    monkeypatch.setattr(chat_settings, '_metrics_enabled', False)
+    turn_metrics.note_lock_end(session, token, TurnOrigin.USER)
+    assert list(session.turns_ended) == []
+    monkeypatch.setattr(chat_settings, '_metrics_enabled', True)
+    session.lock_owner = SimpleNamespace()
+    turn_metrics.note_lock_end(session, token, TurnOrigin.COMPLETION)
+    turn_metrics.note_lock_end(session, None, TurnOrigin.COMPLETION)
+    assert list(session.turns_ended) == []
+
+
 def test_metrics_write_is_bounded_and_failure_is_throttled(monkeypatch, caplog):
     from looper.agents import turn_metrics as metrics
     monkeypatch.setattr(metrics, "_last_warning", float("-inf"))
