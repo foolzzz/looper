@@ -40,7 +40,7 @@ from .agent_settings import CONCURRENCY_MAX, PLANNER_CHOICE_ROLES, TASK_LIMIT_RO
 from .agent_settings import concurrency, index_layers, task_agents_view
 from .agent_settings import TASK_ROLES, AgentSettings, Layer, resolve, resolve_task_concurrency
 from .bus import MessageBus
-from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, RestartMode, planner_address
+from .message import CancelBy, TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, RestartMode, planner_address
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, TaskWorkspaces, execution_fields
 from .project_execution import LessonsMode, ReviewPolicy, TaskBudgetAction, format_usd
 from .step_workspaces import _size_text as size_text
@@ -821,8 +821,30 @@ async def list_tasks_page(
             # What the task's Planner, Workers and Reviewers spent so far.
             "cost": costs.get(t.get("id", "")),
         })
+    await _attach_failed_checks(result)
     return {"tasks": result, "next_before": tasks[-1]["id"] if len(page) > limit else None, "counts": counts,
             "hidden_scheduled": hidden}
+
+
+async def _attach_failed_checks(rows: list[dict[str, Any]]) -> None:
+    """Name the required checks that failed, on attention rows only, and only when there is one.
+
+    One query covers the page. The keys stay off every other row, so a list with no such failure
+    is unchanged. The compact Manager list never reaches here.
+    """
+    attention = [row["task_id"] for row in rows
+                 if row.get("group") == db_tasks.TaskGroup.ATTENTION.value and row.get("task_id")]
+    if not attention:
+        return
+    from ..db import step_check_runs
+
+    found = await step_check_runs.failed_required_current(attention)
+    for row in rows:
+        items = found.get(row["task_id"])
+        if not items:
+            continue
+        row["failed_checks"] = [item["check_id"] for item in items]
+        row["failed_check_step"] = items[0]["step_id"]
 
 
 async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list[dict[str, Any]]:
@@ -1192,7 +1214,8 @@ async def check_task_control(task_id: str, action: str) -> dict[str, Any]:
     return task
 
 
-async def control_task(task_id: str, action: str, bus: MessageBus, source: AgentAddress) -> None:
+async def control_task(task_id: str, action: str, bus: MessageBus, source: AgentAddress, *,
+                       by: CancelBy = CancelBy.USER) -> None:
     """Check a stop, cancel or restart and send it once to the TaskRouter."""
     await check_task_control(task_id, action)
     message_type = {"stop": MessageType.TASK_STOP, "cancel": MessageType.TASK_CANCEL,
@@ -1202,6 +1225,7 @@ async def control_task(task_id: str, action: str, bus: MessageBus, source: Agent
         payload["mode"] = (RestartMode.START_OVER if action == "start_over" else RestartMode.CONTINUE).value
     await bus.publish(MessageEnvelope.create(
         source=source, target=TASK_ROUTER_ADDRESS, message_type=message_type, payload=payload,
+        metadata={"cancel_by": by.value} if action == "cancel" else None,
     ))
 
 

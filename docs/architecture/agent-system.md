@@ -3293,8 +3293,31 @@ the Planner runs checks before asking for its decision and stores append-only
 `step_check_runs` evidence. This stage does not change decisions or Reviewer prompts.
 The operator-only `task_evidence.get` operation (also available through `loopercli`)
 accepts `task` and optional `step`, returning definitions and all evidence attempts,
-including history retained after disabling checks; artifact bytes and storage paths
-are excluded. No evidence tool is added to the Manager or Planner.
+including history retained after disabling checks. It returns no artifact bytes and
+no storage path. No evidence tool is added to the Manager or Planner.
+
+`GET /api/v1/evidence/<task_id>/<run_id>/<index>` returns one artifact's bytes.
+This prefix uses the operator gate, ahead of the `/api/v1/` client API. The handler
+then requires an operator browser session, so a bearer token and an API client are
+refused. The file path is rebuilt
+from the run row that belongs to that task. The URL supplies the task, the run id
+and the artifact index, not a path. The content type is the extension of the stored
+name: `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `text/plain` or
+`application/json`. Those four image types are `Content-Disposition: inline`. Every
+other type is `attachment` with `filename` set to the stored name. A mime recorded
+on the row is ignored, so a row that claims `text/html` or `image/svg+xml` is not
+served as that type. The response also sets `X-Content-Type-Options: nosniff`,
+`Content-Security-Policy: sandbox` and `Cache-Control: no-store`. A run id outside
+the signed 64-bit range is 404 and is not queried.
+
+An attention row from `tasks.page` carries `failed_checks` and `failed_check_step`
+when a required check's current evidence failed. Current evidence is the greatest
+run of the latest attempt. The names are check ids that the step's current `checks`
+still define. A skipped step is omitted. An advisory failure, an error and a stale
+row are omitted. The same name is listed once, on its earliest step.
+`failed_check_step` is that step's id. A row without such a failure, the compact
+task list and task detail omit both keys. The task page reads `task_evidence.get`
+again when the task status or a step's id, status or retries change.
 
 Git checks reuse the verification runner's private checkout, runtime-path copying
 and kernel write notifications. Writing existing code, even restoring its bytes,
@@ -3342,7 +3365,7 @@ views of previously enabled projects with saved checks. Definitions remain in
 the database for operator evidence reads. See the
 [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
 and 13, for the protocol and subsequent stages (decision gates, Reviewer evidence,
-artifact downloads and task-page evidence are still pending).
+and result or channel evidence lines are still pending).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -5255,7 +5278,7 @@ channel command is added.
 
 With a project's `subagents` set to `on` (unset is off), a Worker's `run.` token
 also has `looper_agent_spawn`, `looper_agent_wait` and `looper_agent_cancel`.
-Reviewers and explorers never receive them; Planner support is a later slice.
+Reviewers and explorers never receive them. A task's Planner gets them too, below.
 The run's recorded identity, working directory and live spend supply the parent
 authority; model arguments cannot select a different task or parent. Spawn and
 cancel are write tools, wait is read; all three declare the `inside` action level.
@@ -5282,6 +5305,19 @@ detaches keeps its children across the planned handover. The serve lifecycle
 recovers existing rows, retries queued work and pending room delivery, and
 cancels or hands over children on shutdown. With the switch off, existing
 prompts, tool listings, run grants and launch parameters retain their bytes.
+
+With the same switch on, a task's Planner lists the three tools and its system
+prompt gets an explorers guide (`PlannerSubagents`, the Workers' code path with
+the Planner as spawner and its running turn's record as parent). Spawn and cancel
+run only in a turn Looper sent (`needs_user_turn` otherwise); wait without ids lists
+every explorer the task's Planner spawned, across turns. The Planner's spend is not
+streamed to the server, so the parent-budget term does not take part
+(`parent_spend_known` is false). A result the Planner did not wait for goes to
+the room as a `spawn_result` message pending for it, which wakes it, or, with the room
+off, is appended to its next turn (4,000 characters, the rest by wait); a tool,
+room or turn receipt claims the first delivery under one row lock. A Planner's turn
+ending cancels nothing; the task leaving `running` cancels its explorers
+(`task_ended`).
 
 ### A task's Planner's tools
 
