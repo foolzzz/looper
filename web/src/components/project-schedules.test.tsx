@@ -1057,10 +1057,18 @@ describe("subscription schedules", () => {
     }));
     expect(container.querySelector<HTMLInputElement>('[id$="-name"]')!.value).toBe("事件分流");
     expect(container.textContent).toContain("结果仅存储，暂不发送");
+    expect(container.textContent).toContain("固定范围：私聊、@你的消息、你自己发的消息和已登记的告警机器人");
+    expect(container.textContent).toContain("按最旧消息优先读取，读不完的下一次继续");
+    expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+    expect(container.querySelector('[id$="-quiet"]')).toBeNull();
+    expect(container.querySelector('[id$="-header"]')).toBeNull();
     expect(container.querySelector('[id$="-target"]')).toBeNull();
     await act(async () => button("Create").click());
     expect(writes).toHaveLength(1);
-    expect(writes[0]).toMatchObject({ name: "事件分流", subscription: { source_id: "synthetic-stream", output_kind: "triage" } });
+    expect(writes[0]).toMatchObject({ name: "事件分流", subscription: {
+      source_id: "synthetic-stream", output_kind: "triage", chat_kinds: ["p2p", "group", "topic"],
+      sender_kinds: ["user", "app"], include_history: false, quiet_word: "NONE", output_header: "",
+    } });
     expect(writes[0]).not.toHaveProperty("notify_target");
     expect((writes[0] as { subscription: object }).subscription).not.toHaveProperty("include_chats");
   });

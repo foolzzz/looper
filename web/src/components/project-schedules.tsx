@@ -1692,6 +1692,9 @@ function SubscriptionForm({
 
       <fieldset className="space-y-2 border-t border-border pt-4">
         <legend className={cn(LABEL, "mb-1")}>What a run reads</legend>
+        {draft.outputKind === "triage" ? (
+          <p className="text-xs text-muted-foreground">固定范围：私聊、@你的消息、你自己发的消息和已登记的告警机器人；不读导入历史和 Looper 自己的应用。</p>
+        ) : <>
         <div className="flex flex-wrap gap-x-5 gap-y-1">
           {CHAT_KIND_OPTIONS.map((option) => (
             <label key={option.value} className="flex min-h-11 items-center gap-2 text-xs sm:min-h-0">
@@ -1712,13 +1715,14 @@ function SubscriptionForm({
             <input type="checkbox" className="h-4 w-4 accent-primary" checked={draft.history}
               onChange={(e) => set("history", e.target.checked)} />Include history and imports</label>
         </div>
+        </>}
         <div className="grid gap-3 sm:grid-cols-3">
           {([["maxAge", "Look back (minutes)", "Older messages are dropped and counted."], ["maxEvents", "Newest messages (at most)", "More are cut, oldest first."],
             ["textChars", "Characters per message", "Each message is cut to this many."]] as const).map(([key, label, hint]) => (
             <div key={key} className="space-y-1">
-              <label htmlFor={id(key)} className={LABEL}>{label}</label>
+              <label htmlFor={id(key)} className={LABEL}>{key === "maxEvents" && draft.outputKind === "triage" ? "每次最多消息数" : label}</label>
               <Input id={id(key)} inputMode="numeric" value={draft[key]} onChange={(e) => set(key, e.target.value)} />
-              <p className="text-xs text-muted-foreground">{hint}</p>
+              <p className="text-xs text-muted-foreground">{key === "maxEvents" && draft.outputKind === "triage" ? "按最旧消息优先读取，读不完的下一次继续。" : hint}</p>
             </div>))}
         </div>
       </fieldset>
@@ -1726,6 +1730,7 @@ function SubscriptionForm({
       <fieldset className="space-y-2 border-t border-border pt-4">
         <legend className={cn(LABEL, "mb-1")}>{draft.outputKind === "triage" ? "结果与预算" : "What it pushes"}</legend>
         <div className="grid gap-3 sm:grid-cols-2">
+          {draft.outputKind !== "triage" && <>
           <div className="space-y-1">
             <label htmlFor={id("quiet")} className={LABEL}>Quiet word</label>
             <Input id={id("quiet")} value={draft.quiet} onChange={(e) => set("quiet", e.target.value)} spellCheck={false} />
@@ -1736,6 +1741,7 @@ function SubscriptionForm({
             <Input id={id("header")} value={draft.header} onChange={(e) => set("header", e.target.value)} />
             <p className="text-xs text-muted-foreground">Written above the reply; @ marks in the reply are removed.</p>
           </div>
+          </>}
           <div className="space-y-1">
             <label htmlFor={id("budget")} className={LABEL}>Spend cap per run (USD) *</label>
             <Input id={id("budget")} inputMode="decimal" value={draft.budget} onChange={(e) => set("budget", e.target.value)} />
