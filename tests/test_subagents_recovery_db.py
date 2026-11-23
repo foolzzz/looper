@@ -54,7 +54,8 @@ async def row_until(pool, spawn_id, state):
             await asyncio.sleep(.01)
 
 
-def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_path, monkeypatch):
+@pytest.mark.parametrize('account_admission', [False, True])
+def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_path, monkeypatch, account_admission):
     # Probe/hash outside the deadlines which measure starting and reattaching a keeper.
     from looper import components
     components.loaded_manifest()
@@ -75,6 +76,12 @@ def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_pa
         monkeypatch.setattr(keeper, 'RUNS_DIR', Path('.'))
 
         async def check(pool):
+            from looper.agents import admission
+            controller = admission.Controller()
+            controller.active = account_admission
+            monkeypatch.setattr(admission, '_controller', controller)
+            for name in ('slot', 'register', 'release'):
+                monkeypatch.setattr(admission, name, getattr(controller, name))
             first, caller = await setup(pool, tmp_path, monkeypatch)
             executable = fake_claude(tmp_path / 'claude-held', HELD_EXPLORER)
             first.runtime_root, first.claude_bin, first.keeper = runtime, executable, KeeperSettings(1)
@@ -88,8 +95,13 @@ def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_pa
                 assert asking['child_process']['kept'] is True
                 original_record = asking['child_record_id']
                 original_identity = dict(asking['child_process'])
+                owner = handles[0].manifest['run_id']
+                if account_admission:
+                    assert set(controller.running) == {owner}
+                    assert controller.running[owner].lane is admission.Lane.USER_TASK
                 await first.detach(epoch=1)
                 await asyncio.wait_for(running, 10)
+                assert not controller.running
                 detached = await agent_spawns.get(row['id'], pool=pool)
                 assert detached['state'] == 'asking' and detached['finished_at'] is None
                 assert (await llm_records.get_record(original_record, pool=pool))['status'] == 'running'
@@ -99,6 +111,9 @@ def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_pa
                 no_spawn = AsyncMock(side_effect=AssertionError('restart recovery spawned another process'))
                 monkeypatch.setattr(subagents.spawn, 'run_child', no_spawn)
                 await second.recover()
+                if account_admission:
+                    assert set(controller.running) == {owner}
+                    assert controller.running[owner].lane is admission.Lane.USER_TASK
                 adopted = await agent_spawns.get(row['id'], pool=pool)
                 assert adopted['state'] == 'asking'
                 assert adopted['child_record_id'] == original_record
@@ -125,6 +140,7 @@ def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_pa
                 release_cleanup.set()
                 if collectors:
                     await asyncio.wait_for(asyncio.gather(*collectors), 10)
+                assert not controller.running
                 assert not (runtime / '.local' / 'explorer-homes').joinpath(handles[0].manifest['run_id']).exists()
                 await second.recover()
                 assert finished['spent_usd'] == pytest.approx(.04)
