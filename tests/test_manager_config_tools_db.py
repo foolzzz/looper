@@ -24,6 +24,7 @@ from tests.test_catalog_db import _call as _catalog_call
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
 from tests.test_task_agents_db import _call, _concurrency_chat
 from tests.test_usage_api_db import _run_record
+from tests.builtin_support import BUILTIN_PROFILE_NAMES, builtin_providers
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -303,11 +304,11 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
         await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile["profile_id"]})
         await _ok("PUT", "/api/agent-settings/roles/processor", {"profile_id": profile["profile_id"]})
         listed = await _tool(chat, "looper_agent_profiles", action="list")
-        # The advisor's, its judge's and the leads check's built-in profiles are listed too.
-        assert [p["name"] for p in listed["profiles"]] == ["claude-code/fable-5-2", "claude-code/haiku-5-5",
-                                                          "claude-code/opus", "claude-code/sonnet-5-5", "fast"]
-        assert listed["profiles"][4]["used_by"] == "the worker role"
-        assert listed["profiles"][4]["model_id"] == opus["model_id"]
+        # Every built-in profile is listed too, before the ones the user made.
+        assert [p["name"] for p in listed["profiles"]] == [*BUILTIN_PROFILE_NAMES, "fast"]
+        fast = listed["profiles"][-1]
+        assert fast["used_by"] == "the worker role"
+        assert fast["model_id"] == opus["model_id"]
         assert listed["runtimes"] == [{"runtime_id": "rt-claude-code", "name": "claude-code",
                                        "type": "claude-code", "roles": ["manager", "planner", "worker", "reviewer"]}]
         # The processor and its capability are the dashboard's: the Manager's listing is as it was before them.
@@ -317,8 +318,9 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
         assert all("prices" not in m for m in listed["models"])
         (unknown,) = await chat.say("改 slow", ("looper_agent_profiles", {
             "action": "update", "profile": "slow", "effort": "high"}))
-        assert _error(unknown) == "not_found" and "claude-code/opus, claude-code/sonnet-5-5, fast" in unknown["error"][
-            "message"]
+        # The refusal names every profile there is, as the listing above orders them.
+        assert _error(unknown) == "not_found" and unknown["error"]["message"].endswith(
+            "there are: " + ", ".join([*BUILTIN_PROFILE_NAMES, "fast"]))
         (taken,) = await chat.say("再加一个", ("looper_agent_profiles", {
             "action": "create", "name": "fast", "runtime": "rt-claude-code", "model": opus["model_id"]}))
         assert _error(taken) == "conflict" and "already exists" in taken["error"]["message"]
@@ -403,8 +405,7 @@ def test_deleting_an_agent_profile_asks_first_and_one_in_use_is_refused(
         assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE id = 'agent-sonnet'") == 1
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert done["result"] == {"deleted": "claude-code/sonnet"}
-        assert [p["name"] for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"]] == [
-            "claude-code/fable-5-2", "claude-code/haiku-5-5", "claude-code/opus", "claude-code/sonnet-5-5"]
+        assert [p["name"] for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"]] == BUILTIN_PROFILE_NAMES
 
     run_db(test, monkeypatch)
 
@@ -428,7 +429,7 @@ def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter
         assert model["model"]["provider_id"] == stored["provider_id"]
         listed = await _tool(chat, "looper_providers", action="list")
         assert [p["name"] for p in listed["providers"]] == [
-            "claude-subscription", "coco login", "codex-login", "cursor-login", "grok-login", "deepseek"]
+            *(name for _, name in await builtin_providers(pool)), "deepseek"]
         (refused,) = await chat.say("再登记一个", ("looper_providers", {
             "action": "register", "name": "other", "vendor_type": "deepseek",
             "env": [{"key": "OTHER_API_TOKEN", "value": "x"}]}))
@@ -955,8 +956,8 @@ def test_a_roles_timeout_is_set_as_settings_roles_saves_it(monkeypatch: pytest.M
     ({"values": {"max_concurrency": 2}}, "concurrency is per task: max_concurrency is how many of one task's"),
     ({"role": "manager", "values": {"max_concurrency": 2}}, "max_concurrency is how many"),
     ({"role": "manager", "project": "calc", "values": {"harness_prompt": "x"}}, "the manager spans every project"),
-    ({"role": "worker", "values": {"profile": "nope"}}, "no Agent Profile 'nope'; there are: claude-code/fable-5-2, claude-code/haiku-5-5, claude-code/opus, "
-     "claude-code/sonnet-5-5"),
+    ({"role": "worker", "values": {"profile": "nope"}},
+     f"no Agent Profile 'nope'; there are: {', '.join(BUILTIN_PROFILE_NAMES)}"),
     ({"role": "worker", "values": {}}, "values: give at least one setting"),
     ({"role": "worker", "values": {"run_budget_usd": -1}}, "run_budget_usd must be more than 0"),
 ])

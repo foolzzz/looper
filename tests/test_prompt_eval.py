@@ -13,6 +13,7 @@ import shutil
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -1453,6 +1454,23 @@ def test_every_server_installs_gh_before_starting(tmp_path: Path, monkeypatch: p
         pytest.fail("no server may start")
 
 
+def test_a_server_that_exits_before_answering_shows_its_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            capsys: pytest.CaptureFixture[str]) -> None:
+    def exits(*_: Any, stdout: Any, **__: Any) -> SimpleNamespace:
+        stdout.write("OSError: [Errno 98] address already in use\n")
+        stdout.flush()
+        return SimpleNamespace(poll=lambda: 1, returncode=1)
+
+    monkeypatch.setattr(runner, "free_port", lambda: 49152)
+    monkeypatch.setattr(runner.subprocess, "Popen", exits)
+    with pytest.raises(runner.EvalError, match=r"exited \(1\)"), runner.running_server(
+        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        log_path=tmp_path / "serve.log",
+    ):
+        pytest.fail("no server may start")
+    assert "address already in use" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("rooted", [False, True])
 def test_eval_server_projects_root_preserves_default_ops(tmp_path, monkeypatch, rooted):
     import tomllib
@@ -2161,6 +2179,18 @@ def test_ports_handed_out_in_one_process_are_distinct() -> None:
     assert len(set(ports)) == 64
 
 
+def test_a_port_handed_out_is_out_of_reach_of_other_processes() -> None:
+    port = runner.free_port()
+    # Below the dynamic ports Linux and macOS give a port-0 bind or an outgoing connection.
+    assert port < 32768
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", port))  # nothing listens on it: only the lock can keep another process off
+    claimed = subprocess.run(
+        [sys.executable, "-c", f"from evals.prompt_regression import runner; print(runner._claim({port}))"],
+        cwd=runner.REPO_ROOT, capture_output=True, text=True, timeout=60, check=True).stdout
+    assert claimed.strip() == "False"
+
+
 class _CostlyApi:
     """A task whose cost grows 0.1 per poll; it is cancelled when asked and then reports so."""
 
@@ -2310,7 +2340,8 @@ _MISBEHAVING = EvalTask(
 
 
 # What each fake-mode task is run through: (steps, retries, reviews, chat turns), and how its steps sit side by side.
-_FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
+_FLOW = {"skill_proposal_useful": (2, 0, 0, 0), "skill_proposal_not_needed": (1, 0, 0, 0),
+         "skill_proposal_leak": (1, 0, 0, 0), "panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
          "wait_pr_rereview": (3, 0, 0, 0), "wait_pr_comment_injection": (2, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
          "any_of_ready": (3, 0, 0, 0), "conditions_not_needed": (2, 0, 0, 0),
          "parallel_parts": (3, 0, 0, 0),
@@ -2340,7 +2371,8 @@ _FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_
          "advisor_optional_flaky": (1, 1, 0, 0)}
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
-_SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
+_SHAPE = {"skill_proposal_useful": (0, 0, 1), "skill_proposal_not_needed": (0, 0, 1),
+          "skill_proposal_leak": (0, 0, 1), "panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
           "wait_pr_rereview": (0, 0, 1), "wait_pr_comment_injection": (0, 0, 1), "wait_not_needed": (0, 0, 1),
           "any_of_ready": (1, 0, 2), "conditions_not_needed": (0, 0, 1),
           "parallel_parts": (1, 0, 2),

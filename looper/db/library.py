@@ -20,7 +20,8 @@ from .connection import get_pool
 # An MCP server's configuration comes with its item, but of its environment and headers only the names: the
 # values are secrets and are read by get_mcp_server(s) alone.
 _ITEM_COLUMNS = (
-    "i.id, i.kind, i.name, i.origin, i.owner_project_id, p.name AS owner_project_name, i.description, i.source, "
+    "i.id, i.kind, i.name, i.origin, i.owner_project_id, p.name AS owner_project_name, i.description, i.lifecycle, "
+    "i.source, "
     "i.version, i.sha256, i.size_bytes, i.file_count, i.modified, i.imported_at, i.updated_at, "
     "m.transport AS mcp_transport, m.command AS mcp_command, m.args AS mcp_args, m.url AS mcp_url, "
     "ARRAY(SELECT k FROM jsonb_object_keys(m.env) k ORDER BY k COLLATE \"C\") AS mcp_env_keys, "
@@ -508,7 +509,7 @@ async def list_role_items(project_id: str | None, item_ids: Sequence[str] = (), 
     shaped as ``list_installed`` rows; only those of ``item_ids`` when given."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, i.description, s.scope "
+        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, i.description, i.lifecycle, s.scope "
         "FROM library_installs s JOIN library_items i ON i.id = s.item_id "
         "WHERE s.enabled AND 'task_role' = ANY(s.roles) AND (s.scope = 'global' OR s.project_id = $1) "
         f"AND (cardinality($2::text[]) = 0 OR i.id = ANY($2::text[])) ORDER BY {_BY_NAME}, s.scope",
@@ -522,13 +523,13 @@ async def list_installed(role: str, project_id: str | None, *, pool: Executor | 
     the project.
 
     Each row is an install with its item's ``id``, ``kind``, ``name``,
-    ``origin``, ``owner_project_id`` and ``sha256``: plugins first, then by
-    name, the global install before the project's. An item installed in both
-    places has two rows.
+    ``origin``, ``owner_project_id``, ``sha256``, ``description`` and
+    ``lifecycle``: plugins first, then by name, the global install before the
+    project's. An item installed in both places has two rows.
     """
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, s.scope "
+        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, i.description, i.lifecycle, s.scope "
         "FROM library_installs s JOIN library_items i ON i.id = s.item_id "
         "WHERE s.enabled AND $1 = ANY(s.roles) AND (s.scope = 'global' OR s.project_id = $2) "
         f"ORDER BY {_BY_NAME}, s.scope",

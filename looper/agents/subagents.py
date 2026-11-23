@@ -70,6 +70,9 @@ class Spawner:
     # The caller supplies live streamed spend/cap, never a model argument.
     budget_usd: float | None = None
     spent_usd: float | None = None
+    # Spend the parent will still add to the task but has not recorded (a running Planner turn's cost is written
+    # when its record ends): counted against the task's remaining budget even when its own spend is unknown.
+    unrecorded_usd: float = 0.0
 
 
 def _brief(value: Any, directory: Path) -> dict[str, Any]:
@@ -206,7 +209,7 @@ class SpawnService:
                 limits.append(caller.budget_usd - caller.spent_usd - usage["parent_committed"])
             if project.get("task_budget_usd") is not None:
                 spent = await conn.fetchval(f"SELECT COALESCE(sum(cost_usd), 0) FROM llm_records WHERE task_id = $1 AND {llm_records.TASK_SPEND}", caller.parent.task_id)
-                limits.append(project["task_budget_usd"] - float(spent) - usage["task_reserved"])
+                limits.append(project["task_budget_usd"] - float(spent) - usage["task_reserved"] - caller.unrecorded_usd)
             budget = min(limits)
             if budget < MIN_RUN_USD - 1e-9:
                 raise Refused(RefusalReason.BUDGET, "less than the minimum explorer budget remains")

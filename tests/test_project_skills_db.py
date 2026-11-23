@@ -248,3 +248,35 @@ def test_a_run_loads_only_the_skills_installed_and_enabled_in_its_project(
         assert (await load_installed(runtime, "manager")).items == ()
 
     run_db(_test, monkeypatch)
+
+
+def test_deprecate_and_restore_refuse_a_skill_the_project_does_not_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents import project_skills
+    from looper.agents.project_skills import ProjectSkillNotFound
+    from looper.agents.skill_lifecycle import deprecate, restore
+    from looper.db import projects
+
+    async def _state(pool: Any) -> Any:
+        return (
+            [dict(row) for row in await pool.fetch(
+                "SELECT id, sha256, lifecycle, updated_at FROM library_items ORDER BY id")],
+            await pool.fetchval("SELECT count(*) FROM skill_versions"),
+            await pool.fetchval("SELECT count(*) FROM library_installs"),
+        )
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="calc", pool=pool)
+        other = await projects.create_project(name="other", pool=pool)
+        owned = await project_skills.add_skill(other["id"], _skill("deploy-check"))
+        await pool.execute(
+            "INSERT INTO library_items (id, kind, name, sha256, size_bytes, file_count, origin) "
+            "VALUES ('skill-upload', 'skill', 'uploaded', 'upload-sha', 1, 0, 'upload')")
+        targets = (owned["skill"]["skill_id"], "skill-upload", "skill-missing")
+        for skill_id in targets:
+            before = await _state(pool)
+            for call in (deprecate, restore):
+                with pytest.raises(ProjectSkillNotFound):
+                    await call(project["id"], skill_id)
+                assert await _state(pool) == before
+
+    run_db(_test, monkeypatch)

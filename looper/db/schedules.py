@@ -916,7 +916,7 @@ async def failing(*, db: Db | None = None) -> list[dict[str, Any]]:
     rows = await db.fetch(
         """
         SELECT s.id, s.name, s.project_id, p.name AS project_name, s.timezone, s.consecutive_failures,
-               s.failures_alert_at, s.stale_alert_at, s.deadline_alert_at, s.overlap_alert_at, s.last_success_at,
+               s.failures_alert_at, s.stale_alert_at, s.deadline_alert_at, s.overlap_alert_at, s.last_success_at, s.last_ok_at,
                (SELECT r.status FROM schedule_runs r WHERE r.schedule_id = s.id AND NOT (r.status = ANY($1::text[]))
                 ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS last_status
         FROM schedules s JOIN projects p ON p.id = s.project_id

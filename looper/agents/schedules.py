@@ -24,6 +24,7 @@ as a task's own choices (``projects.set_task_agents``).
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -235,14 +236,31 @@ async def _run_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = 
     return views
 
 
+def _triage_counts(raw: Any) -> dict[str, Any] | None:
+    """Triage's stored counters, or None for a push, leads or intents run (those views stay unchanged)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(raw, Mapping) and "important" in raw:
+        return dict(raw)
+    return None
+
+
 def subscription_run_view(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a subscription run read and made: its window (cursor positions, events in it, selected, dropped as too old
-    or over the cap), the processor's record and its outcome with the output, and why a skipped run skipped it."""
-    return {"from_seq": row["from_seq"], "to_seq": row["to_seq"], "events_in_window": row["events_in_window"],
+    or over the cap), the processor's record and its outcome with the output, and why a skipped run skipped it.
+    A triage run also carries its category counts when they were stored."""
+    view = {"from_seq": row["from_seq"], "to_seq": row["to_seq"], "events_in_window": row["events_in_window"],
             "events_selected": row["events_selected"], "events_too_old": row["events_too_old"],
             "events_over_cap": row["events_over_cap"], "record_id": row["record_id"], "outcome": row["outcome"],
             "output_text": row["output_text"], "notification_id": row["notification_id"],
             "skip_reason": row.get("skip_reason")}
+    counts = _triage_counts(row.get("extract_counts"))
+    if counts is not None:
+        view["extract_counts"] = counts
+    return view
 
 
 def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int | None]:
@@ -272,6 +290,13 @@ def _stale_after_seconds_view(row: Mapping[str, Any], window: timedelta | None) 
                               enabled_at=enabled_at, rule_changed_at=row.get("rule_changed_at"))
     window = deadline - start if deadline is not None and start is not None else STALE_LIMIT
     return int(window.total_seconds())
+
+
+def _usage_hold(schedule_id: str) -> dict[str, Any] | None:
+    """The firing waiting on a usage window, absent once that instant has passed and while the guard is off."""
+    from . import usage_windows
+
+    return usage_windows.schedule_hold(schedule_id, now=_utcnow())
 
 
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
@@ -328,6 +353,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "last_run": last_run,
         **({"subscription": subscriptions.view(row["subscription"])}
            if row.get("kind") == Kind.SUBSCRIPTION.value and row.get("subscription") else {}),
+        **({"usage_hold": usage_hold} if (usage_hold := _usage_hold(row["id"])) else {}),
     }
 
 
@@ -1216,11 +1242,19 @@ def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str
 
 async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None = None,
                   expected_version: str | None = None) -> dict[str, Any]:
-    """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays."""
+    """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays.
+
+    A manual run is not held for a usage window; the observation still records one. The schedule's own firing
+    keeps a hold note that was already there.
+    """
+    from .usage_windows import ScheduleDeferred
+
     try:
-        run_id = await scheduler.run_now(schedule_id, **({"expected_version": expected_version}
-                                                       if expected_version is not None else {}))
+        run_id = await scheduler.run_now(schedule_id, operator=True, **({"expected_version": expected_version}
+                                                                      if expected_version is not None else {}))
     except db_schedules.ConfigurationChanged as exc:
+        raise RequestError(HTTP_409, str(exc)) from None
+    except ScheduleDeferred as exc:
         raise RequestError(HTTP_409, str(exc)) from None
     if run_id is None:
         await _existing(schedule_id)

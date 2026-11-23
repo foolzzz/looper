@@ -23,6 +23,7 @@ from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.ops.tasks import GROUP_START_QUESTION, START_QUESTION
 from tests.db_support import DSN, run_db
 from tests.test_usage_api_db import _get
+from tests.builtin_support import BUILTIN_PROFILE_NAMES
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -323,7 +324,7 @@ def test_root_does_not_assign_a_directory_to_an_existing_project(monkeypatch, tm
     ({"project": "  "}, "project must not be empty"),
     ({"project": "x" * 81}, "ask the user which project"),
     ({"project": "calc", "profiles": {"worker": "claude-code/nope"}},
-     "registered: claude-code/fable-5-2, claude-code/haiku-5-5, claude-code/opus, claude-code/sonnet-5-5"),
+     f"registered: {', '.join(BUILTIN_PROFILE_NAMES)}"),
     ({"project": "calc", "profiles": {"worker": None}}, "give an Agent Profile"),
     ({"project": "calc", "requirement": "x" * 32_001}, "requirement has 32001 characters; at most 32000"),
 ])
@@ -396,7 +397,9 @@ def test_cancelling_asks_first_and_only_a_running_task(monkeypatch: pytest.Monke
         assert "要取消任务「build calc」（task-a，现在 executing）吗？" in chat.turns[1].blocks[0]
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert done["status"] == "ok"
-        assert [(e.message_type, e.payload) for e in chat.sent()] == [(MessageType.TASK_CANCEL, {"task_id": "task-a"})]
+        sent = chat.sent()
+        assert [(e.message_type, e.payload) for e in sent] == [(MessageType.TASK_CANCEL, {"task_id": "task-a"})]
+        assert sent[0].metadata == {"cancel_by": "manager"}
         # A task whose user gate waits still runs, so it can be cancelled too.
         await pool.execute("UPDATE tasks SET status = 'waiting_user' WHERE id = 'task-r'")
         (waiting,) = await chat.say("也取消它", ("looper_task_control", {"task_id": "task-r", "action": "cancel"}))

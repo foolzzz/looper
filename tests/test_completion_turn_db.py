@@ -29,7 +29,7 @@ from looper.agents.tiers.turn_token import TurnStopped
 from looper.agents.task_notice import Notice, NotifyChannel, NotifyTarget, TargetKind, web_end_text
 from looper.db import projects, tasks
 from tests.api_manager_support import USAGE, _manager
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, run_db, until
 from tests.fake_model_api import ResponseScript, call_events, completed, call_item, text_events
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -549,8 +549,8 @@ def test_a_turn_past_its_deadline_on_a_runtime_without_interrupt_does_not_hold_t
         runtime = fresh if swallow else hung  # a fresh runtime: a new session, or the old one started again
         assert runtime.texts[-1].endswith("还在吗？") and runtime.starts == (1 if swallow else 2)
         hung.release.set()
-        await asyncio.sleep(0.05)
-        assert not manager._late_turns or not swallow
+        # The released turn still has to finish its PostgreSQL record.
+        await until(lambda: not manager._late_turns, "the released completion turn to finish", timeout=10)
         await bus.shutdown()
 
     run_db(run, monkeypatch, timeout=60)

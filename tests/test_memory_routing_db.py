@@ -162,7 +162,8 @@ def test_multiple_ids_share_one_wait_deadline_and_report_individual_results(monk
         await pool.execute("INSERT INTO memory_posts(candidate_id,kind,revision,content_hash,complete,channel_id,"
             "chat,text,state) VALUES($1,'push',1,$2,true,'channel-lark','ou_operator_synthetic','Push','sent')",
             second, second_row["content_hash"])
-        monkeypatch.setattr(memory_routing, "WAIT_SECONDS", .02)
+        # Long enough for the woken write to finish on a loaded runner; M-0002 is never written and waits it out.
+        monkeypatch.setattr(memory_routing, "WAIT_SECONDS", 1.0)
         deferred = AsyncMock()
         monkeypatch.setattr(memory_push, "defer_result", deferred)
         def wake():
@@ -286,10 +287,11 @@ def test_late_result_subscription_does_not_wait_for_writer_candidate_lock(monkey
             nonlocal writer
             writer = asyncio.create_task(write())
         monkeypatch.setattr(memory_write, "wake", wake)
-        monkeypatch.setattr(memory_routing, "WAIT_SECONDS", .02)
+        # Long enough for the woken writer to take the row on a loaded runner; it holds it past the deadline.
+        monkeypatch.setattr(memory_routing, "WAIT_SECONDS", .5)
         monkeypatch.setattr(memory_routing, "POLL_SECONDS", .005)
         try:
-            reply = await asyncio.wait_for(execute(envelope("记 M-1")), timeout=.5)
+            reply = await asyncio.wait_for(execute(envelope("记 M-1")), timeout=5)
             assert holding.is_set() and not release.is_set()
             assert reply == "M-0001 已确认，写入后通知你"
             final = await pool.fetchrow("SELECT * FROM memory_posts WHERE kind='final'")

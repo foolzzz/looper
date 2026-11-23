@@ -8,6 +8,7 @@ import pytest
 from looper.db import config_transfer, connection, profile_registry
 from tests.bridge_schema_support import structure
 from tests.db_support import DSN, fresh_connection, run_db
+from tests.builtin_support import BUILTIN_PROFILES
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
@@ -54,8 +55,8 @@ def test_launcher_registry_reads_count_only_profiles_using_that_launcher(monkeyp
                            "SELECT 'agent-ttadk','TTADK','rt-ttadk-codex',id FROM llm_models "
                            "WHERE provider_id='prov-codex-login' AND name='gpt-6.1-sol'")
         assert await profile_registry.launcher_profile_count("ttadk") == 1
-        # The built-in profiles: every role's, the advisor's, its judge's and the leads check's.
-        assert await profile_registry.launcher_profile_count("native") == 4
+        # The built-in profiles, all on the native launcher.
+        assert await profile_registry.launcher_profile_count("native") == len(BUILTIN_PROFILES)
         profile = await profile_registry.get_profile("agent-ttadk")
         assert (profile["runtime_launcher"], profile["runtime_version"]) == ("ttadk", fields["version"])
         assert profile == next(row for row in await profile_registry.list_profiles() if row["id"] == "agent-ttadk")
