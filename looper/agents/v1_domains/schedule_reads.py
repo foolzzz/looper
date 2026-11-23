@@ -102,6 +102,8 @@ SCHEDULE = _object({**_SCHEDULE_FIELDS, "last_run": _nullable(RUN)})
 _USAGE_HOLD = _object({"until": _STR, "reason": _STR, "reset_known": _BOOL, "window": _NULL_STR},
                       ["until", "reason", "reset_known"], closed=True)
 for _schema in (SCHEDULE_WITHOUT_LAST_RUN, SCHEDULE):
+    _schema["properties"]["daily_budget_equivalent_usd"] = {**_NULL_NUMBER, "description":
+        "Optional equivalent-spend daily cap. Only enforce uses separate currency caps; off/observe keep the legacy mixed check."}
     _schema["properties"]["notify_target_available"] = _BOOL
     _schema["properties"]["usage_hold"] = _USAGE_HOLD
     _schema["required"] = [name for name in _schema["required"] if name not in ("subscription", "usage_hold")]

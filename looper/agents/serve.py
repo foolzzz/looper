@@ -1014,7 +1014,8 @@ async def _run_agent_system_watched(
             from .managers import ManagerFleet
             platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                                 supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
-            from . import cost_holds
+            from . import cost_alerts, cost_holds
+            cost_alerts.configure(registry.notify, dashboard_url=dashboard_url)
             cost_holds.configure(platform, sender=registry.notify, dashboard_url=dashboard_url)
             tools_ready = asyncio.Event()
             fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,

@@ -333,7 +333,9 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "last_success_at": row["last_success_at"], "consecutive_failures": row["consecutive_failures"],
         "created_via": row["created_via"], "created_at": row["created_at"], "updated_at": row["updated_at"],
         "gate_command": row.get("gate_command"), "gate_timeout_seconds": row.get("gate_timeout_seconds"),
-        "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
+        "daily_budget_usd": row.get("daily_budget_usd"),
+        **({"daily_budget_equivalent_usd": row["daily_budget_equivalent_usd"]}
+           if row.get("daily_budget_equivalent_usd") is not None else {}), "notify": row.get("notify") or Notify.FAILURES.value,
         "notify_format": row.get("notify_format") or NotifyFormat.REPORT.value,
         "user_gates": row.get("user_gates", UserGates.OFF.value),
         "active_hours": row.get("active_hours"), "idle_only": bool(row.get("idle_only")),
@@ -582,7 +584,8 @@ _PARSERS = {
     "catch_up": lambda raw: _choice("catch_up", raw, CatchUp),
     "run_budget_usd": _budget("run_budget_usd"),
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
-    "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
+    "daily_budget_usd": _budget("daily_budget_usd"),
+    "daily_budget_equivalent_usd": _budget("daily_budget_equivalent_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
     "notify_format": lambda raw: _choice("notify_format", raw, NotifyFormat),
     "user_gates": lambda raw: _choice("user_gates", raw, UserGates),
     "kind": lambda raw: _choice("kind", raw, Kind), "command": _command, "env": _env,
@@ -679,7 +682,7 @@ def _check_kind_fields(kind: str, merged: Mapping[str, Any]) -> None:
         if not merged.get("command"):
             raise RequestError(HTTP_400, "command is required: a nonempty shell command")
         for field in ("requirement", "template_key", "template_inputs", "gate_command", "gate_timeout_seconds",
-                      "run_budget_usd", "daily_budget_usd", "profile_overrides", "task_limits"):
+                      "run_budget_usd", "daily_budget_usd", "daily_budget_equivalent_usd", "profile_overrides", "task_limits"):
             if merged.get(field):
                 raise RequestError(HTTP_400, f"{field} does not apply to a command schedule")
         if merged.get("user_gates") == UserGates.ON.value:

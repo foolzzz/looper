@@ -35,7 +35,7 @@ const SOURCES: Record<string, string> = { run_cap: "单次上限", p95: "近 30 
 const SCOPES: Record<string, string> = { task: "任务", schedule_day: "定时任务当天", role_day: "角色当天", global_day: "全局当天" };
 
 type Hold = { id: number; scope: string; scope_ref: string; currency: string; limit_usd: number;
-  spent_usd: number; created_at: string };
+  spent_usd: number; created_at: string; task_ids?: string[]; reason?: string };
 
 /** One hold's explicit decision, including the existing operator confirmation when a cap is raised. */
 function HoldDecision({ hold, onDecided }: { hold: Hold; onDecided: () => void }) {
@@ -71,7 +71,7 @@ function HoldDecision({ hold, onDecided }: { hold: Hold; onDecided: () => void }
   }
   return <li className="space-y-3 py-4 first:pt-0 last:pb-0">
     <p className="font-medium">C-{hold.id} · {SCOPES[hold.scope] ?? hold.scope} {hold.scope_ref}</p>
-    <p className="text-sm text-muted-foreground">{currency(hold.currency)}已花及预留 {money(hold.spent_usd)} / 上限 {money(hold.limit_usd)}。24 小时未回答会停下任务。</p>
+    <p className="text-sm text-muted-foreground">{currency(hold.currency)}已花及预留 {money(hold.spent_usd)} / 上限 {money(hold.limit_usd)}。{hold.task_ids?.length || hold.scope === "task" ? "24 小时未回答会停下任务。" : "24 小时未回答，上限不变。"}{hold.reason === "review_budget" && "被拦下的动作不会自动重发。"}</p>
     {pending ? <div className="space-y-2" role="status">
       <p className="text-sm">{pending.impact}</p>
       <div className="flex flex-wrap gap-2">
@@ -123,7 +123,7 @@ export function CostGuardSettingsSection() {
       <CardHeader><CardTitle className="flex flex-wrap items-center gap-3">花费守卫 <Badge variant="outline">{modeLabel(view.mode)}</Badge></CardTitle></CardHeader>
       <CardContent className="space-y-4 text-sm">
         <p>{view.mode === "enforce"
-          ? "任务按已花和预留检查上限；选择询问时等待你决定，全局当天上限会暂停新的任务运行。范围链设有上限时，订阅运行会按预留金额事中软停；没有上限则不软停。fail 会计入预留，可能提前停止任务及正在运行的 Worker。收尾回合也按实际准入结果决定。金额上限拒绝优先于用量窗口暂缓。账号被拒或配额失败时，包括你自己发起的运行都会暂缓到重置；重置时间未知时最多冷却五分钟。95% 利用率只暂缓后台角色和定时触发。操作者的管家回合可越过金额上限，但仍受被拒窗口约束；不自动换账号。后台角色和定时任务的花费上限仍仅观察。"
+          ? "任务按已花和预留检查上限；选择询问时等待你决定，全局当天上限会暂停新的任务运行。范围链设有上限时，订阅运行会按预留金额事中软停；没有上限则不软停。fail 会计入预留，可能提前停止任务及正在运行的 Worker。收尾回合也按实际准入结果决定。金额上限拒绝优先于用量窗口暂缓。账号被拒或配额失败时，包括你自己发起的运行都会暂缓到重置；重置时间未知时最多冷却五分钟。95% 利用率只暂缓后台角色和定时触发。操作者的管家回合可越过金额上限，但仍受被拒窗口约束；不自动换账号。后台角色达到自身、定时任务或全局当天上限时停止；定时触发到上限时跳过这次。"
           : "先观察一周，再根据实际花费决定上限。目前只记录预留和本来会被拦下的运行，不拦截、不提问、不发消息。"}</p>
         <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div><dt className="text-muted-foreground">全局每日真钱上限</dt><dd className="mt-1 font-mono">{money(view.daily_usd)}</dd></div>
@@ -153,7 +153,7 @@ export function CostGuardSettingsSection() {
     <Card>
       <CardHeader><CardTitle>花费等你决定</CardTitle></CardHeader>
       <CardContent>
-        <p className="mb-3 text-sm text-muted-foreground">已有等待在关闭或仅观察模式下仍可处理；24 小时未答复会停下任务。</p>
+        <p className="mb-3 text-sm text-muted-foreground">已有等待在关闭或仅观察模式下仍可处理；任务等待 24 小时未答复会停下，其他等待到期后上限不变。</p>
         {holdsError ? <div role="alert" className="space-y-2 text-sm text-destructive"><p>{holdsError}</p>
           <Button type="button" variant="outline" onClick={() => void readHolds()}>重试</Button></div>
           : holds === null ? <p role="status" className="text-sm text-muted-foreground">正在读取等待决定的花费…</p>

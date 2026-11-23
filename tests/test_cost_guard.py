@@ -231,7 +231,7 @@ def test_schedule_observes_its_existing_shared_daily_cap_without_combining_globa
                 for i, c in enumerate(cg.Currency, 1)]
         g = guard(monkeypatch, rows=rows, cap=10)
         g.config = Config(mode=Mode.OBSERVE, daily_usd=10, daily_equivalent_usd=10)
-        cg.store.limits.return_value = {'schedules': {'schedule-a': 10}}
+        cg.store.limits.return_value = {'schedules': {'schedule-a': {'usd': 10, 'equivalent_usd': None}}}
         await g.rebuild()
         scopes = g.scopes(cg.RunKind.SCHEDULE, None, 'schedule-a', currency)
         result = await g.admit(cg.RunKind.SCHEDULE, scopes, currency, 1, reserve=False)

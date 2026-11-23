@@ -126,7 +126,7 @@ def test_after_the_hold_the_firing_is_checked_against_the_daily_budget(
 
         try:
             await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
-            sid = (await env.enabled(daily_budget_usd=0.01))["schedule_id"]
+            sid = (await env.enabled(daily_budget_usd=2))["schedule_id"]
             await env.due(sid)
             await env.pool.execute(
                 "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status, cost_usd, "
@@ -137,6 +137,8 @@ def test_after_the_hold_the_firing_is_checked_against_the_daily_budget(
             await env.scheduler.tick()
             assert env.bus.of("task_start") == []
             assert [run["status"] for run in await env.runs(sid)] == ["completed"]
+            # Spend crosses the cap during the wait; the resumed firing must check the legacy total again.
+            await env.pool.execute("UPDATE schedule_runs SET cost_usd=3 WHERE id='run-spent'")
             env.clock.now = resets + timedelta(seconds=1)
             usage_windows.clear_cache()
             await env.scheduler.tick()

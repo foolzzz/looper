@@ -26,7 +26,7 @@ from . import agent_sessions, subscriptions, tasks
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
           "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
-          "daily_budget_usd", "notify", "notify_format", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs",
+          "daily_budget_usd", "daily_budget_equivalent_usd", "notify", "notify_format", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs",
           "kind", "command", "env", "env_file", "success_deadline", "alert_failures_after",
           "alert_stale_after_seconds", "alert_overlap_after", "active_hours", "idle_only")
 

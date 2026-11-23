@@ -52,6 +52,25 @@ describe("花费观察", () => {
     await act(async () => root.render(<CostGuardSettingsSection />));
   }
 
+  it("审查预算等待不会声称停下任务，并说明提高上限不会重发动作", async () => {
+    result = { ...result, mode: "enforce" };
+    holds = [{ id: 8, scope: "role_day", scope_ref: "outbound_check", currency: "provider_priced_usd",
+      spent_usd: 1, limit_usd: 1, task_ids: [], reason: "review_budget", created_at: "2026-01-15T00:00:00Z" }];
+    await render();
+    expect(container.textContent).toContain("24 小时未回答，上限不变");
+    expect(container.textContent).toContain("被拦下的动作不会自动重发");
+    expect(container.textContent).toContain("后台角色达到自身、定时任务或全局当天上限时停止");
+    expect(container.textContent).toContain("定时触发到上限时跳过这次");
+  });
+
+  it("关联任务的全局等待仍会说明到期停下任务", async () => {
+    holds = [{ id: 9, scope: "global_day", scope_ref: "global", currency: "provider_priced_usd",
+      spent_usd: 1, limit_usd: 1, task_ids: ["task-synthetic"], created_at: "2026-01-15T00:00:00Z" }];
+    await render();
+    expect(container.textContent).toContain("24 小时未回答会停下任务");
+    expect(container.textContent).not.toContain("24 小时未回答，上限不变");
+  });
+
   it("默认关闭、未设上限，并且没有编辑控件", async () => {
     await render();
     expect(isSettingsPage("cost")).toBe(true);

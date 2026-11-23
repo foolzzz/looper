@@ -66,12 +66,12 @@ def test_global_limit_and_currency_are_separate(monkeypatch):
     asyncio.run(check())
 
 
-def test_background_caps_remain_observation_only(monkeypatch):
+def test_background_caps_enforce_global_day(monkeypatch):
     async def check():
         g = setup_guard(monkeypatch, global_cap=0)
         result = await g.admit(cg.RunKind.PROCESSOR, (cg.Scope(cg.BudgetScope.GLOBAL_DAY, 'global', 0),),
                                cg.Currency.PROVIDER, 1)
-        assert result.decision is cg.Decision.ADMIT and result.would is cg.Decision.DENY
+        assert result.decision is cg.Decision.DENY and result.would is cg.Decision.DENY
     asyncio.run(check())
 
 

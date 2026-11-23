@@ -231,3 +231,38 @@ def test_one_scope_cannot_resume_a_task_still_waiting_on_another_scope(monkeypat
         assert await pool.fetchval("SELECT status FROM tasks WHERE id='t-cost'")=='running'
         publish.assert_awaited_once()
     run_db(body,monkeypatch,timeout=30)
+
+
+@pytest.mark.parametrize(('currency', 'cap'), [('provider_priced_usd', 'daily_usd'),
+                                              ('equivalent_usd', 'daily_equivalent_usd')])
+def test_review_budget_continue_raises_only_the_role_currency_cap(monkeypatch, currency, cap):
+    async def body(pool):
+        key = f'cost_guard.roles.outbound_check.{cap}'
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ($1,'2')", key)
+        row, _ = await store.create_hold('role_day', 'outbound_check', currency, 2, 2, 'review_budget',
+                                         estimate_usd=0.1, pool=pool)
+        with pytest.raises(ValueError, match='上限'):
+            await cost_holds.decide(row['id'], 'continue', 2.05, via='api', pool=pool)
+        decided = await cost_holds.decide(row['id'], 'continue', 3, via='api', pool=pool)
+        assert decided['state'] == 'continued' and decided['task_ids'] == []
+        assert await pool.fetchval('SELECT value FROM system_settings WHERE key=$1', key) == '3.0'
+        assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key LIKE 'cost_guard.daily_%'") == 0
+    run_db(body, monkeypatch, timeout=30)
+
+
+def test_review_budget_question_explains_that_the_blocked_action_will_not_be_retried(monkeypatch):
+    from looper.agents import chat_settings, gate_service
+    async def body(pool):
+        sender = AsyncMock(return_value=(True, None))
+        monkeypatch.setattr(cost_holds, '_sender', sender)
+        monkeypatch.setattr(chat_settings, 'delivery_enabled', lambda: False)
+        monkeypatch.setattr(gate_service, 'dashboard_target', AsyncMock(return_value=SimpleNamespace(
+            channel_id='synthetic-channel', target=SimpleNamespace(id='synthetic-chat', group=False))))
+        row, _ = await store.create_hold('role_day', 'outbound_check', 'provider_priced_usd', 2, 2,
+                                         'review_budget', pool=pool)
+        await cost_holds._question(row)
+        text = sender.await_args.args[2]
+        assert '对外审查今天的预算用完了，要提高上限吗？被拦下的动作不会自动重发。' in text
+        assert f'继续 C-{row["id"]}' in text and f'停 C-{row["id"]}' in text
+        assert '24 小时未回答，上限不变' in text
+    run_db(body, monkeypatch, timeout=30)

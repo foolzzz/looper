@@ -37,6 +37,7 @@ PATCH = _object({"mode": {"type": ["string", "null"], "enum": ["off", "observe",
 HOLD = _object({"id": _INT, "scope": _STR, "scope_ref": _STR, "currency": _STR,
                 "limit_usd": {"type": "number"}, "spent_usd": {"type": "number"}, "reason": _STR,
                 "state": _STR, "created_at": _STR, "decided_at": _NULL_STR, "decided_via": _NULL_STR}, closed=True)
+HOLD["properties"]["task_ids"] = _array(_STR)
 _DECIDE = _object({"hold_id": {"type": "integer", "minimum": 1},
                    "decision": {"type": "string", "enum": ["continue", "stop"]},
                    "new_limit_usd": {"type": "number", "minimum": 0},
@@ -51,7 +52,8 @@ _ENFORCE = ("Enforce holds task dispatches at task and global daily caps and ref
             "yourself; 95% utilization holds only schedule firings and background roles. Holds last until reset, "
             "or at most five minutes when reset time is unknown. Window rows apply when "
             "engine.limit_signals.enabled is on; otherwise only quota-failure rules apply. No account is switched. "
-            "Background-role and schedule budget enforcement remains inactive.")
+            "A server already in enforce now stops background roles at their own, schedule or global daily caps "
+            "and skips schedule firings at caps previously only observed. Default off preserves existing behavior.")
 _UPDATE = ("Configure cost guard admission. Off and observe preserve execution. " + _ENFORCE +
            " Existing spend holds remain actionable in every mode. With a scope cap, subscription runs soft stop "
            "at their reservation; no scope caps means no reservation soft stop. Fail counts reservations and "

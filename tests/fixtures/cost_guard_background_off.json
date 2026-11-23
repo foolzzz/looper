@@ -1,0 +1,114 @@
+{
+  "recorded_at": "3c718301c47d3e246ffb3342d7c2bb0f47d6daed",
+  "schedule_view_keys": [
+    "active_hours",
+    "alert_policy",
+    "alerts",
+    "catch_up",
+    "command",
+    "consecutive_failures",
+    "created_at",
+    "created_via",
+    "cron",
+    "daily_budget_usd",
+    "description",
+    "enabled",
+    "env",
+    "env_file",
+    "gate_command",
+    "gate_timeout_seconds",
+    "idle_only",
+    "kind",
+    "last_fired_at",
+    "last_run",
+    "last_success_at",
+    "manager_id",
+    "manager_name",
+    "max_parallel_runs",
+    "name",
+    "next_fire_at",
+    "notify",
+    "notify_format",
+    "notify_target",
+    "overlap",
+    "planner_session",
+    "profile_overrides",
+    "project_id",
+    "project_name",
+    "requirement",
+    "run_budget_usd",
+    "run_timeout_effective_seconds",
+    "run_timeout_seconds",
+    "schedule_id",
+    "spent_today_usd",
+    "success_deadline",
+    "task_limits",
+    "template_inputs",
+    "template_key",
+    "template_name",
+    "throttle",
+    "timezone",
+    "updated_at",
+    "user_gates",
+    "work_dir"
+  ],
+  "manager_schedule_tools": {
+    "looper_schedules": [
+      "action",
+      "enabled",
+      "fields",
+      "project",
+      "schedule"
+    ]
+  },
+  "schedule_outcomes": {
+    "agent:off:False": {
+      "status": "started",
+      "error": null
+    },
+    "agent:off:True": {
+      "status": "skipped_budget",
+      "error": "today's runs cost $2.0000, the daily budget is $1"
+    },
+    "agent:observe:False": {
+      "status": "started",
+      "error": null
+    },
+    "agent:observe:True": {
+      "status": "skipped_budget",
+      "error": "today's runs cost $2.0000, the daily budget is $1"
+    },
+    "subscription:off:False": {
+      "status": "started",
+      "error": null
+    },
+    "subscription:off:True": {
+      "status": "skipped_budget",
+      "error": "today's runs cost $2.0000, the daily budget is $1"
+    },
+    "subscription:observe:False": {
+      "status": "started",
+      "error": null
+    },
+    "subscription:observe:True": {
+      "status": "skipped_budget",
+      "error": "today's runs cost $2.0000, the daily budget is $1"
+    }
+  },
+  "before_run": {
+    "off": {
+      "advice_check": "NoneType",
+      "advisor": "NoneType",
+      "leads_check": "NoneType",
+      "outbound_check": "NoneType",
+      "processor": "NoneType"
+    },
+    "observe": {
+      "advice_check": "Reservation",
+      "advisor": "Reservation",
+      "leads_check": "Reservation",
+      "outbound_check": "Reservation",
+      "processor": "Reservation"
+    }
+  }
+}

@@ -245,7 +245,8 @@ async def _catchup_items() -> list[dict[str, Any]]:
 
 
 def _cost_item(row: Mapping[str, Any]) -> dict[str, Any]:
-    label = "任务花费" if row["scope"] == "task" else "全局当天花费"
+    label = ("任务花费" if row["scope"] == "task" else f"{_plain(row['scope_ref'])} 当天花费"
+             if row["scope"] == "role_day" else "全局当天花费")
     return _item(f"cost:{row['id']}", f"{label}等你决定", context=row["scope_ref"], since=row["created_at"],
                  href="#settings/cost", ref=f"C-{row['id']}", currency=row["currency"],
                  limit_usd=row["limit_usd"], spent_usd=row["spent_usd"])

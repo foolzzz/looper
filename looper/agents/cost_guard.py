@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Callable
 
 from ..db import cost_guard as store
-from . import cost_guard_settings as settings
+from . import cost_guard_settings as settings, cost_alerts
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,11 @@ class BudgetScope(str, Enum):
     SCHEDULE_DAY = 'schedule_day'
     ROLE_DAY = 'role_day'
     GLOBAL_DAY = 'global_day'
+
+
+class ScheduleCapMode(str, Enum):
+    MIXED = 'mixed'
+    SPLIT = 'split'
 
 
 class LimitAction(str, Enum):
@@ -75,6 +80,8 @@ class EstimateSource(str, Enum):
 
 BACKGROUND = frozenset((RunKind.PROCESSOR, RunKind.LEADS_CHECK, RunKind.ADVICE_CHECK,
                         RunKind.OUTBOUND_CHECK, RunKind.ADVISOR))
+INTERACTIVE = frozenset((RunKind.WORKER, RunKind.REVIEWER, RunKind.PLANNER, RunKind.EXPLORER,
+                         RunKind.CONSULT, RunKind.MANAGER))
 SMALL = frozenset((RunKind.PROCESSOR, RunKind.LEADS_CHECK, RunKind.ADVICE_CHECK, RunKind.OUTBOUND_CHECK))
 
 
@@ -128,6 +135,8 @@ class Admission:
     provider_id: str | None = None
     reset_known: bool = True
     window: str | None = None
+    action: LimitAction | None = None
+    alerts: tuple[cost_alerts.Alert, ...] = ()
 
 
 class Denied(Exception):
@@ -211,10 +220,15 @@ class Guard:
             raw = metadata.get('reservation') if row['status'] == 'running' else None
             reservation = None
             if raw:
-                # Historical reservation scopes are authoritative for an already admitted run; refreshed limits
-                # come from today's settings, never from the old cap stored alongside the reservation.
+                schedule_scope = next((s for s in chain if s.scope is BudgetScope.SCHEDULE_DAY), None)
+                # Keep admitted scopes and refresh their limits from today's settings, never from the old cap
+                # stored alongside the reservation.
                 chain = tuple(Scope(BudgetScope(s['scope']), s['scope_ref'], self._limit(
                     BudgetScope(s['scope']), s['scope_ref'], Currency(raw['currency']), limits)) for s in raw['scopes'])
+                # Older interactive dispatches reserved only task/global; recover their schedule accounting too.
+                if schedule_scope is not None and not any(s.key == schedule_scope.key for s in chain):
+                    chain = (*chain, Scope(schedule_scope.scope, schedule_scope.scope_ref,
+                        self._limit(schedule_scope.scope, schedule_scope.scope_ref, Currency(raw['currency']), limits)))
                 reservation = Reservation(float(raw['usd']), Currency(raw['currency']), chain,
                                           metadata.get('cost_guard', {}), row['created_at'], record_id=row['id'],
                                           schedule_id=row.get('schedule_id'))
@@ -250,23 +264,31 @@ class Guard:
         if scope is BudgetScope.TASK:
             return limits.get('tasks', {}).get(ref, {}).get('cap')
         if scope is BudgetScope.SCHEDULE_DAY:
-            # The existing schedule cap covers both currencies until a separate equivalent cap lands.
-            return limits.get('schedules', {}).get(ref)
+            cap = limits.get('schedules', {}).get(ref, {})
+            split = self.config.mode is settings.Mode.ENFORCE and self.schedule_cap_mode(ref, limits) is ScheduleCapMode.SPLIT
+            return cap.get('equivalent_usd' if split and currency is Currency.EQUIVALENT else 'usd')
         if scope is BudgetScope.ROLE_DAY:
             role = self.config.roles.get(ref)
             return getattr(role, 'daily_usd' if currency is Currency.PROVIDER else 'daily_equivalent_usd', None)
         return self.config.daily_usd if currency is Currency.PROVIDER else self.config.daily_equivalent_usd
 
-    def scopes(self, kind, task_id, schedule_id, currency, *, limits=None):
+    def schedule_cap_mode(self, ref, limits=None):
+        limits = self._limits if limits is None else limits
+        cap = limits.get('schedules', {}).get(ref, {})
+        return ScheduleCapMode.SPLIT if cap.get('equivalent_usd') is not None else ScheduleCapMode.MIXED
+
+    def scopes(self, kind, task_id, schedule_id, currency, *, limits=None, role: RunKind | None = None):
         limits = self._limits if limits is None else limits
         chain = []
         if task_id and kind is not RunKind.MANAGER:
-            chain.append((BudgetScope.TASK, task_id))
+            # Background calls inherit a task's schedule, not its interactive task cap (RFC §6.1).
+            if kind not in BACKGROUND:
+                chain.append((BudgetScope.TASK, task_id))
             schedule_id = schedule_id or limits.get('tasks', {}).get(task_id, {}).get('schedule_id')
         if schedule_id:
             chain.append((BudgetScope.SCHEDULE_DAY, schedule_id))
-        if kind in BACKGROUND:
-            chain.append((BudgetScope.ROLE_DAY, kind.value))
+        if kind in BACKGROUND or role in BACKGROUND:
+            chain.append((BudgetScope.ROLE_DAY, (role or kind).value))
         chain.append((BudgetScope.GLOBAL_DAY, 'global'))
         return tuple(Scope(scope, ref, self._limit(scope, ref, currency, limits)) for scope, ref in chain)
 
@@ -289,47 +311,61 @@ class Guard:
                 await self._rebuild()
             return self._admit(run_kind, scopes, currency, estimate, estimate_source, reserve, schedule_id)
 
-    def _admit(self, kind, scopes, currency, estimate, source, reserve, schedule_id):
+    def _admit(self, kind, scopes, currency, estimate, source, reserve, schedule_id, *, record=True, accounting_scopes=None):
         if not math.isfinite(estimate) or estimate < 0:
             raise ValueError('reservation estimate must be finite and nonnegative')
         action, hit = None, None
-        for scope in scopes:
+        alerts = []
+        hit_used = 0.
+        accounting_scopes = scopes if accounting_scopes is None else accounting_scopes
+        for scope in accounting_scopes:
             self._scopes[*scope.key, currency] = scope
         for scope in scopes:
             key = (*scope.key, currency)
             used = self._spent[key]+self._reserved[key]
-            if scope.scope is BudgetScope.SCHEDULE_DAY:
+            if (scope.scope is BudgetScope.SCHEDULE_DAY
+                    and (self.config.mode is not settings.Mode.ENFORCE
+                         or self.schedule_cap_mode(scope.scope_ref) is ScheduleCapMode.MIXED)):
                 used = sum(self._spent[*scope.key, c]+self._reserved[*scope.key, c] for c in Currency)
-            if scope.limit_usd is not None and used+estimate > scope.limit_usd:
-                hit = scope
+            if (self.config.mode is settings.Mode.ENFORCE and scope.limit_usd is not None
+                    and (used+estimate >= .8*scope.limit_usd
+                         or math.isclose(used+estimate, .8*scope.limit_usd, rel_tol=1e-12, abs_tol=1e-12))):
+                alerts.append(cost_alerts.Alert(cost_alerts.AlertKind.NEAR_LIMIT, scope, currency, self.day,
+                                               used+estimate, kind, schedule_id))
+            if hit is None and scope.limit_usd is not None and used+estimate > scope.limit_usd:
+                hit, hit_used = scope, used
                 action = (LimitAction.SKIP if kind is RunKind.SCHEDULE else
                           LimitAction.STOP_ROLE if kind in BACKGROUND else LimitAction.ASK)
-                break
         would = Decision.ADMIT if hit is None else Decision.ASK if action is LimitAction.ASK else Decision.DENY
         observation = {'at': self.clock().isoformat(), 'run_kind': kind.value, 'currency': currency.value,
                        'estimate_usd': estimate, 'estimate_source': source.value, 'decision': would.value,
                        'scope': hit.scope.value if hit else None, 'scope_ref': hit.scope_ref if hit else None,
                        'action': action.value if action else None}
-        self._recent.append(observation)
-        logger.info('cost_guard.observe %s', observation)
+        if record:
+            self._recent.append(observation)
+            logger.info('cost_guard.observe %s', observation)
         reservation = None
-        enforcing = (self.config.mode is settings.Mode.ENFORCE and hit is not None
-                     and hit.scope in (BudgetScope.TASK, BudgetScope.GLOBAL_DAY)
-                     and kind in (RunKind.WORKER, RunKind.REVIEWER, RunKind.PLANNER, RunKind.EXPLORER,
-                                  RunKind.CONSULT, RunKind.MANAGER))
+        enforcing = (self.config.mode is settings.Mode.ENFORCE and hit is not None and (
+            (kind in INTERACTIVE and hit.scope in (BudgetScope.TASK, BudgetScope.GLOBAL_DAY))
+            or (kind in BACKGROUND and hit.scope in (BudgetScope.SCHEDULE_DAY, BudgetScope.ROLE_DAY, BudgetScope.GLOBAL_DAY))
+            or (kind is RunKind.SCHEDULE and hit.scope in (BudgetScope.SCHEDULE_DAY, BudgetScope.ROLE_DAY, BudgetScope.GLOBAL_DAY))))
+        if enforcing:
+            alerts.append(cost_alerts.Alert(cost_alerts.AlertKind.LIMIT, hit, currency, self.day,
+                                           hit_used, kind, schedule_id))
         if reserve and not enforcing:
-            reservation = Reservation(estimate, currency, tuple(scopes), observation, self.clock(), schedule_id=schedule_id)
+            reservation = Reservation(estimate, currency, tuple(accounting_scopes), observation, self.clock(), schedule_id=schedule_id)
             self._pending[reservation.token] = reservation
-            for scope in scopes:
+            for scope in accounting_scopes:
                 self._reserved[*scope.key, currency] += estimate
         return Admission(would if enforcing else Decision.ADMIT, would, reservation, hit, currency,
-                         used if hit else 0., estimate)
+                         hit_used, estimate, action=action, alerts=tuple(alerts))
 
-    def _apply_hold(self, kind, admission, hold, provider_id, *, operator=False):
+    def _apply_hold(self, kind, admission, hold, provider_id, *, operator=False, record=True):
         """Spend refusals win; rejected/quota windows hold all runs, high utilization only background work."""
         if hold is None:
             return admission
-        observation = admission.reservation.observation if admission.reservation is not None else self._recent[-1]
+        observation = (admission.reservation.observation if admission.reservation is not None else
+                       self._recent[-1] if record else {})
         from .usage_windows import HoldReason
 
         enforced = (self.config.mode is settings.Mode.ENFORCE and admission.decision is Decision.ADMIT
@@ -432,11 +468,24 @@ async def refresh():
     except Exception:
         guard.problem = 'Cost accounting could not be refreshed; existing execution and review boundaries remain active.'
         logger.exception('cost guard accounting refresh failed')
+        await _flush_problem(guard)
 
 
 async def admit(run_kind: RunKind, scopes: tuple[Scope, ...], currency: Currency, estimate: float) -> Admission:
     """The common admission policy; off uses only cached configuration and performs no I/O."""
     return await current().admit(run_kind, scopes, currency, estimate)
+
+
+def _problem_alerts(guard, alerts=()):
+    if guard.config.mode is settings.Mode.ENFORCE and guard.problem:
+        return (*alerts, cost_alerts.Alert(cost_alerts.AlertKind.GUARD_ERROR,
+                Scope(BudgetScope.GLOBAL_DAY, 'global'), None, guard.day_start(guard.clock())))
+    return alerts
+
+
+async def _flush_problem(guard, alerts=()):
+    if guard.config.mode is settings.Mode.ENFORCE:
+        await cost_alerts.flush(_problem_alerts(guard, alerts))
 
 
 async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_id=None):
@@ -482,21 +531,20 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
                 cap = min(cap, turn_cap) if cap is not None and turn_cap is not None else turn_cap or cap
             estimate, source = guard.estimate(kind, currency, cap)
             scopes = guard.scopes(kind, task_id, schedule_id, currency)
-            if guard.config.mode is settings.Mode.ENFORCE and kind in (
-                    RunKind.PLANNER, RunKind.WORKER, RunKind.REVIEWER, RunKind.EXPLORER, RunKind.CONSULT,
-                    RunKind.MANAGER):
+            accounting_scopes = scopes
+            if guard.config.mode is settings.Mode.ENFORCE and kind in INTERACTIVE:
                 scopes = tuple(s for s in scopes if s.scope in (BudgetScope.TASK, BudgetScope.GLOBAL_DAY))
             result = (Admission(reservation=queued) if queued is not None else
-                      guard._admit(kind, scopes, currency, estimate, source, True, schedule_id))
-            if result.decision is not Decision.ADMIT:
-                if not operator_override:
-                    raise Denied('今天的花费已到上限，后台任务已暂停。请由操作者提高上限后继续。', admission=result)
+                      guard._admit(kind, scopes, currency, estimate, source, True, schedule_id,
+                                   accounting_scopes=accounting_scopes))
+            if result.decision is not Decision.ADMIT and operator_override:
                 # An operator's own conversation remains available, with its real reservation.
                 reservation = Reservation(estimate, currency, scopes, guard._recent[-1], guard.clock())
                 guard._pending[reservation.token] = reservation
                 for scope in scopes:
                     guard._reserved[*scope.key, currency] += estimate
-                result = replace(result, decision=Decision.ADMIT, reservation=reservation)
+                result = replace(result, decision=Decision.ADMIT, reservation=reservation,
+                                 alerts=tuple(a for a in result.alerts if a.kind is not cost_alerts.AlertKind.LIMIT))
             admission = guard._apply_hold(kind, result, hold, provider_id)
     except (Denied, Held):
         raise
@@ -504,7 +552,12 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
         guard.problem = 'Run accounting failed; inspect the server log.'
         logger.exception('cost guard admission failed for %s', kind.value)
         # Accounting errors leave classification active; only its verdict and persisted audit can allow a send.
+        await _flush_problem(guard)
         return None
+    await _flush_problem(guard, admission.alerts)
+    if admission.decision in (Decision.DENY, Decision.ASK):
+        reply = None if kind in BACKGROUND else '今天的花费已到上限，后台任务已暂停。请由操作者提高上限后继续。'
+        raise Denied(reply, admission=admission)
     if admission.decision is Decision.HOLD:
         from . import usage_windows
 
@@ -564,7 +617,7 @@ async def schedule_enforced_hold(schedule):
         return None
 
 
-async def observe_schedule(schedule, *, operator=False):
+async def observe_schedule(schedule, *, operator=False, defer_alerts=False, record=True):
     guard = current()
     if guard.config.mode is settings.Mode.OFF:
         return
@@ -578,12 +631,24 @@ async def observe_schedule(schedule, *, operator=False):
             # This is a trigger observation, not another reservation: the actual model turn reserves once.
             currency = currency_of(launch)
             estimate, source = guard.estimate(RunKind(role.value), currency, schedule.get('run_budget_usd'))
-            scopes = guard.scopes(RunKind.SCHEDULE, None, schedule['id'], currency)
-            admission = guard._admit(RunKind.SCHEDULE, scopes, currency, estimate, source, False, schedule['id'])
-            return guard._apply_hold(RunKind.SCHEDULE, admission, hold, provider_id, operator=operator)
+            guard._limits.setdefault('schedules', {})[schedule['id']] = {
+                'usd': schedule.get('daily_budget_usd'),
+                'equivalent_usd': schedule.get('daily_budget_equivalent_usd')}
+            scopes = guard.scopes(RunKind.SCHEDULE, None, schedule['id'], currency,
+                                  role=RunKind.PROCESSOR if schedule['kind'] == 'subscription' else None)
+            admission = guard._admit(RunKind.SCHEDULE, scopes, currency, estimate, source, False, schedule['id'],
+                                     record=record)
+            admission = guard._apply_hold(RunKind.SCHEDULE, admission, hold, provider_id, operator=operator, record=record)
+        if defer_alerts:
+            return replace(admission, alerts=_problem_alerts(guard, admission.alerts))
+        await _flush_problem(guard, admission.alerts)
+        return admission
     except Exception:
         guard.problem = 'Schedule accounting failed; inspect the server log.'
         logger.exception('cost guard schedule observation failed')
+        if defer_alerts:
+            return Admission(problem=guard.problem, alerts=_problem_alerts(guard))
+        await _flush_problem(guard)
     return None
 
 
@@ -600,9 +665,13 @@ async def refresh_day():
         async with guard._lock:
             if guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
+        if guard.config.mode is settings.Mode.ENFORCE:
+            await cost_alerts.rollover(guard.day)
+        await _flush_problem(guard)
     except Exception:
         guard.problem = 'Daily accounting refresh failed; inspect the server log.'
         logger.exception('cost guard daily refresh failed')
+        await _flush_problem(guard)
 
 
 async def task_gate(task_id, run_kind, launch_estimate, *, reserve=False, step_id=None) -> Admission:
@@ -617,21 +686,25 @@ async def task_gate(task_id, run_kind, launch_estimate, *, reserve=False, step_i
             if guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
             context = await store.context(task_id, None, pool=guard.pool)
-            guard._limits.setdefault('tasks', {}).update(context['tasks'])
+            for group in ('tasks', 'schedules'):
+                guard._limits.setdefault(group, {}).update(context[group])
             currency = currency_of(launch_estimate)
             kind = RunKind(run_kind)
             estimate, source = guard.estimate(kind, currency, launch_estimate.max_budget_usd)
-            scopes = tuple(s for s in guard.scopes(kind, task_id, None, currency)
-                           if s.scope in (BudgetScope.TASK, BudgetScope.GLOBAL_DAY))
-            result = guard._admit(kind, scopes, currency, estimate, source, reserve, None)
+            accounting_scopes = guard.scopes(kind, task_id, None, currency)
+            scopes = tuple(s for s in accounting_scopes if s.scope in (BudgetScope.TASK, BudgetScope.GLOBAL_DAY))
+            result = guard._admit(kind, scopes, currency, estimate, source, reserve, None,
+                                  accounting_scopes=accounting_scopes)
             result = guard._apply_hold(kind, result, hold, provider_id)
             if result.reservation is not None:
                 result.reservation.profile_id = getattr(launch_estimate.profile, 'id', None)
                 guard._queued[task_id, kind, step_id].append(result.reservation)
-            return result
+        await _flush_problem(guard, result.alerts)
+        return result
     except Exception:
         guard.problem = 'Task admission failed; existing task limits remain active.'
         logger.exception('cost guard task admission failed for %s', task_id)
+        await _flush_problem(guard)
         return Admission(problem=guard.problem)
 
 

@@ -1582,6 +1582,8 @@ export interface ScheduleInfo {
   gate_timeout_seconds: number | null;
   /** Null: no daily cap. */
   daily_budget_usd: number | null;
+  /** Separate equivalent-spend cap; effective only with cost_guard.mode = enforce. */
+  daily_budget_equivalent_usd?: number | null;
   notify: ScheduleNotify;
   notify_format: ScheduleNotifyFormat;
   /** Whether this schedule's tasks may open user gates (also requires the project's permission). */
@@ -1661,6 +1663,8 @@ export interface ScheduleFields {
   gate_command?: string | null;
   gate_timeout_seconds?: number | null;
   daily_budget_usd?: number | null;
+  /** Only enforce splits the two currencies; off/observe keep the legacy mixed check. */
+  daily_budget_equivalent_usd?: number | null;
   notify?: ScheduleNotify;
   notify_format?: ScheduleNotifyFormat;
   user_gates?: ScheduleUserGates;

@@ -87,6 +87,7 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
     ("manager_sessions", "DROP TABLE manager_sessions CASCADE"),
     ("provider_limit_windows", "DROP TABLE provider_limit_windows CASCADE"),
     ("cost_holds", "DROP TABLE cost_holds"),
+    ("schedule_equivalent_budget", "ALTER TABLE schedules DROP COLUMN daily_budget_equivalent_usd"),
 ])
 def test_merged_migrations_remain_discoverable_and_upgrade(migration_name, rollback):
     async def test():
@@ -127,4 +128,18 @@ def test_room_delivery_resumes_validation_without_replacing_constraint(missing_m
                                       "('subagent_room_delivery','subagent_room_delivery_online')") == 2
             assert not await connection.schema_change_pending(conn)
 
+    asyncio.run(test())
+
+
+def test_equivalent_budget_migration_repairs_column_even_with_marker():
+    async def test():
+        from looper.db.migrations import schedule_equivalent_budget as migration
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            assert not await migration.pending(conn)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", migration.name)
+            await conn.execute("ALTER TABLE schedules DROP COLUMN daily_budget_equivalent_usd")
+            assert await migration.pending(conn)
+            await connection.ensure_schema(conn)
+            assert not await migration.pending(conn)
     asyncio.run(test())
