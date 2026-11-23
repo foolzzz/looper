@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -36,8 +36,6 @@ from .turn_metrics import ProactiveSource
 
 logger = logging.getLogger(__name__)
 
-# The user's IANA timezone, which the quiet hours and the day of the cap are in; without it, the server's own.
-TIMEZONE_KEY = "user.timezone"
 DEFAULT_QUIET_START = time(22, 0)
 DEFAULT_QUIET_END = time(8, 0)
 DEFAULT_DM_DAILY_CAP = 5
@@ -135,7 +133,7 @@ class DeliveryPolicy:
     """The operator's rules: the quiet hours (None: none) in ``timezone`` (``user.timezone``), how many counted
     proactive messages a direct chat gets a day, and how long after the user wrote a message passes anyway."""
 
-    timezone: ZoneInfo
+    timezone: tzinfo  # an IANA zone, or a fixed offset when the server has no zone name
     quiet_hours: DailyWindow | None = DailyWindow(DEFAULT_QUIET_START, DEFAULT_QUIET_END)
     dm_daily_cap: int = DEFAULT_DM_DAILY_CAP
     recent_reply: timedelta = DEFAULT_RECENT_REPLY
@@ -228,19 +226,12 @@ def _later(reason: Reason, policy: DeliveryPolicy, state: DeliveryState) -> Deci
 # --- What a send point calls: the policy and the chat's count read, the decision made and recorded once ---
 
 
-async def load_policy() -> DeliveryPolicy:
-    """The operator's policy: the built-in rules in ``user.timezone``, else in the server's own zone (an unknown
-    name is logged and ignored)."""
-    from ..db import system_settings
-    from . import cron
+def load_policy() -> DeliveryPolicy:
+    """The operator's policy: the built-in rules in the user's timezone (``user.timezone``, kept by the turn context
+    settings; else the server's own zone)."""
+    from . import turn_context
 
-    name = (await system_settings.get_settings([TIMEZONE_KEY])).get(TIMEZONE_KEY)
-    if name:
-        try:
-            return DeliveryPolicy(timezone=cron.zone(name))
-        except ValueError:
-            logger.warning("%s is not a timezone (%r); the server's own applies", TIMEZONE_KEY, name)
-    return DeliveryPolicy(timezone=cron.zone(cron.local_zone_name()))
+    return DeliveryPolicy(timezone=turn_context.zone())
 
 
 async def decide(delivery: Delivery, *, dedupe_key: str, channel_id: str, chat: str,
@@ -253,7 +244,7 @@ async def decide(delivery: Delivery, *, dedupe_key: str, channel_id: str, chat: 
     gets one. The decisions on one chat are taken one at a time, so its daily cap holds across send points."""
     from ..db import connection, proactive_deliveries as db
 
-    policy = await load_policy()
+    policy = load_policy()
     async with connection.get_pool().acquire() as conn, conn.transaction():
         await db.lock_chat(conn, channel_id, chat)
         if (row := await db.get(conn, dedupe_key)) is not None and row["decision"] is not None:

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardPage } from "@/pages/dashboard";
 import { Sidebar } from "@/components/sidebar";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
+import { fetchManagerMetrics, type ManagerMetrics } from "@/lib/manager-metrics";
 import { fetchGates, fetchOverview, fetchProjectsList, fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS,
   type GateList, type AgentProcess, type Overview, type TaskDetail, type UserGate, type GatePosted } from "@/lib/api";
 
@@ -13,6 +14,7 @@ vi.mock("@/lib/api", async (original) => ({
   fetchOverview: vi.fn(), fetchTasks: vi.fn(), fetchTaskDetail: vi.fn(), postGateMessage: vi.fn(),
   fetchGates: vi.fn(), fetchProjectsList: vi.fn(),
 }));
+vi.mock("@/lib/manager-metrics", () => ({ fetchManagerMetrics: vi.fn() }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -28,6 +30,11 @@ const gate = (step: string, extra: Partial<UserGate> = {}): UserGate => ({
   retry_at: null, turns: 0, reminders: 0, opened_at: "2026-10-20T10:00:00Z", first_reply_at: null,
   closed_at: null, channel_posts: null, ...extra,
 });
+const METRICS_OFF: ManagerMetrics = {
+  enabled: false, window_days: 7, turns: { by_delivery: {} },
+  ack: { p50_ms: null, p95_ms: null, by_chat: {} }, first_reply: { p50_ms: null, p95_ms: null, by_chat: {} },
+  empty: { count: 0, ratio: null }, proactive: { per_day: [], reply_rate: { all: null, by_source: {} } },
+};
 const task = (id: string, gates: UserGate[]) => ({ task_id: id, name: `Task ${id}`, group: "needs_you", gates } as TaskDetail);
 
 describe("Dashboard waiting gates", () => {
@@ -41,6 +48,8 @@ describe("Dashboard waiting gates", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     vi.setSystemTime(new Date("2026-10-20T10:12:00Z"));
     vi.resetAllMocks();
+    vi.mocked(fetchManagerMetrics).mockResolvedValue(METRICS_OFF);
+    window.localStorage.clear();
     details = [];
     waitingGates = 1;
     overview = {
@@ -99,6 +108,58 @@ describe("Dashboard waiting gates", () => {
     expect(agentsSection().querySelector('a[href="#tasks/a"]')!.textContent).toBe("Compiler · Build parser");
     expect(agentsSection().querySelector('a[href="#history/worker-a?task=a"]')).not.toBeNull();
     expect(agentsSection().querySelector('[title*="Cache read 9,000"]')).not.toBeNull();
+  });
+
+  const metricsSection = () => container.querySelector('section[aria-label="Manager"]')!;
+  /** The browser-local date `back` days before now, as the group names days. */
+  const day = (back: number) => {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - back);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  it("shows the Manager's metrics with a dash for what was not measured, and refetches for 24 hours", async () => {
+    vi.mocked(fetchManagerMetrics).mockResolvedValue({
+      ...METRICS_OFF, enabled: true, turns: { by_delivery: { reply: 38, empty: 2 } },
+      ack: { p50_ms: 1234, p95_ms: 3400, by_chat: {} }, empty: { count: 2, ratio: 0.05 },
+      proactive: {
+        per_day: [{ date: day(1), by_source: { task_notice: 3 } },
+                  { date: day(0), by_source: { task_notice: 2, gate: 2 } }],
+        reply_rate: { all: 0.5, by_source: { task_notice: 0.6, gate: null } },
+      },
+    });
+    await show();
+    const text = metricsSection().textContent!;
+    for (const part of ["1.2 s", "P95 3.4 s", "2 · 5%", "turns that delivered no reply, of 40", "1.0 / day", "reply rate 50%",
+                        "task notices 2 · gates 2", "task notices 60% · gates —"]) expect(text).toContain(part);
+    // The first reply was not measured: a dash, never 0.
+    const tiles = [...metricsSection().querySelectorAll("p")].map((p) => p.textContent);
+    expect(tiles.slice(tiles.indexOf("First reply (P50)") + 1, tiles.indexOf("First reply (P50)") + 3))
+      .toEqual(["—", "P95 —"]);
+    // Every local day of the 7-day window, today and 7 back, a day without messages too.
+    const rows = [...metricsSection().querySelectorAll("tbody tr")].map((r) => [...r.children].map((c) => c.textContent));
+    expect(rows.map((r) => r[0])).toEqual([0, 1, 2, 3, 4, 5, 6, 7].map(day));
+    expect(rows[1]).toEqual([day(1), "task notices 3", "3"]);
+    expect(rows[2]).toEqual([day(2), "—", "0"]);
+    expect(vi.mocked(fetchManagerMetrics).mock.calls.at(-1)![0]).toBe(7);
+    await act(async () => (metricsSection().querySelector('button[aria-pressed="false"]') as HTMLButtonElement).click());
+    expect(vi.mocked(fetchManagerMetrics).mock.calls.at(-1)![0]).toBe(1);
+    expect(window.localStorage.getItem("looper.dashboard.managerMetricsDays")).toBe("1");
+  });
+
+  it("says the metrics are off, with the way to Settings → Chat, and shows no figures", async () => {
+    await show();
+    expect(metricsSection().textContent).toContain("Metrics are off");
+    expect(metricsSection().querySelector('a[href="#settings/chat"]')).not.toBeNull();
+    expect(metricsSection().textContent).not.toContain("Ack");
+    expect(metricsSection().querySelector('[aria-label="Metrics window"]')).toBeNull();  // nothing to window
+  });
+
+  it("keeps the rest of the page when the metrics cannot be read", async () => {
+    vi.mocked(fetchManagerMetrics).mockRejectedValue(new Error("forbidden"));
+    await show();
+    expect(metricsSection().querySelector('[role="alert"]')!.textContent).toContain("forbidden");
+    expect(agentsSection().textContent).toContain("No agent is running now");
   });
 
   it("links each count to the Tasks list with scheduled tasks included, so the list matches the count", async () => {

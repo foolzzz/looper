@@ -74,7 +74,7 @@ def test_a_reminder_at_night_over_the_cap_still_goes(monkeypatch: pytest.MonkeyP
         chat = LARK_GROUP if group else LARK_USER
         # The chat already had its day's worth of counted messages, and it is 03:00 in the user's timezone.
         night = datetime(2026, 11, 20, 3, 0, tzinfo=timezone.utc)
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         for n in range(5):
             await pool.execute(
                 "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, decision, "
@@ -142,7 +142,7 @@ def test_the_courier_does_what_the_decision_says(monkeypatch: pytest.MonkeyPatch
 def test_decide_counts_a_direct_chats_day_in_the_users_timezone_and_keeps_a_first_decision(
         monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'Asia/Tokyo')")
+        monkeypatch.setattr(chat_settings, "_timezone", "Asia/Tokyo")
         notice = delivery.Delivery(delivery.DeliveryKind.TASK_NOTICE, delivery.Urgency.NORMAL,
                                    delivery.ChatKind.DIRECT)
         # 10:00 in Tokyo, 01:00 UTC: outside the quiet hours there, though inside them in UTC.
@@ -169,15 +169,12 @@ def test_decide_counts_a_direct_chats_day_in_the_users_timezone_and_keeps_a_firs
 
 
 def test_an_unknown_user_timezone_falls_back_to_the_servers(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def test(pool: Any) -> None:
-        from looper.agents import cron
+    from looper.agents import turn_context
 
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'Mars/Olympus')")
-        assert (await delivery.load_policy()).timezone == cron.zone(cron.local_zone_name())
-        await pool.execute("UPDATE system_settings SET value = 'Asia/Tokyo' WHERE key = 'user.timezone'")
-        assert str((await delivery.load_policy()).timezone) == "Asia/Tokyo"
-
-    run_db(test, monkeypatch)
+    monkeypatch.setattr(chat_settings, "_timezone", "Mars/Olympus")
+    assert delivery.load_policy().timezone == turn_context.server_zone()
+    monkeypatch.setattr(chat_settings, "_timezone", "Asia/Tokyo")
+    assert str(delivery.load_policy().timezone) == "Asia/Tokyo"
 
 
 def test_a_reminder_the_layer_cannot_decide_on_is_posted_as_with_the_switch_off(
@@ -228,7 +225,7 @@ async def _decide(key: str, now: datetime = AFTERNOON, chat: str = "ou_1") -> de
 
 def test_send_points_racing_for_the_last_message_of_the_day_get_one(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         for round_ in range(5):  # several chats: a missing lock would let two through at least once
             chat = f"ou_{round_}"
             for n in range(4):
@@ -243,7 +240,7 @@ def test_send_points_racing_for_the_last_message_of_the_day_get_one(monkeypatch:
 
 def test_one_message_decided_on_twice_at_once_gets_one_row_and_one_decision(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         night = datetime(2026, 11, 20, 23, 0, tzinfo=timezone.utc)
         decisions = await asyncio.gather(_decide("same", AFTERNOON), _decide("same", night), _decide("same", night))
         assert len(set(decisions)) == 1  # whichever was first: the others keep its decision
@@ -254,7 +251,7 @@ def test_one_message_decided_on_twice_at_once_gets_one_row_and_one_decision(monk
 
 def test_the_daily_count_starts_again_at_local_midnight(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'Asia/Tokyo')")
+        monkeypatch.setattr(chat_settings, "_timezone", "Asia/Tokyo")
         # 21:00 in Tokyo on the 19th (12:00 UTC): five counted messages that day.
         evening = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
         for n in range(5):
@@ -269,22 +266,16 @@ def test_the_daily_count_starts_again_at_local_midnight(monkeypatch: pytest.Monk
 
 
 def test_without_a_user_timezone_the_servers_applies(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def test(pool: Any) -> None:
-        from looper.agents import cron
-
-        assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = 'user.timezone'") == 0
-        assert (await delivery.load_policy()).timezone == cron.zone(cron.local_zone_name())
-        monkeypatch.setenv("TZ", "Asia/Tokyo")  # the server's own zone, as cron reads it
-        assert str((await delivery.load_policy()).timezone) == "Asia/Tokyo"
-
-    run_db(test, monkeypatch)
+    monkeypatch.setattr(chat_settings, "_timezone", None)
+    monkeypatch.setenv("TZ", "Asia/Tokyo")  # the server's own zone, as the turn context reads it
+    assert str(delivery.load_policy().timezone) == "Asia/Tokyo"
 
 
 def test_the_metrics_receipt_lands_on_the_decided_row_and_keeps_the_decision(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         from looper.db import proactive_deliveries
 
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         decided = await _decide("gate-7")
         # The channel's receipt as the metrics record it after the send, under the same key.
         await proactive_deliveries.insert({"source": "task_notice", "channel_id": "channel-lark", "chat": "ou_1",
@@ -305,7 +296,7 @@ def test_a_row_the_metrics_recorded_before_the_layer_was_on_gets_its_decision(mo
     async def test(pool: Any) -> None:
         from looper.db import proactive_deliveries
 
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
         await proactive_deliveries.insert({"source": "task_notice", "channel_id": "channel-lark", "chat": "ou_1",
                                            "chat_kind": "direct", "external_id": "om_9", "outcome": "sent",
                                            "dedupe_key": "notice-1"})
