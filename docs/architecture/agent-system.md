@@ -226,7 +226,9 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   missing `compact_boundary` or context still over the threshold queues a rotation; a runtime without the
   capability rotates directly. At half the context threshold or more, a turn costing over half its budget
   also rotates. Rotation stops the process; the next turn resumes the old session for its handoff and starts
-  a new one with that handoff and the Manager's three latest ended task results, newest first. Compactions and
+  a new one with that handoff. Main also receives the Manager's three latest ended task results, newest first;
+  group and DM sessions keep only their own chat excerpt. Measurements are stored in each session's own
+  row, and maintenance and handoff reopening use its isolated directory and environment. Compactions and
   rotations carry `metadata.session_bound` with the action, reason and before/after token counts.
   The budget also supplies a per-turn soft cap, including subscription runs priced from the model catalog;
   the existing process budget is unchanged. A capped turn gets the fixed `over_cap_reply`, and its next message
