@@ -1,4 +1,4 @@
-"""Project explorer limits preserve old reads until set, and Manager changes require confirmation."""
+"""Project explorer limits preserve old reads and remain operator-only settings."""
 import json
 from pathlib import Path
 
@@ -25,15 +25,18 @@ def test_unset_execution_and_manager_compact_view_match_parent():
     old = manager_config._model_project(BASELINE["execution"])
     assert manager_config._model_project({**BASELINE["execution"], **VALUES, "subagents": "off"}) == old
     assert manager_config._model_project({**BASELINE["execution"], **VALUES}) == {**old, **VALUES}
-    # The Manager's existing tool needs new arguments to turn this feature on from chat.
-    # Keep every old property and description intact; the schema addition is model-visible.
     current = next(tool for tool in manager_config.TOOLS if tool.name == "looper_projects").listing()
-    old_tool = BASELINE["manager_project_tool"]
-    assert current["description"] == old_tool["description"]
-    assert set(current["inputSchema"]["properties"]) - set(old_tool["inputSchema"]["properties"]) == set(SUBAGENT_FIELDS)
-    normalized = {**current, "inputSchema": {**current["inputSchema"], "properties": {
-        key: value for key, value in current["inputSchema"]["properties"].items() if key not in SUBAGENT_FIELDS}}}
-    assert normalized == old_tool
+    assert json.dumps(current, ensure_ascii=False) == json.dumps(BASELINE["manager_project_tool"], ensure_ascii=False)
+
+
+@pytest.mark.parametrize("advisor", ["on", "off"])
+@pytest.mark.parametrize("subagents", [None, "off"])
+def test_manager_compact_view_off_is_byte_identical_to_parent(advisor, subagents):
+    before = {**BASELINE["execution"], "advisor": advisor}
+    expected = {key: value for key, value in before.items()
+                if advisor == "on" or key not in manager_config.ADVISOR_FIELDS}
+    current = manager_config._model_project({**before, **VALUES, "subagents": subagents})
+    assert json.dumps(current, ensure_ascii=False) == json.dumps(expected, ensure_ascii=False)
 
 
 def test_new_task_project_can_set_and_disclose_explorer_limits():
@@ -115,24 +118,20 @@ def test_project_update_readback_export_and_old_import(tmp_path, monkeypatch):
     run_db(run, monkeypatch)
 
 
-def test_manager_turning_subagents_on_waits_for_confirmation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("field", SUBAGENT_FIELDS)
+def test_manager_cannot_change_subagent_settings(field, tmp_path, monkeypatch):
     async def run(pool):
         project = await projects.create_project(name="Example", pool=pool)
         ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="test")
-        first = Turn(channel="web", chat="test", message_id="first")
-        ops.begin_turn(first)
+        turn = Turn(channel="web", chat="test", message_id="first")
+        ops.begin_turn(turn)
         try:
-            asked = await ops.call("looper_projects", {"action": "update", "project": "Example", **VALUES})
+            answer = await ops.call("looper_projects", {
+                "action": "update", "project": "Example", field: VALUES[field]})
         finally:
-            ops.end_turn(first)
-        assert asked["status"] == "needs_confirmation", asked
-        assert (await projects.get_project(project["id"], pool=pool))["subagents"] is None
-        second = Turn(channel="web", chat="test", message_id="second")
-        ops.begin_turn(second)
-        try:
-            confirmed = await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]})
-        finally:
-            ops.end_turn(second)
-        assert confirmed["status"] == "ok", confirmed
-        assert (await projects.get_project(project["id"], pool=pool))["subagents"] == "on"
+            ops.end_turn(turn)
+        assert answer["status"] == "error", answer
+        assert field in answer["error"]["message"], answer
+        saved = await projects.get_project(project["id"], pool=pool)
+        assert all(saved[key] is None for key in SUBAGENT_FIELDS)
     run_db(run, monkeypatch)

@@ -18,22 +18,6 @@ def _hash(value) -> str:
                                      separators=(",", ":")).encode()).hexdigest()
 
 
-def _legacy_listing(tool):
-    """The project tool's new settings arguments are an explicit model-visible exception.
-
-    Retain the frozen comparison for every old argument, description, prompt and
-    tool. The settings test separately checks exactly which arguments were added.
-    """
-    from looper.agents.project_execution import SUBAGENT_FIELDS
-
-    listing = tool.listing()
-    if tool.name != "looper_projects":
-        return listing
-    schema = listing["inputSchema"]
-    return {**listing, "inputSchema": {**schema, "properties": {
-        key: value for key, value in schema["properties"].items() if key not in SUBAGENT_FIELDS}}}
-
-
 def _surfaces() -> dict[str, str]:
     from looper.agents.ops import Tool
     from looper.agents import ops
@@ -51,9 +35,9 @@ def _surfaces() -> dict[str, str]:
         for value in vars(module).values():
             for tool in value if isinstance(value, (tuple, list)) else (value,):
                 if isinstance(tool, Tool):
-                    all_tools[tool.name] = _legacy_listing(tool)
+                    all_tools[tool.name] = tool.listing()
     result["tools:all"] = _hash(all_tools)
-    result["tools:manager"] = _hash([_legacy_listing(tool) for tool in service.MANAGER_TOOLS])
+    result["tools:manager"] = _hash([tool.listing() for tool in service.MANAGER_TOOLS])
     result["tools:planner"] = _hash([tool.listing() for tool in (*planner.TOOLS, *planner.ROLE_TOOLS)])
     result["tools:worker"] = _hash([tool.listing() for tool in (*room.tools_for(MemberKind.WORK), *vault.TOOLS)])
     return result
