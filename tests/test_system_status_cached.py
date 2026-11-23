@@ -108,6 +108,30 @@ def test_proxy_health_is_read_once_and_storage_is_cached(server, monkeypatch):
     asyncio.run(run())
 
 
+def test_registry_without_catchup_support_keeps_status_and_attention_empty(server):
+    from looper.agents import attention
+
+    http, _ = server
+    http._self_checks = []
+    http._channels = SimpleNamespace(start_checks=lambda: [])
+
+    async def run():
+        try:
+            await http.start()
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"http://127.0.0.1:{http._port}/api/v1/system/status", json={},
+                    headers={"Authorization": "Bearer status-test-token"})
+            assert response.status_code == 200
+            result = response.json()["result"]
+            assert result["checks"] == []
+            assert result["channels"] == {"web": http._web_adapter.healthcheck()}
+            assert await attention._catchup_items() == []
+        finally:
+            await http.stop()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("reason", ["retry_exhausted", "stale", "boundary_expired", "page_cap", "pagination", "permission"])
 def test_status_exposes_pending_and_dropped_lark_catchup_windows(server, reason):
     from looper.agents import api_v1
