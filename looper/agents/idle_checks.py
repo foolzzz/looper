@@ -225,6 +225,8 @@ def _intent_waited(item: Mapping[str, Any], now: datetime) -> bool:
 
 # One row per section; ``None`` is a section that never gives a candidate (and why).
 RULES: dict[str, SectionRule | None] = {
+    # New attention sections opt into idle reminders only when they define a rule here.
+    **dict.fromkeys(attention.KINDS),
     "gates": None,  # a gate has its own reminder (24 h by default)
     "confirmations": None,  # void after ten minutes: not there after thirty idle ones
     "schedules": SectionRule(
