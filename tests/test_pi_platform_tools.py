@@ -37,6 +37,7 @@ from looper.agents.room import MemberKind, RoomService, Seat
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported
 from looper.agents.runtimes.pi import PROBE_HELP_TOKENS, PiRuntime
 from looper.agents.vault import VaultConfig
+from tests.role_support import ROLES_WITH_TOOLS
 
 PI = PiRuntime()
 ROLES = ["manager", "planner", "worker", "reviewer"]
@@ -58,7 +59,7 @@ def _launch(role: str, library: AgentLibrary = AgentLibrary(), *, endpoint: str 
 
 def test_pi_advertises_only_the_rfc_capabilities_and_supported_roles() -> None:
     assert PI.capabilities == CAPABILITIES
-    assert servable_roles(PI.capabilities) == ["manager", "planner", "worker", "explorer", "reviewer"]
+    assert servable_roles(PI.capabilities) == ROLES_WITH_TOOLS
     # The remaining RuntimeUnsupported cases validate input/version/session
     # boundaries; none of these execution entry points is a rollout placeholder.
     for method in ("run_command", "resident_session", "consult_command", "steer_command", "run_channel",
