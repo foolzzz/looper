@@ -22,9 +22,9 @@ interface SectionBase { state: StatusSectionState; error?: string | null }
 export type StatusSection =
   | (SectionBase & { name: "manager"; managers?: StatusManager[] })
   | (SectionBase & { name: "tasks"; count?: number })
-  | (SectionBase & { name: "schedules"; next?: { name: string; next_fire_at?: string | null }[]; running?: unknown[] })
+  | (SectionBase & { name: "schedules"; next?: { name: string; next_fire_at?: string | null; timezone?: string | null }[]; running?: { run_id: string; name?: string }[] })
   | (SectionBase & { name: "waiting"; kinds?: StatusWaitingKind[] })
-  | (SectionBase & { name: "reminders"; next?: { due_at?: string | null; text: string } | null })
+  | (SectionBase & { name: "reminders"; next?: { due_at?: string | null; text: string; timezone?: string | null } | null })
   | (SectionBase & { name: string });
 
 export interface StatusSnapshot { read_at: string; text?: string; sections: StatusSection[] }

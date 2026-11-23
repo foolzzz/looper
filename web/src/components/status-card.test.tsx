@@ -107,4 +107,39 @@ describe("StatusCard", () => {
     expect(container.querySelector('[role="alert"]')!.textContent).toContain("Cannot load the status (network down).");
     expect(text()).not.toContain("Idle");
   });
+
+  it("shows a waiting kind in unknown as not available, whatever the other kinds count", async () => {
+    fetchMock.mockResolvedValue(okBody(snapshot([ok("waiting", { kinds: [
+      { kind: "gates", state: "ok", count: 2, earliest: null, error: null },
+      { kind: "logins", state: "unknown", count: 0, earliest: null, error: null }] })])));
+    await show();
+    expect(text()).toContain("logins: Not available here");
+    expect(text()).toContain("2 gates");
+  });
+
+  it("shows a waiting kind in error with its reason, never Nothing", async () => {
+    fetchMock.mockResolvedValue(okBody(snapshot([ok("waiting", { kinds: [
+      { kind: "gates", state: "error", count: 0, earliest: null, error: "gate store down" }] })])));
+    await show();
+    expect(container.querySelector('[role="alert"]')!.textContent).toContain("gate store down");
+    expect(text()).not.toContain("Nothing");
+  });
+
+  it("hides the card when a later read answers 409", async () => {
+    fetchMock.mockResolvedValueOnce(okBody(FULL)).mockResolvedValue(off());
+    await show();
+    expect(text()).toContain("3 gates");
+    await advance(15_000);
+    expect(container.innerHTML).toBe("");
+    await advance(60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a reminder time in the snapshot's timezone", async () => {
+    fetchMock.mockResolvedValue(okBody(snapshot([ok("reminders", {
+      next: { due_at: "2026-10-20T23:30:00Z", text: "Call", timezone: "Asia/Tokyo" } })])));
+    vi.setSystemTime(new Date("2026-10-20T23:00:00Z"));
+    await show();
+    expect(text()).toMatch(/08:30|8:30/);
+  });
 });

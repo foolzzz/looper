@@ -11,10 +11,17 @@ const WAITING = { gates: "gates", confirmations: "confirmations", schedules: "fa
 const BACKGROUND = { completion: "wrapping up a task", own: "its own turn" } as Record<string, string>;
 
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-const when = (iso: string) => {
+/** A due time in the zone the snapshot names (what `/status` shows), the browser's when it names none or an unknown one. */
+const when = (iso: string, timeZone?: string | null) => {
   const d = new Date(iso);
-  const today = new Date().toDateString() === d.toDateString();
-  return today ? time(iso) : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time(iso)}`;
+  const fmt = (o: Intl.DateTimeFormatOptions) => {
+    try { return d.toLocaleString([], { ...o, timeZone: timeZone || undefined }); }
+    catch { return d.toLocaleString([], o); }
+  };
+  const day = fmt({ year: "numeric", month: "numeric", day: "numeric" });
+  const today = new Date().toLocaleString([], { year: "numeric", month: "numeric", day: "numeric", timeZone: timeZone || undefined });
+  const clock = fmt({ hour: "2-digit", minute: "2-digit" });
+  return day === today ? clock : `${fmt({ month: "short", day: "numeric" })} ${clock}`;
 };
 function elapsed(seconds?: number | null): string {
   if (seconds == null || seconds < 60) return "under a minute";
@@ -71,7 +78,7 @@ function Rows({ sections }: { sections: StatusSection[] }) {
   const reminders = get("reminders") as Extract<StatusSection, { name: "reminders" }> | undefined;
   const tasks = get("tasks") as Extract<StatusSection, { name: "tasks" }> | undefined;
   const schedules = get("schedules") as Extract<StatusSection, { name: "schedules" }> | undefined;
-  const kinds = (waiting?.kinds ?? []).filter((k) => k.count > 0 || k.state === "error");
+  const kinds = (waiting?.kinds ?? []).filter((k) => k.count > 0 || k.state !== "ok");
   const nextFire = schedules?.next?.find((n) => n.next_fire_at);
   return (
     <div className="divide-y divide-border">
@@ -84,7 +91,9 @@ function Rows({ sections }: { sections: StatusSection[] }) {
                 <li key={k.kind} role={k.state === "error" ? "alert" : undefined}>
                   {k.state === "error"
                     ? <span className="text-destructive">{WAITING[k.kind] ?? k.kind}: {k.error || "cannot read"}</span>
-                    : <a href="#todo" className={cn("text-warning", linkClass)}>{k.count} {WAITING[k.kind] ?? k.kind}</a>}
+                    : k.state === "unknown"
+                      ? <span className="text-muted-foreground">{WAITING[k.kind] ?? k.kind}: Not available here</span>
+                      : <a href="#todo" className={cn("text-warning", linkClass)}>{k.count} {WAITING[k.kind] ?? k.kind}</a>}
                 </li>
               ))}
             </ul>
@@ -94,7 +103,7 @@ function Rows({ sections }: { sections: StatusSection[] }) {
       {reminders && (
         <Row label="Next reminder" section={reminders}>
           {reminders.next ? (
-            <span className="break-words">{reminders.next.due_at && <span className="text-muted-foreground">{when(reminders.next.due_at)} · </span>}{reminders.next.text}</span>
+            <span className="break-words">{reminders.next.due_at && <span className="text-muted-foreground">{when(reminders.next.due_at, reminders.next.timezone)} · </span>}{reminders.next.text}</span>
           ) : <span className="text-muted-foreground">None</span>}
         </Row>
       )}
@@ -102,7 +111,7 @@ function Rows({ sections }: { sections: StatusSection[] }) {
       {schedules && (
         <Row label="Schedules" section={schedules}>
           <a href="#schedules" className={linkClass}>{schedules.running?.length ?? 0} running</a>
-          <span className="text-muted-foreground">{nextFire ? ` · next ${when(nextFire.next_fire_at!)}` : ""}</span>
+          <span className="text-muted-foreground">{nextFire ? ` · next ${when(nextFire.next_fire_at!, nextFire.timezone)}` : ""}</span>
         </Row>
       )}
     </div>
@@ -124,7 +133,7 @@ export function StatusCard() {
         setError("");
       } catch (e) {
         if (signal.aborted) return;
-        if (isStatusCardOff(e)) return true;
+        if (isStatusCardOff(e)) { setSnapshot(null); setError(""); return true; }
         setError(e instanceof Error ? e.message : String(e));
       }
     }, REFRESH_MS);
