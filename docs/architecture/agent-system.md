@@ -4280,6 +4280,35 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
+### Cost guard observation
+
+`cost_guard.mode` defaults to `off`; this first stage accepts only `off` and `observe`.
+Global and background-role daily caps have no default. Observe for a week before choosing limits;
+the read-only Settings → 花费 page then offers the last 30 days' daily P95 × 1.5 as advice, never an applied cap.
+The operator-only `cost_guard.get/update` operations expose this configuration and accounting; updates declare
+confirmation. They are separate from `chat_settings`, add no agent tool, and are available through the generated CLI.
+Configuration export/import includes explicit cost settings, never runtime observations; a client cannot import them.
+Lark and Telegram share the same observed Manager/model-run paths, with no new command, reply or notification.
+
+`agents/cost_guard.py` reserves before every model turn through `ClaudeRunRecorder.start`, including resident
+Manager/Planner turns, Worker/Reviewer runs, processor/leads checks, advisor/judge/outbound checks and room consults.
+A schedule firing is observed separately without reserving twice. The effective run cap is the estimate; without one,
+use the same role/currency's last 30 days' P95, at least $0.50 ($0.05 for processors and classifiers).
+No samples uses the floor with `estimate_source=floor_no_samples`. OAuth subscription equivalents and real spend
+use separate counters. Startup and each new scheduler day rebuild history, P95 and running reservations; the
+scheduler, subscriptions and guard share `Scheduler.day_start`, with the existing server-local default.
+A completed record replaces its reservation with actual cost. Unknown costs remain unknown; these estimates are
+admission accounting, not a provider billing guarantee.
+
+Observe adds only internal `metadata.reservation` and `metadata.cost_guard` and server log records. It records
+would-admit/ask/deny outcomes, but never enforces, asks, sends, changes retries, adds a soft cap or changes a
+profile. Record presentation removes these fields. Off performs no admission I/O and adds no record fields;
+prompts, tools, commands and process signatures retain their previous inputs. A guard error preserves ordinary
+execution. Outbound reservation errors propagate to `review()`'s existing block-on-error path; a successful
+classifier verdict and successful audit write are both still required to allow an action.
+Enforcement, holds, quota deferrals, alerts, unanswered-push pauses and editable dashboard controls follow the
+[cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分). This stage needs no migration.
+
 ### Why a run failed (failure classes)
 
 While the system setting `engine.failure_typing` is `record` (`off` by default; [engine reliability
