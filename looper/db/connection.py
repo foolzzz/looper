@@ -71,11 +71,15 @@ def fence() -> None:
         _pool.terminate()
 
 
+class PoolNotInitializedError(RuntimeError):
+    """No database pool has been opened in this process."""
+
+
 def get_pool() -> asyncpg.Pool:
     if _fenced:
         raise RuntimeError(_FENCED_MESSAGE)
     if _pool is None:
-        raise RuntimeError("database pool not initialised — call init_pool() first")
+        raise PoolNotInitializedError("database pool not initialised — call init_pool() first")
     return _pool
 
 
@@ -145,6 +149,7 @@ _SUBSCRIPTIONS = "subscriptions"
 _SUBSCRIPTION_RULES = "subscription_rules"
 _SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
+_PROACTIVE_DELIVERIES = "proactive_deliveries"
 _SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
 _MANAGER_EVENT_REASONS_MIGRATION = "manager_event_reasons"
 _MANAGER_EVENT_DELIVERY = "manager_event_delivery"
@@ -159,7 +164,9 @@ _STEP_DIFFICULTY = "step_difficulty"
 _ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
+_CHANNEL_OUTBOX = "channel_outbox"
 _LEDGER = "ledger"
+_MANAGER_SESSIONS = "manager_sessions"
 _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
@@ -174,6 +181,8 @@ _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
 _CARD_ACTIONS = "card_actions"
 
+_MEMORY_CANDIDATES = "memory_candidates"
+_PROVIDER_LIMIT_WINDOWS = "provider_limit_windows"
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
 _UNCERTAIN_DELIVERY_INDEXES = (
@@ -182,6 +191,8 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
 _REMINDERS = "reminders"
+_MCP_TOOL_LEVELS = "mcp_tool_levels"
+_FAILURE_TYPING = "failure_typing"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -271,7 +282,9 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
 _SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source deletions end", re.S)
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
+_PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
+_MANAGER_SESSIONS_BLOCK = re.compile(r"-- manager sessions begin\n(.*?)-- manager sessions end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 _DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
 
@@ -306,7 +319,30 @@ def _decision_snapshots_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its decision snapshots block")
     return found.group(1)
+
+
+_MCP_TOOL_LEVELS_BLOCK = re.compile(r"-- mcp tool levels begin\n(.*?)-- mcp tool levels end", re.S)
+
+
+def _mcp_tool_levels_ddl() -> str:
+    """The MCP tool declarations as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _MCP_TOOL_LEVELS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its mcp tool levels block")
+    return found.group(1)
+
+
 _OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
+_MEMORY_CANDIDATES_BLOCK = re.compile(r"-- memory candidates begin\n(.*?)-- memory candidates end", re.S)
+
+
+def _memory_candidates_ddl() -> str:
+    """The memory candidate tables and their triggers as schema.sql defines them (idempotent), so a database that
+    predates them gets the same text."""
+    found = _MEMORY_CANDIDATES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its memory candidates block")
+    return found.group(1)
 
 
 # The checks that list the classifier: (table, constraint).
@@ -356,6 +392,18 @@ def _run_tree_ddl() -> tuple[str, ...]:
         f"ALTER TABLE llm_records ADD CONSTRAINT llm_records_run_kind_check CHECK (run_kind IN ({kinds})) NOT VALID, "
         "ADD CONSTRAINT llm_records_parent_record_id_fkey FOREIGN KEY (parent_record_id) REFERENCES llm_records(id) "
         "ON DELETE SET NULL NOT VALID",
+    )
+
+
+def _failure_typing_ddl() -> tuple[str, ...]:
+    """The failure columns of llm_records, as schema.sql defines them, added without a scan or a rewrite (as the run
+    tree's are): every older row is NULL, so the check holds; it comes NOT VALID and is validated, and the index
+    built, in ``_ONLINE_STEPS``."""
+    from ..agents.failures import check_sql
+
+    return (
+        "ALTER TABLE llm_records ADD COLUMN failure_class TEXT, ADD COLUMN failure_cause TEXT",
+        f"ALTER TABLE llm_records ADD CONSTRAINT llm_records_failure_check CHECK ({check_sql()}) NOT VALID",
     )
 
 
@@ -524,6 +572,21 @@ def _reminders_ddl() -> str:
     found = _REMINDERS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its reminders block")
+    return found.group(1)
+
+
+def _proactive_deliveries_ddl() -> str:
+    found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its proactive deliveries block")
+    return found.group(1)
+
+
+def _manager_sessions_ddl() -> str:
+    """The Manager session table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _MANAGER_SESSIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its manager sessions block")
     return found.group(1)
 
 
@@ -878,6 +941,10 @@ async def _run_tree_pending(conn: asyncpg.Connection) -> bool:
     return await _column_pending(conn, _RUN_TREE, "llm_records", "run_kind")
 
 
+async def _failure_typing_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _FAILURE_TYPING, "llm_records", "failure_class")
+
+
 async def _step_difficulty_pending(conn: asyncpg.Connection) -> bool:
     return await _column_pending(conn, _STEP_DIFFICULTY, "task_steps", "difficulty")
 
@@ -894,6 +961,26 @@ async def _decision_snapshots_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('decision_snapshots') IS NOT NULL")
 
 
+async def _mcp_tool_levels_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MCP_TOOL_LEVELS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('mcp_tool_levels') IS NOT NULL")
+
+
+async def _provider_limit_windows_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", _PROVIDER_LIMIT_WINDOWS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('provider_limit_windows') IS NOT NULL")
+
+
+def _provider_limit_windows_ddl() -> str:
+    found = re.search(r"-- provider limit windows begin\n(.*?)-- provider limit windows end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its provider limit windows block")
+    return found.group(1)
+
+
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _OUTBOUND_REVIEWS):
         return False
@@ -904,6 +991,12 @@ async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
         if await _lacks_outbound_check(conn, table, constraint):
             return True
     return False
+
+
+async def _memory_candidates_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MEMORY_CANDIDATES):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('memory_candidates') IS NOT NULL")
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -960,6 +1053,21 @@ CREATE TABLE IF NOT EXISTS subscription_daily_claims (
     PRIMARY KEY (schedule_id, local_date)
 );
 """
+
+
+async def _channel_outbox_pending(conn: asyncpg.Connection) -> bool:
+    return not await conn.fetchval("""
+        SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('channel_outbox')
+                       AND attname='claim_token' AND NOT attisdropped)
+        """)
+
+
+def _channel_outbox_ddl() -> str:
+    found = re.search(r"-- channel outbox begin\n(.*?)-- channel outbox end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its channel outbox block")
+    return found.group(1)
 
 
 async def _ledger_pending(conn: asyncpg.Connection) -> bool:
@@ -1063,6 +1171,18 @@ async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_EVENTS):
         return False
     return not await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
+
+
+async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
+
+
+async def _manager_sessions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_SESSIONS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('manager_sessions') IS NOT NULL")
 
 
 async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:

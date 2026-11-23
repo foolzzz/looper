@@ -175,7 +175,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
-            assert {"schedule_user_gates", "command_schedules", "runtime_launcher"} <= {
+            assert {"schedule_user_gates", "command_schedules", "runtime_launcher", "proactive_deliveries",
+                    "channel_outbox"} <= {
                 r["name"] for r in after["schema_migrations"]}
             assert await conn.fetchval("SELECT planner_session_runtime FROM schedules") == "claude-code"
             # Added snapshot and command metadata preserve every historical run field.
@@ -463,8 +464,10 @@ def test_unusual_rows_warn_and_keep_bridge_reading(bridge_source, caplog, damage
             if table == "tasks":
                 assert json.loads(after[0]["config"]) == {}
             elif table == "llm_records":
-                # The run tree's columns are added and no row is rewritten: older rows have no kind and no parent.
-                assert after == [{**r, "parent_record_id": None, "run_kind": None} for r in before]
+                # The run tree's and the failure classes' columns are added and no row is rewritten: older rows have
+                # no kind, no parent and no failure class.
+                assert after == [{**r, "parent_record_id": None, "run_kind": None, "failure_class": None,
+                                  "failure_cause": None} for r in before]
             else:
                 assert after == before
             assert any(r.levelname == "WARNING" and identity in r.message for r in caplog.records)
