@@ -161,8 +161,9 @@ def test_finished_record_replaces_reservation_only_after_its_cost_is_saved(monke
     assert events[-1][1:] == ((42,), {"cost_usd": 0.25, "cost_source": "runtime"})
 
 
-@pytest.mark.parametrize('failure', ['guard', 'reservation', 'audit', None])
-def test_review_allows_only_a_successful_classifier_and_a_successful_audit(monkeypatch, tmp_path, failure):
+@pytest.mark.parametrize('failure', ['guard', 'reservation', 'audit', 'guard_audit', None])
+@pytest.mark.parametrize('verdict', ['allow', 'block'])
+def test_review_allows_only_a_successful_classifier_and_a_successful_audit(monkeypatch, tmp_path, failure, verdict):
     from looper.agents import outbound
     from looper.agents.agent_settings import AgentType
     from looper.agents.cost_guard_settings import Config, Mode
@@ -172,12 +173,14 @@ def test_review_allows_only_a_successful_classifier_and_a_successful_audit(monke
     g = cost_guard.Guard(Config(mode=Mode.OBSERVE))
     monkeypatch.setattr(cost_guard, '_guard', g)
     monkeypatch.setattr(cost_guard.store, 'history', AsyncMock(
-        side_effect=OSError('synthetic guard failure') if failure == 'guard' else None, return_value=[]))
+        side_effect=OSError('synthetic guard failure') if failure in ('guard', 'guard_audit') else None, return_value=[]))
     monkeypatch.setattr(cost_guard.store, 'limits', AsyncMock(return_value={}))
     monkeypatch.setattr(llm_records, 'start_record', AsyncMock(
         side_effect=OSError('synthetic reservation failure') if failure == 'reservation' else None, return_value=42))
-    audit = AsyncMock(side_effect=OSError('synthetic audit failure') if failure == 'audit' else None, return_value=7)
+    audit = AsyncMock(side_effect=OSError('synthetic audit failure') if failure in ('audit', 'guard_audit') else None,
+                      return_value=7)
     monkeypatch.setattr(outbound_reviews, 'insert', audit)
+    classified = []
 
     async def classify(*args):
         recorder = ClaudeRunRecorder(agent_id='outbound_check-synthetic', task_id=None, command=['claude'],
@@ -185,14 +188,23 @@ def test_review_allows_only_a_successful_classifier_and_a_successful_audit(monke
                                      launch=builtin_launch(role=AgentType.OUTBOUND_CHECK))
         try:
             await recorder.start()
-            return outbound.Decision.ALLOW, 'The operator asked.', (), None
+            classified.append(verdict)
+            return outbound.Decision(verdict), 'Synthetic classifier verdict.', (), None
         finally:
             recorder._untrack()
 
     monkeypatch.setattr(outbound, '_classify', classify)
     action = outbound.Action('synthetic_send', outbound.ActionLevel.EXTERNAL, 'chat', 'synthetic', 'Send example')
     origin = outbound.Origin('manager', outbound.Source.TOOL)
-    result = asyncio.run(outbound.review(action, outbound.Asker(outbound.Who.OPERATOR, message='Send example'),
-                                         origin, runtime_root=tmp_path))
-    assert result.allowed is (failure is None)
-    audit.assert_awaited_once()
+    async def check():
+        # A failed first rebuild leaves day unset; later reviews must still classify rather than repeatedly block.
+        for _ in range(2):
+            result = await outbound.review(action, outbound.Asker(outbound.Who.OPERATOR, message='Send example'),
+                                           origin, runtime_root=tmp_path)
+            assert result.allowed is (verdict == 'allow' and failure in (None, 'guard'))
+        assert classified == ([] if failure == 'reservation' else [verdict, verdict])
+        assert audit.await_count == 2
+        if failure in ('guard', 'guard_audit'):
+            assert g.problem and g.day is None
+            assert cost_guard.store.history.await_count == 2
+    asyncio.run(check())

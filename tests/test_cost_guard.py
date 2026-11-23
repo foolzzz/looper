@@ -122,15 +122,37 @@ def test_profile_auth_determines_currency_before_running(auth, currency):
     assert cg.currency_of(launch) is currency
 
 
-def test_guard_failure_keeps_review_exception_boundary(monkeypatch):
+@pytest.mark.parametrize('run_kind', ['worker', 'outbound_check'])
+def test_guard_failure_keeps_review_exception_boundary(monkeypatch, caplog, run_kind):
     async def check():
         g = guard(monkeypatch)
         monkeypatch.setattr(cg, '_guard', g)
         cg.store.history.side_effect = OSError('synthetic accounting failure')
         launch = SimpleNamespace(profile=SimpleNamespace(provider=SimpleNamespace(auth='api_key')), max_budget_usd=1)
-        assert await cg.before_run(launch=launch, run_kind='worker') is None
-        with pytest.raises(OSError, match='accounting'):
-            await cg.before_run(launch=launch, run_kind='outbound_check')
+        assert await cg.before_run(launch=launch, run_kind=run_kind) is None
+        assert g.problem and g.day is None
+        assert 'synthetic accounting failure' in caplog.text
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('failure', ['limits', 'context', 'reservation'])
+def test_observe_rebuild_and_context_failures_return_without_reserving(monkeypatch, failure):
+    async def check():
+        g = guard(monkeypatch)
+        monkeypatch.setattr(cg, '_guard', g)
+        if failure == 'limits':
+            cg.store.limits.side_effect = OSError('synthetic limits failure')
+        elif failure == 'context':
+            monkeypatch.setattr(cg.store, 'context', AsyncMock(side_effect=OSError('synthetic context failure')))
+        else:
+            cg.store.history.return_value = [dict(id=1, run_kind='outbound_check', task_id=None,
+                schedule_id=None, created_at=NOW, status='running', cost_usd=None,
+                currency='provider_priced_usd', metadata={'reservation': {'usd': 'broken'}})]
+        launch = SimpleNamespace(profile=SimpleNamespace(provider=SimpleNamespace(auth='api_key')), max_budget_usd=1)
+        for _ in range(2):
+            assert await cg.before_run(launch=launch, run_kind='outbound_check', task_id='task-a') is None
+            assert g.problem
+        assert g.snapshot()['counters'] == []
     asyncio.run(check())
 
 
@@ -187,9 +209,35 @@ def test_schedule_observation_does_not_double_reserve_its_model_run(monkeypatch)
         g = guard(monkeypatch)
         g.config = Config(mode=Mode.OBSERVE, daily_equivalent_usd=.1)
         monkeypatch.setattr(cg, '_guard', g)
-        monkeypatch.setattr(agent_settings, 'load_agent_settings', AsyncMock(return_value=builtin_launch().settings))
+
+        async def load_settings(*args, **kwargs):
+            assert not g._lock.locked()
+            return builtin_launch().settings
+
+        monkeypatch.setattr(agent_settings, 'load_agent_settings', load_settings)
         await cg.observe_schedule({'id': 'schedule-new', 'kind': 'agent', 'project_id': None, 'run_budget_usd': 1})
         recent = g.snapshot()['recent'][0]
         assert recent['decision'] == 'deny' and recent['action'] == 'skip'
         assert all(c['reserved_usd'] == 0 for c in g.snapshot()['counters'])
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('currency', list(cg.Currency))
+def test_schedule_observes_its_existing_shared_daily_cap_without_combining_global_currencies(monkeypatch, currency):
+    async def check():
+        rows = [dict(id=i, run_kind='planner', task_id=None, schedule_id='schedule-a', created_at=NOW,
+                     status='completed', cost_usd=6, currency=c.value, metadata={})
+                for i, c in enumerate(cg.Currency, 1)]
+        g = guard(monkeypatch, rows=rows, cap=10)
+        g.config = Config(mode=Mode.OBSERVE, daily_usd=10, daily_equivalent_usd=10)
+        cg.store.limits.return_value = {'schedules': {'schedule-a': 10}}
+        await g.rebuild()
+        scopes = g.scopes(cg.RunKind.SCHEDULE, None, 'schedule-a', currency)
+        result = await g.admit(cg.RunKind.SCHEDULE, scopes, currency, 1, reserve=False)
+        assert result.decision is cg.Decision.ADMIT and result.would is cg.Decision.DENY
+        assert g.snapshot()['recent'][0]['scope'] == 'schedule_day'
+        assert g.snapshot()['recent'][0]['action'] == 'skip'
+        global_scopes = g.scopes(cg.RunKind.WORKER, None, None, currency)
+        result = await g.admit(cg.RunKind.WORKER, global_scopes, currency, 1, reserve=False)
+        assert result.would is cg.Decision.ADMIT
     asyncio.run(check())

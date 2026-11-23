@@ -219,7 +219,7 @@ class Guard:
         if scope is BudgetScope.TASK:
             return limits.get('tasks', {}).get(ref, {}).get('cap')
         if scope is BudgetScope.SCHEDULE_DAY:
-            # The existing schedule cap is observed in each currency; the separate equivalent cap lands later.
+            # The existing schedule cap covers both currencies until a separate equivalent cap lands.
             return limits.get('schedules', {}).get(ref)
         if scope is BudgetScope.ROLE_DAY:
             role = self.config.roles.get(ref)
@@ -266,7 +266,10 @@ class Guard:
             self._scopes[*scope.key, currency] = scope
         for scope in scopes:
             key = (*scope.key, currency)
-            if scope.limit_usd is not None and self._spent[key]+self._reserved[key]+estimate > scope.limit_usd:
+            used = self._spent[key]+self._reserved[key]
+            if scope.scope is BudgetScope.SCHEDULE_DAY:
+                used = sum(self._spent[*scope.key, c]+self._reserved[*scope.key, c] for c in Currency)
+            if scope.limit_usd is not None and used+estimate > scope.limit_usd:
                 hit = scope
                 action = (LimitAction.SKIP if kind is RunKind.SCHEDULE else
                           LimitAction.STOP_ROLE if kind in BACKGROUND else LimitAction.ASK)
@@ -387,8 +390,7 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None):
     except Exception:
         guard.problem = 'Run accounting failed; inspect the server log.'
         logger.exception('cost guard admission failed for %s', kind.value)
-        if kind is RunKind.OUTBOUND_CHECK:
-            raise  # review() catches this; failure can never become permission to send
+        # Accounting errors leave classification active; only its verdict and persisted audit can allow a send.
         return None
 
 
@@ -423,14 +425,15 @@ async def observe_schedule(schedule):
     if guard.config.mode is settings.Mode.OFF:
         return
     try:
+        from .agent_settings import AgentType, load_agent_settings, Launch
+
+        role = AgentType.PROCESSOR if schedule['kind'] == 'subscription' else AgentType.PLANNER
+        launch = Launch(await load_agent_settings(role, schedule.get('project_id'),
+                                                  schedule_id=schedule['id'], wait=False), role=role)
         async with guard._lock:
             if guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
             # This is a trigger observation, not another reservation: the actual model turn reserves once.
-            from .agent_settings import AgentType, load_agent_settings, Launch
-            role = AgentType.PROCESSOR if schedule['kind'] == 'subscription' else AgentType.PLANNER
-            launch = Launch(await load_agent_settings(role, schedule.get('project_id'),
-                                                      schedule_id=schedule['id'], wait=False), role=role)
             currency = currency_of(launch)
             estimate, source = guard.estimate(RunKind(role.value), currency, schedule.get('run_budget_usd'))
             scopes = guard.scopes(RunKind.SCHEDULE, None, schedule['id'], currency)
