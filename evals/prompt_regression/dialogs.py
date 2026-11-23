@@ -2444,6 +2444,42 @@ def _follows_settings(look: Look) -> str | None:
     return None if chosen is None else f"the session still has {chosen} selected"
 
 
+BOUND_TASK_TITLE = "会话预算验收"
+BOUND_TASK_SUMMARY = "已生成校验报告"
+
+
+def _seed_session_bound_task(database_url: str, project_id: str) -> None:
+    """One ended task, created after startup so no task agent or recovery turn ever runs for it."""
+    import asyncpg
+
+    from looper.db.tasks import create_task, update_task_status
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            task_id = f"task-{uuid.uuid4().hex[:12]}"
+            await create_task(task_id=task_id, project_id=project_id, requirement="Generate a verification report.",
+                              title=BOUND_TASK_TITLE, status="completed", pool=conn)
+            await update_task_status(task_id, "completed", result_summary=BOUND_TASK_SUMMARY, pool=conn)
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+
+
+def _remembered_after_session_bound(look: Look) -> str | None:
+    if BOUND_TASK_TITLE not in look.reply or BOUND_TASK_SUMMARY not in look.reply:
+        return "the reply did not recover the ended task's title and result from the resume brief"
+    runs = _manager_runs(look)
+    if not any((row.get("metadata") or {}).get("session_bound", {}).get("action") == "rotated" for row in runs):
+        return "no session-bound rotation was recorded"
+    record = look.api.post("/api/v1/runs/get", {"record_id": runs[-1]["id"]})["result"]["record"]
+    text = _input(record)
+    if not all(part in text for part in ("[RESUME]", "Recent task results", BOUND_TASK_TITLE, BOUND_TASK_SUMMARY)):
+        return "the next Manager turn did not receive the ended task in its session-bound resume brief"
+    return None
+
+
 def _remembered_after_switching_back(look: Look) -> str | None:
     if not look.fake and "TEAL-42" not in look.reply:
         return "the reply lacks TEAL-42"
@@ -2963,14 +2999,26 @@ DIALOGS: tuple[Dialog, ...] = (
 )
 
 
+# Context measurements are scripted here, so these cases are selected explicitly in fake mode only.
+FAKE_DIALOGS: tuple[Dialog, ...] = (
+    Dialog("session_bound_rotate", (
+        Say("先记住这一轮。", lambda look: None,
+            (("__context__", {"tokens": 40001}), ("__reply__", {"text": "已记住。"}))),
+        Say("刚才结束的任务叫什么，结果是什么？", _remembered_after_session_bound,
+            (("__recent_task_results__", {}),)),
+    ), tags=("manager", "session_budget")),
+)
+
+
 def select(ids: list[str] | None) -> tuple[Dialog, ...]:
     if not ids:
         return DIALOGS
-    known = {dialog.id for dialog in DIALOGS}
+    cases = (*DIALOGS, *FAKE_DIALOGS)
+    known = {dialog.id for dialog in cases}
     unknown = sorted(set(ids) - known)
     if unknown:
         raise ValueError(f"unknown dialog id(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
-    return tuple(dialog for dialog in DIALOGS if dialog.id in ids)
+    return tuple(dialog for dialog in cases if dialog.id in ids)
 
 
 # --- Running them ---
@@ -3033,10 +3081,11 @@ def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bo
     from looper.agents.claude_cli import BUDGET_SUBTYPE
 
     records = api.post("/api/v1/runs/list", {"agent_id": agent_id, "limit": 500})["result"]["records"]
-    # Neither Claude's own turns nor a completion turn (a task that ended meanwhile) answer the message.
+    # Autonomous, completion and maintenance turns do not answer this message.
     new = [record for record in records if record["id"] > since
            and not (record.get("metadata") or {}).get("autonomous")
-           and not (record.get("metadata") or {}).get("completion")]
+           and not (record.get("metadata") or {}).get("completion")
+           and (record.get("metadata") or {}).get("maintenance") != "session_bound"]
     if not new and withdraw:
         return
     if not new:
@@ -3443,6 +3492,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _enable_ledger(database_url)
         if dialog.id == "reminder_tools":
             _seed_reminders(database_url)
+        if dialog.id == "session_bound_rotate":
+            if mode != "fake":
+                raise EvalError("session_bound_rotate uses fake-mode context measurements")
+            api.post("/api/v1/session_budget/update", {"turn_budget_usd": 4})
+            api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": 40000})
+            _seed_session_bound_task(database_url, project_id)
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
