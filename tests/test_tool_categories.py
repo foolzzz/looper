@@ -1,6 +1,7 @@
 """The phase 3 RFC's category registry covers exactly the Manager's and API clients' write actions."""
 
 from collections.abc import Mapping
+from dataclasses import replace
 
 import pytest
 
@@ -10,6 +11,25 @@ from looper.agents.ops.clients import CLIENT_TOOLS
 from looper.agents.ops.ledger import TOOLS as LEDGER_TOOLS
 from looper.agents.ops.reminders import TOOLS as REMINDER_TOOLS
 from looper.agents.ops.service import CONFIRM_TOOL, MANAGER_TOOLS
+
+
+# Handler success-result keys for actions whose subject is not an argument.
+# Keep these action-specific: catalog uninstall has item, but no install.
+SUCCESS_RESULT_KEYS = {
+    ("looper_task_create", None): {"task_id", "name", "status", "project"},
+    ("looper_projects", "create"): {"project"},
+    ("looper_agent_profiles", "create"): {"profile", "warnings"},
+    ("looper_providers", "register"): {"provider", "warnings", "note"},
+    ("looper_models", "create"): {"model", "warnings"},
+    ("looper_catalog", "install"): {"install", "item", "note"},
+    ("looper_catalog", "update"): {"install", "item"},
+    ("looper_schedules", "create"): {"schedule", "enabled", "shown_to_user"},
+    ("looper_ledger_add", None): {"item", "shown_to_user"},
+    ("looper_reminder_create", None): {"reminder", "shown_to_user"},
+    ("looper_reminder_cancel", None): {"reminder", "shown_to_user"},
+}
+SUBJECTLESS_ACTIONS = {("looper_settings", action) for action in
+                       ("scheduler", "waits", "knowledge_vault", "llmrec", "gateway")}
 
 
 def test_every_write_action_has_exactly_one_kind_and_reads_have_none():
@@ -33,9 +53,30 @@ def test_every_write_action_has_exactly_one_kind_and_reads_have_none():
         for action, kind in kinds:
             assert isinstance(kind, categories.ActionKind), (name, action)
             assert isinstance(kind.category, categories.ActionCategory)
-            assert all(value.strip() for value in (kind.noun, kind.verb, kind.subject)), (name, action)
+            assert all(value.strip() for value in (kind.noun, kind.verb)), (name, action)
+            assert (kind.subject is None) == ((name, action) in SUBJECTLESS_ACTIONS), (name, action)
+            if kind.subject is not None:
+                keys = set(tools[name].schema.get("properties", {})) | SUCCESS_RESULT_KEYS.get((name, action), set())
+                assert kind.subject in keys, (name, action, kind.subject)
             declared[name, action] = kind
     assert declared.keys() == expected, "a write without a category, or a category of no write action"
+
+
+@pytest.mark.parametrize("name,action,subject", [
+    ("looper_task_create", None, "task"),
+    ("looper_task_control", "start", "task"),
+    ("looper_catalog", "uninstall", "install"),
+    ("looper_settings", "set", "settings"),
+    ("looper_settings", "scheduler", "settings"),
+    ("looper_schedules", "delete", "unknown_subject"),
+])
+def test_invalid_subject_is_rejected(monkeypatch, name, action, subject):
+    entry = categories.TOOL_ACTIONS[name]
+    kind = entry[action] if isinstance(entry, Mapping) else entry
+    invalid = replace(kind, subject=subject)
+    monkeypatch.setitem(categories.TOOL_ACTIONS, name, {**entry, action: invalid} if isinstance(entry, Mapping) else invalid)
+    with pytest.raises(AssertionError, match=name):
+        test_every_write_action_has_exactly_one_kind_and_reads_have_none()
 
 
 # Independent of completeness: the semantic choices in RFC section 6.3, including its exceptions.

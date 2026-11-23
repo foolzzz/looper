@@ -25,25 +25,25 @@ class ActionKind:
     category: ActionCategory
     noun: str
     verb: str
-    subject: str  # The object key used to find its name and id in arguments or results.
+    subject: str | None  # An object key in arguments or success results; None when there is no subject key.
 
 
 CREATE, UPDATE, CONTROL, REMOVE, RELAY = (ActionCategory.CREATE, ActionCategory.UPDATE, ActionCategory.CONTROL,
                                          ActionCategory.REMOVE, ActionCategory.RELAY)
 
 TOOL_ACTIONS: Mapping[str, ActionKind | Mapping[str, ActionKind]] = {
-    "looper_task_create": ActionKind(CREATE, "任务", "新建", "task"),
+    "looper_task_create": ActionKind(CREATE, "任务", "新建", "task_id"),
     "looper_task_control": {
-        "start": ActionKind(CONTROL, "任务", "开始", "task"),
-        "stop": ActionKind(CONTROL, "任务", "停止", "task"),
-        "restart": ActionKind(CONTROL, "任务", "重新开始", "task"),
-        "start_over": ActionKind(CONTROL, "任务", "从头开始", "task"),
-        "cancel": ActionKind(CONTROL, "任务", "取消", "task"),
+        "start": ActionKind(CONTROL, "任务", "开始", "task_id"),
+        "stop": ActionKind(CONTROL, "任务", "停止", "task_id"),
+        "restart": ActionKind(CONTROL, "任务", "重新开始", "task_id"),
+        "start_over": ActionKind(CONTROL, "任务", "从头开始", "task_id"),
+        "cancel": ActionKind(CONTROL, "任务", "取消", "task_id"),
     },
-    "looper_task_instruct": ActionKind(RELAY, "任务", "补充说明", "task"),
+    "looper_task_instruct": ActionKind(RELAY, "任务", "补充说明", "task_id"),
     "looper_task_gate_reply": ActionKind(RELAY, "关卡", "回复", "gate"),
-    "looper_task_update": ActionKind(UPDATE, "任务", "修改", "task"),
-    "looper_concurrency": ActionKind(UPDATE, "任务并发", "修改", "task"),
+    "looper_task_update": ActionKind(UPDATE, "任务", "修改", "task_id"),
+    "looper_concurrency": ActionKind(UPDATE, "任务并发", "修改", "task_id"),
     "looper_projects": {
         "create": ActionKind(CREATE, "项目", "新建", "project"),
         "update": ActionKind(UPDATE, "项目", "修改", "project"),
@@ -65,18 +65,20 @@ TOOL_ACTIONS: Mapping[str, ActionKind | Mapping[str, ActionKind]] = {
         "delete": ActionKind(REMOVE, "模型", "删除", "model"),
     },
     "looper_catalog": {
+        # install carries install_id; the display name is in item.name, not in install.
         "install": ActionKind(CREATE, "能力", "安装", "install"),
         "update": ActionKind(UPDATE, "安装", "修改", "install"),
-        "uninstall": ActionKind(REMOVE, "能力", "卸载", "install"),
+        "uninstall": ActionKind(REMOVE, "能力", "卸载", "install_id"),
     },
     "looper_settings": {
-        "set": ActionKind(UPDATE, "设置", "修改", "settings"),
-        "allowed_profiles": ActionKind(UPDATE, "可选 Profile", "修改", "settings"),
-        "scheduler": ActionKind(UPDATE, "调度设置", "修改", "settings"),
-        "waits": ActionKind(UPDATE, "等待设置", "修改", "settings"),
-        "knowledge_vault": ActionKind(UPDATE, "知识库设置", "修改", "settings"),
-        "llmrec": ActionKind(UPDATE, "记录保留设置", "修改", "settings"),
-        "gateway": ActionKind(UPDATE, "网关设置", "修改", "settings"),
+        # Settings have no settings subject key. Use project where supported; set may omit it.
+        "set": ActionKind(UPDATE, "设置", "修改", "project"),
+        "allowed_profiles": ActionKind(UPDATE, "可选 Profile", "修改", "project"),
+        "scheduler": ActionKind(UPDATE, "调度设置", "修改", None),
+        "waits": ActionKind(UPDATE, "等待设置", "修改", None),
+        "knowledge_vault": ActionKind(UPDATE, "知识库设置", "修改", None),
+        "llmrec": ActionKind(UPDATE, "记录保留设置", "修改", None),
+        "gateway": ActionKind(UPDATE, "网关设置", "修改", None),
     },
     "looper_schedules": {
         "create": ActionKind(CREATE, "定时任务", "新建", "schedule"),
