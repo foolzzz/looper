@@ -232,7 +232,10 @@ def grok_executable(root: Path, *, cost: float, fallback: bool) -> str:
     headless = headless.replace(cost_line, f"'total_cost_usd': {cost!r},")
     acp = FAKE_ACP.replace(answer_line, f"answer = {reply!r}")
     acp = acp.replace(usage_line, f"usage(1, 100, 40, 5, {int(round(cost * 10**10))})")
-    prefix = "import os, sys\n" + ("os.environ['FAKE_ACP_DEAD'] = '1'\n" if fallback else "")
+    # The refusing ACP process exits only once it has the runtime's first request: exiting at once raced the
+    # runtime's liveness check before that write, and the capture then had no first input to record.
+    prefix = "import os, sys\n" + ("os.environ['FAKE_ACP_DEAD'] = '1'\n"
+                                   "if 'agent' in sys.argv[1:]:\n    sys.stdin.readline()\n" if fallback else "")
     body = prefix + f"src = {acp!r} if 'agent' in sys.argv[1:] else {headless!r}\nexec(compile(src, 'fake', 'exec'))\n"
     (root / "bin").mkdir()
     return fake_claude(root / "bin/grok", body)
