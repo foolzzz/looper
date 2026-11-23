@@ -41,7 +41,7 @@ def _surfaces(baseline: dict) -> dict:
                 if isinstance(tool, Tool):
                     all_tools[tool.name] = tool.listing()
     each = {name: _hash(all_tools[name]) if name in all_tools else None for name in baseline["tools:each"]}
-    order = {}
+    order, listed = {}, {}
     # Explorer tools must never appear on a disabled run's MCP listing.
     from looper.agents.ops.subagents import TOOL_NAMES
     for name, tools in {
@@ -53,12 +53,16 @@ def _surfaces(baseline: dict) -> dict:
         frozen = set(baseline["tools:order"][name])
         assert frozen <= baseline["tools:each"].keys(), name  # each listed tool's bytes are frozen in tools:each
         order[name] = [tool.name for tool in tools if tool.name in frozen]
-    return {"prompts": prompts, "tools:each": each, "tools:order": order}
+        # The bytes this role is actually given for each of its existing tools, not the catalog's copy by name.
+        listed[name] = {tool.name: _hash(tool.listing()) for tool in tools if tool.name in frozen}
+    return {"prompts": prompts, "tools:each": each, "tools:order": order, "tools:listed": listed}
 
 
 def test_existing_prompts_and_tool_listings_remain_byte_identical() -> None:
-    baseline = json.loads((Path(__file__).parent / "fixtures" / "subagents_default_off.json").read_text())
-    assert _surfaces(baseline["surfaces"]) == baseline["surfaces"]
+    baseline = json.loads((Path(__file__).parent / "fixtures" / "subagents_default_off.json").read_text())["surfaces"]
+    listed = {role: {tool: baseline["tools:each"][tool] for tool in names}
+              for role, names in baseline["tools:order"].items()}
+    assert _surfaces(baseline) == {**baseline, "tools:listed": listed}
 
 
 def test_disabled_run_grant_lists_exactly_the_existing_worker_tools() -> None:
