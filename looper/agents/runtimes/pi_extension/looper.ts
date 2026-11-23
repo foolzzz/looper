@@ -30,7 +30,7 @@ const TOKEN_ENV = "LOOPER_AGENT_TOKEN";
 const TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE";
 const REQUEST_TIMEOUT_MS = 120_000;
 const WAIT_MARGIN_MS = 20_000;
-const WAITING_TOOL = "looper_room_inbox";
+const WAITING_TOOLS = new Set(["looper_room_inbox", "looper_agent_spawn", "looper_agent_wait"]);
 
 interface Binding {
   url: string;
@@ -183,7 +183,7 @@ function toParameters(schema: Record<string, unknown>): ParametersSchema {
 }
 
 function timeoutFor(name: string, args: Record<string, unknown>): number {
-  const wait = name === WAITING_TOOL ? args.wait_seconds : undefined;
+  const wait = WAITING_TOOLS.has(name) ? args.wait_seconds : undefined;
   if (typeof wait === "number" && Number.isFinite(wait) && wait > 0) {
     return Math.max(REQUEST_TIMEOUT_MS, wait * 1000 + WAIT_MARGIN_MS);
   }

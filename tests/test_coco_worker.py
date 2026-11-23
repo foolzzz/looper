@@ -221,6 +221,7 @@ for line in sys.stdin:
         pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
         pool.room_ops = SimpleNamespace(
             room=room, issue=lambda *a, **kw: "", revoke_run=lambda *a: None,
+            bind_subagents=lambda *a: None, end_subagents=AsyncMock(),
             library_with_server=AsyncMock(side_effect=lambda library, *a, **kw: library))
         work = tmp_path / "work"
         work.mkdir()

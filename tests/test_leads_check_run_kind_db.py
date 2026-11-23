@@ -76,3 +76,28 @@ def test_an_existing_kind_constraint_is_widened_without_a_scan_then_validated_on
         assert await pool.fetchval("SELECT run_kind FROM llm_records WHERE id = $1", old) is None
 
     run_db(test, monkeypatch)
+
+
+def test_subagents_upgrade_preserves_an_already_migrated_leads_check_kind():
+    import asyncio
+
+    from tests.db_support import fresh_connection
+    from tests.subagents_schema_support import ensure_before_platform_subagents
+
+    async def test():
+        async with fresh_connection(command_timeout=60) as conn:
+            await ensure_before_platform_subagents(conn)
+            await conn.execute("INSERT INTO schema_migrations (name) SELECT unnest($1::text[])", list(_MARKERS))
+            old = await conn.fetchval("INSERT INTO llm_records (agent_id, run_kind) "
+                                      "VALUES ('leads_check:synthetic-legacy', 'leads_check') RETURNING id")
+            witness = await conn.fetchrow("SELECT ctid::text, xmin::text FROM llm_records WHERE id=$1", old)
+            await connection.ensure_schema(conn)
+            assert await conn.fetchrow("SELECT ctid::text, xmin::text FROM llm_records WHERE id=$1", old) == witness
+            for kind in ("leads_check", "explorer"):
+                await llm_records.start_record(agent_id="synthetic-upgrade", run_kind=kind, pool=conn)
+            assert await _validated(conn)
+            assert not await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert await _validated(conn)
+
+    asyncio.run(test())
