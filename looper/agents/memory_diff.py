@@ -25,17 +25,18 @@ def unified(path: str, before: bytes | None, after: bytes) -> str:
 
 
 async def revision_diffs(state: str, changes: list[dict[str, Any]], db: Any = None) -> tuple[dict[str, str], str | None]:
-    """``({path: unified diff}, problem)``: the diffs, or none and the reason in words."""
+    """``({path: unified diff}, problem)``: the diffs, or none and a stable reason code: ``not_configured``,
+    ``vault_problem``, one of the writer's conflict reasons (``base_changed``, ``anchor_missing``) or ``unreadable``."""
     if state not in _UNWRITTEN:
         return {}, None
     settings, problem = await memory_settings.load(db)
     config, vault_problem = await vault.load()
     if settings is None or config is None:
-        return {}, problem or vault_problem or "memory writing is not configured"
+        return {}, "vault_problem" if problem or vault_problem else "not_configured"
     try:
         after, before = await asyncio.to_thread(memory_write.replay, config.path, changes)
     except memory_write.WriteFailure as error:
-        return {}, f"the vault no longer matches this proposal: {error.reason}"
-    except (ValueError, OSError) as error:
-        return {}, f"the vault could not be read: {error}"
+        return {}, error.reason.value
+    except (ValueError, OSError):
+        return {}, "unreadable"
     return {path: unified(path, before[path], data) for path, data in after.items()}, None

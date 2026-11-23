@@ -23,6 +23,7 @@ def test_the_operations_are_the_operators_and_add_no_tool():
         assert op.operator_only and op.tool is None and not op.hand and len(op.summary) <= 120
         assert op.description.startswith(op.summary)
         assert op.risk == ("write" if op.operation_id.rsplit(".", 1)[1] in (*_WRITES, "settings_put") else "read")
+        assert op.confirms == (op.operation_id == "memory.settings_put")
         if op.operation_id.rsplit(".", 1)[1] in _WRITES:
             assert not op.audit_operator  # the candidate's erasable events own this trail
 
@@ -73,10 +74,16 @@ def test_the_operator_saves_reads_checks_and_clears_the_setting(monkeypatch, tmp
                                                           "problem": None}
             status, answer = await call("memory.settings_put", {"root": "mem", "targets": {"wish": {"shape": "note"}}})
             assert status == 400 and "unknown kinds" in answer["error"]["message"]
-            status, answer = await call("memory.settings_put", {
+            status, asked = await call("memory.settings_put", {
                 "root": "mem", "enabled": True, "sources": {"manager": True},
                 "targets": {"preference": {"shape": "note", "folders": ["prefs"], "index": "prefs/_index.md"}}})
+            answer = asked
+            assert status == 202 and answer["status"] == "needs_confirmation", answer
+            status, answer = await call("memory.settings_get")
+            assert answer["result"]["configured"] is False  # not saved until confirmed
+            status, answer = await call("confirm", {"confirmation_id": asked["confirmation_id"]})
             assert status == 200, answer
+            answer = {"result": answer["result"]}
             assert answer["result"]["enabled"] and answer["result"]["settings"]["branch"] == "main"
             status, answer = await call("memory.check")
             assert status == 200 and answer["result"]["ok"], answer
@@ -183,15 +190,68 @@ def test_memory_get_adds_a_code_made_diff_per_file_and_nothing_else(monkeypatch,
             assert "+Conclusion first." in diffs["mem/prefs/weekly.md"]
             assert "+- [[weekly]] conclusion first" in diffs["mem/prefs/_index.md"]
             assert "--- a/mem/prefs/_index.md" in diffs["mem/prefs/_index.md"]
-            # The diff is made from the vault file as it is now: an anchor that went missing is said in words.
+            # The diff is made from the vault file as it is now: an anchor that went missing has a stable code.
             (repo / "mem/prefs/_index.md").write_text("no heading any more\n")
             status, answer = await call("memory.get", {"candidate": candidate})
             current = answer["result"]["candidate"]["current"]
-            assert current["diffs"] == {} and "anchor_missing" in current["diffs_problem"]
-            # A missing setting is said in words too.
+            assert current["diffs"] == {} and current["diffs_problem"] == "anchor_missing"
+            # A missing setting has its own code.
             await pool.execute("DELETE FROM system_settings WHERE key='memory_write'")
             status, answer = await call("memory.get", {"candidate": candidate})
             current = answer["result"]["candidate"]["current"]
-            assert current["diffs"] == {} and "not configured" in current["diffs_problem"]
+            assert current["diffs"] == {} and current["diffs_problem"] == "not_configured"
+
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_enabling_and_changing_the_push_target_need_the_operators_confirmation(monkeypatch, tmp_path):
+    import json
+
+    repo = sup.synthetic_vault(tmp_path)
+    body = {"root": "mem", "rules_files": ["mem/AGENTS.md"], "required_frontmatter": ["kind"],
+            "targets": {"preference": {"shape": "note", "folders": ["prefs"], "index": "prefs/_index.md"}}}
+
+    async def check(pool):
+        await vault.update_settings({"path": str(repo), "writable": []})
+        for name, kind in (("lark-a", "lark"), ("lark-b", "lark")):
+            await pool.execute("INSERT INTO channel_configs (channel_id, channel_type, enabled, config) VALUES "
+                               "($1, $2, true, $3::jsonb)", name, kind, json.dumps({"operator_sender_id": "ou_synthetic"}))
+        async with v1_api(tmp_path, pool) as call:
+            # Turned off, or saved off, nothing is asked.
+            status, answer = await call("memory.settings_put", {**body, "enabled": False})
+            assert status == 200 and answer["result"]["enabled"] is False, answer
+            # Turning it on asks first, listing the area, branch, worktree, push target and daily cap; nothing is on yet.
+            status, asked = await call("memory.settings_put", {**body, "enabled": True, "push_channel": "lark-a"})
+            assert status == 202 and asked["status"] == "needs_confirmation", asked
+            for part in ("Memory folder: mem", "Branch: main", "Worktree folder:", "Push target: lark-a", "$1"):
+                assert part in asked["impact"], asked["impact"]
+            status, answer = await call("memory.settings_get")
+            assert answer["result"]["enabled"] is False
+            # An API client cannot take the operator's place.
+            status, answer = await call("memory.settings_put", {**body, "enabled": True}, client=True)
+            assert status == 403, answer
+            status, answer = await call("confirm", {"confirmation_id": asked["confirmation_id"]}, client=True)
+            assert status != 200, answer
+            status, answer = await call("memory.settings_get")
+            assert answer["result"]["enabled"] is False
+            status, answer = await call("confirm", {"confirmation_id": asked["confirmation_id"]})
+            assert status == 200 and answer["result"]["enabled"] is True, answer
+            assert answer["result"]["settings"]["push_channel"] == "lark-a"
+            # Saving other fields while on, with the same push target, runs at once.
+            status, answer = await call("memory.settings_put", {
+                **body, "enabled": True, "push_channel": "lark-a", "pending_days": 9})
+            assert status == 200 and answer["result"]["settings"]["pending_days"] == 9, answer
+            # Another push target is asked again, and not applied until confirmed.
+            status, asked = await call("memory.settings_put", {**body, "enabled": True, "push_channel": "lark-b"})
+            assert status == 202 and "Push target: lark-b" in asked["impact"], asked
+            status, answer = await call("memory.settings_get")
+            assert answer["result"]["settings"]["push_channel"] == "lark-a"
+            status, answer = await call("confirm", {"confirmation_id": asked["confirmation_id"]})
+            assert status == 200 and answer["result"]["settings"]["push_channel"] == "lark-b", answer
+            # Switching off and clearing never ask.
+            status, answer = await call("memory.settings_put", {**body, "enabled": False})
+            assert status == 200 and answer["result"]["enabled"] is False
+            status, answer = await call("memory.settings_put", {"root": None})
+            assert status == 200 and answer["result"]["configured"] is False
 
     run_db(check, monkeypatch, timeout=60)
