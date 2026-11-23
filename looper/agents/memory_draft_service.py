@@ -1,8 +1,8 @@
 """Turn queued memory seeds into reviewable revisions; no vault writes or Manager context.
 
-A transaction advisory lock serializes draft spend across servers. A candidate's row stays locked while its
-private, tool-less call runs, so deletion and confirmation cannot consume a partially assembled revision.
-Failures record only typed reasons. The writer still requires the operator's confirmation of the new hash.
+Short transactions claim a bounded spend lease and persist the result; inference holds no database locks.
+Typed target waits survive restarts without paid retries. Failures record only typed reasons. The writer
+still requires the operator's confirmation of the new hash.
 """
 
 from __future__ import annotations
@@ -13,14 +13,18 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..db import connection, memory as store, system_settings
 from . import memory_draft, memory_draft_role, memory_model as model, memory_settings, memory_write, vault
-from .model_call import CallFailed
+from .model_call import CallFailed, CallFailure, Execution
 from .spawn import MIN_RUN_USD, SpawnParent
 
 logger = logging.getLogger(__name__)
 TICK_SECONDS = 10
+# The whole call is bounded before the lease expires, including input assembly and role resolution.
+_CALL_SECONDS = memory_draft_role.TIMEOUT_SEC + 30
+_LEASE_SECONDS = _CALL_SECONDS + 30
 # Independent of the vault writer's repository lock; only drafting spends this daily allowance.
 _LOCK = 741934
 _WAKE = "looper_memory_draft"
@@ -91,12 +95,15 @@ class MemoryDraftService:
 
     async def _pass(self) -> bool:
         pool = self.db or connection.get_pool()
+        token = uuid4()
         async with pool.acquire() as conn, conn.transaction():
             if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1::bigint)", _LOCK):
                 return False
-            # Hold the settings stable through validation and persistence; OFF never reads the filesystem.
-            await conn.fetch("SELECT key FROM system_settings WHERE key = ANY($1::text[]) ORDER BY key FOR SHARE",
-                             [model.SETTING_KEY, vault.SETTING_KEY])
+            if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM memory_draft_lease WHERE expires_at>now())"):
+                return False
+            # Capture the settings under short locks; changed settings fence the eventual result.
+            saved = dict(await conn.fetch("SELECT key,value FROM system_settings WHERE key = ANY($1::text[]) "
+                                          "ORDER BY key FOR SHARE", [model.SETTING_KEY, vault.SETTING_KEY]))
             raw = await memory_settings.stored(conn)
             if raw is None or raw.get("enabled") is not True:
                 return False
@@ -107,8 +114,11 @@ class MemoryDraftService:
                 settings = model.check_settings(raw, config)
             except (ValueError, OSError):
                 return False
-            row = await conn.fetchrow("SELECT * FROM memory_candidates WHERE destination='vault' AND state='drafting' "
-                                      "ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 1")
+            row = await conn.fetchrow(
+                "SELECT c.* FROM memory_candidates c WHERE destination='vault' AND state='drafting' "
+                "AND NOT EXISTS (SELECT 1 FROM memory_draft_waits w JOIN memory_candidates b "
+                "ON b.id=w.blocking_candidate_id WHERE w.candidate_id=c.id AND b.state=ANY($1::text[])) "
+                "ORDER BY c.updated_at,c.id FOR UPDATE OF c SKIP LOCKED LIMIT 1", list(model.DRAFT_BLOCKING_STATES))
             if row is None:
                 return False
             now = datetime.now(timezone.utc)
@@ -118,38 +128,63 @@ class MemoryDraftService:
                                                "WHERE run_kind='memory_draft' AND created_at >= $1",
                                                midnight, settings.draft_budget_usd))
             cap = min(settings.draft_budget_usd, settings.daily_budget_usd - spent)
-            if cap < MIN_RUN_USD:
-                await self._budget_notice(settings, midnight.date().isoformat())
-                return False
-            found = await store.get(row["id"], db=conn)
-            sources = found["sources"]
-            for source in sources:
-                if source["lead_id"] is not None:
-                    lead = await conn.fetchrow("SELECT summary,detail FROM message_leads WHERE id=$1", source["lead_id"])
-                    source["text"] = "\n".join(str(v or "") for v in lead.values()) if lead else ""
-                if source["journal_id"] is not None:
-                    source["text"] = await conn.fetchval("SELECT summary FROM task_journal WHERE id=$1", source["journal_id"])
-            opened, rejected = await self._related(conn, row, settings)
+            if cap >= MIN_RUN_USD:
+                found = await store.get(row["id"], db=conn)
+                sources = found["sources"]
+                for source in sources:
+                    if source["lead_id"] is not None:
+                        lead = await conn.fetchrow("SELECT summary,detail FROM message_leads WHERE id=$1", source["lead_id"])
+                        source["text"] = "\n".join(str(v or "") for v in lead.values()) if lead else ""
+                    if source["journal_id"] is not None:
+                        source["text"] = await conn.fetchval("SELECT summary FROM task_journal WHERE id=$1", source["journal_id"])
+                opened, rejected = await self._related(conn, row, settings)
+                await conn.execute("DELETE FROM memory_draft_waits WHERE candidate_id=$1", row["id"])
+                await conn.execute("INSERT INTO memory_draft_lease(token,candidate_id,expires_at) "
+                                   "VALUES($1,$2,now()+$3*interval '1 second') ON CONFLICT(id) DO UPDATE "
+                                   "SET token=EXCLUDED.token,candidate_id=EXCLUDED.candidate_id,expires_at=EXCLUDED.expires_at",
+                                   token, row["id"], _LEASE_SECONDS)
+        if cap < MIN_RUN_USD:
+            await self._budget_notice(settings, midnight.date().isoformat())
+            return False
+        try:
+            draft = None
             try:
-                draft = await memory_draft.assemble(config, settings, {**dict(row), "sources": sources},
-                                                    open_candidates=opened, rejected=rejected)
-                task_id = next((s["task_id"] for s in sources if s.get("task_id")), None)
-                done = await memory_draft_role.run(draft, config, settings, row["kind"],
-                                                   parent=SpawnParent(task_id), runtime_root=self.runtime_root,
-                                                   cap_usd=cap, claude_bin=self.claude_bin, backend=self.backend)
+                async with asyncio.timeout(_CALL_SECONDS):
+                    draft = await memory_draft.assemble(config, settings, {**dict(row), "sources": sources},
+                                                       open_candidates=opened, rejected=rejected)
+                    task_id = next((s["task_id"] for s in sources if s.get("task_id")), None)
+                    done = await memory_draft_role.run(draft, config, settings, row["kind"],
+                                                       parent=SpawnParent(task_id), runtime_root=self.runtime_root,
+                                                       cap_usd=cap, claude_bin=self.claude_bin, backend=self.backend)
             except memory_draft.DraftError as error:
-                await self._drop(conn, row["id"], error.reason)
-                return True
-            if isinstance(done, CallFailed):
-                if isinstance(done.error, memory_draft.DraftError) and not done.error.retryable:
-                    await self._drop(conn, row["id"], done.error.reason)
+                done = error
+            except TimeoutError:
+                done = CallFailed(execution=Execution(None), failure=CallFailure.TIMEOUT, reason="draft deadline")
+            async with pool.acquire() as conn, conn.transaction():
+                # A reclaimed/expired lease, deletion or concurrent revision must never accept stale output.
+                await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", _LOCK)
+                if not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM memory_draft_lease "
+                                           "WHERE token=$1 AND expires_at>now())", token):
+                    return True
+                live = dict(await conn.fetch("SELECT key,value FROM system_settings WHERE key = ANY($1::text[]) "
+                                             "ORDER BY key FOR SHARE", [model.SETTING_KEY, vault.SETTING_KEY]))
+                current = await conn.fetchrow("SELECT * FROM memory_candidates WHERE id=$1 FOR UPDATE", row["id"])
+                if current is None or current["state"] != "drafting" or current["updated_at"] != row["updated_at"] or live != saved:
+                    return True
+                if isinstance(done, memory_draft.DraftError):
+                    await self._drop(conn, row["id"], done.reason)
+                elif isinstance(done, CallFailed):
+                    if isinstance(done.error, memory_draft.DraftError) and not done.error.retryable:
+                        await self._drop(conn, row["id"], done.error.reason)
+                    else:
+                        await self._failed(conn, row["id"], done.failure.value)
                 else:
-                    await self._failed(conn, row["id"], done.failure.value)
-                return True
-            processed = await self._apply(conn, dict(row), done.value, draft, settings, done.record_id)
-            logger.info("memory draft candidate=%s decision=%s record=%s", model.format_id(row["id"]),
-                        done.value.decision, done.record_id)
-            return processed
+                    await self._apply(conn, dict(current), done.value, draft, settings, done.record_id)
+                    logger.info("memory draft candidate=%s decision=%s record=%s", model.format_id(row["id"]),
+                                done.value.decision, done.record_id)
+            return True
+        finally:
+            await pool.execute("DELETE FROM memory_draft_lease WHERE token=$1", token)
 
     async def _related(self, conn, row, settings):
         target = settings.targets[model.Kind(row["kind"])]
@@ -208,9 +243,14 @@ class MemoryDraftService:
             if not model.allowed(target["kind"], combined):
                 await self._drop(conn, row["id"], model.Reason.DUPLICATE)
                 return True
-            if result.revise and target["state"] != "pending":
-                await conn.execute("UPDATE memory_candidates SET updated_at=now() WHERE id=$1", row["id"])
-                return False
+            if result.revise and model.State(target["state"]) in model.DRAFT_BLOCKING_STATES:
+                await conn.execute("INSERT INTO memory_draft_waits(candidate_id,blocking_candidate_id,reason) "
+                                   "VALUES($1,$2,$3) ON CONFLICT(candidate_id) DO UPDATE "
+                                   "SET blocking_candidate_id=EXCLUDED.blocking_candidate_id,reason=EXCLUDED.reason",
+                                   row["id"], target_id, model.DraftWaitReason.TARGET_BUSY.value)
+                logger.info("memory draft candidate=%s waiting=%s target=%s", model.format_id(row["id"]),
+                            model.DraftWaitReason.TARGET_BUSY.value, model.format_id(target_id))
+                return True
             await conn.execute("INSERT INTO memory_candidate_sources(candidate_id,kind,manager_action_id,journal_id,lead_id,quote) "
                                "SELECT $2,s.kind,s.manager_action_id,s.journal_id,s.lead_id,s.quote FROM memory_candidate_sources s "
                                "WHERE s.candidate_id=$1 AND NOT EXISTS (SELECT 1 FROM memory_candidate_sources t "

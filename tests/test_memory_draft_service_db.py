@@ -200,9 +200,14 @@ def test_two_drafters_claim_once_and_wait_for_confirmed_revision(monkeypatch, tm
         second = MemoryDraftService(tmp_path / "runtime", db=pool, backend=backend)
         running = asyncio.create_task(first.run_once())
         await asyncio.wait_for(started.wait(), 5)
+        # Claiming commits before inference: neither candidate/settings rows nor the spend lock stay held.
+        async with pool.acquire() as conn, conn.transaction():
+            assert await conn.fetchval("SELECT pg_try_advisory_xact_lock(741934::bigint)")
+            await conn.fetchrow("SELECT id FROM memory_candidates WHERE id=$1 FOR UPDATE NOWAIT", cid)
+            await conn.fetch("SELECT key FROM system_settings FOR UPDATE NOWAIT")
         assert not await second.run_once()
         release.set()
-        assert not await running  # Defer to the next tick, never a tight paid retry loop.
+        assert await running  # Parking is progress: the loop can immediately try another seed.
         found = await store.get(cid, db=pool)
         assert found["candidate"]["state"] == "drafting" and len(backend.requests) == 1
         other = await store.get(target, db=pool)
@@ -210,6 +215,129 @@ def test_two_drafters_claim_once_and_wait_for_confirmed_revision(monkeypatch, tm
         assert len(other["sources"]) == 1
 
     run_db(check, monkeypatch, timeout=30, max_size=5)
+
+
+@pytest.mark.parametrize("state", ["confirmed", "writing", "blocked", "conflict"])
+def test_waiting_drafts_spend_nothing_until_the_target_finishes(monkeypatch, tmp_path, state):
+    from looper.agents.memory_draft_service import MemoryDraftService
+
+    repo = sup.synthetic_vault(tmp_path)
+
+    async def check(pool):
+        settings = await sup.configure_write(repo, pool)
+        target = await sup.candidate(pool, statement="Existing proposal")
+        current = await sup.revise_current(pool, target, settings, note_path=sup.NOTE["path"])
+        await memory_actions.act("confirm", model.format_id(target), content_hash=current["content_hash"], db=pool)
+        if state != "confirmed":
+            await sup.move(pool, target, "writing", "claim")
+        if state in {"blocked", "conflict"}:
+            await sup.move(pool, target, state, "block" if state == "blocked" else "conflict",
+                           reason="dirty_target" if state == "blocked" else "base_changed")
+        cid = await sup.candidate(pool, statement="A supplement")
+        backend = Backend(reply(revise="P1"))
+        service = MemoryDraftService(tmp_path / "runtime", db=pool, backend=backend)
+        assert await service.run_once()
+        wait = await pool.fetchrow("SELECT * FROM memory_draft_waits WHERE candidate_id=$1", cid)
+        assert wait["reason"] == model.DraftWaitReason.TARGET_BUSY and wait["blocking_candidate_id"] == target
+        assert (await store.get(cid, db=pool))["candidate"]["state"] == "drafting"
+        # Restart and unrelated updates cannot turn this back into a paid retry.
+        service = MemoryDraftService(tmp_path / "restart", db=pool, backend=backend)
+        await pool.execute("UPDATE memory_candidates SET updated_at=now() WHERE id=$1", target)
+        for _ in range(3):
+            assert not await service.run_once()
+        assert len(backend.requests) == 1
+        other = await sup.candidate(pool, statement="Independent seed")
+        backend.output = json.dumps({"decision": "duplicate", "of": "X1", "reason": "Already indexed",
+                                     "instructions_seen": []})
+        assert await service.run_once()
+        assert (await store.get(other, db=pool))["candidate"]["reason"] == "duplicate"
+        assert len(backend.requests) == 2
+        if state == "conflict":
+            await memory_actions.act("reject", model.format_id(target), db=pool, reason="Do not store")
+        else:
+            if state == "blocked":
+                await memory_actions.act("retry", model.format_id(target), db=pool)
+                assert not await service.run_once()  # Still waiting while confirmed.
+            if state != "writing":
+                await sup.move(pool, target, "writing", "claim")
+            await sup.move(pool, target, "written", "write", commit_sha="a" * 40)
+        assert await service.run_once()
+        assert len(backend.requests) == 3
+        assert (await store.get(cid, db=pool))["candidate"]["reason"] == "duplicate"
+        assert not await pool.fetchval("SELECT EXISTS(SELECT 1 FROM memory_draft_waits WHERE candidate_id=$1)", cid)
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("change", ["delete", "disable", "expire", "replace"])
+def test_inflight_draft_is_fenced_after_claim_changes(monkeypatch, tmp_path, change):
+    from looper.agents.memory_draft_service import MemoryDraftService
+
+    repo = sup.synthetic_vault(tmp_path)
+
+    async def check(pool):
+        await sup.configure_write(repo, pool)
+        cid = await sup.candidate(pool)
+        started, release = asyncio.Event(), asyncio.Event()
+        class Delayed(Backend):
+            async def run(self, request):
+                started.set()
+                await release.wait()
+                return await super().run(request)
+        backend = Delayed(reply())
+        service = MemoryDraftService(tmp_path / "runtime", db=pool, backend=backend)
+        running = asyncio.create_task(service.run_once())
+        await asyncio.wait_for(started.wait(), 5)
+        if change == "delete":
+            await asyncio.wait_for(memory_actions.act("delete", model.format_id(cid), db=pool), 2)
+            await sup.candidate(pool, statement="Next seed")
+            assert not await MemoryDraftService(tmp_path / "other", db=pool, backend=backend).run_once()
+        elif change == "disable":
+            await pool.execute("UPDATE system_settings SET value=jsonb_set(value::jsonb,'{enabled}','false')::text "
+                               "WHERE key='memory_write'")
+        elif change == "replace":
+            from uuid import uuid4
+            await pool.execute("UPDATE memory_draft_lease SET token=$1", uuid4())
+        else:
+            await pool.execute("UPDATE memory_draft_lease SET expires_at=now()-interval '1 second'")
+        release.set()
+        assert await running
+        assert await pool.fetchval("SELECT count(*) FROM memory_candidate_revisions") == 0
+        assert await pool.fetchval("SELECT count(*) FROM memory_draft_lease") == (1 if change == "replace" else 0)
+        if change != "delete":
+            assert (await store.get(cid, db=pool))["candidate"]["state"] == "drafting"
+
+    run_db(check, monkeypatch, timeout=30, max_size=5)
+
+
+def test_expired_spend_lease_is_reclaimed_and_deadline_releases_it(monkeypatch, tmp_path):
+    from uuid import uuid4
+    from looper.agents import memory_draft_service
+
+    repo = sup.synthetic_vault(tmp_path)
+
+    async def check(pool):
+        await sup.configure_write(repo, pool)
+        cid = await sup.candidate(pool)
+        await pool.execute("INSERT INTO memory_draft_lease(token,candidate_id,expires_at) "
+                           "VALUES($1,$2,now()-interval '1 second')", uuid4(), cid)
+        started = asyncio.Event()
+        class Hanging(Backend):
+            async def run(self, request):
+                started.set()
+                await asyncio.Event().wait()
+        monkeypatch.setattr(memory_draft_service, "_CALL_SECONDS", .5)
+        assert await memory_draft_service.MemoryDraftService(tmp_path / "runtime", db=pool, backend=Hanging()).run_once()
+        assert started.is_set()
+        assert await pool.fetchval("SELECT count(*) FROM memory_draft_lease") == 0
+        assert (await store.get(cid, db=pool))["events"][-1]["note"] == "draft_failed:timeout"
+        monkeypatch.setattr(memory_draft_service, "_CALL_SECONDS", 150)
+        backend = Backend(reply())
+        assert await memory_draft_service.MemoryDraftService(tmp_path / "runtime", db=pool, backend=backend).run_once()
+        assert len(backend.requests) == 1
+        assert (await store.get(cid, db=pool))["candidate"]["state"] == "pending"
+
+    run_db(check, monkeypatch, timeout=30)
 
 
 @pytest.mark.parametrize("decision", ["same_as", "revise"])

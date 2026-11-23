@@ -2645,6 +2645,23 @@ CREATE TRIGGER projects_memory_lessons_drop BEFORE DELETE ON projects
     FOR EACH ROW EXECUTE FUNCTION memory_candidates_project_deleted();
 -- memory candidates end
 
+-- memory draft queue begin
+-- Persist waits across restarts. Removing either candidate removes only the wait; the seed can be claimed again.
+CREATE TABLE IF NOT EXISTS memory_draft_waits (
+    candidate_id          BIGINT PRIMARY KEY REFERENCES memory_candidates(id) ON DELETE CASCADE,
+    blocking_candidate_id BIGINT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
+    reason                TEXT NOT NULL CHECK (reason IN ('target_busy')),
+    CHECK (candidate_id <> blocking_candidate_id)
+);
+-- A single bounded call owns the daily spend allowance. No FK: deleting its seed must not release live spend.
+CREATE TABLE IF NOT EXISTS memory_draft_lease (
+    id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    token        UUID NOT NULL,
+    candidate_id BIGINT NOT NULL,
+    expires_at   TIMESTAMPTZ NOT NULL
+);
+-- memory draft queue end
+
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online
 -- (connection.py ``_ONLINE_STEPS``).

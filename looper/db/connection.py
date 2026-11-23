@@ -174,6 +174,7 @@ _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
 _MEMORY_CANDIDATES = "memory_candidates"
 _MEMORY_DRAFT = "memory_draft_role"
+_MEMORY_DRAFT_QUEUE = "memory_draft_queue"
 _CARD_ACTIONS = "card_actions"
 
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
@@ -311,6 +312,7 @@ def _decision_snapshots_ddl() -> str:
     return found.group(1)
 _OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
 _MEMORY_CANDIDATES_BLOCK = re.compile(r"-- memory candidates begin\n(.*?)-- memory candidates end", re.S)
+_MEMORY_DRAFT_QUEUE_BLOCK = re.compile(r"-- memory draft queue begin\n(.*?)-- memory draft queue end", re.S)
 
 
 def _memory_candidates_ddl() -> str:
@@ -320,6 +322,18 @@ def _memory_candidates_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its memory candidates block")
     return found.group(1)
+
+
+def _memory_draft_queue_ddl() -> str:
+    found = _MEMORY_DRAFT_QUEUE_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its memory draft queue block")
+    return found.group(1)
+
+
+async def _memory_draft_queue_pending(conn: asyncpg.Connection) -> bool:
+    return not await conn.fetchval("SELECT to_regclass('memory_draft_waits') IS NOT NULL "
+                                   "AND to_regclass('memory_draft_lease') IS NOT NULL")
 
 
 # The checks that list the classifier: (table, constraint).
@@ -1795,6 +1809,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _memory_candidates_pending(conn):
             await conn.execute(_memory_candidates_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MEMORY_CANDIDATES)
+        if await _memory_draft_queue_pending(conn):
+            await conn.execute(_memory_draft_queue_ddl())
+        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _MEMORY_DRAFT_QUEUE)
         if await _uncertain_deliveries_pending(conn):
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
         if await _reminders_pending(conn):
@@ -1858,6 +1875,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn) or await _memory_candidates_pending(conn)
             or bool(await _memory_draft_ddl(conn))
+            or await _memory_draft_queue_pending(conn)
             or await _uncertain_deliveries_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)

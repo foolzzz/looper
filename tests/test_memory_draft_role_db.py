@@ -48,6 +48,27 @@ def test_drafting_checks_upgrade_online_and_seed_the_role(monkeypatch):
     asyncio.run(check())
 
 
+def test_drafting_queue_upgrades_existing_candidate_tables(monkeypatch):
+    from tests.db_support import run_db
+    from tests import memory_support as sup
+
+    async def check(pool):
+        cid = await sup.candidate(pool)
+        await pool.execute("DROP TABLE memory_draft_waits, memory_draft_lease; "
+                           "DELETE FROM schema_migrations WHERE name='memory_draft_queue'")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval("SELECT state FROM memory_candidates WHERE id=$1", cid) == "drafting"
+        assert await pool.fetchval("SELECT to_regclass('memory_draft_waits') IS NOT NULL "
+                                   "AND to_regclass('memory_draft_lease') IS NOT NULL")
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+
+    run_db(check, monkeypatch)
+
+
 def test_a_private_draft_records_only_a_digest_and_typed_events(monkeypatch, tmp_path):
     import json
 
