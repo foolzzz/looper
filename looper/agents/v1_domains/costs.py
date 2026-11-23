@@ -11,33 +11,33 @@ TASK_MODEL_COST = _object({
     **{key: _INT for key in ("runs", "running", "unpriced_runs", "interrupted_runs", "input_tokens",
                              "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cache_reported_runs",
                              "cache_missing_runs", "cache_hit_prompt_tokens", "cache_hit_read_tokens")}},
-    ["model", "cost_usd", "runs", "running", "unpriced_runs", "interrupted_runs", "input_tokens",
+    ["model", "cost_status", "cost_usd", "runs", "running", "unpriced_runs", "interrupted_runs", "input_tokens",
      "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cache_reported_runs",
      "cache_missing_runs", "cache_hit_prompt_tokens", "cache_hit_read_tokens"], closed=True)
 
 TASK_COST = _object({
-    "cost_status": _COST_STATUS, "cost_usd": _NUMBER, "runs": _INT, "running": _INT, "unpriced_runs": _INT,
+    "cost_status": _COST_STATUS, "unknown_models": _array(_STR), "cost_usd": _NUMBER, "runs": _INT, "running": _INT, "unpriced_runs": _INT,
     "equivalent_runs": _INT, "provider_price_runs": _INT,
     "by_role": _object({role: _object({"cost_usd": _NUMBER, "runs": _INT}, closed=True)
                         for role in ("planner", "worker", "reviewer", "consult")},
                        ["planner", "worker", "reviewer"], closed=True),
     "by_model": _array(TASK_MODEL_COST), "manager_by_model": _array(TASK_MODEL_COST)},
-    ["cost_usd", "runs", "running", "unpriced_runs", "by_role", "by_model", "manager_by_model"], closed=True)
+    ["cost_status", "unknown_models", "cost_usd", "runs", "running", "unpriced_runs", "by_role", "by_model", "manager_by_model"], closed=True)
 
 SPEND_SUMMARY = _object({
     "cost_status": _COST_STATUS, "provider_priced_usd": _NUMBER, "equivalent_usd": _NUMBER,
     "runs": _INT, "running": _INT, "unpriced_runs": _INT},
-    ["provider_priced_usd", "equivalent_usd", "runs", "running", "unpriced_runs"], closed=True)
+    ["cost_status", "provider_priced_usd", "equivalent_usd", "runs", "running", "unpriced_runs"], closed=True)
 
 _TASK = _object({"task_id": _STR, "name": _STR, "status": _STR, "cost": TASK_COST, "note": _STR}, closed=True)
 _RANGE = {"since": _NULL_STR, "until": _NULL_STR, "total": SPEND_SUMMARY, "note": _STR}
 _PROJECT = _object({**_RANGE, "project": _STR,
     "tasks": _array(_object({"task_id": _STR, "name": _STR, "provider_priced_usd": _NUMBER,
-                             "equivalent_usd": _NUMBER, "runs": _INT}, closed=True)),
+                             "equivalent_usd": _NUMBER, "runs": _INT, "cost_status": _COST_STATUS}, closed=True)),
     "more_tasks": _INT}, closed=True)
 _GLOBAL = _object({**_RANGE,
     "projects": _array(_object({"project": _NULL_STR, "provider_priced_usd": _NUMBER,
-                                "equivalent_usd": _NUMBER, "runs": _INT, "tasks": _INT}, closed=True)),
+                                "equivalent_usd": _NUMBER, "runs": _INT, "tasks": _INT, "cost_status": _COST_STATUS}, closed=True)),
     "note_projects": _STR}, closed=True)
 
 RESULTS = {"costs": {"oneOf": [_TASK, _PROJECT, _GLOBAL]}}

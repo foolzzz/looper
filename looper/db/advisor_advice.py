@@ -13,6 +13,7 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
+from ..agents.run_usage import CostStatus
 
 # The kinds of request (``advice.AdviceKind``'s values; the db package does not import the agents').
 _KINDS = frozenset({"diagnose", "design_choice", "plan_review", "unblock"})
@@ -115,6 +116,7 @@ async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
             "attempt": row["attempt"] if row["attempt"] is not None else brief.get("attempt"),
             "state": row["state"], "failure": result.get("failure"), "rounds": row["rounds"], "returns": row["returns"],
             "spent_usd": float(row["spent_usd"]), "status": advice.get("status"),
+            "cost_status": (CostStatus.UNKNOWN if result.get("unpriced_runs") else CostStatus.KNOWN).value,
             "checks": [{"stage": stage, "category": category, "count": count}
                        for (stage, category), count in checks.items()],
             "answers": [{"question_id": a["question_id"], "conclusion": a["conclusion"],
@@ -149,6 +151,7 @@ async def summary_line(task_id: str, *, pool: asyncpg.Pool | None = None) -> str
     pool = pool or get_pool()
     row = await pool.fetchrow(
         """SELECT count(*) AS consults, COALESCE(sum(s.spent_usd), 0) AS spent,
+                  bool_or(jsonb_array_length(COALESCE(s.result->'unpriced_runs', '[]')) > 0) AS unknown,
                   COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(a.adoption_detail->'items') i
                                  WHERE i->>'use' IN ('adopted', 'partial'))), 0) AS taken,
                   COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(a.adoption_detail->'items') i
@@ -161,7 +164,9 @@ async def summary_line(task_id: str, *, pool: asyncpg.Pool | None = None) -> str
             WHERE s.task_id = $1 AND s.kind = 'advisor'""", task_id)
     if not row["consults"]:
         return None
-    line = (f"请教 advisor {row['consults']} 次，花费 {float(row['spent']):.2f} 美元，采纳 {row['taken']} 条，"
+    money = (f"花费未知（已知小计 {float(row['spent']):.2f} 美元）" if row["unknown"]
+             else f"花费 {float(row['spent']):.2f} 美元")
+    line = (f"请教 advisor {row['consults']} 次，{money}，采纳 {row['taken']} 条，"
             f"其中 {row['helped']} 条帮步骤通过")
     if row["incomplete"]:
         line += f"；检查点请教未完成：{', '.join(sorted(row['incomplete']))}"

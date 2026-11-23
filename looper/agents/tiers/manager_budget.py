@@ -10,7 +10,7 @@ import asyncio
 import contextvars
 import logging
 from dataclasses import dataclass
-from functools import lru_cache, wraps
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 from ...db import agent_sessions, connection
@@ -51,11 +51,6 @@ class _ReplyScope:
 _reply_scope: contextvars.ContextVar[_ReplyScope | None] = contextvars.ContextVar("manager_budget_reply", default=None)
 
 
-@lru_cache(maxsize=64)
-def _no_price(profile: str, model: str) -> None:
-    logger.warning("Manager profile %s model %s: no price; the per-turn session budget stops on unpriced usage", profile, model)
-
-
 async def prepare(session: ManagerSession, token: TurnToken, launch: Launch) -> dict[str, Any]:
     """An enabled turn's recorder options; an unset/unreadable switch leaves its constructor unchanged."""
     session.budget = None
@@ -69,8 +64,6 @@ async def prepare(session: ManagerSession, token: TurnToken, launch: Launch) -> 
     price = launch.price or pricer(launch.settings.resolved_model, catalog=launch.settings.pricing_catalog)
     cap = min(usd, launch.max_budget_usd) if launch.max_budget_usd is not None else usd
     spend = RunSpend(price, launch.model, cap)
-    if not price.model_price(launch.model).complete:
-        _no_price(launch.profile.id, launch.model)
     session.budget = BudgetTurn(token, usd, spend, switch=pending(session))
     if (scope := _reply_scope.get()) is not None:
         scope.budget = session.budget
@@ -154,7 +147,13 @@ async def annotate(session: ManagerSession, recorder: ClaudeRunRecorder) -> None
 def cap_reply(session: ManagerSession, exc: Exception) -> str | None:
     from .manager import OverCap
 
-    return policy.over_cap_reply(session.budget.usd) if session.budget is not None and isinstance(exc, OverCap) else None
+    return _stop_reply(session.budget) if session.budget is not None and isinstance(exc, OverCap) else None
+
+
+def _stop_reply(budget: BudgetTurn) -> str:
+    spend = budget.spend
+    return policy.over_cap_reply(budget.usd, unverifiable=spend is not None and spend.budget_unverifiable,
+                                 unknown_models=tuple(sorted(spend.unknown_models)) if spend is not None else ())
 
 
 async def completion_reply(manager: ManagerAgent, token: TurnToken, prepared: Prepared) -> str:
@@ -166,7 +165,7 @@ async def completion_reply(manager: ManagerAgent, token: TurnToken, prepared: Pr
     except OverCap:
         if prepared.session.budget is None:
             raise
-        return policy.over_cap_reply(prepared.session.budget.usd)
+        return _stop_reply(prepared.session.budget)
 
 
 async def bound(manager: ManagerAgent, session: ManagerSession) -> None:

@@ -169,6 +169,7 @@ class Guard:
         self._spent = defaultdict(float)
         self._reserved = defaultdict(float)
         self._unknown = defaultdict(set)
+        self._unknown_warned: dict[tuple, tuple] = {}
         self._scopes: dict[tuple, Scope] = {}
         self._pending: dict[str, Reservation] = {}
         self._records: dict[int, Reservation] = {}
@@ -259,7 +260,11 @@ class Guard:
         for scope in scopes:
             currencies = Currency if scope.scope is BudgetScope.SCHEDULE_DAY else (currency,)
             models = sorted(set().union(*(self._unknown[*scope.key, c] for c in currencies)))
-            if models and scope.limit_usd is not None:
+            warning_key = (*scope.key, tuple(currencies))
+            warning_state = (self.day, tuple(models))
+            if (models and scope.limit_usd is not None
+                    and self._unknown_warned.get(warning_key) != warning_state):
+                self._unknown_warned[warning_key] = warning_state
                 logger.warning('cost guard cannot verify %s %s spend cap: unknown price/cost for model(s) %s',
                                scope.scope.value, scope.scope_ref, ', '.join(models))
 

@@ -205,10 +205,7 @@ class PriceSnapshot:
         return self.builtin.get(base, ModelPrice())
 
     def __call__(self, model: str, usage: Usage) -> float | None:
-        cost = self.model_price(model).cost(usage)
-        if cost_status(cost) is CostStatus.UNKNOWN and usage != Usage():
-            logger.warning("model %s: price unknown; cost and spend-cap coverage are unknown", model)
-        return cost
+        return self.model_price(model).cost(usage)
 
 
 def pricer(provider: LegacyProviderSpec | ProviderSpec | ResolvedModel, *,
@@ -324,7 +321,7 @@ class RunSpend:
         cost = self._price(actual_model, usage)
         # Check event models, not only the configured alias: auxiliary models and alias targets can change.
         if cost_status(cost) is CostStatus.UNKNOWN and usage != Usage():
-            if actual_model not in self.unknown_models:
+            if self.cap is not None and actual_model not in self.unknown_models:
                 logger.warning("model %s: price unknown; spend budget cannot be verified%s", actual_model,
                                "; stopping at the configured cap" if self.cap is not None else "")
             self.unknown_models.add(actual_model)

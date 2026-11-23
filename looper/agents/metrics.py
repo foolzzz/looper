@@ -104,7 +104,7 @@ class Cost:
         return {basis: {"usd": None if self.runs[basis] and self.unknown[basis] == self.runs[basis]
                         else round(self.usd[basis], 6),
                         "runs": self.runs[basis], "unknown_runs": self.unknown[basis],
-                        **({"cost_status": CostStatus.UNKNOWN.value} if self.unknown[basis] else {})}
+                        "cost_status": (CostStatus.UNKNOWN if self.unknown[basis] else CostStatus.KNOWN).value}
                 for basis in self.usd}
 
 
@@ -264,7 +264,7 @@ def _average_cost(rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]]) -
     """The mean of (usd, unknown_runs) pairs: a case with an unknown cost is counted apart, never as 0."""
     known = [usd for usd, unknown in rows if not unknown]
     return {"mean_usd": _mean(known), "n_known": len(known), "unknown": len(rows) - len(known),
-            **({"cost_status": CostStatus.UNKNOWN.value} if len(known) < len(rows) else {})}
+            "cost_status": (CostStatus.UNKNOWN if len(known) < len(rows) else CostStatus.KNOWN).value}
 
 
 def task_success_rate(d: Data) -> dict[str, Any]:

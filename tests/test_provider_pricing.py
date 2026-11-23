@@ -835,7 +835,7 @@ def test_final_model_usage_reports_unknown_prices_even_without_stream_events(cap
     from looper.agents.run_usage import CostStatus
     usage = reported_totals({"modelUsage": {"claude-haiku-5-5": {"inputTokens": 100}}}, pricer(_provider()))
     assert usage.cost_status is CostStatus.UNKNOWN and usage.cost_usd is None
-    assert "claude-haiku-5-5" in caplog.text
+    assert not caplog.records  # Reading prices without a cap is quiet.
 
 
 def test_final_usage_cannot_erase_an_unknown_event_price(agent_db, tmp_path):
@@ -854,3 +854,11 @@ def test_final_usage_cannot_erase_an_unknown_event_price(agent_db, tmp_path):
     assert saved["cost_usd"] is None
     assert saved["metadata"]["cost_status"] == "unknown"
     assert saved["metadata"]["unknown_price_models"] == ["claude-haiku-5-5"]
+
+
+@pytest.mark.parametrize("cap,warnings", [(None, 0), (1, 1)])
+def test_unknown_price_warnings_require_a_cap_and_are_deduplicated(caplog, cap, warnings):
+    spend = RunSpend(_provider(), "claude-haiku-5-5", cap)
+    for _ in range(50):
+        spend.add(usage_event("claude-haiku-5-5", Usage(input_tokens=1)))
+    assert len(caplog.records) == warnings

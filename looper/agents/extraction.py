@@ -1083,7 +1083,10 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                                          run_id=run_id, record_id=result.record_id, now=now, more=found.more)
         return {**counts, **checked.counts} if checked is not None else counts
 
-    cost = asked.cost_usd if checked is None else (asked.cost_usd or 0.0) + checked.counts["check_cost_usd"]
+    cost = asked.cost_usd
+    if checked is not None:
+        check_cost = checked.counts["check_cost_usd"]
+        cost = cost + check_cost if cost is not None and check_cost is not None else None
     # What the check did, typed: skipped (off, or nothing to check), checked or failed (fail-open: stored unchecked).
     check_status = ("skipped" if checked is None or not (parsed.state == "items" and parsed.items)
                     else "failed" if checked.counts["check_failed"] else "checked")
@@ -1107,7 +1110,7 @@ async def _check(runs: Any, kind: str, parsed: Parsed, found: Batch, schedule: M
     cap = schedule["run_budget_usd"] - extracted_usd
     if schedule.get("daily_budget_usd") is not None:
         spent = await db_schedules.spent_since(db_connection.get_pool(), schedule["id"], runs.day_start(now))
-        cap = min(cap, schedule["daily_budget_usd"] - spent - extracted_usd)
+        cap = min(cap, schedule["daily_budget_usd"] - spent)
     reference = {"kind": f"{kind}_check", "schedule_id": schedule["id"], "run_id": run_id, "record_id": record_id}
     try:
         outcome = await leads_check.check(

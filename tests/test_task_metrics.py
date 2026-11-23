@@ -230,7 +230,7 @@ def test_cost_tree_attributes_by_ancestor_and_never_drops_unattributed_spend():
             first["advisor"].usd["provider_priced"]) == (1.0, 0.25, 0.75)
     assert tree.planning.usd["provider_priced"] == 0.5 + 0.125 + 0.0625 + 0.03125
     assert tree.unattributed["advisor"].usd["provider_priced"] == 2.0
-    assert tree.unattributed["worker"].view()["provider_priced"] == {"usd": 3.0, "runs": 1, "unknown_runs": 0}
+    assert tree.unattributed["worker"].view()["provider_priced"] == {"usd": 3.0, "runs": 1, "unknown_runs": 0, "cost_status": "known"}
     assert tree.unattributed["worker"].view()["equivalent"] == {"usd": None, "runs": 1, "unknown_runs": 1, "cost_status": "unknown"}
     total = m._sum([*tree.attempts[10].values(), *tree.attempts[11].values(), tree.planning,
                     *tree.unattributed.values()])
@@ -252,7 +252,7 @@ def test_step_cost_splits_first_attempt_and_retries_and_keeps_unknown_apart():
     assert cost["n"] == 2
     assert paid["total"] == {"mean_usd": 3.5, "n_known": 1, "unknown": 1, "cost_status": "unknown"}
     assert paid["first"]["mean_usd"] == 1.5 and paid["retry"]["mean_usd"] == 1.0
-    assert cost["equivalent"]["total"] == {"mean_usd": 0.0, "n_known": 2, "unknown": 0}
+    assert cost["equivalent"]["total"] == {"mean_usd": 0.0, "n_known": 2, "unknown": 0, "cost_status": "known"}
 
 
 def test_one_failed_part_costs_only_its_figures():

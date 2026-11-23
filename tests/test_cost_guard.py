@@ -246,7 +246,7 @@ def test_schedule_observes_its_existing_shared_daily_cap_without_combining_globa
 
 @pytest.mark.parametrize('mode', [Mode.OBSERVE, Mode.ENFORCE])
 @pytest.mark.parametrize('kind', [cg.RunKind.WORKER, cg.RunKind.PROCESSOR])
-def test_unknown_spend_alerts_every_affected_cap_on_rebuild_and_admission(monkeypatch, caplog, mode, kind):
+def test_unknown_spend_warns_once_for_each_affected_cap(monkeypatch, caplog, mode, kind):
     from looper.agents.cost_guard_settings import RoleLimits
 
     async def check():
@@ -265,11 +265,14 @@ def test_unknown_spend_alerts_every_affected_cap_on_rebuild_and_admission(monkey
         assert {row['scope'] for row in snapshot['counters']} == (
             {'task', 'schedule_day', 'global_day', 'role_day'} if kind is cg.RunKind.PROCESSOR else
             {'task', 'schedule_day', 'global_day'})
+        assert 'claude-haiku-5-5' in caplog.text and 'cannot verify' in caplog.text
+        assert len(caplog.records) == len(snapshot['counters'])
+        assert all(record.levelname == 'WARNING' for record in caplog.records)
         caplog.clear()
         await g.admit(kind, g.scopes(kind, 'task-a', 'schedule-a', cg.Currency.PROVIDER),
                       cg.Currency.PROVIDER, .1)
-        assert 'claude-haiku-5-5' in caplog.text and 'cannot verify' in caplog.text
-        assert all(record.levelname == 'WARNING' for record in caplog.records)
+        await g.rebuild()
+        assert not caplog.records
     asyncio.run(check())
 
 

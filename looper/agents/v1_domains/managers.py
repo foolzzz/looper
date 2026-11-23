@@ -38,7 +38,8 @@ _VIEW_FIELDS = {
 MANAGER_VIEW = _object({**_VIEW_FIELDS,
     "state": _object({"running": _BOOL, "busy": _BOOL, "healthy": _BOOL, "sync": _enum("ok", "pending"),
                       "sync_error": _STR}, ["running", "busy", "healthy", "sync"]),
-    "spend": _object({"today_usd": {"type": "number"}, "last_7d_usd": {"type": "number"}, "runs_today": _INT}),
+    "spend": _object({"today_usd": {"type": "number"}, "last_7d_usd": {"type": "number"}, "runs_today": _INT,
+                      "cost_status": {"type": "string", "enum": ["known", "unknown"]}, "unpriced_runs": _INT}),
 }, list(_VIEW_FIELDS))
 MANAGERS = _object({"managers": _array(MANAGER_VIEW), "max_enabled": _INT})
 _PATCH = {**_object(_MANAGER_FIELDS, [], closed=True),

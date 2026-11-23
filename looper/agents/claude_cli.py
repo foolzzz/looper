@@ -2021,8 +2021,13 @@ class ClaudeRunRecorder:
                 cost = replace(cost, source=CostSource.PROVIDER_PRICE)
             usage = cost.usage
             if self._spend is not None and self._spend.unknown_models:
-                # A final result or explicit usage cannot erase a request priced with a missing rate.
-                usage = replace(usage, cost_usd=None)
+                from .runtimes import CostSource
+
+                # Catalog estimates cannot replace a runtime's own reported bill.
+                metadata = {"catalog_cost_status": CostStatus.UNKNOWN.value,
+                            "catalog_unknown_price_models": sorted(self._spend.unknown_models), **(metadata or {})}
+                if cost.source is not CostSource.RUNTIME:
+                    usage = replace(usage, cost_usd=None)
             if usage.cost_status is CostStatus.UNKNOWN:
                 metadata = {"cost_status": usage.cost_status.value, **(metadata or {})}
                 if self._spend is not None and self._spend.unknown_models:

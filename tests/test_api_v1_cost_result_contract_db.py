@@ -146,7 +146,7 @@ def test_project_breakdown_is_limited_and_reports_more_tasks(tmp_path, monkeypat
             assert result["total"]["equivalent_usd"] == pytest.approx(0.35)
             assert result["more_tasks"] == 1 and len(result["tasks"]) == 10
             assert result["tasks"][0] == {"task_id": "task-example", "name": "Example task",
-                "provider_priced_usd": 1.5, "equivalent_usd": 0.25, "runs": 4}
+                "provider_priced_usd": 1.5, "equivalent_usd": 0.25, "runs": 4, "cost_status": "unknown"}
     run_db(run, monkeypatch, timeout=30)
 
 
@@ -159,9 +159,9 @@ def test_global_aggregates_include_unassigned_tasks_and_manager_totals(tmp_path,
             assert result["total"] == await llm_records.spend_since(None, pool=pool) == {
                 "provider_priced_usd": 17.5, "equivalent_usd": 5.75, "runs": 8, "running": 1, "unpriced_runs": 1, "cost_status": "unknown"}
             assert result["projects"] == [
-                {"project": "Other", "provider_priced_usd": 7, "equivalent_usd": 0, "runs": 1, "tasks": 1},
-                {"project": "Example", "provider_priced_usd": 1.5, "equivalent_usd": 0.25, "runs": 4, "tasks": 1},
-                {"project": None, "provider_priced_usd": 0, "equivalent_usd": 0.5, "runs": 1, "tasks": 1}]
+                {"project": "Other", "provider_priced_usd": 7, "equivalent_usd": 0, "runs": 1, "tasks": 1, "cost_status": "known"},
+                {"project": "Example", "provider_priced_usd": 1.5, "equivalent_usd": 0.25, "runs": 4, "tasks": 1, "cost_status": "unknown"},
+                {"project": None, "provider_priced_usd": 0, "equivalent_usd": 0.5, "runs": 1, "tasks": 1, "cost_status": "known"}]
             assert result["total"]["runs"] - sum(p["runs"] for p in result["projects"]) == 2
     run_db(run, monkeypatch, timeout=30)
 

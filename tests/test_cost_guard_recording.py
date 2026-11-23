@@ -247,3 +247,69 @@ def test_subscription_reservation_adds_an_in_run_cap_only_with_an_enforced_scope
             assert recorder._spend is None
     finally:
         recorder._untrack()
+
+
+@pytest.mark.parametrize('cap_owner', ['manager', 'guard'])
+def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, monkeypatch, cap_owner):
+    from looper.agents import session_budget
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.cost_guard_settings import Config, Mode
+    from looper.agents.profile_registry import builtin_resolved_profile
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import usage_event
+    from looper.agents.tiers import manager_budget
+    from tests.runtime_model_helpers import with_model_name
+
+    launch = Launch(AgentSettings(profile=with_model_name(builtin_resolved_profile(), 'sonnet')),
+                    role=AgentType.MANAGER)
+    config = Config(mode=Mode.ENFORCE if cap_owner == 'guard' else Mode.OBSERVE,
+                    daily_equivalent_usd=4)
+    guard = cost_guard.Guard(config, clock=lambda: datetime(2026, 11, 23, tzinfo=timezone.utc))
+    monkeypatch.setattr(cost_guard, '_guard', guard)
+    monkeypatch.setattr(guard, '_usage_hold', AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(cost_guard.store, 'history', AsyncMock(return_value=[]))
+    monkeypatch.setattr(cost_guard.store, 'limits', AsyncMock(return_value={}))
+    monkeypatch.setattr(cost_guard.store, 'context', AsyncMock(return_value={'tasks': {}, 'schedules': {}}))
+    monkeypatch.setattr(session_budget, 'turn_budget_usd', AsyncMock(return_value=4 if cap_owner == 'manager' else None))
+
+    async def run():
+        session = SimpleNamespace(budget=None, pending_switch=None)
+        options = await manager_budget.prepare(session, SimpleNamespace(), launch)
+        recorder = ClaudeRunRecorder(agent_id='manager', task_id=None, command=['claude'], cwd=str(tmp_path),
+                                     input_text='test', launch=launch, **options)
+        await recorder.start()
+        recorder.account(usage_event('claude-haiku-5-5', Usage(input_tokens=100)))
+        assert recorder.cap_stop is not None
+        await recorder.finish(output_text='done', result_event={
+            'type': 'result', 'subtype': 'success', 'total_cost_usd': .05})
+
+    asyncio.run(run())
+    saved = agent_db.finish_record.await_args.kwargs
+    assert saved['cost_source'] == 'runtime'
+    assert saved['cost_usd'] == .05
+    assert saved['metadata']['catalog_cost_status'] == 'unknown'
+    assert saved['metadata']['catalog_unknown_price_models'] == ['claude-haiku-5-5']
+    assert saved['metadata'].get('cost_status', 'known') == 'known'
+    assert not saved['metadata'].get('unknown_price_models')
+    counter = next(item for item in guard.snapshot()['counters'] if item['scope'] == 'global_day')
+    assert counter['spent_usd'] == .05 and counter['cost_status'] == 'known'
+
+
+def test_unknown_event_model_reaches_guard_settlement(monkeypatch):
+    guard = cost_guard.Guard(cost_guard.settings.Config(mode=cost_guard.settings.Mode.OBSERVE))
+    guard.day = guard.day_start(guard.clock())
+    monkeypatch.setattr(cost_guard, '_guard', guard)
+    scope = cost_guard.Scope(cost_guard.BudgetScope.GLOBAL_DAY, 'global', 4)
+    reservation = guard._admit(cost_guard.RunKind.WORKER, (scope,), cost_guard.Currency.PROVIDER, .1,
+                               cost_guard.EstimateSource.RUN_CAP, True, None).reservation
+    guard.bind(reservation, 42)
+    monkeypatch.setattr(llm_records, 'finish_record', AsyncMock())
+    recorder = ClaudeRunRecorder(agent_id='worker-test', task_id=None, command=['claude'],
+                                 cwd='/synthetic', input_text='test')
+    recorder._record_id = 42
+    asyncio.run(recorder._write_end({'status': 'completed', 'cost_usd': None, 'cost_source': 'provider_price',
+                                     'model': 'sonnet', 'metadata': {
+                                         'unknown_price_models': ['claude-haiku-5-5']}}))
+    counter = guard.snapshot()['counters'][0]
+    assert counter['cost_status'] == 'unknown'
+    assert counter['unknown_models'] == ['claude-haiku-5-5']

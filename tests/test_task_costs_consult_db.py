@@ -1,8 +1,6 @@
 """Room consult spend is part of a task's cost, and of the budgets that read it.
 
-A task with no consult row stays byte-identical to task_costs at
-0cda75a9a937439c04f58de0826a9c22ab42a428 (that query is unchanged through
-a6edcd784146a3c4128cb2cebcaa3f2a00b5737d), including key order.
+Tasks without consults keep their recorded amounts and roles; cost coverage is explicit.
 """
 from __future__ import annotations
 
@@ -79,7 +77,12 @@ def test_a_task_without_consults_keeps_the_recorded_cost():
         await _finish(pool, "advisor-fixture", task, 0.04, "advisor-model", run_kind="advisor")
         await _finish(pool, "explorer-fixture", task, 0.01, "explorer-model", run_kind="explorer")
         costs = await llm_records.task_costs([task, "empty-task"], pool=pool)
-        assert json.dumps(costs[task]) == RECORDED_COST
+        expected = json.loads(RECORDED_COST)
+        expected["cost_status"] = "known"
+        expected["unknown_models"] = []
+        for row in expected["by_model"]:
+            row["cost_status"] = "known"
+        assert costs[task] == expected
         assert list(costs[task]["by_role"]) == ["planner", "worker", "reviewer", "explorer"]
         assert "consult" not in costs[task]["by_role"]
         empty = costs["empty-task"]
@@ -106,7 +109,7 @@ def test_a_room_consult_is_in_the_task_cost_and_can_cross_its_budget(caplog):
         assert cost["cost_status"] == "unknown"
         gap = next(row for row in cost["by_model"] if row["model"] == "consult-gap")
         assert gap["cost_status"] == "unknown"
-        assert "consult-gap" in caplog.text and "spend cap" in caplog.text
+        assert not caplog.records
         total = await llm_records.spend_since(None, pool=pool)
         assert total["cost_status"] == "unknown"
         assert cost["equivalent_runs"] == 1
@@ -347,32 +350,34 @@ def test_a_task_cap_reports_unknown_price_instead_of_treating_it_as_free(tmp_pat
         from looper.agents.tiers.planner import PlannerAgent, TaskPlan
 
         await _finish(pool, "worker-unpriced", "unpriced-task", None, "haiku",
-                      metadata={"model_reported": "claude-haiku-5-5"})
+                      metadata={"model_reported": "claude-haiku-5-5", "cost_status": "unknown"})
         planner = PlannerAgent(task_id="unpriced-task", runtime_root=tmp_path)
         planner._execution = ProjectExecution(task_budget_usd=0.15)
         planner._activity = AsyncMock()
         plan = TaskPlan(plan_id="plan", goal_id="goal", requirement="Run",
                         work_dir=str(tmp_path), status="executing")
         assert await planner._within_budget(plan) is True
-        assert "claude-haiku-5-5" in caplog.text and "spend cap" in caplog.text
         planner._activity.assert_awaited_once()
         assert "cannot be verified" in planner._activity.await_args.args[1]
     run_db(check, monkeypatch)
 
 
-def test_task_cap_warning_names_unknown_auxiliary_models_instead_of_known_main(caplog):
+def test_task_cost_read_preserves_unknown_auxiliary_models_without_warning(caplog):
     async def check(pool):
         await _finish(pool, "worker-auxiliary", "auxiliary-task", None, "known-main",
                       metadata={"model_reported": "known-main", "unknown_price_models": ["unknown-one", "unknown-two"]})
         cost = (await llm_records.task_costs(["auxiliary-task"], pool=pool))["auxiliary-task"]
         assert cost["cost_status"] == "unknown"
-        assert "unknown-one" in caplog.text and "unknown-two" in caplog.text
-        assert "known-main" not in caplog.text
+        assert cost["unknown_models"] == ["unknown-one", "unknown-two"]
+        assert not caplog.records
     run_db(check)
 
 
 @pytest.mark.parametrize("kind", ["agent", "subscription"])
 def test_schedule_budget_reports_unknown_auxiliary_models_without_a_task_for_subscriptions(kind, caplog):
+    from looper.db import schedules
+    schedules._warn_unknown_spend.cache_clear()
+
     async def check(pool):
         from looper.db.projects import create_project
         from looper.db.schedules import spent_since

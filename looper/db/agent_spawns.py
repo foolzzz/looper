@@ -18,6 +18,7 @@ from typing import Any
 import asyncpg
 
 from .connection import _connection, get_pool
+from ..agents.run_usage import CostStatus
 
 
 class SpawnState(str, Enum):
@@ -124,6 +125,7 @@ def _row(record: asyncpg.Record | None) -> dict[str, Any] | None:
     for key in ("budget_usd", "spent_usd"):
         if row.get(key) is not None:
             row[key] = float(row[key])
+    row["cost_status"] = (CostStatus.UNKNOWN if row["result"].get("unpriced_runs") else CostStatus.KNOWN).value
     return row
 
 
@@ -237,10 +239,10 @@ async def note_run(spawn_id: int, record_id: int, *, pool: asyncpg.Pool | None =
             WHERE id = $1 AND NOT COALESCE(result->'runs', '[]') @> to_jsonb($2::bigint)""", spawn_id, record_id)
 
 
-async def book(spawn_id: int, record_id: int, cost_usd: float, *, pool: asyncpg.Pool | None = None) -> bool:
+async def book(spawn_id: int, record_id: int, cost_usd: float | None, *, pool: asyncpg.Pool | None = None) -> bool:
     """Add what run ``record_id`` spent to the spawn's spend, once per run (``result.booked``); False when it was
     booked before."""
-    if not math.isfinite(cost_usd) or cost_usd < 0:
+    if cost_usd is not None and (not math.isfinite(cost_usd) or cost_usd < 0):
         raise ValueError("cost_usd cannot be negative")
     pool = pool or get_pool()
     task_id = await pool.fetchval("SELECT task_id FROM agent_spawns WHERE id=$1", spawn_id)
@@ -250,8 +252,11 @@ async def book(spawn_id: int, record_id: int, cost_usd: float, *, pool: asyncpg.
         status = await conn.execute(
             """UPDATE agent_spawns SET spent_usd = spent_usd + $3, updated_at = now(),
                       result = jsonb_set(result, '{booked}', COALESCE(result->'booked', '[]') || to_jsonb($2::bigint))
+                               || CASE WHEN $4::boolean THEN jsonb_build_object('unpriced_runs',
+                                   COALESCE(result->'unpriced_runs', '[]') || to_jsonb($2::bigint))
+                                   ELSE '{}'::jsonb END
                 WHERE id = $1 AND NOT COALESCE(result->'booked', '[]') @> to_jsonb($2::bigint)""",
-            spawn_id, record_id, cost_usd)
+            spawn_id, record_id, cost_usd if cost_usd is not None else 0.0, cost_usd is None)
     return status == "UPDATE 1"
 
 

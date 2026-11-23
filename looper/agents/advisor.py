@@ -230,7 +230,7 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
 
 
 async def _book(spawn_id: int, done: Execution) -> None:
-    if done.record_id is not None and done.cost_usd:
+    if done.record_id is not None:
         await agent_spawns.book(spawn_id, done.record_id, done.cost_usd)
 
 
@@ -247,8 +247,9 @@ async def reconcile(spawn_id: int) -> None:
         if record_id in booked:
             continue
         record = await llm_records.get_record(record_id)
-        if record and record.get("cost_usd"):
-            await agent_spawns.book(spawn_id, record_id, float(record["cost_usd"]))
+        if record and record["status"] != "running":
+            await agent_spawns.book(spawn_id, record_id,
+                                    float(record["cost_usd"]) if record["cost_usd"] is not None else None)
 
 
 async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, context: Context = Context(),
@@ -274,6 +275,9 @@ async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, c
                 ids=context.ids, domains=context.domains)
     if hits:
         return await _return(row, describe(hits), [hit.view() for hit in hits])
+    if row.get("cost_status") == CostStatus.UNKNOWN.value:
+        return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
+                          detail="consult budget cannot be verified: previous run cost unknown")
     if _left(row) < MIN_RUN_USD:
         return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
                           detail=f"{_left(row):.2f} USD is left, less than a run needs")
