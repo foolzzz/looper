@@ -508,11 +508,13 @@ def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test starts with stopping a reply off, its default (``chat_settings``), whatever an earlier one set."""
-    from looper.agents import chat_settings
+    """Every test starts from the chat and persona defaults, whatever an earlier one stored in memory."""
+    from looper.agents import chat_settings, persona
 
     monkeypatch.setattr(chat_settings, "_stop_enabled", chat_settings.DEFAULT_STOP_ENABLED)
     monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.DEFAULT_COMPLETION_TURNS)
+    monkeypatch.setattr(persona, "_current", persona.Persona())
+    monkeypatch.setattr(persona, "_warned", None)
 
 
 @pytest.fixture(scope="session", autouse=True)
