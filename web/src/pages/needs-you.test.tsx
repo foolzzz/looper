@@ -92,6 +92,23 @@ describe("Needs you page", () => {
     expect(host.textContent).toContain("Nothing waits for you");
   });
 
+  it("shows stopped Lark catch-up with the affected window and recovery action", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "deliveries", state: "ok", count: 1, error: null, items: [
+        { key: "catchup:synthetic", title: "chat-synthetic: 08:00–08:02; retry_exhausted", context: "channel-lark",
+          since: null, href: "#settings/channels", ref: null,
+          facts: { source: "catchup", channel: "lark", state: "dropped",
+            fix: "Check the chat and forward missed messages to Looper." } }] },
+    ] });
+    await render();
+    expect(host.textContent).toContain("Lark catch-up dropped");
+    expect(host.textContent).toContain("Looper never sends these again: check the chat, and resend by hand if it is missing.");
+    expect(host.textContent).toContain("from Lark");
+    expect(host.textContent).toContain("chat-synthetic: 08:00–08:02");
+    expect(host.textContent).toContain("Check the chat and forward missed messages to Looper.");
+    expect(host.querySelector('a[href="#settings/channels"]')).not.toBeNull();
+  });
+
   it("says when the summary is off", async () => {
     vi.mocked(fetchAttention).mockRejectedValue(new V1Error(409, "conflict", "not enabled"));
     await render();

@@ -22,6 +22,7 @@ from looper.agents.tiers.manager import ManagerAgent
 from looper.agents.turn_context import SpeakerKind, TURN_CONTEXT_CONTRACT
 from tests.db_support import DSN, run_db
 from tests.lark_cli_stand_in import OPEN_ID, OTHER
+from tests.manager_surface_support import assert_main_surfaces
 from tests.test_manager_session_routing_db import _Rig
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -95,21 +96,19 @@ def fingerprint(prepared, tools, root):
     config = json.loads(Path(prepared.launch.library.mcp_config).read_text())
     item, = prepared.launch.library.items
     assert item.sha256 == hashlib.sha256(json.dumps(config["mcpServers"]["looper"], sort_keys=True).encode()).hexdigest()
-    signature[1] = prepared.system_prompt.text
+    signature[1] = "<system prompt, checked per section>"
     signature[3] = {"kind": item.kind, "plugin": item.plugin, "name": item.name, "config": config}
     return {key: hashlib.sha256(normalized(value, root).encode()).hexdigest() for key, value in {
-        "turn": prepared.turn_text, "system": prepared.system_prompt.text, "tools": tools,
-        "command": command, "signature": signature,
+        "turn": prepared.turn_text, "command": command, "signature": signature,
     }.items()}
 
 
-# Captured before wiring, on origin/main (2087fa7ba), with the same fixed inputs.
+# Captured before wiring, on origin/main (2087fa7ba), with the same fixed inputs. The system prompt and the tools
+# are checked per section and per tool against tests/fixtures/manager_surfaces_off.json.
 OFF_BASELINE = {
     "turn": "4e9d6108033e75dc5e2144612dd4f12e1876e4a2c7943716a2268615d7d49f74",
-    "system": "7d14661d728105ddd57740dc865754ac93a3a509613d185b65ec5a9adea55ebf",
-    "tools": "de8b33d0d94ea993f875cf3c2e54c07afe471aece5825a4e845610404da22ddc",
     "command": "7525d496fea853ca24a731eff0f7034169a77b754142e1f1815d1398f6a91104",
-    "signature": "9fb5bf09bd9b08845c716322f67eff25d1cd6361fb480bed1f442090c0c83a31",
+    "signature": "f03dc4dc86fdb0995e69fc081bbb262ff17f4a5ef88486114e92d2d819caae5f",
 }
 
 
@@ -131,6 +130,7 @@ def test_off_matches_main_prompt_tools_command_and_process_signature(monkeypatch
             tools = await rig.manager.ops.current_listing(prepared.turn)
             actual = fingerprint(prepared, tools, tmp_path)
             assert actual == OFF_BASELINE, actual
+            assert_main_surfaces(tools, prepared.system_prompt.text, tmp_path)
         finally:
             await rig.close()
 
