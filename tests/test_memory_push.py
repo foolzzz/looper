@@ -1,6 +1,8 @@
 """Code-rendered memory notices contain the exact changes a DM may confirm."""
 from datetime import datetime, timezone
 
+import pytest
+
 from looper.agents import memory_push
 
 
@@ -18,6 +20,21 @@ def test_complete_boundary_and_long_reply_has_no_confirm():
         assert complete is (size == 1500)
         assert ("回复「记」" in text) is complete
         assert ("内容较长，请到记忆页确认" in text) is not complete
+
+
+@pytest.mark.parametrize("long", [False, True])
+@pytest.mark.parametrize("markdown", [False, True])
+def test_change_markdown_cannot_hide_urls(long, markdown):
+    line = "+ [safe label](https://unsafe.example.invalid) ![image](https://image.example.invalid) `code`"
+    lines = [line] + (["+ " + "x" * 1500] if long else [])
+    text, complete = memory_push.push_text(row(), {}, lines, markdown=markdown)
+    assert complete is not long
+    if markdown:
+        assert r"\[safe label\]\(https://unsafe\.example\.invalid\)" in text
+        assert r"\!\[image\]\(https://image\.example\.invalid\)" in text
+        assert r"\`code\`" in text
+    else:
+        assert line in text
 
 
 def test_flags_are_code_rendered_and_mentions_removed():

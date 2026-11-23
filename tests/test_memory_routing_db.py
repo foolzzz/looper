@@ -121,6 +121,9 @@ def test_memory_reject_quoting_intent_push_never_reaches_intent_router(monkeypat
 
 @pytest.mark.parametrize("condition,expected", [("hash", "M-0001 在推送后改过，请看最新的推送"),
     ("incomplete", "M-0001 内容较长，请到记忆页确认："), ("expired", "M-0001 已过期"),
+    ("uncertain", "M-0001 推送送达情况不明"), ("failed", "M-0001 推送失败"),
+    ("sending", "M-0001 推送尚未完成"), ("missing", "M-0001 尚未在此私聊推送"),
+    ("confirmed", "M-0001 已确认，写入后通知你"), ("writing", "M-0001 已确认，写入后通知你"),
     ("rejected", "M-0001 已驳回"), ("written", "M-0001 已写入")])
 def test_confirm_refusals_do_not_change_state(monkeypatch, condition, expected):
     async def check(pool):
@@ -133,12 +136,18 @@ def test_confirm_refusals_do_not_change_state(monkeypatch, condition, expected):
             await pool.execute("UPDATE memory_candidates SET expires_at=now()-interval '1 second'")
         elif condition == "rejected":
             await memory_actions.act("reject", "M-1")
+        elif condition in ("uncertain", "failed", "sending"):
+            await pool.execute("UPDATE memory_posts SET state=$1", condition)
+        elif condition == "missing":
+            await pool.execute("UPDATE memory_posts SET chat='ou_another_synthetic'")
         else:
             await memory_actions.act("confirm", "M-1", content_hash=row["content_hash"])
-            await sup.move(pool, number, "writing", "claim")
-            await sup.move(pool, number, "written", "write", commit_sha="a" * 40)
+            if condition != "confirmed":
+                await sup.move(pool, number, "writing", "claim")
+            if condition == "written":
+                await sup.move(pool, number, "written", "write", commit_sha="a" * 40)
         before = await pool.fetchval("SELECT count(*) FROM memory_candidate_events")
-        reply = await execute(envelope("记", quote="om_push_synthetic"))
+        reply = await execute(envelope("记 M-1"))
         assert reply.startswith(expected)
         assert await pool.fetchval("SELECT count(*) FROM memory_candidate_events") == before
     run_db(check, monkeypatch)

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from looper.agents import memory_push as push, memory_write
+from looper.agents import memory_actions, memory_push as push, memory_write
 from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.db import memory as store
 from tests import memory_support as sup
@@ -75,7 +75,69 @@ def test_one_push_per_revision_and_updated_quote(monkeypatch, tmp_path):
         await env.service.run_once()
         assert len(env.channels.posts) == 2
         assert env.channels.posts[-1][3]["reply_to"] == "om_memory_1"
+        assert r"\[\[weekly\]\] updated" in env.channels.posts[-1][2]
         assert env.channels.edits[-1][3] == f"🔄 M-{env.cid:04d} 已更新，请看新消息"
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("outcome", [PostOutcome.SENT, PostOutcome.UNKNOWN, PostOutcome.REJECTED])
+def test_revived_revision_pushes_once_and_supersedes_expired_message(monkeypatch, tmp_path, outcome):
+    async def check(pool):
+        env = await setup(pool, tmp_path)
+        await env.service.run_once()
+        await sup.move(pool, env.cid, "expired", "expire")
+        await env.service.run_once()
+        assert env.channels.edits[-1][3] == f"⌛ M-{env.cid:04d} 已过期"
+        original = await pool.fetchrow("SELECT revision,content_hash FROM memory_candidates WHERE id=$1", env.cid)
+        for attempt in range(2):
+            await memory_actions.act("revive", f"M-{env.cid}")
+            env.channels.outcome = outcome
+            await env.service.run_once()
+            await env.service.run_once()
+            assert len(env.channels.posts) == attempt + 2
+            assert env.channels.posts[-1][3]["reply_to"] == (
+                f"om_memory_{attempt + 1}" if outcome is PostOutcome.SENT else "om_memory_1")
+            current = await pool.fetchrow("SELECT revision,content_hash FROM memory_candidates WHERE id=$1", env.cid)
+            assert current == original
+            if outcome is PostOutcome.SENT:
+                assert env.channels.edits[-1][3] == f"🔄 M-{env.cid:04d} 已更新，请看新消息"
+            await sup.move(pool, env.cid, "expired", "expire")
+            await env.service.run_once()
+    run_db(check, monkeypatch)
+
+
+def test_candidate_failure_still_processes_other_candidates_and_alerts(monkeypatch, tmp_path, caplog):
+    async def check(pool):
+        env = await setup(pool, tmp_path)
+        other = await sup.candidate(pool, statement="Another synthetic memory")
+        await sup.revise_current(pool, other, env.settings)
+        async with store.transaction(pool) as conn:
+            for _ in range(3):
+                await store._event(conn, env.cid, sup.Action.BLOCK, sup.Actor.SYSTEM, sup.Via.SYSTEM,
+                                   note="dirty_target")
+        process = env.service._process
+        async def fail_one(conn, candidate_id):
+            if candidate_id == env.cid:
+                raise ValueError("Synthetic candidate failure")
+            await process(conn, candidate_id)
+        monkeypatch.setattr(env.service, "_process", fail_one)
+        await env.service.run_once()
+        assert await pool.fetchval("SELECT candidate_id FROM memory_posts WHERE kind='push'") == other
+        assert any(post[2].startswith("告警") for post in env.channels.posts)
+        assert f"candidate={env.cid}" in caplog.text
+    run_db(check, monkeypatch)
+
+
+def test_result_reservation_uses_insert_time_not_transaction_start(monkeypatch, tmp_path):
+    async def check(pool):
+        env = await setup(pool, tmp_path)
+        async with store.transaction(pool) as conn:
+            await conn.fetchval("SELECT transaction_timestamp()")
+            row = await conn.fetchrow("SELECT * FROM memory_candidates WHERE id=$1 FOR UPDATE", env.cid)
+            before_insert = await conn.fetchval("SELECT clock_timestamp()")
+            post_id = await push.reserve_result(conn, row, channel_id=CHANNEL, chat=DM)
+            created = await conn.fetchval("SELECT created_at FROM memory_posts WHERE id=$1", post_id)
+            assert created >= before_insert
     run_db(check, monkeypatch)
 
 

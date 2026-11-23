@@ -35,6 +35,8 @@ def _state_reply(row: Mapping[str, Any], action: str) -> str | None:
     label = model.format_id(row["id"])
     if row["state"] in ("written", "rejected"):
         return f"{label} 已写入" if row["state"] == "written" else f"{label} 已驳回"
+    if row["state"] in ("confirmed", "writing"):
+        return f"{label} 已确认，写入后通知你"
     if action == "confirm" and (row["state"] == "expired" or (
             row["expires_at"] is not None and row["expires_at"] <= datetime.now(timezone.utc))):
         return f"{label} 已过期，请到记忆页恢复：{memory_push.dashboard_link(row['id'])}"
@@ -133,8 +135,13 @@ async def _execute(numbers: list[int], *, action: str, reason: str | None, chann
                                      post["revision"] != row["revision"]):
                 replies[number] = f"{label} 在推送后改过，请看最新的推送"
                 continue
-            if post is None or post["state"] != "sent" or not post["complete"]:
-                replies[number] = f"{label} 内容较长，请到记忆页确认：{memory_push.dashboard_link(number)}"
+            problem = ("尚未在此私聊推送" if post is None else
+                       "推送送达情况不明" if post["state"] == "uncertain" else
+                       "推送失败" if post["state"] == "failed" else
+                       "推送尚未完成" if post["state"] != "sent" else
+                       "内容较长" if not post["complete"] else None)
+            if problem:
+                replies[number] = f"{label} {problem}，请到记忆页确认：{memory_push.dashboard_link(number)}"
                 continue
         try:
             # Commit confirmation and its result subscription before waking the writer, whose git transaction

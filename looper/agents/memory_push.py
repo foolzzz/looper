@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
@@ -68,7 +69,8 @@ def final_text(row: Mapping[str, Any], *, dashboard_url: str | None = None) -> s
 
 
 def push_text(row: Mapping[str, Any], revision: Mapping[str, Any], lines: list[str] | None, *,
-              sources: list[Mapping[str, Any]] = (), pending_days: int = 7, dashboard_url: str | None = None) -> tuple[str, bool]:
+              sources: list[Mapping[str, Any]] = (), pending_days: int = 7, dashboard_url: str | None = None,
+              markdown: bool = False) -> tuple[str, bool]:
     """The 1,500-character limit counts changed and context lines, including markers and newlines."""
     label = model.format_id(row['id'])
     source = {'manager_turn': '私聊', 'task': '任务', 'lead': '消息线索'}[row['source_kind']]
@@ -85,13 +87,15 @@ def push_text(row: Mapping[str, Any], revision: Mapping[str, Any], lines: list[s
         result.append(f'⚠️ 会删掉这篇笔记 {removed} 行')
     if row.get('hard_rule'):
         result.append('⚠️ 这条像是每次都要遵守的硬规则：可能还要写进全局指令（Looper 不写）')
+    display = '\n'.join(lines or [])
+    if not complete:
+        display = display[:400]
+    if display:
+        # Render literal changes: Markdown links and images must not conceal the URLs being confirmed.
+        result.append(re.sub(r'([\\`*_{}\[\]<>()#+\-.!|~])', r'\\\1', display) if markdown else display)
     if complete:
-        result.extend(lines)
         result.append(f'回复「记」或「记 {label}」写入；「驳回 {label} [理由]」驳回。{pending_days} 天没处理会过期。')
     else:
-        preview = '\n'.join(lines or [])[:400]
-        if preview:
-            result.append(preview)
         result.append(f'内容较长，请到记忆页确认：{dashboard_link(row["id"], dashboard_url=dashboard_url)}')
         result.append(f'「驳回 {label} [理由]」驳回。{pending_days} 天没处理会过期。')
     return strip_mentions('\n'.join(result)), complete
@@ -154,8 +158,8 @@ async def reserve_result(conn: Any, row: Mapping[str, Any], *, channel_id: str, 
     if await target_for(conn) != (channel_id, chat):
         return None
     return await conn.fetchval(
-        "INSERT INTO memory_posts(candidate_id,kind,revision,content_hash,complete,channel_id,chat,text,error) "
-        "VALUES($1,'final',$2,$3,false,$4,$5,'',$6) RETURNING id", row['id'], row['revision'],
+        "INSERT INTO memory_posts(candidate_id,kind,revision,content_hash,complete,channel_id,chat,text,error,created_at) "
+        "VALUES($1,'final',$2,$3,false,$4,$5,'',$6,clock_timestamp()) RETURNING id", row['id'], row['revision'],
         row['content_hash'], channel_id, chat, _AWAITING_REPLY)
 
 
@@ -214,14 +218,6 @@ async def _insert_final(conn, row, channel, chat, text):
         "VALUES($1,'final',$2,$3,false,$4,$5,$6)", row['id'], row['revision'], row['content_hash'], channel, chat, text)
 
 
-async def final_edit(candidate_id: int) -> None:
-    if _active is not None:
-        try:
-            await _active.final_edit(candidate_id)
-        except Exception:
-            logger.warning('memory candidate=%s final notice deferred', candidate_id, exc_info=True)
-
-
 class MemoryPushService:
     def __init__(self, registry: Any, *, drain: Any = None, clock: Callable[[], datetime] | None = None,
                  interval: float = TICK_SECONDS, dashboard_url: str | None = None):
@@ -262,7 +258,10 @@ class MemoryPushService:
             "AND (p.state='sending' OR (p.kind='push' AND p.state='sent' AND (p.edited_at IS NULL OR p.edited_at<c.updated_at)) "
             "OR (p.kind='final' AND p.state='pending')))) ORDER BY id")
         for row in rows:
-            await self.final_edit(row['id'])
+            try:
+                await self.final_edit(row['id'])
+            except Exception:
+                logger.warning('memory candidate=%s push processing deferred', row['id'], exc_info=True)
         await self._alerts()
 
     async def final_edit(self, candidate_id):
@@ -291,9 +290,13 @@ class MemoryPushService:
                                                      via='system', now=now)
         posts = await conn.fetch('SELECT * FROM memory_posts WHERE candidate_id=$1 ORDER BY id', candidate_id)
         pushes = [p for p in posts if p['kind'] == 'push']
+        # A revive reopens the same revision; only attempts after its durable event suppress a new push.
+        since = await conn.fetchval("SELECT created_at FROM memory_candidate_events WHERE candidate_id=$1 "
+                                    "AND action='revive' ORDER BY id DESC LIMIT 1", candidate_id)
         latest = next((p for p in reversed(pushes) if p['state'] == 'sent' and p['external_id']
                        and (p['channel_id'], p['chat']) == target), None)
-        if row['state'] == 'pending' and not any(p['revision'] == row['revision'] for p in pushes):
+        if row['state'] == 'pending' and not any(p['revision'] == row['revision'] and (
+                since is None or p['created_at'] >= since) for p in pushes):
             detail = await db_memory.get(candidate_id, db=conn)
             config, problem = await vault.load()
             lines = None
@@ -303,8 +306,10 @@ class MemoryPushService:
                 except (ValueError, OSError, memory_write.WriteFailure):
                     pass
             raw = await memory_settings.stored(conn)
+            channel = await channel_configs.get_config(target[0], pool=conn)
             text, complete = push_text(row, detail['revision'], lines, sources=detail['sources'],
-                                       pending_days=int(raw.get('pending_days', 7)), dashboard_url=self._dashboard_url)
+                                       pending_days=int(raw.get('pending_days', 7)), dashboard_url=self._dashboard_url,
+                                       markdown=bool(channel and channel['channel_type'] in LARK_CHANNEL_TYPES))
             post = await conn.fetchrow("INSERT INTO memory_posts(candidate_id,kind,revision,content_hash,complete, "
                 "channel_id,chat,text,state,attempts) VALUES($1,'push',$2,$3,$4,$5,$6,$7,'sending',1) RETURNING *",
                 candidate_id, row['revision'], row['content_hash'], complete, *target, text)
@@ -316,10 +321,12 @@ class MemoryPushService:
             posts = await conn.fetch('SELECT * FROM memory_posts WHERE candidate_id=$1 ORDER BY id', candidate_id)
             pushes = [p for p in posts if p['kind'] == 'push']
         current_push = next((p for p in reversed(pushes) if p['revision'] == row['revision']
+                            and (since is None or p['created_at'] >= since)
                             and p['state'] == 'sent' and p['external_id'] and (p['channel_id'], p['chat']) == target), None)
         if current_push:
             for old in pushes:
-                if old['revision'] < row['revision'] and old['state'] == 'sent' and old['external_id'] and (
+                if (old['revision'] < row['revision'] or (since is not None and old['created_at'] < since)) and (
+                        old['state'] == 'sent' and old['external_id']) and (
                         old['channel_id'], old['chat']) == target:
                     text = f'🔄 {model.format_id(candidate_id)} 已更新，请看新消息'
                     if old['text'] != text:
