@@ -534,7 +534,8 @@ def test_every_client_error_exit_has_the_failed_receipt_notes_and_both_columns(
 
 
 # The Manager swaps these in or out of its scope by their own switches, so a stand-in would not stay.
-_SWITCHED = {"looper_ledger_add", "looper_ledger_update", "looper_reminder_create", "looper_reminder_cancel"}
+_SWITCHED = {"looper_ledger_add", "looper_ledger_update", "looper_reminder_create", "looper_reminder_cancel",
+             "looper_skill_propose"}
 
 
 def _fake_tools(client: bool = True) -> list[tuple[Any, Any]]:

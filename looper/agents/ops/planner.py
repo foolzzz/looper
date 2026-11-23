@@ -530,6 +530,12 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
     step = await _step(call.task_id, arguments["step"]) if arguments.get("step") else None
     where = f"step {step.get('step_key') or step['id']}" if step else "the rest of the task"
     wanted = arguments.get("profile_id")
+    from ..acp_guards import refuse_profile
+
+    try:
+        await refuse_profile(wanted, "looper_task_profile_set")
+    except RegistryError as exc:
+        raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
     profile: Mapping[str, Any] | None = None
     if wanted is not None:
         profile = _match(allowed, wanted)
@@ -773,6 +779,13 @@ async def _role_set(call: PlannerCall) -> dict[str, Any]:
         except RoleError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
     elif template is not None and template["profile_id"]:
+        from ..acp_guards import refuse_profile
+        from ..profile_registry import RegistryError
+
+        try:
+            await refuse_profile(template["profile_id"], "looper_task_role_set template")
+        except RegistryError as exc:
+            raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
         # The template's profile comes with it while the project still allows it.
         if template["profile_allowed"]:
             profile = {"id": template["profile_id"], "name": template["profile_name"]}

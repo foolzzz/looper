@@ -2,6 +2,7 @@
 
 from ...db import projects as db_projects
 from .. import agent_settings, projects
+from ..acp_guards import refuse_client_selection
 from ..api_v1 import _array, _object, _STR, _NULL_STR, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
@@ -45,6 +46,7 @@ OPERATIONS = (
 async def impact(server, operation, arguments, principal, headers):
     if not operation.operation_id.startswith("project_agent_settings.update"):
         return None
+    await refuse_client_selection(principal, operation.operation_id, profile_id=arguments["values"].get("profile_id"))
     project = await db_projects.get_project(arguments["project_id"])
     if project is None:
         raise OpError(ErrorCode.NOT_FOUND, f"project {arguments['project_id']!r} not found")
@@ -58,6 +60,7 @@ async def run(server, operation, arguments, principal, headers):
     if name == "project_agent_settings.get":
         return await answered(agent_settings.project_settings_view(project_id))
     if name.startswith("project_agent_settings.update"):
+        await refuse_client_selection(principal, name, profile_id=arguments["values"].get("profile_id"))
         return await answered(agent_settings.update_project(project_id, arguments["values"],
                                                             role=arguments.get("role")))
     if name == "allowed_profiles.replace":
