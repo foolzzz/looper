@@ -410,7 +410,7 @@ def _failure_typing_ddl() -> tuple[str, ...]:
 _INDEX_PROBE = "looper_index_probe"
 
 
-async def _index_kept(conn: asyncpg.Connection, name: str, definition: str) -> bool:
+async def _index_kept(conn: asyncpg.Connection, name: str, definition: str, *, unique: bool = False) -> bool:
     """Whether the index ``name`` is there, valid and the same as ``definition`` (``ON <table> ...``) would build.
     The comparison is PostgreSQL's own text of each (``pg_get_indexdef`` from ``USING`` on, uniqueness too): the
     definition is built on an empty copy of its table in a transaction that is rolled back, so nothing is scanned
@@ -426,7 +426,8 @@ async def _index_kept(conn: asyncpg.Connection, name: str, definition: str) -> b
     await probe.start()
     try:
         await conn.execute(f"CREATE TEMP TABLE {_INDEX_PROBE} (LIKE {table.group(1)})")
-        await conn.execute(f"CREATE INDEX {_INDEX_PROBE}_index ON {_INDEX_PROBE} {definition[table.end():]}")
+        await conn.execute(f"CREATE {'UNIQUE ' if unique else ''}INDEX {_INDEX_PROBE}_index "
+                           f"ON {_INDEX_PROBE} {definition[table.end():]}")
         wanted = await conn.fetchval("SELECT pg_get_indexdef(to_regclass($1))", f"{_INDEX_PROBE}_index")
     finally:
         await probe.rollback()
@@ -466,13 +467,15 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
                 continue
             for table, constraint in step.validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
-            for name, definition in step.indexes:
+            indexes = [(name, definition, False) for name, definition in step.indexes]
+            indexes.extend((name, definition, True) for name, definition in step.unique_indexes)
+            for name, definition, unique in indexes:
                 # Kept only when it is valid and is the index the step builds: one a stopped build left INVALID,
                 # or an older definition under the same name, is dropped and built again.
-                if await _index_kept(conn, name, definition):
+                if await _index_kept(conn, name, definition, unique=unique):
                     continue
                 await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-                await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
+                await conn.execute(f"CREATE {'UNIQUE ' if unique else ''}INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _ONLINE_LOCK)

@@ -32,6 +32,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_task_role_set": INSIDE, "looper_task_concurrency": ORIGIN,
     "looper_room_roster": INSIDE, "looper_room_post": INSIDE, "looper_room_inbox": INSIDE, "looper_room_read": INSIDE,
     "looper_room_watch": INSIDE,
+    "looper_agent_spawn": INSIDE, "looper_agent_wait": INSIDE, "looper_agent_cancel": INSIDE,
     "looper_vault_search": INSIDE, "looper_vault_read": INSIDE, "looper_vault_write": MACHINE,
 }
 
@@ -145,6 +146,8 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters
+    "cost_guard.update": INSIDE,  # changes only Looper's observation configuration
     # Stores permission only; the runner executes checks separately after Worker success.
     "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
     "task_evidence.get": INSIDE,  # reads only stored check definitions and measured evidence

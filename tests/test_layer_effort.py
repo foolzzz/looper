@@ -23,8 +23,8 @@ from looper.agents.profile_registry import (
 from tests.runtime_model_helpers import resolved_profile
 
 S = (Layer.SYSTEM, None, None)
-# The roles whose layers predate Agent Profiles' efforts: the advisor's roles came after, with layers of their own.
-ROLES = tuple(role for role in AgentType if role not in SPAWN_ROLES)
+# Only roles whose shared layers predate Agent Profiles' efforts participate in this migration.
+ROLES = tuple(role for role in AgentType if role not in (*SPAWN_ROLES, AgentType.EXPLORER))
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 P = "proj-a"
 

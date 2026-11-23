@@ -193,6 +193,14 @@ def test_a_fresh_database_ends_with_the_leads_check_constraints_validated(monkey
 
 
 def test_a_database_without_the_leads_check_gets_it_unvalidated_then_validated_online_once(monkeypatch):
+    # Replay the released leads-check migration before explorer widened the role catalog.
+    # Rolling back only that shared constraint does not recreate explorer's historical predecessor.
+    for name in ("_MIGRATIONS", "_PENDING_MIGRATIONS"):
+        monkeypatch.setattr(connection, name, tuple(m for m in getattr(connection, name)
+                                                   if m.name != "platform_subagents"))
+    monkeypatch.setattr(connection, "_ONLINE_STEPS", tuple(step for step in connection._ONLINE_STEPS
+                                                         if step.migration != "platform_subagents"))
+
     async def stopped(conn):
         return None
 
