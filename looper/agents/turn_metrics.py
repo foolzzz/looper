@@ -151,6 +151,7 @@ class ProactiveSource(str, Enum):
     AUTONOMOUS = 'autonomous'
     USER_REMINDER = 'user_reminder'
     TRIAGE = 'triage'
+    MORNING_BRIEF = 'morning_brief'  # the digest itself: sent uncounted, never deferred
 
 
 @dataclass(frozen=True)
