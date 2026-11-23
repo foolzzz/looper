@@ -359,7 +359,19 @@ def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:
     found = dict(row)
     if isinstance(found.get("config"), str):
         found["config"] = json.loads(found["config"])
+    # Keep non-triage readbacks unchanged; only triage runs opt into exact window bookkeeping.
+    if found.get("window_seqs") is None:
+        found.pop("window_seqs", None)
     return found
+
+
+async def runs_for_message(seq: int, *, db: Db | None = None) -> list[dict[str, Any]]:
+    """Runs whose selected window contains this exact message, including uncited and skipped windows.
+
+    A seq between from_seq and to_seq is not necessarily selected. No source text is read or retained here.
+    """
+    rows = await _db(db).fetch("SELECT * FROM subscription_runs WHERE $1 = ANY(window_seqs) ORDER BY run_id", seq)
+    return [_run_row(row) for row in rows]
 
 
 async def get_run(run_id: str, *, db: Db | None = None) -> dict[str, Any] | None:

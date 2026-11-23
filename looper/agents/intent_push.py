@@ -12,8 +12,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from ..db import connection, schedules as db_schedules, subscriptions as db_subs
-from . import turn_metrics
-from . import leads_model, subscriptions
+from . import intent_cards, leads_model, subscriptions, turn_metrics
 from .channels.base import PostOutcome
 from .message import builtin_channel_id, parse_channel_id
 from .operator_identity import operator_sender_id
@@ -217,7 +216,10 @@ class IntentPushService:
             if push is not None and (push["edited_at"] is None or push["edited_at"] < row["handled_at"]):
                 text = final_text(view, timezone=timezone)
                 try:
-                    receipt = await self._registry.edit(channel, push_target(channel, chat), push["external_id"], text)
+                    card = await intent_cards.final_card(intent_id, channel, chat, push["external_id"], text, conn=conn)
+                    receipt = (await self._registry.edit_card(channel, push_target(channel, chat), push["external_id"], card)
+                               if card is not None else
+                               await self._registry.edit(channel, push_target(channel, chat), push["external_id"], text))
                     success = receipt.success
                 except Exception:
                     success = False
@@ -264,12 +266,15 @@ class IntentPushService:
         if claimed is None:
             return
         external = error = None
+        card = None
         try:
-            receipt = await self._registry.post(post["channel_id"], push_target(post["channel_id"], post["chat"]),
-                                                post["text"], reply_to=reply,
-                                                idempotency_key=f"intent-{intent['id']}-{post['id']}",
-                                                **turn_metrics.proactive_kwargs(
-                                                    turn_metrics.ProactiveSource.INTENT, intent["id"]))
+            card = (await intent_cards.make(intent, post["channel_id"], post["chat"], post["text"], conn=conn)
+                    if post["kind"] == "push" else None)
+            target = push_target(post["channel_id"], post["chat"])
+            kwargs = {"reply_to": reply, "idempotency_key": f"intent-{intent['id']}-{post['id']}",
+                      **turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.INTENT, intent["id"])}
+            receipt = (await self._registry.post_card(post["channel_id"], target, card, **kwargs) if card is not None
+                       else await self._registry.post(post["channel_id"], target, post["text"], **kwargs))
             state = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "failed", PostOutcome.UNKNOWN: "uncertain"}[receipt.result]
             external = receipt.external_ids[0] if receipt.external_ids else None
             error = receipt.error
@@ -277,6 +282,9 @@ class IntentPushService:
             state, error = "uncertain", type(exc).__name__
         await conn.execute("UPDATE intent_posts SET state=$2, external_id=$3, error=$4, updated_at=$5 WHERE id=$1",
                            post["id"], state, external, error, now)
+        if state == "failed" and card is not None:
+            from ..db import card_actions as db_cards
+            await db_cards.lapse([card.token], pool=conn)
         if state == "sent":
             parent_id = intent["merged_into"] if post["kind"] == "progress" else intent["id"]
             if post["kind"] in ("push", "progress"):
