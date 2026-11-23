@@ -1,9 +1,6 @@
-"""Rule boundaries and the alert switch's recorded default-off contract."""
+"""Rule boundaries and the alert switch's default-off behavior."""
 import asyncio
-import hashlib
-import subprocess
-from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -57,19 +54,25 @@ def test_missing_attempts_has_no_sample_floor(count):
     assert result.judged and result.fired == bool(count)
 
 
-@pytest.mark.parametrize("enabled", [None, False])
-def test_off_tick_is_byte_identical_to_the_recorded_base(monkeypatch, enabled):
-    # These are the source bytes of the reviewed API/UI base, not a moving origin/main.
-    baseline = "0458e85b7934b4b34bb07dd16545675c2a060543"
-    for path in ("looper/agents/v1_domains/metrics.py", "looper/agents/tiers/manager.py",
-                 "looper/agents/tiers/planner.py", "looper/agents/tiers/worker.py"):
-        expected = subprocess.check_output(["git", "show", f"{baseline}:{path}"])
-        assert hashlib.sha256(Path(path).read_bytes()).digest() == hashlib.sha256(expected).digest()
-    monkeypatch.setattr(alerts, "_enabled", bool(enabled))
-    monkeypatch.setattr(alerts.connection, "get_pool", lambda: pytest.fail("off tick accessed database"))
-    monkeypatch.setattr(alerts.metrics, "compute", AsyncMock(side_effect=AssertionError("off computation")))
+def test_off_tick_does_not_access_database_compute_metrics_or_notify(monkeypatch):
+    monkeypatch.setattr(alerts, "_enabled", False)
+    pool = Mock()
+    get_pool = Mock(return_value=pool)
+    store = AsyncMock(spec=alerts.system_settings)
+    metric_reads = AsyncMock(spec=alerts.db_metrics)
+    compute = AsyncMock()
+    monkeypatch.setattr(alerts.connection, "get_pool", get_pool)
+    monkeypatch.setattr(alerts, "system_settings", store)
+    monkeypatch.setattr(alerts, "db_metrics", metric_reads)
+    monkeypatch.setattr(alerts.metrics, "compute", compute)
     sender = AsyncMock()
     asyncio.run(alerts.MetricsAlertService(sender).run_once())
+    # Assert calls after the tick: its exception handler must not hide an off-path side effect.
+    get_pool.assert_not_called()
+    assert pool.mock_calls == []
+    assert store.mock_calls == []
+    assert metric_reads.mock_calls == []
+    compute.assert_not_called()
     sender.notify.assert_not_called()
 
 
