@@ -90,7 +90,7 @@ def test_the_module_imports_and_pi_runtime_can_be_constructed() -> None:
     assert PI.auth_kinds == frozenset({AuthKind.API_KEY})
     assert AuthKind.OAUTH not in PI.auth_kinds
     assert adapter("pi") is ADAPTERS["pi"]
-    assert servable_roles(PI.capabilities) == ["manager", "planner", "worker", "reviewer"]
+    assert servable_roles(PI.capabilities) == ["manager", "planner", "worker", "explorer", "reviewer"]
 
 
 def test_the_probe_requires_the_launch_flags() -> None:
