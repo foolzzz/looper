@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ChevronRight, FileUp, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { OriginTag, RoleChecks } from "@/components/install-controls";
 import { McpSummary } from "@/components/mcp-servers";
+import { SkillHistory } from "@/components/skill-history";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -171,6 +172,7 @@ function InstallRow({
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState<"uninstall" | "delete" | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [body, setBody] = useState<string | null>(null);
   const [bodyError, setBodyError] = useState("");
   const [draft, setDraft] = useState<NewProjectSkill>({ name: "", description: "", content: "" });
@@ -277,7 +279,7 @@ function InstallRow({
           onChange={(roles) => changeInstall({ roles })}
         />
         {!entry.enabled && <span className="text-[11px] text-muted-foreground">Off</span>}
-        <div className="ml-auto flex shrink-0 items-center gap-1">
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
           <Switch
             checked={entry.enabled}
             disabled={busy}
@@ -286,6 +288,14 @@ function InstallRow({
           />
           {writtenHere && (
             <>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-expanded={historyOpen}
+                aria-controls={`${id}-history`}
+                onClick={() => setHistoryOpen((open) => !open)}
+              >History</Button>
               <Button type="button" variant="ghost" size="sm" onClick={startEdit} aria-label={`Edit ${item.name}`}>
                 <Pencil className="h-3.5 w-3.5" />
               </Button>
@@ -351,6 +361,16 @@ function InstallRow({
             </pre>
           )}
         </div>
+      )}
+      {historyOpen && writtenHere && (
+        <SkillHistory
+          id={`${id}-history`}
+          projectId={projectId}
+          skillId={item.item_id}
+          revision={item.updated_at}
+          busy={busy}
+          onRolledBack={() => onApply(() => fetchProjectInstalls(projectId))}
+        />
       )}
     </li>
   );
