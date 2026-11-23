@@ -64,6 +64,7 @@
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
 | P4.7 花费守卫 | 运行前预留、观察模式与操作者只读展示已交付；任务和全局每日上限的 `enforce`、`ask` 等待、持久化决定/到期、操作者管家回合例外、私聊回复与最小花费界面已实现，默认仍为 `off`。收尾回合按实际准入决定，范围链没有上限时不按预留软停；离开 `enforce` 后已有等待的私聊决定、待办、Settings 和到期仍可用。金额上限拒绝优先于用量窗口暂缓；账号被拒和 quota 失败也暂缓自发运行，95% 利用率只暂缓后台和定时触发。角色每日额度、定时预算动作与无人回复推送仍按 RFC 后续阶段交付；[替身服务验收](../validation/cost-guard/run.md) | [RFC](../architecture/rfcs/cost-guard-v0.zh-CN.md) |
+| 未知模型价格 | 本分支修复：Haiku 别名按实际 5.5 模型读回；仓库无权威单价，保留未知。共享费用状态贯穿单次上限、任务/每日额度、花费守卫及费用读回；缺价软停或显式告警，关态保留。真实模型重评未运行。 | [费用与上限](../architecture/agent-system.md#runtimes-llm-providers-and-agent-profiles) |
 | 热升级 v0 | 组件规划、排空、Claude Code 看护与跨重启接管 | 默认关闭；macOS launchd 替身链路已验证，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍有缺口（[证据](../validation/kept-runs/README.md)） | M9a、M9c |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发和控制台命令型表单 | 现有定时任务；热升级排空功能 |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发，以及管家创建、配置展示与确认命令型定时任务 | 现有定时任务；热升级排空功能 |
@@ -560,6 +561,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-23 | 未知模型价格（本分支）：Haiku 别名更新至实际的 5.5，缺少仓库内权威单价时保持未知。共享类型贯穿单次软停、任务及每日上限告警、守卫 scope、咨询与费用读回；隔离服务 HTTP 已读回未知模型与状态，真实模型重评未运行。 |
 | 2026-11-23 | 发布 v2.15.28：自 v2.15.27 标签（打在发布提交 `d14f14bcf`）到冻结点 `1a9c4285e`。那个标签的冻结点 `6613380fa` 之后合入、但不在标签上的 #1531、#1549、#1575、#1583、#1585、#1588、#1591 在本版本发布。#1601 是 v2.15.27 的发布拉取请求，不是本版本的改动。冻结点之后合入的 #1596、#1597、#1600、#1574、#1620 在下一个版本发布。没有一个新开关默认打开。关闭时：记忆写入循环每 10 秒读 `memory_write` 后返回，不碰文件系统、Git、清理或候选状态；记忆推送循环每 10 秒读设置，`enabled` 不是布尔 true 或没有 `push_channel` 时不查候选、不调通道，路由也只读一次设置；晨报循环每 30 秒看内存里的开关，不拿数据库连接。`subscriptions.triage.enabled` 不是字符串 `true` 时，开关打开时建的分流订阅以 `skipped_gate` 结束（v2.15.27 存不下分流订阅），错误是 `subscriptions.triage.enabled is off`，游标不动；新建是 HTTP 400。`intents.enabled` 不是字符串 `true` 时过期和终态通知都不跑，但迁移仍建空表 `intent_final_notices`。从 v2.15.27 升级跑三条迁移、零个新在线步骤：`intent_final_notices`（700）、`morning_brief_kind`（720，schema 事务里校验 `proactive_deliveries_source_check`）、`morning_briefs`（730）。不改写行。清理现在无论度量是否打开都删除超过 90 天的 `proactive_deliveries`。配置导出没有新键。本版本不起草记忆候选。`web/` 有改动，仪表盘包由发布流程重新构建。测试 #1588、#1591、#1593、#1603、#1604、#1606、#1607、#1608、#1619。 |
 | 2026-11-23 | 升级测试先挪开后表的外键（#1603，已合入，只改测试）：`dropped_tables()` 在一条语句里丢掉列出的表之前，先挪开后表指进来的外键，再把键放回。起因是 `morning_brief_consumed` 指向 `proactive_deliveries`、`intent_final_notices` 指向 `intent_posts`。没有产品行为变化，没有新开关，没有迁移。 |
 | 2026-11-23 | 运行时角色列表从角色注册表读取（#1607，已合入，只改测试）：运行时、Profile 和注册表测试的角色列表改从注册表读，后面再加角色不必再改与该角色无关的测试。顺序仍比较。没有产品行为变化，没有新开关，没有迁移。 |
