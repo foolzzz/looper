@@ -1,0 +1,556 @@
+{
+ "about": "Synthetic, labelled leads and queries comparing leads.search_mode words and fulltext (assistant search RFC, section 4). Every project, chat and person is invented. A query's bilingual form is what the fulltext tool description asks the Manager to send: the words both ways when they could differ.",
+ "chats": {
+  "nebula": "Nebula 发布群",
+  "orion": "Orion 值班群",
+  "design": "设计评审群",
+  "atlas": "Atlas 数据组",
+  "team": "研发大群"
+ },
+ "people": {
+  "alice": "Alice",
+  "bob": "Bob",
+  "carol": "Carol",
+  "wangwu": "王五",
+  "lilei": "李雷"
+ },
+ "leads": [
+  {
+   "id": "L01",
+   "chat": "nebula",
+   "by": "alice",
+   "kind": "decision",
+   "summary": "Nebula 的上线日期定在 12 月 15 日，前提是安全评审通过",
+   "detail": "发布日期以安全评审结果为准"
+  },
+  {
+   "id": "L02",
+   "chat": "nebula",
+   "by": "bob",
+   "kind": "status",
+   "summary": "Nebula 的安全评审排到 12 月 8 日",
+   "detail": ""
+  },
+  {
+   "id": "L03",
+   "chat": "nebula",
+   "by": "alice",
+   "kind": "decision",
+   "summary": "Nebula 发布前必须跑完 ZX-42 回归套件",
+   "detail": "结果贴到发布群"
+  },
+  {
+   "id": "L04",
+   "chat": "nebula",
+   "by": "carol",
+   "kind": "decision",
+   "summary": "Nebula 采用蓝绿发布，回滚由 Carol 负责",
+   "detail": ""
+  },
+  {
+   "id": "L05",
+   "chat": "nebula",
+   "by": "bob",
+   "kind": "issue",
+   "summary": "Nebula 预发环境的数据库连接池偶尔耗尽",
+   "detail": "怀疑是慢查询"
+  },
+  {
+   "id": "L06",
+   "chat": "nebula",
+   "by": "bob",
+   "kind": "request",
+   "summary": "Bob 请大家在周五前提交 Nebula 的发布说明",
+   "detail": ""
+  },
+  {
+   "id": "L07",
+   "chat": "nebula",
+   "by": "alice",
+   "kind": "commitment",
+   "summary": "Alice 承诺下周三前补齐 Nebula 的监控看板",
+   "detail": ""
+  },
+  {
+   "id": "L08",
+   "chat": "nebula",
+   "by": "carol",
+   "kind": "fact",
+   "summary": "Nebula 的灰度先放 5% 流量，观察一天再放量",
+   "detail": ""
+  },
+  {
+   "id": "L09",
+   "chat": "orion",
+   "by": "wangwu",
+   "kind": "decision",
+   "summary": "Orion 的 CPU 报警阈值定为 85%，持续 5 分钟才报",
+   "detail": ""
+  },
+  {
+   "id": "L10",
+   "chat": "orion",
+   "by": "lilei",
+   "kind": "issue",
+   "summary": "Orion 昨晚出现内存泄漏，重启后恢复",
+   "detail": ""
+  },
+  {
+   "id": "L11",
+   "chat": "orion",
+   "by": "lilei",
+   "kind": "status",
+   "summary": "Orion 的磁盘扩容已完成",
+   "detail": ""
+  },
+  {
+   "id": "L12",
+   "chat": "orion",
+   "by": "wangwu",
+   "kind": "request",
+   "summary": "王五希望把 Orion 的告警收敛到值班群",
+   "detail": ""
+  },
+  {
+   "id": "L13",
+   "chat": "orion",
+   "by": "wangwu",
+   "kind": "decision",
+   "summary": "Orion 值班改为两周一轮，由李雷排班",
+   "detail": ""
+  },
+  {
+   "id": "L14",
+   "chat": "orion",
+   "by": "lilei",
+   "kind": "fact",
+   "summary": "Orion 的 P99 延迟目标是 200 毫秒",
+   "detail": ""
+  },
+  {
+   "id": "L15",
+   "chat": "design",
+   "by": "carol",
+   "kind": "decision",
+   "summary": "登录页改版采用设计稿 v3，按钮颜色改成深蓝",
+   "detail": ""
+  },
+  {
+   "id": "L16",
+   "chat": "design",
+   "by": "carol",
+   "kind": "request",
+   "summary": "Carol 请设计组周四前给出移动端适配方案",
+   "detail": ""
+  },
+  {
+   "id": "L17",
+   "chat": "design",
+   "by": "alice",
+   "kind": "status",
+   "summary": "设计评审会议改到下周一下午三点",
+   "detail": ""
+  },
+  {
+   "id": "L18",
+   "chat": "design",
+   "by": "bob",
+   "kind": "issue",
+   "summary": "设计稿里的字体在 Windows 上显示模糊",
+   "detail": ""
+  },
+  {
+   "id": "L19",
+   "chat": "atlas",
+   "by": "lilei",
+   "kind": "decision",
+   "summary": "Atlas 的数据迁移在周末窗口执行，先迁订单表",
+   "detail": ""
+  },
+  {
+   "id": "L20",
+   "chat": "atlas",
+   "by": "bob",
+   "kind": "status",
+   "summary": "Atlas schema migration finished for the users table",
+   "detail": ""
+  },
+  {
+   "id": "L21",
+   "chat": "atlas",
+   "by": "bob",
+   "kind": "issue",
+   "summary": "Atlas nightly ETL job failed twice because of a timeout",
+   "detail": ""
+  },
+  {
+   "id": "L22",
+   "chat": "atlas",
+   "by": "bob",
+   "kind": "commitment",
+   "summary": "Bob will deploy the Atlas API to staging on Thursday",
+   "detail": ""
+  },
+  {
+   "id": "L23",
+   "chat": "atlas",
+   "by": "lilei",
+   "kind": "fact",
+   "summary": "Atlas 的离线报表每天早上 6 点产出",
+   "detail": ""
+  },
+  {
+   "id": "L24",
+   "chat": "atlas",
+   "by": "alice",
+   "kind": "request",
+   "summary": "Alice asked to roll back the Atlas dashboard change",
+   "detail": ""
+  },
+  {
+   "id": "L25",
+   "chat": "team",
+   "by": "alice",
+   "kind": "decision",
+   "summary": "Looper 新版本 release 定在下周二",
+   "detail": ""
+  },
+  {
+   "id": "L26",
+   "chat": "team",
+   "by": "bob",
+   "kind": "status",
+   "summary": "PR #1234 的 code review 已经通过",
+   "detail": ""
+  },
+  {
+   "id": "L27",
+   "chat": "team",
+   "by": "bob",
+   "kind": "issue",
+   "summary": "CI 的 flaky test 导致合并队列卡住",
+   "detail": ""
+  },
+  {
+   "id": "L28",
+   "chat": "team",
+   "by": "lilei",
+   "kind": "fact",
+   "summary": "staging 环境的证书下月到期",
+   "detail": ""
+  },
+  {
+   "id": "L29",
+   "chat": "team",
+   "by": "alice",
+   "kind": "status",
+   "summary": "周报模板已更新",
+   "detail": ""
+  },
+  {
+   "id": "L30",
+   "chat": "team",
+   "by": "bob",
+   "kind": "fact",
+   "summary": "团队下周五团建",
+   "detail": ""
+  },
+  {
+   "id": "L31",
+   "chat": "team",
+   "by": "lilei",
+   "kind": "request",
+   "summary": "李雷希望大家按时提交周报",
+   "detail": ""
+  },
+  {
+   "id": "L32",
+   "chat": "team",
+   "by": "alice",
+   "kind": "status",
+   "summary": "我们讨论了下季度的招聘计划",
+   "detail": ""
+  },
+  {
+   "id": "L33",
+   "chat": "team",
+   "by": "bob",
+   "kind": "decision",
+   "summary": "会议室预订改用新系统",
+   "detail": ""
+  },
+  {
+   "id": "L34",
+   "chat": "team",
+   "by": "carol",
+   "kind": "fact",
+   "summary": "下周三全员大会",
+   "detail": ""
+  }
+ ],
+ "queries": [
+  {
+   "id": "Q01",
+   "category": "chinese",
+   "query": "Nebula 上线时间",
+   "relevant": [
+    "L01"
+   ]
+  },
+  {
+   "id": "Q02",
+   "category": "chinese",
+   "query": "报警阈值",
+   "relevant": [
+    "L09"
+   ]
+  },
+  {
+   "id": "Q03",
+   "category": "chinese",
+   "query": "告警阈值",
+   "relevant": [
+    "L09"
+   ]
+  },
+  {
+   "id": "Q04",
+   "category": "chinese",
+   "query": "内存泄露",
+   "relevant": [
+    "L10"
+   ]
+  },
+  {
+   "id": "Q05",
+   "category": "chinese",
+   "query": "值班排班",
+   "relevant": [
+    "L13"
+   ]
+  },
+  {
+   "id": "Q06",
+   "category": "chinese",
+   "query": "数据迁移 订单",
+   "relevant": [
+    "L19"
+   ]
+  },
+  {
+   "id": "Q07",
+   "category": "chinese",
+   "query": "移动端适配",
+   "relevant": [
+    "L16"
+   ]
+  },
+  {
+   "id": "Q08",
+   "category": "chinese",
+   "query": "设计评审会",
+   "relevant": [
+    "L17"
+   ]
+  },
+  {
+   "id": "Q09",
+   "category": "chinese",
+   "query": "监控大盘",
+   "relevant": [
+    "L07"
+   ],
+   "bilingual": "监控大盘 看板 dashboard"
+  },
+  {
+   "id": "Q10",
+   "category": "chinese",
+   "query": "灰度放量",
+   "relevant": [
+    "L08"
+   ]
+  },
+  {
+   "id": "Q11",
+   "category": "chinese",
+   "query": "连接池耗尽",
+   "relevant": [
+    "L05"
+   ]
+  },
+  {
+   "id": "Q12",
+   "category": "chinese",
+   "query": "证书过期",
+   "relevant": [
+    "L28"
+   ],
+   "bilingual": "证书 过期 到期 certificate"
+  },
+  {
+   "id": "Q13",
+   "category": "words",
+   "query": "Nebula 发布 日期 安全评审",
+   "relevant": [
+    "L01",
+    "L02"
+   ]
+  },
+  {
+   "id": "Q14",
+   "category": "words",
+   "query": "Orion 告警 值班群",
+   "relevant": [
+    "L12"
+   ]
+  },
+  {
+   "id": "Q15",
+   "category": "words",
+   "query": "Atlas 迁移 周末 订单表 窗口",
+   "relevant": [
+    "L19"
+   ]
+  },
+  {
+   "id": "Q16",
+   "category": "words",
+   "query": "蓝绿发布 回滚 负责人",
+   "relevant": [
+    "L04"
+   ]
+  },
+  {
+   "id": "Q17",
+   "category": "english",
+   "query": "Nebula launch date",
+   "relevant": [
+    "L01"
+   ],
+   "bilingual": "Nebula launch date 上线 日期"
+  },
+  {
+   "id": "Q18",
+   "category": "english",
+   "query": "Orion CPU alert threshold",
+   "relevant": [
+    "L09"
+   ],
+   "bilingual": "Orion CPU alert threshold 报警 阈值"
+  },
+  {
+   "id": "Q19",
+   "category": "english",
+   "query": "memory leak",
+   "relevant": [
+    "L10"
+   ],
+   "bilingual": "memory leak 内存 泄漏"
+  },
+  {
+   "id": "Q20",
+   "category": "english",
+   "query": "login page redesign",
+   "relevant": [
+    "L15"
+   ],
+   "bilingual": "login page redesign 登录页 改版"
+  },
+  {
+   "id": "Q21",
+   "category": "english",
+   "query": "rollback owner",
+   "relevant": [
+    "L04"
+   ],
+   "bilingual": "rollback owner 回滚 负责"
+  },
+  {
+   "id": "Q22",
+   "category": "english",
+   "query": "Atlas migration",
+   "relevant": [
+    "L19",
+    "L20"
+   ],
+   "bilingual": "Atlas migration 迁移"
+  },
+  {
+   "id": "Q23",
+   "category": "variants",
+   "query": "ETL failure",
+   "relevant": [
+    "L21"
+   ]
+  },
+  {
+   "id": "Q24",
+   "category": "variants",
+   "query": "deploying staging",
+   "relevant": [
+    "L22"
+   ]
+  },
+  {
+   "id": "Q25",
+   "category": "variants",
+   "query": "Alise rollback",
+   "relevant": [
+    "L24"
+   ],
+   "bilingual": "Alise rollback roll back 回滚"
+  },
+  {
+   "id": "Q26",
+   "category": "variants",
+   "query": "Loopr release",
+   "relevant": [
+    "L25"
+   ]
+  },
+  {
+   "id": "Q27",
+   "category": "variants",
+   "query": "code reviews",
+   "relevant": [
+    "L26"
+   ]
+  },
+  {
+   "id": "Q28",
+   "category": "variants",
+   "query": "flaky tests",
+   "relevant": [
+    "L27"
+   ]
+  },
+  {
+   "id": "Q29",
+   "category": "names",
+   "query": "Carol",
+   "relevant": [
+    "L04",
+    "L08",
+    "L15",
+    "L16",
+    "L34"
+   ]
+  },
+  {
+   "id": "Q30",
+   "category": "names",
+   "query": "李雷 值班",
+   "relevant": [
+    "L13"
+   ]
+  },
+  {
+   "id": "Q31",
+   "category": "words",
+   "query": "下周 会议",
+   "relevant": [
+    "L17"
+   ]
+  }
+ ]
+}
