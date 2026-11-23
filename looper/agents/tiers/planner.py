@@ -160,7 +160,7 @@ from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
 from ..session_switch import SessionSwitch, SwitchReason
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
-from .. import waits
+from .. import subagent_delivery, waits
 from .. import workflow_reporting as workflows
 from ..workflow_reporting import Phase
 from ..waits import (
@@ -208,6 +208,7 @@ from ..message import (
 )
 from . import decisions, journal
 from .plan_view import PLAN_FULL_EVERY_TURNS, PlanItem, PlanShown, render as render_plan_view
+from .. import skill_proposal_sources
 from .conditions import State, StepOutcome, evaluate, leaves, parse as parse_condition, render, to_json
 from .journal import JournalEntry, JournalKind, LearningScope
 from .planner_protocol import (
@@ -2088,7 +2089,7 @@ class PlannerAgent:
         step.status = gate.state.step_status
         step.result = {"status": GateState.PASSED.value, "summary": conclusion}
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         summary = reply.summary
         how = "the user ended the discussion" if forced else "the Planner closed it"
         change = ", ".join(f"{name} {'+'.join(labels)}" for name, labels in gate.plan_change.items() if labels)
@@ -2315,7 +2316,7 @@ class PlannerAgent:
         now = datetime.now(timezone.utc)
         action = reply.action
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         entries: list[JournalEntry] = []
         if action is WaitAction.EXTEND:
             seconds = int(reply.max_wait_seconds or 0)
@@ -3450,7 +3451,7 @@ class PlannerAgent:
             await attempts.decide_attempt(await self._attempt(step), attempts.Decision(decision.value),
                                           record_id=self._last_record_id, adjudicated=bool(reply.adjudications))
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
 
         if self._execution.advisor_on and context.result is ResultKind.WORK and context.succeeded \
                 and not context.review_required and not context.checkpoint and decision is not Decision.REVIEW:
@@ -4062,7 +4063,7 @@ class PlannerAgent:
             waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
             cancelled = gates_cancelled or waits_cancelled
         if reply is not None and reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         if reply is None or reply.action is ChatAction.NONE:
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
@@ -4193,7 +4194,7 @@ class PlannerAgent:
         waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
         cancelled = gates_cancelled or waits_cancelled
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         text = await self._apply_chat(plan, reply, envelope)
         # The answer to a change made on the task page has no chat to go to: the activity keeps it.
         await self._activity("phase", f"Planner answered a change to the task ({reply.action.value}): "
@@ -4257,7 +4258,7 @@ class PlannerAgent:
         waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
         cancelled = gates_cancelled or waits_cancelled
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         await self._activity("phase", f"Planner answered in the room ({reply.action.value}"
                                       f"{'' if posted else ', nothing posted'}): {reply.reply}"[:300])
         if reply.action is not ChatAction.NONE:
@@ -4600,23 +4601,24 @@ class PlannerAgent:
         """
         await self._read_run_deadline()
         run = run or self._turn
-        reply = await run(message)
-        await self._read_roles()  # a role the turn defined counts for its reply
-        try:
-            return parse(reply)
-        except ProtocolError as first:
-            await attempts.count_contract_rejection(self._last_record_id, kind.value)
-            await self._activity("error", f"Planner reply broke the {kind.value} contract ({first}); asking again"[:500])
-            reply = await run(
-                f"[{kind.value}] Your last reply broke the reply contract: {first}\n"
-                f"Answer the same request again. End with exactly one ```json block in the {kind.value} shape."
-            )
-            await self._read_roles()
+        async with skill_proposal_sources.plan_message(self, kind, message) as message:
+            reply = await run(message)
+            await self._read_roles()  # a role the turn defined counts for its reply
             try:
                 return parse(reply)
-            except ProtocolError as second:
+            except ProtocolError as first:
                 await attempts.count_contract_rejection(self._last_record_id, kind.value)
-                raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
+                await self._activity("error", f"Planner reply broke the {kind.value} contract ({first}); asking again"[:500])
+                reply = await run(
+                    f"[{kind.value}] Your last reply broke the reply contract: {first}\n"
+                    f"Answer the same request again. End with exactly one ```json block in the {kind.value} shape."
+                )
+                await self._read_roles()
+                try:
+                    return parse(reply)
+                except ProtocolError as second:
+                    await attempts.count_contract_rejection(self._last_record_id, kind.value)
+                    raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
 
     async def _template_lines(self, plan: TaskPlan) -> list[str]:
         """The project's role templates, one line each, for a turn that plans, where its project lets its Planner
@@ -4655,6 +4657,7 @@ class PlannerAgent:
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
         return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy(),
+                       skill_proposals=getattr(self, "_skill_proposals", False),
                        conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps,
                        review_panel=self._panel_on,
                        verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
@@ -4988,6 +4991,11 @@ class PlannerAgent:
         started ``resuming``, the session it was told to resume."""
         plan = self._plan
         assert plan is not None
+        # With the room off, finished explorer results ride the next turn (none: no change to the text).
+        note, delivered = await subagent_delivery.planner_turn_note(
+            self._task_id, on=self._room is None and self._execution.subagents_on and not maintenance)
+        text += note
+        turn_kwargs, claimed = subagent_delivery.claim_when_sent(delivered)
         recorder = self._recorder(plan, text, process)
         last_context: int | None = None
         compacted: dict[str, Any] | None = None
@@ -5044,8 +5052,9 @@ class PlannerAgent:
                     launch = process.launch
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=limits)
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
-                                              limit if limit > 0 else None)
+                turn = await asyncio.wait_for(
+                    self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop, **turn_kwargs),
+                    limit if limit > 0 else None)
             except TurnBlocked as exc:
                 await recorder.finish(output_text=None, result_event=None, error=str(exc))
                 raise
@@ -5059,6 +5068,7 @@ class PlannerAgent:
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error) from None
             finally:
+                await claimed()  # the results were claimed the moment the runtime sent the prompt, if it did
                 if self._ops is not None and self._token is not None:
                     self._ops.end_turn(self._token)
 
@@ -5359,6 +5369,7 @@ class PlannerAgent:
             contract_name="REPLY_CONTRACT",
             # With its platform tools, how to use them follows the reply contract.
             contract=reply_contract(self._execution.step_retries,
+                                    skill_proposals=getattr(self, "_skill_proposals", False),
                                     roles=self._execution.roles_on,
                                     workflow_roles=bool((self._workflow or {}).get("roles")),
                                     gates=self._gate_policy is GatePolicy.ALLOWED
@@ -5368,7 +5379,8 @@ class PlannerAgent:
                                     adjudication=self._panel_on and bool((self._workflow or {}).get("adjudication")),
                                     advisor=self._execution.advisor_on, acceptance_checks=self._execution.acceptance_checks)
             + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
-                                         vault=planner_guide(self._vault) if self._vault else "")
+                                         vault=planner_guide(self._vault) if self._vault else "",
+                                         subagents=self._execution.subagents_on)
                if self._ops else ""),
             knowledge=knowledge,
         )
@@ -6040,6 +6052,7 @@ class PlannerAgent:
         plan.project_description = str(project.get("description") or "")
         plan.project_background = str(project.get("background") or "")
         plan.project_work_dir = str(project.get("work_dir") or "")
+        self._skill_proposals = project.get("skill_proposals") == "on"
         self._workflow = project.get("task_workflow")
         self._execution = ProjectExecution.from_row(project).overlaid(self._workflow)
         self._template = project.get("task_template")

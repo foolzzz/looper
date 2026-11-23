@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -322,6 +322,19 @@ async def names_and_projects_of(
                                           requirement=row["requirement"], task_id=row["id"])} for row in rows}
 
 
+# Called with a task's id when it leaves the active statuses or is reset for a restart (the server registers the
+# explorer cascade here); a failing listener never blocks the status change.
+task_ended_listeners: list[Callable[[str], Awaitable[None]]] = []
+
+
+async def _task_ended(task_id: str) -> None:
+    for listener in list(task_ended_listeners):
+        try:
+            await listener(task_id)
+        except Exception:
+            logger.warning("task %s: a task-end listener failed", task_id, exc_info=True)
+
+
 async def update_task_status(
     task_id: str,
     status: str,
@@ -358,6 +371,8 @@ async def update_task_status(
         attempt_ended_at,
         json.dumps(process_record, ensure_ascii=False) if process_record is not None else None,
     )
+    if status in ("completed", "failed", "cancelled", "stopped"):
+        await _task_ended(task_id)
 
 
 async def update_task_phase(
@@ -522,6 +537,7 @@ async def reset_task_for_restart(
         """,
         task_id,
     )
+    await _task_ended(task_id)  # the previous attempt's explorers end with it, however briefly it is `pending`
     return result == "UPDATE 1"
 
 

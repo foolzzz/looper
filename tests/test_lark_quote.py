@@ -206,10 +206,10 @@ def _reads(log: Path) -> list[list[str]]:
 
 class _Launch:
     """One lark-cli call as Looper started it: its arguments, its process, and whether every call started before it
-    was still running then."""
+    was still running then. ``running`` names those calls' reads, taken when this call was registered."""
 
-    def __init__(self, argv: list[str], process: Any, overlapped: bool) -> None:
-        self.argv, self.process, self.overlapped = argv, process, overlapped
+    def __init__(self, argv: list[str], process: Any, overlapped: bool, running: list[str]) -> None:
+        self.argv, self.process, self.overlapped, self.running = argv, process, overlapped, running
 
     @property
     def read(self) -> str:
@@ -217,19 +217,26 @@ class _Launch:
         return self.argv[2] if self.argv[0] == "api" else self.argv[1]
 
 
+def _still_running(call: _Launch) -> bool:
+    """Registered before spawn, so the process may still be missing; a call Looper has waited on has a return code."""
+    return call.process is None or call.process.returncode is None
+
+
 @pytest.fixture
 def launched(monkeypatch: pytest.MonkeyPatch) -> list[_Launch]:
-    """Every lark-cli call Looper starts, recorded as it starts it. The stand-in's own log has a call only once the
-    call's interpreter runs, which a call killed at once never reaches: a single read that lost to the batch read, or
-    ran out of its first-try time, on a loaded machine."""
+    """Every lark-cli call Looper starts, registered before the process is spawned, with the reads still running
+    then. The stand-in's argv log is not that order: the concurrent batch read
+    (``/open-apis/im/v1/messages/mget``) can still be in flight and append after a later call."""
     calls: list[_Launch] = []
     spawn = asyncio.create_subprocess_exec
 
     async def recording(program: str, *args: str, **kwargs: Any) -> Any:
-        overlapped = all(call.process.returncode is None for call in calls)
-        process = await spawn(program, *args, **kwargs)
-        calls.append(_Launch(list(args), process, overlapped))
-        return process
+        running = [call.read for call in calls if _still_running(call)]
+        # Before the spawn awaits, so a call another task starts meanwhile sees this one as running.
+        launch = _Launch(list(args), None, len(running) == len(calls), running)
+        calls.append(launch)
+        launch.process = await spawn(program, *args, **kwargs)
+        return launch.process
 
     monkeypatch.setattr(lark_cli.asyncio, "create_subprocess_exec", recording)
     return calls
@@ -373,6 +380,7 @@ def test_reading_a_quote_keeps_the_messages_own_attachments_also_on_a_replay(
 @pytest.mark.parametrize("parent", ["om_longslow", "om_longservertimeout"])
 def test_a_raw_read_that_times_out_falls_back_to_the_rendered_read_once(
     tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch, parent: str,
+    launched: list[_Launch],
 ) -> None:
     monkeypatch.setattr(lark_transport, "READ_FIRST_SECONDS", 1.5)
     rendered = "<forwarded_messages>\n[10:02] Bob: the plan\n[Image: img_f]\n</forwarded_messages>"
@@ -384,10 +392,14 @@ def test_a_raw_read_that_times_out_falls_back_to_the_rendered_read_once(
     (quote,) = read.quotes
     assert quote.sender == "Alan Turing" and quote.message_type == "merge_forward"
     assert "Bob: the plan" in quote.lines[0] and "[image 1]" in quote.lines[0]
-    # A stand-in killed at its first try may not have logged it yet; the rendered read comes once, last.
-    reads = [argv[2] if argv[0] == "api" else argv[1] for argv in _reads(lark_cli_stand_in)]
+    # +messages-mget once, and only once the raw read has ended: it is killed and waited before the fallback.
+    # The argv log can still put a later line first. The late writer is the concurrent batch read
+    # (/open-apis/im/v1/messages/mget), which is not waited on before the fallback starts.
+    calls = [call for call in launched if call.argv[:2] == ["api", "GET"] or "+messages-mget" in call.argv]
+    reads = [call.read for call in calls]
     assert reads[-1] == "+messages-mget" and reads.count("+messages-mget") == 1
     assert set(reads[:-1]) <= {f"/open-apis/im/v1/messages/{parent}", "/open-apis/im/v1/messages/mget"}
+    assert f"/open-apis/im/v1/messages/{parent}" not in calls[-1].running
     downloads = [argv for argv in _calls(lark_cli_stand_in) if "+messages-resources-download" in argv]
     assert downloads[0][downloads[0].index("--message-id") + 1] == parent  # the rendering shows the forward's copies
 

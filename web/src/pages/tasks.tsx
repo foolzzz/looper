@@ -17,6 +17,7 @@ import {
   MessageCircleQuestionMark,
   X,
 } from "lucide-react";
+import { FailedChecksLine } from "@/components/failed-checks-line";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -328,8 +329,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [scheduleNames, setScheduleNames] = useState<Record<string, string>>({});
   const [taskPath, taskQuery = ""] = (sub || "").split("?");
   const selectedTaskId = taskPath ? decodeURIComponent(taskPath) : null;
-  const gateStep = new URLSearchParams(taskQuery).get("gate");
-  const tabParam = new URLSearchParams(taskQuery).get("tab");
+  const taskParams = new URLSearchParams(taskQuery);
+  const gateStep = taskParams.get("gate");
+  const tabParam = taskParams.get("tab");
+  const focusStep = taskParams.get("step");
   const roomFilter = new URLSearchParams(taskQuery).get("filter");
   const roomRole = new URLSearchParams(taskQuery).get("role");
   // The list's filter, so leaving a task's detail returns to the list it was opened from.
@@ -591,6 +594,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       <TaskDetailRoute
         taskId={selectedTaskId}
         gateStep={gateStep}
+        focusStep={focusStep}
         tab={tabParam}
         onTab={(tab) => {
           if (tab === "room" && tabParam === "room") return;
@@ -862,6 +866,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                         </span>
                       )}
                     </div>
+                    {task.failed_checks && task.failed_checks.length > 0 && (
+                      <FailedChecksLine taskId={task.task_id} checks={task.failed_checks} stepId={task.failed_check_step} />
+                    )}
                   </div>
                 </div>
                 <div className="shrink-0 flex flex-wrap items-center gap-1 max-sm:pl-7">

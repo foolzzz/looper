@@ -198,3 +198,14 @@ describe("Sidebar New project dialog", () => {
     expect(host.querySelector('[role="dialog"]')).toBeNull();
   });
 });
+
+describe("Sidebar Memory item", () => {
+  it("is always listed after the Message stream and opens its page", async () => {
+    await render();
+    const labels = [...host.querySelectorAll("nav")[0].querySelectorAll("button")].map((b) => b.textContent ?? "");
+    expect(labels.findIndex((l) => l.includes("Memory"))).toBe(labels.findIndex((l) => l.includes("Message stream")) + 1);
+    const button = [...host.querySelectorAll("nav button")].find((item) => item.textContent?.includes("Memory"))!;
+    act(() => (button as HTMLButtonElement).click());
+    expect(onNavigate).toHaveBeenCalledWith("memory");
+  });
+});

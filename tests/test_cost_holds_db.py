@@ -133,12 +133,14 @@ def test_upgrade_adds_ask_to_existing_project_constraint(monkeypatch):
         from looper.db import connection
         await pool.execute("ALTER TABLE projects DROP CONSTRAINT projects_task_budget_action_check, "
                            "ADD CONSTRAINT projects_task_budget_action_check "
-                           "CHECK (task_budget_action IN ('wrap_up','fail'))")
+                           "CHECK (task_budget_action IN ('wrap_up','fail','defer'))")
+        await pool.execute("INSERT INTO projects(id,name,task_budget_action) VALUES ('p-defer','Deferred','defer')")
         # A fresh database has no per-file marker. Its existing hold table cannot conceal the missing value.
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
         await pool.execute("INSERT INTO projects(id,name,task_budget_action) VALUES ('p-ask','Ask','ask')")
+        assert await pool.fetchval("SELECT task_budget_action FROM projects WHERE id='p-defer'") == 'defer'
         assert await pool.fetchval("SELECT convalidated FROM pg_constraint WHERE conrelid='projects'::regclass "
                                    "AND conname='projects_task_budget_action_check'")
         async with pool.acquire() as conn:

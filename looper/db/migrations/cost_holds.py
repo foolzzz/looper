@@ -1,6 +1,6 @@
 """Durable operator decisions when task or daily spend admission waits."""
 
-from . import OnlineStep
+from . import OnlineStep, _widen_check
 
 name = "cost_holds"
 order = 1430
@@ -25,10 +25,8 @@ CREATE TABLE IF NOT EXISTS cost_holds (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cost_holds_pending_scope
     ON cost_holds (scope, scope_ref) WHERE state = 'pending';
 """
-_ASK_DDL = ("ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_task_budget_action_check, "
-            "ADD CONSTRAINT projects_task_budget_action_check "
-            "CHECK (task_budget_action IN ('wrap_up','fail','ask'))")
-fresh_ddl = _TABLE_DDL + _ASK_DDL + ';'
+_ASK_DDL = _widen_check.ddl('projects', 'task_budget_action', 'projects_task_budget_action_check', ('ask',))
+fresh_ddl = _TABLE_DDL + _ASK_DDL + 'ALTER TABLE projects VALIDATE CONSTRAINT projects_task_budget_action_check;'
 online_order = 1430
 online = (OnlineStep(name, 'cost_holds_online', validate=(('projects', 'projects_task_budget_action_check'),)),)
 
@@ -45,5 +43,5 @@ async def pending(conn):
 async def apply(conn, *, sql, state):
     if await pending(conn):
         await conn.execute(_TABLE_DDL)
-        await conn.execute(_ASK_DDL + ' NOT VALID')
+        await conn.execute(_ASK_DDL)
         await conn.execute("INSERT INTO schema_migrations(name) VALUES ($1)", name)

@@ -2,7 +2,7 @@
 
 Only ``project_skills`` add, update and delete write these rows. An upload, a
 git import, a machine import, a Settings skill and ``catalog`` update do not.
-``proposal`` is a stored author kind for a later change; this module does not write it.
+``proposal`` marks a version written by a confirmed skill proposal (``skill_proposals``), with its id as ``author_ref``.
 """
 
 from __future__ import annotations

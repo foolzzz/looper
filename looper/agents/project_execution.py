@@ -310,6 +310,8 @@ class ProjectExecution:
     subagents_per_run: int | None = None
     subagents_per_task: int | None = None
     acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF
+    # Operator-only platform sub-agents switch (``projects.subagents``); not an execution field, so never in a view.
+    subagents_on: bool = False
 
     def overlaid(self, workflow: Mapping[str, Any] | None) -> ProjectExecution:
         """Apply the immutable task workflow over the project's current settings."""
@@ -434,6 +436,7 @@ class ProjectExecution:
             except ValueError as exc:
                 logger.warning("ignoring project %s's %s: %s", (row or {}).get("id"), field, exc)
         values["acceptance_checks"] = acceptance_checks_mode((row or {}).get("acceptance_checks"))
+        values["subagents_on"] = (row or {}).get("subagents") == "on"
         return cls(**values)
 
     def view(self) -> dict[str, Any]:
