@@ -123,7 +123,7 @@ def test_every_layer_and_usage_reads_the_same_model_reference(monkeypatch):
         assert usage['allowed_in'] == ['Test project']
         view = service.profile_view(profile, usage)
         assert view['profile_id'] == 'agent-test' and view['used_by'] == usage
-        assert view['roles'] == ['manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check',
+        assert view['roles'] == ['manager', 'planner', 'worker', 'explorer', 'reviewer', 'processor', 'advisor', 'advice_check',
                                  'leads_check', 'outbound_check']
         assert view['cost']['source'] == 'provider_price'
         assert view['cost']['unpriced'] == ['unknown-model'] and view['warnings']
@@ -214,7 +214,7 @@ def test_profile_view_preserves_usage_cost_and_warnings_from_normalized_settings
     assert view['profile_id'] == 'agent-test' and view['model_id'] == 'model-test'
     assert view['model']['name'] == 'unknown-model[1m]'
     assert view['provider']['provider_id'] == 'prov-test' and view['provider_name'] == 'Saved account'
-    assert view['roles'] == ['manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check',
+    assert view['roles'] == ['manager', 'planner', 'worker', 'explorer', 'reviewer', 'processor', 'advisor', 'advice_check',
                              'leads_check', 'outbound_check'] and view['used_by'] == used
     assert view['cost'] == {'source': 'provider_price', 'equivalent': False, 'unpriced': ['unknown-model[1m]']}
     assert view['warnings'] and view['custom_prompt'] == 'Saved prompt'

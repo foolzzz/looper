@@ -1,7 +1,8 @@
 """Project-owned skills; installation switches belong to the catalog domain."""
 
-from .. import catalog, project_skills
-from ..api_v1 import Operation, _object, _STR, _INT, _BOOL
+from .. import catalog, project_skills, skill_versions
+from ..action_levels import ActionLevel
+from ..api_v1 import Operation, _array, _object, _STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
 from .catalog import PROJECT_INSTALLS, _answer as catalog_answer
@@ -23,7 +24,28 @@ def _op(action, request, result, risk):
     if action == "delete":
         description += " Removes its installations in every project; client tokens require session confirmation."
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), description, description,
-                     request, result, risk=risk, confirms=risk == "high")
+                     request, result, risk=risk, confirms=risk == "high", level=ActionLevel.INSIDE)
+
+
+_VERSIONS_SUMMARY = "List one project skill's versions, and the difference between two of them."
+_ROLLBACK_SUMMARY = "Write a new version of a project skill from an older version's content."
+_AUTHOR = {"type": "string", "enum": ["operator", "proposal", "rollback"]}
+_VERSION = _object({
+    "version": _INT, "name": _STR, "description": _STR, "sha256": _STR, "author_kind": _AUTHOR,
+    "author_ref": {"type": ["string", "null"]}, "reason": _STR, "created_at": _STR,
+})
+_AFFECTED = _object({"project_id": _STR, "project_name": _STR})
+_DIFF = _object({
+    "from_version": _INT, "to_version": _INT,
+    "name": _object({"from": _STR, "to": _STR}),
+    "description": _object({"from": _STR, "to": _STR}),
+    "content": _STR,
+})
+_VERSIONS = _object({
+    "skill_id": _STR, "current_version": {"type": ["integer", "null"]}, "versions": _array(_VERSION),
+    "affected_projects": _array(_AFFECTED), "diff": {**_DIFF, "type": ["object", "null"]},
+})
+_ROLLBACK = _object({**_CHANGE["properties"], "version": _INT, "affected_projects": _array(_AFFECTED)})
 
 
 OPERATIONS = (
@@ -35,6 +57,18 @@ OPERATIONS = (
                            closed=True), _CHANGE, "write"),
     _op("delete", _object(_IDS, closed=True),
         _object({**PROJECT_INSTALLS["properties"], "deleted": _STR}), "high"),
+    Operation(
+        "project_skills.rollback", "POST", "/api/v1/project_skills/rollback", _ROLLBACK_SUMMARY,
+        _ROLLBACK_SUMMARY + " The new version keeps that content and hash. Returns the projects that install the skill.",
+        _object({**_IDS, "version": _INT}, closed=True), _ROLLBACK, risk="write", level=ActionLevel.INSIDE,
+        operator_only=True,
+    ),
+    Operation(
+        "project_skills.versions", "POST", "/api/v1/project_skills/versions", _VERSIONS_SUMMARY,
+        _VERSIONS_SUMMARY + " Each version records the content hash, author kind, reason and time.",
+        _object({**_IDS, "from_version": _INT, "to_version": _INT}, ["project_id", "skill_id"], closed=True),
+        _VERSIONS, risk="read", level=ActionLevel.INSIDE, operator_only=True,
+    ),
 )
 RESULTS = {}
 
@@ -75,6 +109,12 @@ async def run(server, operation, arguments, principal, headers):
         return await _answer(project_skills.get_skill(project_id, skill_id))
     if name == "project_skills.update":
         return await _answer(project_skills.update_skill(project_id, skill_id, arguments["fields"]))
+    if name == "project_skills.versions":
+        return await _answer(skill_versions.versions(
+            project_id, skill_id, from_version=arguments.get("from_version"),
+            to_version=arguments.get("to_version")))
+    if name == "project_skills.rollback":
+        return await _answer(skill_versions.rollback(project_id, skill_id, arguments["version"]))
     # A pending confirmation reserves nothing: read current references and ownership again.
     # The core deletes the item and all current installations in one transaction.
     await _references(arguments)

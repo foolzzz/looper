@@ -341,7 +341,10 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
                            "DELETE FROM schema_migrations WHERE name IN ('schedule_notification_events', "
                            "'schedule_notification_events_online')")
         if before == "no_table":  # older than completion events
-            await pool.execute("DROP TABLE manager_events; DELETE FROM schema_migrations WHERE name = 'manager_events'")
+            # Later derived tables must go too when reconstructing a database from before completion events.
+            await pool.execute("DROP TABLE triage_event_sources, triage_events, manager_events; "
+                               "DELETE FROM schema_migrations WHERE name IN "
+                               "('manager_events', 'event_triage', 'event_triage_online')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
@@ -349,6 +352,9 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
         assert await pool.fetchval(HAS_EVENT_COLUMN)
+        assert await pool.fetchval("SELECT convalidated FROM pg_constraint "
+                                   "WHERE conrelid = to_regclass('triage_events') "
+                                   "AND conname = 'triage_events_manager_event_id_fkey'")
         # The outbox's new foreign key is indexed (built online), as a new database has it.
         assert await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = "
                                    "'idx_schedule_notifications_manager_event' AND schemaname = current_schema()") == FRESH_INDEX
@@ -486,6 +492,7 @@ def test_a_database_whose_events_predate_the_new_reasons_and_delivery_gets_them_
         _, constraints = await _events_shape(pool)
         assert {c["conname"] for c in constraints if not c["convalidated"]} == {
             "manager_events_reason_check", "manager_events_delivery_check",
+            "manager_events_kind_check", "manager_events_task",
             "schedule_notifications_manager_event_id_fkey"}
         await connection.ensure_schema(pool)  # the next start validates them after its commit
         assert await _events_shape(pool) == fresh

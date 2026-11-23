@@ -63,6 +63,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
+| P4.7 花费守卫 | PR 1：运行前预留、历史 P95 与每日计数重算、全部模型回合及调度触发的观察接线、操作者只读展示已实现；默认关闭，仅支持 `off/observe`；定向测试 433 通过，隔离服务及替身 Manager 回合已验证，真实模型验证待批准；执行拦截、等待、通知、暂停与用量窗口按 RFC 后续 PR 交付 | [RFC](../architecture/rfcs/cost-guard-v0.zh-CN.md) |
 | 热升级 v0 | 组件规划、排空、Claude Code 看护与跨重启接管 | 默认关闭；macOS launchd 替身链路已验证，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍有缺口（[证据](../validation/kept-runs/README.md)） | M9a、M9c |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发和控制台命令型表单 | 现有定时任务；热升级排空功能 |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发，以及管家创建、配置展示与确认命令型定时任务 | 现有定时任务；热升级排空功能 |
@@ -1025,7 +1026,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 - **引擎可靠性：用量和限流信号**（[RFC](../architecture/rfcs/engine-reliability-v0.zh-CN.md)）：本分支实现默认关闭的 Claude Code / Codex app-server 窗口采集、账号七天用量、只读 `providers.limits`、额度块和自检；独立服务用替身事件验证，真实额度耗尽与重置未测。准入、冻结、失败处理和降级仍待后续实现。
 
-- **助理层第 3 期：空闲检查、车道与插话、动作类别与回执、状态卡**（[RFC](../architecture/rfcs/assistant-phase3-v0.zh-CN.md)，决定已定，只有文档；维护者 2026-11-22 的答复是 D24–D35）：四项各一个默认关闭的开关；PR 顺序和依赖见 RFC 第 12 节，3.6a、3.7a、3.5a、3.5b 可以先做（会话路由 #1518 已合入），空闲检查要在车道之后才能打开。
+- **助理层第 3 期：空闲检查、车道与插话、动作类别与回执、状态卡**（[RFC](../architecture/rfcs/assistant-phase3-v0.zh-CN.md)，决定已定；维护者 2026-11-22 的答复是 D24–D35）：本分支已实现 3.6a 的 `ActionCategory`、`ActionKind`、`TOOL_ACTIONS` 和写动作完整性测试，只有声明，不改变运行行为；运行时回执、开关和存储仍归 3.6b。其余按 RFC 第 12 节推进：3.7a、3.5a、3.5b 可以先做（会话路由 #1518 已合入），空闲检查要在车道之后才能打开。
 
 - **流程预设的后续入口**：任务模板引用流程、定时任务选择流程；当前模板和定时任务仍不采用项目默认流程。
 

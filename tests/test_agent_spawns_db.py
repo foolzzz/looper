@@ -79,7 +79,7 @@ async def _shape(conn: Any) -> dict[str, Any]:
     tables = ["llm_records", "task_steps", *_NEW_TABLES]
     columns = await conn.fetch(
         "SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = ANY($1) ORDER BY table_name, ordinal_position",
+        "WHERE table_schema = current_schema() AND table_name = ANY($1) ORDER BY table_name, column_name",
         tables)
     constraints = await conn.fetch(
         "SELECT conrelid::regclass::text AS tbl, conname, pg_get_constraintdef(oid) AS def, convalidated "

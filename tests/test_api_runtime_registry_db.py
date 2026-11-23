@@ -199,7 +199,7 @@ def test_existing_runtime_keeps_stored_capabilities_and_unrestricted_roles(api, 
         row = await db.get_runtime(f"rt-{runtime_type}")
         view = service.runtime_view(row)
         assert view["capabilities"] == capabilities
-        assert view["roles"] == ["worker", "reviewer"]
+        assert view["roles"] == ["worker", "explorer", "reviewer"]
         assert service.runtime_spec(row).capabilities == frozenset({runtimes.Capability.RUN})
         assert view["in_process"] is False
 
