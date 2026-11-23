@@ -129,7 +129,7 @@
 
 和抽取一样，入库和结束运行、推进游标在同一个事务里：
 - 先锁住出处，再复核确认；复核不过，这次运行取消，游标不动。
-- 当前运行阶段（PR ②）只写 `triage_events` 和 `triage_event_sources`；`important.manager_event_id` 保持 NULL，不向尚未接入分流回合的完成事件队列写入。管家交接在 PR ④ 实现后，才在同一个事务里写 `manager_events`。
+- 当前运行阶段（PR ②）只写 `triage_events` 和 `triage_event_sources`；`important.manager_event_id` 保持 NULL，不向尚未接入分流回合的完成事件队列写入。PR ④ 起，同一个事务里为「至少拥有一条窗口消息」的重要事件写 `manager_events`（被更高类别或更早的同类事件完全覆盖的事件不写，见 `owned_counts`）。
 - `window_seqs` 只存实际选中、渲染后保留的窗口消息；跳过的窗口也保存它。类别计数按窗口消息计，`raised` 是 `digest` 的子集，`uncited` 是 `ignore` 的子集。
 - 显式忽略组落一行事件，标题和摘要为空。未引用消息不落事件行，基础层的 `reason_kind = uncited` 枚举在本阶段不用于写入。`NONE` 将全窗口计为忽略而不建事件；未回复私聊和 @ 的代码保底仍只调高类别。
 
@@ -228,7 +228,7 @@
 |---|---|---|
 | ① | 表和类型：`triage_events`、`triage_event_sources`、`output_kind` 加 `triage`、`window_seqs`，以及 `manager_events` 的 kind、`reason` 和约束；开关；关闭时逐字节不变的测试 | #1482 |
 | ② | 分流运行：预设、渲染、契约、解析、代码保底、入库；`evals/processor` 的 `triage_*` 用例和第一次实测 | ① |
-| ③ | 「为什么没告诉我」：查询、API、命令行、消息流页的标签 | ② |
+| ③ | 「为什么没告诉我」：查询、API、命令行、消息流页上的查询和运行计数 | ② |
 | ④ | 重要的事件交给管家：`manager_events` 的 `triage` kind、批处理、回合契约、`deliver()`、改进晨报的兜底 | ②，P1.3，#1486，#1469 |
 | ⑤ | 晨报的「进摘要的事件」一节 | ②，晨报 PR（P2.5 ④） |
 | ⑥ | 真实数据标注和线上指标 | ③ |
@@ -236,6 +236,8 @@
 ①②③ 可以先做，不依赖还没合入的送达层和晨报。④⑤ 等各自的前提合入后再开工。
 
 PR ① 提供基础层：迁移 `event_triage`、在线校验 `event_triage_online`、类型和只读查询，以及操作者专用的 `triage_settings.get/update`（`subscriptions.triage.enabled` 默认关闭）。PR ② 接入「事件分流」预设、确认、抽取运行、解析、代码保底和事件入库。关闭时只拒绝创建分流订阅，已有订阅仍可停用、改名和修改配置，已有订阅触发仍为 `skipped_gate`，不读消息、不启动 processor、不动游标。打开后只有确认仍有效的订阅会运行，结果仅存储；不交给管家、不投递、不进入晨报。
+
+③ 交付查询、`triage.why`、`looper msgflow why`、消息流页上的「为什么没告诉我」，以及运行记录里的分流计数。每条消息旁的类别标签要等消息列表，不在这一次。
 
 PR ② 的真实模型验证尚未执行：`evals/processor` 有 6 个 `triage_*` 合成窗口、18 条逐条标注消息，指标在代码保底前计算，避免保底掩盖模型漏判。拟用 Sonnet、每例 2 次；若实际 processor 用 Haiku，再对该 Profile 重复。命令、每窗口预算及总上限见 [evals/README.md](../../../evals/README.md)；获批后才执行，并把首次实测成本和分类指标写回第 9 节。
 

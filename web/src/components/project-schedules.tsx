@@ -1940,11 +1940,18 @@ const SKIP_LABELS: Record<NonNullable<SubscriptionRunInfo["skip_reason"]>, strin
   blocked_by_hook: "a prompt hook blocked it", invalid_reply: "its reply could not be read, twice",
 };
 
+function triageCountLine(counts: NonNullable<SubscriptionRunInfo["extract_counts"]>): string | null {
+  if (typeof counts.important !== "number") return null;
+  const dropped = counts.dropped ? Object.values(counts.dropped).reduce((sum, value) => sum + value, 0) : 0;
+  return `important ${counts.important} · digest ${counts.digest ?? 0} · ignore ${counts.ignore ?? 0} · uncited ${counts.uncited ?? 0} · raised ${counts.raised ?? 0} · dropped ${dropped}`;
+}
+
 /** What a subscription run read and made, under its line of the history. */
 function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
   const sub = run.subscription;
   if (!sub) return null;
   const dropped = [sub.events_too_old && `${sub.events_too_old} too old`, sub.events_over_cap && `${sub.events_over_cap} over the cap`].filter(Boolean);
+  const counts = sub.extract_counts ? triageCountLine(sub.extract_counts) : null;
   return (
     <div className="min-w-0 text-xs sm:basis-full">
       <p className="text-muted-foreground">
@@ -1953,6 +1960,7 @@ function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
         {" · "}events {sub.from_seq + 1}–{sub.to_seq}
         {sub.deliveries && sub.deliveries.length > 0 && ` · messages: ${sub.deliveries.map((d) => `${d.segment} ${d.state}`).join(", ")}`}
       </p>
+      {counts && <p className="text-muted-foreground">{counts}</p>}
       {sub.output_text && (
         <details className="mt-1">
           <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">Output</summary>
