@@ -5813,6 +5813,36 @@ writes nothing.
 - **Not yet:** the To-do page, the ledger contract in the Manager's system
   prompt (the tool descriptions are all it has), HTTP writes.
 
+### Proactive messages: the delivery layer
+
+A proactive message is one Looper sends without being asked in that moment (a
+gate reminder; later a task notice, a subscription's push, an intent, a
+completion turn, a reminder the user set). With the system setting
+`delivery.enabled` on (operator-only `proactive_delivery.update`; off by
+default, and then no send point asks), a send point asks
+`proactive_delivery.decide` before the message goes out. The decision is the
+pure function `deliver`'s, first match wins: a source that said it has nothing
+to tell is dropped (`silent`); a gate that holds back a task (`blocking`) or a
+reminder the user set (`user_set`) is sent, never throttled or counted
+(`urgent`); outside its schedule's or subscription's own active hours it goes
+into the digest; within 5 minutes of the user writing in that chat it is sent
+uncounted (`recent_reply`); between 22:00 and 08:00 in `user.timezone` (else
+the server's own zone) it goes into the digest (`quiet_hours`); a direct chat
+that already had 5 counted messages that local day sends it into the digest
+(`daily_cap`); otherwise it is sent, counted in a direct chat. A deferred
+message's `digest_date` is the local date the next quiet hours end on. The
+decision goes into the message's row of `proactive_deliveries`, the table the
+proactive-message metrics keep (`decision`, `reason`, `counted`, `local_date`,
+`digest_date`, `decided_at`), under the send point's key for the message (a
+gate's `gate-<message id>`, its posts' idempotency key), so a message tried
+again keeps its first decision and the channel's receipt lands on the same
+row; decisions on one chat are taken one at a time, so the cap holds across
+send points. After the post the send point records the receipt (`outcome`
+`sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
+did. Off, the layer writes nothing. Wired so far: gate
+reminders only, which are always `blocking`; a decision that fails is logged
+and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+
 ### Card buttons
 
 A Manager's confirmation and a user gate can be answered with one press of a
@@ -6010,7 +6040,9 @@ and `gate_timeout_seconds`, which check a schedule before a run starts.
   waited for the user for its project's `gate_reminder_hours` since its
   opening, the last message the user or the Planner wrote in it and its last
   reminder: a `reminder` note in its discussion, which the courier posts to
-  the gate's chat, and a line in the task's activity.
+  the gate's chat, and a line in the task's activity. With `delivery.enabled`
+  on, the courier first takes the delivery layer's decision on it (see
+  "Proactive messages: the delivery layer"): blocking, so always sent.
 - **The chat.** A gate's messages also go to a chat (`gate_service.gate_chat`):
   the Lark direct message or group (the requester @-mentioned) or the
   Telegram chat its task came from, else, for a task asked for on the

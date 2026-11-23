@@ -167,6 +167,8 @@
  "outbound_review.get": "inside",
  "outbound_review.update": "inside",
  "overview": "inside",
+ "proactive_delivery.get": "inside",
+ "proactive_delivery.update": "inside",
  "processor_settings.get": "inside",
  "processor_settings.update": "inside",
  "profiles.create": "inside",
