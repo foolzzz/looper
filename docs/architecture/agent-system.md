@@ -117,6 +117,18 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   positive number of US dollars, null for off; the recommended value is $4.00) and report a stored value that is
   not a budget. **Manager wiring is pending:** storing the budget changes no turn, prompt, record or command line
   yet.
+- **Operator profile** (`operator_profile.py`, `manager.profile.source`, default unset): a deterministic compiler
+  reads `关于我.md` (or `记忆/关于我.md`, but not both) and `偏好/**/*.md` from the folder the operator names.
+  Notes whose path has a part starting with `.` or `_` are skipped. It produces a typed profile — name, address,
+  reply language, time zone, working hours, communication preferences and standing rules — and each value cites
+  the note path and heading. The rendered text is at most 1500 characters; lower-priority fields are dropped
+  first, and the last remaining field is truncated with `…` when it alone is still over the cap. `profile.get`
+  stores the result in `profile_blocks` and keeps the version when the compiled body is unchanged. The
+  operator-only v1 operations are `profile.get`, `profile_source.get` and `profile_source.update` (null clears
+  the folder and the cached block). They are not chat settings and not Manager tools. **Manager wiring is
+  pending:** with the folder unset nothing is compiled and nothing is written, and storing a folder changes no
+  prompt, tool list, record or channel call. See the
+  [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md).
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
