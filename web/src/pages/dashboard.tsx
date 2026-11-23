@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { DashboardGates } from "@/components/dashboard-gates";
+import { StatusCard } from "@/components/status-card";
 import { ManagerSessions } from "@/components/manager-sessions";
 import { RunStatusBadge, ScheduleTime } from "@/components/project-schedules";
 import {
@@ -724,6 +725,7 @@ export function DashboardPage() {
         )}
         <Health unhealthy={overview.health.unhealthy} />
       </div>
+      <StatusCard />
       <TaskCounts tasks={overview.tasks} />
       <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
       <Agents overview={overview} />
