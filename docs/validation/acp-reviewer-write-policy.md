@@ -21,9 +21,9 @@
 (allow file-write* (literal "/dev/null"))
 ```
 
-通过绝对路径 `/usr/bin/sandbox-exec` 安装策略，子进程继承。文件系统写操作只对新 scratch、独立 config 和 `/dev/null` 放行；继承的标准输出、标准错误和管道仍可使用。这不是磁盘读取隔离或完整的网络隔离：公网连接、DNS 和明确配置的代理仍可使用，不保证代理转发目标的行为。Unix socket、其他回环端口、LaunchServices 和 Apple events 的拒绝阻止通过这些入口委托进程树外的常驻服务写盘。
+通过绝对路径 `/usr/bin/sandbox-exec` 安装策略，子进程继承。文件系统写操作只对新 scratch、独立 config 和 `/dev/null` 放行；继承的标准输出、标准错误和管道仍可使用。这不是磁盘读取隔离或完整的网络隔离：公网连接、DNS 和通过预检的代理仍可使用。Unix socket、其他回环端口、LaunchServices 和 Apple events 的拒绝阻止通过这些入口委托进程树外的常驻服务写盘。
 
-代理端口从该次启动实际环境的 HTTP(S)/ALL_PROXY（含小写变量）解析，只对本地代理开放对应端口，不开放全部回环地址端口。
+代理端口只从服务进程自身 `os.environ` 的 HTTP(S)/ALL_PROXY（含小写变量）解析，绝不读取 `Launch.environment()` 或角色、项目、任务环境层。启动环境清除分层代理覆盖，并恢复同一份服务环境快照（含 NO_PROXY）；只对本地代理开放对应端口。没有新增设置或操作，`chat_settings`、操作权限与 action level 不变。
 
 ## 启动前保护集与预检
 
@@ -34,6 +34,9 @@
 3. 检查命令和配置来源，见下一节。
 4. 在 Looper 自有临时目录创建文件探针，记录 inode；绝不在 Worker 报告的目录中创建文件或写打开报告中的路径。沙箱探针对文件类型和 inode 做比对，再以 `O_NONBLOCK | O_NOFOLLOW` 尝试写打开，必须得到 EPERM，不写任何字节；scratch 写入必须成功。只读 inspect root 和 FIFO 不会阻塞预检。
 5. Looper 创建 Unix socket 和回环监听器，宿主进程先成功连接，作为正向对照。沙箱内的两个固定连接探针都必须以 EPERM 失败；任一成功、超时或其他错误均记 `write_policy_unavailable`，拒绝启动。探针和监听器随作用域退出清理。
+6. 对服务环境中每个不同的代理，从宿主显式发出到 Looper 自建监听器的 CONNECT，分别使用 `127.0.0.1`、`::1` 和 `localhost`，不受 NO_PROXY 影响；每个监听器都先完成并清空正向对照连接。代理返回 2xx，或监听器收到代理转发的连接（即使返回 403），均以 `proxy_loopback_allowed` 拒绝启动。只有明确的 403 且监听器无连接才通过；断连、超时、认证失败及其他响应均以 `proxy_preflight_unavailable` 拒绝。HTTP(S) 代理支持 URL 中的 Basic 认证；未知协议和无效 URL 以 `unknown_cli_config` 拒绝，不在记录里保存代理地址或凭据。宿主探针避免沙箱自身的网络拒绝掩盖代理能力。
+
+这些探针证明的是启动时所测目标被拒绝；它们不能代替代理端持续执行目标访问控制，或证明所有地址别名和未来配置都安全。操作者仍需使用拒绝本地目标的代理。
 
 Linux、缺少系统 `sandbox-exec` 或无法证明强制性的主机拒绝启动。
 
@@ -58,7 +61,7 @@ args = []
 
 ## 回归证据与缺口
 
-`tests/test_acp_policy.py` 覆盖大小写路径双向重叠、runtime/vault/HOME、配置白名单、选项值、文件 inode、只读/FIFO、子孙进程写保护和 IPv4/IPv6 代理端口例外。分别移除 Unix socket 和回环拒绝规则，预检必须拒绝启动；这两项在修复前失败。固定 Python 探针不运行模型。
+`tests/test_acp_policy.py` 覆盖大小写路径双向重叠、runtime/vault/HOME、配置白名单、选项值、文件 inode、只读/FIFO、子孙进程写保护和 IPv4/IPv6 代理端口例外。新增回归在修复前观察到 6 项失败；修复后覆盖真实 Reviewer 启动路径中的角色层代理注入、全部六个服务代理变量、安全代理可用、CONNECT 转发和伪装 403、断连、未知协议、认证与 NO_PROXY 绕过探针的防护。分别移除 Unix socket 和回环拒绝规则，预检必须拒绝启动。固定 Python 探针不运行模型。
 
 任务 Profile 选择在共同的 `profile_choices` 入口拒绝 ACP；Manager 创建/更新工具、task agents API 和 create-time profile_overrides 均有参数化拒绝与数据库无写入回归。ACP channel 的 `fs/write_text_file` 与 `terminal/*` 请求均有拒绝测试。
 
