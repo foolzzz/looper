@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -28,20 +29,31 @@ def clear_operator_proxies(monkeypatch):
 
 
 @contextmanager
-def proxy_server(host="127.0.0.1", behavior="deny"):
+def proxy_server(host="127.0.0.1", behavior="deny", plain_host=None):
     requests = []
 
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
             self.connection.settimeout(2)
             line = self.rfile.readline().decode().strip()
-            if not line:  # A TCP positive control, without a CONNECT request.
+            if not line:  # A TCP positive control, without an HTTP request.
                 return
             headers = []
             while (header := self.rfile.readline().strip()):
                 headers.append(header.decode())
             requests.append((line, headers))
             if behavior == "broken":
+                return
+            if line.startswith("GET ") and urlsplit(line.split()[1]).hostname == plain_host:
+                target = urlsplit(line.split()[1])
+                if behavior in {"http_forward", "http_forward_deny"}:
+                    with socket.create_connection((target.hostname, target.port), timeout=1) as upstream:
+                        upstream.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                if behavior == "http_broken":
+                    return
+                status = {"http_forward": "200 OK", "http_allow": "200 OK",
+                          "http_forward_deny": "403 Forbidden", "http_error": "502 Bad Gateway"}[behavior]
+                self.wfile.write(f"HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n".encode())
                 return
             if behavior in {"forward", "forward_deny"}:
                 address, port = line.split()[1].rsplit(":", 1)
@@ -371,7 +383,9 @@ def test_only_configured_loopback_proxy_port_is_allowed(configured, repository, 
         policy = asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository,
             config_dir=configured))
         try:
-            assert requests and all(request[0].startswith("CONNECT ") for request in requests)
+            assert len(requests) == 8
+            assert [urlsplit(line.split()[1]).hostname for line, _ in requests if line.startswith("GET ")] == [
+                "127.0.0.1", "::1", "localhost", "0.0.0.0"]
             assert policy.environment({key: "http://127.0.0.1:1"})[key] == url
             assert policy.wrap()[0] == "/usr/bin/sandbox-exec"
             code = '''import errno,json,socket,sys
@@ -449,6 +463,23 @@ def test_proxy_preflight_refuses_unsafe_or_unproven_proxy(configured, repository
 
 @pytest.mark.installed
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost", "0.0.0.0"])
+@pytest.mark.parametrize("behavior,reason", [("http_forward", "proxy_loopback_allowed"),
+    ("http_forward_deny", "proxy_loopback_allowed"), ("http_allow", "proxy_loopback_allowed"),
+    ("http_error", "proxy_preflight_unavailable"), ("http_broken", "proxy_preflight_unavailable")])
+def test_proxy_preflight_refuses_plain_http_bypass(configured, repository, monkeypatch, host, behavior, reason):
+    # This proxy denies every CONNECT and all other targets; only this GET is unsafe.
+    with proxy_server(behavior=behavior, plain_host=host) as (url, requests):
+        monkeypatch.setenv("HTTP_PROXY", url)
+        monkeypatch.setenv("NO_PROXY", "*")
+        with pytest.raises(acp_policy.PolicyError) as error:
+            asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
+        assert error.value.record["reason"] == reason
+        assert any(line.startswith("GET ") and urlsplit(line.split()[1]).hostname == host for line, _ in requests)
+
+
+@pytest.mark.installed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
 def test_role_layer_proxy_cannot_open_loopback_port(configured, repository, monkeypatch):
     from unittest.mock import AsyncMock
     from looper.agents import acp_reviewer_settings as settings
@@ -515,6 +546,7 @@ def test_proxy_preflight_checks_every_proxy_with_credentials(configured, reposit
         with pytest.raises(acp_policy.PolicyError) as error:
             asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
         assert error.value.reason.value == "proxy_loopback_allowed"
-        assert unsafe_requests and len(safe_requests) == 3
-        assert "Proxy-Authorization: Basic dGVzdEB1c2VyOnN5bnRoZXRpYzpzZWNyZXQ=" in safe_requests[0][1]
+        assert unsafe_requests and len(safe_requests) == 8
+        assert all("Proxy-Authorization: Basic dGVzdEB1c2VyOnN5bnRoZXRpYzpzZWNyZXQ=" in headers
+                   for _, headers in safe_requests)
         assert "synthetic" not in str(error.value)

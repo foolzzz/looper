@@ -260,7 +260,7 @@ def _proxy_ports(environment: Mapping[str, str]) -> tuple[int, ...]:
         host = proxy.hostname
         if (proxy.scheme not in {"http", "https"} or not host or proxy.path not in {"", "/"}
                 or proxy.query or proxy.fragment or any(ord(c) < 32 for c in value)):
-            raise ValueError("only HTTP(S) proxies with a verifiable CONNECT boundary are supported")
+            raise ValueError("only HTTP(S) proxies with a verifiable loopback boundary are supported")
         port = proxy.port or {"http": 80, "https": 443}[proxy.scheme]
         try:
             local = host == "localhost" or (host is not None and ipaddress.ip_address(host).is_loopback)
@@ -272,7 +272,7 @@ def _proxy_ports(environment: Mapping[str, str]) -> tuple[int, ...]:
 
 
 def _proxy_preflight(environment: Mapping[str, str]) -> None:
-    """Require an explicit CONNECT denial, and independently detect forwarding.
+    """Require explicit CONNECT and plain HTTP denials, and detect forwarding.
 
     Probe from the host so sandbox denials cannot hide an unsafe proxy. Only
     Looper-owned listeners are targeted; NO_PROXY never bypasses this check.
@@ -283,7 +283,8 @@ def _proxy_preflight(environment: Mapping[str, str]) -> None:
         if proxy.username is not None:
             credentials = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}".encode()
             headers["Proxy-Authorization"] = "Basic " + base64.b64encode(credentials).decode("ascii")
-        for host in ("127.0.0.1", "::1", "localhost"):
+        for method, host in ((method, host) for method in ("CONNECT", "GET")
+                             for host in ("127.0.0.1", "::1", "localhost", "0.0.0.0")):
             try:
                 family = socket.AF_INET6 if ":" in host else socket.AF_INET
                 with socket.socket(family) as listener:
@@ -291,7 +292,7 @@ def _proxy_preflight(environment: Mapping[str, str]) -> None:
                     listener.listen(2)
                     port = listener.getsockname()[1]
                     # Establish and drain a positive control before the proxy attempt.
-                    with socket.create_connection((listener.getsockname()[0], port), timeout=1):
+                    with socket.create_connection((host, port), timeout=1):
                         control, _ = listener.accept()
                         control.close()
                     connection_type = http.client.HTTPSConnection if proxy.scheme == "https" else http.client.HTTPConnection
@@ -299,19 +300,20 @@ def _proxy_preflight(environment: Mapping[str, str]) -> None:
                     status = None
                     try:
                         target = f"[{host}]:{port}" if family == socket.AF_INET6 else f"{host}:{port}"
-                        connection.request("CONNECT", target, headers=headers)
+                        # Absolute-form GET exercises forwarding without a CONNECT tunnel.
+                        connection.request(method, target if method == "CONNECT" else f"http://{target}/", headers=headers)
                         with connection.getresponse() as response:
                             status = response.status
                     except (OSError, http.client.HTTPException):
-                        pass  # Connectivity alone is not evidence of a denied tunnel.
+                        pass  # Connectivity alone is not evidence of a denied request.
                     finally:
                         connection.close()
                     if select.select([listener], [], [], 0)[0] or (status is not None and 200 <= status < 300):
                         raise PolicyError(ConfigCheck(PolicyReason.PROXY_LOOPBACK_ALLOWED,
-                                                     "proxy CONNECT permits a Looper-owned loopback listener"))
+                                                     f"proxy {method} permits a Looper-owned loopback listener"))
                     if status != 403:
                         raise PolicyError(ConfigCheck(PolicyReason.PROXY_PREFLIGHT_UNAVAILABLE,
-                                                     "proxy CONNECT did not prove an explicit loopback denial"))
+                                                     f"proxy {method} did not prove an explicit loopback denial"))
             except (OSError, ValueError, http.client.HTTPException) as exc:
                 raise PolicyError(ConfigCheck(PolicyReason.PROXY_PREFLIGHT_UNAVAILABLE,
                                              "proxy loopback preflight unavailable")) from exc
