@@ -46,6 +46,14 @@ _SESSION_RUN_COLUMNS = """    planner_context_tokens BIGINT CHECK (planner_conte
     planner_session_after_tokens BIGINT CHECK (planner_session_after_tokens >= 0),
     failure_kind TEXT CHECK (failure_kind IN ('task_budget'))
 """
+_THROTTLE_COLUMNS = """    -- Throttle fields (proactive delivery RFC section 5, agents/schedule_throttle.py): the hours a firing may happen
+    -- in, in the schedule's timezone (NULL: all day; it may cross midnight), and whether a firing waits for its
+    -- Manager not to be answering (skipped_busy).
+    active_hours TEXT CONSTRAINT schedules_active_hours_check CHECK (
+        active_hours ~ '^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$'
+        AND split_part(active_hours, '-', 1) <> split_part(active_hours, '-', 2)),
+    idle_only BOOLEAN NOT NULL DEFAULT false,
+"""
 _KIND_CHECK = """    CONSTRAINT schedules_kind_fields_check CHECK (
         (kind = 'command') = (command IS NOT NULL)
         AND (kind = 'command' OR (env = '{}'::jsonb AND env_file IS NULL))
@@ -60,8 +68,8 @@ async def existing_baseline(conn):
               "    CONSTRAINT schedules_command_notify_format_check CHECK (kind <> 'command' OR notify_format = 'report'),\n",
               *_SCHEDULE_COLUMNS.splitlines(keepends=True), *_RUN_COLUMNS.splitlines(keepends=True),
               *_SESSION_COLUMNS.splitlines(keepends=True), *_SESSION_RUN_COLUMNS.splitlines(keepends=True),
-              "    deferred_by_drain BOOLEAN NOT NULL DEFAULT false,\n",
-              _KIND_CHECK, "                      'succeeded', 'interrupted')),\n",
+              "    deferred_by_drain BOOLEAN NOT NULL DEFAULT false,\n", _THROTTLE_COLUMNS,
+              _KIND_CHECK, "                      'succeeded', 'interrupted', 'skipped_busy')),\n",
               "                                              'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered')),\n",
               "CREATE INDEX IF NOT EXISTS idx_schedule_runs_finished ON schedule_runs (finished_at) WHERE finished_at IS NOT NULL;\n"]
     for piece in pieces:
@@ -103,7 +111,8 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
             await connection.ensure_schema(old)
             expected = {line.strip().split()[0]: None for line in _SCHEDULE_COLUMNS.splitlines()}
             expected.update({line.strip().split()[0]: None for line in _SESSION_COLUMNS.splitlines()})
-            expected.update(kind="agent", env="{}", consecutive_overlaps=0, notify_format="report")
+            expected.update(kind="agent", env="{}", consecutive_overlaps=0, notify_format="report", active_hours=None,
+                            idle_only=False)
             assert dict(await old.fetchrow("SELECT * FROM schedules")) == {**before["schedules"][0], **expected}
             run_defaults = {line.strip().split()[0]: None for line in _RUN_COLUMNS.splitlines()}
             run_defaults.update({line.strip().split()[0]: None for line in _SESSION_RUN_COLUMNS.splitlines()})
