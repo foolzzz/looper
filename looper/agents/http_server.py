@@ -1326,6 +1326,9 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
+        if self._channels is not None:
+            status["channels"].update({channel["channel_id"]: channel for channel in self._channels.list_channels()
+                                       if "catchup" in channel})
         if getattr(self, "_startup_steps", None) is not None:
             status["startup_steps"] = dict(self._startup_steps)
         if self._worker_pool is not None and (keepers := self._worker_pool.keeper_status()):

@@ -66,7 +66,25 @@ class ChannelRegistry:
                  "status": "fail" if state["state"] == "failed" else "warn",
                  "detail": f"{state['state']}: {state['last_error'] or ''}; next attempt: {state['next_attempt_at']}",
                  "fix": "Check Settings → Channels and the channel's credentials or transport."}
-                for channel_id, state in self._starts.items() if state["state"] != "running"] + self.down_checks
+                for channel_id, state in self._starts.items() if state["state"] != "running"] + self.down_checks \
+            + self.catchup_checks()
+
+    def catchup_checks(self) -> list[dict[str, str]]:
+        checks = []
+        for channel in self.list_channels():
+            for window in channel.get("catchup", {}).get("windows", []):
+                state, chat, start = window["state"], window["chat_id"], window["start"]
+                times = [datetime.fromtimestamp(window[key], timezone.utc).isoformat() for key in ("start", "end")]
+                checks.append({
+                    "id": f"lark_catchup:{channel['channel_id']}:{chat}:{start}:{state}",
+                    "label": f"飞书消息补收{'失败' if state == 'dropped' else '等待重试'}",
+                    "status": "fail" if state == "dropped" else "warn",
+                    "detail": f"{chat or '聊天发现'}: {times[0]} – {times[1]}; {state}; "
+                              f"attempts={window['attempts']}; {window['reason'] or ''}",
+                    "fix": "检查聊天并把遗漏的消息转发给 Looper。" if state == "dropped"
+                           else "服务会自动重试这个窗口。",
+                })
+        return checks
 
     async def start_bot(self, channel_id: str, start: Callable[[bool], Awaitable[bool]]) -> None:
         """Try once on startup; own one retry loop per failed enabled channel until shutdown/disable.

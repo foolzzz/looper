@@ -18,6 +18,17 @@ _BINDING = _object({
     "by": _array(_object({"reason": _STR, "runtime": _STR, "tool": _STR, "count": _INT, "manager": _STR},
                          ["reason", "runtime", "tool", "count"])),
     "matches": _array(_object({"by": _STR, "when": _STR, "count": _INT}))}, ["enforced", "mismatches", "by"])
+_CATCHUP_WINDOW = _object({
+    "chat_id": _STR, "start": {"type": "number"}, "end": {"type": "number"},
+    "state": {"type": "string", "enum": ["pending", "dropped"]}, "attempts": _INT, "reason": {"enum": [None, "retry_exhausted"]},
+})
+_CHANNELS = _object({"web": _object({"channel": {"const": "web"}, "healthy": _BOOL,
+                                   "active_sse_streams": _INT})})
+_CHANNELS["additionalProperties"] = _object({
+    "channel_id": _STR, "channel_type": _STR, "channel": _STR, "healthy": _BOOL,
+    "active_conversations": _INT, "lark_cli_available": _BOOL, "transport": _STR,
+    "catchup": _object({"pending": _INT, "dropped": _INT, "windows": _array(_CATCHUP_WINDOW)}),
+}, ["channel_id", "channel_type", "channel", "healthy", "catchup"])
 _STATUS = _object({
     "startup_steps": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}},
     "drain": DRAIN,
@@ -27,8 +38,7 @@ _STATUS = _object({
                         "failed_after_start": {"type": "object", "additionalProperties": _INT}}),
     "status": {"const": "running"}, "agents": {"type": "object", "additionalProperties": _AGENT},
     "tasks": _object({"total": _INT, "running": _INT, "completed": _INT}),
-    "channels": _object({"web": _object({"channel": {"const": "web"}, "healthy": _BOOL,
-                                         "active_sse_streams": _INT})}),
+    "channels": _CHANNELS,
     "checks": _array(_object({"id": _STR, "label": _STR, "detail": _STR, "fix": _STR,
                                "status": {"type": "string", "enum": ["ok", "warn", "fail", "skip", "pending"]}})),
     "can_sign_out": _BOOL, "turn_binding": _BINDING,

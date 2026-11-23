@@ -108,6 +108,42 @@ def test_proxy_health_is_read_once_and_storage_is_cached(server, monkeypatch):
     asyncio.run(run())
 
 
+def test_status_exposes_pending_and_dropped_lark_catchup_windows(server):
+    from looper.agents import api_v1
+    from looper.agents.channels.registry import ChannelRegistry
+
+    http, _ = server
+    http._self_checks = []
+    windows = [
+        {"chat_id": "chat-pending", "start": 100.0, "end": 160.0, "state": "pending",
+         "attempts": 1, "reason": None},
+        {"chat_id": "chat-dropped", "start": 200.0, "end": 260.0, "state": "dropped",
+         "attempts": 8, "reason": "retry_exhausted"},
+    ]
+    health = {"channel": "lark", "healthy": True, "active_conversations": 0, "lark_cli_available": True,
+              "catchup": {"pending": 1, "dropped": 1, "windows": windows}}
+    registry = ChannelRegistry(SimpleNamespace())
+    registry._channels["channel-lark"] = SimpleNamespace(
+        channel_id="channel-lark", channel_type="lark", healthcheck=lambda: health)
+    http._channels = registry
+
+    async def run():
+        result = await http._status_result({})
+        assert result["channels"]["web"]["healthy"]
+        assert result["channels"]["channel-lark"]["catchup"]["windows"] == windows
+        checks = [check for check in result["checks"] if check["id"].startswith("lark_catchup:")]
+        assert [check["status"] for check in checks] == ["warn", "fail"]
+        assert "chat-dropped" in checks[1]["detail"] and "retry_exhausted" in checks[1]["detail"]
+        assert "1970-01-01T00:03:20" in checks[1]["detail"]
+        operation = api_v1.find("POST", "/api/v1/system/status")
+        api_v1.validate_arguments(operation.result, result)
+        windows.clear()
+        health["catchup"].update(pending=0, dropped=0)
+        assert not [check for check in await http._checks_now() if check["id"].startswith("lark_catchup:")]
+
+    asyncio.run(run())
+
+
 def test_startup_status_returns_before_queued_blocking_startup_work(server):
     http, _ = server
     http._self_checks = [self_check.Check('database', 'PostgreSQL', 'ok', 'connected').to_dict(), *[

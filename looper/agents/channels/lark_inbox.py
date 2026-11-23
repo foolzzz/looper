@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,11 @@ PROCESSED_KEPT = 20_000
 THREADS_KEPT = 1_000
 THREAD_MAX_AGE = 7 * 24 * 60 * 60
 BOT_ACTIVITY_MAX_AGE = 7 * 24 * 60 * 60
+
+
+class CatchupState(str, Enum):
+    PENDING = "pending"
+    DROPPED = "dropped"
 
 
 class LarkInbox(SQLiteInbox):
@@ -27,6 +33,13 @@ class LarkInbox(SQLiteInbox):
         self._db.execute("CREATE TABLE IF NOT EXISTS thread_activity (chat_id TEXT NOT NULL, thread_id TEXT NOT NULL, "
                          "at REAL NOT NULL, PRIMARY KEY (chat_id, thread_id))")
         self._db.execute("CREATE TABLE IF NOT EXISTS bot_activity (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)")
+        for table in ("catchup_debt", "discovery"):
+            columns = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
+            if "attempts" not in columns:
+                self._db.execute(f"ALTER TABLE {table} ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        self._db.execute("CREATE TABLE IF NOT EXISTS catchup_dropped (chat_id TEXT NOT NULL, start REAL NOT NULL, "
+                         "end REAL NOT NULL, attempts INTEGER NOT NULL, reason TEXT NOT NULL, "
+                         "PRIMARY KEY (chat_id, start, end))")
         self._db.commit()
         row = self._db.execute("SELECT at FROM boundary WHERE id = 1").fetchone()
         self.boundary: float | None = row[0] if row else None
@@ -44,7 +57,7 @@ class LarkInbox(SQLiteInbox):
     @serialized
     def defer_discovery(self, start: float, end: float) -> None:
         with self._db:
-            self._db.execute("INSERT INTO discovery VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            self._db.execute("INSERT INTO discovery (id, start, end) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET "
                              "start = min(start, excluded.start), end = max(end, excluded.end)", (start, end))
 
     @serialized
@@ -61,13 +74,39 @@ class LarkInbox(SQLiteInbox):
     def defer(self, chat_id: str, start: float, end: float) -> None:
         with self._db:
             self._db.execute(
-                "INSERT INTO catchup_debt VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET "
+                "INSERT INTO catchup_debt (chat_id, start, end) VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET "
                 "start = excluded.start, end = excluded.end", (chat_id, start, end))
 
     @serialized
     def complete(self, chat_id: str) -> None:
         with self._db:
             self._db.execute("DELETE FROM catchup_debt WHERE chat_id = ?", (chat_id,))
+
+    @serialized
+    def fail_catchup(self, chat_id: str | None, max_attempts: int) -> None:
+        """Count failed passes only; atomically retain exhausted windows for the operator."""
+        table, key, value = ("discovery", "id", 1) if chat_id is None else ("catchup_debt", "chat_id", chat_id)
+        with self._db:
+            self._db.execute(f"UPDATE {table} SET attempts = attempts + 1 WHERE {key} = ?", (value,))
+            row = self._db.execute(f"SELECT start, end, attempts FROM {table} WHERE {key} = ?", (value,)).fetchone()
+            if row is not None and row[2] >= max_attempts:
+                self._db.execute("INSERT OR REPLACE INTO catchup_dropped VALUES (?, ?, ?, ?, ?)",
+                                 (chat_id or "", *row, "retry_exhausted"))
+                self._db.execute(f"DELETE FROM {table} WHERE {key} = ?", (value,))
+
+    @serialized
+    def catchup_status(self) -> dict[str, Any]:
+        windows = [{"chat_id": chat, "start": start, "end": end, "attempts": attempts,
+                    "state": CatchupState.PENDING.value, "reason": None}
+                   for chat, start, end, attempts in self._db.execute(
+                       "SELECT chat_id, start, end, attempts FROM catchup_debt UNION ALL "
+                       "SELECT '', start, end, attempts FROM discovery ORDER BY start, end, chat_id")]
+        pending = len(windows)
+        windows.extend({"chat_id": chat, "start": start, "end": end, "attempts": attempts,
+                        "state": CatchupState.DROPPED.value, "reason": reason}
+                       for chat, start, end, attempts, reason in self._db.execute(
+                           "SELECT chat_id, start, end, attempts, reason FROM catchup_dropped ORDER BY start, end, chat_id"))
+        return {"pending": pending, "dropped": len(windows) - pending, "windows": windows}
 
     @serialized
     def processed(self, message_id: str) -> bool:

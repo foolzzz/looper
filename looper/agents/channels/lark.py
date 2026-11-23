@@ -66,6 +66,8 @@ _QUOTE_SECONDS = 15.0
 _THREAD_MESSAGES_KEPT = 1_000
 _DOWNLOAD_MESSAGE_SECONDS = 60.0
 _CATCHUP_MAX_AGE = 15 * 60
+_CATCHUP_RETRY_DELAYS = (30, 60, 120, 300, 600)
+_CATCHUP_MAX_ATTEMPTS = 10
 _CATCHUP_OVERLAP = 10
 _CATCHUP_MAX_CHATS = 100
 _CATCHUP_MAX_PAGES = 5
@@ -176,6 +178,7 @@ class LarkChannelAdapter(ChannelAdapter):
     """Bridge a Lark transport and the agent message bus."""
 
     _RESTART_SECONDS = 10.0
+    _catchup_retry_wait = staticmethod(asyncio.sleep)
 
     def __init__(
         self,
@@ -236,6 +239,8 @@ class LarkChannelAdapter(ChannelAdapter):
         self._outbound_task: asyncio.Task[Any] | None = None
         self._collector_task: asyncio.Task[Any] | None = None
         self._catchup_task: asyncio.Task[Any] | None = None
+        self._catchup_retry_task: asyncio.Task[Any] | None = None
+        self._catchup_status: dict[str, Any] = {"pending": 0, "dropped": 0, "windows": []}
         self._heartbeat_task: asyncio.Task[Any] | None = None
         self._bot_poll_task: asyncio.Task[Any] | None = None
         self._bot_poll_logged_at: float | None = None
@@ -276,6 +281,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 await self._inbox.defer_discovery(boundary - _CATCHUP_OVERLAP, time())
             # Keep the live boundary until the consumer is healthy.
             await self._inbox.checkpoint(boundary if boundary is not None else time())
+            self._catchup_status = await self._inbox.catchup_status()
         else:
             boundary = None
             if self._resolve_chat is not None and any(
@@ -293,7 +299,7 @@ class LarkChannelAdapter(ChannelAdapter):
         self._outbound_task = asyncio.create_task(self._outbound_loop())
         self._collector_task = asyncio.create_task(self._event_collector_loop())
         if self._inbox is not None:
-            self._catchup_task = asyncio.create_task(self._catch_up(boundary))
+            self._catchup_task = asyncio.create_task(self._startup_catchup(boundary))
             self._heartbeat_task = asyncio.create_task(self._heartbeat())
             self._bot_poll_task = asyncio.create_task(self._bot_poll_loop())
         logger.info("%s adapter started", self.channel_id)
@@ -305,7 +311,8 @@ class LarkChannelAdapter(ChannelAdapter):
                  and ready is not None and ready.is_set())
         stopped_at = time()
         self._running = False
-        for task in (self._bot_poll_task, self._heartbeat_task, self._catchup_task, self._outbound_task, self._collector_task):
+        for task in (self._bot_poll_task, self._heartbeat_task, self._catchup_task, self._catchup_retry_task,
+                     self._outbound_task, self._collector_task):
             if task:
                 task.cancel()
                 try:
@@ -717,6 +724,8 @@ class LarkChannelAdapter(ChannelAdapter):
             "active_conversations": len(self._correlation_chat),
         }
 
+        if self.channel_type == "lark":
+            info["catchup"] = self._catchup_status
         if self._transport.kind is LarkTransportKind.CLI:
             info["lark_cli_available"] = self._transport.available()
         else:
@@ -755,7 +764,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 if (self._inbox is not None and (sender.get("sender_type") or sender.get("type")) in {"app", "bot"}
                         and not message.get("deleted") and created.at <= end):
                     await self._inbox.remember_bot(chat_id, created.at)
-                if created.before(start) or created.before(time() - _CATCHUP_MAX_AGE):
+                if created.before(start) or (bots_only and created.before(time() - _CATCHUP_MAX_AGE)):
                     stats["too_old"] += 1
                     continue
                 if message.get("deleted") or created.at > end:
@@ -858,76 +867,94 @@ class LarkChannelAdapter(ChannelAdapter):
                                       for message in reversed(page["messages"])]}, chat_id,
                 start=start, end=end, stats=stats, bots_only=bots_only)
 
+    async def _startup_catchup(self, boundary: float | None) -> None:
+        await self._catch_up(boundary)
+        if self._running and self._catchup_status["pending"]:
+            self._catchup_retry_task = asyncio.create_task(self._retry_catchup())
+
+    async def _retry_catchup(self) -> None:
+        retry = 0
+        while self._running and self._catchup_status["pending"]:
+            delay = _CATCHUP_RETRY_DELAYS[min(retry, len(_CATCHUP_RETRY_DELAYS) - 1)]
+            await self._catchup_retry_wait(delay)
+            if not self._running:
+                return
+            # No new discovery or live window: only the durable work still owed.
+            await self._catch_up(None)
+            retry += 1
+
     async def _catch_up(self, boundary: float | None) -> None:
         stats = dict(chats_scanned=0, messages_found=0, handled=0, duplicates=0, too_old=0, failures=0,
-                     debt_windows_dropped=0, threads_scanned=0, thread_failures=0, thread_roots_capped=0)
+                     threads_scanned=0, thread_failures=0, thread_roots_capped=0)
         expired = boundary is not None and time() - boundary > _CATCHUP_MAX_AGE
+        discovering = False
+        waiting_for_consumer = False
         try:
             assert self._inbox is not None
             debts = await self._inbox.debts()
-            cutoff = time() - _CATCHUP_MAX_AGE
-            for chat_id, (start, end) in list(debts.items()):
-                if start < cutoff:
-                    stats["debt_windows_dropped"] += 1
-                    logger.warning("%s: catch-up debt expired chat=%s start=%s end=%s skipped_seconds=%s "
-                                   "debt_windows_dropped=1", self.channel_id, chat_id, start, min(end, cutoff),
-                                   min(end, cutoff) - start)
-                    if end <= cutoff:
-                        await self._inbox.complete(chat_id)
-                        del debts[chat_id]
-                    else:
-                        debts[chat_id] = (cutoff, end)
-                        await self._inbox.defer(chat_id, cutoff, end)
             discovery = await self._inbox.discovery()
             live_start = boundary - _CATCHUP_OVERLAP if boundary is not None and not expired else None
+            live_end = time()
             if discovery is not None:
-                if discovery[1] <= cutoff:
-                    await self._inbox.complete_discovery()
-                    logger.warning("%s: catch-up discovery expired skipped_windows=1", self.channel_id)
-                else:
-                    pending_start = max(discovery[0], cutoff)
-                    live_start = min(live_start, pending_start) if live_start is not None else pending_start
+                live_start = min(live_start, discovery[0]) if live_start is not None else discovery[0]
+                live_end = max(live_end, discovery[1]) if boundary is not None else discovery[1]
             if (live_start is None and not debts) or not hasattr(self._transport, "list_messages"):
                 return
-            chats = await self._catchup_chats()
+            discovering = live_start is not None
+            chats = await self._catchup_chats() if discovering else []
             # Persist all planned work before awaiting history: live checkpoints can
             # advance independently, even if startup is cancelled halfway through.
-            windows: dict[str, float] = {}
-            for chat_id in dict.fromkeys([*debts, *chats]):
-                if live_start is None and chat_id not in debts:
-                    continue
-                owed = debts.get(chat_id)
-                start = min(live_start, owed[0]) if live_start is not None and owed else (
-                    live_start if live_start is not None else owed[0])
-                assert start is not None
-                windows[chat_id] = start
-                await self._inbox.defer(chat_id, start, time())
-            if ready := getattr(self._transport, "consumer_started", None):
-                await asyncio.wait_for(ready.wait(), timeout=60)
-            end = time()
-            for chat_id, start in windows.items():
+            windows = dict(debts)
+            if live_start is not None:
+                for chat_id in dict.fromkeys([*debts, *chats]):
+                    owed = debts.get(chat_id)
+                    windows[chat_id] = (min(live_start, owed[0]) if owed else live_start,
+                                        max(live_end, owed[1]) if owed else live_end)
+            for chat_id, (start, end) in windows.items():
                 await self._inbox.defer(chat_id, start, end)
-            await self._inbox.complete_discovery()
-            for chat_id, start in list(windows.items())[:_CATCHUP_MAX_CHATS]:
+            if ready := getattr(self._transport, "consumer_started", None):
+                waiting_for_consumer = True
+                await asyncio.wait_for(ready.wait(), timeout=60)
+                waiting_for_consumer = False
+            if discovering:
+                # Include messages arriving while the live consumer was becoming ready.
+                end = time() if boundary is not None else live_end
+                for chat_id, (start, previous_end) in windows.items():
+                    windows[chat_id] = (start, max(end, previous_end))
+                    await self._inbox.defer(chat_id, *windows[chat_id])
+                await self._inbox.complete_discovery()
+            discovering = False
+            for chat_id, (start, end) in list(windows.items())[:_CATCHUP_MAX_CHATS]:
                 stats["chats_scanned"] += 1
-                failures = stats["failures"]
+                failures = stats["failures"] + stats["thread_failures"]
                 try:
                     async for page in self._history_pages(
                         self._transport.list_messages, chat_id, start=start, end=end,  # type: ignore[attr-defined]
                     ):
                         await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
                     await self._catchup_threads(chat_id, start=start, end=end, stats=stats)
-                    if failures == stats["failures"]:
+                    if failures == stats["failures"] + stats["thread_failures"]:
                         await self._inbox.complete(chat_id)
+                        continue
                 except Exception:
                     stats["failures"] += 1
                     logger.warning("%s: catch-up chat failed chat=%s", self.channel_id, chat_id, exc_info=True)
+                await self._inbox.fail_catchup(chat_id, _CATCHUP_MAX_ATTEMPTS)
         except Exception:
             stats["failures"] += 1
             logger.warning("%s: catch-up discovery failed", self.channel_id, exc_info=True)
+            if self._inbox is not None:
+                if discovering:
+                    await self._inbox.fail_catchup(None, _CATCHUP_MAX_ATTEMPTS)
+                if waiting_for_consumer:
+                    for chat_id in await self._inbox.debts():
+                        await self._inbox.fail_catchup(chat_id, _CATCHUP_MAX_ATTEMPTS)
         finally:
-            logger.info("lark_catchup channel=%s boundary=%s boundary_expired=%s %s", self.channel_id, boundary,
-                        expired, " ".join(f"{key}={value}" for key, value in stats.items()))
+            if self._inbox is not None:
+                self._catchup_status = await self._inbox.catchup_status()
+            logger.info("lark_catchup channel=%s boundary=%s boundary_expired=%s %s pending=%s dropped=%s",
+                        self.channel_id, boundary, expired, " ".join(f"{key}={value}" for key, value in stats.items()),
+                        self._catchup_status["pending"], self._catchup_status["dropped"])
 
     async def _bound_chats(self) -> list[str]:
         from ...db.chat_bindings import list_bindings
@@ -1068,8 +1095,6 @@ class LarkChannelAdapter(ChannelAdapter):
             if self._inbox is not None and message_id and await self._inbox.processed(message_id):
                 return "duplicate"
             created = event.get("_catchup_created_at")
-            if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
-                return "too_old"
             if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
                     and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
                 await self._inbox.remember_bot(event["chat_id"], time())

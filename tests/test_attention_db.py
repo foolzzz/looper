@@ -151,6 +151,38 @@ def test_deliveries_lists_what_may_not_have_arrived_in_the_window(monkeypatch):
     run_db(check, monkeypatch, timeout=20)
 
 
+def test_dropped_catchup_windows_stay_in_deliveries_until_recovered(monkeypatch):
+    checks = [
+        {"id": "lark_catchup:channel-lark:chat-pending:100:pending", "status": "warn",
+         "label": "Lark catch-up pending", "detail": "Pending synthetic window", "fix": "Retrying automatically"},
+        {"id": "lark_catchup:channel-lark:chat-dropped:200:dropped", "status": "fail",
+         "label": "Lark catch-up dropped", "detail": "chat-dropped: 1970-01-01T00:03:20Z–00:04:20Z; retry_exhausted",
+         "fix": "Check the chat and forward any missed messages to Looper."},
+    ]
+
+    async def read_checks():
+        return checks
+
+    async def check(pool):
+        monkeypatch.setattr(attention, "_status_checks", read_checks)
+        summary = await attention.collect()
+        deliveries = section(summary, "deliveries")
+        assert deliveries["count"] == 1
+        (item,) = deliveries["items"]
+        assert item["title"] == checks[1]["detail"]
+        assert item["facts"]["source"] == "catchup" and item["facts"]["state"] == "dropped"
+        assert item["facts"]["fix"] == checks[1]["fix"] and item["href"] == "#settings/channels"
+        assert await attention.earliest("deliveries") == item
+        text = attention.summary_text(summary)
+        assert "飞书消息补收失败" in text and "chat-dropped" in text
+        monkeypatch.setattr(attention, "SHOWN", 0)
+        assert section(await attention.collect(), "deliveries")["count"] == 1
+        checks.clear()
+        assert section(await attention.collect(), "deliveries")["count"] == 0
+
+    run_db(check, monkeypatch, timeout=20)
+
+
 def test_confirmations_come_from_each_managers_memory_and_are_unknown_without_them(monkeypatch):
     def ops(*waiting):
         return SimpleNamespace(waiting_confirmations=lambda: list(waiting))

@@ -34,7 +34,7 @@ const HOW: Partial<Record<AttentionKind, string>> = {
   confirmations: "Reply 确认 in the chat that asked, before it lapses; anything else drops it.",
   intents: "Build or reject each one on the Intents page, or reply 建 / 驳回 with its number in your chat.",
   ledger: "Confirm, close or amend them through the Manager, or with looper ledger on this machine.",
-  deliveries: "Looper never sends these again: check the chat, and resend by hand if it is missing.",
+  deliveries: "检查聊天；如果缺少消息，请重新发送，或将未补收的消息转发给 Looper。",
 };
 
 const ALERTS: Record<string, string> = {
@@ -43,6 +43,7 @@ const ALERTS: Record<string, string> = {
 const LEDGER_KINDS: Record<string, string> = { pending: "to-do", decision: "decision to confirm", work_item: "work item" };
 const DELIVERY_SOURCES: Record<string, string> = {
   subscription: "Subscription push", intent: "Intent message", task_end: "Task end notice",
+  catchup: "飞书消息补收失败",
 };
 
 const text = (value: unknown) => (typeof value === "string" ? value : "");
@@ -76,7 +77,8 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
         badges: facts.overdue === true ? ["overdue"] : [] };
     case "deliveries":
       return { line: parts(DELIVERY_SOURCES[text(facts.source)] ?? text(facts.source), ref,
-        text(facts.channel) && `to ${channelLabel(text(facts.channel))}`), badges: [] };
+        text(facts.channel) && `${facts.source === "catchup" ? "来自" : "to"} ${channelLabel(text(facts.channel))}`,
+        text(facts.fix)), badges: [] };
   }
 }
 
