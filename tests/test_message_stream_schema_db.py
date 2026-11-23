@@ -6,7 +6,7 @@ import pytest
 from looper.db import connection
 from tests import memory_support as memory
 from tests.bridge_schema_support import structure
-from tests.db_support import DSN, fresh_connection, run_db
+from tests.db_support import DSN, drop_tables, fresh_connection, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -70,12 +70,15 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
         async with fresh_connection() as fresh:
             await connection.ensure_schema(fresh)
             expected = await structure(fresh)
-        await pool.execute(memory.DROP_MEMORY + "DROP FUNCTION triage_drop_event() CASCADE; " + "; ".join(f"DROP TABLE {table}" for table in tables)
-                           + "; DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions', "
-                           "'subscription_rules', 'subscription_lookback', 'message_leads', 'event_triage', 'event_triage_online')")
+        await pool.execute(memory.DROP_MEMORY + "DROP FUNCTION triage_drop_event() CASCADE")
+        restore = await drop_tables(pool, *tables)
+        await pool.execute("DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions', "
+                           "'subscription_rules', 'subscription_lookback', 'message_leads', 'event_triage', "
+                           "'event_triage_online')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
+        await restore()
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
             assert await structure(conn) == expected
@@ -97,7 +100,8 @@ def test_deleting_a_run_does_not_scan_the_events(monkeypatch):
 
 def test_existing_stream_gets_deletion_and_retention_schema(monkeypatch):
     async def check(pool):
-        await pool.execute("DROP TABLE source_deletions; ALTER TABLE event_sources DROP COLUMN retention_last_at; "
+        restore = await drop_tables(pool, "source_deletions")
+        await pool.execute("ALTER TABLE event_sources DROP COLUMN retention_last_at; "
                            "ALTER TABLE source_runs DROP COLUMN IF EXISTS skipped_by_deletion; "
                            "DELETE FROM schema_migrations WHERE name = 'message_stream_deletions'")
         async with pool.acquire() as conn:
@@ -110,6 +114,7 @@ def test_existing_stream_gets_deletion_and_retention_schema(monkeypatch):
                 "AND relation = 'source_events'::regclass AND granted")
             assert not {row["mode"] for row in locks} & {
                 "ShareLock", "ShareRowExclusiveLock", "ExclusiveLock", "AccessExclusiveLock"}
+        await restore()
         await source(pool)
         assert await pool.fetchval("SELECT retention_last_at FROM event_sources") is None
         await pool.execute("INSERT INTO source_runs (source_id, mode, trigger, status) "

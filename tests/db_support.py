@@ -145,6 +145,31 @@ def run_with_models(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.
     run_db(test, monkeypatch, setup=setup, timeout=30)
 
 
+async def drop_tables(conn: Any, *tables: str) -> Callable[[], Awaitable[None]]:
+    """Drop ``tables`` in one statement, as a database from before them lacks them, and return what puts back the
+    foreign keys other tables have into them.
+
+    A table added later may point at one an upgrade test drops. Its migration is not the one under test, so it stays:
+    only its foreign keys into ``tables`` are set aside, and a new table never has to join an older test's list.
+    Await the returned function once the upgrade has recreated the tables; a key no longer fitting them fails there.
+    """
+    keys = await conn.fetch(
+        "SELECT conrelid::regclass::text AS dependent, conname, pg_get_constraintdef(oid) AS definition "
+        "FROM pg_constraint WHERE contype = 'f' "
+        "AND confrelid = ANY(SELECT to_regclass(name) FROM unnest($1::text[]) AS name) "
+        "AND conrelid <> ALL(SELECT to_regclass(name) FROM unnest($1::text[]) AS name) "
+        "ORDER BY 1, 2", list(tables))
+    for key in keys:
+        await conn.execute(f'ALTER TABLE {key["dependent"]} DROP CONSTRAINT "{key["conname"]}"')
+    await conn.execute(f"DROP TABLE {', '.join(tables)}")
+
+    async def restore() -> None:
+        for key in keys:
+            await conn.execute(f'ALTER TABLE {key["dependent"]} ADD CONSTRAINT "{key["conname"]}" {key["definition"]}')
+
+    return restore
+
+
 async def until(check: Callable[[], Any], what: str = "the condition", timeout: float = 15.0) -> None:
     """Wait until ``check()`` holds, looking every 10 ms; fail after ``timeout`` seconds."""
     loop = asyncio.get_running_loop()
