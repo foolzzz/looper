@@ -902,6 +902,37 @@ describe("subscription schedules", () => {
     expect(container.textContent).toContain("Skipped (a prompt hook blocked it)");
   });
 
+  it("shows triage category counts on a triage run and leaves other runs unchanged", async () => {
+    const base = { from_seq: 10, to_seq: 31, events_in_window: 21, events_selected: 18, events_too_old: 2,
+      events_over_cap: 1, record_id: null, notification_id: null, output_text: null };
+    const triage = {
+      run_id: "run-triage", status: "completed", trigger: "scheduled", firings: 1, scheduled_for: "2026-11-19T10:05:00Z",
+      subscription: { ...base, outcome: "extracted", extract_counts: {
+        important: 1, digest: 0, ignore: 2, uncited: 1, raised: 0, dropped: { missing_source: 3 } } },
+    } as unknown as ScheduleRunInfo;
+    const page = (run: ScheduleRunInfo) => vi.fn(async (url: RequestInfo | URL) => {
+      if (url === "/api/v1/schedule_admin/runs") return Response.json({ status: "ok", result: { runs: [run],
+        next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 } } });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", page(triage));
+    await act(async () => root.render(<RunHistory schedule={subscription(null)} open version={0} />));
+    const text = container.textContent ?? "";
+    expect(text).toContain("18 of 21 messages read (2 too old, 1 over the cap)");
+    expect(text).toContain("events 11–31");
+    expect(text).toContain("important 1 · digest 0 · ignore 2 · uncited 1 · raised 0 · dropped 3");
+    const leads = {
+      run_id: "run-leads", status: "completed", trigger: "scheduled", firings: 1, scheduled_for: "2026-11-19T10:05:00Z",
+      subscription: { ...base, outcome: "extracted", extract_counts: { new: 4, merged: 1 } },
+    } as unknown as ScheduleRunInfo;
+    vi.stubGlobal("fetch", page(leads));
+    await act(async () => root.render(<RunHistory schedule={subscription(null)} open version={1} />));
+    const again = container.textContent ?? "";
+    expect(again).toContain("18 of 21 messages read (2 too old, 1 over the cap)");
+    expect(again).not.toContain("important 1");
+    expect(again).not.toContain("uncited");
+  });
+
   it("offers the subscription type for a new schedule and sends its stream with the create", async () => {
     const writes: Record<string, unknown>[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {

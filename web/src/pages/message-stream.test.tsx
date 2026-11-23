@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageStreamPage } from "@/pages/message-stream";
 import {
   configureMessageStream, fetchMessageStream, fetchMessageStreamRuns, fetchMessageStreamChats,
-  setMessageStreamChat, previewMessageStreamDeletion, deleteMessageStream,
+  setMessageStreamChat, previewMessageStreamDeletion, deleteMessageStream, triageWhy,
   type MessageStreamRun, type MessageStreamSource,
 } from "@/lib/api";
 import { leadsChats, leadsSearch, leadsSettingsGet } from "@/lib/api-leads";
@@ -14,7 +14,7 @@ vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
   fetchMessageStream: vi.fn(), fetchMessageStreamRuns: vi.fn(), configureMessageStream: vi.fn(),
   fetchMessageStreamChats: vi.fn(), setMessageStreamChat: vi.fn(),
-  previewMessageStreamDeletion: vi.fn(), deleteMessageStream: vi.fn(),
+  previewMessageStreamDeletion: vi.fn(), deleteMessageStream: vi.fn(), triageWhy: vi.fn(),
 }));
 vi.mock("@/lib/api-leads", () => ({
   leadsSettingsGet: vi.fn(), leadsSearch: vi.fn(), leadsChats: vi.fn(),
@@ -275,6 +275,29 @@ describe("MessageStreamPage", () => {
     await show();
     expect(container.textContent).toContain("Deleted chat");
     expect(container.querySelector<HTMLButtonElement>('button[aria-label="Include chat-deleted"]')?.disabled).toBe(true);
+  });
+
+  it("looks up why a message was not reported and shows a failed read", async () => {
+    vi.mocked(fetchMessageStream).mockResolvedValue({ sources: [source()] });
+    vi.mocked(triageWhy).mockResolvedValueOnce({
+      case: "event", event_id: "E-7", category: "important", reason: "synthetic-reason-delta",
+      reason_kind: "model", handling: "not handed to the Manager yet (that step is not built)",
+    });
+    await show();
+    expect(container.textContent).toContain("1,234");
+    const form = container.querySelector<HTMLFormElement>('form[aria-label="为什么没告诉我"]')!;
+    await change("#why-message", "om_synthetic");
+    await act(async () => { form.requestSubmit(); });
+    expect(triageWhy).toHaveBeenCalledWith("om_synthetic");
+    const text = container.textContent ?? "";
+    expect(text).toContain("有事件引用（重要）");
+    expect(text).toContain("E-7");
+    expect(text).toContain("synthetic-reason-delta");
+    expect(text).toContain("not handed to the Manager yet (that step is not built)");
+    vi.mocked(triageWhy).mockRejectedValueOnce(new Error("the read failed"));
+    await act(async () => { form.requestSubmit(); });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("the read failed");
+    expect(container.textContent).not.toContain("E-7");
   });
 
 });
