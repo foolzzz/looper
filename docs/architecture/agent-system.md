@@ -6432,10 +6432,12 @@ writes what it wrote before, byte for byte.
   (`from_operator`): a Lark or Telegram message, button or `/gate` command is when it came from the operator's own
   direct chat (`gate_service.sender_is_operator`; not when the operator's id cannot be read); a Manager or client
   call is when it ran in the operator's own turn or with the operator's token (`ops.service.operator_call`); the
-  dashboard's are. A message that reached a closed gate keeps it as the supplement it becomes. The Planner's
-  [GATE] turn fences a user's message whose `from_operator` is not TRUE (`gate_message`, its author inside the
-  block), and its [CHAT] and [RESTART] turns such a supplement (`supplement`); NULL (rows from before the column)
-  is fenced too.
+  dashboard's are, a `/gate` command there too unless an API client sent it. A message that reached a closed gate
+  keeps it as the supplement it becomes. The Planner's [GATE] turn fences a user's message whose `from_operator`
+  is not TRUE (`gate_message`, an empty end of the discussion too, its author inside the block). Such a supplement
+  is a `supplement` block wherever the journal shows it: the [CHAT] and [RESTART] turns' new and earlier ones,
+  the plan view's progress, the PLAN turn and the Workers' and Reviewers' task section (not the Planner's own gate
+  conclusion). NULL (rows from before the column) is fenced too.
 
 ### Turns Claude runs on its own
 
