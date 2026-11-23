@@ -10,6 +10,7 @@
  "agent_settings.update_system": "inside",
  "allowed_profiles.get": "inside",
  "allowed_profiles.replace": "inside",
+ "attention.settings_get": "inside",
  "attention.summary": "inside",
  "auth.clear_password": "inside",
  "auth.set_password": "inside",

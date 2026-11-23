@@ -201,6 +201,21 @@ def test_a_source_that_cannot_be_read_is_an_error_not_an_empty_section(monkeypat
     run_db(check, monkeypatch, timeout=20)
 
 
+@pytest.mark.parametrize("value", [None, "false", "true"])
+def test_settings_read_on_a_fresh_database_without_operator_identity(monkeypatch, tmp_path, value):
+    async def check(pool):
+        if value is not None:
+            await setting(pool, attention.ENABLED_KEY, value)
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("attention.settings_get")
+            assert status == 200, answer
+            assert answer["result"] == {"enabled": value == "true"}
+            status, answer = await call("attention.settings_get", client=True)
+            assert status == 403, answer
+
+    run_db(check, monkeypatch, timeout=60)
+
+
 def test_the_api_is_the_operators_and_answers_conflict_while_off(monkeypatch, tmp_path):
     async def check(pool):
         await sup.seed(pool)
