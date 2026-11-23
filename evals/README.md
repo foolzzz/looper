@@ -641,6 +641,20 @@ above say, with `--dialogs leads_background,leads_dont_search,leads_conflict,lea
 `status` and `confirm_create_start` with leads off show that the default path is unchanged. Group chats, other
 senders and turning leads off are unit tests (`tests/test_leads_manager_tool_db.py`).
 
+#### Delivery recovery
+
+`tools_only_no_text` enables `manager.delivery_guard.enabled` through its operator-only operation. In fake
+mode the first turn reads the projects and ends without text, and the hidden follow-up delivers the answer.
+The check requires two records in the same session, the exact hidden input and the follow-up annotation.
+Real models may answer immediately; that checks normal delivery with the guard enabled, rather than forcing
+them to produce an empty turn.
+
+`dialogs --delivery-guard` enables the guard in every selected dialog's disposable server. The JSON records
+the number of hidden follow-ups per dialog (`followups`), and the Markdown report gives their total. Select
+the affected tools and reply dialogs explicitly with `--dialogs`; run fake mode first. Real-mode comparisons
+require separate authorization: Sonnet at two reps and the Opus xhigh Manager at one rep, each with a $3
+total cap and the guard on. A fake pass checks wiring, not model behavior.
+
 #### The Manager's state block
 
 `--stable-context` turns `manager.stable_context` on in every dialog's database before its first message, so the
@@ -846,6 +860,7 @@ database, a disposable `looper serve`, and fake or real mode.
 
 | dialog | what it checks |
 |---|---|
+| `tools_only_no_text` | the delivery guard recovers a successful tool-only turn with a hidden follow-up; fake mode requires two records in the same session and the recovery annotation |
 | `workflow_named` | a task created after confirmation uses the workflow the user named, stores its snapshot and names it in the reply |
 | `workflow_unspecified` | with a workflow available but none requested, a confirmed task on a project without a default uses no workflow |
 | `template_review_task` | a scenario Manager (`code-review`, from `docs/examples`): a PR link is restated and confirmation asked before anything is created; 「确认」 creates one task from the `pr_review` template with that link |
@@ -1251,6 +1266,9 @@ uv run --extra test python -m evals.assistant_experience --model sonnet \
 Use `--claude ~/.local/bin/claude` explicitly: the PATH shim hangs inside serve.
 
 Use `--categories time,identity` or `--cases time_now,short_answer` for a subset.
+Add `--turn-context` to enable per-turn context through `turn_context_settings.update`
+on each disposable server and read its timezone through `turn_context_settings.get`;
+the default leaves that switch off. The result records the selected switch.
 `--manager-model` and `--manager-effort` override the selected Manager profile.
 `--jobs > 1` under a total cap requires `--case-budget-usd`, reserving that amount for
 in-flight cases. The runner stops admitting cases at the total cap and checks spending
