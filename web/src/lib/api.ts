@@ -121,6 +121,10 @@ export interface TaskInfo {
   manager_id?: string;
   manager_name?: string | null;
   continues_schedule_session: boolean;
+  /** Required checks whose current evidence failed. Present only on an attention row, and only when one did. */
+  failed_checks?: string[];
+  /** The step database id of the first of `failed_checks`, so the row can open that card. */
+  failed_check_step?: string;
 }
 
 /** The agents that work on one task; their runs make up its cost. */
@@ -2984,6 +2988,19 @@ export interface JournalEntry {
   created_at: string;
 }
 
+/** One acceptance check bound to a criterion (1-based). Omitted on a step that has none. */
+export interface AcceptanceCheck {
+  id: string;
+  criterion: number;
+  type: "command" | "artifact";
+  command: string;
+  timeout_seconds: number;
+  required: boolean;
+  network: boolean;
+  protect: string[];
+  artifact?: string[];
+}
+
 /** A review role a step names. */
 export interface StepReviewRole {
   role: string;
@@ -3008,6 +3025,8 @@ export interface TaskStep {
   instruction: string;
   /** How to tell the step is done, as the Planner wrote it; checked by its Worker and its Reviewer. */
   acceptance_criteria: string[];
+  /** Omitted when the step has none, so a task without checks stays as it was. */
+  checks?: AcceptanceCheck[];
   target_files: string[];
   /** The ids of the steps it needs before it starts. */
   depends_on: string[];

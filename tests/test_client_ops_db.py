@@ -162,3 +162,20 @@ def test_a_call_that_fails_unexpectedly_stays_in_the_trail(monkeypatch: pytest.M
             ("error", "unavailable", asked["confirmation_id"], client.client_id)]
 
     run_db(test, monkeypatch)
+
+
+def test_operator_cancel_control_has_explicit_user_origin(monkeypatch, tmp_path):
+    async def test(pool):
+        await _task(pool, "task-cancel", "executing", await _project(pool))
+        ops = _ops(tmp_path)
+        asked = await ops.call(OPERATOR, "s1", "looper_task_control",
+                               {"task_id": "task-cancel", "action": "cancel"})
+        assert asked["status"] == "needs_confirmation"
+        done = await ops.confirm(OPERATOR, "s1", asked["confirmation_id"])
+        assert done["status"] == "ok"
+        envelope = ops._platform.bus.get_queue("task-router").get_nowait()
+        assert envelope.message_type is MessageType.TASK_CANCEL
+        assert envelope.payload == {"task_id": "task-cancel"}
+        assert envelope.metadata == {"cancel_by": "user"}
+
+    run_db(test, monkeypatch)

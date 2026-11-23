@@ -318,7 +318,7 @@ class ApiSession:
         # An interrupted first request created no durable history to resume, even if init was not observed.
         self._session = (None if result.outcome is Outcome.CANCELLED and result.first_request_failed and not history
                          else sid)
-        return claude_cli.ResidentTurn(event, session_started=True, usage=usage, prompt_sent=True,
+        return claude_cli.ResidentTurn(event, session_started=True, usage=usage, prompt_sent=cancel.prompt_sent,
                                        usage_complete=complete,
                                        stopped=StopMethod.CANCEL if result.outcome is Outcome.CANCELLED or cancel.requested else None)
 
