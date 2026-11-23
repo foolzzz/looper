@@ -520,3 +520,12 @@ def test_upgrade_indexes_an_existing_message_with_a_huge_token(monkeypatch: pyte
         await connection.ensure_schema(pool)
 
     run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("routing", [False, True])
+def test_search_availability_follows_actual_group_session_isolation(monkeypatch, routing):
+    from looper.agents import session_routing
+
+    monkeypatch.setattr(session_routing, "_routing_enabled", routing)
+    expected = session_search.GroupSessions.OWN if routing else session_search.GroupSessions.SHARED
+    assert session_search.group_sessions() is expected

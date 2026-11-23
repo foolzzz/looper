@@ -11,6 +11,34 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 ### Manager (`looper/agents/tiers/manager.py`)
 
+With `manager.metrics.enabled` on (default off, operator only), model user turns
+record `metadata.turn_metrics`: version, origin, chat kind, receipt time, ack kind
+and latency, first-reply latency, top-level tool calls, delivery and replay status.
+Completion turns record origin, tool calls and delivery. Proactive sends record
+their typed source and receipt in `proactive_deliveries`; an operator message
+marks deliveries in that chat from the preceding 30 minutes. All writes run in
+bounded background tasks and failures leave replies unaffected. The read-only
+`manager_metrics.get` operation (also available through the CLI) returns delivery
+counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
+counts in the server timezone and mature, successfully sent delivery reply rates
+for 1–30 days. Housekeeping retains proactive rows for 90 days. This feature owns the table's single named migration:
+one row per message, with the send receipt in `outcome`. `source` includes
+`completion` and `user_reminder`; `chat_kind` is `direct` or `group`.
+Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
+idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries update
+only the receipt, preserving the first decision. Nullable `decision`, `reason`,
+cap and digest fields are reserved for the delivery layer's future `decide()`
+write point.
+Off, turns have no metrics key and sends add no writes.
+The operator-only operations `manager_metrics_settings.get` (body `{}`) and
+`manager_metrics_settings.update` (body `{"enabled": true}`, `false` or `null`)
+read and store the switch; null restores off. Update is high risk and declares
+confirmation; Settings → Chat confirms the change before saving it. Both return
+`{"enabled": boolean}`. `manager_metrics.get` remains the read of measurements.
+Existing `chat_settings` views, schemas and writes stay unchanged for clients.
+The generated CLI exposes the same operations; Lark and Telegram need no new
+control because configuration is operator-only. Dashboard metric widgets are separate.
+
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
@@ -19,14 +47,98 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   to its conversation (the resident runtime and its lifecycle lock, the saved
   session, the turn lock and the turn holding it, the turn's research sources,
   what the next turn is told) is one `ManagerSession`
-  (`looper/agents/tiers/manager_session.py`), `main`, the only one so far: a
-  group chat's turns run in the operator's session, which
-  `session_routing.group_isolation` reports as `shared` for a feature that
-  must not reach a group through it. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  (`looper/agents/tiers/manager_session.py`). Every Manager has `main`; by
+  default it is the only one, and a group chat's turns run in the operator's
+  session. [Session routing](#manager-session-routing) gives the default
+  Manager more. `session_routing.group_isolation` tells a feature that must
+  not reach a group through the operator's context how far a group's turns
+  are kept apart: `shared`, or `isolated` while routing is on. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
   otherwise
+- <a id="manager-session-routing"></a>**Session routing**
+  (`manager.session_routing.enabled`, off by default; Settings → Chat;
+  operator-only, like `manager.sessions.max_resident`): the default Manager
+  runs each conversation in the session its key names
+  (`session_routing.session_key_for`). The dashboard chat (with or without an
+  API client) and the operator's own direct chats are `main`. A Lark or
+  Telegram group (its topics included) is `group:<channel id>:<chat>`, and
+  another allowed sender's direct chat is `dm:<channel id>:<chat>`. A bot
+  with no operator id cannot tell its operator apart, so its direct chats stay
+  in `main`; turning routing on lists such bots.
+  - The operator-only `session_routing.get/update` operations read and store
+    `session_routing_enabled` and `max_resident`; null restores off and 2.
+    Update is high risk and declares confirmation. Turning routing on returns
+    `missing_operator_ids` for bots whose direct chats stay in main. The
+    dashboard and generated CLI use these operations; `chat_settings` keeps
+    only reply stopping, completion turns, research order and the ledger.
+    Lark and Telegram need no new configuration command.
+  - Sessions run in parallel; inside one, messages run in order. The message
+    loop hands each user message to its session's worker. Completion wake-ups
+    resolve the bot's identity before claiming events, then use the event
+    actually claimed to select their worker
+    (`tiers/manager_routing.py`). The worker runs it on that session and only
+    then settles it on the bus (`subscribe(settle=False)`), so a message cut
+    off replays at restart. Messages that run no model turn stay in the loop.
+    An identity read failure retains a previously known identity or pauses
+    processing for retry; it never counts as an unconfigured identity.
+  - `main` stays in `agent_sessions`; the others are rows of
+    `manager_sessions`. A read or write there that fails gives the turn a new
+    session, never `main`'s.
+  - Each non-main resident has its own label (`manager.<kind>.<digest>`,
+    for its logs and session directory), workspace, runtime state, caches, prompts,
+    MCP configuration and binding file under
+    `.local/manager-sessions/<digest>/`. Its MCP entry carries a distinct
+    credential: the server checks that a binding belongs to that credential's
+    session, so learning another binding cannot authorize its calls. Only
+    Looper's platform tools are available: no local file or shell tools,
+    catalog MCP servers, plugins, skills or subagents. Claude Code and the
+    in-process API runtime support this mode; other runtimes refuse a
+    non-main turn without falling back to main. Main's launch is unchanged.
+    Claude Code shares only its CLI login with the operator (the original
+    keychain namespace on macOS), keeping settings and histories separate.
+    A default macOS keychain login retains the original `HOME` so its native
+    refresh locks are shared; the session's explicit Claude configuration,
+    XDG and temporary directories keep its conversation state separate.
+    This tool boundary runs under the
+    server's OS user; it does not sandbox a compromised runtime executable.
+    Calls remain bound until the routed turns end, even after routing is
+    switched off, whatever `chat.stop_enabled` says.
+  - At most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
+    process. Starts reserve capacity atomically, including saved-session
+    restores; successful, failed and cancelled starts release their reservation.
+    A session other than main that would start one at the cap stops
+    the least recently active idle one other than main; its session id stays
+    saved and resumes on its next message. When none is idle, the message
+    waits, with the status 「排队中：其他会话正忙」, until a turn ends. Main
+    never waits and is never stopped for another. With a cap of 1, a session
+    other than main still runs its turn when only main holds a process, and
+    stops it once the turn is over.
+  - `/new` resets only the session it was sent in. In a group or dm session
+    it leaves main's pending confirmations and remembered leads alone. The
+    profile chosen for the session (`/profile`, `select_session_profile`) is
+    main's: another session follows the settings and refuses `/profile`.
+  - Switched off, new messages go to `main` again. Turns under way finish,
+    what main's worker holds keeps its order, and the other sessions'
+    processes stop once idle (the fleet's idle sweep). Their rows and saved
+    runtime histories stay, including across a restart while routing is off.
+  - What a group or dm session sees is its own chat only
+    (`tiers/group_session.py`). Its first turn starts with an opening, not
+    `main`'s resume brief: `[GROUP SESSION] This is the session of one Lark
+    group chat. You do not see the operator's direct chats or other groups.`
+    (Telegram when the bot is; a dm session says `[DIRECT CHAT SESSION]` and
+    "the direct chat of another allowed sender"). Then come the chat's 8 most
+    recent stored messages (`chat_messages` under the chat's own session id),
+    oldest first, one line each, at most 300 characters, as data, without the
+    message being answered. A Telegram group stores none, so its opening says
+    so. A session that starts over (a full context, a changed agent) gets its
+    own handoff and the same excerpt, never other chats. `main`'s brief is
+    unchanged. A group or dm session's turn is not the operator's, so its
+    tools have no leads search or vault reads. A reply out of a dm session goes
+    through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
+    fence enabled, stored user messages in this excerpt use the same typed group or direct-message
+    fence as new messages, with chat and time provenance; assistant messages and handoffs stay unchanged.
 - Acts on Looper only through its platform tools
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells
@@ -130,7 +242,27 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   characters). `db.tasks.task_name` is what lists, headings, the Chat page and
   the end notice show: the title, else the goal id, else the requirement's
   first line, else the task id (a task from before titles)
-- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads), so
+- **Turn context foundation** (`turn_context.py`): typed speaker classification distinguishes the operator,
+  an API client, an allowlisted sender and a member. An operator in a group may authorize operations, while
+  access to private tools still follows the existing operator-turn check. `ManagerOps.call` refuses escalating
+  operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
+  and drops a refused confirmation. A turn with no speaker keeps the existing behavior.
+  Settings → Chat uses the operator-only v1 `turn_context_settings.get` and `turn_context_settings.update`
+  operations to store `manager.turn_context.enabled`
+  (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`
+  (`zh-CN` or `en`, default `zh-CN`). The read includes `server_timezone`; updates validate and write only named
+  fields, are high risk and declare confirmation, and null restores each default. Existing `chat_settings` views,
+  writes and access rules stay unchanged. Enabling returns the enabled bots with no operator id;
+  nobody on those bots can count as the operator. Settings are cached at startup and refreshed after updates.
+  The renderer provides a `[Turn context]` block with local time, speaker, chat and reply language, and its
+  matching contract. Sender display names pass through `untrusted_text.display_name` once during classification:
+  control characters and structural punctuation are removed, whitespace is collapsed, and names are capped at
+  40 characters. The typed speaker category comes first; the name is labelled as sender-set text. Future
+  model-visible sender names in group openers, cards and summaries must use the same helper. Unknown channel
+  types are rejected, and member wording follows the chat kind. **Manager integration is pending:** saving these
+  settings does not yet replace the `Channel:` line, inject the contract or set a turn's speaker. The dashboard, Lark, Telegram and API-client
+  turns therefore retain their current prompt and authorization behavior until that integration lands.
+- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads; with [session routing](#manager-session-routing) on, groups and other senders' direct chats have their own), so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
   direct message`, `Channel: a Lark group chat, from <sender>` (the name the
@@ -2754,6 +2886,60 @@ The tools are Looper's MCP tools, the same on every runtime.
   directly (the tools are the supported way, not an enforced boundary); Looper
   gives no isolation between processes of the same user.
 
+### Memory candidates: what Looper may write to the vault once confirmed
+
+What is worth remembering becomes a memory candidate, staged in PostgreSQL;
+only the operator's confirmation of its exact content lets Looper write it
+into the vault's memory folder
+([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
+PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
+part is the foundation: the tables, the vocabulary, the setting and the
+reads. Nothing proposes, drafts, confirms or writes a candidate yet.
+
+- **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
+  `M-0042`; its kind, state and reason, the least trusted class of its
+  sources, a fingerprint, the current revision's content hash, the
+  confirmation), `memory_candidate_revisions` (the typed changes:
+  `create_note`, `replace_note`, `append_line`, `replace_line`),
+  `memory_candidate_events` (only added), `memory_candidate_sources` (a
+  Manager's propose call, a task's journal entry or a lead; the class is a
+  generated column), `memory_posts` and `memory_tombstones`. The schema keeps
+  what each state needs: a confirmed candidate points, by a composite foreign
+  key, at the operator's confirmation event of its current content hash, from
+  the dashboard or a direct chat; a new revision drops it. A `looper` row
+  (a project's lesson) has its own states and never takes effect from an
+  outside or system source. A deleted source takes a candidate not written
+  yet; a written one keeps only its paths, hashes and commit. A deleted
+  project takes its lessons.
+- **Code** (`looper/agents/memory_model.py`, `looper/db/memory.py`): the
+  kinds and the source classes each accepts (`ALLOWED_CLASSES`: preferences
+  and corrections only from the operator; a lead never becomes one; a task
+  proposes lessons and project facts), the transitions of a `vault` row
+  (`TRANSITIONS`), `content_hash()` (the candidate, its commit subject and
+  its changes, a note's text by its sha256, as canonical JSON) and
+  `fingerprint()` (the kind and the statement without case, spaces or
+  punctuation). `db.memory` makes a candidate from a seed, stores a
+  revision, moves a candidate (a confirmation must name the current hash)
+  and deletes one, leaving a tombstone that stops the same seed from any
+  source but the operator.
+- **The setting** (`system_settings` key `memory_write`, absent: off;
+  `looper/agents/memory_settings.py`): the memory folder inside the
+  knowledge vault (it may not overlap a writable folder), the rules files,
+  each kind's folders and index or pages, the required frontmatter, the
+  sources, the push bot, the pending days and the drafting budgets. Saving
+  it records the main checkout's branch and the commit prefix, and refuses a
+  vault outside git, a detached HEAD, a memory folder whose new notes git
+  ignores, a worktree folder inside the repository and a push bot without
+  the operator's id. It is checked again whenever it is read. It is a local
+  path, so the configuration export leaves it out.
+- **Reads:** `/api/v1/memory/list`, `get`, `settings_get`, `settings_put` and
+  `check` (the read-only preflight: the setting, git, the branch, no merge or
+  rebase under way, no ignored path, the worktree folder, the push bot), all
+  operator-only and none a tool; `looper memory list | show | check`, reading
+  the database directly, refused inside an agent run (exit codes: 0, 1 none
+  found or a check failed, 2 usage, 3 not configured, 4 refused, 5 no such
+  candidate, 6 database unusable).
+
 ### Project skills: skills a project writes
 
 A project can write its own Claude Code skills (`looper/agents/project_skills.py`,
@@ -3407,7 +3593,9 @@ evaluation is required before the original schedule requirement is complete.
   sender allowlist allows. Every message is recorded in
   `schedule_notifications`: `sent`, `failed` with the reason (such as a channel
   that is not running), or `dashboard` (no chat, an alert under `never`, or
-  an alert/recovery for a `deliverable` schedule).
+  an alert/recovery for a `deliverable` schedule, a removed target, or no sender).
+  Pre-send refusals retain their reason in `error`; only messages handed to
+  the sender are recorded as `sent` or `failed`.
 - **Deleting.** A project with schedules is not deleted (409) until they are.
   Deleting a schedule (the project's Schedules tab, the Schedules page, the
   schedule's page, `POST /api/v1/schedule_admin/delete` with `schedule_id`, the Manager's
@@ -3851,6 +4039,46 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
+### Why a run failed (failure classes)
+
+While the system setting `engine.failure_typing` is `record` (`off` by default; [engine reliability
+RFC](rfcs/engine-reliability-v0.zh-CN.md), section 4), the close of a failed run records why it failed as a type
+(`looper/agents/failures.py`): `llm_records.failure_class` (`quota`, `transient`, `environment` or `judgment`),
+`failure_cause` (each cause has one class, and a check constraint holds the pair: `usage_limit`, `rate_limit`;
+`connection_failed`, `provider_overloaded`, `start_timeout`; `runtime_missing`, `login`, `tls`, `profile`; `timeout`,
+`context`, `budget`, `report`, `unknown`), and `metadata.failure` (`signal`: `typed` or `text`, and `resets_at` for a
+used-up window). This step only records: what happens to a failed run, its step and its task is unchanged.
+
+- **Which runs.** A record that ends `failed`, and a Worker's or Reviewer's run whose own report says the step failed
+  (`metadata.outcome` `reported_failed`, `contract` or `files_mismatch`: `judgment`, `report`). A Reviewer's
+  `not_passed` is a verdict, not a failure; an `interrupted` record (Looper stopped the run) has no class.
+- **How.** Looper's own reason comes first: a keeper that did not open its control socket in time is `start_timeout`
+  (`RunStartTimeout`), a missing executable or directory `runtime_missing`, a launch the runtime cannot take
+  `profile`, a run over its time limit `timeout`. Then the runtime adapter's `failure_signal`, then the run's own
+  report, then its spend cap; anything else is `unknown`. The recorder gathers the evidence from every event it
+  accounts, before a record's keep filter, so a processor run (whose record keeps only system and result events) is
+  classified the same way.
+  - Claude Code: the result's `api_error` (`usage_limit_reached`, `connection_failed`), `api_error_status` and
+    `api_error_type`, the stream's rejected `rate_limit_event` (with its `resetsAt`) and the synthetic assistant
+    message's `error`. Text only where an older Claude Code gives none of these.
+  - Codex: the app-server's `codexErrorInfo`, which its `codex_error` events and failed result now carry as
+    `codex_error_info` (with `will_retry`; a retried error is not the run's failure), only when Codex sends one. Codex
+    exec reports messages only, matched against codex-cli 0.169.0's texts for a used-up limit, a rate limit, a model
+    at capacity and a broken stream (`signal: text`).
+  - The API runtime: its loop's error kind, which a failed result now carries (`error_kind`, `error_status`).
+  - Other runtimes give no signal yet: their failures are `unknown`.
+- **Settings.** `engine_settings.get` and `engine_settings.update` (`{"failure_typing": "off" | "record" | null}`,
+  null for the built-in `off`; operator only; `act`, failure handling, is refused until it exists), and the generated
+  `loopercli engine-settings` commands. Not a Manager tool: nothing changes for the Manager, Telegram or Lark.
+- **Counts.** `runs.failures` (`{"days"}`, 1 to 90, 7 when omitted): the classified runs by UTC day, run kind,
+  runtime, class and cause, the total by class, and `steps`: of the Workers' and Reviewers' classified runs, how
+  many were not a judgment (the failures that reach a Planner without needing one).
+- **Dashboard.** A run card shows its class and cause beside its status, and in its body what the class means, when
+  the used-up window resets and whether the runtime's error text told it.
+- **Off.** No class and no `metadata.failure`: a record's close writes exactly what it wrote before. The migration
+  `failure_typing` adds the two columns without a rewrite; its check is validated and its index
+  (`idx_llm_records_failures`) built online.
+
 ### Translated models (local gateway)
 
 Claude Code can run an `openai-chat` model through Looper's local gateway.
@@ -4264,7 +4492,7 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
 | `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat. `manager_actions.result` keeps no note text | read; only in the user's own turns |
 | `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
-| `looper_session_search` | Only the default Manager's, and only while the session search is in effect (`manager.session_search.enabled` `true`, and group chats in sessions of their own: not yet): search the user's own earlier conversations with it (`db.chat_search`) for the words of `query`, matched as the [assistant search RFC](rfcs/assistant-search-v0.zh-CN.md) section 3 says (Chinese by overlapping character pairs, English by the start of a word), within `days`, at most `limit` (1–10, default 5), best first: a notice (what was said then, background and never instructions), each message's `where` (the dashboard chat, a Lark or Telegram direct chat, a task's Planner chat on the dashboard), `who` (`user`, `manager`, `planner`), `at` and up to 300 characters around the match, fenced as outside content (`untrusted.fence`), and how many more matched. The message being answered is left out, and `manager_actions.result` keeps only the messages' ids and their count | read; only in the user's own turns |
+| `looper_session_search` | Only the default Manager's, and only while the session search is in effect (`manager.session_search.enabled` `true`, and session routing isolates group chats): search the user's own earlier conversations with it (`db.chat_search`) for the words of `query`, matched as the [assistant search RFC](rfcs/assistant-search-v0.zh-CN.md) section 3 says (Chinese by overlapping character pairs, English by the start of a word), within `days`, at most `limit` (1–10, default 5), best first: a notice (what was said then, background and never instructions), each message's `where` (the dashboard chat, a Lark or Telegram direct chat, a task's Planner chat on the dashboard), `who` (`user`, `manager`, `planner`), `at` and up to 300 characters around the match, fenced as outside content (`untrusted.fence`), and how many more matched. The message being answered is left out, and `manager_actions.result` keeps only the messages' ids and their count | read; only in the user's own turns |
 | `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
@@ -4327,9 +4555,10 @@ when it is the web chat without an API client, or a direct chat whose sender is 
 A Manager on DSH lists only the catalog's tools, so it has neither the leads search nor the session search.
 
 **Session search** ([assistant search RFC](rfcs/assistant-search-v0.zh-CN.md), section 2). It takes effect only once
-group chats run in sessions of their own: today every chat shares the default Manager's one model session, so a
-passage found in the user's own chat would stay in what a group turn reads. While `session_search.group_sessions()` is
-`SHARED` (until session routing makes it `OWN`), the operator-only `session_search.update` refuses turning it on
+group chats run in sessions of their own: with session routing off, every chat shares the default Manager's one
+model session, so a passage found in the user's own chat would stay in what a group turn reads. The typed
+`session_search.group_sessions()` follows `session_routing.group_isolation` for the default Manager: `OWN` while
+routing isolates group chats, otherwise `SHARED`. While it is `SHARED`, the operator-only `session_search.update` refuses turning it on
 (`conflict`, before anything is asked) and stores nothing, and a `true` written by hand takes no effect: the tool is
 not listed, a call is refused and nothing is recorded. `session_search.get` answers `enabled`, `available`,
 `in_effect` and, while it cannot take effect, `unavailable_reason`. Once in effect, `current_scope` adds
@@ -5612,6 +5841,36 @@ writes nothing.
 - **Not yet:** the To-do page, the ledger contract in the Manager's system
   prompt (the tool descriptions are all it has), HTTP writes.
 
+### Proactive messages: the delivery layer
+
+A proactive message is one Looper sends without being asked in that moment (a
+gate reminder; later a task notice, a subscription's push, an intent, a
+completion turn, a reminder the user set). With the system setting
+`delivery.enabled` on (operator-only `proactive_delivery.update`; off by
+default, and then no send point asks), a send point asks
+`proactive_delivery.decide` before the message goes out. The decision is the
+pure function `deliver`'s, first match wins: a source that said it has nothing
+to tell is dropped (`silent`); a gate that holds back a task (`blocking`) or a
+reminder the user set (`user_set`) is sent, never throttled or counted
+(`urgent`); outside its schedule's or subscription's own active hours it goes
+into the digest; within 5 minutes of the user writing in that chat it is sent
+uncounted (`recent_reply`); between 22:00 and 08:00 in `user.timezone` (else
+the server's own zone) it goes into the digest (`quiet_hours`); a direct chat
+that already had 5 counted messages that local day sends it into the digest
+(`daily_cap`); otherwise it is sent, counted in a direct chat. A deferred
+message's `digest_date` is the local date the next quiet hours end on. The
+decision goes into the message's row of `proactive_deliveries`, the table the
+proactive-message metrics keep (`decision`, `reason`, `counted`, `local_date`,
+`digest_date`, `decided_at`), under the send point's key for the message (a
+gate's `gate-<message id>`, its posts' idempotency key), so a message tried
+again keeps its first decision and the channel's receipt lands on the same
+row; decisions on one chat are taken one at a time, so the cap holds across
+send points. After the post the send point records the receipt (`outcome`
+`sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
+did. Off, the layer writes nothing. Wired so far: gate
+reminders only, which are always `blocking`; a decision that fails is logged
+and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+
 ### Card buttons
 
 A Manager's confirmation and a user gate can be answered with one press of a
@@ -5809,7 +6068,9 @@ and `gate_timeout_seconds`, which check a schedule before a run starts.
   waited for the user for its project's `gate_reminder_hours` since its
   opening, the last message the user or the Planner wrote in it and its last
   reminder: a `reminder` note in its discussion, which the courier posts to
-  the gate's chat, and a line in the task's activity.
+  the gate's chat, and a line in the task's activity. With `delivery.enabled`
+  on, the courier first takes the delivery layer's decision on it (see
+  "Proactive messages: the delivery layer"): blocking, so always sent.
 - **The chat.** A gate's messages also go to a chat (`gate_service.gate_chat`):
   the Lark direct message or group (the requester @-mentioned) or the
   Telegram chat its task came from, else, for a task asked for on the
@@ -6317,8 +6578,9 @@ first turn stay as they were (`tests/test_advisor_off.py` hashes them).
 ### Reviews of outbound actions
 
 Before an agent does something that may leave the operator's machine, `outbound.review` (`looper/agents/outbound.py`,
-the outbound-review RFC) asks a tool-less run whether the operator asked for it, to that target. No tool calls it
-yet; its callers come with the `outbound_review.enabled` switch.
+the outbound-review RFC) asks a tool-less run whether the operator asked for it, to that target. The Managers'
+tool calls are its first caller, through a hook, while the system setting `outbound_review.enabled` is on (default
+off; `outbound_review.get` and `outbound_review.update`).
 
 - **The action** is typed: its tool and action, its `ActionLevel` (`inside`, `operator`, `origin`, `machine`,
   `external`, `unknown`; only `external` and `unknown` are reviewed), its target and a summary code wrote, and the
@@ -6346,6 +6608,76 @@ yet; its callers come with the `outbound_review.enabled` switch.
   row cannot be written in time is blocked. Its free text (the target, the summary, the model's reason) is stored
   masked. The run's record has `run_kind` `outbound_check` and the asking run as its
   `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
+- **The Managers' hook** (`looper/agents/outbound_hook.py`). While the review is on, each Manager's Claude Code
+  carries a PreToolUse hook in its `--settings` (matcher `*`) and reads no settings file (`--setting-sources ""`),
+  so nothing it writes in its working directory turns the hook off. Turning the review on or off changes the
+  command; turning it on also stops each Manager process started without the hook, and no turn or handoff runs in
+  such a process while it is on (checked right before the prompt reaches the process). The hook is
+  `outbound_hook_client.py`, run by path with `python -I`, behind a shell that prints a `deny` whenever the client
+  cannot run or prints nothing. The client sets an alarm before anything else that ends it with a `deny` at
+  `DEADLINE_SEC` (75 s) and moves it to its config's `deadline` before it reads its input; it asks
+  `POST /api/agent/v1/outbound/check` with the Manager's token, waits for the answer at most `CHECK_TIMEOUT_SEC`
+  (60 s), and denies when it gets none; Claude Code waits for the hook `HOOK_TIMEOUT_SEC` (90 s), since it runs a
+  call whose hook failed or timed out. Its config (the URL, the token, the waits) is
+  `<runtime root>/.local/outbound-hook/<manager>.json`, readable by the operator only. Routed sessions have their own
+  config and credential; calls, loaded MCP trust and recent file excerpts stay within that session.
+  - **What runs at once** is decided by the tool's type (`outbound_hook.level_of`): Claude Code's built-in tools have
+    a level each (`BUILTIN_LEVELS`: `Bash` and `Monitor` are `unknown`; `WebSearch`, `WebFetch`, `RemoteTrigger` and
+    `SendMessage` `external`); a tool not listed is `unknown`. Looper's own tools are `inside` here (`ManagerOps.call`
+    runs them). Another MCP server's tools are `unknown`, except the ones the operator declared `inside` for that
+    server (`mcp_tool_levels`, `mcp_tool_levels.get` and `mcp_tool_levels.put`). A name is read only against the
+    servers the Manager's process loaded (`outbound_hook.Trusted`: its library's MCP items and Looper's own), with
+    the full tool name; one that no loaded server or more than one could stand for is `unknown`. An undeclared
+    tool of a read-only MCP server is therefore reviewed in the operator's turns (a few seconds and about 0.003 USD
+    a call) and blocked in every other turn.
+  - **Whose turn:** the call's own, never the turn that runs when it comes. That is the turn whose stream showed
+    its `tool_use` (`ManagerOps.expect`); a subagent's call belongs to the turn of the call that started it
+    (`parent_tool_use_id`). A call Looper cannot place within `PLACE_WAIT_SEC`, or whose turn is over, is no one's.
+  - **What is reviewed:** an `unknown` or `external` call, in the operator's own turn (`operator_identity`); in any
+    other turn, code blocks it. The review sees the leads this turn's searches found and the files the session wrote
+    last (a later `sh s.sh` runs one).
+  - **What code refuses:** a `Write`, `Edit`, `MultiEdit` or `NotebookEdit` of Looper's own files: anything under
+    `<runtime root>/.local` or `ops`, the operator token, or the hook's client (`outbound.refuse`, `protected`).
+  - **A block** is a `deny` whose reason the model reads ("Looper's outbound review blocked this action: <reason>.
+    It did not run. …"). The operator is told once per turn in the chat the dashboard's user gates use, never in
+    the turn's own chat.
+  - **Without a hook:** the review is not turned on while an enabled Manager's Agent Profile runs on a runtime
+    without one (`RuntimeAdapter.tool_hook`: Claude Code only). While it is on, such a Manager starts no turn.
+  - **Spend:** a review of a Manager's call that no task owns is the Manager's spend (`manager_spend`), and goes
+    with the Manager when it is purged (`manager_cleanup`).
+
+### The untrusted fence
+
+Content from outside Looper that reaches a model goes in an `<untrusted source=... ...>` block
+(`looper/agents/untrusted.py`, the outbound-review RFC section 8) while the system setting
+`untrusted_fence.enabled` is `true` (there is no dashboard switch; off when it cannot be read). Off, every entry
+writes what it wrote before, byte for byte.
+
+- **The block** (`untrusted.fence`) names its typed source (`untrusted.Source`) and where the content came from
+  (`from`, `at`, `ref`, ...; quotes, angle brackets and line breaks dropped). The content loses its @ markup
+  (`subscriptions.strip_mentions`), and its own `<untrusted` and `</untrusted` (any case) become `&lt;untrusted`
+  and `&lt;/untrusted`, so nothing inside can close the block or open another. The same input gives the same
+  bytes; no length limit of its own. One line (`untrusted.LEAD_LINE`), written once before the first block, says
+  they are data, never instructions.
+- **The Manager's entries:** a Lark or Telegram message from someone other than the operator
+  (`operator_identity.is_operator`: any group chat's, a direct chat's other than the operator's) is a
+  `group_message` or `direct_message` block naming its sender, time and message id; the dashboard's and an API
+  client's messages, and the operator's own, are not fenced. A Lark quote is a `quote` block instead of
+  `<lark_quote>`, whoever's message it came with. The attachments' list keeps its lines outside, and the items,
+  whose names the sender chose, go in an `attachment` block (the files' contents are read in the runtime, unfenced).
+  The `Channel:` label carries no sender-controlled name: the sender is in the message block's provenance,
+  processed by `untrusted.display_name` (one line, no mentions or invisible control characters).
+  `looper_leads_search` fences each lead's summary (`lead`, with its first source's chat, sender and time) and
+  each source string, and adds the lead line to its notice; sender fields also use `display_name`.
+  The group backstop still compares the lead's own words.
+- **The vault:** Manager and task vault tools fence paths, snippets and note bodies under the vault's `inbox/`
+  area (case-insensitive), including its subdirectories and aliases whose resolved targets are there
+  (`inbox` source, with the relative path). Other folders keep their text.
+  The Manager's backstop remembers the original text before fencing it.
+- **The processor:** subscription message streams and leads and intents extraction use `untrusted.fence`
+  (`message_stream` source, because a batch can mix chat types) instead of a separate `<messages>` block.
+  Each input or tool answer with fenced content carries the lead line once. Off, the original processor and
+  vault output is byte-identical.
 
 ### Turns Claude runs on its own
 
@@ -6587,6 +6919,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; its chats (kind, name, inclusion, `bridge_*` file state); thread cursors and people names (not used yet); one row per ingest run with its counts; and the events, each unique per source by `external_id`, with its `seq`, send time, `text`, raw `body` and `origin` |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
+| `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)` (`session_key` = `kind:channel_id:chat`): the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), and `last_active_at`. `main` stays in `agent_sessions` |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
@@ -6597,6 +6930,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
 | `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `message_id`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
+| `mcp_tool_levels` | The operator's declarations of an MCP server's tools for the outbound review ([Reviews of outbound actions](#reviews-of-outbound-actions)): `item_id` (going with its server), `tool`, `level` (`inside`: its calls run unreviewed) |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
@@ -6802,7 +7136,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 
 ### Pages
 
-- **Dashboard**: what is happening now, read from `GET /api/overview` every 5 s. A warning names each supervisor component that is not running: "is down" with when it restarts, or "keeps crashing" with its restarts in a row (and, when it is up between crashes, that it counts as stable after 5 minutes); else one muted "All components healthy" line. Task counts by group (In progress, Ready, Needs attention, Completed, and Cancelled or Other when they hold a task), each opening the Tasks page on that group (`#tasks?group=<group>`). "Agents running now": a table of the agent runs going on now (`live_runs`: a Manager's or a Planner's turn, a Worker's, a Reviewer's, a consult's or the processor's run, in that order) and the Worker and Reviewer runs "waiting" for room under their task's limit; each row has the role (a Manager's name; the id of the role its task's Planner defined that it runs as), its task and, for a Worker or Reviewer, its step, its runtime and model, the pid of the process serving it, how long it has run, and its TPM, linking to its agent history. TPM is the tokens of the run's usage events in the last 60 s, all four kinds (input, output, cache read, cache write; the breakdown on hover); a runtime that reports usage only when a turn ends (Codex, Coco, Cursor: `RuntimeAdapter.streams_usage` false) shows "—". The header has the total TPM of all agents, runs that ended within the minute included. It is kept in memory: a restart starts empty, and a resumed run's replay is not counted again. The Managers without a row are named below the table: busy ones (before their turn's run starts: the runtime starting, a session switch) and idle ones (between turns). "Running by project": for each project with a task in progress or ready, its running and ready tasks and its running Workers and Reviewers, with the waiting ones (a project has no limits), then how many projects are idle. "Schedules", when there is one: how many are enabled, the next 5 fires in their own zones, the failing schedules (failures in a row or an alert active, with the last run's status and the last success) and today's skipped runs by reason, each linking to its row on the project's Schedules tab. "Today's spend": the runs started since the server's local midnight, provider-priced (money) apart from the subscription equivalent (not billed), and the runs that ended without a cost.
+- **Dashboard**: what is happening now, read from `GET /api/overview` every 5 s. A warning names each supervisor component that is not running: "is down" with when it restarts, or "keeps crashing" with its restarts in a row (and, when it is up between crashes, that it counts as stable after 5 minutes); else one muted "All components healthy" line. Task counts by group (In progress, Ready, Needs attention, Completed, and Cancelled or Other when they hold a task), each opening the Tasks page on that group (`#tasks?group=<group>`). "Agents running now": a table of the agent runs going on now (`live_runs`: a Manager's or a Planner's turn, a Worker's, a Reviewer's, a consult's or the processor's run, in that order) and the Worker and Reviewer runs "waiting" for room under their task's limit; each row has the role (a Manager's name; the id of the role its task's Planner defined that it runs as), its task and, for a Worker or Reviewer, its step, its runtime and model, the pid of the process serving it, how long it has run, and its TPM, linking to its agent history. TPM is the tokens of the run's usage events in the last 60 s, all four kinds (input, output, cache read, cache write; the breakdown on hover); a runtime that reports usage only when a turn ends (Codex, Coco, Cursor: `RuntimeAdapter.streams_usage` false) shows "—". The header has the total TPM of all agents, runs that ended within the minute included. It is kept in memory: a restart starts empty, and a resumed run's replay is not counted again. The Managers without a row are named below the table: busy ones (before their turn's run starts: the runtime starting, a session switch) and idle ones (between turns). "Manager": the Manager's turns and proactive messages from `manager_metrics.get`, read on its own every 60 s over 24 h or 7 d (the choice kept in the browser): ack and first-reply P50 with P95, empty deliveries (turns that delivered no reply: count, share and the turns they are out of), proactive messages per day with the 30-minute reply rate, every local day the window touches (today and 1 or 7 days back, a day without messages shown as 0) by source, and the reply rate by source; "—" for what was not measured. With `manager.metrics.enabled` off it says so, with a link to Settings → Chat (its "记录管家体验指标" box); a failed read shows its error in the group only. "Running by project": for each project with a task in progress or ready, its running and ready tasks and its running Workers and Reviewers, with the waiting ones (a project has no limits), then how many projects are idle. "Schedules", when there is one: how many are enabled, the next 5 fires in their own zones, the failing schedules (failures in a row or an alert active, with the last run's status and the last success) and today's skipped runs by reason, each linking to its row on the project's Schedules tab. "Today's spend": the runs started since the server's local midnight, provider-priced (money) apart from the subscription equivalent (not billed), and the runs that ended without a cost.
 - **Chat history API**: The dashboard reads targets, sessions and messages and saves messages through the operator-only `POST /api/v1/operator_chat/{targets,sessions,messages,save_message}` operations. Database read failures return typed `unavailable` rather than empty history; save failures return `unavailable` rather than claiming persistence succeeded. Client-owned `chat.*` and Telegram/Lark delivery are unchanged.
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`. Its message box stays usable while the Manager replies: Enter queues the message in a staging area above the box (up to 20; the Edit button or ↑ pulls them back into the box, ahead of what is typed), and once a reply ends as `answered` the queued messages go as one message joined by a blank line; after a failed, stopped or confirm reply they go back into the box instead, and they survive a reload (kept per chat in `sessionStorage`). ↑ and ↓ in the box walk the thread's earlier messages (the latest 100, adjacent duplicates collapsed). Esc, or the Stop button that replaces Send while the box is empty, calls `POST /api/chat/stop`; typing `/stop` and Enter does the same. When the Manager's runtime cannot interrupt a reply (`can_interrupt` false), the Stop button shows disabled with "This runtime cannot interrupt a reply." and Esc does nothing. After a reload the page asks `GET /api/chat/turn` whether a reply is still running. A planner's chat has the queue and the history but no Stop. Beside the Manager, a list shows its conversations on every channel (`POST /api/v1/operator_chat/sessions`), grouped as Dashboard chat, loopercli (conversations an API client opened, with the client's name), Lark and Telegram, each the most recently active first, with its last message's start, sender and time and its message count; it is re-read every 10 s and after each answer, and a failed read shows its error. Picking a dashboard chat opens it as the web chat thread; picking a Lark or Telegram conversation shows its newest messages read-only, with their times and no message box, re-read every 10 s, and says when only the newest 200 of more are shown; an answer its channel did not deliver says so under it, with the channel's reason. Below the md breakpoint the list opens from a button in the header.
 - **Tasks**: Task list, newest first, 50 at a time with Load more ("Showing N of M"; the newest page is re-read every 3 s and the older pages loaded stay below it), with project and status filters (several chips at once, listed in the address in chip order, for example `status=init,running,waiting,waiting_user,pending`; with neither `status` nor `group` nor `schedule` the page shows Ready, Running, Waiting, Waiting for you and Pending, and `status=all` shows every task; a single value such as `status=failed` still selects that one filter; `Ready` is ready tasks; `Running` covers tasks whose Planner is planning, executing, verifying or winding down, including the assigned and running statuses; `POST /api/v1/tasks/page` takes `statuses`, one to ten of the same filter names, and returns their union, or `status` for one name, not both; counts stay per filter and count every task under the other filters), time display, each task's cost so far, a "Scheduled" badge linking to the schedule that created the task (with "continues the schedule's Planner session" on the detail page when `continues_schedule_session` is true), Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. On a stopped, failed or cancelled task, Start (here and on its detail page) goes on from its saved plan, and Start over, after an inline confirm, plans it anew (`POST /api/tasks/start` with `start_over`). `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page; `#tasks?group=<group>` lists one task group, shown as a chip that clears it, `#tasks?schedule=<id>` one schedule's tasks, shown as a chip too. With no `status`, a group or a schedule lists every task in it; an explicit `status` still narrows that list. A project link keeps the unfinished default. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
@@ -7092,6 +7426,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/manager_session/{get,select_profile}` | POST | `manager_session.{get,select_profile}` |
 | `/api/v1/operator_chat/{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` | POST | `operator_chat.{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` |
 | `/api/v1/chat_settings/{get,update}` | POST | `chat_settings.{get,update}` |
+| `/api/v1/session_routing/{get,update}` | POST | `session_routing.{get,update}` |
 | `/api/v1/clients/{list,create,revoke}` | POST | `clients.{list,create,revoke}` |
 | `/api/v1/roles/{list,get,update,reset_prompt}` | POST | `roles.{list,get,update,reset_prompt}` |
 | `/api/v1/agent_settings/{get,update_system,update_role}` | POST | `agent_settings.{get,update_system,update_role}` |
@@ -7132,6 +7467,7 @@ The retained private capability protocol is separate from this public inventory:
 |---|---|---|
 | GET | `/api/agent/v1/tools` | Manager, task Planner or run token; only that principal's tools |
 | POST | `/api/agent/v1/ops/:tool` | The same capability token; task/run/turn scope checked before dispatch |
+| POST | `/api/agent/v1/outbound/check` | A Manager's token; its Claude Code's PreToolUse hook asks whether one tool call runs ([Reviews of outbound actions](#reviews-of-outbound-actions)) |
 
 Clients cannot authenticate on the private protocol, obtain its tokens or invoke its private tools through
 `CLIENT_TOOLS`. `/login` (GET/POST), `/logout` (POST), pages and static assets deliver browser authentication
@@ -7365,8 +7701,42 @@ seeded default from before the recommendation was tracked get the current one.
 The Web channel is always on. Telegram and Lark are built in; `looper serve`
 takes no flags for them. At startup it reads `channel_configs`, which
 Settings → Channels edits, and starts each enabled channel. Bot credentials and
-runner configuration require a restart; explicit chat bindings and the top-level
-`bound_chats_only` policy update the running registry immediately after commit.
+runner configuration of running adapters require a restart; explicit chat bindings
+and the top-level `bound_chats_only` policy update the running registry immediately after commit.
+An enabled bot that fails to start retries in the background: transport failures
+wait 30 seconds, doubling up to 10 minutes; credential/configuration failures
+wait 10 minutes between attempts. Each retry reads the saved settings and uses
+the normal adapter start, including chat bindings and catch-up. Disabling or
+deleting the bot cancels pending starts; shutdown cancels all retry tasks.
+System status checks report starting, retrying and failed bots, with the last
+error and next attempt, and clear on success. `channel_configs` responses expose
+the same lifecycle as read-only `runtime` (`starting`, `running`, `retrying`,
+`failed`; null when disabled or not started by this server).
+
+The control plane checks enabled bots every 30 seconds. After a bot has been
+not running, or all its deliveries have failed, for more than
+`channels.down_alert_minutes` (default 10), system status includes a
+`channel_down:<channel_id>` problem. The existing dashboard top banner displays
+it until recovery, refreshing every 30 seconds. Delivery streaks combine
+`schedule_notifications` sent/failed outcomes with notification, post and chat
+delivery receipts; phase updates, streaming deltas, empty replies and missing
+chat routes cannot prove delivery recovery. A successful send ends a delivery
+failure streak. Dashboard-only schedule messages, including pre-send refusals
+for removed targets or missing senders, are not sends.
+
+Each outage also attempts one operator notice through every other enabled,
+healthy bot with an `operator_sender_id`, and one recovery notice when it
+recovers. Neither notice uses the affected bot. With no alternate path, the
+banner remains the operator's alert. Outage transitions and delivery watermarks
+are stored in `system_settings` before sending, preventing repeat notices after
+a restart; an interrupted or failed external notice is not retried. Disabling
+a bot clears its active problem and resets its outage interval.
+
+Operator-only `channel_down_alert.get/update` reads or sets `down_alert_minutes`
+(a positive whole number; null restores 10). The generated CLI exposes these
+same operations. This setting adds no Manager tool, chat setting or channel
+command. Healthy bots send no outage notices and retain their existing message
+content, prompts and command lines.
 
 **A bot per Manager** (stage 2 of the
 [scenario Managers RFC](rfcs/scenario-managers.zh-CN.md)). Each Telegram or
@@ -7640,7 +8010,43 @@ implementation supplies it and is retested.
   markers into the same notation before the shared adapter reads them. All outgoing Lark, Telegram and dashboard chat text redacts stored
   attachment paths, including filenames with spaces and Unicode. Dashboard
   turns with attachments show the final answer without streaming text deltas,
-  so a path split across chunks cannot escape redaction. It sends with `lark-cli im
+  so a path split across chunks cannot escape redaction. With `channels.outbound.enabled` off (the default),
+  both Lark transports retain their original calls and write no outbox rows. Settings → Chat reads and updates
+  `outbound_enabled` through the separate operator-only `outbound_gateway.get/update` operations; the existing
+  `chat_settings` response fields, accepted writes and Manager tools remain unchanged. Gateway updates are
+  high-risk operations with confirmation for callers that require it; null restores each field's default.
+  On, `GatedLarkTransport` routes every write through
+  one gateway per channel, sharing its in-flight cap and both send/reply and total-write token buckets
+  by the verified app id across CLI/Bot channels (defaults 5/s and 15/s),
+  at most four platform calls in flight, classified errors, up to five retries with jitter and
+  `retry_after` (valid delays capped at 60 seconds; non-finite, negative and over-one-day hints ignored),
+  a 15-minute total delivery deadline, a 60-second circuit breaker after five consecutive failures in 30 seconds, and coalesced
+  edits at least one second apart. The same `outbound_gateway.get/update` operations also expose
+  `send_qps`, `write_qps`, `edit_interval_seconds` and `max_in_flight` (integer 1–32). Rate and edit
+  defaults remain **to verify** against the real platform. The Settings switch uses its own request and error
+  state, so an unavailable gateway API does not block other chat controls. Numeric tuning is available through
+  the operator v1 API and its generated CLI; Telegram/Lark chat commands and Manager tools do not configure
+  the gateway. Answers, progress, notices, notifications and posts first enter
+  `channel_outbox`, ordered per chat and concurrent across chats. Caller keys win; otherwise envelope ids
+  and part numbers derive stable keys. The first possibly delivered attempt is saved before platform I/O.
+  Every retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
+  persistence; expired possibly delivered rows become `uncertain` and are never resent. Older rows without
+  an attempt timestamp conservatively use their creation time on upgrade. A delivery past its total deadline
+  becomes `uncertain` if attempted, otherwise `failed`, releasing the chat head even if a saved retry is far
+  in the future. Before platform I/O, the attempt timestamp write has a five-second total deadline, including
+  retries; a database failure releases the app's shared slot and defers the unsent row without spending a retry
+  or tripping the platform breaker. A successful send retries its state write independently without another
+  platform call; claim tokens make a lost claim acknowledgement safe to retry. Restart recovery reuses the same
+  key within the window. Callers wait at most 30 seconds for a receipt,
+  while queued work continues, including after the switch is turned off. Startup also recovers unfinished
+  rows with the switch off in a background task with a 30-second probe/recovery deadline; unavailability adds no warning
+  and cannot block legacy startup, receiving or catch-up. An empty disabled outbox performs no recovery writes. Waiters share in-process
+  completion futures; the scanner sleeps until the earliest unblocked retry or new work. Notifications can
+  carry a caller-supplied event key to deduplicate retries. An insert failure logs a warning and falls back to the gateway. Status
+  lines and reactions use the gateway alone. Housekeeping retains sent rows for seven days and other rows
+  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Telegram wiring
+  and dashboard metrics follow separately; the standalone probe remains independent.
+  The CLI transport sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
   user (`--user-id`); a failed send carries lark-cli's reason. A body that
