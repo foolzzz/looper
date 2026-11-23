@@ -719,23 +719,41 @@ async def hand_on(conn: Db, run_ids: Sequence[str]) -> None:
 
 
 async def spent_since(conn: Db, schedule_id: str, since: datetime) -> float:
-    """What the schedule's runs fired since ``since`` cost: each its recorded cost, a running one its task's so
-    far, as ``task_costs`` counts it."""
+    """What the schedule's runs fired since ``since`` cost.
+
+    A running run counts its task so far, as ``task_costs`` does, and a room consult is part of that cost. A
+    finished run counts its recorded cost. When that record is an older settlement and leaves a room consult out,
+    the live task cost is used instead, and it is not added twice when the settlement already includes the consult.
+    A run with no consult keeps its recorded cost.
+    """
     return (await spent_since_each(conn, [schedule_id], since))[schedule_id]
 
 
 async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -> dict[str, float]:
     """``spent_since`` for each of ``schedule_ids``, in one query."""
+    # ``consult.spent > 0`` is the only reason to leave the recorded cost. A run with no consult stays on
+    # COALESCE(snapshot, live), so later non-consult rows do not move a finished run.
+    role = _SPEND_ROLE.replace("agent_id", "l.agent_id")
     rows = await conn.fetch(
         f"""
-        SELECT r.schedule_id, sum(COALESCE(r.cost_usd::numeric,
-                   (SELECT sum(g.cost_usd) FROM (
-                       SELECT round(sum(l.cost_usd::numeric), 6) AS cost_usd
-                       FROM llm_records l WHERE l.task_id = r.task_id
-                       AND {TASK_SPEND.replace("agent_id", "l.agent_id")}
-                       GROUP BY {_SPEND_ROLE.replace("agent_id", "l.agent_id")}, l.model
-                   ) g))) AS spent
-        FROM schedule_runs r WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
+        SELECT r.schedule_id, sum(
+                   CASE WHEN consult.spent > 0
+                        THEN GREATEST(COALESCE(r.cost_usd::numeric, 0), COALESCE(live.spent, 0))
+                        ELSE COALESCE(r.cost_usd::numeric, live.spent) END) AS spent
+        FROM schedule_runs r
+        LEFT JOIN LATERAL (
+            SELECT sum(g.cost_usd) AS spent FROM (
+                SELECT round(sum(l.cost_usd::numeric), 6) AS cost_usd
+                FROM llm_records l WHERE l.task_id = r.task_id
+                AND {TASK_SPEND.replace("agent_id", "l.agent_id")}
+                GROUP BY {role}, l.model
+            ) g
+        ) live ON true
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(sum(l.cost_usd::numeric), 0) AS spent
+            FROM llm_records l WHERE l.task_id = r.task_id AND ({role}) = 'consult'
+        ) consult ON true
+        WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
         """,
         schedule_ids, since,
     )

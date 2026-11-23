@@ -724,14 +724,15 @@ async def role_runs(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[d
     return [dict(row) for row in rows]
 
 
-# ``_TASK_ROLE`` and ``EQUIVALENT`` of the runs ``r`` of a query that joins their tasks ``t``.
-_RUN_TASK_ROLE = _TASK_ROLE.replace("agent_id", "r.agent_id")
+# ``_SPEND_ROLE`` and ``EQUIVALENT`` of the runs ``r`` of a query that joins their tasks ``t``.
+_RUN_SPEND_ROLE = _SPEND_ROLE.replace("agent_id", "r.agent_id")
 _RUN_EQUIVALENT = EQUIVALENT.replace("metadata", "r.metadata")
-# The runs started in [$1, $2) (a NULL bound is none) and, with $3, those of the tasks of project $3 that make up their
-# cost (``task_costs``).
+# The runs started in [$1, $2) (a NULL bound is none). With $3, only the runs of project $3's tasks that make up
+# their cost, room consults included, the same way ``task_costs`` counts them. A null project does not filter by
+# role, so that total already includes room consults and the Manager.
 _IN_RANGE = (
     "($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) "
-    f"AND ($3::text IS NULL OR (t.project_id = $3 AND {_RUN_TASK_ROLE} IS NOT NULL))"
+    f"AND ($3::text IS NULL OR (t.project_id = $3 AND {_RUN_SPEND_ROLE} IS NOT NULL))"
 )
 _SPEND = f"""count(*) AS runs,
                count(*) FILTER (WHERE r.status = 'running') AS running,
@@ -744,9 +745,10 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
                       manager_id: str | None = None, project_ids: Sequence[str] | None = None,
                       pool: asyncpg.Pool | None = None) -> dict[str, Any]:
     """What every agent's runs started at or after ``since`` (and before ``until``; None for no bound) cost, the
-    Manager's included, split by basis; with ``project_id``, only the runs of that project's tasks that make up
-    their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them); with ``manager_id``, only
-    the runs of that Manager and of its tasks.
+    Manager's included, split by basis. With no ``project_id`` every run in the window is counted, so room consults
+    are already in that total. With ``project_id``, only the runs of that project's tasks that make up their cost,
+    room consults included, the same way ``task_costs`` counts them. With ``manager_id``, only the runs of that
+    Manager and of its tasks.
 
     ``provider_priced_usd`` is money: runs with an API key, at their
     provider's prices (Claude Code's figure for Anthropic's API, Looper's for
@@ -773,8 +775,9 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
 async def task_spend(since: datetime | None, until: datetime | None = None, *, project_id: str | None = None,
                      manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """What each task's runs started in [``since``, ``until``) cost (None for no bound), split by basis as
-    ``spend_since`` splits it, most first: the runs that make up a task's cost (``task_costs``), of the tasks of
-    ``project_id`` only when it is given, of the tasks of ``manager_id`` only when that is. Each row has the task's ``name`` and its ``project_id`` and
+    ``spend_since`` splits it, most first: the runs that make up a task's cost, room consults included, the same
+    way ``task_costs`` counts them, of the tasks of ``project_id`` only when it is given, of the tasks of
+    ``manager_id`` only when that is. Each row has the task's ``name`` and its ``project_id`` and
     ``project_name`` now."""
     from .tasks import task_name
 
@@ -784,7 +787,7 @@ async def task_spend(since: datetime | None, until: datetime | None = None, *, p
         f"""
         SELECT r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name AS project_name, {_SPEND}
         FROM llm_records r JOIN tasks t ON t.id = r.task_id LEFT JOIN projects p ON p.id = t.project_id
-        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL{by_manager}
+        WHERE {_IN_RANGE} AND {_RUN_SPEND_ROLE} IS NOT NULL{by_manager}
         GROUP BY r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name
         ORDER BY sum(r.cost_usd) DESC NULLS LAST, r.task_id
         """,

@@ -194,3 +194,142 @@ def test_explorer_admission_refuses_when_consult_spend_uses_the_rest(tmp_path, m
         admitted = await service.admit(parent, brief, key="after", budget_usd=0.15)
         assert admitted["budget_usd"] == 0.15
     run_db(check, monkeypatch)
+
+
+def _money(row: dict) -> float:
+    return float(row["provider_priced_usd"]) + float(row["equivalent_usd"])
+
+
+def test_schedule_spend_uses_the_live_task_cost_when_a_settlement_left_out_a_consult():
+    """A finished run with no consult keeps its recorded cost. A consult already in the settlement is not added again."""
+    async def check(pool):
+        from looper.db.projects import create_project
+        from looper.db.schedules import spent_since_each
+
+        project = await create_project(name="Settled", pool=pool)
+        fired = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+        await pool.execute(
+            "INSERT INTO tasks (id, project_id, requirement, status) VALUES "
+            "('frozen-task', $1, 'Run', 'completed'), ('included-task', $1, 'Run', 'completed')",
+            project["id"])
+        await pool.execute(
+            "INSERT INTO schedules (id, project_id, name, cron, timezone, requirement) VALUES "
+            "('frozen', $1, 'frozen', '0 0 * * *', 'UTC', 'do the thing'), "
+            "('included', $1, 'included', '0 1 * * *', 'UTC', 'do the thing')",
+            project["id"])
+        await _finish(pool, "worker-frozen", "frozen-task", 0.10, "worker-model")
+        await _finish(pool, "worker-frozen-later", "frozen-task", 0.04, "worker-model")
+        await _finish(pool, "worker-included", "included-task", 0.10, "worker-model")
+        await _finish(pool, "consult-included0001", "included-task", 0.05, "consult-model")
+        await pool.execute(
+            "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status, task_id, cost_usd) "
+            "VALUES ('frozen-run', 'frozen', $1, $1, 'scheduled', 'completed', 'frozen-task', 0.10), "
+            "('included-run', 'included', $1, $1, 'scheduled', 'completed', 'included-task', 0.15)",
+            fired)
+        since = fired - timedelta(seconds=1)
+        spent = await spent_since_each(pool, ["frozen", "included"], since)
+        assert spent["frozen"] == 0.10
+        assert spent["included"] == 0.15
+        await pool.execute("UPDATE schedule_runs SET cost_usd = 0.10 WHERE id = 'included-run'")
+        assert (await spent_since_each(pool, ["included"], since))["included"] == 0.15
+    run_db(check)
+
+
+def test_a_settled_consult_stops_the_next_schedule_run_at_the_daily_budget(monkeypatch, tmp_path):
+    from tests.schedule_support import run_scheduled, with_sender
+    from tests.test_schedule_gate_budget_alerts_db import _fire
+
+    async def test(env):
+        from looper.db.schedules import spent_since
+
+        with_sender(env)
+        sid = (await env.enabled(daily_budget_usd=0.15))["schedule_id"]
+        first = await _fire(env, sid)
+        task_id = first["task_id"]
+        await _finish(env.pool, f"worker-{task_id}", task_id, 0.10, "worker-model")
+        await env.end_task(task_id, "completed")
+        await _finish(env.pool, "consult-schedcap0001", task_id, 0.05, "consult-model")
+        settled = next(run for run in await env.runs(sid) if run["task_id"] == task_id)
+        cost = (await llm_records.task_costs([task_id], pool=env.pool))[task_id]["cost_usd"]
+        since = env.scheduler.day_start(env.clock.now)
+        assert settled["cost_usd"] == 0.10
+        assert cost == 0.15
+        assert await spent_since(env.pool, sid, since) == 0.15
+
+        skipped = await _fire(env, sid)
+        assert (skipped["status"], skipped["task_id"]) == ("skipped_budget", None)
+        assert "daily budget is $0.15" in skipped["error"]
+        assert env.bus.of("task_start") == [task_id]
+        assert await env.pool.fetchval("SELECT count(*) FROM tasks WHERE schedule_id = $1", sid) == 1
+
+        await env.pool.execute("UPDATE schedule_runs SET cost_usd = 0.15 WHERE task_id = $1", task_id)
+        assert await spent_since(env.pool, sid, since) == 0.15
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_projects_total_includes_a_room_consult_the_way_its_task_total_does():
+    async def check(pool):
+        from looper.db.projects import create_project
+
+        grouped = await create_project(name="Grouped", pool=pool)
+        other = await create_project(name="Other spend", pool=pool)
+        await pool.execute(
+            "INSERT INTO tasks (id, project_id, requirement, status) VALUES "
+            "('grouped-task', $1, 'Run', 'running'), ('other-task', $2, 'Run', 'running')",
+            grouped["id"], other["id"])
+        await _finish(pool, "worker-grouped", "grouped-task", 0.10, "worker-model")
+        await _finish(pool, "consult-grouped0001", "grouped-task", 0.05, "consult-model")
+        await _finish(pool, "manager", "grouped-task", 5.0, "manager-model")
+        await _finish(pool, "worker-other", "other-task", 0.40, "worker-model")
+        assert (await llm_records.task_costs(["grouped-task"], pool=pool))["grouped-task"]["cost_usd"] == 0.15
+
+        project_total = await llm_records.spend_since(None, project_id=grouped["id"], pool=pool)
+        assert _money(project_total) == pytest.approx(0.15) and project_total["runs"] == 2
+        [grouped_row] = await llm_records.task_spend(None, project_id=grouped["id"], pool=pool)
+        assert grouped_row["task_id"] == "grouped-task"
+        assert _money(grouped_row) == pytest.approx(0.15) and grouped_row["runs"] == 2
+        other_total = await llm_records.spend_since(None, project_id=other["id"], pool=pool)
+        assert _money(other_total) == pytest.approx(0.40) and other_total["runs"] == 1
+        [other_row] = await llm_records.task_spend(None, project_id=other["id"], pool=pool)
+        assert other_row["task_id"] == "other-task"
+        assert _money(other_row) == pytest.approx(0.40) and other_row["runs"] == 1
+        # No project filter: the global total already included the consult (and the Manager).
+        overall = await llm_records.spend_since(None, pool=pool)
+        assert _money(overall) == pytest.approx(5.55) and overall["runs"] == 4
+    run_db(check)
+
+
+def test_a_consult_makes_the_planner_stop_at_the_task_cap(tmp_path, monkeypatch):
+    async def check(pool):
+        from types import SimpleNamespace
+
+        from looper.agents.project_execution import ProjectExecution
+        from looper.agents.tiers.planner import PlannerAgent, TaskPlan
+        from looper.db.projects import create_project
+
+        project = await create_project(name="Capped", pool=pool)
+        await pool.execute(
+            "INSERT INTO tasks (id, project_id, requirement, status, phase) "
+            "VALUES ('capped-task', $1, 'Run', 'running', 'executing')",
+            project["id"])
+        await _finish(pool, "worker-capped", "capped-task", 0.10, "worker-model")
+        planner = PlannerAgent(task_id="capped-task", runtime_root=tmp_path)
+        planner._execution = ProjectExecution(task_budget_usd=0.15)
+        planner._bus = SimpleNamespace(publish=AsyncMock())
+        plan = TaskPlan(plan_id="plan-capped", goal_id="goal-capped", requirement="Run",
+                        work_dir=str(tmp_path), status="executing")
+        assert await planner._within_budget(plan) is True
+        planner._bus.publish.assert_not_awaited()
+        assert plan.status == "executing"
+        assert await pool.fetchval("SELECT phase FROM tasks WHERE id = 'capped-task'") == "executing"
+
+        await _finish(pool, "consult-capped00001", "capped-task", 0.05, "consult-model")
+        assert await planner._within_budget(plan) is False
+        assert plan.status == "failed"
+        planner._bus.publish.assert_awaited_once()
+        message = planner._bus.publish.await_args.args[0]
+        assert message.payload["fail_kind"] == "task_budget"
+        assert message.payload["status"] == "failed"
+        assert await pool.fetchval("SELECT phase FROM tasks WHERE id = 'capped-task'") == "failed"
+    run_db(check, monkeypatch)
