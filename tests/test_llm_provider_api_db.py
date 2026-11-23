@@ -127,7 +127,8 @@ def test_invalid_creation_is_rejected_before_database_access(monkeypatch, tmp_pa
 def test_vendor_creation_registry_models_and_saved_defaults(monkeypatch, tmp_path):
     async def test(client, pool):
         registry = await client.ok("POST", "/api/v1/registry/view", {})
-        assert {v["vendor_type"] for v in registry["vendor_types"]} == {v.value for v in VendorType}
+        assert {v["vendor_type"] for v in registry["vendor_types"]} == {
+            v.value for v in VendorType if v is not VendorType.ACP_COMMAND}
         assert "provider_presets" not in registry
         assert registry["prices"] and registry["limits"]["secret_mask"] == "***"
         assert registry["runtime_types"] and registry["runtimes"] and registry["profiles"]

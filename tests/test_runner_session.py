@@ -489,3 +489,44 @@ def test_descriptor_fork_round_trip_and_exclusive_saved_session():
         Descriptor.parse(argv + ["--session", "saved"])
     with pytest.raises(ValueError):
         replace(descriptor, session="saved")
+
+
+def test_failure_before_prompting_never_marks_the_prompt_sent(tmp_path):
+    from looper.agents.runtimes.cancel import TurnCancel
+
+    async def exercise():
+        async with connection() as (bridge, reader, writer, _):
+            session, descriptor = await opened(tmp_path, bridge, reader, writer)
+
+            async def specs():
+                writer.close()
+                await bridge._reader_task
+                return []
+            bind(session)
+            session.set_turn_tools(SimpleNamespace(specs=specs))
+            cancel, fired = TurnCancel(), []
+            cancel.on_sent(lambda: fired.append(1))
+            result = await session.run_turn("never sent", [].append, cancel=cancel)
+            assert not result.prompt_sent and not fired and not cancel.prompt_sent
+    run(exercise())
+
+
+def test_prompt_written_then_rejected_is_marked_sent(tmp_path):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, _):
+            session, descriptor = await opened(tmp_path, bridge, reader, writer)
+
+            async def specs():
+                return []
+
+            async def written_then_rejected(sid, trace, emit, turn, **kwargs):
+                bridge.sessions[sid].prompt_sent = True  # the frame was written (bridge._write)
+                raise RpcFailure({"code": "bad_request", "message": "rejected"})
+            bridge.begin_turn = written_then_rejected
+            bind(session)
+            session.set_turn_tools(SimpleNamespace(specs=specs))
+            cancel, fired = TurnCancel(), []
+            cancel.on_sent(lambda: fired.append(1))
+            result = await session.run_turn("sent", [].append, cancel=cancel)
+            assert result.prompt_sent and fired == [1]
+    run(exercise())
