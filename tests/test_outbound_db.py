@@ -439,7 +439,8 @@ def test_a_database_from_before_the_reviews_gets_them_without_a_row_rewritten_an
             assert not await connection.schema_change_pending(conn)
             for constraint in ("llm_records_run_kind_check", "agent_setting_layers_role_check"):
                 # validated after the schema transaction, not under its locks
-                assert not await conn.fetchval("SELECT convalidated FROM pg_constraint WHERE conname = $1",
+                assert not await conn.fetchval("SELECT convalidated FROM pg_constraint WHERE conname = $1 "
+                                               "AND connamespace = current_schema()::regnamespace",
                                                constraint), constraint
             markers = {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
             assert "outbound_reviews" in markers and "outbound_reviews_online" not in markers
