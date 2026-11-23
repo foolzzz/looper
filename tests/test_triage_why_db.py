@@ -446,3 +446,76 @@ def test_a_missing_database_is_exit_6(tmp_path, capsys):
     missing = urlunsplit(parts._replace(path="/triage_why_no_such_database"))
     assert run_cli(tmp_path, missing, "1") == 6
     assert "database" in capsys.readouterr().err.lower()
+
+
+def test_window_membership_uses_the_gin_index(monkeypatch):
+    """Membership on a seeded table is an index plan, including a seq stored inside a longer array."""
+    from looper.db import subscriptions
+
+    async def check(pool):
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('p', 'Synthetic project')")
+        await pool.execute(
+            "INSERT INTO schedules (id, project_id, name, cron, timezone, kind, requirement) "
+            "VALUES ('s', 'p', 'Synthetic triage', '0 * * * *', 'UTC', 'subscription', 'Synthetic triage')")
+        await pool.execute(
+            "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status) "
+            "SELECT 'w' || g, 's', now(), 'manual', 'completed' FROM generate_series(1, 20000) g")
+        await pool.execute(
+            "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status) "
+            "VALUES ('cover', 's', now(), 'manual', 'completed')")
+        await pool.execute(
+            "INSERT INTO subscription_runs (run_id, from_seq, to_seq, window_seqs) "
+            "SELECT 'w' || g, 0, 1, ARRAY[100000 + g]::bigint[] FROM generate_series(1, 20000) g")
+        await pool.execute("UPDATE subscription_runs SET window_seqs = ARRAY[42]::bigint[] WHERE run_id = 'w1'")
+        await pool.execute(
+            "INSERT INTO subscription_runs (run_id, from_seq, to_seq, window_seqs) "
+            "VALUES ('cover', 0, 99, ARRAY[7, 42, 99]::bigint[])")
+        await pool.execute("ANALYZE subscription_runs")
+        assert await pool.fetchval(
+            "SELECT indisvalid FROM pg_index "
+            "WHERE indexrelid = to_regclass('idx_subscription_runs_window_seqs')") is True
+
+        class _Lookup:
+            def __init__(self, conn):
+                self.conn = conn
+                self.sql = ""
+                self.args = ()
+
+            async def fetch(self, sql, *args):
+                self.sql, self.args = sql, args
+                return await self.conn.fetch(sql, *args)
+
+        async with pool.acquire() as conn:
+            recorded = _Lookup(conn)
+            found = await subscriptions.runs_for_message(42, db=recorded)
+            sql, args = recorded.sql, recorded.args
+            missed = await subscriptions.runs_for_message(43, db=recorded)
+        assert [row["run_id"] for row in found] == ["cover", "w1"]
+        assert missed == []
+        assert "window_seqs @>" in sql
+        plan = "\n".join(row[0] for row in await pool.fetch("EXPLAIN " + sql, *args))
+        assert "idx_subscription_runs_window_seqs" in plan, plan
+
+    run_db(check, monkeypatch, timeout=120)
+
+
+def test_a_missing_window_index_is_built_online(monkeypatch):
+    from looper.db import connection
+
+    async def check(pool):
+        await pool.execute("DROP INDEX IF EXISTS idx_subscription_runs_window_seqs")
+        await pool.execute(
+            "DELETE FROM schema_migrations WHERE name IN "
+            "('subscription_window_seqs', 'subscription_window_seqs_online')")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval(
+            "SELECT indisvalid FROM pg_index "
+            "WHERE indexrelid = to_regclass('idx_subscription_runs_window_seqs')") is True
+        names = {row["name"] for row in await pool.fetch("SELECT name FROM schema_migrations")}
+        assert {"subscription_window_seqs", "subscription_window_seqs_online"} <= names
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+
+    run_db(check, monkeypatch)
