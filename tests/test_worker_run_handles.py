@@ -86,6 +86,48 @@ async def _finish(pool: WorkerPool, root: Path, worker_id: str = "w1", *, attemp
     assert worker_id not in pool._slots and worker_id not in pool._active
 
 
+def test_account_wait_precedes_record_and_process_start(tmp_path, monkeypatch, agent_db):
+    from looper.agents import admission
+    from datetime import datetime, timezone
+
+    waiting, granted = asyncio.Event(), asyncio.Event()
+    grant_time = None
+
+    @asynccontextmanager
+    async def slot(provider_id, lane, *, owner, **kwargs):
+        assert provider_id == "prov-claude-subscription" and owner == "w1"
+        waiting.set()
+        await granted.wait()
+        yield
+
+    monkeypatch.setattr(admission, "slot", slot)
+    monkeypatch.setattr(admission, "enabled", lambda: True)
+    monkeypatch.setattr(admission, "recorded", AsyncMock())
+    run = ScriptedRun(_events())
+
+    async def scenario():
+        nonlocal grant_time
+        async with _pool(tmp_path, monkeypatch, run) as (pool, _, results):
+            execute_once = pool._execute_once
+
+            async def execute(ctx, fallbacks):
+                assert ctx.started_at >= grant_time  # queued time is not a kept run's execution time
+                return await execute_once(ctx, fallbacks)
+
+            monkeypatch.setattr(pool, "_execute_once", execute)
+            await pool._dispatch(_item(tmp_path))
+            await waiting.wait()
+            assert "w1" in pool._slots  # task limit is acquired before account admission
+            agent_db.start_record.assert_not_awaited()
+            assert run.launch_calls == 0
+            grant_time = datetime.now(timezone.utc)
+            granted.set()
+            await pool._tasks["w1"]
+            assert run.launch_calls == 1 and results[0].payload["status"] == "completed"
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
 def test_hosted_run_completes_without_a_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                               agent_db: Any) -> None:
     run = ScriptedRun(_events())

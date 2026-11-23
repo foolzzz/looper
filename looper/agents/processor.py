@@ -399,33 +399,37 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
     agent_id = f"{role.value}:{owner}"
     directory = runtime_root.absolute() / ".local" / "processor" / run_id
     directory.mkdir(mode=0o700, parents=True)
-    try:
-        prompt_file = system_prompt.write_file(runtime_root)
-        try:
-            command = launch.runtime.run_command(launch.executable(claude_bin), cwd=directory, prompt_file=prompt_file,
-                                                 launch=launch, max_turns=config.max_turns)
-        except RuntimeUnsupported as exc:
-            return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
-        recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
-                                     input_text=reference, system_prompt=system_prompt, launch=launch,
-                                     whole_process=True, keep=typed_events, schedule_id=schedule_id)
-        await recorder.start()
-        noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
-        if noted:
-            await recorder.annotate(noted)
-        try:
-            from . import untrusted
+    from . import admission
 
-            finished = await single_run.run_once(
-                recorder, command, cwd=str(directory), prompt=user_turn(input_text, fence=await untrusted.enabled()),
-                launch=launch, timeout=deadline,
-                what=f"the {role.value} run", label=f"{role.value} {agent_id} {run_id}", quiet=True)
-        except single_run.StartFailed as exc:
-            await recorder.annotate({"processor_failure": ProcessorFailure.FAILED.value})
-            return ProcessorRun(None, recorder.record_id, failure=ProcessorFailure.FAILED,
-                                detail=f"its runtime does not start: {exc}")
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
+    async with admission.slot(launch.profile.provider.id, admission.Lane.BACKGROUND,
+                              owner=run_id):
+        try:
+            prompt_file = system_prompt.write_file(runtime_root)
+            try:
+                command = launch.runtime.run_command(launch.executable(claude_bin), cwd=directory, prompt_file=prompt_file,
+                                                     launch=launch, max_turns=config.max_turns)
+            except RuntimeUnsupported as exc:
+                return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
+            recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
+                                         input_text=reference, system_prompt=system_prompt, launch=launch,
+                                         whole_process=True, keep=typed_events, schedule_id=schedule_id)
+            await recorder.start()
+            noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
+            if noted:
+                await recorder.annotate(noted)
+            try:
+                from . import untrusted
+
+                finished = await single_run.run_once(
+                    recorder, command, cwd=str(directory), prompt=user_turn(input_text, fence=await untrusted.enabled()),
+                    launch=launch, timeout=deadline,
+                    what=f"the {role.value} run", label=f"{role.value} {agent_id} {run_id}", quiet=True)
+            except single_run.StartFailed as exc:
+                await recorder.annotate({"processor_failure": ProcessorFailure.FAILED.value})
+                return ProcessorRun(None, recorder.record_id, failure=ProcessorFailure.FAILED,
+                                    detail=f"its runtime does not start: {exc}")
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
     result, record_id = finished.result, recorder.record_id
     recorded: float | None = None
     try:

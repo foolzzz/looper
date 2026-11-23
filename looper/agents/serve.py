@@ -796,6 +796,8 @@ async def _run_agent_system_watched(
                 await chat_settings.load()
                 from . import lanes_settings
                 await lanes_settings.load()
+                from . import admission
+                await admission.initialize()
                 await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
@@ -945,6 +947,8 @@ async def _run_agent_system_watched(
             # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
             # task ends, to record a scheduled run's outcome.
             drain = DrainState()  # A new control plane always starts serving; drain is never stored.
+            admission.configure_drain(lambda: drain.draining)
+            drain.add_waker(lambda: asyncio.create_task(admission.wake()))
             scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
@@ -956,6 +960,8 @@ async def _run_agent_system_watched(
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook
             advisor_alerts.configure(registry.notify)
+            from . import admission_notices
+            admission_notices.configure(registry.notify)
             # So do the outbound review's block notices; its switch is read once here, and kept by its operations.
             outbound_hook.configure(registry.notify)
             await outbound_hook.enabled()
@@ -1291,6 +1297,7 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),
             self_check.provider_limit_checks(),
+            self_check.admission_checks(),
         )
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])

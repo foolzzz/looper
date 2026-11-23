@@ -1,6 +1,8 @@
 {
  "acceptance_checks.get": "inside",
  "acceptance_checks.update": "inside",
+ "admission_settings.get": "inside",
+ "admission_settings.update": "inside",
  "agent_profiles.create": "inside",
  "agent_profiles.delete": "inside",
  "agent_profiles.list": "inside",
@@ -240,6 +242,7 @@
  "provider_accounts.set_enabled": "inside",
  "provider_accounts.update": "inside",
  "providers.limits": "inside",
+ "providers.limits_clear": "inside",
  "providers.list": "inside",
  "providers.register": "inside",
  "providers.update": "inside",

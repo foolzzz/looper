@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any
 from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
-from .. import attempts, failures, outbound_hook, proc_tree, reported_files, vault
+from .. import admission, attempts, failures, outbound_hook, proc_tree, reported_files, vault
 from ...db import tasks as db_tasks
 from .. import keeper, kept_dirs
 from ..keeper.client import KeeperGone
@@ -1357,6 +1357,7 @@ class WorkerPool:
                 self._reminders[run_id] = reminders
             self._active[run_id] = wp
             self._slots[run_id] = (agent, task_id)
+            await admission.register(launch.profile.provider.id, admission.Lane.RECOVERY, owner=run_id)
             self._input_ready[run_id] = asyncio.Event()
             task = asyncio.create_task(self._run_adopted(wp, ctx, handle, recorder, reply,
                                                         (record.get("metadata") or {}).get("fallback", [])))
@@ -1442,7 +1443,10 @@ class WorkerPool:
                     if not ctx.is_verify and handle.state is not KeptRunState.DETACHED:
                         await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)
 
-        await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks, severity=ctx.severity)
+        try:
+            await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks, severity=ctx.severity)
+        finally:
+            await admission.release(wp.worker_id)
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.
@@ -2360,6 +2364,7 @@ class WorkerPool:
         settings = None
         verification = None
         verification_ctx = None
+        lane = None
         while True:
             ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
                                       agent_settings=settings, fallbacks=fallbacks)
@@ -2374,7 +2379,16 @@ class WorkerPool:
                     ctx.handle.manifest["verification"] = verification
             timeout = None
             try:
-                result = await self._execute_once(ctx, fallbacks)
+                if lane is None:
+                    lane = await admission.worker_lane(ctx.parent_task_id, envelope.payload, role=ctx.launch.role)
+                async with admission.slot(ctx.launch.profile.provider.id, lane, owner=ctx.worker_id,
+                        on_wait=lambda text: self._activity(ctx.parent_task_id, ctx.worker_id, "phase", text),
+                        draining=lambda: self._drain is not None and self._drain.draining):
+                    if admission.enabled():
+                        ctx.started_at = datetime.now(timezone.utc)
+                        if isinstance(ctx.handle, KeptRun):
+                            ctx.handle.manifest["started_at"] = ctx.started_at.isoformat()
+                    result = await self._execute_once(ctx, fallbacks)
             except asyncio.TimeoutError as exc:
                 ctx.run_failure = attempts.RunFailure.TIMEOUT
                 timeout = exc

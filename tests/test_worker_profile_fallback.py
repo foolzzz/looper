@@ -163,6 +163,34 @@ def test_profile_fallback_runs_share_the_attempt(run_primary, monkeypatch, agent
     assert all("attempt_id" not in record["input_text"] for record in records)
 
 
+def test_fallback_releases_then_admits_the_new_account(run_primary, monkeypatch):
+    from contextlib import asynccontextmanager
+    from looper.agents import admission
+
+    backup = worker.fallback_settings.return_value
+    resolved = backup.profile.resolved_model
+    backup = replace(backup, profile=replace(backup.profile, resolved_model=replace(
+        resolved, provider=replace(resolved.provider, id="backup-account"),
+        model=replace(resolved.model, provider_id="backup-account"),
+        endpoint=replace(resolved.endpoint, provider_id="backup-account"))))
+    monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=backup))
+    events = []
+
+    @asynccontextmanager
+    async def slot(provider_id, lane, *, owner, **kwargs):
+        events.append(("enter", provider_id))
+        try:
+            yield
+        finally:
+            events.append(("exit", provider_id))
+
+    monkeypatch.setattr(admission, "slot", slot)
+    result, _ = run_primary("claude-code")
+    assert result["status"] == "completed"
+    assert events == [("enter", "provider"), ("exit", "provider"),
+                      ("enter", "backup-account"), ("exit", "backup-account")]
+
+
 @pytest.mark.parametrize(("events", "exit_code", "failure"), [
     ([], 2, "crash"),
     ([{"type": "result", "subtype": "error_max_budget_usd", "is_error": True}], 1, "run_cap"),

@@ -62,7 +62,8 @@ def test_fresh_target_schema_and_second_initialization() -> None:
         for table in ('agent_setting_layers', 'task_system_prompt_modes'):
             assert any(r['table_name'] == table and r['column_name'] == 'system_prompt_mode' for r in columns)
         tables = ('llm_providers', 'llm_provider_endpoints', 'llm_models', 'agent_profiles',
-                  'registry_schema_version', 'schema_fingerprint', 'provider_limit_windows')
+                  'registry_schema_version', 'schema_fingerprint', 'provider_limit_windows',
+                  'provider_admission', 'provider_admission_events')
         before = {table: await conn.fetch(f'SELECT * FROM {table} ORDER BY 1, 2') for table in tables}
         await connection.ensure_schema(conn)
         assert {table: await conn.fetch(f'SELECT * FROM {table} ORDER BY 1, 2') for table in tables} == before
