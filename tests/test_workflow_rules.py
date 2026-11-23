@@ -13,6 +13,7 @@ from looper.agents.tiers.planner_protocol import (
     Decision, DecisionContext, PlanView, ProtocolError, ResultKind, parse_decision, parse_plan,
 )
 from looper.agents.user_gates import GatePolicy
+from tests.prompt_sections import assert_frozen
 from tests.test_planner_agent import (
     REVIEW_PASS, WORK_FAILED, WORK_OK, _project, always, decide, drive, plan, step,
 )
@@ -149,7 +150,8 @@ def test_default_planner_prompt_keeps_its_bytes_without_workflow():
         task=plan_task_section(task_id="task-baseline", requirement="Build the project",
                                project_name="Example", work_dir=""),
         contract_name="REPLY_CONTRACT", contract=reply_contract())
-    assert prompt.sha256 == "25b30ea66f08b6e7b7cba1c492e58b058ba2cd64bd154b5121b5ca45bf604626"
+    assert_frozen("planner_prompt_builtin_harness", prompt.text)
+    assert "workflow" not in prompt.text.lower()
 
 
 @pytest.mark.parametrize("rule", ["verification", "escalation"])

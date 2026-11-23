@@ -74,7 +74,8 @@ class _Queues:
         self.sequence = 0
 
     def put_nowait(self, item: MessageEnvelope | _Completion) -> None:
-        queue = self.background if isinstance(item, _Completion) else self.interactive
+        background = isinstance(item, _Completion) or item.message_type is MessageType.IDLE_CHECK_DUE
+        queue = self.background if background else self.interactive
         queue.append((self.sequence, item))
         self.sequence += 1
         self.ready.set()
@@ -105,6 +106,15 @@ class _Queues:
                 self.background.remove(entry)
                 break
 
+    def take_idle_checks(self) -> list[MessageEnvelope]:
+        """Atomically remove unstarted checks before any asynchronous state writes."""
+        checks = [item for _, item in self.background if isinstance(item, MessageEnvelope)
+                  and item.message_type is MessageType.IDLE_CHECK_DUE]
+        self.background = deque((sequence, item) for sequence, item in self.background
+                                if not (isinstance(item, MessageEnvelope)
+                                        and item.message_type is MessageType.IDLE_CHECK_DUE))
+        return checks
+
 
 class SessionRouter:
     """The workers of a Manager's sessions, and its resident processes' cap."""
@@ -127,11 +137,14 @@ class SessionRouter:
         """The session whose worker takes ``envelope``; None when the message loop handles it itself: one that runs
         no model turn, or any message while routing is off and main's worker holds none."""
         kind = envelope.message_type
+        main = self._agent._sessions[MAIN_SESSION]
+        if kind is MessageType.IDLE_CHECK_DUE:
+            return main if (lanes_settings.enabled() or session_routing.routes(self._agent.agent_id)
+                            or self.holds(main)) else None
         if kind not in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE):
             return None
         if kind is MessageType.COMPLETION_DUE and lanes_settings.enabled():
             return None  # claim in the loop; only the claimed batch joins the background lane
-        main = self._agent._sessions[MAIN_SESSION]
         if not session_routing.routes(self._agent.agent_id):
             return main if self.holds(main) or (kind is MessageType.USER_MESSAGE
                 and (mid_turn_input.enabled(self._agent.agent_id) or lanes_settings.enabled())) else None
@@ -149,6 +162,23 @@ class SessionRouter:
     def dispatch(self, session: ManagerSession, envelope: MessageEnvelope) -> None:
         """Queue ``envelope`` for ``session``'s worker, started on first use."""
         self._enqueue(session, envelope)
+
+    async def void_idle_checks(self, session: ManagerSession) -> None:
+        """A user returned to main: checks still queued no longer have an idle period to inspect."""
+        if session.key != MAIN_SESSION or (queue := self._queues.get(session.key)) is None:
+            return
+        from ...db import idle_checks
+
+        for wake in queue.take_idle_checks():
+            # A failed write leaves the wake unacknowledged; restart marks its running row failed.
+            try:
+                await idle_checks.settle(wake.payload["check_id"], "preempted")
+            except Exception as exc:
+                logger.warning("could not void idle check %s; restart will recover it: %s",
+                               wake.payload["check_id"], exc, exc_info=True)
+                continue
+            if self._agent._bus is not None:
+                self._agent._bus.settle_handled(wake)
 
     def _enqueue(self, session: ManagerSession, item: MessageEnvelope | _Completion) -> None:
         queue = self._queues.setdefault(session.key, _Queues())
@@ -289,6 +319,7 @@ class SessionRouter:
                 finally:
                     self._handling.pop(session.key, None)
                     session.last_activity = agent._clock()
+                    session.turn_ended_at = session.last_activity
                 if not agent._running:
                     break  # left unsettled: a restart replays it
                 if isinstance(item, _Completion) or not self.holds_completion(envelope):

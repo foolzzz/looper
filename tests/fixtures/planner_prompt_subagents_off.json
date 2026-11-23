@@ -1,0 +1,4 @@
+{
+ "note": "sha256 of the Planner system prompt with the sub-agents switch off and the explorer tools wired; the bytes the base branch produced before this feature (checked against it when recorded). Update only when the prompt changes on purpose.",
+ "sha256": "cca7d98d48853045196be9bb29afa7feb466caf05df777450ccb7fbedcd4b39b"
+}

@@ -304,7 +304,10 @@ class Area:
 
 
 AREAS: tuple[Area, ...] = (
-    Area("/api/agent/v1/", Access.AGENT), Area("/api/v1/", Access.CLIENT), Area("/api/", Access.OPERATOR))
+    Area("/api/agent/v1/", Access.AGENT),
+    # Before /api/v1/: artifact bytes stay on the operator gate, not the JSON client API.
+    Area("/api/v1/evidence/", Access.OPERATOR),
+    Area("/api/v1/", Access.CLIENT), Area("/api/", Access.OPERATOR))
 
 
 def access(path: str) -> Access:

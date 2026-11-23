@@ -30,6 +30,7 @@ class Lane(IntEnum):
 
 def manager_lane(origin: TurnOrigin) -> Lane | None:
     return {TurnOrigin.USER: Lane.INTERACTIVE, TurnOrigin.COMPLETION: Lane.BACKGROUND,
+            TurnOrigin.IDLE_CHECK: Lane.BACKGROUND,
             TurnOrigin.OWN: None}[origin]
 
 
@@ -83,6 +84,7 @@ async def route_arrival(agent: ManagerAgent, session: ManagerSession, envelope: 
     arrival = classify_arrival(origin, session.claude.can_interrupt, merged)
     if arrival is Arrival.PREEMPT and preempt(session, ops=agent.ops):
         token.preempted_by = envelope.message_id
+    await agent._router.void_idle_checks(session)
     return arrival is Arrival.MERGE
 
 

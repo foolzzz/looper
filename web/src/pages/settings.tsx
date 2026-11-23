@@ -12,7 +12,9 @@ import { ManagersSection } from "@/components/managers-settings";
 import { ProvidersSection } from "@/components/provider-settings";
 import { RolesSection } from "@/components/role-settings";
 import { RuntimesSection } from "@/components/runtime-cards";
+import { AcpReviewerSettingsSection } from "@/components/acp-reviewer-settings";
 import { SchedulerSection } from "@/components/scheduler-settings";
+import { MemorySettingsSection } from "@/components/memory-settings";
 import { VaultSettingsSection } from "@/components/vault-settings";
 import {
   AGENT_PROFILE,
@@ -71,7 +73,7 @@ export function SettingsPage({ sub }: { sub: string }) {
         {page !== "roles" && <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{DESCRIPTIONS[page]}</p>}
       </div>
       {page === "providers" && <ProvidersSection adding={inner === "new"} />}
-      {page === "runtimes" && <RuntimesSection />}
+      {page === "runtimes" && <><AcpReviewerSettingsSection /><RuntimesSection /></>}
       {page === AGENT_PROFILE.slug && <AgentProfilesSection />}
       {page === "roles" && <RolesSection sub={inner} />}
       {page === "workflows" && <WorkflowsSection />}
@@ -82,7 +84,7 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "chat" && <ChatSettingsSection />}
       {page === "cost" && <CostGuardSettingsSection />}
       {page === "scheduler" && <SchedulerSection />}
-      {page === "vault" && <VaultSettingsSection />}
+      {page === "vault" && <><VaultSettingsSection /><MemorySettingsSection /></>}
       {page === "recording" && <LlmrecSettingsSection />}
       {page === "gateway" && <GatewaySettingsSection />}
       {page === "transfer" && <ConfigTransferCard />}

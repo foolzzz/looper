@@ -14,7 +14,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
-from ..db import (connection as db_connection, decision_snapshots, manager_events, proactive_deliveries,
+from ..db import (connection as db_connection, decision_snapshots, idle_checks, manager_events, proactive_deliveries,
                   schedules as db_schedules, llm_requests, channel_outbox, provider_admission)
 from . import admission, chat_attachments, scheduler_settings
 from .command_runs import CommandRuns, Finished, Lost, LOGS_DIR, RUNNER_DIR, RUNS_DIR
@@ -43,6 +43,7 @@ class Report:
     provider_admission_events: int = 0
     decision_snapshots: int = 0
     proactive_deliveries: int = 0
+    idle_checks: int = 0
     logs: int = 0
     log_bytes: int = 0
     run_dirs: int = 0
@@ -52,6 +53,7 @@ class Report:
     llm_route_files: int = 0
     chat_attachments: int = 0
     skill_tombstones: int = 0
+    skill_proposals_expired: int = 0
     rotated: list[str] = field(default_factory=list)
     failed_steps: dict[str, str] = field(default_factory=dict)
 
@@ -282,6 +284,13 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             from .skill_versions import purge_tombstones
 
             report.skill_tombstones = await purge_tombstones(conn, now=now)
+    with _step(report, "skill proposals"):
+        from .skill_proposal_notice import notify_pending
+        from .skill_proposals import expire_due
+
+        async with db_connection.transaction() as conn:
+            report.skill_proposals_expired = await expire_due(conn, now)
+        await notify_pending(now=now)
     with _step(report, "decision snapshots"):
         # Off, nothing writes the table, this cleanup included: rows of an earlier window stay with their task.
         async with db_connection.transaction() as conn:
@@ -300,6 +309,10 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             report.proactive_deliveries += count
             if count == 0:
                 break
+
+    with _step(report, "idle checks"):
+        while (count := await idle_checks.purge(now - timedelta(days=idle_checks.RETENTION_DAYS))):
+            report.idle_checks += count
 
     with _step(report, "llm requests"):
         await _prune_llm_requests(report, now)

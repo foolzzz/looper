@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { DashboardGates } from "@/components/dashboard-gates";
 import { StatusCard } from "@/components/status-card";
 import { ManagerSessions } from "@/components/manager-sessions";
+import { TaskQualitySection } from "@/components/task-quality-section";
 import { RunStatusBadge, ScheduleTime } from "@/components/project-schedules";
 import {
   fetchOverview,
@@ -439,6 +440,7 @@ const PROACTIVE_SOURCES: Record<string, string> = {
   task_notice: "task notices", completion: "completion turns", progress: "progress", gate: "gates",
   gate_reminder: "gate reminders", subscription: "subscriptions", intent: "intents", schedule: "schedules",
   advisor_alert: "advisor alerts", autonomous: "autonomous turns", user_reminder: "reminders",
+  idle_check: "idle checks", triage: "event triage",
 };
 const sourceLabel = (source: string) => PROACTIVE_SOURCES[source] ?? source;
 
@@ -495,6 +497,7 @@ function MetricFigures({ metrics }: { metrics: Metrics }) {
           detail={`reply rate ${percent(metrics.proactive.reply_rate.all)}`} />
       </div>
       <OutboundFigures metrics={metrics} />
+      <ActionFigures metrics={metrics} />
       <table className="w-full text-sm">
         <caption className="sr-only">Proactive messages by day</caption>
         <thead>
@@ -524,6 +527,26 @@ function MetricFigures({ metrics }: { metrics: Metrics }) {
         </p>
       )}
     </div>
+  );
+}
+
+const ACTION_CATEGORIES: Record<string, string> = {
+  create: "created", update: "updated", control: "controlled", remove: "removed", relay: "relayed",
+};
+
+/** What the Manager and API clients wrote over the window, by category; failed writes in brackets. Absent while
+ * action receipts are off (no row has a category then). */
+function ActionFigures({ metrics }: { metrics: Metrics }) {
+  const rows = Object.entries(metrics.actions?.by_category ?? {});
+  if (rows.length === 0) return null;
+  const phrase = ([category, byStatus]: [string, Record<string, number>]) => {
+    const failed = byStatus.error ?? 0;
+    return `${ACTION_CATEGORIES[category] ?? category} ${byStatus.ok ?? 0}${failed > 0 ? ` (${failed} failed)` : ""}`;
+  };
+  return (
+    <p aria-label="Writes" className="text-xs text-muted-foreground">
+      Writes: {rows.map(phrase).join(" · ")}
+    </p>
   );
 }
 
@@ -709,6 +732,7 @@ export function DashboardPage() {
       <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
       <Agents overview={overview} />
       <ManagerMetricsSection />
+      <TaskQualitySection />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
       {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}
       <Spend spend={overview.spend_today} />

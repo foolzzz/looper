@@ -93,12 +93,18 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
     monkeypatch.setattr(housekeeping.db_schedules, "open_log_paths", AsyncMock(return_value=[]))
     monkeypatch.setattr(housekeeping.manager_events, "prune", AsyncMock(return_value=0))
     monkeypatch.setattr(housekeeping.proactive_deliveries, "purge", AsyncMock(return_value=0))
+    monkeypatch.setattr(housekeeping.idle_checks, "purge", AsyncMock(return_value=0))
     monkeypatch.setattr(housekeeping.decision_snapshots, "enabled", AsyncMock(return_value=False))
     monkeypatch.setattr(housekeeping, "_prune_llm_requests", AsyncMock())
     from looper.agents import skill_versions
 
     tombstones = AsyncMock(return_value=0)
     monkeypatch.setattr(skill_versions, "purge_tombstones", tombstones)
+    from looper.agents import skill_proposal_notice, skill_proposals
+
+    expiry = AsyncMock(return_value=0)
+    monkeypatch.setattr(skill_proposals, "expire_due", expiry)
+    monkeypatch.setattr(skill_proposal_notice, "notify_pending", AsyncMock(return_value=False))
     outbox_purge = AsyncMock(return_value=2)
     monkeypatch.setattr(housekeeping.channel_outbox, "purge", outbox_purge)
     monkeypatch.setattr(housekeeping.provider_admission, "prune", admission_prune)
@@ -117,6 +123,7 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
     assert admission_prune.await_count == int(admission_on)
     outbox_purge.assert_awaited_once_with(NOW)
     tombstones.assert_awaited_once()
+    expiry.assert_awaited_once_with(None, NOW)
     assert tombstones.await_args.kwargs["now"] == NOW
     assert not old.exists() and (fresh / "note.txt").read_text() == "recent"
     assert "chat_attachments=1" in caplog.text

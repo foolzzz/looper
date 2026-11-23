@@ -413,7 +413,12 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
             recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
                                          input_text=reference, system_prompt=system_prompt, launch=launch,
                                          whole_process=True, keep=typed_events, schedule_id=schedule_id)
-            await recorder.start()
+            from .cost_guard import Held
+
+            try:
+                await recorder.start()
+            except Held as held:
+                return ProcessorRun(None, failure=ProcessorFailure.FAILED, detail=str(held))
             noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
             if noted:
                 await recorder.annotate(noted)
