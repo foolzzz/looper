@@ -16,14 +16,58 @@ from typing import Any
 import pytest
 
 from looper.agents import chat_settings, proactive_delivery as delivery
+from looper.agents.task_notice import NotifyTarget, TargetKind
 from tests.db_support import DSN, run_db
 from tests.test_gate_channels_db import LARK_GROUP, LARK_USER, _Poster, _say, _task_with_gate
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_needs_you_notice_keeps_its_post_and_is_blocking_only_when_on(monkeypatch, enabled):
+    async def test(pool):
+        from looper.agents.gate_courier import GateCourier
+
+        chat_settings.set_delivery_enabled(enabled)
+        night = datetime(2026, 11, 20, 3, tzinfo=timezone.utc)
+        real_decide = delivery.decide
+        monkeypatch.setattr(delivery, "decide", lambda *a, **kw: real_decide(*a, **kw, now=night))
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
+        await _task_with_gate(pool, origin="channel-lark", chat=LARK_USER, kind="user")
+        poster = _Poster()
+        await GateCourier(poster).run_once()
+        assert poster.posts == [{
+            "channel": "channel-lark", "target": NotifyTarget(TargetKind.USER, LARK_USER),
+            "text": "⏸ 需要你决定 · settings file\nstorage\n1. Which database?（选项：PostgreSQL / SQLite）\n"
+                    "直接回复这条消息作答。\n[/#tasks/task-a](/#tasks/task-a)\n"
+                    "/gates 查看所有等你回答的关卡；/gate 编号 回答，/gate 编号 end 结束讨论",
+            "reply_to": None, "key": "gate-1"}]
+        rows = await pool.fetch("SELECT source, urgency, decision, counted, outcome FROM proactive_deliveries")
+        assert [tuple(row) for row in rows] == ([('task_notice', 'blocking', 'send', False, 'sent')] if enabled else [])
+    run_db(test, monkeypatch)
+
+
 ROWS = ("SELECT source, source_ref, urgency, channel_id, chat, chat_kind, task_id, step_id, decision, reason, counted, "
         "digest_date, decided_at IS NOT NULL AS decided, outcome, external_id, sent_at IS NOT NULL AS sent "
         "FROM proactive_deliveries ORDER BY id")
+
+
+@pytest.mark.parametrize("kind", ["updated", "resumed"])
+def test_waiting_question_notices_remain_blocking(monkeypatch, kind):
+    async def check(pool):
+        from looper.agents.gate_courier import GateCourier
+
+        chat_settings.set_delivery_enabled(True)
+        await _task_with_gate(pool, origin="channel-lark", chat=LARK_USER, kind="user")
+        poster = _Poster()
+        courier = GateCourier(poster)
+        await courier.run_once()
+        await _say("task-a", "step-g1", kind, "Synthetic question update")
+        await courier.run_once()
+        assert len(poster.posts) == 2
+        rows = await pool.fetch("SELECT source, urgency, decision, counted, outcome "
+                                "FROM proactive_deliveries ORDER BY id")
+        assert [tuple(row) for row in rows] == [('task_notice', 'blocking', 'send', False, 'sent')] * 2
+    run_db(check, monkeypatch)
 
 
 async def _reminded(pool: Any, *, group: bool = False) -> None:
@@ -48,18 +92,19 @@ def test_a_reminder_is_posted_the_same_with_the_switch_off_or_on(monkeypatch: py
         assert reminder["text"].splitlines()[:2] == ["⏰ 还在等你 · 已等 0 小时 · settings file", "storage"]
         assert (reminder["channel"], reminder["target"].id, reminder["reply_to"]) == ("channel-lark", LARK_USER,
                                                                                       "om_101")
-        rows = [dict(row) for row in await pool.fetch(ROWS)]
+        rows = [dict(row) for row in await pool.fetch(ROWS.replace("ORDER BY id", "WHERE source = 'gate_reminder'"))]
         if not enabled:
             assert rows == []  # off: nothing is recorded
             return
-        # On: only the reminder is a proactive message; blocking, so sent and not counted.
+        # The reminder is blocking, sent and not counted; the initial needs-you notice is tested above.
         assert rows == [{"source": "gate_reminder", "source_ref": "step-g1", "urgency": "blocking",
                          "channel_id": "channel-lark", "chat": LARK_USER, "chat_kind": "direct", "task_id": "task-a",
                          "step_id": "step-g1", "decision": "send", "reason": "urgent", "counted": False,
                          "digest_date": None, "decided": True, "outcome": "sent", "external_id": "om_102",
                          "sent": True}]
         # Under the key the post used: the channel's receipt, from the metrics too, lands on the same row.
-        assert await pool.fetchval("SELECT dedupe_key FROM proactive_deliveries") == reminder["key"]
+        assert await pool.fetchval("SELECT dedupe_key FROM proactive_deliveries WHERE source = 'gate_reminder'") == (
+            reminder["key"])
 
     run_db(test, monkeypatch)
 
@@ -105,7 +150,7 @@ def test_a_reminder_tried_again_keeps_one_decision_and_is_marked_sent_when_it_go
         await _say("task-a", "step-g1", "reminder", "Still waiting for you (25 h): storage")
         poster.fail = 1
         await courier.run_once()  # the reminder's post sends nothing: tried again later
-        sent = "SELECT decision, outcome, sent_at IS NOT NULL FROM proactive_deliveries"
+        sent = "SELECT decision, outcome, sent_at IS NOT NULL FROM proactive_deliveries WHERE source = 'gate_reminder'"
         assert [tuple(row) for row in await pool.fetch(sent)] == [("send", None, False)]
         await pool.execute("UPDATE task_user_gate_messages SET post_retry_at = now() WHERE kind = 'reminder'")
         await courier.run_once()
@@ -124,7 +169,9 @@ def test_the_courier_does_what_the_decision_says(monkeypatch: pytest.MonkeyPatch
         decision = delivery.Decision(outcome, delivery.Reason.QUIET_HOURS if outcome is delivery.Outcome.DIGEST
                                      else delivery.Reason.SILENT,
                                      digest_date=date(2026, 11, 21) if outcome is delivery.Outcome.DIGEST else None)
-        monkeypatch.setattr(delivery, "deliver", lambda *args: decision)
+        real_deliver = delivery.deliver
+        monkeypatch.setattr(delivery, "deliver", lambda item, *args: (
+            decision if item.kind is delivery.DeliveryKind.GATE_REMINDER else real_deliver(item, *args)))
         await _reminded(pool)
         poster = _Poster()
         await GateCourier(poster).run_once()
@@ -133,7 +180,7 @@ def test_the_courier_does_what_the_decision_says(monkeypatch: pytest.MonkeyPatch
             "SELECT kind, post_state FROM task_user_gate_messages ORDER BY id")] == [
                 ("opened", "sent"), ("reminder", "none")]
         assert [tuple(row) for row in await pool.fetch(
-            "SELECT decision, reason, outcome, sent_at FROM proactive_deliveries")] == [
+            "SELECT decision, reason, outcome, sent_at FROM proactive_deliveries WHERE source = 'gate_reminder'")] == [
                 (outcome.value, decision.reason.value, None, None)]
 
     run_db(test, monkeypatch)

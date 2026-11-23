@@ -56,9 +56,9 @@ _OVERVIEW = _object({
             "overlap_since": _NULL_STR, "last_success_at": _NULL_STR,
             "last_status": {"type": ["string", "null"], "enum": [None, "queued", "gating", "running", "completed",
                 "succeeded", "failed", "stopped", "cancelled", "timed_out", "interrupted", "skipped_overlap",
-                "skipped_missed", "skipped_gate", "gate_failed", "skipped_budget"]}})),
+                "skipped_missed", "skipped_gate", "gate_failed", "skipped_budget", "skipped_busy"]}})),
         "skipped_today": _object({reason: _INT for reason in (
-            "skipped_gate", "skipped_overlap", "skipped_missed", "skipped_budget")})})})
+            "skipped_gate", "skipped_overlap", "skipped_missed", "skipped_budget", "skipped_busy")})})})
 
 # Existing Tool result contracts belong here; their model-facing schemas stay untouched.
 RESULTS = {
