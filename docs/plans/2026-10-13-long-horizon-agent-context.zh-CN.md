@@ -1033,6 +1033,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 - **场景管家继承默认管家的人格**：`manager.persona` 现在只给默认管家；场景管家继承名字、称呼、语气和补充说明推迟到有使用方再加。
 - **订阅窗口与每日策略表单**：`window: lookback` 与 `delivery_policy: daily` 可通过 API/生成 CLI 配置；后续在 Dashboard 表单中补配置和窗口说明，并在 lookback 模式隐藏游标重置入口。现有推送确认和运行结果继续复用。
+- **定时任务节制字段的表单**：`active_hours`（生效时段）和 `idle_only`（只在空闲时运行）可通过 API、生成 CLI 和配置导入导出设置；后续在 Dashboard 的定时任务表单和详情里加上这两项和 `throttle` 视图。
 
 - **按流程聚合的看板**：按 workflow 汇总评审轮次、验证结果、模型回落和升级；现阶段通过单任务的 Process record 查看。
 - **管家获取 Provider 模型**：为 Manager 提供获取 Provider 模型列表的操作；当前仅操作员控制台和 CLI 可用。
