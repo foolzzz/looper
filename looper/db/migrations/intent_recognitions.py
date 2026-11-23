@@ -33,17 +33,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_intent_recognitions_running ON intent_reco
 ALTER TABLE intents ADD COLUMN IF NOT EXISTS recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE;
 ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_via_check;
 ALTER TABLE intents ADD CONSTRAINT intents_via_check CHECK (via IN ('subscription', 'followed_group', 'on_request'));
+ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_on_request;
 ALTER TABLE intents ADD CONSTRAINT intents_on_request CHECK ((via = 'on_request') = (recognition_id IS NOT NULL));
 """
 
 
 async def pending(conn):
-    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", name):
-        return False
-    return not await conn.fetchval("SELECT to_regclass('intent_recognitions') IS NOT NULL")
+    # A repaired earlier migration may recreate via and remove its dependent checks.
+    return not await conn.fetchval(
+        "SELECT to_regclass('intent_recognitions') IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('intents') "
+        "AND attname='recognition_id' AND attnum>0 AND NOT attisdropped) "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('intents') "
+        "AND conname='intents_on_request') "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('intents') "
+        "AND conname='intents_via_check' AND strpos(pg_get_constraintdef(oid), $1)>0)", "'on_request'")
 
 
 async def apply(conn, *, sql, state):
     if await pending(conn):
         await conn.execute(fresh_ddl)
-        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)

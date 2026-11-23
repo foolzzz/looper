@@ -131,3 +131,21 @@ def test_room_delivery_resumes_validation_without_replacing_constraint(missing_m
             assert not await connection.schema_change_pending(conn)
 
     asyncio.run(test())
+
+
+@pytest.mark.parametrize("rollback", ["ALTER TABLE intents DROP CONSTRAINT intents_on_request",
+                                     "ALTER TABLE intents DROP COLUMN recognition_id CASCADE"])
+def test_recognition_repairs_incomplete_schema_with_its_marker_present(rollback):
+    async def check():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("INSERT INTO schema_migrations(name) VALUES('intent_recognitions') "
+                               "ON CONFLICT DO NOTHING")
+            await conn.execute(rollback)
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert not await connection.schema_change_pending(conn)
+            definition = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid='intents'::regclass AND conname='intents_on_request'")
+            assert "on_request" in definition and "recognition_id IS NOT NULL" in definition
+    asyncio.run(check())
