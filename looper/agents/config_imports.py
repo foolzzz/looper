@@ -78,6 +78,9 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
     """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
         return data
+    if "cost_guard" in data.get("settings", {}):
+        raise OpError(ErrorCode.FORBIDDEN, "Cost guard settings require operator identity; "
+                      "upload this configuration with an operator token")
     if data.get("settings", {}).get("chat"):
         raise OpError(ErrorCode.FORBIDDEN, "Chat settings require operator identity; "
                       "upload this configuration with an operator token")
@@ -122,6 +125,10 @@ async def _run(data: dict[str, Any], *, apply: bool) -> config_transfer.Plan:
     if apply:
         await scheduler_settings.load()  # a minimum interval in the file applies at once
         await chat_settings.load()
+        if "cost_guard" in data.get("settings", {}):
+            from . import cost_guard
+
+            await cost_guard.refresh()
     return plan
 
 

@@ -35,6 +35,8 @@ def normalize_record_metadata(metadata: Any) -> Any:
 
     if not isinstance(metadata, dict):
         return metadata
+    metadata = {key: value for key, value in metadata.items()
+                if key not in ("reservation", "cost_guard", "cost_guard_schedule_id")}
     def obj(value):
         return value if isinstance(value, dict) else {}
 

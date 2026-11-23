@@ -145,6 +145,8 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters
+    "cost_guard.update": INSIDE,  # changes only Looper's observation configuration
     "providers.limits": INSIDE,  # reads stored quota windows and usage
     "limit_signals_settings.get": INSIDE,  # reads Looper's collection switch
     "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch

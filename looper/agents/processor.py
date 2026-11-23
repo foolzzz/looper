@@ -408,7 +408,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
             return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
         recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
                                      input_text=reference, system_prompt=system_prompt, launch=launch,
-                                     whole_process=True, keep=typed_events)
+                                     whole_process=True, keep=typed_events, schedule_id=schedule_id)
         await recorder.start()
         noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
         if noted:
