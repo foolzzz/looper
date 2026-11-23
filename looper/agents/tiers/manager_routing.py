@@ -197,6 +197,11 @@ class SessionRouter:
             if session.key != MAIN_SESSION and not session_routing.routes(agent.agent_id):
                 await self._stop_idle(session)
 
+    def queued(self, session: ManagerSession) -> int:
+        """How many messages wait in ``session``'s queue. The one a worker has already taken is not in it."""
+        queue = self._queues.get(session.key)
+        return 0 if queue is None else queue.qsize()
+
     def holds(self, session: ManagerSession) -> bool:
         """Whether ``session``'s worker has a message: queued, or being handled."""
         queue = self._queues.get(session.key)

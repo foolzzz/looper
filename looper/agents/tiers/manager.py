@@ -74,7 +74,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook, turn_metrics
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
@@ -908,6 +908,7 @@ class ManagerAgent:
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
+        self._status_tasks: set[asyncio.Task[Any]] = set()
         # Completion turns past their deadline that did not end, and the stops of their runtimes (``_tell_completion``).
         self._late_turns: set[asyncio.Task[Any]] = set()
         # Retired runtimes' tree cleanup, separate from turns that can ignore cancellation indefinitely.
@@ -1090,6 +1091,10 @@ class ManagerAgent:
                     await self._stop_from_chat(envelope)
                     bus.settle(envelope.message_id)
                     continue
+                if isinstance(text, str) and chat_commands.is_status(text) and status_card.enabled():
+                    await self._status_from_chat(envelope)
+                    bus.settle(envelope.message_id)
+                    continue
                 self._register_turn(envelope)
             queue.put_nowait(envelope)
         self._task = asyncio.create_task(self._message_loop())
@@ -1133,22 +1138,31 @@ class ManagerAgent:
         except Exception:
             logger.debug("could not read leads.enabled; keeping the last value", exc_info=True)
 
+    def activity(self) -> list[status_card.SessionActivity]:
+        """What this Manager's sessions are doing, for the status card."""
+        return status_card.session_activity(self)
+
     def _receive(self, envelope: MessageEnvelope) -> bool:
         """Bus consumer, run in ``bus.publish`` before the queue: take a ``/stop`` addressed to the Manager out of
-        its queue and handle it at once; give any other user message its turn token, so a stop finds it from here
-        on, queued or not."""
+        its queue and handle it at once; while the status card is on, answer ``/status`` the same way. Give any
+        other user message its turn token, so a stop finds it from here on, queued or not."""
         if envelope.target.agent_id != self.agent_id:
             return False
         if self._drain is not None and self._drain.draining:
             return False
         text = envelope.payload.get("text")
-        if not isinstance(text, str) or not is_stop_command(text):
-            self._register_turn(envelope)
-            return False
-        task = asyncio.create_task(self._stop_from_chat(envelope))
-        self._stop_tasks.add(task)
-        task.add_done_callback(self._stop_tasks.discard)
-        return True
+        if isinstance(text, str) and is_stop_command(text):
+            task = asyncio.create_task(self._stop_from_chat(envelope))
+            self._stop_tasks.add(task)
+            task.add_done_callback(self._stop_tasks.discard)
+            return True
+        if isinstance(text, str) and chat_commands.is_status(text) and status_card.enabled():
+            task = asyncio.create_task(self._status_from_chat(envelope))
+            self._status_tasks.add(task)
+            task.add_done_callback(self._status_tasks.discard)
+            return True
+        self._register_turn(envelope)
+        return False
 
     def _register_turn(self, envelope: MessageEnvelope) -> TurnToken:
         self._last_activity = self._clock()
@@ -1200,6 +1214,21 @@ class ManagerAgent:
             await self._send_reply(envelope, reply, persist=False)
         except Exception:
             logger.exception("%s: could not handle /stop %s", self._log, envelope.message_id)
+
+    async def _status_from_chat(self, envelope: MessageEnvelope) -> None:
+        """Answer ``/status`` from the snapshot. Not stored, and not waited on behind the running turn."""
+        try:
+            platform = self.ops.platform if self.ops is not None else None
+            managers = platform.managers if platform is not None else None
+            fleet = managers if managers is not None else status_card.SoloFleet(self)
+            text = await status_card.command_reply(
+                envelope, fleet=fleet,
+                task_router=platform.task_router if platform is not None else None,
+                worker_pool=platform.worker_pool if platform is not None else None,
+                now=datetime.now(timezone.utc))
+            await self._send_reply(envelope, text, persist=False)
+        except Exception:
+            logger.exception("%s: could not answer /status %s", self._log, envelope.message_id)
 
     async def stop(self) -> None:
         self._running = False
