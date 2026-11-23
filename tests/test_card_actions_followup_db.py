@@ -90,9 +90,12 @@ def test_needs_you_reads_persisted_confirmations_without_a_running_manager(monke
         assert section["state"] == "ok" and section["count"] == 1
         assert section["items"][0]["ref"] == "c-1"
         assert section["items"][0]["href"] == "#chat?conversation=session-1"
+        earliest = await attention.earliest("confirmations")
+        assert earliest["ref"] == "c-1" and earliest["href"] == section["items"][0]["href"]
         await store.claim("test-card", by="7", via="button", choice="confirm", outcome="ok", pool=pool)
         section = next(s for s in (await attention.collect())["sections"] if s["kind"] == "confirmations")
         assert section["state"] == "ok" and section["count"] == 0
+        assert await attention.earliest("confirmations") is None
 
     run_db(check, monkeypatch, timeout=20)
 

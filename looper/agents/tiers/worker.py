@@ -47,7 +47,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum, StrEnum
 from pathlib import Path
@@ -56,7 +56,8 @@ from typing import TYPE_CHECKING, Any
 from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
-from .. import failures, proc_tree, reported_files, vault
+from .. import failures, outbound_hook, proc_tree, reported_files, vault
+from ...db import tasks as db_tasks
 from .. import keeper, kept_dirs
 from ..keeper.client import KeeperGone
 from ..keeper.protocol import ErrorCode, KeeperError
@@ -292,6 +293,11 @@ def run_outcome(result_event: dict[str, Any] | None, judged: dict[str, Any], *, 
     if report["status"] == "failed":
         return RunOutcome.REPORTED_FAILED
     return RunOutcome.COMPLETED if judged.get("status") == "completed" else RunOutcome.FILES_MISMATCH
+
+
+# A step's run that did not start: its task took in outside content, the outbound review is on, and its runtime has no
+# tool hook (the outbound-review RFC, D13).
+REVIEW_UNSUPPORTED_RUNTIME = "review_unsupported_runtime"
 
 
 def _work_failed(error: str, **extra: Any) -> dict[str, Any]:
@@ -1901,7 +1907,8 @@ class WorkerPool:
     async def _end_room_run(self, worker_id: str, task_id: str | None = None, seat: Seat | None = None) -> None:
         if self.room_ops is None:
             return
-        if seat is None and (grant := self.room_ops.export_run(worker_id)) is not None:
+        if seat is None and (grant := self.room_ops.export_run(worker_id)) is not None and grant["room"]:
+            # (a run whose token only serves the outbound review's hook was never in the room)
             task_id = grant["task_id"]
             data = grant["seat"]
             seat = Seat(**{**data, "kind": MemberKind(data["kind"])})
@@ -2159,6 +2166,23 @@ class WorkerPool:
 
         launch = await attach(launch, agent_id=worker_id, task_id=parent_task_id or None,
                               step_id=payload.get("task_id") or None, cwd=work_dir)
+        if parent_task_id and outbound_hook.known_enabled() and await db_tasks.untrusted_inputs(parent_task_id):
+            # Outside content went into the task: while the review is on, the run's tool calls are checked
+            # (RFC section 6.3), or it does not start; the Planner decides what to do then.
+            if not launch.runtime.tool_hook or self.room_ops is None:
+                problem = (f"This task took in outside content (leads or an intent): while the outbound review is "
+                           f"on, its {agent.value} runs on a runtime with a tool hook, and {launch.runtime.label} "
+                           "has none. Choose a Claude Code profile for it, change the plan, or fail the step.")
+                await self._activity(parent_task_id, worker_id, "error", problem[:500])
+                await self._end_room_run(worker_id)
+                await outbound_hook.notify_unsupported(parent_task_id, worker_id, launch.runtime.label)
+                return _verify_failed(problem) if is_verify else _work_failed(
+                    problem, failure=REVIEW_UNSUPPORTED_RUNTIME)
+            if token is None:
+                token = self.room_ops.issue(parent_task_id, run_seat(payload, is_verify=is_verify, run=worker_id),
+                                            room=False, kept=kept)
+            launch = replace(launch, tool_hook=self.room_ops.tool_hook(token, worker_id, self._runtime_root,
+                                                                       self._config.claude_bin, launch.library))
         background = str((project or {}).get("background") or "")
         if task_role is None:
             system_prompt = build_system_prompt(

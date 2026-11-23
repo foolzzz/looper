@@ -266,12 +266,14 @@ async def update_delivery(value: bool | None) -> dict[str, bool]:
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
+    from . import status_card
+
     global _turn_context_enabled, _timezone, _reply_language
     stored = await db_settings.get_settings([
         STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
         MID_TURN_INPUT_KEY,
         TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY, DELIVERY_ENABLED_KEY,
-        session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY,
+        session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY, status_card.ENABLED_KEY,
         *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
     ])
     session_routing.apply_stored(stored)
@@ -305,6 +307,7 @@ async def load() -> bool:
     except ValueError:
         turns = DEFAULT_COMPLETION_TURNS
     set_completion_turns(turns)
+    status_card.apply_stored(stored.get(status_card.ENABLED_KEY))
     return _stop_enabled
 
 

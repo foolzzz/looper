@@ -166,7 +166,7 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert sessions["manager-bridge"]["session_totals"] == original["manager-bridge"]["session_totals"]
             assert sessions["manager-bridge"]["pending_handoff"] == "Keep the handoff"
             for key in ("manager-empty", "manager-codex", "manager-provider"):
-                assert sessions[key] == {**original[key], "context_tokens": None, "last_turn_cost_usd": None}
+                assert sessions[key] == {**original[key], "leads_session_id": None, "context_tokens": None, "last_turn_cost_usd": None}  # no leads search marked it
             for row in after["channel_configs"]:
                 assert json.loads(row["config"])["allowed_user_ids"] == ["7", "8"]
             metadata = json.loads(after["llm_records"][0]["metadata"])

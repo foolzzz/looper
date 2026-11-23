@@ -203,6 +203,11 @@ class SessionRouter:
         queue = self._queues.get(session.key)
         return queue is not None and not queue.empty()
 
+    def queued_count(self, session: ManagerSession) -> int:
+        """How many messages wait in ``session``'s queue. The one a worker has already taken is not in it."""
+        queue = self._queues.get(session.key)
+        return 0 if queue is None else queue.qsize()
+
     def holds(self, session: ManagerSession) -> bool:
         """Whether ``session``'s worker has a message: queued, or being handled."""
         queue = self._queues.get(session.key)

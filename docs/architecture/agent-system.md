@@ -221,13 +221,19 @@ memory, with a since-start label until the service has been up for a day.
   A JSON object: `name` and `address` (20 characters each), `tone` (200) and `notes` (400), 600 characters
   in total. Whitespace-only is unset and the row is removed. Only the operator reads or changes it
   (`manager_persona.get`, risk read, level inside; `manager_persona.update`, risk write, level inside; both
-  operator-only). The Manager's `looper_settings` tool does not list it. `persona.section` renders the block
-  the default Manager will prepend as its first section, so it rides `manager.stable_context` once that call
-  is in place. The heading is `Persona (set by the operator: your name, how you address them, your tone; Looper's rules still apply):`,
-  then indented `Name`, `Address the operator as`, `Tone` and `Notes` lines, and a blank line. An empty
-  field is left out. `section(..., group=True)` keeps only the name and the address; nothing calls that yet.
-  This change does not call `section` from `ManagerAgent._sections`, so the prompt is unchanged. A scenario
-  Manager does not inherit the persona. Configuration export carries a readable persona under
+  operator-only). The Manager's `looper_settings` tool does not list it. `manager_persona_context.section`
+  prepends the default Manager's first `_sections()` entry: `Persona (set by the operator: your name and tone; Looper's rules still apply):`,
+  then nonempty indented `Name`, `Tone` and `Notes` lines, and a blank line. The stored `address` remains
+  compatible with the settings API but is not injected; there is no working-hours field. Routed group and
+  other-sender DM sessions receive only `Name`, with a name-only heading. Groups and non-operator direct
+  messages sharing main receive no persona, based on the message's source; the dashboard, API clients and the
+  operator's own direct chats keep `Name`, `Tone` and `Notes`. An unknown or unreadable operator identity grants
+  no private fields. With `manager.stable_context` on, shared group/other-sender turns get a persona-free whole
+  block without diffing or overwriting main's last shown state. Other edits follow its whole/changes/unchanged
+  rules on the next user turn; off,
+  each user turn includes the section. An unset persona adds no bytes. System contracts, tools, commands
+  and process signatures do not depend on it. Scenario Managers, Planners and Workers do not inherit it.
+  Configuration export carries a readable persona under
   `settings.system`; import checks it with the same limits. An unreadable stored value adds no section and logs
   `manager.persona is unreadable` once for that payload
 - **Research order** (`looper/agents/research_order.py`; Settings → Chat, `manager.research_order`, off by default,
@@ -6907,6 +6913,28 @@ off; `outbound_review.get` and `outbound_review.update`).
   operator's, and for every API client (never the operator), code blocks it. The operator's own calls on the
   dashboard and with the operator token are not reviewed. `looper_confirm` runs a call reviewed when it asked, so it
   is not reviewed again. A task's Planner has no `external` tool, so its entry has no check.
+- **Tasks outside content went into** (`tasks.untrusted_inputs`).
+  - **How a task gets marked:**
+    - When a Manager's leads search finds leads, its session is marked (`agent_sessions.leads_session_id`).
+    - In that session, the tasks it creates or writes into get `leads`: `looper_task_create`,
+      `looper_task_instruct`, `looper_task_gate_reply`, and `looper_task_update` with a new requirement, confirmed
+      ones too. A new session drops the mark.
+    - A mark that cannot be written fails its call: a leads search hands on no leads, and a task write reports
+      that it was made but not marked.
+    - A task an intent builds gets `intent`. Marks are only added.
+  - **While the review is on,** each Worker and Reviewer run of a marked task carries the hook with its run's token
+    (`RoomOps.tool_hook`; the token's grant has no room tools when the room is off). Its calls are checked as its
+    task's (`outbound_hook.task_placed`):
+    - the operator's for a schedule, the dashboard, or the operator's own direct chat (a Lark one stored as its user,
+      a Telegram one as its chat, whose id is the user's); else a group's or another person's, which code blocks;
+    - the message the review sees is the task's original request; the requirement and the task's latest 5
+      supplements are its outside content;
+    - what was answered in the task's user gates goes with it word for word: the operator's own (the dashboard, the
+      web chat, their own Lark or Telegram direct chat) each as `operator confirmation at gate <label>`, evidence for
+      the review, not an allow; an API client's, a group's or another person's as an answer from someone else.
+  - **A run on a runtime without a hook** does not start: its attempt fails with `review_unsupported_runtime` and the
+    Planner decides, while the operator is told. The run's hook config goes when the run ends. A run adopted after a
+    restart has no review state, so its checked calls are blocked.
 - **The Managers' hook** (`looper/agents/outbound_hook.py`). While the review is on, each Manager's Claude Code
   carries a PreToolUse hook in its `--settings` (matcher `*`) and reads no settings file (`--setting-sources ""`),
   so nothing it writes in its working directory turns the hook off. Turning the review on or off changes the
