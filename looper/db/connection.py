@@ -165,6 +165,8 @@ _LEADS_CHECK = "leads_check"
 _LEADS_CHECK_ONLINE = "leads_check_online"
 _RUN_SKIPS = "run_skips"
 _RUN_SKIPS_ONLINE = "run_skips_online"
+_EVENT_TRIAGE = "event_triage"
+_EVENT_TRIAGE_ONLINE = "event_triage_online"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
@@ -402,6 +404,11 @@ _ONLINE_STEPS = (
                 validate=(*(("subscription_runs", f"subscription_runs_{name}")
                             for name in ("outcome_check", "skip_reason_check", "skipped")),
                           ("schedule_notifications", "schedule_notifications_kind_check"))),
+    _OnlineStep(_EVENT_TRIAGE, _EVENT_TRIAGE_ONLINE,
+                validate=(("subscriptions", "subscriptions_output_kind_check"),
+                          ("manager_events", "manager_events_kind_check"),
+                          ("manager_events", "manager_events_task"),
+                          ("manager_events", "manager_events_reason_check"))),
     _OnlineStep(_MID_TURN_INPUT, "mid_turn_input_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
@@ -510,6 +517,38 @@ def _intent_merges_ddl() -> str:
 
 _LEADS_CHECK_BLOCK = re.compile(r"-- leads check begin\n(.*?)-- leads check end", re.S)
 _RUN_SKIPS_BLOCK = re.compile(r"-- run skips begin\n(.*?)-- run skips end", re.S)
+
+
+_EVENT_TRIAGE_BLOCK = re.compile(r"-- event triage begin\n(.*?)-- event triage end", re.S)
+
+
+def _event_triage_ddl() -> str:
+    """All triage DDL in one block, shared by fresh installs and the named upgrade."""
+    found = _EVENT_TRIAGE_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its event triage block")
+    return found.group(1)
+
+
+async def _event_triage_pending(conn: asyncpg.Connection) -> bool:
+    """Admit an unmarked pre-triage catalog; recorded migrations never repair missing objects."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _EVENT_TRIAGE):
+        return False
+    return not await conn.fetchval(
+        "SELECT to_regclass('triage_events') IS NOT NULL AND to_regclass('triage_event_sources') IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('subscription_runs') "
+        "AND attname = 'window_seqs' AND attnum > 0 AND NOT attisdropped) "
+        "AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('manager_events') "
+        "AND attname = 'task_id' AND NOT attnotnull AND attnum > 0 AND NOT attisdropped) "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('manager_events') "
+        "AND conname = 'manager_events_task') "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('manager_events') "
+        "AND conname = 'manager_events_kind_check' AND strpos(pg_get_constraintdef(oid), $1) > 0) "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('manager_events') "
+        "AND conname = 'manager_events_reason_check' AND strpos(pg_get_constraintdef(oid), $2) > 0) "
+        "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('subscriptions') "
+        "AND conname = 'subscriptions_output_kind_check' AND strpos(pg_get_constraintdef(oid), $1) > 0)",
+        "'triage'", "'manager_silent'")
 
 
 def _run_skips_ddl() -> str:
@@ -1737,6 +1776,17 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _reminders_pending(conn):
             await conn.execute(_reminders_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REMINDERS)
+        # After historical migrations that widen these same checks. Only existing tables need online validation.
+        if await _event_triage_pending(conn):
+            await conn.execute(_event_triage_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _EVENT_TRIAGE)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _EVENT_TRIAGE_ONLINE)
+        elif state == "empty":
+            for table, constraint in _online_step(_EVENT_TRIAGE).validate:
+                await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+        elif await _unvalidated(conn, _EVENT_TRIAGE):
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _EVENT_TRIAGE)
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", _EVENT_TRIAGE_ONLINE)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1788,7 +1838,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
-            or await _run_skips_pending(conn)
+            or await _run_skips_pending(conn) or await _event_triage_pending(conn)
             or await _outbound_reviews_pending(conn)
             or await _uncertain_deliveries_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
