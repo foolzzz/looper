@@ -448,10 +448,10 @@ def test_waiting_counts_errors_and_the_earliest_item(monkeypatch: pytest.MonkeyP
     late = NOW - timedelta(hours=1)
 
     async def collect(**_: Any) -> dict[str, Any]:
+        # The shown list keeps only the later gate. The oldest one is a separate read.
         return {"sections": [
             {"kind": "gates", "state": "ok", "count": 1, "items": [
-                {"key": "gate:late", "title": "晚的\n关卡", "since": late},
-                {"key": "gate:early", "title": "早的关卡", "since": early}], "error": None},
+                {"key": "gate:late", "title": "晚的\n关卡", "since": late}], "error": None},
             {"kind": "confirmations", "state": "unknown", "count": 0, "items": [], "error": None},
             {"kind": "schedules", "state": "error", "count": 0, "items": [], "error": "down"},
             {"kind": "logins", "state": "ok", "count": 0, "items": [], "error": None},
@@ -460,8 +460,13 @@ def test_waiting_counts_errors_and_the_earliest_item(monkeypatch: pytest.MonkeyP
     async def on(**_: Any) -> bool:
         return True
 
+    async def earliest(kind: str, **_: Any) -> dict[str, Any]:
+        assert kind == "gates"
+        return {"key": "gate:early", "title": "早的关卡", "since": early}
+
     monkeypatch.setattr("looper.agents.attention.enabled", on)
     monkeypatch.setattr("looper.agents.attention.collect", collect)
+    monkeypatch.setattr("looper.agents.attention.earliest", earliest)
 
     async def check() -> None:
         card = await status_card.snapshot(
@@ -496,6 +501,17 @@ def test_waiting_counts_errors_and_the_earliest_item(monkeypatch: pytest.MonkeyP
 
         monkeypatch.setattr("looper.agents.attention.enabled", unread)
         monkeypatch.setattr("looper.agents.reminders.enabled", unread)
+        card = await status_card.snapshot(
+            fleet=_Fleet(_Agent([_idle()])), task_router=SimpleNamespace(running_planners=lambda: []),
+            worker_pool=None, now=NOW)
+        assert "等你：没能读取（RuntimeError: switch）" in card["text"]
+        assert "提醒：没能读取（RuntimeError: switch）" in card["text"]
+
+        async def off(**_: Any) -> bool:
+            return False
+
+        monkeypatch.setattr("looper.agents.attention.enabled", off)
+        monkeypatch.setattr("looper.agents.reminders.enabled", off)
         card = await status_card.snapshot(
             fleet=_Fleet(_Agent([_idle()])), task_router=SimpleNamespace(running_planners=lambda: []),
             worker_pool=None, now=NOW)

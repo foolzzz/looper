@@ -14,7 +14,8 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from enum import Enum, StrEnum
+from typing import Any, Literal, NotRequired, TypedDict, cast
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,151 @@ _WAITING = {"gates": "关卡", "confirmations": "确认", "schedules": "失败�
 _BACKGROUND = {"completion": "收尾", "own": "自己发起"}
 
 _enabled = False
+
+# A reply marked with this is shown on the live stream and stored in no chat a later session reads.
+EPHEMERAL_CHAT = "ephemeral_chat"
+
+
+class SessionState(StrEnum):
+    """What one Manager session is doing."""
+
+    IDLE = "idle"
+    ANSWERING = "answering"
+    BACKGROUND = "background"
+
+
+SectionState = Literal["ok", "error", "unknown"]
+
+
+class _ErrorSection(TypedDict):
+    name: str
+    state: Literal["error"]
+    error: str
+
+
+class _UnknownSection(TypedDict):
+    name: str
+    state: Literal["unknown"]
+    error: None
+
+
+class _SessionView(TypedDict):
+    key: str
+    state: Literal["idle", "answering", "background"]
+    origin: str | None
+    channel: str | None
+    chat: str | None
+    group: bool
+    client_id: str | None
+    started_at: str | None
+    elapsed_seconds: int | None
+    queued: int
+
+
+class _ManagerRow(TypedDict):
+    manager_id: str
+    name: str
+    queued: int
+    sessions: list[_SessionView]
+
+
+class _ManagerSection(TypedDict):
+    name: Literal["manager"]
+    state: SectionState
+    error: str | None
+    managers: NotRequired[list[_ManagerRow]]
+
+
+class _TaskRow(TypedDict):
+    task_id: str
+    name: str
+    project_id: str | None
+    project_name: str | None
+    workers_running: int
+    workers_waiting: int
+    reviewers_running: int
+    reviewers_waiting: int
+    planner: bool
+
+
+class _TasksSection(TypedDict):
+    name: Literal["tasks"]
+    state: SectionState
+    error: str | None
+    count: NotRequired[int]
+    shown: NotRequired[list[_TaskRow]]
+    more: NotRequired[int]
+
+
+class _ScheduleNext(TypedDict):
+    schedule_id: str
+    name: str
+    project_name: str | None
+    next_fire_at: str | None
+    timezone: str | None
+
+
+class _ScheduleRunning(TypedDict):
+    run_id: str
+    schedule_id: str
+    name: str
+    project_name: str | None
+    fired_at: str | None
+    timezone: str | None
+
+
+class _SchedulesSection(TypedDict):
+    name: Literal["schedules"]
+    state: SectionState
+    error: str | None
+    next: NotRequired[list[_ScheduleNext]]
+    running: NotRequired[list[_ScheduleRunning]]
+
+
+class _Earliest(TypedDict):
+    key: str | None
+    title: str
+    since: str | None
+
+
+class _WaitingKind(TypedDict):
+    kind: str
+    state: SectionState
+    count: int
+    earliest: _Earliest | None
+    error: str | None
+
+
+class _WaitingSection(TypedDict):
+    name: Literal["waiting"]
+    state: SectionState
+    error: str | None
+    kinds: NotRequired[list[_WaitingKind]]
+
+
+class _ReminderNext(TypedDict):
+    due_at: str | None
+    text: str
+    timezone: str | None
+
+
+class _RemindersSection(TypedDict):
+    name: Literal["reminders"]
+    state: SectionState
+    error: str | None
+    next: NotRequired[_ReminderNext | None]
+
+
+_Section = (_ManagerSection | _TasksSection | _SchedulesSection | _WaitingSection | _RemindersSection
+            | _ErrorSection | _UnknownSection)
+
+
+class StatusSnapshot(TypedDict):
+    """The card as code returns it: section states are ``ok``, ``error`` or ``unknown``."""
+
+    read_at: str
+    text: str
+    sections: list[_Section]
 
 
 def enabled() -> bool:
@@ -44,6 +190,17 @@ def set_enabled(value: bool) -> None:
     """Apply a value in memory only (``load`` and ``update`` store it; tests use this directly)."""
     global _enabled
     _enabled = value
+
+
+def ephemeral_status(text: str, *, target_type: str) -> bool:
+    """Whether ``text`` is an enabled ``/status`` addressed to a Manager.
+
+    That reply is built in code. The dashboard must keep both the command and the card out of every store a later
+    session or a resume brief reads. Off, and any other target, it stays an ordinary message.
+    """
+    from .chat_commands import is_status
+
+    return target_type == "manager" and is_status(text) and enabled()
 
 
 def view() -> dict[str, bool]:
@@ -66,7 +223,7 @@ class SessionActivity:
     """One Manager session as the card reads it: idle, answering the operator, or a background turn."""
 
     key: str
-    state: str  # idle | answering | background
+    state: SessionState
     origin: str | None
     channel: str | None
     chat: str | None
@@ -74,6 +231,10 @@ class SessionActivity:
     client_id: str | None
     started_at: datetime | None
     queued: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, SessionState):
+            self.state = SessionState(self.state)
 
 
 class SoloFleet:
@@ -103,12 +264,12 @@ def session_activity(agent: Any) -> list[SessionActivity]:
         locked = session.turn_lock.locked()
         origin = _origin(token)
         if token is None and not locked:
-            state, origin = "idle", None
+            state, origin = SessionState.IDLE, None
             channel = chat = client_id = None
             group = False
             started = None
         else:
-            state = "answering" if origin in (None, "user") else "background"
+            state = SessionState.ANSWERING if origin in (None, "user") else SessionState.BACKGROUND
             channel, chat, group, client_id = _session_place(token)
             started = token.received_at if token is not None else None
         queued = agent._router.queued(session)
@@ -146,7 +307,7 @@ def _session_place(token: Any) -> tuple[str | None, str | None, bool, str | None
 
 
 async def snapshot(*, fleet: Any, task_router: Any, worker_pool: Any, now: datetime,
-                   source: str = "snapshot") -> dict[str, Any]:
+                   source: str = "snapshot") -> StatusSnapshot:
     """The card now. ``source`` is only the log line (``snapshot``, ``status`` or ``get``)."""
     started = time.perf_counter()
     if now.tzinfo is None:
@@ -163,7 +324,7 @@ async def snapshot(*, fleet: Any, task_router: Any, worker_pool: Any, now: datet
     failed = ",".join(section["name"] for section in sections if section["state"] == "error") or "-"
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     logger.info("status_card source=%s elapsed_ms=%d failed=%s", source, elapsed_ms, failed)
-    return {"read_at": now.isoformat(), "text": text, "sections": _jsonable(sections)}
+    return cast(StatusSnapshot, {"read_at": now.isoformat(), "text": text, "sections": _jsonable(sections)})
 
 
 async def command_reply(envelope: Any, *, fleet: Any, task_router: Any, worker_pool: Any, now: datetime) -> str:
@@ -319,9 +480,8 @@ async def _waiting_section(fleet: Any) -> dict[str, Any] | None:
 
     try:
         on = await attention.enabled()
-    except Exception:
-        logger.warning("status_card: could not read whether attention is on", exc_info=True)
-        return None
+    except Exception as exc:
+        return _error("waiting", exc)
     if not on:
         return None
     managers = fleet if fleet is not None and callable(getattr(fleet, "ops", None)) else None
@@ -331,16 +491,20 @@ async def _waiting_section(fleet: Any) -> dict[str, Any] | None:
         return _error("waiting", exc)
     kinds = []
     for section in summary.get("sections") or []:
-        items = section.get("items") or []
+        earliest = None
+        # The shown list is capped and often urgency-ordered, so the oldest item has its own read.
+        if section.get("state") == "ok" and section.get("count"):
+            try:
+                earliest = _earliest_view(await attention.earliest(section["kind"], managers=managers))
+            except Exception:
+                logger.warning("status_card: could not read the earliest %s", section.get("kind"), exc_info=True)
         kinds.append({"kind": section["kind"], "state": section["state"], "count": section.get("count") or 0,
-                      "earliest": _earliest(items), "error": section.get("error")})
+                      "earliest": earliest, "error": section.get("error")})
     return {"name": "waiting", "state": "ok", "error": None, "kinds": kinds}
 
 
-def _earliest(items: list[Mapping[str, Any]]) -> dict[str, Any] | None:
-    dated = [item for item in items if isinstance(item.get("since"), datetime)]
-    item = min(dated, key=lambda one: one["since"]) if dated else (items[0] if items else None)
-    if item is None:
+def _earliest_view(item: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not item:
         return None
     since = item.get("since")
     return {"key": item.get("key"), "title": _plain(item.get("title")),
@@ -352,9 +516,8 @@ async def _reminders_section() -> dict[str, Any] | None:
 
     try:
         on = await reminders.enabled()
-    except Exception:
-        logger.warning("status_card: could not read whether reminders are on", exc_info=True)
-        return None
+    except Exception as exc:
+        return _error("reminders", exc)
     if not on:
         return None
     try:
@@ -562,6 +725,8 @@ def _zone(name: str | None) -> Any:
 def _jsonable(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
     if isinstance(value, dict):
         return {key: _jsonable(item) for key, item in value.items()}
     if isinstance(value, list):

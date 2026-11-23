@@ -6,7 +6,7 @@ Each test uses its own schema. The card stays off unless a test turns it on, and
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -199,5 +199,44 @@ def test_get_conflicts_while_off_and_returns_the_card_once_on(monkeypatch: pytes
         assert "recent" not in card and "lanes" not in card
         assert await pool.fetchval("SELECT value FROM system_settings WHERE key = $1",
                                    status_card.ENABLED_KEY) == "true"
+
+    run_db(test, monkeypatch)
+
+
+def test_the_oldest_pending_intent_is_not_taken_from_the_capped_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Twenty shown intents are the urgent one and the newest ordinary ones. The card's earliest is the oldest."""
+    from looper.agents import attention
+
+    async def test(pool: Any) -> None:
+        await pool.execute("INSERT INTO event_sources (id, kind, name) VALUES ('s', 'lark_user', 'S')")
+        await pool.executemany(
+            "INSERT INTO system_settings (key, value) VALUES ($1, 'true')",
+            [("attention.enabled",), ("intents.enabled",)])
+        opened = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        oldest = None
+        for index in range(attention.SHOWN + 1):
+            intent_id = await pool.fetchval(
+                "INSERT INTO intents (source_id, type_key, type_version, title, confidence, state, chat_id, "
+                "created_at) VALUES ('s', 'dev_task', 1, $1, 'high', 'pending', 'chat', $2) RETURNING id",
+                f"task {index:02d}", opened + timedelta(minutes=index))
+            if index == 0:
+                oldest = intent_id
+        urgent = await pool.fetchval(
+            "INSERT INTO intents (source_id, type_key, type_version, title, confidence, state, chat_id, created_at) "
+            "VALUES ('s', 'alert_triage', 1, 'newer urgent', 'high', 'pending', 'chat', $1) RETURNING id",
+            opened + timedelta(days=1))
+        summary = await attention.collect()
+        intents = next(section for section in summary["sections"] if section["kind"] == "intents")
+        shown = [item["key"] for item in intents["items"]]
+        assert intents["count"] == attention.SHOWN + 2
+        assert shown[0] == f"intent:{urgent}" and f"intent:{oldest}" not in shown and len(shown) == attention.SHOWN
+
+        card = await status_card.snapshot(
+            fleet=_Fleet(), task_router=SimpleNamespace(running_planners=lambda: []), worker_pool=None, now=NOW)
+        waiting = _section(card, "waiting")
+        kind = next(item for item in waiting["kinds"] if item["kind"] == "intents")
+        assert kind["count"] == attention.SHOWN + 2
+        assert kind["earliest"]["key"] == f"intent:{oldest}"
+        assert kind["earliest"]["title"] == "task 00"
 
     run_db(test, monkeypatch)

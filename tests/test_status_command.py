@@ -7,8 +7,8 @@ launched-process comparison is two separate first turns, so a resume cannot make
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
-import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,9 +26,6 @@ from tests.test_manager_stop import _Session, _manager
 
 TELEGRAM = channel_address("telegram")
 READY = "please reply with the word ready"
-_LOOP = re.compile(r"http://127\.0\.0\.1:\d+\S*")
-# The builtin MCP config is named by a hash of its content, which includes this endpoint's port and token.
-_MCP_CONFIG = re.compile(r"/\.local/mcp/[0-9a-f]{64}\.json")
 
 
 @pytest.fixture(autouse=True)
@@ -338,30 +335,131 @@ def _turn_text(root: Path) -> str:
     return raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, sort_keys=True)
 
 
-def _scrub(value: Any, prompt_file: str, root: str) -> Any:
-    """The prompt file, this runtime root, the recorder's loopback port and the content-addressed MCP config
-    filename are not part of the comparison. The config file is named by a hash of its content, and that content
-    carries this endpoint's port and a random token."""
+def _port_of(url: str) -> str | None:
+    marker = "127.0.0.1:"
+    start = url.find(marker)
+    if start < 0:
+        return None
+    port = []
+    for char in url[start + len(marker):]:
+        if not char.isdigit():
+            break
+        port.append(char)
+    return "".join(port) or None
+
+
+def _endpoint(launch: Any) -> tuple[str | None, str | None, str | None]:
+    """This launch's loopback port, MCP token and config path. The port is only the ``127.0.0.1`` port."""
+    path = getattr(getattr(launch, "library", None), "mcp_config", None)
+    if not path:
+        return None, None, None
+    servers = json.loads(Path(path).read_text(encoding="utf-8")).get("mcpServers") or {}
+    server = servers.get("looper")
+    env = server.get("env") if isinstance(server, dict) and isinstance(server.get("env"), dict) else {}
+    url = env.get("LOOPER_AGENT_URL")
+    token = env.get("LOOPER_AGENT_TOKEN")
+    return (_port_of(url) if isinstance(url, str) else None), (token if isinstance(token, str) else None), path
+
+
+def _apply(value: Any, change: Any) -> Any:
     if isinstance(value, str):
-        text = _LOOP.sub("http://127.0.0.1:PORT/r/ROUTE", value.replace(prompt_file, "PROMPT").replace(root, "ROOT"))
-        return _MCP_CONFIG.sub("/.local/mcp/CONFIG.json", text)
+        return change(value)
     if isinstance(value, tuple):
-        return tuple(_scrub(item, prompt_file, root) for item in value)
+        return tuple(_apply(item, change) for item in value)
     if isinstance(value, list):
-        return [_scrub(item, prompt_file, root) for item in value]
+        return [_apply(item, change) for item in value]
+    if isinstance(value, dict):
+        return {key: _apply(item, change) for key, item in value.items()}
     return value
 
 
-def _comparable(signature: Any, prompt_file: str, root: str) -> Any:
-    """Drop the two hashes that name this process's ops endpoint.
+def _volatile(text: str, *, prompt_file: str, root: str, port: str | None, token: str | None) -> str:
+    """Replace this run's prompt file, runtime root, loopback port and MCP token, and nothing else."""
+    text = text.replace(prompt_file, "PROMPT").replace(root, "ROOT")
+    if port:
+        text = text.replace(f"127.0.0.1:{port}", "127.0.0.1:PORT")
+    if token:
+        text = text.replace(token, "TOKEN")
+    return text
 
-    Index 2 is the environment hash: each endpoint's loopback port is in the environment. Index 3 is the library
-    hash: the builtin MCP server item hashes a config that contains that port and a random token. The command's
-    ``--mcp-config`` path is that file's content hash; ``_scrub`` replaces the filename and every other argument
-    is compared as itself.
+
+def _mcp_file(path: str | None, volatile: Any) -> tuple[str | None, str | None, str | None]:
+    """The normalized MCP file, its real content hash, and the hash of the normalized text.
+
+    The filename is that content hash. Replacing the whole filename would hide every other server in the file.
     """
-    scrubbed = _scrub(signature, prompt_file, root)
-    return scrubbed[:2] + scrubbed[4:]
+    if not path:
+        return None, None, None
+    raw = Path(path).read_text(encoding="utf-8")
+    text = volatile(raw)
+    return text, hashlib.sha256(raw.encode("utf-8")).hexdigest(), hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _library_sha(launch: Any, volatile: Any) -> str | None:
+    """The library hash with the builtin ``looper`` item hashed from its normalized server config.
+
+    That item's sha is ``sha256`` of ``json.dumps(server, sort_keys=True)`` (default separators). Other items stay.
+    """
+    from looper.agents.library import ItemKind, LoadedItem, library_sha256
+
+    path = getattr(launch.library, "mcp_config", None)
+    items = tuple(launch.library.items)
+    if not path:
+        return library_sha256(items)
+    servers = json.loads(Path(path).read_text(encoding="utf-8")).get("mcpServers") or {}
+    server = servers.get("looper")
+    if not isinstance(server, dict):
+        return library_sha256(items)
+    sha = hashlib.sha256(json.dumps(_apply(server, volatile), sort_keys=True).encode("utf-8")).hexdigest()
+    replaced = tuple(
+        LoadedItem(item.kind, item.name, sha, plugin=item.plugin, scope=item.scope)
+        if item.kind is ItemKind.MCP and item.name == "looper" else item
+        for item in items)
+    return library_sha256(replaced)
+
+
+def _env_sha(pairs: list[tuple[str, str]]) -> str | None:
+    """The same hash ``Launch.env_sha256`` uses, over the normalized pairs."""
+    from looper.agents.agent_settings import sha256_text
+
+    if not pairs:
+        return None
+    return sha256_text(json.dumps(pairs, ensure_ascii=False, separators=(",", ":")))
+
+
+def _comparable(turn: dict[str, Any], root: str) -> dict[str, Any]:
+    """The launched turn with only its port, token and temp paths normalized.
+
+    The environment hash, the library hash and the MCP filename stay in the comparison. Each is recomputed after
+    that normalization, so a different variable, plugin or MCP server still fails the comparison. The prompt hash,
+    the binding hash and a tools-list hash are compared as stored.
+    """
+    launch = turn["launch"]
+    port, token, mcp_path = _endpoint(launch)
+
+    def volatile(text: str) -> str:
+        return _volatile(text, prompt_file=turn["prompt_file"], root=root, port=port, token=token)
+
+    mcp_text, raw_hash, norm_hash = _mcp_file(mcp_path, volatile)
+
+    def finish(text: str) -> str:
+        # Swap the filename hash before the token, so a token cannot eat those hex characters.
+        if raw_hash and norm_hash and raw_hash != norm_hash:
+            text = text.replace(raw_hash, "MCPHASH")
+        text = volatile(text)
+        if raw_hash and norm_hash and raw_hash != norm_hash:
+            text = text.replace("MCPHASH", norm_hash)
+        return text
+
+    command, prompt_sha, _env_hash, _library_hash, binding_sha, url, *rest = turn["signature"]
+    env = [(key, finish(value)) for key, value in launch.env]
+    return {
+        "signature": (_apply(command, finish), prompt_sha, _env_sha(env), _library_sha(launch, finish),
+                      binding_sha, finish(url) if isinstance(url, str) else url, *rest),
+        "env": env,
+        "environment": {key: finish(value) for key, value in launch.environment().items()},
+        "mcp": mcp_text,
+    }
 
 
 def test_off_the_launched_manager_matches_an_ordinary_message(
@@ -387,7 +485,8 @@ def test_off_the_launched_manager_matches_an_ordinary_message(
             result = await prepare(self, *args, **kwargs)
             if result.signature is not None:
                 seen.append({"prompt": result.system_prompt.text, "signature": result.signature,
-                             "prompt_file": str(result.prompt_file), "tools": listed_last[0]})
+                             "prompt_file": str(result.prompt_file), "tools": listed_last[0],
+                             "launch": result.launch})
             return result
 
         async def listed(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -427,9 +526,123 @@ def test_off_the_launched_manager_matches_an_ordinary_message(
         assert turns[0].replace(READY, "MSG") == turns[1].replace("/status", "MSG")
         assert ready["prompt"].replace(READY, "MSG") == status["prompt"].replace("/status", "MSG")
         assert ready["tools"] == status["tools"] and ready["tools"]
-        assert _comparable(ready["signature"], ready["prompt_file"], str(tmp_path / "ready")) == \
-            _comparable(status["signature"], status["prompt_file"], str(tmp_path / "status"))
+        assert _comparable(ready, str(tmp_path / "ready")) == _comparable(status, str(tmp_path / "status"))
         assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = $1",
                                    status_card.ENABLED_KEY) == 0
 
     run_db(test, monkeypatch, timeout=120)
+
+
+def test_an_enabled_dashboard_status_is_not_stored(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A dashboard ``/status`` while the card is on is streamed, then absent from every later session.
+
+    The send goes through ``POST /api/v1/operator_chat/send`` and the web channel. The command and the card are
+    absent from ``chat_messages`` and from the resume brief. Replaying the journaled reply, with nothing left in
+    memory, still stores nothing. Off, ``/status`` is an ordinary stored message; on, an ordinary message is too.
+    """
+    from looper.agents.api_v1 import OPERATOR
+    from looper.agents.channels.web import WebChannelAdapter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.ops.clients import ClientOps
+    from looper.agents.tiers.task import TaskRouter
+    from looper.db import chat as db_chat
+    from tests.test_usage_api_db import _Writer
+
+    class _Dash:
+        def __init__(self, agent: Any) -> None:
+            self._agent = agent
+
+        def get(self, manager_id: str) -> Any:
+            return self._agent if manager_id == self._agent.agent_id else None
+
+        @property
+        def default(self) -> Any:
+            return self._agent
+
+        def agents(self) -> list[Any]:
+            return [self._agent]
+
+    async def test(pool: Any) -> None:
+        monkeypatch.setattr(status_card, "_enabled", True)
+        session = _Session(hold=False)
+        manager, bus, _queue = _manager(tmp_path, session)
+        manager._running = True
+        held: list[asyncio.Task[Any]] = []
+        receive = manager._receive
+
+        def take(envelope: MessageEnvelope) -> bool:
+            before = set(manager._status_tasks)
+            taken = receive(envelope)
+            held.extend(set(manager._status_tasks) - before)
+            return taken
+
+        bus.subscribe_topic(MessageType.USER_MESSAGE.value, take, consumes=True)
+        web = WebChannelAdapter(port=0)
+        await web.start(bus)
+        server = AgentHTTPServer(
+            port=0, web_adapter=web, supervisor=SimpleNamespace(), managers=_Dash(manager),
+            task_router=TaskRouter(runtime_root=tmp_path), runtime_root=tmp_path)
+        server._client_ops = ClientOps(SimpleNamespace())
+
+        async def post(text: str, session_id: str, message_id: str) -> tuple[int, Any]:
+            writer = _Writer()
+            body = json.dumps({"text": text, "session_id": session_id, "message_id": message_id}).encode()
+            await server._handle_v1("POST", "/api/v1/operator_chat/send", {}, {}, body, writer, OPERATOR)
+            head, _, payload = writer.data.partition(b"\r\n\r\n")
+            answer = json.loads(payload)
+            if answer.get("status") == "ok":
+                answer = answer["result"]
+            return int(head.split()[1]), answer
+
+        def stored(rows: list[Any]) -> list[tuple[Any, Any, Any]]:
+            return [(row["session_id"], row["role"], row["content"]) for row in rows]
+
+        try:
+            status, answer = await post("/status", "sess-on", "m-on")
+            assert status == 200 and answer["correlation_id"]
+            assert held
+            await asyncio.gather(*held)
+            final = None
+            async for event in web.iter_sse_events(answer["correlation_id"], timeout=5):
+                if event.get("kind") == "answer.final":
+                    final = event["payload"]["text"]
+                    break
+            assert isinstance(final, str) and final.startswith("截至")
+            assert session.turns == []
+            assert await pool.fetchval("SELECT count(*) FROM chat_messages") == 0
+            assert await db_chat.recent_conversations(sessions=5, messages=20) == []
+            brief = await manager._resume_brief(MessageEnvelope.create(
+                source=channel_address("web"), target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                payload={"text": "later", "channel_context": {"session_id": "sess-later"}}), "later")
+            assert "/status" not in brief and "截至" not in brief
+            assert await pool.fetchval("SELECT manager_id FROM chat_threads WHERE session_id = 'sess-on'") == "manager"
+
+            replies = []
+            journal = tmp_path / ".local" / "agent-bus" / "journal.jsonl"
+            for line in journal.read_text(encoding="utf-8").splitlines():
+                envelope = MessageEnvelope.from_dict(json.loads(line))
+                if envelope.message_type == MessageType.AGENT_REPLY:
+                    replies.append(envelope)
+            assert len(replies) == 1 and replies[0].metadata.get(status_card.EPHEMERAL_CHAT) is True
+            assert str(replies[0].payload.get("text", "")).startswith("截至")
+            fresh = WebChannelAdapter(port=0)
+            await fresh.deliver(replies[0])
+            assert await pool.fetchval("SELECT count(*) FROM chat_messages") == 0
+
+            monkeypatch.setattr(status_card, "_enabled", False)
+            status, _answer = await post("/status", "sess-off", "m-off")
+            assert status == 200
+            monkeypatch.setattr(status_card, "_enabled", True)
+            status, _answer = await post("hello", "sess-hello", "m-hello")
+            assert status == 200
+            rows = await pool.fetch("SELECT session_id, role, content FROM chat_messages ORDER BY id")
+            assert stored(rows) == [("sess-off", "user", "/status"), ("sess-hello", "user", "hello")]
+            assert await pool.fetchval("SELECT count(*) FROM chat_messages WHERE session_id = 'sess-on'") == 0
+            assert session.turns == []
+        finally:
+            await web.stop()
+            await manager.stop()
+            await bus.shutdown()
+
+    run_db(test, monkeypatch, timeout=60)

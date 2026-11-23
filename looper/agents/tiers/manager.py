@@ -811,7 +811,8 @@ class GoalSnapshot:
 
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
-                   snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> MessageEnvelope:
+                   snapshot: str | None = None, cards: list[dict[str, Any]] | None = None,
+                   ephemeral: bool = False) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
     the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
@@ -826,7 +827,8 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
         reply_to=original.message_id,
         metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original), **record,
                   **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {}),
-                  **({"cards": cards} if cards else {})},
+                  **({"cards": cards} if cards else {}),
+                  **({status_card.EPHEMERAL_CHAT: True} if ephemeral else {})},
     )
 
 
@@ -1227,7 +1229,7 @@ class ManagerAgent:
                 task_router=platform.task_router if platform is not None else None,
                 worker_pool=platform.worker_pool if platform is not None else None,
                 now=datetime.now(timezone.utc))
-            await self._send_reply(envelope, text, persist=False)
+            await self._send_reply(envelope, text, persist=False, ephemeral=True)
         except Exception:
             logger.exception("%s: could not answer /status %s", self._log, envelope.message_id)
 
@@ -3690,11 +3692,13 @@ class ManagerAgent:
             logger.warning("%s: could not persist a %s chat turn", self._log, channel, exc_info=True)
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
-                          persist: bool = True, outcome: ReplyOutcome | None = None,
+                          persist: bool = True, ephemeral: bool = False, outcome: ReplyOutcome | None = None,
                           snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
-        history (a user gate keeps its own discussion). Web replies always retain their recovery identity.
+        history (a user gate keeps its own discussion). ``ephemeral`` is an enabled ``/status``: the web channel
+        shows it and stores neither it nor, with the send path, the command. Web replies always retain their
+        recovery identity.
         ``outcome`` is how the turn ended; by default
         failed with an ``error``, else answered."""
         assert self._bus is not None
@@ -3702,7 +3706,7 @@ class ManagerAgent:
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
-                                               record=record, snapshot=snapshot, cards=cards))
+                                               record=record, snapshot=snapshot, cards=cards, ephemeral=ephemeral))
         token = self._turns.find(original.message_id) or self._metrics_reply_tokens.get(original.message_id)
         if token is not None and token.message_id == original.message_id and token.times is not None and text and error is None:
             if token.times.first_reply_at is None:
