@@ -149,10 +149,17 @@ _SCHEDULE_ALERTS = (("failures", "failures_alert_at"), ("stale", "stale_alert_at
 
 
 def _schedule_items(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    from .unanswered_pushes import PauseReason
+
     items = []
     for row in rows:
         alerts = [name for name, column in _SCHEDULE_ALERTS if row[column] is not None]
-        since = min((row[column] for _, column in _SCHEDULE_ALERTS if row[column] is not None), default=None)
+        moments = [row[column] for _, column in _SCHEDULE_ALERTS if row[column] is not None]
+        if row.get("pause_reason") == PauseReason.UNANSWERED:
+            alerts.append(PauseReason.UNANSWERED.value)
+            if row.get("paused_at") is not None:
+                moments.append(row["paused_at"])
+        since = min(moments) if moments else None
         items.append(_item(f"schedule:{row['id']}", row["name"], context=row["project_name"], since=since,
                            href=f"#schedules/{row['id']}", failures=row["consecutive_failures"], alerts=alerts,
                            last_status=row["last_status"], last_ok_at=row.get("last_ok_at")))
@@ -245,6 +252,11 @@ async def _catchup_items() -> list[dict[str, Any]]:
 
 
 def _cost_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    if row.get("reason") == "unanswered":
+        name = _plain(row.get("schedule_name") or row["scope_ref"])
+        return _item(f"cost:{row['id']}", f"『{name}』{row['pushes']} 条推送没人回", context=row["scope_ref"],
+                     since=row["created_at"], href="#settings/cost", ref=f"C-{row['id']}",
+                     reason="unanswered", pushes=row["pushes"])
     label = "任务花费" if row["scope"] == "task" else "全局当天花费"
     return _item(f"cost:{row['id']}", f"{label}等你决定", context=row["scope_ref"], since=row["created_at"],
                  href="#settings/cost", ref=f"C-{row['id']}", currency=row["currency"],
@@ -372,7 +384,8 @@ _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的�
            "logins": "登录失效", "intents": "待处理的意图", "ledger": "账本里等你的事",
            "deliveries": "可能没送到的消息", "cost": "花费等你决定"}
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
-_ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠"}
+_ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠",
+           "unanswered": "没人回，已自动暂停"}
 _LEDGER_KINDS = {"pending": "待办", "decision": "待确认的决定", "work_item": "在做的事"}
 _DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知", "catchup": "飞书消息补收失败"}
 _HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
@@ -424,6 +437,8 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
     if kind == "intents":
         return f"- {item['ref']} {title}（{context}" + ("，紧急" if facts["priority"] == "urgent" else "") + "）"
     if kind == "cost":
+        if facts.get("reason") == "unanswered":
+            return f"- {item['ref']} {title}"
         money = "等价花费" if facts["currency"] == "equivalent_usd" else "真钱"
         return f"- {item['ref']} {title}（{context}；{money} ${facts['spent_usd']:.2f} / 上限 ${facts['limit_usd']:.2f}）"
     if kind == "ledger":
@@ -451,7 +466,10 @@ def summary_text(summary: Mapping[str, Any]) -> str:
             lines = [f"{_TITLES[kind]} {section['count']}：", *(_line(kind, item, now) for item in section["items"])]
             if section["count"] > len(section["items"]):
                 lines.append(f"- 另有 {section['count'] - len(section['items'])} 项，见控制台「Needs you」页")
-            hint = _HINTS[kind].format(ref=section["items"][0]["ref"]) if kind in _HINTS else ""
+            if kind == "cost" and section["items"][0]["facts"].get("reason") == "unanswered":
+                hint = f"回复「继续 {section['items'][0]['ref']}」继续推，或「停 {section['items'][0]['ref']}」暂停。"
+            else:
+                hint = _HINTS[kind].format(ref=section["items"][0]["ref"]) if kind in _HINTS else ""
             parts.append("\n".join(lines) + (f"\n\n{hint}" if hint else ""))
     if not parts and not unread:
         return NOTHING

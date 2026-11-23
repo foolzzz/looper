@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import logging
 import math
+from enum import Enum
 
 from ..db import cost_holds as store, tasks as db_tasks
 from ..db.connection import get_pool
 from .message import AgentAddress, MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS, planner_address
 
 logger = logging.getLogger(__name__)
+
+
+class HoldScope(str, Enum):
+    """Where a hold applies. ``schedule`` is the schedule as a whole, not its day.
+
+    The first four values match ``BudgetScope``. Admission never uses ``schedule``.
+    """
+
+    TASK = "task"
+    SCHEDULE_DAY = "schedule_day"
+    ROLE_DAY = "role_day"
+    GLOBAL_DAY = "global_day"
+    SCHEDULE = "schedule"
 _platform = None
 _sender = None
 _dashboard_url = ''
@@ -19,8 +33,10 @@ def needs_service():
     """Keep existing decisions reachable after enforcement is switched off."""
     from . import cost_guard, cost_guard_settings
 
+    config = cost_guard_settings.cached()
     return (cost_guard.current().holds_need_recovery
-            or cost_guard_settings.cached().mode is cost_guard_settings.Mode.ENFORCE)
+            or config.mode is cost_guard_settings.Mode.ENFORCE
+            or config.unanswered.enabled)
 
 
 async def initialize(*, pool=None):
@@ -39,13 +55,15 @@ def _value(value):
     return value.value if hasattr(value, 'value') else value
 
 
-async def create_hold(scope, ref, currency, limit, spent, reason='budget', *, task_id=None, estimate_usd=0,
-                      platform=None, pool=None):
+async def create_hold(scope, ref, currency=None, limit=None, spent=None, reason='budget', *, task_id=None,
+                      estimate_usd=0, pushes=None, platform=None, pool=None):
     from . import cost_guard
 
+    if reason == 'unanswered':
+        currency = limit = spent = None
     task_id = task_id or (ref if _value(scope) == 'task' else None)
     row, created = await store.create_hold(_value(scope), ref, _value(currency), limit, spent, reason,
-                                            task_id=task_id, estimate_usd=estimate_usd, pool=pool)
+                                            task_id=task_id, estimate_usd=estimate_usd, pushes=pushes, pool=pool)
     # Keep recovery enabled until restart: clearing a cached flag on a tick can race a new hold commit.
     cost_guard.current().holds_need_recovery = True
     runtime = platform or _platform
@@ -62,11 +80,43 @@ async def create_hold(scope, ref, currency, limit, spent, reason='budget', *, ta
     return row, created
 
 
-async def _question(row):
+async def _schedule_name(row) -> str:
+    from .attention import _plain
+
+    name = row.get('schedule_name')
+    if not name:
+        name = await get_pool().fetchval("SELECT name FROM schedules WHERE id=$1", row['scope_ref'])
+    return _plain(name or row['scope_ref'])
+
+
+async def _send_hold(row, text, *, urgency, dedupe_key, source_ref=None, proactive_dedupe=None):
     from . import chat_settings, proactive_delivery as delivery
     from .gate_service import dashboard_target
     from .turn_metrics import ProactiveSource, proactive_kwargs
 
+    target = await dashboard_target()
+    if target is None or _sender is None:
+        return
+    if chat_settings.delivery_enabled():
+        await delivery.decide(delivery.Delivery(delivery.DeliveryKind.ADVISOR_ALERT, urgency,
+            delivery.ChatKind.GROUP if target.target.group else delivery.ChatKind.DIRECT),
+            dedupe_key=dedupe_key, channel_id=target.channel_id, chat=target.target.id,
+            last_user_message_at=None, source_ref=source_ref,
+            task_id=row['scope_ref'] if row['scope'] == 'task' else None)
+    proactive = proactive_kwargs(ProactiveSource.ADVISOR_ALERT,
+                                 row['scope_ref'] if row['scope'] == 'task' else None, dedupe_key=proactive_dedupe)
+    sent, error = await _sender(target.channel_id, target.target.id, text, idempotency_key=dedupe_key,
+                                 group=target.target.group, **proactive)
+    if not sent:
+        logger.warning('cannot send spend hold %s: %s', dedupe_key, error)
+
+
+async def _question(row):
+    from . import proactive_delivery as delivery
+
+    if row.get('reason') == 'unanswered':
+        await _unanswered_question(row)
+        return
     label = f"C-{row['id']}"
     scope = '任务' if row['scope'] == 'task' else '今天的全局花费'
     currency = '等价花费' if row['currency'] == 'equivalent_usd' else '真钱'
@@ -75,21 +125,36 @@ async def _question(row):
             f"回复「继续 {label} <新上限美元>」或「停 {label}」；只有一条等待时也可回复「继续」或「停」。\n"
             f"24 小时未答复将停下。控制台：{link}")
     logger.warning('spend hold %s waits for the operator', label)
-    target = await dashboard_target()
-    if target is None or _sender is None:
-        return
-    key = f"cost-hold:{row['id']}"
-    if chat_settings.delivery_enabled():
-        await delivery.decide(delivery.Delivery(delivery.DeliveryKind.ADVISOR_ALERT, delivery.Urgency.BLOCKING,
-            delivery.ChatKind.GROUP if target.target.group else delivery.ChatKind.DIRECT),
-            dedupe_key=key, channel_id=target.channel_id, chat=target.target.id,
-            last_user_message_at=None, source_ref=label,
-            task_id=row['scope_ref'] if row['scope'] == 'task' else None)
-    proactive = proactive_kwargs(ProactiveSource.ADVISOR_ALERT, row['scope_ref'] if row['scope'] == 'task' else None)
-    sent, error = await _sender(target.channel_id, target.target.id, text, idempotency_key=key,
-                                  group=target.target.group, **proactive)
-    if not sent:
-        logger.warning('cannot send spend hold %s: %s', label, error)
+    await _send_hold(row, text, urgency=delivery.Urgency.BLOCKING, dedupe_key=f"cost-hold:{row['id']}",
+                     source_ref=label)
+
+
+async def _unanswered_question(row):
+    from . import cost_guard_settings, proactive_delivery as delivery
+
+    rule = cost_guard_settings.cached().unanswered
+    name = await _schedule_name(row)
+    label = f"C-{row['id']}"
+    link = _dashboard_url.rstrip('/') + '/#todo'
+    text = (f"{label}：『{name}』{rule.window_days} 天推了 {row['pushes']} 条，你都没回。"
+            f"还要继续推吗？回复「继续 {label}」（{rule.snooze_days} 天内不再问）或「停 {label}」（暂停这个定时任务）。"
+            f"{rule.pause_after_days} 天内不回答、也没回过它的推送，会自动暂停。控制台：{link}")
+    logger.warning('unanswered pushes %s wait for the operator', label)
+    await _send_hold(row, text, urgency=delivery.Urgency.BLOCKING, dedupe_key=f"cost-hold:{row['id']}",
+                     source_ref=label)
+
+
+async def _paused_notice(hold_id, name, pause_days):
+    """One normal-urgency notice after the pause has committed. The dedupe key is the hold."""
+    from . import attention, proactive_delivery as delivery
+
+    plain = attention._plain(name)
+    text = (f"『{plain}』已自动暂停：{pause_days} 天没有回答，也没回过它的推送。"
+            "在控制台的「需要你处理」里点「恢复」，或让管家恢复它。")
+    key = f"unanswered-pause:{hold_id}"
+    logger.warning('schedule paused for unanswered pushes %s', hold_id)
+    await _send_hold({'id': hold_id, 'scope': 'schedule', 'scope_ref': None}, text,
+                     urgency=delivery.Urgency.NORMAL, dedupe_key=key, source_ref=plain, proactive_dedupe=key)
 
 
 async def _continue_limit(conn, row, new_limit):
@@ -146,10 +211,27 @@ async def decide(hold_id, decision, new_limit_usd=None, *, via, platform=None, p
             raise ValueError(f'没有 C-{hold_id} 这条花费等待。')
         if row['state'] != 'pending':
             raise ValueError(f'C-{hold_id} 已处理。')
-        if decision == 'continue':
-            await _continue_limit(conn, row, new_limit_usd)
-        row = dict(await conn.fetchrow("UPDATE cost_holds SET state=$2,decided_at=now(),decided_via=$3 "
-            "WHERE id=$1 RETURNING *", hold_id, 'continued' if decision == 'continue' else 'stopped', via))
+        if row['reason'] == 'unanswered':
+            if decision == 'continue' and new_limit_usd is not None:
+                raise ValueError('这条提问不需要上限')
+            from . import cost_guard_settings
+
+            if decision == 'continue':
+                await conn.execute(
+                    "UPDATE schedules SET unanswered_snooze_until = now() + make_interval(days => $2) WHERE id = $1",
+                    row['scope_ref'], cost_guard_settings.cached().unanswered.snooze_days)
+            else:
+                await conn.execute(
+                    "UPDATE schedules SET enabled = false, pause_reason = 'operator', paused_at = now(), "
+                    "next_fire_at = NULL WHERE id = $1", row['scope_ref'])
+            row = dict(await conn.fetchrow(
+                "UPDATE cost_holds SET state=$2, decided_at=now(), decided_via=$3, applied_at=now() "
+                "WHERE id=$1 RETURNING *", hold_id, 'continued' if decision == 'continue' else 'stopped', via))
+        else:
+            if decision == 'continue':
+                await _continue_limit(conn, row, new_limit_usd)
+            row = dict(await conn.fetchrow("UPDATE cost_holds SET state=$2,decided_at=now(),decided_via=$3 "
+                "WHERE id=$1 RETURNING *", hold_id, 'continued' if decision == 'continue' else 'stopped', via))
     if decision == 'continue':
         from . import cost_guard
         if cost_guard.current().config.mode.value == 'enforce':
@@ -200,7 +282,8 @@ async def _apply(row, decision, platform, pool):
 async def expire(*, platform=None, pool=None):
     pool = pool or get_pool()
     rows = await pool.fetch("UPDATE cost_holds SET state='expired',decided_at=now() "
-                            "WHERE state='pending' AND created_at <= now()-interval '24 hours' RETURNING *")
+                            "WHERE state='pending' AND reason <> 'unanswered' "
+                            "AND created_at <= now()-interval '24 hours' RETURNING *")
     pending = await pool.fetch("SELECT * FROM cost_holds WHERE state <> 'pending' AND applied_at IS NULL "
                                "ORDER BY decided_at,id")
     for row in pending:

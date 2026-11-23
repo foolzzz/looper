@@ -13,8 +13,11 @@ from ..db import system_settings as db_settings
 PREFIX = "cost_guard."
 ROLES = ("processor", "leads_check", "advice_check", "outbound_check", "advisor")
 CAPS = ("daily_usd", "daily_equivalent_usd")
+UNANSWERED_INTS = {"window_days": (1, 30), "min_pushes": (1, 1000), "pause_after_days": (1, 30), "snooze_days": (1, 365)}
+UNANSWERED_FIELDS = ("enabled", *UNANSWERED_INTS)
 KEYS = (PREFIX + "mode", *(PREFIX + cap for cap in CAPS),
-        *(f"{PREFIX}roles.{role}.{cap}" for role in ROLES for cap in CAPS))
+        *(f"{PREFIX}roles.{role}.{cap}" for role in ROLES for cap in CAPS),
+        *(f"{PREFIX}unanswered_pushes.{name}" for name in UNANSWERED_FIELDS))
 
 
 class Mode(str, Enum):
@@ -30,11 +33,21 @@ class RoleLimits:
 
 
 @dataclass(frozen=True)
+class UnansweredRule:
+    enabled: bool = False
+    window_days: int = 3
+    min_pushes: int = 15
+    pause_after_days: int = 3
+    snooze_days: int = 30
+
+
+@dataclass(frozen=True)
 class Config:
     mode: Mode = Mode.OFF
     daily_usd: float | None = None
     daily_equivalent_usd: float | None = None
     roles: dict[str, RoleLimits] = field(default_factory=dict)
+    unanswered: UnansweredRule = field(default_factory=UnansweredRule)
 
 
 _config = Config()
@@ -54,9 +67,20 @@ def _cap(value: Any, name: str) -> float | None:
     return float(value)
 
 
+def _unanswered_value(name: str, value: Any) -> str:
+    if name == "enabled":
+        if not isinstance(value, bool):
+            raise ValueError("unanswered_pushes.enabled must be true or false")
+        return "true" if value else "false"
+    low, high = UNANSWERED_INTS[name]
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError(f"unanswered_pushes.{name} must be an integer from {low} to {high}")
+    return str(value)
+
+
 def checked(body: Mapping[str, Any]) -> dict[str, str | None]:
     """Validate the whole patch before any setting is written."""
-    if not body or any(key not in ("mode", *CAPS, "roles") for key in body):
+    if not body or any(key not in ("mode", *CAPS, "roles", "unanswered_pushes") for key in body):
         raise ValueError("give mode, daily_usd, daily_equivalent_usd or roles; unknown settings are refused")
     values: dict[str, str | None] = {}
     if "mode" in body:
@@ -78,6 +102,18 @@ def checked(body: Mapping[str, Any]) -> dict[str, str | None]:
             for cap, raw in limits.items():
                 value = _cap(raw, f"roles.{role}.{cap}")
                 values[f"{PREFIX}roles.{role}.{cap}"] = None if value is None else repr(value)
+    if "unanswered_pushes" in body:
+        raw = body["unanswered_pushes"]
+        if not isinstance(raw, Mapping) or any(key not in UNANSWERED_FIELDS for key in raw):
+            raise ValueError("unanswered_pushes must contain only enabled, window_days, min_pushes, "
+                             "pause_after_days or snooze_days")
+        if raw.get("enabled") is True:
+            from .chat_settings import metrics_enabled
+
+            if not metrics_enabled():
+                raise ValueError("先打开 manager.metrics.enabled：没有推送和回复记录就无法判断没人回")
+        for name, item in raw.items():
+            values[f"{PREFIX}unanswered_pushes.{name}"] = _unanswered_value(name, item)
     if not values:
         raise ValueError("give at least one setting")
     return values
@@ -91,7 +127,26 @@ def from_stored(stored: Mapping[str, str]) -> Config:
 
     roles = {role: RoleLimits(**{name: cap(f"{PREFIX}roles.{role}.{name}") for name in CAPS})
              for role in ROLES if any(f"{PREFIX}roles.{role}.{name}" in stored for name in CAPS)}
-    return Config(mode, *(cap(PREFIX + name) for name in CAPS), roles)
+
+    def unanswered_raw(name: str) -> str | None:
+        return stored.get(f"{PREFIX}unanswered_pushes.{name}")
+
+    enabled_raw = unanswered_raw("enabled")
+    if enabled_raw not in (None, "true", "false"):
+        raise ValueError("unanswered_pushes.enabled must be true or false")
+    numbers: dict[str, int] = {}
+    for name, (low, high) in UNANSWERED_INTS.items():
+        raw = unanswered_raw(name)
+        if raw is None:
+            continue
+        if not raw.isdecimal():
+            raise ValueError(f"unanswered_pushes.{name} must be an integer from {low} to {high}")
+        number = int(raw)
+        if not low <= number <= high:
+            raise ValueError(f"unanswered_pushes.{name} must be an integer from {low} to {high}")
+        numbers[name] = number
+    unanswered = UnansweredRule(enabled_raw == "true", **numbers)
+    return Config(mode, *(cap(PREFIX + name) for name in CAPS), roles, unanswered)
 
 
 async def load(*, pool: Any = None) -> Config:
@@ -106,11 +161,17 @@ async def load(*, pool: Any = None) -> Config:
     return _config
 
 
+def _unanswered_view(rule: UnansweredRule) -> dict[str, Any]:
+    return {"enabled": rule.enabled, "window_days": rule.window_days, "min_pushes": rule.min_pushes,
+            "pause_after_days": rule.pause_after_days, "snooze_days": rule.snooze_days}
+
+
 def view() -> dict[str, Any]:
     return {"mode": _config.mode.value, "daily_usd": _config.daily_usd,
             "daily_equivalent_usd": _config.daily_equivalent_usd,
             "roles": {name: {cap: getattr(limits, cap) for cap in CAPS}
-                      for name, limits in _config.roles.items()}, "problem": _problem}
+                      for name, limits in _config.roles.items()},
+            "unanswered_pushes": _unanswered_view(_config.unanswered), "problem": _problem}
 
 
 async def update(body: Mapping[str, Any], *, pool: Any = None) -> dict[str, Any]:
@@ -132,6 +193,10 @@ async def portable(conn: Any) -> dict[str, Any]:
             entry[name] = raw
         elif name in CAPS:
             entry[name] = float(raw)
+        elif name.startswith("unanswered_pushes."):
+            field_name = name.split(".", 1)[1]
+            entry.setdefault("unanswered_pushes", {})[field_name] = (
+                raw == "true" if field_name == "enabled" else int(raw))
         else:
             _, role, cap = name.split(".")
             entry.setdefault("roles", {}).setdefault(role, {})[cap] = float(raw)
