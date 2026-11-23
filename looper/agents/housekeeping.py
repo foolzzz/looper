@@ -290,15 +290,13 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             if count == 0:
                 break
 
-    from . import chat_settings
-
-    if chat_settings.metrics_enabled():
-        with _step(report, "proactive deliveries"):
-            while True:
-                count = await proactive_deliveries.purge(now - timedelta(days=proactive_deliveries.RETENTION_DAYS))
-                report.proactive_deliveries += count
-                if count == 0:
-                    break
+    # Delivery writes this table while metrics are off, so the 90-day cleanup follows the rows.
+    with _step(report, "proactive deliveries"):
+        while True:
+            count = await proactive_deliveries.purge(now - timedelta(days=proactive_deliveries.RETENTION_DAYS))
+            report.proactive_deliveries += count
+            if count == 0:
+                break
 
     with _step(report, "idle checks"):
         while (count := await idle_checks.purge(now - timedelta(days=idle_checks.RETENTION_DAYS))):
