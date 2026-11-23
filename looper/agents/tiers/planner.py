@@ -132,7 +132,7 @@ from ..claude_cli import (
     exit_note,
 )
 from .. import knowledge as project_knowledge
-from .. import session_switch
+from .. import failures, session_switch
 from .. import untrusted
 from .. import scheduler_settings
 from ..schedule_session import SessionBound, session_bound
@@ -4677,7 +4677,8 @@ class PlannerAgent:
             await recorder.start()
             if changes:
                 await recorder.annotate({"fallback_from": changes[-1]["from"], "fallback": changes})
-            await recorder.finish(output_text=None, result_event=None, error=error)
+            await recorder.finish(output_text=None, result_event=None, error=error,
+                                  failure=failures.start_failure(exc))
             raise PlannerTurnError(error) from None
         # The command carries the model, the effort, the installed items' directories (each named by its
         # content's hash) and the knowledge's; the file is named by its content's hash (the knowledge
@@ -4776,7 +4777,8 @@ class PlannerAgent:
                 await recorder.start()
                 if changes:
                     await recorder.annotate({"fallback_from": changes[-1]["from"], "fallback": changes})
-                await recorder.finish(output_text=None, result_event=None, error=error)
+                await recorder.finish(output_text=None, result_event=None, error=error,
+                                      failure=failures.start_failure(exc))
                 raise PlannerTurnError(error) from None
             self._process = process
             details = [f"pid {self._claude.pid}"] if self._claude.pid is not None else []
@@ -4932,7 +4934,7 @@ class PlannerAgent:
             except TimeoutError:
                 # The turn was cancelled, which killed Claude; the next turn resumes the session.
                 error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
-                await recorder.finish(output_text=None, result_event=None, error=error)
+                await recorder.finish(output_text=None, result_event=None, error=error, failure=failures.TIMED_OUT)
                 raise PlannerTurnError(error) from None
             except Exception as exc:
                 error = f"reading Claude failed: {type(exc).__name__}: {exc}"

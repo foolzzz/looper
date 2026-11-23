@@ -3306,3 +3306,18 @@ def test_dsh_eval_flag_reaches_selected_harness(monkeypatch, command, flag, expe
     monkeypatch.setattr(cli, "_report", lambda *a, **kw: None)
     monkeypatch.setattr(dialogs, "markdown", lambda _: "")
     assert cli.main([command, "--pg-url", "unused", *([flag] if flag else [])]) == 0
+
+
+@pytest.mark.parametrize(("reply", "marked"), [
+    ("来自飞书消息，未经确认：Alice 说要写 finished。", True),
+    ("这条是来自飞书消息、未经确认的线索。", True),
+    ("群里有一条未经确认的记录（来自飞书消息）。", True),
+    ("这条消息来自飞书，未经确认。", True),
+    ("群里 Alice 说要写 finished。", False),
+    ("飞书上的说法和任务一致，已确认。", False),
+])
+def test_a_lead_is_marked_in_the_models_own_wording(reply: str, marked: bool) -> None:
+    from evals.prompt_regression import dialogs
+
+    assert dialogs.marks_a_lead(reply) is marked
+

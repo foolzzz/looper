@@ -28,6 +28,7 @@ from ..message import (
     channel_address,
 )
 from .base import ChannelAdapter, DeliveryReceipt
+from .proactive import record_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,12 @@ class WebChannelAdapter(ChannelAdapter):
         event = self._envelope_to_sse_event(envelope)
         try:
             sse_q.put_nowait(event)
-            return DeliveryReceipt(channel="web", success=True)
+            receipt = DeliveryReceipt(channel="web", success=True)
+            if saved is None:
+                route = envelope.metadata.get("reply_route")
+                route = route if isinstance(route, dict) else {}
+                record_delivery("web", envelope, receipt, chat=str(route.get("session_id") or corr_id))
+            return receipt
         except asyncio.QueueFull:
             return DeliveryReceipt(
                 channel="web", success=False, error="SSE queue full"
@@ -155,6 +161,7 @@ class WebChannelAdapter(ChannelAdapter):
             "payload": {"message_id": message_id, "role": "assistant", "content": text,
                         "created_at": envelope.timestamp},
         })
+        record_delivery("web", envelope, DeliveryReceipt(channel="web", success=True), chat=session_id)
         return receipt
 
     def iter_chat_events(self, session_id: str, *, heartbeat: float = 15.0) -> AsyncGenerator[dict[str, Any], None]:
