@@ -352,3 +352,30 @@ def test_a_manager_schedule_result_omits_a_usage_hold():
         shown = await _in_scope(call, view)
         assert "usage_hold" not in shown
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("kind", ["manager", "planner", "worker", "reviewer", "consult"])
+def test_self_started_runs_hold_on_rejection_but_not_high_utilization(monkeypatch, kind):
+    from looper.agents import cost_manager, session_budget
+
+    async def check():
+        g = _guard(monkeypatch, Mode.ENFORCE)
+        monkeypatch.setattr(cost_manager, "admit", AsyncMock(return_value=False))
+        monkeypatch.setattr(session_budget, "turn_budget_usd", AsyncMock(return_value=None))
+        monkeypatch.setattr(windows, "notify_hold", AsyncMock())
+        future = NOW + timedelta(hours=1)
+        rows = [_window(utilization=0.95, resets_at=future)]
+
+        async def hold_for(provider_id, *, background, now, pool):
+            return windows.hold_from(rows, None, background=background, now=now)
+
+        monkeypatch.setattr(windows, "hold_for", hold_for)
+        started = await cg.before_run(launch=_launch(), run_kind=kind)
+        assert started is not None
+        await cg.abandon(started)
+        rows[0]["status"] = "rejected"
+        with pytest.raises(cg.Held) as raised:
+            await cg.before_run(launch=_launch(), run_kind=kind)
+        assert raised.value.until == future and raised.value.reason == "rejected"
+        assert not g._pending and all(value == 0 for value in g._reserved.values())
+    asyncio.run(check())

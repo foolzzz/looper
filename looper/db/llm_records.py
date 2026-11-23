@@ -415,12 +415,20 @@ _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
 # Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
 _PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check', 'outbound_check')"
+_ROLE_BRANCHES = " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES)
 _TASK_ROLE = (
     f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
-    + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
+    f"{_ROLE_BRANCHES} END"
 )
 # A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
+# The same runs, plus a room consult. The consult branch is before the id prefixes, so an explicit consult kind
+# wins over an agent id that also matches a role prefix. Run listings stay on ``TASK_RUN``.
+_SPEND_ROLE = (
+    f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
+    f"WHEN {RUN_KIND} = 'consult' THEN 'consult' {_ROLE_BRANCHES} END"
+)
+TASK_SPEND = f"{_SPEND_ROLE} IS NOT NULL"
 
 
 async def manager_spend(
@@ -622,7 +630,7 @@ async def task_costs(
     *,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs, in total and by role.
+    """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs and its room consults, in total and by role.
 
     Every given task id gets an entry. ``runs`` counts every run; ``running``
     those still going, whose cost is not known yet; ``unpriced_runs`` the
@@ -643,7 +651,7 @@ async def task_costs(
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"""
-        SELECT task_id, CASE WHEN {_ROLE_FILTERS['manager']} THEN 'manager' ELSE {_TASK_ROLE} END AS role,
+        SELECT task_id, CASE WHEN {_ROLE_FILTERS['manager']} THEN 'manager' ELSE {_SPEND_ROLE} END AS role,
                model, count(*) AS runs,
                count(*) FILTER (WHERE status = 'running') AS running,
                count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
@@ -662,7 +670,7 @@ async def task_costs(
                COALESCE(sum(cache_read_tokens) FILTER (WHERE {_CACHE_USAGE_REPORTED}), 0)::bigint AS cache_hit_read_tokens,
                round(sum(cost_usd::numeric), 6) AS cost_usd
         FROM llm_records
-        WHERE task_id = ANY($1::text[]) AND ({_TASK_ROLE} IS NOT NULL OR {_ROLE_FILTERS['manager']})
+        WHERE task_id = ANY($1::text[]) AND ({TASK_SPEND} OR {_ROLE_FILTERS['manager']})
         GROUP BY 1, 2, 3
         """,
         task_ids, RecordStatus.INTERRUPTED.value,
@@ -673,10 +681,14 @@ async def task_costs(
     explorer_tasks.update(row["id"] for row in await pool.fetch(
         "SELECT t.id FROM tasks t JOIN projects p ON p.id=t.project_id "
         "WHERE t.id=ANY($1::text[]) AND p.subagents='on'", task_ids))
+    # Consult is a key only for a task that has consult rows, not for every task.
+    consult_tasks = {row["task_id"] for row in rows if row["role"] == "consult"}
     costs = {
         task_id: {"cost_usd": Decimal(0), "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
                   "provider_price_runs": 0, "by_role": {role: {"cost_usd": Decimal(0), "runs": 0}
-                                                      for role in TASK_ROLES + (("explorer",) if task_id in explorer_tasks else ())},
+                                                      for role in TASK_ROLES
+                                                      + (("explorer",) if task_id in explorer_tasks else ())
+                                                      + (("consult",) if task_id in consult_tasks else ())},
                   "by_model": {}, "manager_by_model": {}}
         for task_id in task_ids
     }
@@ -733,14 +745,15 @@ async def role_runs(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[d
     return [dict(row) for row in rows]
 
 
-# ``_TASK_ROLE`` and ``EQUIVALENT`` of the runs ``r`` of a query that joins their tasks ``t``.
-_RUN_TASK_ROLE = _TASK_ROLE.replace("agent_id", "r.agent_id")
+# ``_SPEND_ROLE`` and ``EQUIVALENT`` of the runs ``r`` of a query that joins their tasks ``t``.
+_RUN_SPEND_ROLE = _SPEND_ROLE.replace("agent_id", "r.agent_id")
 _RUN_EQUIVALENT = EQUIVALENT.replace("metadata", "r.metadata")
-# The runs started in [$1, $2) (a NULL bound is none) and, with $3, those of the tasks of project $3 that make up their
-# cost (``task_costs``).
+# The runs started in [$1, $2) (a NULL bound is none). With $3, only the runs of project $3's tasks that make up
+# their cost, room consults included, the same way ``task_costs`` counts them. A null project does not filter by
+# role, so that total already includes room consults and the Manager.
 _IN_RANGE = (
     "($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) "
-    f"AND ($3::text IS NULL OR (t.project_id = $3 AND {_RUN_TASK_ROLE} IS NOT NULL))"
+    f"AND ($3::text IS NULL OR (t.project_id = $3 AND {_RUN_SPEND_ROLE} IS NOT NULL))"
 )
 _SPEND = f"""count(*) AS runs,
                count(*) FILTER (WHERE r.status = 'running') AS running,
@@ -753,9 +766,10 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
                       manager_id: str | None = None, project_ids: Sequence[str] | None = None,
                       pool: asyncpg.Pool | None = None) -> dict[str, Any]:
     """What every agent's runs started at or after ``since`` (and before ``until``; None for no bound) cost, the
-    Manager's included, split by basis; with ``project_id``, only the runs of that project's tasks that make up
-    their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them); with ``manager_id``, only
-    the runs of that Manager and of its tasks.
+    Manager's included, split by basis. With no ``project_id`` every run in the window is counted, so room consults
+    are already in that total. With ``project_id``, only the runs of that project's tasks that make up their cost,
+    room consults included, the same way ``task_costs`` counts them. With ``manager_id``, only the runs of that
+    Manager and of its tasks.
 
     ``provider_priced_usd`` is money: runs with an API key, at their
     provider's prices (Claude Code's figure for Anthropic's API, Looper's for
@@ -782,8 +796,9 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
 async def task_spend(since: datetime | None, until: datetime | None = None, *, project_id: str | None = None,
                      manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """What each task's runs started in [``since``, ``until``) cost (None for no bound), split by basis as
-    ``spend_since`` splits it, most first: the runs that make up a task's cost (``task_costs``), of the tasks of
-    ``project_id`` only when it is given, of the tasks of ``manager_id`` only when that is. Each row has the task's ``name`` and its ``project_id`` and
+    ``spend_since`` splits it, most first: the runs that make up a task's cost, room consults included, the same
+    way ``task_costs`` counts them, of the tasks of ``project_id`` only when it is given, of the tasks of
+    ``manager_id`` only when that is. Each row has the task's ``name`` and its ``project_id`` and
     ``project_name`` now."""
     from .tasks import task_name
 
@@ -793,7 +808,7 @@ async def task_spend(since: datetime | None, until: datetime | None = None, *, p
         f"""
         SELECT r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name AS project_name, {_SPEND}
         FROM llm_records r JOIN tasks t ON t.id = r.task_id LEFT JOIN projects p ON p.id = t.project_id
-        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL{by_manager}
+        WHERE {_IN_RANGE} AND {_RUN_SPEND_ROLE} IS NOT NULL{by_manager}
         GROUP BY r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name
         ORDER BY sum(r.cost_usd) DESC NULLS LAST, r.task_id
         """,

@@ -223,7 +223,9 @@ async def v1_api(tmp_path, pool):
     router = TaskRouter(runtime_root=tmp_path)
     server = AgentHTTPServer(host="127.0.0.1", port=0, operator_token=operator_token,
         static_dir=tmp_path, runtime_root=tmp_path, supervisor=SimpleNamespace(bus=bus),
-        web_adapter=SimpleNamespace(_address=channel_address("web")), task_router=router)
+        web_adapter=SimpleNamespace(_address=channel_address("web")), task_router=router,
+        channels=SimpleNamespace(start_checks=lambda: [], catchup_checks=lambda: [], list_channels=lambda: [],
+                                 get=lambda _: None))
     server._client_ops = ClientOps(Platform(bus=bus, task_router=router, runtime_root=tmp_path))
     await server.start()
     try:

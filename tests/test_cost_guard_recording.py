@@ -8,6 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -64,9 +65,10 @@ def test_off_keeps_the_original_stored_fields(monkeypatch):
     recorder._untrack()
 
 
-# Not marked provenance: this is the off-path comparison itself, not a proof of where a fixture came from.
-@pytest.mark.parametrize("role", ["manager", "planner", "processor"])
-def test_off_record_payload_is_byte_identical_to_the_pinned_main_recorder(monkeypatch, tmp_path, role):
+# Not marked provenance: this is the off/observe comparison itself, not a proof of where a fixture came from.
+@pytest.mark.parametrize("role", ["manager", "planner", "schedule", "processor"])
+@pytest.mark.parametrize("mode", ["off", "observe"])
+def test_record_payload_is_byte_identical_to_the_pinned_main_recorder(monkeypatch, tmp_path, role, mode):
     """Read the actual base implementation, then compare complete would-be stored rows without running a model."""
     from looper.agents import claude_cli, cost_guard_settings
     from looper.agents.agent_settings import AgentType
@@ -74,7 +76,7 @@ def test_off_record_payload_is_byte_identical_to_the_pinned_main_recorder(monkey
     from tests.runtime_model_helpers import builtin_launch
 
     root = Path(__file__).resolve().parents[1]
-    revision = "4b602aeed"
+    revision = "6613380fa"
     source = subprocess.check_output(
         ["git", "show", f"{revision}:looper/agents/claude_cli.py"], cwd=root, text=True)
     original = next(node for node in ast.parse(source).body
@@ -83,22 +85,32 @@ def test_off_record_payload_is_byte_identical_to_the_pinned_main_recorder(monkey
     exec(compile("from __future__ import annotations\n" + ast.get_source_segment(source, original),
                  f"{revision}:looper/agents/claude_cli.py", "exec"), namespace)
     baseline = namespace["ClaudeRunRecorder"]
-    monkeypatch.setattr(cost_guard_settings, "_config", cost_guard_settings.Config())
-    monkeypatch.setattr(cost_guard, "_guard", cost_guard.Guard(cost_guard_settings.Config()))
+    config = cost_guard_settings.Config(mode=cost_guard_settings.Mode(mode))
+    monkeypatch.setattr(cost_guard_settings, "_config", config)
+    monkeypatch.setattr(cost_guard, "_guard", cost_guard.Guard(config, clock=lambda: datetime(2026,11,23,tzinfo=timezone.utc)))
+    monkeypatch.setattr(cost_guard.store, "history", AsyncMock(return_value=[]))
+    monkeypatch.setattr(cost_guard.store, "limits", AsyncMock(return_value={}))
+    monkeypatch.setattr(cost_guard.store, "context", AsyncMock(return_value={'tasks':{},'schedules':{}}))
+    from looper.agents import session_budget
+    monkeypatch.setattr(session_budget, "turn_budget_usd", AsyncMock(return_value=None))
     opened = AsyncMock(return_value=42)
     monkeypatch.setattr(llm_records, "start_record", opened)
     prompt = SystemPrompt(f"Synthetic {role} system prompt", {"role": {"id": role}})
-    launch = builtin_launch(role=AgentType(role))
+    launch = builtin_launch(role=AgentType("planner" if role == "schedule" else role))
     command = launch.runtime.run_command("claude", cwd=tmp_path, prompt_file=tmp_path / "prompt.md", launch=launch)
     kwargs = {"agent_id": f"{role}-synthetic", "task_id": None if role == "manager" else "task-synthetic",
               "command": command, "cwd": str(tmp_path), "input_text": "Synthetic user turn",
-              "session_id": "synthetic-session", "system_prompt": prompt, "launch": launch, "pid": 1000}
+              "session_id": "synthetic-session", "system_prompt": prompt, "launch": launch, "pid": 1000,
+              **({'schedule_id':'schedule-synthetic'} if role == 'schedule' else {})}
 
     async def recorded(recorder_type):
         recorder = recorder_type(**kwargs)
         try:
             await recorder.start()
-            return json.dumps(opened.await_args.kwargs, sort_keys=True, separators=(",", ":")).encode()
+            payload = dict(opened.await_args.kwargs)
+            if mode == 'observe':
+                payload['metadata'] = llm_records.normalize_record_metadata(payload['metadata'])
+            return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         finally:
             recorder._untrack()
 
@@ -208,3 +220,30 @@ def test_review_allows_only_a_successful_classifier_and_a_successful_audit(monke
             assert g.problem and g.day is None
             assert cost_guard.store.history.await_count == 2
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('mode', ['off', 'observe', 'enforce'])
+@pytest.mark.parametrize('scope_cap', [None, 0, 2])
+def test_subscription_reservation_adds_an_in_run_cap_only_with_an_enforced_scope_cap(monkeypatch, mode, scope_cap):
+    from looper.agents.cost_guard_settings import Config, Mode
+    from tests.runtime_model_helpers import builtin_launch
+    launch = builtin_launch()
+    assert cost_guard.currency_of(launch) is cost_guard.Currency.EQUIVALENT
+    guard = cost_guard.Guard(Config(mode=Mode(mode)))
+    monkeypatch.setattr(cost_guard, '_guard', guard)
+    scopes = (cost_guard.Scope(cost_guard.BudgetScope.GLOBAL_DAY, 'global', scope_cap),)
+    reservation = cost_guard.Reservation(.25, cost_guard.Currency.EQUIVALENT, scopes, {},
+                                          datetime.now(timezone.utc))
+    monkeypatch.setattr(cost_guard, 'before_run', AsyncMock(return_value=reservation if mode!='off' else None))
+    monkeypatch.setattr(cost_guard, 'bind', AsyncMock())
+    monkeypatch.setattr(llm_records, 'start_record', AsyncMock(return_value=42))
+    recorder = ClaudeRunRecorder(agent_id='planner-synthetic',task_id='task-synthetic',command=['claude'],
+        cwd='/synthetic',input_text='Synthetic',launch=launch)
+    asyncio.run(recorder.start())
+    try:
+        if mode=='enforce' and scope_cap is not None:
+            assert recorder._spend is not None and recorder._spend.cap==.25
+        else:
+            assert recorder._spend is None
+    finally:
+        recorder._untrack()
