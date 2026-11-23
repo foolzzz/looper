@@ -293,7 +293,7 @@ async def confirmation_impact(body: Mapping[str, Any], *, runtime_root: Path | N
         "Change where memory proposals are pushed." if changing else
         "Turn on memory writing: memories you confirm are written into your knowledge vault as git commits.",
         f"Memory folder: {settings.root or '(the whole vault)'}",
-        f"Branch: {settings.branch or facts.branch or '(the main checkout\'s current branch)'}",
+        "Branch: " + (settings.branch or facts.branch or "(the main checkout's current branch)"),
         f"Worktree folder: {worktrees if worktrees is not None else '(under the runtime folder)'}",
         f"Push target: {settings.push_channel or 'none (the memory page only)'}",
         f"Daily drafting budget: ${settings.daily_budget_usd:g}"))
