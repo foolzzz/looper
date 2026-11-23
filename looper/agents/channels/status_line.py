@@ -36,6 +36,9 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+from .. import chat_settings, turn_metrics
 from enum import Enum
 from typing import Any
 
@@ -236,6 +239,8 @@ class Reactions:
     def add(self, chat: str, message_id: str) -> None:
         """React to the message in the background; this returns at once."""
         if not message_id or len(self._pending) >= REACTIONS_PENDING_MAX:
+            if message_id and chat_settings.metrics_enabled():
+                turn_metrics.ack(self._channel, message_id, None)
             return
         task = asyncio.ensure_future(self._call(chat, message_id))
         self._pending.add(task)
@@ -244,7 +249,11 @@ class Reactions:
     async def _call(self, chat: str, message_id: str) -> None:
         try:
             await self._react(chat, message_id)
+            if chat_settings.metrics_enabled():
+                turn_metrics.ack(self._channel, message_id, datetime.now(timezone.utc))
         except Exception as exc:
+            if chat_settings.metrics_enabled():
+                turn_metrics.ack(self._channel, message_id, None)
             if self._failed:
                 logger.debug("%s: could not react to message %s: %s", self._channel, message_id, exc)
                 return

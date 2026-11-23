@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -26,6 +28,28 @@ from tests.test_channel_post import _Bot, _telegram
 TELEGRAM = channel_address("telegram", "channel-telegram")
 LARK = channel_address("lark", "channel-lark")
 RECORD = {"session_id": "telegram:12345", "message_id": "m1:reply"}
+
+
+@pytest.mark.parametrize('kind', ['telegram', 'lark'])
+@pytest.mark.parametrize('payload,expected', [({'phase': 'thinking'}, []), ({'delta': 'partial'}, []),
+                                           ({'text': ''}, []), ({'text': 'progress'}, [True])])
+def test_outage_observer_counts_only_actual_outbound_deliveries(tmp_path, lark_cli_stand_in, kind, payload, expected):
+    adapter = (_telegram(_Bot()) if kind == 'telegram' else LarkChannelAdapter(runtime_root=tmp_path,
+               allowlist=SenderAllowlist('channel-lark', frozenset({OPEN_ID}))))
+    adapter._correlation_chat['c1'] = 12345 if kind == 'telegram' else 'oc_dm'
+    adapter._status.update = AsyncMock()
+    observed = []
+    adapter.delivery_observer = observed.append
+    envelope = MessageEnvelope.create(source=MANAGER_ADDRESS, target=channel_address(kind, f'channel-{kind}'),
+        message_type=MessageType.STATUS_UPDATE, payload=payload, correlation_id='c1')
+
+    async def messages(_):
+        yield envelope
+
+    adapter._bus = SimpleNamespace(subscribe=messages, runtime_root=tmp_path)
+    adapter._running = True
+    asyncio.run(adapter._outbound_loop())
+    assert observed == expected
 
 
 def _answer(target: Any, text: str = "ok", *, corr: str = "c1", record: dict[str, str] | None = RECORD
