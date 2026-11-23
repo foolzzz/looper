@@ -5818,6 +5818,11 @@ migration's locks; the online step `leads_check_online` validates them after the
 schema transaction commits (resumed by the next start if one stops first). A
 fresh database validates them on its empty tables in its own transaction.
 
+Migration `leads_check_run_kind` separately widens the `llm_records.run_kind`
+check with `NOT VALID`; `leads_check_run_kind_online` validates it after commit.
+New check records use `leads_check`; old NULL values remain untouched and are
+read through the agent-id fallback.
+
 `looper leads search [WORDS ...]` reads the database directly, even while serve
 is stopped, with `--chat`, `--person`, `--since YYYY-MM-DD` or `--days N`,
 `--kind`, `--state` (default `active`), `--limit` (1–50, default 10) and `--json`.
@@ -5995,7 +6000,7 @@ here pushes: the intent push service polls `intents`.
   built-in `claude-code/haiku-5-5` (`claude-haiku-5-5`), its role prompt is
   `role_configs.leads_check`, it runs through `processor.run(role=...)` as
   `leads_check:<schedule id>` (its record keeps only a reference to its input;
-  it has no `run_kind`), its cap is what the extraction left of the run's
+  its `run_kind` is `leads_check`), its cap is what the extraction left of the run's
   `run_budget_usd` and of the day's `daily_budget_usd`, its deadline what is
   left of the run's (at most 300 s). Its reply is one JSON object
   `{"verdicts": [{"item", "verdict": "keep|drop|fix", "confidence", "reason"}],
@@ -6768,13 +6773,20 @@ before.
 ### Tool-less calls with typed replies
 
 `model_call.call` (`looper/agents/model_call.py`) is the typed, tool-less call used by outbound reviews, advisor
-rounds and their judge, and leads checks. It returns `CallOk` with the parsed reply or `CallFailed` with a
+rounds and their judge, leads checks, subscription output, extraction, CLI leads backfill and one-shot spawns.
+It returns `CallOk` with the parsed reply or `CallFailed` with a
 `CallFailure` and the original parse exception when present, retaining the run's record, cost, latency and model.
 Its `Backend` protocol is retained for a future direct-API backend. Its one implementation, `SubscriptionBackend`,
 uses the existing Agent Profile CLI paths through `spawn.run_child` or `processor.run`, preserving their launch,
 deadlines, spend checks and record formats. Advisor lifecycle callbacks
-book each run before parsing; retry and consult state remain the advisor's. There is no direct-API backend or new
-setting, and the processor's subscription and extraction calls are unchanged.
+book each run before parsing; retry and consult state remain the advisor's. Processor recipes also retain their
+project and schedule settings layers. `processor_result` keeps the processor owners' existing reply, failure,
+record, cost and profile contract, including hook blocking; extraction and backfill still own their parsing and
+one reformat retry. There is no direct-API backend or new setting.
+
+`spawn.run_child` and `processor.run` remain the backend's execution recipes, rather than calling back into
+`model_call`. Room consults (`consult.py`) do not fit this contract: they fork a previous session and retain reading
+tools, with their own resume, read-only and delivery checks. They keep their existing execution path.
 
 ### The processor: runs with no tools
 
@@ -6782,11 +6794,10 @@ The processor (`AgentType.PROCESSOR`, `looper/agents/processor.py`; [message
 stream RFC](rfcs/message-stream-v0.zh-CN.md), section 8) reads a batch of messages
 other people wrote and replies with what its instructions ask, with no tool
 at all, so nothing in a message can make it act. Code that has a batch calls
-`processor.run` with the instructions, the batch's text, a reference to the
+`model_call` with a `ProcessorCall` containing the instructions, the batch's text, a reference to the
 batch, the quiet word, a per-run cap and a deadline; `chosen_profile(project,
 schedule)` says beforehand which Agent Profile it would run, from which layer,
-and why it cannot. Nothing calls it yet: the subscription kind of schedule
-will.
+and why it cannot. Subscription output, extraction and CLI backfill use this recipe.
 
 - **Its Agent Profile** resolves like any role's
   ([Harness, profile and environment](#harness-profile-and-environment)),
@@ -7388,7 +7399,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while the session search is in effect, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
-| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`, `leads_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
