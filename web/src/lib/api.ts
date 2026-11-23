@@ -1426,7 +1426,7 @@ export interface SubscriptionInfo {
   quiet_word: string;
   output_header: string;
   /** What a run writes. Absent on older answers: a push. */
-  output_kind?: "push" | "leads" | "intents";
+  output_kind?: "push" | "leads" | "intents" | "triage";
   render?: "lines_v1" | "lines_v2";
   /** Selection rules (set through the API); empty: the filter above. */
   rules?: { name: string; label: string; never_quiet: boolean }[];

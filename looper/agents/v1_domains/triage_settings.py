@@ -10,11 +10,11 @@ RESULTS = {}
 OPERATIONS = (
     Operation("triage_settings.get", "POST", "/api/v1/triage_settings/get",
               "Read the event triage setting.",
-              "Read the event triage setting. It is disabled by default; execution is delivered separately.",
+              "Read the event triage setting. It is disabled by default; confirmed subscriptions store events when enabled.",
               _object({}, closed=True), VIEW, operator_only=True, level=ActionLevel.INSIDE),
     Operation("triage_settings.update", "POST", "/api/v1/triage_settings/update",
               "Set the event triage setting.",
-              "Set the event triage setting. Null restores the disabled default. This foundation cannot run triage.",
+              "Set the event triage setting. Null restores the disabled default. When enabled, confirmed triage subscriptions run and store events; no delivery is performed.",
               _object({"enabled": {"type": ["boolean", "null"]}}, closed=True), VIEW,
               risk="high", confirms=True, operator_only=True, level=ActionLevel.INSIDE),
 )
@@ -23,7 +23,7 @@ OPERATIONS = (
 async def impact(server, operation, arguments, principal, headers):
     if operation.operation_id == "triage_settings.update":
         return (f"Set {triage_settings.KEY} to {str(bool(arguments['enabled'])).lower()}? "
-                "This stores the switch only; triage execution is not available yet.")
+                "Confirmed triage subscriptions will run and store events when enabled. Nothing is delivered until the Manager handoff exists.")
     return None
 
 
