@@ -3082,6 +3082,20 @@ and `advisor_internal_domains` (at most 20 domains whose names, and the hosts
 under them, the code checks refuse in a request) ([Consults of the
 advisor](#consults-of-the-advisor)).
 
+Executable acceptance definitions are opt-in per project: `acceptance_checks`
+is `off` by default (stored as NULL), `local` or `network`. Only the operator
+can read or change this permission through `acceptance_checks.get/update`,
+including from Project → Settings. It is separate from agent-writable execution
+fields and chat settings. Configuration imports require operator identity to
+set it; omission preserves the target permission. With it enabled, Planner work steps may carry typed
+`command` or `artifact` checks bound to a criterion; definitions persist in
+`task_steps.checks` through plan edits and restarts. This stage stores definitions
+only: it executes no checks and adds no evidence or decision gate. Empty checks
+and the disabled permission are omitted from existing responses and exports;
+while off, Planner contracts and prompts remain byte-identical. See the
+[executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
+and 13, for the protocol and subsequent stages.
+
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
 (`get_task_project` reads it in its place). Continuing such a task at its cap
@@ -5500,6 +5514,33 @@ Manager's `looper_schedules` cannot create or change one.
   file leaves it out), migrating existing digest and daily jobs, and Looper's own
   collection.
 
+### Event triage foundation
+
+The [event triage RFC](rfcs/event-triage-v0.zh-CN.md) has a storage foundation only.
+The migration file `db/migrations/event_triage.py` owns the fresh and upgrade DDL
+for `event_triage`; `event_triage_online` validates its checks on existing tables
+with their migration locks released. It adds `triage_events`, their cascading
+message sources, `subscription_runs.window_seqs`, the `triage` output kind,
+and the Manager event vocabulary (`triage`, `manager_silent`, a task only for
+`task_end`). Deleting any cited message deletes the entire derived event.
+
+`agents.triage_model` holds the typed categories, reasons, events and extraction
+counts, including `uncited`. `db.triage_events` reads events and provenance;
+`db.subscriptions.runs_for_message` uses exact selected seqs rather than the
+window's range, including messages no event cited. Non-triage runs leave the
+array null and retain their existing readback shape.
+
+`subscriptions.triage.enabled` defaults to false, with no startup setting row.
+Only the operator can read or store it through `triage_settings.get/update`;
+it is absent from chat settings and Manager tools. Public subscription creation
+still accepts only push, leads and intents. A stored triage subscription fires
+as `skipped_gate`, leaves its cursor alone and starts no processor: the reason
+is the disabled switch, or unavailable execution when the switch is on.
+Recovered running triage attempts are cancelled before extraction. There is no
+triage preset, renderer, parser, writer, why API/CLI, UI, Manager hand-off or
+briefing reader yet. The dashboard, Lark and Telegram therefore gain no new
+message behavior; CLI configuration can call the operator-only operations.
+
 ### Message leads
 
 Message leads are sourced, unconfirmed notes, stored in PostgreSQL rather than
@@ -5916,8 +5957,9 @@ and the reminder posted as with the switch off. Design: [proactive delivery RFC]
 
 ### Card buttons
 
-A Manager's confirmation and a user gate can be answered with one press of a
-card's button ([Card buttons RFC](rfcs/assistant-card-actions-v0.zh-CN.md);
+A Manager's confirmation, a user gate, an intent push and a relayed ledger
+decision can be answered with one press of a card's button
+([Card buttons RFC](rfcs/assistant-card-actions-v0.zh-CN.md);
 `looper/agents/card_actions.py`). It is off until the system setting
 `cards.actions.enabled` is `true`; the dashboard has no switch yet. Off,
 nothing is stored, replies carry no cards, gate messages go as text, a Lark
@@ -5933,7 +5975,7 @@ when the channel has one.
   are answered by typing.
 - **The table** (`card_actions`; migration `card_actions`): one row per card,
   keyed by the opaque token that is all a button carries (`<token>:<choice>`),
-  with its `kind` (`confirmation`, `gate`), `subject`, the `digest` of the
+  with its `kind` (`confirmation`, `gate`, `intent`, `ledger`), `subject`, the `digest` of the
   parameters it is bound to, the `chat` it is in and the channel
   `message_id` it became (both noted from the send's answer: a Lark card sent
   to an open_id gets its direct chat's id), who may press
@@ -5970,6 +6012,21 @@ when the channel has one.
   of its open questions (at most 3 questions, 5 options each) and
   「按现在的结论结束」; a press goes into the gate as the user's message
   (`gate_service.post_message`, `via` `button:<channel>`), like `/gate N`.
+- **Intents.** Operator direct-chat pushes get 建 and 驳回. They run the same
+  build/reject service as `建 I-0042` and `驳回 I-0042`. The intent row lock,
+  card claim and transition share a transaction; typed commands settle the
+  same card records. A changed title, summary, sources or project configuration
+  invalidates the old card. A missing project or directory leaves it retryable
+  and asks for the existing numbered reply or dashboard flow. Final edits keep
+  the original card format and remove its buttons.
+- **Ledger.** In the operator's own direct chat, `looper_ledger_update` get/list
+  adds a 确认 card for each open, relayed decision. The user's own decisions
+  are already confirmed; groups and other senders get no confirmation cards.
+  The button rechecks the current operator and ledger switch, then uses
+  `db.ledger.apply` under the item's lock. Typed confirmation, including CLI,
+  settles those same card rows; changing or cancelling the decision invalidates
+  them. Both new kinds reuse channel/message binding and the authorization
+  deadline. No new model tools, settings or v1 operations are introduced.
 
 ### What needs you
 
@@ -5985,8 +6042,10 @@ list or command line changes either way.
 - **Sections**, in order: `gates` (user gates waiting for the operator,
   `gate_service.list_gates` with `waiting_on=user`), `confirmations` (each
   Manager's operation waiting for the operator's word,
-  `ManagerOps.waiting_confirmations`, read from memory, so a restart drops
-  them), `schedules` (`db.schedules.failing`, the Schedules card's list),
+  `card_actions.pending_confirmations`: durable card rows while cards are on,
+  supplemented only by confirmations that could not be persisted; otherwise
+  `ManagerOps.waiting_confirmations` from memory), `schedules`
+  (`db.schedules.failing`, the Schedules card's list),
   `logins` (the Claude Code CLI or login, or a runtime login an Agent
   Profile uses, failing in the checks `system/status` reads; the HTTP server
   registers that reader with `attention.use_status_checks` while it runs),
@@ -6971,7 +7030,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and the typed delivery of its message: `delivery` (`pending`, `sending`, `sent`, `failed`, `uncertain`), `delivery_attempts`, `delivery_at` (sending since, or tried again from) and `delivery_error`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
-| `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `message_id`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
+| `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`, `intent`, `ledger`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `message_id`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
 | `mcp_tool_levels` | The operator's declarations of an MCP server's tools for the outbound review ([Reviews of outbound actions](#reviews-of-outbound-actions)): `item_id` (going with its server), `tool`, `level` (`inside`: its calls run unreviewed) |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |

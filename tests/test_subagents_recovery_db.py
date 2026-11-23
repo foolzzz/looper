@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from contextlib import suppress
 from pathlib import Path
 import sys
@@ -80,6 +81,7 @@ def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_pa
             second = subagents.SpawnService(runtime, pool=pool, claude_bin=executable, keeper=KeeperSettings(2))
             row = await first.admit(caller, brief(), key='kept-once')
             running = asyncio.create_task(first.run(row['id']))
+            release_cleanup = asyncio.Event()
             try:
                 await until(lambda: (tmp_path / 'ready').exists(), 'the explorer first input')
                 asking = await row_until(pool, row['id'], 'asking')
@@ -103,9 +105,24 @@ def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_pa
                 assert adopted['child_process'] == original_identity
                 assert not (runtime / 'run' / keeper.DETACH).exists()
                 assert (await second.admit(caller, brief(), key='kept-once'))['id'] == row['id']
+                home = runtime / '.local' / 'explorer-homes' / handles[0].manifest['run_id']
+                cleanup_started = asyncio.Event()
+                original_to_thread = asyncio.to_thread
+
+                async def hold_cleanup(function, *args, **kwargs):
+                    if function is shutil.rmtree and args[0] == home:
+                        cleanup_started.set()
+                        await release_cleanup.wait()
+                    return await original_to_thread(function, *args, **kwargs)
+
+                monkeypatch.setattr(asyncio, 'to_thread', hold_cleanup)
                 (tmp_path / 'release').touch()
                 finished = await row_until(pool, row['id'], 'answered')
+                await asyncio.wait_for(cleanup_started.wait(), 10)
+                # Recovery/shutdown must still own the collector until its runtime home is reclaimed.
+                assert row['id'] in second._running
                 collectors = list(second._running.values())
+                release_cleanup.set()
                 if collectors:
                     await asyncio.wait_for(asyncio.gather(*collectors), 10)
                 assert not (runtime / '.local' / 'explorer-homes').joinpath(handles[0].manifest['run_id']).exists()
@@ -125,6 +142,7 @@ def test_kept_explorer_detaches_and_recovers_same_process_record_and_cost(tmp_pa
                     "WHERE record_id=$1 AND event::text LIKE '%held-read%'", original_record) == 1
                 no_spawn.assert_not_awaited()
             finally:
+                release_cleanup.set()
                 (tmp_path / 'release').touch()
                 for handle in handles:
                     with suppress(Exception):

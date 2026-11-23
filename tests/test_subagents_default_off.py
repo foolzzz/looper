@@ -1,4 +1,4 @@
-"""Frozen model-facing bytes from main before the explorer service was added.
+"""Frozen model-facing bytes from the reviewed prefix before the explorer service.
 
 Hashes cover the existing prompts/contracts and the actual MCP listings, not
 just whether a subagent tool's name happens to be absent.

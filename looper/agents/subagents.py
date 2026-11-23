@@ -578,13 +578,15 @@ class SpawnService:
             raise
         finally:
             self._children.pop(row["id"], None)
-            self._handles.pop(row["id"], None)
-            self._running.pop(row["id"], None)
-            from .kept_run import KeptRunState
-            if handle.state is not KeptRunState.DETACHED:
-                import shutil
-                home = self.runtime_root / ".local" / "explorer-homes" / manifest["run_id"]
-                await asyncio.to_thread(shutil.rmtree, home, True)
+            try:
+                from .kept_run import KeptRunState
+                if handle.state is not KeptRunState.DETACHED:
+                    import shutil
+                    home = self.runtime_root / ".local" / "explorer-homes" / manifest["run_id"]
+                    await asyncio.to_thread(shutil.rmtree, home, True)
+            finally:
+                self._handles.pop(row["id"], None)
+                self._running.pop(row["id"], None)
 
     async def detach(self, *, epoch: int, timeout: float = 5) -> None:
         """Hand keepable children to the next controller; cancel the others."""
