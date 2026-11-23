@@ -82,6 +82,22 @@ def test_off_push_has_exact_original_call_and_no_card_writes(monkeypatch, tmp_pa
     run_db(check, monkeypatch)
 
 
+@pytest.mark.parametrize("cards_on", [False, True])
+def test_intent_push_keeps_measurements_for_cards_and_text(monkeypatch, tmp_path, cards_on):
+    from looper.agents import chat_settings, turn_metrics
+
+    async def check(pool):
+        env = await seed(pool, monkeypatch, tmp_path, on=cards_on)
+        monkeypatch.setattr(chat_settings, "metrics_enabled", lambda: True)
+        await env.service.run_once()
+        calls = env.card_posts if cards_on else env.posts
+        assert len(calls) == 1
+        proactive = calls[0][3]["proactive"]
+        assert proactive.source == turn_metrics.ProactiveSource.INTENT
+        assert proactive.source_ref == env.iid
+    run_db(check, monkeypatch)
+
+
 @pytest.mark.parametrize("channel", ["lark_bot", "telegram"])
 def test_buttons_build_once_using_the_same_task_service(monkeypatch, tmp_path, channel):
     async def check(pool):
