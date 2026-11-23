@@ -19,6 +19,8 @@ agent system started it in:
   user's last message (or, when the user ended the discussion, left open
   with an assumption), adding the script's ``gate_close_steps``; a decision
   on a step that ``decision_gates`` names also makes those gate changes;
+  [WAIT] (a wait that timed out or was cancelled) by proceeding, its
+  resolution saying the wait ended without what it waited for;
   [SUPERVISE] with no review and a progress note. With
   ``planner_calls`` (``{"PLAN": [[tool, arguments], ...]}``), it first makes
   that turn kind's calls over its ``looper`` MCP server;
@@ -286,6 +288,9 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
             reply = {"reply": script.get("room_reply", "Noted."), "action": "none"}
         elif message.startswith("[CHAT]"):
             reply = _chat(script, message)
+        elif message.startswith("[WAIT]"):
+            reply = {"reply": "Going on without it.", "action": "none",
+                     "wait": {"action": "proceed", "resolution": "the wait ended without what it waited for"}}
         elif message.startswith("[VAULT]"):
             vault_calls = script.get("vault_calls") or []
             if vault_calls and rpc is None:
