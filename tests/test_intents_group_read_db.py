@@ -5,11 +5,13 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
+import asyncpg
 import pytest
 
 from looper.agents import chat_settings, extraction, intents, subscription_runs, subscriptions
 from looper.agents.serve import seed_role_configs
 from looper.db import connection, schedules as db_schedules, subscriptions as db_subs
+from looper.db.migrations import intent_group_reads
 from tests import leads_support
 from tests.db_support import DSN, run_db
 from tests.subscription_support import DM, SOURCE, add, chat, processor_says, source
@@ -241,9 +243,10 @@ def test_a_database_without_intent_group_reads_gets_it_on_upgrade(monkeypatch):
         await source(pool)
         event = await add(pool, "old intent", chat_id="g", sent_at=NOW)
         iid = await leads_support.intent(pool, [event])
-        await pool.execute("DROP TABLE intent_group_reads, intent_group_read_days; ALTER TABLE intents DROP COLUMN via; "
-                           "DELETE FROM schema_migrations WHERE name='intent_group_reads'")
+        await pool.execute("INSERT INTO schema_migrations(name) VALUES('intent_group_reads') ON CONFLICT DO NOTHING; "
+                           "DROP TABLE intent_group_reads, intent_group_read_days; ALTER TABLE intents DROP COLUMN via")
         async with pool.acquire() as conn:
+            assert await intent_group_reads.pending(conn)
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT via FROM intents WHERE id=$1", iid) == "subscription"
@@ -253,6 +256,63 @@ def test_a_database_without_intent_group_reads_gets_it_on_upgrade(monkeypatch):
         await pool.execute("DELETE FROM source_chats WHERE source_id=$1 AND chat_id='g'", SOURCE)
         assert await pool.fetchval("SELECT count(*) FROM intent_group_reads") == 0
         assert await pool.fetchval("SELECT count(*) FROM intent_group_read_days") == 0
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("marker", [False, True])
+@pytest.mark.parametrize("rollback", [
+    "DROP TABLE intent_group_reads",
+    "DROP TABLE intent_group_read_days",
+    "DROP TABLE intent_group_read_days; ALTER TABLE intents DROP COLUMN via",
+    "ALTER TABLE intents DROP COLUMN via",
+    "ALTER TABLE intents DROP CONSTRAINT intents_via_check",
+    "ALTER TABLE intents DROP CONSTRAINT intents_via_check; "
+    "ALTER TABLE intents ADD CONSTRAINT intents_via_check CHECK (via IN ('subscription'))",
+])
+def test_incomplete_group_read_schema_is_repaired_regardless_of_marker(monkeypatch, marker, rollback):
+    async def check(pool):
+        await pool.execute("DELETE FROM schema_migrations WHERE name='intent_group_reads'")
+        if marker:
+            await pool.execute("INSERT INTO schema_migrations(name) VALUES('intent_group_reads')")
+        await pool.execute(rollback)
+        async with pool.acquire() as conn:
+            assert await intent_group_reads.pending(conn)
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await intent_group_reads.pending(conn)
+            assert not await connection.schema_change_pending(conn)
+        await source(pool)
+        await followed(pool)
+        async with pool.acquire() as conn, conn.transaction():
+            await db_subs.count_group_day(conn, SOURCE, NOW.date(), read={"g": 2}, skipped={"g": 1})
+        event = await add(pool, "synthetic request", chat_id="g", sent_at=NOW)
+        iid = await leads_support.intent(pool, [event], via="followed_group")
+        assert await pool.fetchval("SELECT via FROM intents WHERE id=$1", iid) == "followed_group"
+        assert tuple(await pool.fetchrow("SELECT read,skipped FROM intent_group_read_days")) == (2, 1)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute("UPDATE intents SET via='unknown' WHERE id=$1", iid)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name='intent_group_reads'") == 1
+    run_db(check, monkeypatch)
+
+
+def test_group_read_upgrade_preserves_existing_intent_via_values(monkeypatch):
+    async def check(pool):
+        await source(pool)
+        event = await add(pool, "synthetic request", chat_id="g", sent_at=NOW)
+        await pool.execute("ALTER TABLE intents DROP CONSTRAINT intents_via_check; "
+                           "ALTER TABLE intents ADD CONSTRAINT intents_via_check "
+                           "CHECK (via IN ('subscription', 'on_request')); "
+                           "DROP TABLE intent_group_reads, intent_group_read_days; "
+                           "DELETE FROM schema_migrations WHERE name='intent_group_reads'")
+        iid = await leads_support.intent(pool, [event], via="on_request")
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval("SELECT via FROM intents WHERE id=$1", iid) == "on_request"
+        for via in ("subscription", "followed_group", "on_request"):
+            await pool.execute("UPDATE intents SET via=$1 WHERE id=$2", via, iid)
+        async with pool.acquire() as conn:
+            assert not await intent_group_reads.pending(conn)
     run_db(check, monkeypatch)
 
 
