@@ -41,11 +41,14 @@ def test_a_worker_with_a_project_skill_is_launched_and_recorded_as_the_baseline(
     import agent_launch_parity as parity
 
     from looper.agents import project_skills
+    from looper.agents.runtimes.claude_code import AGENT_TEAMS
 
     root = tmp_path.resolve()
     (root / "home").mkdir()
     monkeypatch.setenv("HOME", str(root / "home"))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    # Capture records parent/child environment differences; match the frozen baseline's parent.
+    monkeypatch.setenv(AGENT_TEAMS, "1")
     monkeypatch.setitem(parity.SCENARIOS, "skill", {"cases": [f"worker@{parity.PROJECT_A}"]})
 
     async def _test(pool: Any) -> None:
