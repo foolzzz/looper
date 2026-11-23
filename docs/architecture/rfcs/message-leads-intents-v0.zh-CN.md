@@ -263,18 +263,19 @@ tasked、rejected、merged 是终态。
 
 ### 11.2 操作接口与入口
 
-四个操作都是 `operator_only`：只接受操作者身份（仪表盘），API 客户端不能调，也不做成 Manager 工具；`tests/operation_levels.json` 里登记为 `inside`。写操作沿用 v1 写操作的操作记录。
+五个操作都是 `operator_only`：只接受操作者身份（仪表盘），API 客户端不能调，也不做成 Manager 工具；`tests/operation_levels.json` 里登记为 `inside`。写操作沿用 v1 写操作的操作记录。
 
 | 操作 | 请求 | 结果、拒绝 |
 |---|---|---|
 | `intent_group_reads.list` | `source_id`（只有一个来源时可省） | `{enabled, run_max, day_max, groups: [{chat_id, name, kind, added_at, read_from, readable, messages_24h, intents_7d}]}`；`readable` 为假表示被排除、不读；`messages_24h` 是最近 24 小时人发的实时消息条数，只计数，供估算 |
+| `intent_group_reads.preview` | `source_id`、`chat_id` | `{group: {chat_id, name, kind, messages_24h, estimate_usd: [低, 高]}}`，只读、不写名单；估算按第 8 节的单价，消息数取 `messages_24h` 和每天上限中较小的；拒绝同 `put` |
 | `intent_group_reads.put` | `source_id`、`chat_id` | 同 `list`；已在名单上的不改开始时间；会话不存在、不是群或话题群、被排除时拒绝（`invalid`，说明原因） |
 | `intent_group_reads.delete` | `source_id`、`chat_id` | 同 `list`；不在名单上也算成功 |
 | `intent_group_reads.settings_put` | `enabled` | 同 `list`；从关到开时，在同一个事务里把所有群的 `read_from` 改为当时 |
 
 `intents.settings_get`、`intents.settings_put` 的请求和结果不变。
 
-**入口：** 仪表盘意图页新增「关注的群」标签：开关；名单（群名、类型、加入时间、开始时间、24 小时消息数、7 天意图数、撤销）；按名字或 id 搜会话（`leads.chats`，只列群和话题群）后点「关注」。「关注」先弹确认框，写明：从现在起读这个群里人发的消息，加入之前的、机器人和导入的都不读；最近 24 小时 N 条，按第 8 节的单价每天约 $X–Y，计入意图订阅每天的上限；推送只发你的私聊。飞书和 Telegram 不变（推送本来就只发私聊，来源一行已写群名）；命令行不加，和告警机器人白名单一样只在仪表盘。
+**入口：** 仪表盘意图页新增「关注的群」标签：开关；名单（群名、类型、加入时间、开始时间、24 小时消息数、7 天意图数、撤销）；按名字或 id 搜会话（`leads.chats`，只列群和话题群）后点「关注」。「关注」先调 `preview`，再弹确认框，写明：从现在起读这个群里人发的消息，加入之前的、机器人和导入的都不读；最近 24 小时 N 条，按第 8 节的单价每天约 $X–Y，计入意图订阅每天的上限；推送只发你的私聊。飞书和 Telegram 不变（推送本来就只发私聊，来源一行已写群名）；命令行不加，和告警机器人白名单一样只在仪表盘。
 
 ### 11.3 读取路径
 
@@ -361,7 +362,7 @@ OR (e.sender_kind = 'user' AND e.origin = 'live' AND EXISTS (
 | `test_followed_chats_are_labelled_and_the_note_is_added_only_with_them`（纯函数） | 只有含名单消息的会话标题带标记；没有名单消息时指令和输入逐字节不变 |
 | `test_triage_and_leads_ignore_followed_groups`（数据库） | 开关开、名单非空时，线索和事件分流的窗口和估算不变 |
 | `test_a_followed_group_intent_goes_only_to_the_operator_dm`（数据库） | 名单群里来的意图推到操作者私聊；订阅目标改成群时不推 |
-| `test_group_reads_round_trip_and_refusals`（接口） | 四个操作的声明形状；私聊、`unknown`、被排除、不存在的会话被拒；重复加入不改开始时间；API 客户端被拒 |
+| `test_group_reads_round_trip_and_refusals`（接口） | 五个操作的声明形状；`preview` 不写名单；私聊、`unknown`、被排除、不存在的会话被拒；重复加入不改开始时间；API 客户端被拒 |
 | `test_intents_off_path_matches_main`（golden，参数化） | 11.7 的三种情况和 `main` 的 golden 逐字节相同 |
 | 迁移 | 旧库升级后有这张表；会话被删时名单行跟着删 |
 | 界面（`intents.test.tsx`） | 「关注的群」标签：列表、确认后关注、撤销、开关 |
