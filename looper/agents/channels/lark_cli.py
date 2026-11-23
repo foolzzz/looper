@@ -57,6 +57,10 @@ class LarkCliError(RuntimeError):
         return self.code is not None or self.error_type == "validation" or self.not_sent
 
 
+class LarkCliOutputError(LarkCliError):
+    """A successful lark-cli process whose output cannot be decoded as a JSON object."""
+
+
 # ``LarkCliError.error_type`` of a call that did not answer in time.
 TIMEOUT = "timeout"
 
@@ -314,9 +318,9 @@ async def run_json(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS,
     try:
         data = json.loads(out)
     except ValueError:
-        raise LarkCliError(f"lark-cli printed something that is not JSON: {out[:200]!r}") from None
+        raise LarkCliOutputError(f"lark-cli printed something that is not JSON: {out[:200]!r}") from None
     if not isinstance(data, dict):
-        raise LarkCliError("lark-cli printed JSON that is not an object")
+        raise LarkCliOutputError("lark-cli printed JSON that is not an object")
     if data.get("ok") is False:
         error = data.get("error") or {}
         raise LarkCliError(failure(out) or "lark-cli answered ok: false",

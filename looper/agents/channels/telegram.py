@@ -43,9 +43,10 @@ from ..message import (
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from ..ops.leads import for_group
 from .allowlist import SenderAllowlist
-from .. import card_actions, chat_attachments, chat_commands
+from .. import card_actions, chat_attachments, chat_commands, chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
+from .proactive import record_delivery
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 from .telegram_inbox import TelegramInbox
@@ -294,7 +295,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._bus = None
         logger.info("telegram channel adapter stopped")
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
         """Send ``text`` as plain text to Telegram chat ``chat`` (a user's private chat has the user's id)."""
         if self._app is None:
             return DeliveryReceipt(channel="telegram", success=False, error="the Telegram bot is not started")
@@ -305,7 +306,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=True, external_id=str(msg.message_id))
         except Exception as exc:
             logger.warning("telegram notification to %s failed: %s", chat, exc)
-            return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)))
+            return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)), outcome=_post_outcome(exc))
 
     async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
                    idempotency_key: str | None = None) -> PostReceipt:
@@ -764,7 +765,13 @@ class TelegramChannelAdapter(ChannelAdapter):
                 if not self._running:
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
-                await record_reply(self.channel_type, envelope, await self.deliver(envelope),
+                receipt = await self.deliver(envelope)
+                if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
+                    route = envelope.metadata.get("reply_route")
+                    route = route if isinstance(route, dict) else {}
+                    chat = str(route.get("chat_id") or self._correlation_chat.get(envelope.correlation_id) or "")
+                    record_delivery(self.channel_id, envelope, receipt, chat=chat, group=chat.startswith("-"))
+                await record_reply(self.channel_type, envelope, receipt,
                                    runtime_root=self._bus.runtime_root)
         except asyncio.CancelledError:
             pass

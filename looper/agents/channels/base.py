@@ -32,6 +32,11 @@ class DeliveryReceipt:
     external_id: str | None = None
     error: str | None = None
     failure: DeliveryFailure | None = None  # when not ``success``: why, if not SEND_FAILED
+    outcome: PostOutcome | None = None
+
+    @property
+    def result(self) -> PostOutcome:
+        return PostOutcome.SENT if self.success else (self.outcome or PostOutcome.UNKNOWN)
 
 
 class PostOutcome(StrEnum):
@@ -100,8 +105,8 @@ class ChannelAdapter(ABC):
         """Send a message from the system to the user through this channel."""
         ...
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
-        """Send ``text``, unprompted, to ``chat``: a schedule's message, or a task's end (``task_notice``)."""
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
+        """Send ``text`` unprompted. A capable channel deduplicates caller retries by ``idempotency_key``."""
         return DeliveryReceipt(channel=self.channel_type, success=False,
                                error=f"the {self.channel_type} channel cannot send notifications")
 
