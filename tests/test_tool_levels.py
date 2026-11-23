@@ -26,6 +26,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_projects": "args", "looper_agent_profiles": INSIDE, "looper_models": INSIDE, "looper_providers": MACHINE,
     "looper_catalog": MACHINE, "looper_settings": "args", "looper_schedules": "args", "looper_confirm": INSIDE,
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
+    "looper_session_search": INSIDE,  # reads earlier conversations stored by Looper
     "looper_reminder_list": INSIDE, "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     "looper_task_pipeline": INSIDE, "looper_gates": "args",
     "looper_task_profiles": INSIDE, "looper_task_roles": INSIDE, "looper_task_profile_set": INSIDE,
@@ -170,6 +171,8 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "memory.check": INSIDE,  # checks prerequisites without changing files or sending messages
     "outbound_review.get": INSIDE,  # reads Looper's own review setting
     "outbound_review.update": INSIDE,  # changes Looper's own review setting
+    "project_skills.rollback": INSIDE,  # writes a new stored skill version inside Looper; sends nothing and does not touch the machine outside the catalog
+    "project_skills.versions": INSIDE,  # reads stored skill versions; sends nothing
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
     "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
 
