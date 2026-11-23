@@ -1,6 +1,6 @@
 """Project-owned skills; installation switches belong to the catalog domain."""
 
-from .. import catalog, project_skills, skill_lifecycle, skill_versions
+from .. import catalog, project_skills, skill_lifecycle, skill_proposals, skill_versions
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
@@ -59,6 +59,35 @@ _BUDGET = _object({
 })
 
 
+_PROPOSALS = "project_skills.proposals"
+_HASH = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+_NULL_STR = {"type": ["string", "null"]}
+_EVIDENCE = _object({"task": _STR, "step": _STR}, ["task"], closed=True)
+_PROPOSAL = _object({
+    "proposal_id": _INT, "project_id": _STR, "action": {"type": "string", "enum": ["create", "update"]},
+    "skill_id": _NULL_STR, "name": _STR, "description": _STR, "why": _STR, "evidence": _array(_EVIDENCE),
+    "proposer": _STR, "status": {"type": "string", "enum": [s.value for s in skill_proposals.Status]},
+    "content_sha256": _STR, "base_sha256": _NULL_STR, "content": _STR, "created_at": _STR, "expires_at": _STR,
+    "decided_at": _NULL_STR, "decision_note": _NULL_STR,
+    "current": {**_object({"name": _STR, "description": _STR, "sha256": _STR}), "type": ["object", "null"]},
+    "diff": {**_object({"name": _object({"from": _STR, "to": _STR}), "description": _object({"from": _STR, "to": _STR}),
+                        "content": _STR}), "type": ["object", "null"]},
+    "stale": _BOOL, "affected_projects": _array(_AFFECTED),
+})
+_PROPOSAL_ID = {"project_id": _STR, "proposal_id": _INT}
+_PROPOSAL_ONE = _object({"proposal": _PROPOSAL})
+_LIST_SUMMARY = "List a project's skill proposals, newest first, with the difference from the current skill."
+_GET_SUMMARY = "Read one skill proposal with its events."
+_CONFIRM_SUMMARY = "Confirm a skill proposal by the content hash the operator saw, optionally editing it first."
+_REJECT_SUMMARY = "Reject a pending skill proposal, with an optional reason."
+_PROPOSAL_RESTORE_SUMMARY = "Make an expired skill proposal pending again after checking it once more."
+_MODE_SUMMARY = "Allow or stop agents proposing skills for a project."
+_CONFIRMED = _object({"proposal": _PROPOSAL, "skill": PROJECT_SKILL, "version": {"type": ["integer", "null"]},
+                      "affected_projects": _array(_AFFECTED)})
+_EVENT = _object({"action": _STR, "actor_kind": _STR, "via": _STR, "content_sha256": _NULL_STR, "note": _NULL_STR,
+                  "at": _STR})
+
+
 OPERATIONS = (
     _op("add", _object({"project_id": _STR, "skill": _object({**_FIELDS, "enabled": _BOOL},
                                                           list(_FIELDS), closed=True)}, closed=True),
@@ -97,6 +126,52 @@ OPERATIONS = (
         _object({"project_id": _STR}, closed=True), _BUDGET, risk="read", level=ActionLevel.INSIDE,
         operator_only=True,
     ),
+    # Proposals. An API client may read them; confirming, rejecting, restoring and the switch are the operator's.
+    Operation(
+        f"{_PROPOSALS}.list", "POST", "/api/v1/project_skills/proposals/list", _LIST_SUMMARY,
+        _LIST_SUMMARY + " Pending and expired ones unless a status is given. mode is the project's switch.",
+        _object({"project_id": _STR, "status": {"type": "string", "enum": [s.value for s in skill_proposals.Status]},
+                 "limit": {"type": "integer", "minimum": 1, "maximum": skill_proposals.LIST_MAX}},
+                ["project_id"], closed=True),
+        _object({"mode": {"type": "string", "enum": ["off", "on"]}, "proposals": _array(_PROPOSAL)}),
+        risk="read", level=ActionLevel.INSIDE,
+    ),
+    Operation(
+        f"{_PROPOSALS}.get", "POST", "/api/v1/project_skills/proposals/get", _GET_SUMMARY,
+        _GET_SUMMARY + " Events record who did what, through which entry, and the content hash.",
+        _object(_PROPOSAL_ID, closed=True), _object({"proposal": _PROPOSAL, "events": _array(_EVENT)}),
+        risk="read", level=ActionLevel.INSIDE,
+    ),
+    Operation(
+        f"{_PROPOSALS}.confirm", "POST", "/api/v1/project_skills/proposals/confirm", _CONFIRM_SUMMARY,
+        _CONFIRM_SUMMARY + " Dashboard only. A hash that is not the proposal's current one is a 409. An update "
+        "whose skill changed since the draft becomes superseded and writes nothing (409). Fields given make the "
+        "operator's own edit, written as an operator version.",
+        _object({**_PROPOSAL_ID, "content_sha256": _HASH,
+                 "fields": {**_object(_FIELDS, [], closed=True), "minProperties": 1}},
+                ["project_id", "proposal_id", "content_sha256"], closed=True),
+        _CONFIRMED, risk="write", level=ActionLevel.INSIDE, operator_only=True, cli=False, audit_operator=False,
+    ),
+    Operation(
+        f"{_PROPOSALS}.reject", "POST", "/api/v1/project_skills/proposals/reject", _REJECT_SUMMARY,
+        _REJECT_SUMMARY + " The reason has at most 500 characters.",
+        _object({**_PROPOSAL_ID, "reason": _STR}, ["project_id", "proposal_id"], closed=True),
+        _PROPOSAL_ONE, risk="write", level=ActionLevel.INSIDE, operator_only=True,
+    ),
+    Operation(
+        f"{_PROPOSALS}.restore", "POST", "/api/v1/project_skills/proposals/restore", _PROPOSAL_RESTORE_SUMMARY,
+        _PROPOSAL_RESTORE_SUMMARY + " It must still pass every rule, and an update's skill must be unchanged.",
+        _object(_PROPOSAL_ID, closed=True), _PROPOSAL_ONE, risk="write", level=ActionLevel.INSIDE,
+        operator_only=True,
+    ),
+    Operation(
+        f"{_PROPOSALS}.set_mode", "POST", "/api/v1/project_skills/proposals/set_mode", _MODE_SUMMARY,
+        _MODE_SUMMARY + " On lets agents draft skills for the operator to confirm; a draft never takes effect "
+        "before the operator confirms it. Off stores nothing (NULL).",
+        _object({"project_id": _STR, "mode": {"type": "string", "enum": ["off", "on"]}}, closed=True),
+        _object({"project_id": _STR, "mode": {"type": "string", "enum": ["off", "on"]}}),
+        risk="write", level=ActionLevel.INSIDE, operator_only=True,
+    ),
 )
 RESULTS = {}
 
@@ -104,6 +179,8 @@ RESULTS = {}
 async def _answer(request):
     try:
         return _plain(await request)
+    except skill_proposals.ProposalForbidden as exc:
+        raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
     except (project_skills.ProjectSkillError, project_skills.ProjectSkillNotFound,
             project_skills.ProjectSkillConflict) as exc:
         code = (ErrorCode.NOT_FOUND if isinstance(exc, project_skills.ProjectSkillNotFound) else
@@ -130,6 +207,8 @@ async def impact(server, operation, arguments, principal, headers):
 async def run(server, operation, arguments, principal, headers):
     name = operation.operation_id
     project_id = arguments["project_id"]
+    if name.startswith(_PROPOSALS + "."):
+        return await _answer(_proposals(name.rsplit(".", 1)[1], project_id, arguments, principal))
     if name == "project_skills.add":
         return await _answer(project_skills.add_skill(project_id, arguments["skill"]))
     if name == "project_skills.context_budget":
@@ -153,3 +232,22 @@ async def run(server, operation, arguments, principal, headers):
     # The core deletes the item and all current installations in one transaction.
     await _references(arguments)
     return await _answer(project_skills.delete_skill(project_id, skill_id))
+
+
+async def _proposals(action, project_id, arguments, principal):
+    if action == "list":
+        status = skill_proposals.Status(arguments["status"]) if "status" in arguments else None
+        return await skill_proposals.list_view(project_id, status=status, limit=arguments.get("limit", 50))
+    if action == "set_mode":
+        return await skill_proposals.set_mode(project_id, arguments["mode"])
+    proposal_id = arguments["proposal_id"]
+    if action == "get":
+        return await skill_proposals.get_view(project_id, proposal_id)
+    if action == "reject":
+        return await skill_proposals.reject(project_id, proposal_id, arguments.get("reason", ""), principal=principal)
+    if action == "restore":
+        return await skill_proposals.restore(project_id, proposal_id, principal=principal)
+    if "fields" in arguments:
+        return await skill_proposals.edit_and_confirm(
+            project_id, proposal_id, arguments["content_sha256"], arguments["fields"], principal=principal)
+    return await skill_proposals.confirm(project_id, proposal_id, arguments["content_sha256"], principal=principal)

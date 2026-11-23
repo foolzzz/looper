@@ -8,6 +8,7 @@ import {
   fetchCatalog,
   fetchContextBudget,
   fetchProjectInstalls,
+  fetchSkillProposals,
   fetchSkillVersions,
   restoreProjectSkill,
   type Catalog,
@@ -23,6 +24,7 @@ vi.mock("@/lib/api", async (original) => ({
   fetchProjectInstalls: vi.fn(),
   fetchCatalog: vi.fn(),
   fetchContextBudget: vi.fn(),
+  fetchSkillProposals: vi.fn(),
   fetchSkillVersions: vi.fn(),
   fetchProjectSkill: vi.fn(),
   deprecateProjectSkill: vi.fn(),
@@ -159,6 +161,7 @@ beforeEach(() => {
   vi.mocked(fetchProjectInstalls).mockResolvedValue(view());
   vi.mocked(fetchCatalog).mockResolvedValue({ items: [] } as unknown as Catalog);
   vi.mocked(fetchContextBudget).mockResolvedValue(budget());
+  vi.mocked(fetchSkillProposals).mockResolvedValue({ mode: "off", proposals: [] });
   vi.mocked(fetchSkillVersions).mockResolvedValue(versions([{ project_id: "proj-1", project_name: "Calc" }]));
   vi.mocked(deprecateProjectSkill).mockResolvedValue({} as never);
   vi.mocked(restoreProjectSkill).mockResolvedValue({} as never);
@@ -316,5 +319,22 @@ describe("ProjectSkillsSection lifecycle", () => {
     if (section.scrollWidth > 0 && section.clientWidth > 0) {
       expect(section.scrollWidth).toBeLessThanOrEqual(section.clientWidth);
     }
+  });
+});
+
+describe("ProjectSkillsSection proposals", () => {
+  it("has no proposals column while they are off and none exist", async () => {
+    await renderSection();
+    expect(host.textContent).not.toContain("Proposed skills");
+    expect(host.textContent).not.toContain("Skill proposals");
+    expect(fetchSkillProposals).toHaveBeenCalledWith("proj-1");
+  });
+
+  it("lists proposals above the installed skills when the project allows them", async () => {
+    vi.mocked(fetchSkillProposals).mockResolvedValue({ mode: "on", proposals: [] });
+    await renderSection();
+    const text = host.textContent ?? "";
+    expect(text).toContain("Proposed skills");
+    expect(text.indexOf("Proposed skills")).toBeLessThan(text.indexOf("Installed here"));
   });
 });

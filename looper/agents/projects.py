@@ -150,6 +150,8 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "task_count": row.get("task_count", 0),
         "active_count": row.get("active_count", 0),
         "schedule_count": row.get("schedule_count", 0),
+        # Only a project that switched skill proposals on shows the key; every other view is as before.
+        **({"skill_proposals": row["skill_proposals"]} if row.get("skill_proposals") else {}),
     }
 
 

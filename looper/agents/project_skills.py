@@ -251,6 +251,40 @@ async def _answer(project_id: str, **extra: Any) -> dict[str, Any]:
     return {**extra, **await project_view(project_id)}
 
 
+async def _insert_skill(
+    conn: Any, project_id: str, fields: Mapping[str, Any], *, author: Any, author_ref: str | None,
+) -> Mapping[str, Any]:
+    """Insert a new skill, its install and its first version on ``conn``, which holds the project's row lock."""
+    import asyncpg
+
+    from ..db import library as db_library
+    from .catalog import TASK_ROLES, name_conflict
+    from .skill_versions import append, point
+
+    file, sha256 = skill_md(fields["name"], fields["description"], fields["content"])
+    owned = await db_library.list_owned_items(project_id, pool=conn)
+    if any(row["name"] == fields["name"] for row in owned):
+        raise _name_taken(fields["name"])
+    if len(owned) >= PROJECT_MAX_SKILLS:
+        raise ProjectSkillError(f"a project has at most {skills_label(PROJECT_MAX_SKILLS)}")
+    if reason := await name_conflict(conn, project_id, None, fields["name"]):
+        raise ProjectSkillConflict(reason)
+    try:
+        row = await db_library.insert_owned_skill(
+            conn, item_id=f"skill-{uuid.uuid4().hex[:12]}", project_id=project_id, name=fields["name"],
+            description=fields["description"], file=file, sha256=sha256, roles=TASK_ROLES,
+            enabled=fields.get("enabled", True),
+        )
+    except asyncpg.UniqueViolationError:  # pragma: no cover - the project's row lock orders adds
+        raise _name_taken(fields["name"]) from None
+    version = await append(
+        conn, item_id=row["id"], name=fields["name"], description=fields["description"],
+        content=fields["content"], sha256=sha256, author=author, author_ref=author_ref, reason="",
+    )
+    await point(conn, row["id"], version)
+    return row
+
+
 async def add_skill(project_id: str, data: Any) -> dict[str, Any]:
     """Write a skill (``name``, ``description``, ``content``, optionally ``enabled``) and install it in the project.
 
@@ -258,38 +292,14 @@ async def add_skill(project_id: str, data: Any) -> dict[str, Any]:
     given (default on). Returns the skill and the project's view
     (``catalog.project_view``).
     """
-    import asyncpg
-
-    from ..db import library as db_library
     from ..db.project_documents import locked_project
-    from .catalog import TASK_ROLES, name_conflict
-    from .skill_versions import AuthorKind, append, point
+    from .skill_versions import AuthorKind
 
     fields = _fields(data, adding=True)
-    file, sha256 = skill_md(fields["name"], fields["description"], fields["content"])
     async with locked_project(project_id) as (conn, project):
         if project is None:
             raise ProjectSkillNotFound(f"project {project_id!r} not found")
-        owned = await db_library.list_owned_items(project_id, pool=conn)
-        if any(row["name"] == fields["name"] for row in owned):
-            raise _name_taken(fields["name"])
-        if len(owned) >= PROJECT_MAX_SKILLS:
-            raise ProjectSkillError(f"a project has at most {skills_label(PROJECT_MAX_SKILLS)}")
-        if reason := await name_conflict(conn, project_id, None, fields["name"]):
-            raise ProjectSkillConflict(reason)
-        try:
-            row = await db_library.insert_owned_skill(
-                conn, item_id=f"skill-{uuid.uuid4().hex[:12]}", project_id=project_id, name=fields["name"],
-                description=fields["description"], file=file, sha256=sha256, roles=TASK_ROLES,
-                enabled=fields.get("enabled", True),
-            )
-        except asyncpg.UniqueViolationError:  # pragma: no cover - the project's row lock orders adds
-            raise _name_taken(fields["name"]) from None
-        version = await append(
-            conn, item_id=row["id"], name=fields["name"], description=fields["description"],
-            content=fields["content"], sha256=sha256, author=AuthorKind.OPERATOR, author_ref=None, reason="",
-        )
-        await point(conn, row["id"], version)
+        row = await _insert_skill(conn, project_id, fields, author=AuthorKind.OPERATOR, author_ref=None)
     return await _answer(project_id, skill=skill_view(row))
 
 
@@ -302,42 +312,51 @@ async def get_skill(project_id: str, skill_id: str) -> dict[str, Any]:
     return {"skill": skill_view(row), "content": skill_body(text, row["name"], row["description"])}
 
 
+async def _change_skill(
+    conn: Any, project_id: str, skill_id: str, fields: Mapping[str, Any], *, author: Any, author_ref: str | None,
+) -> Mapping[str, Any]:
+    """Change a skill and append its version on ``conn``, which holds the project's row lock."""
+    import asyncpg
+
+    from ..db import library as db_library
+    from .skill_versions import append
+
+    row = _owned(await db_library.get_item(skill_id, pool=conn), project_id, skill_id)
+    name = fields.get("name", row["name"])
+    description = fields.get("description", row["description"])
+    content = fields.get("content")
+    if content is None:
+        text = await db_library.get_file(skill_id, SKILL_FILE, pool=conn) or ""
+        content = skill_body(text, row["name"], row["description"])
+    await _check_rename(conn, project_id, skill_id, row, name)
+    file, sha256 = skill_md(name, description, content)
+    # The version row is inserted first. The pointer moves with the content in one UPDATE.
+    # Either statement failing rolls the transaction back, so the item and its history stay together.
+    version = await append(
+        conn, item_id=skill_id, name=name, description=description, content=content, sha256=sha256,
+        author=author, author_ref=author_ref, reason="",
+    )
+    try:
+        return await db_library.update_owned_skill(
+            conn, skill_id, name=name, description=description, file=file, sha256=sha256, skill_version=version,
+        )
+    except asyncpg.UniqueViolationError:  # pragma: no cover - the project's row lock orders changes
+        raise _name_taken(name) from None
+
+
 async def update_skill(project_id: str, skill_id: str, data: Any) -> dict[str, Any]:
     """Change a skill's name, description or content; returns it and the project's view.
 
     A new name must be free in the project and in every project the skill is installed in.
     """
-    import asyncpg
-
-    from ..db import library as db_library
     from ..db.project_documents import locked_project
-    from .skill_versions import AuthorKind, append
+    from .skill_versions import AuthorKind
 
     fields = _fields(data, adding=False)
     async with locked_project(project_id) as (conn, project):
         if project is None:
             raise ProjectSkillNotFound(f"project {project_id!r} not found")
-        row = _owned(await db_library.get_item(skill_id, pool=conn), project_id, skill_id)
-        name = fields.get("name", row["name"])
-        description = fields.get("description", row["description"])
-        content = fields.get("content")
-        if content is None:
-            text = await db_library.get_file(skill_id, SKILL_FILE, pool=conn) or ""
-            content = skill_body(text, row["name"], row["description"])
-        await _check_rename(conn, project_id, skill_id, row, name)
-        file, sha256 = skill_md(name, description, content)
-        # The version row is inserted first. The pointer moves with the content in one UPDATE.
-        # Either statement failing rolls the transaction back, so the item and its history stay together.
-        version = await append(
-            conn, item_id=skill_id, name=name, description=description, content=content, sha256=sha256,
-            author=AuthorKind.OPERATOR, author_ref=None, reason="",
-        )
-        try:
-            row = await db_library.update_owned_skill(
-                conn, skill_id, name=name, description=description, file=file, sha256=sha256, skill_version=version,
-            )
-        except asyncpg.UniqueViolationError:  # pragma: no cover - the project's row lock orders changes
-            raise _name_taken(name) from None
+        row = await _change_skill(conn, project_id, skill_id, fields, author=AuthorKind.OPERATOR, author_ref=None)
     return await _answer(project_id, skill=skill_view(row))
 
 

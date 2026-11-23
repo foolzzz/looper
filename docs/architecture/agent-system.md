@@ -3136,6 +3136,34 @@ A run's library record, launch arguments and prompts gain no field from a
 version. A skill uploaded, taken from git, imported from this machine or
 written in Settings has no versions.
 
+**Proposals.** A project can allow agents to draft skills for the operator to
+confirm (`projects.skill_proposals`, NULL or `off` by default, set with
+`project_skills.proposals.set_mode`; the key appears in a project's view and
+export only while it is `on`). A proposal (`skill_proposals`,
+`looper/agents/skill_proposals.py`) is a `create` or an `update` with its full
+text, its reason and the tasks and steps it comes from. It changes no catalog
+item and reaches no run. In this release nothing gives an agent the means to
+propose: the function exists for the Planner and Manager paths that follow.
+The checks reuse the skill field rules, refuse a secret-shaped string in the
+description, the content or the reason (`skill_secrets`, a fixed table of
+named rules), allow only an `update` once the project has 20 skills, and keep
+the newest pending proposal per name (an older one becomes `superseded`). A
+pending proposal expires after seven days; the operator can restore it, and it
+is checked again.
+
+Only the operator's dashboard session confirms
+(`project_skills.proposals.confirm`; an API client may read proposals but not
+confirm, reject, restore or switch them, and the operation has no `loopercli`
+command). Confirming names the content hash the operator saw: another hash is a
+409, and an `update` whose skill changed after the draft becomes `superseded`
+and writes nothing. A confirmation writes a skill version with author kind
+`proposal` (the proposal's id as the reference), or `operator` after the
+operator edited the text first (`confirmed_edited`). The database ties a
+confirmed status to a `confirm` event of the dashboard, by the user, with that
+hash (`skill_proposal_events`). While proposals are pending, the operator
+gets at most one direct message a day with names, reasons and the page link,
+never skill text; a reply confirms nothing.
+
 **Caps.** Each is refused with a 400 that states it:
 
 - a name: at most 64 characters, Claude Code's limit for a skill name;

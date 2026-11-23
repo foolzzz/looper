@@ -3,6 +3,7 @@ import { ChevronRight, FileUp, Loader2, Pencil, Plus, Trash2 } from "lucide-reac
 import { OriginTag, RoleChecks } from "@/components/install-controls";
 import { McpSummary } from "@/components/mcp-servers";
 import { SkillHistory } from "@/components/skill-history";
+import { SkillProposals } from "@/components/skill-proposals";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -737,6 +738,7 @@ export function ProjectSkillsSection({ projectId }: { projectId: string }) {
       {!data && !loadError && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Loading" />}
       {data && caps && (
         <>
+          <SkillProposals projectId={projectId} onWritten={() => apply(() => fetchProjectInstalls(projectId))} />
           <div className="space-y-2">
             <h3 className="text-xs font-medium text-muted-foreground">Installed here</h3>
             {data.installs.length ? (
