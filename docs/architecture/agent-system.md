@@ -2872,8 +2872,12 @@ separately. Drafting has its own contract; existing agents gain no prompt or too
   alone.
 - **Drafting** (`memory_draft_service.py`, `memory_draft.py`, `memory_draft_role.py`):
   the service polls every 10 seconds and PostgreSQL wakes it after a seed commits.
-  An advisory lock serializes spending across servers; a row lock with `SKIP LOCKED`
-  claims a `drafting` vault candidate. Code searches only the kind's configured
+  A short transaction uses an advisory lock and `SKIP LOCKED` to claim a `drafting`
+  vault candidate and a 180-second spend lease across servers. Input assembly and
+  the model call run after commit, with a 150-second outer deadline and no database
+  locks. A short transaction then checks the lease, candidate and saved settings
+  before persisting; a deleted/changed candidate or expired/replaced lease discards
+  the result. Deleting a seed does not release its live spend lease. Code searches only the kind's configured
   folders (`vault.search`'s internal `under` argument), includes its rules, index,
   entry pages and related open/rejected candidates, and bounds the escaped input
   to 60,000 characters. The `memory_draft` role runs through `model_call.ChildCall`,
@@ -2888,8 +2892,10 @@ separately. Drafting has its own contract; existing agents gain no prompt or too
   Strict parsing resolves only supplied ids, checks paths, snapshots, frontmatter,
   index updates, exact anchors and credentials, and saves a revision in `pending`.
   Duplicate/rejected seeds are dropped; matching open candidates merge only source
-  classes their kind permits. A revision of a confirmed/writing/blocked candidate
-  waits for it to finish. Runtime and malformed-JSON failures get two retries;
+  classes their kind permits. A revision of a confirmed/writing/blocked/conflict
+  candidate stays in `drafting` with a durable `target_busy` wait naming that
+  candidate. Polls and restarts skip it without model calls until the target leaves
+  those states or is deleted; other seeds continue immediately. Runtime and malformed-JSON failures get two retries;
   invalid changes and credentials are dropped immediately. `large_removal` and
   `flagged` preserve review warnings. Off, the service performs no vault read,
   model call or candidate write, and existing agent prompts/tools/launches stay
