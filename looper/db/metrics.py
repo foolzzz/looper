@@ -1,6 +1,6 @@
 """Reads behind the task-quality metrics. Task and step figures come from the ``task_outcomes`` and
-``step_attempts`` snapshots; the one table that is large, ``llm_records``, is only read by task id (its index), for the
-tasks a figure is about, never by a time scan."""
+``step_attempts`` snapshots. ``llm_records`` is read by task id and a run's time span (``idx_llm_records_task``), never
+by a scan of the whole table."""
 
 from datetime import datetime
 from typing import Any
@@ -78,24 +78,37 @@ async def attempt_rows(since: datetime, until: datetime, project: str | None,
 async def contract_counts(since: datetime, until: datetime, project: str | None, profile: str | None,
                           difficulty: str | None, floor: datetime | None, *, pool: Database | None = None) -> dict[str, int]:
     """Worker and Reviewer runs that reported an outcome and how many broke the contract, the Planner's turns and the
-    rejections of its replies, and the Worker runs with no attempt since ``floor``; over the tasks whose run ended in
-    the window."""
+    rejections of its replies, over the runs that ended in the window: a run owns records from its start until the next
+    run of the task starts. ``missing_attempts`` is separate, the Worker runs of those tasks since ``floor`` with no
+    attempt (a failed write can predate the run)."""
     row = await (pool or get_pool()).fetchrow(
         f"""
-        WITH picked AS ({TASKS_IN_WINDOW}), runs AS (
-            SELECT {RUN_KIND} AS kind, metadata->>'outcome' AS outcome, attempt_id, created_at,
-                   CASE WHEN jsonb_typeof(metadata->'contract_rejections') = 'object' THEN
-                        (SELECT COALESCE(sum(e.value::integer), 0) FROM jsonb_each_text(metadata->'contract_rejections') e)
+        WITH window_runs AS (
+            SELECT o.task_id, o.run_no, COALESCE(o.started_at, t.created_at) AS lower_at,
+                   COALESCE((SELECT COALESCE(n.started_at, n.ended_at) FROM task_outcomes n
+                             WHERE n.task_id = o.task_id AND n.run_no > o.run_no
+                             ORDER BY n.run_no LIMIT 1), 'infinity'::timestamptz) AS upper_at
+            FROM ({OUTCOMES_IN_WINDOW}) o JOIN tasks t ON t.id = o.task_id),
+        runs AS (
+            SELECT {RUN_KIND} AS kind, r.metadata->>'outcome' AS outcome, r.attempt_id, r.created_at,
+                   CASE WHEN jsonb_typeof(r.metadata->'contract_rejections') = 'object' THEN
+                        (SELECT COALESCE(sum(e.value::integer), 0) FROM jsonb_each_text(r.metadata->'contract_rejections') e)
                         ELSE 0 END AS rejections
-            FROM llm_records WHERE task_id IN (SELECT task_id FROM picked) AND {TASK_RUN})
+            FROM window_runs w JOIN LATERAL (
+                SELECT metadata, attempt_id, created_at, run_kind, agent_id FROM llm_records r
+                WHERE r.task_id = w.task_id AND r.created_at >= w.lower_at AND r.created_at < w.upper_at
+                  AND {TASK_RUN}) r ON true)
         SELECT count(*) FILTER (WHERE kind = 'worker' AND outcome IS NOT NULL) AS worker_runs,
                count(*) FILTER (WHERE kind = 'worker' AND outcome = 'contract') AS worker_contract,
                count(*) FILTER (WHERE kind = 'reviewer' AND outcome IS NOT NULL) AS reviewer_runs,
                count(*) FILTER (WHERE kind = 'reviewer' AND outcome = 'contract') AS reviewer_contract,
                count(*) FILTER (WHERE kind = 'planner') AS planner_turns,
                COALESCE(sum(rejections) FILTER (WHERE kind = 'planner'), 0)::bigint AS planner_rejections,
-               count(*) FILTER (WHERE kind = 'worker' AND attempt_id IS NULL AND $6::timestamptz IS NOT NULL
-                                AND created_at >= $6) AS missing_attempts
+               (SELECT count(*) FROM (SELECT DISTINCT task_id FROM window_runs) picked JOIN LATERAL (
+                    SELECT 1 FROM llm_records r
+                    WHERE r.task_id = picked.task_id AND {TASK_RUN} AND {RUN_KIND} = 'worker'
+                      AND r.attempt_id IS NULL AND $6::timestamptz IS NOT NULL AND r.created_at >= $6) m ON true)
+               AS missing_attempts
         FROM runs
         """, since, until, project, profile, difficulty, floor)
     return dict(row)

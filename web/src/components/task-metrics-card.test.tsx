@@ -104,6 +104,25 @@ describe("the task page's 指标 card", () => {
     expect(container.querySelector('[data-testid="delivery-feedback"]')).toBeNull();
   });
 
+  it("keeps the spend table and the missing-attempt warning when there are no attempts, at 390px", async () => {
+    vi.stubGlobal("innerWidth", 390);
+    container.style.width = "390px";
+    vi.mocked(metrics.fetchStepAttempts).mockResolvedValue(view({
+      summary: { steps: 0, attempts: 0, accepted_steps: 0, first_pass_steps: 0, open_attempts: 0, failure_kinds: {} },
+      missing_attempts: 1,
+    }));
+    await show();
+    expect(window.innerWidth).toBe(390);
+    expect(text()).toContain("没有尝试记录");
+    expect(text()).toContain("未归属");
+    expect(text()).toContain("$2.00");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("1 个 Worker 运行没有记下尝试");
+    expect(text()).not.toContain("一次通过的步骤");
+    const table = container.querySelector("table");
+    expect(table?.parentElement?.className).toContain("overflow-x-auto");
+    expect(container.querySelector("section")!.scrollWidth).toBeLessThanOrEqual(390);
+  });
+
   it("says so when the task has no attempt records, and warns when a write was missed", async () => {
     vi.mocked(metrics.fetchStepAttempts).mockResolvedValue(view({
       summary: { steps: 0, attempts: 0, accepted_steps: 0, first_pass_steps: 0, open_attempts: 0, failure_kinds: {} },

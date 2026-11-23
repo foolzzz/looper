@@ -112,6 +112,22 @@ def test_first_pass_counts_original_steps_accepted_at_their_only_attempt_and_lea
     assert m.step_replans(data(attempts=[attempt("x", 1, decision="replan")]))["decisions"] == 1
 
 
+def test_first_pass_keeps_a_reopened_step_that_is_still_pending_in_the_denominator():
+    attempts = [attempt(f"ok{i}") for i in range(20)]
+    attempts += [attempt("reopened", 1), attempt("reopened", 2, "reopen_late_review", decision=None)]
+    attempts += [attempt("open", 1, decision=None), attempt("skipped", 1, decision="skip"),
+                 attempt("ended", 1, decision="task_ended", failure_kind="stopped"),
+                 attempt("retrying", 1, decision="retry"), attempt("retrying", 2, "retry", decision=None)]
+    first = m.step_first_pass_rate(data(attempts=attempts))
+    assert (first["k"], first["n"]) == (20, 21)
+
+
+def test_a_step_that_used_two_profiles_is_grouped_under_each():
+    attempts = [attempt("mix", 1, profile_id="fast"), attempt("mix", 2, "retry", profile_id="slow")]
+    assert [s.key for s in data(attempts=attempts, filters={"profile": "fast"}).steps] == ["mix"]
+    assert [s.key for s in data(attempts=attempts, filters={"profile": "slow"}).steps] == ["mix"]
+
+
 def test_attempts_per_accepted_step_distribution_and_rework_rate():
     attempts = [attempt("a")] + [attempt("b", 1, decision="retry"), attempt("b", 2, "retry")]
     attempts += [attempt("c", 1, decision="retry"), attempt("c", 2, "retry", decision="retry"), attempt("c", 3, "retry")]

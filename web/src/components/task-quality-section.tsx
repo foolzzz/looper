@@ -130,14 +130,14 @@ function Figures({ metrics }: { metrics: TaskMetrics }) {
         item={steps.cost_per_accepted_step}
         value={(c) => `供应商 ${meanCostText(c.provider_priced.total)}`}
         detail={(c) => `等价 ${meanCostText(c.equivalent.total)} · 首次 ${meanCostText(c.provider_priced.first)} / 重试 ${meanCostText(c.provider_priced.retry)}`}
-        previous={(c) => `供应商 ${meanCostText(c.provider_priced.total)}`}
+        previous={(c) => `供应商 ${meanCostText(c.provider_priced.total)} · 等价 ${meanCostText(c.equivalent.total)}`}
       />
       <Figure
         label="每个完成任务的花费"
         item={tasks.cost_per_completed_task}
         value={(c) => `供应商 ${meanCostText(c.provider_priced)}`}
         detail={(c) => `等价 ${meanCostText(c.equivalent)} · ${c.n} 个完成的任务`}
-        previous={(c) => `供应商 ${meanCostText(c.provider_priced)}`}
+        previous={(c) => `供应商 ${meanCostText(c.provider_priced)} · 等价 ${meanCostText(c.equivalent)}`}
       />
       <Figure
         label="agent 时长 P50 / P95"

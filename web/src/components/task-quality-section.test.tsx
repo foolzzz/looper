@@ -94,6 +94,28 @@ describe("the dashboard's 任务质量 group", () => {
     expect(fetchTaskMetrics).toHaveBeenCalledWith(7, { project: "", profile: "" }, expect.anything());
   });
 
+  it("shows the equivalent spend in the 28-day cost comparison", async () => {
+    const answer = metrics();
+    answer.steps.cost_per_accepted_step = {
+      ...answer.steps.cost_per_accepted_step,
+      previous: {
+        n: 20,
+        provider_priced: { first: mean(1), retry: mean(1), total: mean(2) },
+        equivalent: { first: mean(1), retry: mean(1), total: mean(3) },
+      },
+    };
+    answer.tasks.cost_per_completed_task = {
+      ...answer.tasks.cost_per_completed_task,
+      previous: { n: 10, provider_priced: mean(2), equivalent: mean(4) },
+    };
+    vi.mocked(fetchTaskMetrics).mockResolvedValue(answer);
+    await show();
+    const tile = (label: string) => [...container.querySelectorAll("div")].find((node) =>
+      node.querySelector("p")?.textContent === label);
+    expect(tile("每个被接受步骤的花费")?.textContent).toContain("前 28 天：供应商 $2.00 · 等价 $3.00");
+    expect(tile("每个完成任务的花费")?.textContent).toContain("前 28 天：供应商 $2.00 · 等价 $4.00");
+  });
+
   it("switches project and profile and reads again with the choice", async () => {
     await show();
     const projectSelect = container.querySelector('select[aria-label="项目"]') as HTMLSelectElement;

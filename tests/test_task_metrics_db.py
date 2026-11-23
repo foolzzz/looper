@@ -292,3 +292,102 @@ def test_compute_runs_on_an_empty_database(monkeypatch):
         assert all("error" not in item for group in ("tasks", "steps", "reviews", "contract")
                    for item in result[group].values())
     run_db(check, monkeypatch, setup=seed)
+
+
+def test_contract_counts_only_runs_that_ended_inside_the_window(monkeypatch):
+    """One task, two runs: 20 completed Worker runs on the run that ended 10 days ago, and 1 contract Worker run on
+    the run that ended an hour ago. Each window counts its own run (0/20 and 1/1), including when both runs used
+    the same Profile. A Worker run from before the first run starts is in neither."""
+    async def check(pool):
+        from looper.db import metrics as db_metrics
+
+        await task(pool, "t")
+        await outcome(pool, "t", timedelta(days=10), run_no=1, minutes=120)
+        await attempt(pool, "t", "s1", 1, "first", "accept", timedelta(days=10), profile_id="fast", task_run_no=1)
+        await record(pool, "worker-before", "t", metadata={"outcome": "contract"}, ago=timedelta(days=11))
+        for i in range(20):
+            await record(pool, f"worker-old-{i}", "t", metadata={"outcome": "completed"},
+                         ago=timedelta(days=10) - timedelta(minutes=30))
+        await outcome(pool, "t", timedelta(hours=1), run_no=2, minutes=120)
+        await attempt(pool, "t", "s2", 1, "first", "accept", timedelta(hours=1), profile_id="fast", task_run_no=2)
+        await record(pool, "worker-new", "t", metadata={"outcome": "contract"}, ago=timedelta(minutes=30))
+        now = datetime.now(timezone.utc)
+        split = now - timedelta(days=7)
+
+        async def counts(since, until, profile):
+            row = await db_metrics.contract_counts(since, until, None, profile, None, None, pool=pool)
+            return row["worker_contract"], row["worker_runs"]
+
+        assert await counts(split - timedelta(days=28), split, None) == (0, 20)
+        assert await counts(split, now, None) == (1, 1)
+        assert await counts(split - timedelta(days=28), split, "fast") == (0, 20)
+        assert await counts(split, now, "fast") == (1, 1)
+        rates = (await metrics.compute(7, metrics.Filters(), pool=pool))["contract"]["rates"]
+        assert (rates["previous"]["worker"]["k"], rates["previous"]["worker"]["n"]) == (0, 20)
+        assert rates["worker"] == {"insufficient": True, "n": 1}
+    run_db(check, monkeypatch, setup=seed)
+
+
+class _IndexedReads:
+    """EXPLAIN each read before it runs, and refuse a sequential scan of the two large tables."""
+
+    def __init__(self, pool):
+        self.pool = pool
+
+    async def _check(self, sql, args):
+        if not sql.lstrip()[:6].upper().startswith(("SELECT", "WITH")):
+            return
+        plan = "\n".join(row[0] for row in await self.pool.fetch("EXPLAIN " + sql, *args))
+        assert "Seq Scan on step_attempts" not in plan, plan
+        assert "Seq Scan on llm_records" not in plan, plan
+
+    async def execute(self, sql, *args):
+        await self._check(sql, args)
+        return await self.pool.execute(sql, *args)
+
+    async def fetch(self, sql, *args):
+        await self._check(sql, args)
+        return await self.pool.fetch(sql, *args)
+
+    async def fetchrow(self, sql, *args):
+        await self._check(sql, args)
+        return await self.pool.fetchrow(sql, *args)
+
+    async def fetchval(self, sql, *args):
+        await self._check(sql, args)
+        return await self.pool.fetchval(sql, *args)
+
+
+def test_comparison_window_and_profile_reads_do_not_scan_the_large_tables(monkeypatch):
+    """100k attempts and 200k Worker runs sit on a task whose run ended in the comparison window, but the rows
+    themselves are far older than that run. The comparison read and a Profile filter must not sequentially scan
+    ``step_attempts`` or ``llm_records`` to ignore them."""
+    async def check(pool):
+        from looper.db import metrics as db_metrics
+
+        await task(pool, "hist")
+        await outcome(pool, "hist", timedelta(days=10), minutes=120)
+        await attempt(pool, "hist", "s", 1, "first", "accept", timedelta(days=10), profile_id="fast")
+        await pool.execute(
+            """
+            INSERT INTO step_attempts(task_id, task_run_no, step_key, attempt, trigger, profile_id, decision,
+                                      started_at, decided_at)
+            SELECT 'hist', 1, 'old' || i, 1, 'first', 'old', 'accept', ts, ts
+            FROM generate_series(1, 100000) AS i, (SELECT now() - interval '400 days' AS ts) AS clock
+            """)
+        await pool.execute(
+            """
+            INSERT INTO llm_records(agent_id, task_id, run_kind, metadata, created_at)
+            SELECT 'worker-bulk', 'hist', 'worker', '{"outcome":"completed"}'::jsonb, now() - interval '400 days'
+            FROM generate_series(1, 200000)
+            """)
+        await pool.execute("ANALYZE step_attempts, llm_records, task_outcomes, tasks")
+        now = datetime.now(timezone.utc)
+        split = now - timedelta(days=7)
+        since, until = split - timedelta(days=28), split
+        watched = _IndexedReads(pool)
+        await db_metrics.attempt_rows(since, until, None, pool=watched)
+        await db_metrics.contract_counts(since, until, None, None, None, since, pool=watched)
+        await db_metrics.task_rows(since, until, None, "fast", None, pool=watched)
+        await db_metrics.contract_counts(since, until, None, "fast", None, since, pool=watched)
+    run_db(check, monkeypatch, setup=seed, timeout=180)

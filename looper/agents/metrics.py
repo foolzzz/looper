@@ -224,8 +224,9 @@ class Data:
 
     @cached_property
     def steps(self) -> list[Step]:
-        """Steps with an attempt decided in the window; a profile or difficulty filter keeps the steps that have one
-        attempt of that profile, and the difficulty of the step."""
+        """Steps with an attempt decided in the window. A profile filter keeps every step that has an attempt of that
+        profile, so a step that used more than one profile is counted under each of them; a difficulty filter keeps
+        the steps of that difficulty."""
         keep = []
         for step in group_steps(self.part("attempts")):
             if self.filters.profile and not any(a["profile_id"] == self.filters.profile for a in step.attempts):
@@ -303,9 +304,10 @@ def task_user_corrections(d: Data) -> dict[str, Any]:
 
 def step_first_pass_rate(d: Data) -> dict[str, Any]:
     """Steps of the original plan (first attempt ``first``) that were accepted at their only attempt. A step still open,
-    or skipped, or cut off by the task ending is not counted; steps added by a replan are apart (``replans``)."""
+    or skipped, or cut off by the task ending is not counted. One that was reopened and is still pending stays in the
+    denominator: the reopen already spent the first pass. Steps added by a replan are apart (``replans``)."""
     steps = [s for s in d.steps if s.first["trigger"] == Trigger.FIRST and d.within(s.first["decided_at"])
-             and s.last["decision"] in _RESOLVED]
+             and (s.last["decision"] in _RESOLVED or any(a["trigger"] in _REOPEN for a in s.attempts))]
     return _share(steps, lambda s: len(s.attempts) == 1 and s.last["decision"] == Decision.ACCEPT)
 
 

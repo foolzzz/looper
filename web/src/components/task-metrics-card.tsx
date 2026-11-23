@@ -261,40 +261,44 @@ export function TaskMetricsCard({ taskId, status, active, revision }: {
       )}
       {!view ? (
         !error && <p className="mt-2 text-sm text-muted-foreground">读取中…</p>
-      ) : view.summary.attempts === 0 ? (
-        <p className="mt-2 text-sm text-muted-foreground">
-          这个任务没有尝试记录：只有开始记录之后派出的步骤才有（{view.coverage_since ? "记录始于 " + new Date(view.coverage_since).toLocaleDateString() : "还没有任何记录"}）。
-        </p>
       ) : (
         <div className="mt-3 space-y-4">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <Tile
-              label="一次通过的步骤"
-              value={`${view.summary.first_pass_steps} / ${view.summary.steps}`}
-              detail={active ? "进行中，随运行更新" : undefined}
-            />
-            <Tile
-              label="尝试次数"
-              value={String(view.summary.attempts)}
-              detail={view.summary.open_attempts > 0 ? `${view.summary.open_attempts} 次尚未决定` : undefined}
-            />
-            <Tile label="被接受的步骤" value={`${view.summary.accepted_steps} / ${view.summary.steps}`} />
-          </div>
+          {view.summary.attempts === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              这个任务没有尝试记录：只有开始记录之后派出的步骤才有（{view.coverage_since ? "记录始于 " + new Date(view.coverage_since).toLocaleDateString() : "还没有任何记录"}）。
+            </p>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <Tile
+                label="一次通过的步骤"
+                value={`${view.summary.first_pass_steps} / ${view.summary.steps}`}
+                detail={active ? "进行中，随运行更新" : undefined}
+              />
+              <Tile
+                label="尝试次数"
+                value={String(view.summary.attempts)}
+                detail={view.summary.open_attempts > 0 ? `${view.summary.open_attempts} 次尚未决定` : undefined}
+              />
+              <Tile label="被接受的步骤" value={`${view.summary.accepted_steps} / ${view.summary.steps}`} />
+            </div>
+          )}
           <CostTable costs={view.costs} />
-          <div>
-            <h4 className="text-xs text-muted-foreground">没被接受的原因</h4>
-            {failures.length === 0 ? (
-              <p className="mt-1 text-sm text-muted-foreground">没有。</p>
-            ) : (
-              <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                {failures.map(([kind, count]) => (
-                  <li key={kind}>
-                    {FAILURE_LABELS[kind] ?? kind} <span className="tabular-nums text-muted-foreground">×{count}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          {view.summary.attempts > 0 && (
+            <div>
+              <h4 className="text-xs text-muted-foreground">没被接受的原因</h4>
+              {failures.length === 0 ? (
+                <p className="mt-1 text-sm text-muted-foreground">没有。</p>
+              ) : (
+                <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                  {failures.map(([kind, count]) => (
+                    <li key={kind}>
+                      {FAILURE_LABELS[kind] ?? kind} <span className="tabular-nums text-muted-foreground">×{count}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           {view.missing_attempts > 0 && (
             <p role="alert" className="text-xs text-warning">
               有 {view.missing_attempts} 个 Worker 运行没有记下尝试（写入失败），上面的数字不完整。
