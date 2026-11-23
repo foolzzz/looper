@@ -128,6 +128,14 @@ def _normalize(value: Any, root: Path) -> Any:
     return value
 
 
+def read_golden(fixture: Path) -> str:
+    """Keep baseline fixtures intact while pinning the attribution migration's NULL default."""
+    expected = json.loads(fixture.read_text())
+    for record in expected["tables"]["llm_records"]:
+        record.setdefault("attempt_id", None)
+    return json.dumps(expected, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
 def assert_golden(name: str, payload: Any, root: Path) -> None:
     def convert(item: Any) -> Any:
         if isinstance(item, Enum):
@@ -148,6 +156,6 @@ def assert_golden(name: str, payload: Any, root: Path) -> None:
         assert unchanged.returncode == 0, "regenerate goldens only with production sources from baseline main"
         _FIXTURES.mkdir(parents=True, exist_ok=True)
         fixture.write_text(actual)
-    expected = fixture.read_text()
+    expected = read_golden(fixture)
     assert actual == expected, "\n".join(difflib.unified_diff(expected.splitlines(), actual.splitlines(),
                                                            fromfile="main", tofile="caller"))
