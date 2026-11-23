@@ -615,3 +615,114 @@ def test_on_every_write_tool_gets_its_receipt_and_category(monkeypatch: pytest.M
         assert all(r["category"] and r["receipt"] for r in rows) and len(rows) > 40
 
     run_db(test, monkeypatch, timeout=60)
+
+
+def test_on_and_off_with_the_real_tools_a_real_escalate_own_blocks_and_the_four_switched_tools(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stand-in matrix cannot show what the real tools do; these run the real implementations, off then on."""
+    import re
+
+    from tests.db_support import run_with_channel_configs
+    from tests.test_reminders_db import _dm, _operator, _switch as reminders_switch
+    from looper.agents.ops import reminders as ops_reminders
+
+    async def scenario(ops: ManagerOps, pool: Any, tag: str, n: int) -> list[tuple[str, dict[str, Any], list[str]]]:
+        from tests.test_reminders_db import _call as call
+
+        steps = [
+            ("looper_schedules", {"action": "delete", "schedule": f"gone-{tag}"}),  # a real escalate refuses it
+            ("looper_projects", {"action": "update", "project": f"p-{tag}", "background": "B"}),
+            ("looper_projects", {"action": "update", "project": f"none-{tag}", "background": "B"}),
+            ("looper_schedules", {"action": "update", "schedule": f"s-{tag}", "fields": {"cron": "0 9 * * *"}}),
+            ("looper_ledger_add", {"kind": "pending", "title": f"T-{tag}"}),
+            ("looper_ledger_update", {"action": "note", "item": f"L-{n}", "note": "seen"}),
+            ("looper_ledger_update", {"action": "note", "item": "L-9999", "note": "seen"}),
+            (ops_reminders.CREATE, {"text": f"r-{tag}", "in_minutes": 30}),
+            (ops_reminders.CANCEL, {"id": n}),
+            (ops_reminders.CANCEL, {"id": 9999}),
+        ]
+        done = []
+        for index, (name, arguments) in enumerate(steps):
+            turn = _dm(f"m-{tag}-{index}")
+            done.append((name, await call(ops, turn, name, arguments), turn.blocks))
+        return done
+
+    async def test(pool: Any) -> None:
+        project = await pool.fetchrow("INSERT INTO projects (id, name, background, work_dir) VALUES ('p1', 'p-off', 'A', '/srv/p') RETURNING id")
+        await pool.execute("INSERT INTO projects (id, name, background, work_dir) VALUES ('p2', 'p-on', 'A', '/srv/p')")
+        await _schedule(pool, project["id"], "s-off")
+        await _schedule(pool, project["id"], "s-on")
+        await _operator(pool, enabled=True)
+        await reminders_switch(pool)
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('ledger.enabled', 'true') "
+                           "ON CONFLICT (key) DO UPDATE SET value = 'true'")
+        ops = _ops()
+        off = await scenario(ops, pool, "off", 1)
+        off_rows = await _rows(pool)
+        assert {(r["category"], r["receipt"]) for r in off_rows} == {(None, None)}
+        receipts_settings.set_enabled(True)
+        on = await scenario(ops, pool, "on", 2)
+        norm = lambda text: re.sub(r"\d+", "N", re.sub(r"sched-[0-9a-f]+", "sched-X", text).replace("-off", "-X").replace("-on", "-X"))
+        own = {"looper_schedules": 3, "looper_ledger_add": 4, "looper_ledger_update": 5, "looper_reminder_create": 7,
+               "looper_reminder_cancel": 8}
+        for index, ((name, off_answer, off_blocks), (_, on_answer, on_blocks)) in enumerate(zip(off, on)):
+            if index in (3, 4, 5, 7, 8):  # tools with their own line: byte-identical blocks, their own shown_to_user
+                assert [norm(b) for b in on_blocks] == [norm(b) for b in off_blocks] and len(off_blocks) == 1, (index, off_answer, on_answer)
+                assert on_answer["status"] == off_answer["status"] == "ok", (index, on_answer)
+                assert norm(json.dumps(on_answer, ensure_ascii=False, sort_keys=True)) == norm(
+                    json.dumps(off_answer, ensure_ascii=False, sort_keys=True)), index
+            elif index in (0, 2, 6, 9):  # failures: nothing before, a failed-write line now
+                assert off_answer["status"] == "error" and off_blocks == [] and "shown_to_user" not in off_answer
+                assert on_answer["status"] == "error" and on_answer["shown_to_user"] == receipts.SHOWN_FAILED
+                assert len(on_blocks) == 1 and on_blocks[0].startswith("❌ 没做成："), (index, on_blocks)
+            else:  # the plain success
+                assert off_blocks == [] and len(on_blocks) == 1 and on_blocks[0].startswith("✅ ")
+                assert on_answer["result"]["shown_to_user"] == receipts.SHOWN_DONE
+        on_rows = (await _rows(pool))[len(off_rows):]
+        writes = [r for r in on_rows if r["status"] != "needs_confirmation"]
+        assert len(writes) == 10 and all(r["category"] and r["receipt"] for r in writes)
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_turning_the_switch_off_and_on_again_does_not_backfill_old_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _sample(pool)
+        await _switch(pool)
+        receipts_settings.set_enabled(True)
+        ops = _ops()
+        press = _presser(monkeypatch, ops)
+        _, turn = await _ask(ops)
+        await (await press(_value(turn))).later
+        receipts_settings.set_enabled(False)  # off and on again, no turn in between
+        receipts_settings.set_enabled(True)
+        assert ops.begin_turn(_turn("om_next")) == ""
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_a_reset_named_session_does_not_read_the_notes_left_in_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _sample(pool)
+        await _switch(pool)
+        receipts_settings.set_enabled(True)
+        ops = _ops()
+        press = _presser(monkeypatch, ops)
+
+        async def ask_and_press() -> None:
+            turn = _turn("om_ask")
+            ops.begin_turn(turn, session_key="group:g1")
+            await ops.call("looper_projects", DELETE)
+            ops.end_turn(turn)
+            await (await press(_value(turn))).later
+
+        await ask_and_press()
+        assert ops.begin_turn(_turn("om_main"), session_key="main") == ""  # another session never reads it
+        assert ops.begin_turn(_turn("om_g1"), session_key="group:g1").startswith("[Looper] After your last reply")
+        await _sample(pool)
+        await ask_and_press()
+        ops.forget_session("group:g1")  # what the Manager does when that session is reset
+        assert ops.begin_turn(_turn("om_g1b"), session_key="group:g1") == ""
+        assert ops._button_notes == {}
+
+    run_db(test, monkeypatch, timeout=30)
