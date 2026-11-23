@@ -58,7 +58,8 @@ async def run(manager: ManagerAgent, token: TurnToken, prepared: Prepared) -> st
         token.check()
         followups += 1
         prepared = replace(prepared, message=FOLLOWUP_MESSAGE, turn_text=FOLLOWUP_MESSAGE, note="",
-                           quoted=None, state=None, switch=None, retried=True, run=RunState(),
+                           quoted=None, state=None, switch=None, retried=True,
+                           run=RunState(persona_scope=prepared.run.persona_scope),
                            delivery_followup=followups)
         try:
             return await manager._run_prepared(token, prepared)
