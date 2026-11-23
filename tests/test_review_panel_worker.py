@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import subprocess
 from dataclasses import replace
@@ -48,8 +47,13 @@ def test_explicit_failed_verdict_stays_failed_without_blocking(tmp_path):
 
 
 def test_legacy_verdict_and_contract_are_unchanged(tmp_path):
+    from pathlib import Path
+
+    from tests.prompt_sections import assert_sections
+
     assert review_contract(False) == REVIEW_CONTRACT
-    assert hashlib.sha256(REVIEW_CONTRACT.encode()).hexdigest() == "4605220c239c54b4fc3321f2423720cbea8e6aa4102c6493ebd3f1eabe1ae3e4"
+    frozen = json.loads((Path(__file__).parent / "fixtures" / "worker_prompt_sections.json").read_text())
+    assert_sections(REVIEW_CONTRACT, frozen["review_contract"], label="review_contract")
     result = verdict(tmp_path, ["A legacy finding"], severity=False)
     assert result["passed"] is True and result["findings"] == ["A legacy finding"]
     assert "inconsistent" not in result
@@ -224,10 +228,14 @@ def test_unexpected_review_failure_publishes_a_structured_verdict(tmp_path, agen
     assert result["findings"] == [{"severity": "blocking", "where": "unknown", "text": "review unavailable"}]
 
 
-@pytest.mark.parametrize("verify,expected", [(False, '14f6bc1407fe9fd8f27740be743b7ea5855773ab8c17d09b8d93c07a10ebb868'), (True, 'f996d7bf88438205171f7e9e5af7c80208fda5bce0271deb0235b5147216c421')])
-def test_default_work_and_review_system_prompts_match_released_bytes(verify, expected):
+@pytest.mark.parametrize("verify", [False, True])
+def test_default_work_and_review_system_prompts_match_released_bytes(verify):
+    from pathlib import Path
+
     from looper.agents.agent_settings import Harness, Layer
     from looper.agents.system_prompt import WORK_CONTRACT, build_system_prompt
+    from tests.prompt_sections import assert_sections
+
     payload = {"requirement": "Build the project", "step_key": "s1", "instruction": "Implement the change",
                "acceptance_criteria": ["Tests pass"]}
     prompt = build_system_prompt(harness=Harness("Work carefully.", Layer.BUILTIN),
@@ -236,4 +244,6 @@ def test_default_work_and_review_system_prompts_match_released_bytes(verify, exp
         task=WorkerPool._task_section(payload, "", is_verify=verify),
         contract_name="REVIEW_CONTRACT" if verify else "WORK_CONTRACT",
         contract=review_contract(False) if verify else WORK_CONTRACT)
-    assert prompt.sha256 == expected
+    frozen = json.loads((Path(__file__).parent / "fixtures" / "worker_prompt_sections.json").read_text())
+    assert_sections(prompt.text, frozen["panel_review" if verify else "panel_work"],
+                    label="panel_review" if verify else "panel_work")

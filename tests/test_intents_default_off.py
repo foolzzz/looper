@@ -1,7 +1,9 @@
 """Intent replies add no model-facing prompt, tool or launch-signature content.
 
-These baselines pin main's prompts, tools, command and signature. The routing
-suite separately exercises the absent-setting branch through a real Manager turn.
+Each existing prompt section and each existing tool is frozen on its own
+(``fixtures/catalog_default_off.json``). A section or tool added since is not
+compared. The routing suite separately exercises the absent-setting branch
+through a real Manager turn.
 """
 
 import ast
@@ -18,21 +20,43 @@ from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents import agent_settings
 from looper.agents.ops import clients, planner, room, service
 from looper.agents.tiers import manager, planner as planner_tier, worker
+from tests.prompt_sections import assert_sections
+
+_CATALOG = Path(__file__).parent / "fixtures" / "catalog_default_off.json"
 
 
-def _digest(value):
+def _sha(value) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
+def assert_default_prompts_and_tools() -> None:
+    """The four default prompts and the five tool catalogs still have every frozen item, in order."""
+    baseline = json.loads(_CATALOG.read_text())
+    prompts = {
+        "manager": manager.DEFAULT_SYSTEM_PROMPT,
+        "planner": planner_tier.DEFAULT_SYSTEM_PROMPT,
+        "worker": worker.DEFAULT_SYSTEM_PROMPT,
+        "harness": agent_settings.DEFAULT_HARNESS_PROMPT,
+    }
+    for name, text in prompts.items():
+        assert_sections(text, baseline["prompts"][name], label=name)
+    catalogs = {
+        "manager": service.MANAGER_TOOLS,
+        "client": clients.CLIENT_TOOLS,
+        "planner": planner.TOOLS,
+        "planner_roles": planner.ROLE_TOOLS,
+        "room": room.TOOLS,
+    }
+    for name, tools in catalogs.items():
+        frozen = baseline["tools"][name]
+        current = {tool.name: _sha({"name": tool.name, "description": tool.description, "schema": tool.schema})
+                   for tool in tools}
+        assert [tool.name for tool in tools if tool.name in frozen["each"]] == frozen["order"], name
+        assert {key: current.get(key) for key in frozen["each"]} == frozen["each"], name
+
+
 def test_default_prompts_and_tool_list_equal_the_main_baseline():
-    prompts = [manager.DEFAULT_SYSTEM_PROMPT, planner_tier.DEFAULT_SYSTEM_PROMPT,
-               worker.DEFAULT_SYSTEM_PROMPT, agent_settings.DEFAULT_HARNESS_PROMPT]
-    tools = [(tool.name, tool.description, tool.schema) for tool in (
-        *service.MANAGER_TOOLS, *clients.CLIENT_TOOLS, *planner.TOOLS,
-        *planner.ROLE_TOOLS, *room.TOOLS,
-    )]
-    assert _digest(prompts) == "113dcfc6ecb667fd2d45c4ba855505e86ded3941ffafa669091bed02b221ff28"
-    assert _digest(tools) == "76a6006374afaae65cb1525742bf74c3c99dc0a7954e441d51844e7668655346"
+    assert_default_prompts_and_tools()
 
 
 # These snapshots were read back from main. Compare the command bytes on the off
