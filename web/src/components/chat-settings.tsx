@@ -154,10 +154,10 @@ export function ChatSettingsSection() {
               <input id={`${id}-metrics`} type="checkbox" checked={metrics?.enabled ?? false}
                      disabled={!metrics || metricsSaving} aria-describedby={`${id}-metrics-help`}
                      onChange={(event) => void saveMetrics(event.target.checked)} />
-              管家度量：记录回复延迟和主动消息
+              记录管家体验指标
             </label>
             <p id={`${id}-metrics-help`} className="text-xs text-muted-foreground">
-              默认关闭，仅操作者可修改。开启后记录回合延迟、主动消息送达和回复情况；发送方式保持原样。
+              每轮记下回执、首条回复、工具调用次数和是否交付；主动消息记一行。只记录，不改变管家的行为。
             </p>
             {metricsError && <p role="alert" className="break-words text-sm text-destructive">{metricsError}</p>}
           </div>

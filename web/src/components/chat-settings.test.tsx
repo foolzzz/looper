@@ -87,6 +87,12 @@ describe("Chat settings", () => {
     expect(box.checked).toBe(true);
   });
 
+  it("names the metrics switch the way the dashboard's off line points to it", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$='-metrics']") as HTMLInputElement;
+    expect(box.closest("label")!.textContent).toBe("记录管家体验指标");
+  });
+
   it("keeps the metrics value when a change is cancelled or fails", async () => {
     await act(async () => root.render(<ChatSettingsSection />));
     const box = container.querySelector("input[id$='-metrics']") as HTMLInputElement;
