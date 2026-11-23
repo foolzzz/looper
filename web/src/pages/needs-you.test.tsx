@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NeedsYouPage } from "@/pages/needs-you";
-import { fetchAttention, type AttentionSummary } from "@/lib/api-attention";
+import { attentionSettingsGet, fetchAttention, type AttentionSummary } from "@/lib/api-attention";
 import { V1Error } from "@/lib/v1";
 
 vi.mock("@/lib/api-attention", async (original) => ({
-  ...await original<typeof import("@/lib/api-attention")>(), fetchAttention: vi.fn(),
+  ...await original<typeof import("@/lib/api-attention")>(), attentionSettingsGet: vi.fn(), fetchAttention: vi.fn(),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -36,6 +36,7 @@ async function render() {
 }
 
 beforeEach(() => {
+  vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -98,11 +99,14 @@ describe("Needs you page", () => {
     expect(host.querySelector("section")).toBeNull();
   });
 
-  it("shows a failed read with a retry", async () => {
-    vi.mocked(fetchAttention).mockRejectedValueOnce(new Error("network down")).mockResolvedValue(summary);
+  it.each(["settings", "summary"])("shows a failed %s read with a retry", async (source) => {
+    vi.mocked(fetchAttention).mockResolvedValue(summary);
+    if (source === "settings") vi.mocked(attentionSettingsGet).mockRejectedValueOnce(new Error("network down"));
+    else vi.mocked(fetchAttention).mockRejectedValueOnce(new Error("network down"));
     await render();
     const alert = host.querySelector('[role="alert"]')!;
     expect(alert.textContent).toContain("network down");
+    if (source === "settings") expect(fetchAttention).not.toHaveBeenCalled();
     await act(async () => { (alert.querySelector("button") as HTMLButtonElement).click(); });
     expect(host.querySelector('section[aria-label="Gates waiting for your answer"]')).not.toBeNull();
   });

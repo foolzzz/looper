@@ -5,7 +5,8 @@ see. While ``attention.enabled`` is off it answers ``conflict`` (the dashboard's
 """
 
 from .. import attention
-from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _OBJ
+from ..action_levels import ActionLevel
+from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _OBJ, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
 
@@ -18,6 +19,11 @@ SUMMARY = _object({"read_at": _STR, "total": _INT, "sections": _array(_SECTION)}
 
 RESULTS = {}
 OPERATIONS = (
+    Operation("attention.settings_get", "POST", "/api/v1/attention/settings_get",
+              "Read whether the needs-you summary is enabled.",
+              "Read whether the needs-you summary is enabled. Disabled by default; reads no summary sources.",
+              _object({}, closed=True), _object({"enabled": _BOOL}, closed=True), operator_only=True,
+              level=ActionLevel.INSIDE),  # reads only Looper's own feature setting
     Operation("attention.summary", "POST", "/api/v1/attention/summary",
               "Read what needs the operator now.",
               "Read what needs the operator now. The sections: user gates waiting for an answer, a Manager's "
@@ -31,6 +37,8 @@ OPERATIONS = (
 
 
 async def run(server, operation, arguments, principal, headers):
+    if operation.operation_id == "attention.settings_get":
+        return {"enabled": await attention.enabled()}
     if not await attention.enabled():
         raise OpError(ErrorCode.CONFLICT, "the needs-you summary is not enabled (system setting attention.enabled)")
     return _plain(await attention.collect(managers=getattr(server, "_managers", None)))
