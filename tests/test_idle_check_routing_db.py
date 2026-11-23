@@ -72,37 +72,57 @@ def test_user_voids_all_queued_checks_only_when_entering_main(monkeypatch, tmp_p
     run_db(check, monkeypatch)
 
 
-def test_failed_void_write_keeps_the_wake_unacknowledged(monkeypatch, tmp_path):
+def test_failed_void_write_keeps_wake_unacknowledged_and_dispatches_user(monkeypatch, tmp_path, caplog):
+    from tests.api_manager_support import USAGE, _manager, _message
+    from tests.fake_model_api import ResponseScript, text_events
+
     monkeypatch.setattr(lanes_settings, "_enabled", True)
+    monkeypatch.setattr(session_routing, "_routing_enabled", False)
     async def check(pool):
-        agent = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
-        agent._running = True
-        main = agent._sessions["main"]
-        settled = []
-        agent._bus = SimpleNamespace(settle_handled=lambda e: settled.append(e.message_id))
-        entered, release = asyncio.Event(), asyncio.Event()
-        async def hold(_):
-            entered.set()
-            await release.wait()
-        agent._handle = hold
-        agent._router.dispatch(main, _user())
-        await entered.wait()
-        check_id = await _row(pool)
-        wake = idle_checks.due_envelope(check_id)
-        agent._router.dispatch(main, wake)
-        async def failed_settle(*args, **kwargs):
-            raise RuntimeError("synthetic write failure")
-        monkeypatch.setattr(store, "settle", failed_settle)
-        try:
-            with pytest.raises(RuntimeError, match="synthetic write failure"):
-                await lanes.route_arrival(agent, main, _user())
-            assert (await store.get(check_id))["state"] == "running"
-            assert wake.message_id not in settled
-            assert agent._router.queued_count(main, lanes.Lane.BACKGROUND) == 0
-        finally:
-            release.set()
-            await agent._router.stop()
-    run_db(check, monkeypatch)
+        gate = asyncio.Event()
+        first = ResponseScript(events=text_events("First answer", usage=USAGE), gate=gate)
+        second = ResponseScript(events=text_events("Next answer", usage=USAGE))
+        async with _manager(pool, tmp_path, monkeypatch, [first, second]) as chat:
+            settled = []
+            original = chat.bus.settle_handled
+            def acknowledge(envelope):
+                settled.append(envelope.message_id)
+                original(envelope)
+            monkeypatch.setattr(chat.bus, "settle_handled", acknowledge)
+            await chat.bus.start()
+            await chat.manager.start(chat.bus)
+            await chat.bus.publish(_message("First question"))
+            await asyncio.wait_for(first.gate_reached.wait(), 15)
+            ids = [await _row(pool), await _row(pool)]
+            wakes = [idle_checks.due_envelope(i) for i in ids]
+            main = chat.manager._sessions["main"]
+            for wake in wakes:
+                await chat.bus.publish(wake)
+            await until(lambda: chat.manager._router.queued_count(main, lanes.Lane.BACKGROUND) == 2)
+            settle = store.settle
+            async def failed_settle(check_id, *args, **kwargs):
+                if check_id == ids[0]:
+                    raise RuntimeError("synthetic write failure")
+                return await settle(check_id, *args, **kwargs)
+            monkeypatch.setattr(store, "settle", failed_settle)
+            user = _message("Next question")
+            try:
+                await chat.bus.publish(user)
+                await until(lambda: chat.manager._router.queued_count(main, lanes.Lane.BACKGROUND) == 0)
+                gate.set()
+                await until(lambda: user.message_id in settled, "user processed after idle settlement failed")
+                assert chat.manager.is_healthy()
+                assert len(chat.model.requests) == 2
+                assert "Next question" in str(chat.model.requests[1].body)
+                assert (await store.get(ids[0]))["state"] == "running"
+                assert wakes[0].message_id not in settled
+                assert (await store.get(ids[1]))["state"] == "preempted"
+                assert wakes[1].message_id in settled
+                assert any(record.levelname == "WARNING" and "synthetic write failure" in record.getMessage()
+                           for record in caplog.records)
+            finally:
+                gate.set()
+    run_db(check, monkeypatch, timeout=60)
 
 
 def test_group_arrivals_do_not_reset_main_and_busy_group_does_not_block_its_check(monkeypatch, tmp_path):

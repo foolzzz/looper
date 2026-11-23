@@ -10,6 +10,8 @@ import pytest
 
 from looper.agents import chat_settings, completion_events, idle_checks, lanes_settings, proactive_delivery
 from looper.agents.channels.base import PostReceipt
+from looper.agents.managers import ManagerFleet
+from looper.agents.supervisor import AgentSupervisor
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.runtimes.api.session import ApiSession
 from looper.agents.tiers import idle_check_turn
@@ -103,11 +105,31 @@ def test_main_user_preempts_the_check_and_gets_one_note_after_its_wake_is_settle
             await asyncio.wait_for(check.gate_reached.wait(), 15)
             user = _message("Please answer me")
             if via_stop:
+                fleet = ManagerFleet(platform=chat.ops.platform, supervisor=AgentSupervisor(chat.bus, tmp_path),
+                    runtime_root=tmp_path, url="http://127.0.0.1:1", config=chat.manager._config, broadcaster=None)
+                fleet._agents[chat.manager.agent_id] = chat.manager
+                chat.manager.stop_chat = fleet.stop_chat
+                token = chat.manager._sessions["main"].running_token
                 monkeypatch.setattr(chat_settings, "_stop_enabled", True)
+                for channel_id, sender, chat_type in [
+                    ("channel-lark-other", "ou_synthetic_idle", "p2p"),
+                    ("channel-lark", "ou_synthetic_other", "p2p"),
+                    ("channel-lark", "ou_synthetic_idle", "group"),
+                ]:
+                    unrelated = MessageEnvelope.create(source=channel_address("lark", channel_id),
+                        target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                        payload={"text": "/stop", "channel_context": {"chat_id": "oc_synthetic_idle_dm",
+                            "chat_type": chat_type, "sender_id": sender}})
+                    await chat.bus.publish(unrelated)
+                    await asyncio.gather(*chat.manager._stop_tasks)
+                    assert token.stop is None
+                    assert (await store.get(check_id))["state"] == "running"
                 stop = MessageEnvelope.create(source=channel_address("lark"), target=MANAGER_ADDRESS,
                     message_type=MessageType.USER_MESSAGE, payload={"text": "/stop", "channel_context": {
                         "chat_id": "oc_synthetic_idle_dm", "chat_type": "p2p", "sender_id": "ou_synthetic_idle"}})
                 await chat.bus.publish(stop)
+                await asyncio.gather(*chat.manager._stop_tasks)
+                assert token.stop is not None
                 await until(lambda: wake.message_id in settled, "operator stop ended the check")
             await chat.bus.publish(user)
             await until(lambda: user.message_id in settled, "idle check fallback and user reply")

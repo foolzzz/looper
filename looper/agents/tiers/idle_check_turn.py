@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ...db import idle_checks as store, llm_records
-from .. import idle_checks, turn_metrics
+from .. import idle_checks, lanes, turn_metrics
 from ..message import MessageEnvelope, MessageType, channel_address, parse_channel_id
 from ..ops import TurnOrigin
 from ..turn_metrics import TurnDelivery
@@ -39,18 +39,16 @@ def _context(agent: ManagerAgent, check: dict[str, Any]) -> MessageEnvelope:
         correlation_id=f"idle-{check['id']}", metadata={"origin_channel_id": check["channel_id"]})
 
 
-def stop_tokens(agent: ManagerAgent, envelope: MessageEnvelope, found: list[TurnToken]) -> list[TurnToken]:
+def live_tokens(agent: ManagerAgent, channel_id: str, sender_id: str | None,
+                found: list[TurnToken]) -> list[TurnToken]:
     """Lark's send target is an open_id; /stop arrives with the actual DM's chat_id."""
-    from .manager import _message_origin
-
-    origin = _message_origin(envelope)
     token = agent._sessions["main"].running_token
     turn = token.ops_turn if token is not None else None
-    if (token is not None and token.live and token not in found and turn is not None
-            and turn.origin is TurnOrigin.IDLE_CHECK and not origin["group"]
-            and origin["channel_id"] == turn.channel_id and origin["sender"] == turn.sender):
-        return [token]
-    return []
+    if (sender_id and token is not None and token.live and token not in found and turn is not None
+            and turn.origin is TurnOrigin.IDLE_CHECK and not turn.group
+            and channel_id == turn.channel_id and sender_id == turn.sender):
+        return [*found, token]
+    return found
 
 
 def _record_id(state: dict[str, Any]) -> int | None:
@@ -72,6 +70,9 @@ async def handle(agent: ManagerAgent, envelope: MessageEnvelope) -> None:
     if agent._turned_off:
         await idle_checks.settle(check_id, "failed", reason="manager_off")
         return
+    if agent._router.queued_count(agent._sessions["main"], lanes.Lane.INTERACTIVE):
+        await idle_checks.settle(check_id, "preempted")
+        return
     state: dict[str, Any] = {}
     delivery = TurnDelivery.REPLY
 
@@ -88,6 +89,9 @@ async def handle(agent: ManagerAgent, envelope: MessageEnvelope) -> None:
             return
         try:
             reply = result.value()
+            token = state.get("token")
+            if token is not None and token.cancel.requested:
+                raise TurnStopped()
         except TurnStopped:
             delivery = TurnDelivery.STOPPED
             await idle_checks.settle(check_id, "preempted", record_id=_record_id(state))

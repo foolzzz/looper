@@ -315,6 +315,7 @@ def test_a_restart_fails_the_checks_the_server_before_left_running(monkeypatch):
         await seed_checks(pool, 2, hours_ago=0.2, state="running")
         await seed_checks(pool, 1, hours_ago=5, state="sent")
         idle = service(Bus(), idle=None, interval=3600)
+        await idle.recover()
         await idle.start()
         await idle.stop()
         assert [(row["state"], row["reason"]) for row in await rows(pool)] == [
@@ -655,7 +656,7 @@ def test_a_new_database_has_the_table_and_the_widened_check_and_records_only_the
             await connection.ensure_schema(conn)
             assert await conn.fetchval("SELECT to_regclass('idle_checks') IS NOT NULL")
             _, definition, validated = await source_check(conn)
-            assert values_of(definition) == {*_BASE_SOURCES, "idle_check"} and validated
+            assert values_of(definition) == {*_BASE_SOURCES, "idle_check", "morning_brief"} and validated
             await deliver_row(conn, "idle_check", "k1")
             with pytest.raises(Exception):
                 await deliver_row(conn, "no_such_source", "k2")
@@ -683,16 +684,20 @@ def test_the_source_check_keeps_the_values_other_migrations_added(others):
 
             assert await idle_check_source.pending(conn)  # the object, not the marker, says so
             assert await connection.schema_change_pending(conn)
-            await connection.ensure_schema(conn)
+            # Exercise this widening alone: the simulated pre-upgrade check may intentionally omit
+            # morning_brief, whose own released migration has separate admission rules.
+            await idle_check_source.apply(conn, sql="", state="current")
+            await connection._finish_online(conn)
             _, definition, validated = await source_check(conn)
             assert values_of(definition) == {*_BASE_SOURCES, *others, "idle_check"} and validated
-            assert not await idle_check_source.pending(conn) and not await connection.schema_change_pending(conn)
+            assert not await idle_check_source.pending(conn)
             assert await conn.fetchval("SELECT count(*) FROM proactive_deliveries") == 3 + len(others)
             for source in (*others, "idle_check"):
                 await deliver_row(conn, source, f"after-{source}")  # still accepted
             with pytest.raises(Exception):
                 await deliver_row(conn, "no_such_source", "bad")
-            await connection.ensure_schema(conn)  # idempotent
+            await idle_check_source.apply(conn, sql="", state="current")  # idempotent
+            await connection._finish_online(conn)
             assert values_of((await source_check(conn))[1]) == {*_BASE_SOURCES, *others, "idle_check"}
 
     asyncio.run(asyncio.wait_for(check(), 60))
@@ -727,3 +732,32 @@ def test_the_table_is_added_to_a_database_that_has_not_got_it():
             assert not await connection.schema_change_pending(conn)
 
     asyncio.run(asyncio.wait_for(check(), 60))
+
+
+@pytest.mark.parametrize("status,age,channel,chat,blocked", [
+    ("sent", timedelta(hours=2) - timedelta(seconds=1), CHANNEL, OP, True),
+    ("sent", timedelta(hours=2), CHANNEL, OP, False),
+    ("failed", timedelta(minutes=30), CHANNEL, OP, False),
+    ("sending", timedelta(minutes=30), CHANNEL, OP, False),
+    ("uncertain", timedelta(minutes=30), CHANNEL, OP, False),
+    ("skipped", timedelta(minutes=30), CHANNEL, OP, False),
+    ("sent", timedelta(minutes=30), "channel-other", OP, False),
+    ("sent", timedelta(minutes=30), CHANNEL, "ou_other_synthetic", False),
+])
+def test_a_sent_morning_brief_suppresses_checks_for_two_hours_only_for_its_chat(
+        monkeypatch, status, age, channel, chat, blocked):
+    async def check(pool):
+        await ready(pool)
+        now = datetime.now(UTC)
+        sent_at = now - age
+        await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, updated_at) "
+                           "VALUES ($1, $2, $3, $4, $5)", sent_at.date(), channel, chat, status, sent_at)
+        bus = Bus()
+        idle = service(bus, clock=lambda: now)
+        check_id = await idle.run_once()
+        assert (check_id is None) is blocked
+        assert len(bus.published) == (0 if blocked else 1)
+        if blocked:
+            assert {reason.value: count for reason, count in idle.skips.items()} == {"morning_brief_recent": 1}
+            assert await rows(pool) == []
+    run_with_channel_configs(check, monkeypatch)

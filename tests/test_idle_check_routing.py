@@ -114,3 +114,22 @@ def test_idle_for_uses_start_time_until_own_turn_ends_and_checks_each_main_busy_
             main.turn_ended_at = 1500.0
             assert agent.idle_for() == 400.0
     asyncio.run(check())
+
+
+def test_loop_does_not_reset_main_clock_for_completion_held_by_router(monkeypatch, tmp_path):
+    async def check():
+        agent, main, settled = _agent(tmp_path, monkeypatch)
+        main.turn_ended_at = 100.0
+        monkeypatch.setattr(agent, "_clock", lambda: 200.0)
+        wake = MessageEnvelope.create(source=channel_address("web"), target=MANAGER_ADDRESS,
+            message_type=MessageType.COMPLETION_DUE, payload={})
+        async def subscribe(*args, **kwargs):
+            yield wake
+        agent._bus.subscribe = subscribe
+        async def claim(envelope):
+            agent._router._completion_ids.add(envelope.message_id)
+        agent._handle = claim
+        await agent._message_loop()
+        assert main.turn_ended_at == 100.0
+        assert settled == []
+    asyncio.run(check())

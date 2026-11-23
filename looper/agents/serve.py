@@ -79,14 +79,14 @@ from .tiers.worker import WorkerConfig, WorkerPool
 logger = logging.getLogger(__name__)
 
 
-async def _start_idle_checks(bus: MessageBus, fleet: ManagerFleet, drain: DrainState, *, post: PostFn) -> IdleCheckService:
-    """Start after the Managers; resolve the current default after a settings-driven replacement too."""
+async def _prepare_idle_checks(bus: MessageBus, fleet: ManagerFleet, drain: DrainState, *, post: PostFn) -> IdleCheckService:
+    """Recover before bus replay; callbacks also follow a settings-driven Manager replacement."""
     from .tiers import idle_check_turn
 
     idle_check_turn.configure(post)
     service = IdleCheckService(bus, idle_for=lambda: fleet.default.idle_for(),
                                manager_running=lambda: fleet.is_running("manager"), drain=drain)
-    await service.start()
+    await service.recover()
     return service
 
 
@@ -1114,6 +1114,7 @@ async def _run_agent_system_watched(
 
             if interrupted := await fail_interrupted():
                 logger.warning("%d consult(s) of the advisor were interrupted by the restart and failed", interrupted)
+            idle_check_service = await _prepare_idle_checks(bus, fleet, drain, post=registry.post)
             await supervisor.start_all()
             await fleet.sweep()
             await carry_on_tasks(task_router, left_running)
@@ -1135,7 +1136,7 @@ async def _run_agent_system_watched(
         await intent_push_service.start()
         await memory_writer.start()
         await reminder_service.start()  # idle while reminders are off
-        idle_check_service = await _start_idle_checks(bus, fleet, drain, post=registry.post)
+        await idle_check_service.start()
         await morning_brief_service.start()  # idle while the morning brief is off
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
