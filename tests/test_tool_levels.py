@@ -177,6 +177,7 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "project_skills.deprecate": INSIDE,  # marks a catalog skill deprecated inside Looper; sends nothing and does not touch installs or files
     "project_skills.restore": INSIDE,  # marks a catalog skill active inside Looper; sends nothing and does not touch installs or files
     "project_skills.rollback": INSIDE,  # writes a new stored skill version inside Looper; sends nothing and does not touch the machine outside the catalog
+    "project_skills.usage": INSIDE,  # reads run records and attempts to count a skill's loads and calls; sends nothing
     "project_skills.versions": INSIDE,  # reads stored skill versions; sends nothing
     "project_skills.proposals.list": INSIDE,  # reads stored skill proposals; sends nothing
     "project_skills.proposals.get": INSIDE,  # reads one stored skill proposal and its events; sends nothing
