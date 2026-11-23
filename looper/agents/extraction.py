@@ -59,6 +59,21 @@ RECENT_INTENTS_MAX = 30
 SAME_MATTER_WITHIN = timedelta(hours=6)  # a pending or tasked intent a new one may merge into
 REJECTED_WITHIN = timedelta(days=30)  # a rejected one: the same request again is merged, not raised again
 ITEMS_MAX = 50
+# Followed groups (RFC section 11.6): at most this many of their messages per run (the rest wait for the immediate
+# catch-up run) and per group per local day (the rest are skipped and counted); at most this many groups per source.
+GROUP_READ_RUN_MAX = 200
+GROUP_READ_DAY_MAX = 500
+GROUP_READ_MAX_GROUPS = 10
+GROUP_LABEL = " · 全部消息"
+GROUP_REQUESTS_NOTE = """\
+## Requests in group chats
+A chat marked 全部消息 gives every person's message, not only the ones to the user. In it, an intent is a
+development request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or
+problem report, a scenario that needs support, or a request for access, addressed to the group, a team or nobody
+in particular. Use dev_task for a requirement or a change and bug_triage for a bug or a problem. Not an intent:
+small talk, answers to questions, follow-ups on something someone has already taken up, a request handed to a
+named person who accepted it, and +1s or echoes of someone else's request. When several messages raise the same
+thing, make one intent with all of them as its sources, or use same_as when a recent intent is that thing."""
 SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
 # What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run
