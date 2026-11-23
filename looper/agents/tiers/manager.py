@@ -35,6 +35,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -51,7 +52,7 @@ from ..bus import MessageBus
 from ..channels import lark_quote
 from ..channels.chat_history import CHAT_RECORD, chat_record
 from ..supervisor import cancel_and_wait
-from ..agent_settings import AgentSettings, AgentType, Launch, Layer, load_agent_settings
+from ..agent_settings import Access, AgentSettings, AgentType, Launch, Layer, load_agent_settings
 from ..session_profile import (
     Effect, ProfileCommandKind, ProfileRefError, SessionProfileResult, choices as profile_choices, display_name,
     effect as profile_effect, format_list, parse_profile_command, resolve_ref,
@@ -79,10 +80,10 @@ from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
-from ..library import load_installed
+from ..library import EMPTY_LIBRARY, load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, research_order, session_switch
+from .. import leads_model, research_order, session_switch, untrusted as untrusted_text
 from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
@@ -96,12 +97,16 @@ from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered
 from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_field
+from .manager_routing import SessionRouter
+from . import group_session
+from .. import session_routing
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
-from ..ops.service import tools_down_reply
+from ..ops.service import _operator_turn, tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
 from ..ops.reminders import TOOL_NAMES as REMINDER_TOOLS
 from ..message import (
+    BOT_CHANNEL_TYPES,
     MANAGER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
@@ -137,6 +142,7 @@ from ...db import tasks as db_tasks
 from ...db import manager_events as db_manager_events
 from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
+from ...db import manager_sessions as db_manager_sessions
 from ...db import api_sessions as db_api_sessions
 from ...db import llm_records as db_llm_records
 from ...db.llm_records import RecordStatus
@@ -144,6 +150,7 @@ from ...db import projects as db_projects
 from ...db import user_gates as db_user_gates
 
 TURNED_OFF_REPLY = "This Manager was turned off; your message was not handled."
+PROFILE_NOT_HERE_REPLY = "群和他人的私聊使用管家的设置，不能单独选 Profile。"
 
 SCOPE_HEADING = "## This Manager's scope"
 SCOPE_TOOLS = {
@@ -395,7 +402,7 @@ PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message",
-    "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
+    "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
 
@@ -521,7 +528,7 @@ CHANNEL_NAMES = {"web": "the Looper dashboard chat"}
 CHAT_CHANNEL_NAMES = {"telegram": "Telegram", "lark": "Lark", "lark_bot": "Lark"}
 
 
-def channel_line(envelope: MessageEnvelope) -> str:
+def channel_line(envelope: MessageEnvelope, *, fence: bool = False) -> str:
     """The line before a message that tells Claude where it came from, and so where its reply goes; in a group
     chat, who wrote it, when the channel names them (Lark: the sender's name, else their open_id)."""
     client_name = _message_client(envelope)[1]
@@ -534,7 +541,7 @@ def channel_line(envelope: MessageEnvelope) -> str:
         where = f"a {CHAT_CHANNEL_NAMES[channel]} {'group chat' if origin['group'] else 'direct message'}"
         context = envelope.payload.get("channel_context")
         name = context.get("sender_name") if origin["group"] and isinstance(context, dict) else None
-        if name:
+        if name and not fence:
             where += f", from {name}"
     else:
         where = CHANNEL_NAMES.get(channel, f"the {channel} channel")
@@ -583,6 +590,26 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
             group = False
     return {"channel": channel, "channel_id": getattr(envelope.source, "agent_id", None),
             "sender": str(sender) if sender else None, "chat": chat, "group": group}
+
+
+async def _outside_source(turn: Turn | None) -> untrusted_text.Source | None:
+    """What a turn's message is to the fence: a Lark or Telegram message from someone other than the operator (any
+    group chat's) is outside content; the operator's own, the dashboard's and an API client's are not."""
+    if turn is None or turn.channel not in BOT_CHANNEL_TYPES or await _operator_turn(turn):
+        return None
+    return untrusted_text.Source.GROUP_MESSAGE if turn.group else untrusted_text.Source.DIRECT_MESSAGE
+
+
+def _message_provenance(envelope: MessageEnvelope | None) -> dict[str, str]:
+    """Where a chat message came from, for its fence: who wrote it (the name the channel gave, else their id),
+    when it arrived and its message id."""
+    context = envelope.payload.get("channel_context") if envelope is not None else None
+    context = context if isinstance(context, dict) else {}
+    sender = context.get("sender_name") or context.get("sender_id") or context.get("username") or context.get("user_id")
+    found = {"from": untrusted_text.display_name(str(sender)) if sender else None,
+             "at": envelope.timestamp if envelope is not None else None,
+             "ref": context.get("message_id")}
+    return {key: str(value) for key, value in found.items() if value}
 
 
 def _group_task(envelope: MessageEnvelope) -> bool:
@@ -882,6 +909,7 @@ class ManagerAgent:
             key=MAIN_SESSION, claude=CLAUDE_CODE.resident_session(self.agent_id), claude_runtime=CLAUDE_CODE,
             last_activity=clock())}
         self._clock = clock
+        self._router = SessionRouter(self)  # the sessions' workers while session routing is on
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
@@ -928,14 +956,76 @@ class ManagerAgent:
         session = self._current.get()
         return self._sessions[MAIN_SESSION] if session is None else session
 
+    def _resident_label(self) -> str:
+        """The label of the resident runtime of the session the code runs on: main's is the Manager's id."""
+        return session_routing.resident_label(self.agent_id, self._session_now().route)
+
+    def _session_root(self) -> Path:
+        """Non-main sessions keep all materialized context and runtime state in their own tree, even after off."""
+        session = self._session_now()
+        if session.key == MAIN_SESSION:
+            return self._runtime_root
+        root = self._runtime_root / ".local" / "manager-sessions" / session_routing.key_digest(session.key)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return root
+
+    def _session_work_dir(self) -> Path:
+        if self._session_now().key == MAIN_SESSION:
+            return self._config.work_dir
+        path = self._session_root() / "work"
+        path.mkdir(mode=0o700, exist_ok=True)
+        return path
+
+    def _session_environment(self, launch: Launch) -> dict[str, str]:
+        env = launch.environment()
+        if self._session_now().key == MAIN_SESSION:
+            return env
+        root = self._session_root()
+        original_home = Path(env.get("HOME", str(Path.home())))
+        original_config = Path(env.get("CLAUDE_CONFIG_DIR") or original_home / ".claude")
+        login_namespace = env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR", env.get("CLAUDE_CONFIG_DIR", ""))
+        for key, name in (("HOME", "home"), ("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "config"),
+                          ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "run"),
+                          ("CLAUDE_CONFIG_DIR", "claude"), ("TMPDIR", "tmp"), ("TMP", "tmp"), ("TEMP", "tmp")):
+            path = root / name
+            path.mkdir(mode=0o700, exist_ok=True)
+            env[key] = str(path)
+        if launch.runtime is not CLAUDE_CODE:
+            return env
+        # Share only the CLI login, never its settings, projects, histories or plugin caches. The model has no
+        # local tools with which to read it. Pin the original keychain namespace: otherwise Claude hashes the
+        # isolated config directory into a new service name and cannot find or refresh the subscription login.
+        if sys.platform != "darwin" and not login_namespace:
+            # File-based logins and their refresh locks stay at the original auth root too.
+            login_namespace = str(original_config.absolute())
+        env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = login_namespace
+        keychains = original_home / "Library" / "Keychains"
+        if sys.platform == "darwin" and not login_namespace:
+            # The default keychain login locks HOME/.claude during refresh. Keep that same lock root for every
+            # borrower; Claude's histories/settings/caches still use the explicit per-session config directory.
+            env["HOME"] = str(original_home)
+        elif sys.platform == "darwin" and keychains.is_dir():
+            library = Path(env["HOME"]) / "Library"
+            library.mkdir(mode=0o700, exist_ok=True)
+            link = library / "Keychains"
+            if not link.exists():
+                link.symlink_to(keychains.absolute(), target_is_directory=True)
+        login = original_config / ".credentials.json"
+        link = Path(env["CLAUDE_CONFIG_DIR"]) / login.name
+        if login.is_file() and not link.exists():
+            link.symlink_to(login.absolute())
+        return env
+
     async def _load_session_state(self, session: ManagerSession | None = None) -> None:
         """Read the session a previous run saved, once; without a readable one the next turn starts a new one.
         ``session`` (default: the one the code runs on) is main's: the saved session is ``agent_sessions``'."""
         session = self._session_now() if session is None else session
         session.session_loaded = True
         try:
-            saved = await db_agent_sessions.get_session(self.agent_id)
+            saved = (await db_agent_sessions.get_session(self.agent_id) if session.key == MAIN_SESSION
+                     else await db_manager_sessions.get(self.agent_id, session.key))
         except Exception:
+            # Another session starts new rather than read main's: that would bring a group into your context.
             logger.warning("%s: cannot read its saved session; starting a new one", self._log, exc_info=True)
             return
         if saved:
@@ -960,12 +1050,21 @@ class ManagerAgent:
                 and await db_api_sessions.last_turn(session.session_id, pool=pool) is not None:
             # API init can precede a failed request: only committed history owns the brief safely.
             handoff = None
-        await db_agent_sessions.save_session(self.agent_id, session.session_id, session.session_totals.to_dict(),
-                                             runtime_type=session.session_runtime,
-                                             provider_id=session.session_provider,
-                                             profile_id=session.session_profile, clean_start=session.clean_start,
-                                             pending_handoff=handoff,
-                                             pool=pool)
+        if session.key != MAIN_SESSION:
+            route = session.route
+            await db_manager_sessions.save({
+                "manager_id": self.agent_id, "session_key": session.key, "kind": route.kind.value,
+                "channel_id": route.channel_id, "chat": route.chat, "session_id": session.session_id,
+                "session_totals": session.session_totals.to_dict(), "runtime_type": session.session_runtime,
+                "profile_id": session.session_profile, "provider_id": session.session_provider,
+                "clean_start": session.clean_start, "pending_handoff": handoff}, pool=pool)
+        else:
+            await db_agent_sessions.save_session(self.agent_id, session.session_id, session.session_totals.to_dict(),
+                                                 runtime_type=session.session_runtime,
+                                                 provider_id=session.session_provider,
+                                                 profile_id=session.session_profile, clean_start=session.clean_start,
+                                                 pending_handoff=handoff,
+                                                 pool=pool)
         if not session.clean_start and session.pending_handoff and handoff is None:
             session.pending_switch = session.pending_handoff = None
 
@@ -1114,8 +1213,8 @@ class ManagerAgent:
         for session in self._sessions.values():  # every session's
             if session.running_token is not None:
                 tokens.append(session.running_token)  # settled while its record finishes, but still answering the chat
-        pending = ([(self._handling, "")] if self._handling is not None else []) + [
-            (t.envelope, t.partial) for t in tokens if t.envelope is not None]
+        handling = ([self._handling] if self._handling is not None else []) + self._router.handling()
+        pending = [(e, "") for e in handling] + [(t.envelope, t.partial) for t in tokens if t.envelope is not None]
         self.stopped_in_flight = tuple({e.message_id: (e, partial) for e, partial in pending}.values())
         if self._bus is not None:
             self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._receive)
@@ -1128,6 +1227,12 @@ class ManagerAgent:
                 logger.warning("%s: turn drain did not finish within %.1f s; proceeding with shutdown",
                                self._log, STOP_DRAIN_SEC)
             self._task = None
+        try:
+            async with asyncio.timeout(STOP_DRAIN_SEC):
+                await self._router.stop()  # the sessions' workers, with session routing on
+        except TimeoutError:
+            logger.warning("%s: the sessions' turns did not end within %.1f s; proceeding with shutdown",
+                           self._log, STOP_DRAIN_SEC)
         for token in self._turns.live():
             token.settle(ReplyOutcome.STOPPED)
         self._turns.clear()
@@ -1151,7 +1256,7 @@ class ManagerAgent:
                 closing.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
 
     def _idle_blocked(self) -> bool:
-        return bool(self.busy or self._handling is not None
+        return bool(self.busy or self._handling is not None or self._router.pending()
                     or any(session.running_token is not None for session in self._sessions.values())  # any session's
                     or self._turns.live() or (self._bus and self._bus.pending_count(self.agent_id)))
 
@@ -1166,6 +1271,7 @@ class ManagerAgent:
     async def try_suspend_idle(self, now: float) -> bool:
         """Close only a provably idle resident, retaining the enabled agent and its complete session state."""
         main = self._sessions[MAIN_SESSION]  # main's: the resident the idle timeout closes
+        await self._router.sweep()  # session routing switched off: the other sessions' idle processes stop
         timeout = self._definition.idle_timeout_seconds
         if self.agent_id == DEFAULT_MANAGER_ID or not timeout or not self._running or self._turned_off:
             return False
@@ -1215,13 +1321,16 @@ class ManagerAgent:
                 await self._config.http_ready.wait()
             if self._tools_ready is not None:
                 await self._tools_ready.wait()
-            async for envelope in self._bus.subscribe(self.agent_id):
+            async for envelope in self._bus.subscribe(self.agent_id, settle=False):
                 if not self._running:
                     break
                 # Before persisting chat, emitting status, commands, or taking _turn_lock.
-                # subscribe() acknowledges only after this handler returns; restart replays held messages.
+                # A message is settled only after its handler returns; restart replays held messages.
                 if self._drain is not None:
                     await self._drain.wait_serving()
+                if (session := await self._router.target(envelope)) is not None:
+                    self._router.dispatch(session, envelope)  # its session's worker handles and settles it
+                    continue
                 self._handling = envelope
                 try:
                     await self._handle(envelope)
@@ -1233,6 +1342,8 @@ class ManagerAgent:
                 # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
                 if not self._running:
                     break
+                if not self._router.holds_completion(envelope):
+                    self._bus.settle_handled(envelope)
         except asyncio.CancelledError:
             pass
 
@@ -1499,7 +1610,7 @@ class ManagerAgent:
     async def _library_with_server(self, library: Any) -> Any:
         if self.ops is None:
             return library
-        return await self.ops.library_with_server(library, self._runtime_root, session_key=self._session_now().key)
+        return await self.ops.library_with_server(library, self._session_root(), session_key=self._session_now().key)
 
     async def _prepare_turn(self, token: TurnToken, envelope: MessageEnvelope, *, ask: Ask | None = None) -> Prepared:
         """Everything a turn needs before its process starts, every await a stoppable ``token.step`` or a
@@ -1584,7 +1695,8 @@ class ManagerAgent:
             # Turns run one at a time; a stop while this one waits for its turn ends it.
             await token.step("turn_lock", self._turn_lock.acquire())
             self._lock_owner = token
-            waiting = self.ops.begin_turn(turn, binding=token.binding) if self.ops is not None else ""
+            waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
+                       if self.ops is not None else "")
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
                       quoted=quoted)
         token.prepared_ask = ask
@@ -1603,10 +1715,15 @@ class ManagerAgent:
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         await token.step("templates", self._read_templates())
-        library = await token.step("library", load_installed(
+        routed = self._session_now().key != MAIN_SESSION
+        library = EMPTY_LIBRARY if routed else await token.step("library", load_installed(
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
-        launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        launch = Launch(agent_settings, library, role=AgentType.MANAGER,
+                        access=Access.PLATFORM_TOOLS if routed else None)
+        if routed and not launch.runtime.supports_platform_tools_only:
+            raise ProfileUnavailable(f"{launch.runtime.label} 尚不支持仅使用平台工具的路由会话，请选择支持的 Agent Profile。",
+                                     agent_settings.profile_source)
         if self.ops is not None and await token.step("outbound_review", outbound_hook.enabled()):
             # The review hooks every tool call of the Manager; a runtime it cannot hook does not run while it is on.
             if not launch.runtime.tool_hook:
@@ -1615,9 +1732,9 @@ class ManagerAgent:
                     "which has no tool hook: choose a Claude Code profile, or turn the review off",
                     agent_settings.profile_source)
             launch = replace(launch, tool_hook=self.ops.tool_hook(self._runtime_root, self._config.claude_bin,
-                                                                   launch.library))
+                                                                   launch.library, session_key=self._session_now().key))
         launch = await token.step("llmrec_attach", llmrec.attach(
-            launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
+            launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._session_work_dir()))
         if ask.turn is not None:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
         # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
@@ -1625,7 +1742,7 @@ class ManagerAgent:
         self._research = self._research_sources(tools, launch)
         system_prompt = self._composed_prompt(agent_settings)
         try:
-            prompt_file = system_prompt.write_file(self._runtime_root)
+            prompt_file = system_prompt.write_file(self._session_root())
         except OSError as exc:
             raise RuntimeError(f"无法写入 system prompt 文件：{exc}") from None
         # The command carries the model, the effort and the library's directories; the file is named by
@@ -1656,28 +1773,25 @@ class ManagerAgent:
             # A server restart left no resident object; reopen the old chat for its handoff. Cursor keeps
             # its old instruction copy until a replacement starts, even though this command names the new one.
             await token.keep("claude_stop", self._claude.stop(), 10)
-            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
-            await token.keep("claude_start", self._claude.start(
-                command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                totals=self._session_totals, price=launch.price), 10, undo=lambda: self._claude.stop(kill=True))
+            await token.step("claude_start", self._restore_resident(token, session, envelope, command,
+                                                                   signature, launch, seconds=10))
             self._process = _Process(command, signature, system_prompt, launch)
             if self.ops is not None:
-                self.ops.activate_tool_hook(launch.tool_hook)
+                self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         if switch is None and session.session_id and session.session_runtime == "api" \
                 and (self._claude_runtime is not launch.runtime or not self._claude.started):
             # Restore the API session's saved context before deciding whether it needs a handoff.
             await token.keep("claude_stop", self._claude.stop(), 10)
-            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
             with self._runtime_start_budget(launch) as seconds:
-                await token.keep("claude_start", self._claude.start(
-                    command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                    totals=self._session_totals, price=launch.price), seconds,
-                    undo=lambda: self._claude.stop(kill=True))
+                await token.step("claude_start", self._restore_resident(token, session, envelope, command,
+                                                                       signature, launch, seconds=seconds))
             self._process = _Process(command, signature, system_prompt, launch)
             if self.ops is not None:
-                self.ops.activate_tool_hook(launch.tool_hook)
+                self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
             switch = session_switch.context_full(
@@ -1694,11 +1808,24 @@ class ManagerAgent:
                 ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
                 attachments=[*attachments, *(ask.quoted.attachments if ask.quoted else ())],
                 quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input,
-                sections=state is None))
+                sections=state is None, turn=ask.turn))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
             quoted=ask.quoted, state=tuple(state) if state is not None else None, session=session)
+
+    async def _restore_resident(self, token: TurnToken, session: ManagerSession, envelope: MessageEnvelope,
+                                command: list[str], signature: Any, launch: Launch, *, seconds: float) -> None:
+        """A preparation-time restore has the same capacity reservation and cancellation cleanup as a new start."""
+        async with session.lifecycle_gate:
+            try:
+                await token.step("resident_admission", self._router.admit(session, envelope))
+                await token.keep("claude_start", self._claude.start(
+                    command, cwd=str(self._session_work_dir()), signature=signature, env=self._session_environment(launch),
+                    totals=self._session_totals, price=launch.price), seconds,
+                    undo=lambda: self._claude.stop(kill=True))
+            finally:
+                await self._router.release(session)
 
     @contextmanager
     def _runtime_start_budget(self, launch: Launch) -> Iterator[float]:
@@ -1779,9 +1906,12 @@ class ManagerAgent:
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
-            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
         if self._claude.stale(signature):
             await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
+        if not self._claude.started and session_routing.routes(self.agent_id):
+            # Room under the resident cap, or a wait for it (``SessionRouter.admit``).
+            await token.step("resident_admission", self._router.admit(session, envelope))
         command = self._claude.command if self._claude.started else await token.step("claude_command", asyncio.to_thread(
             self._claude_command, prepared.prompt_file, launch))
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
@@ -1797,7 +1927,7 @@ class ManagerAgent:
             agent_id=self.agent_id,
             task_id=envelope.metadata.get("task_id"),
             command=command,
-            cwd=str(self._config.work_dir),
+            cwd=str(self._session_work_dir()),
             input_text=f"{brief}\n\n{asked}" if brief else asked,
             session_id=session.session_id,
             system_prompt=prepared.system_prompt,
@@ -1819,14 +1949,14 @@ class ManagerAgent:
                 try:
                     with self._runtime_start_budget(launch) as seconds:
                         await token.keep("claude_start", self._claude.start(
-                            command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                            command, cwd=str(self._session_work_dir()), signature=signature, env=self._session_environment(launch),
                             totals=self._session_totals if run.resuming else None,
                             autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
                             price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
                     self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
                     if self.ops is not None:
-                        self.ops.activate_tool_hook(launch.tool_hook)
+                        self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
                     raise
                 except OSError as exc:
                     cause = str(exc) or type(exc).__name__
@@ -1846,7 +1976,7 @@ class ManagerAgent:
                     await token.step("recorder_annotate", recorder.annotate({"command": command}))
                 self._process = _Process(command, signature, prepared.system_prompt, launch)
                 if self.ops is not None:
-                    self.ops.activate_tool_hook(launch.tool_hook)
+                    self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         except TurnStopped:
             # Stopped while the record was open: it ends as stopped, with no spend.
             await token.keep("recorder_finish", self._finish_stopped_early(token, recorder, prepared.turn), 10)
@@ -1887,10 +2017,13 @@ class ManagerAgent:
                         # launch in this turn's record and retry the capability refresh next turn.
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
                                            signature=previous.signature,
-                                           prompt_file=previous.system_prompt.write_file(self._runtime_root))
+                                           prompt_file=previous.system_prompt.write_file(self._session_root()))
                         if prepared.turn is not None:
                             prepared.turn.blocks.append(notice)
-                await self._start_turn(token, prepared)
+                try:
+                    await self._start_turn(token, prepared)
+                finally:
+                    await self._router.release(prepared.session)
             return await self._converse(token, prepared)
         except BaseException as exc:
             failure = exc
@@ -2115,11 +2248,13 @@ class ManagerAgent:
         if target is None or target.manager_id != self.agent_id or self._bus is None:
             return
         off = chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
+        routed = session_routing.routes(self.agent_id)
         try:
             if off or not self._takes_completion_turns:
                 await completion_events.fall_back(self._bus, self.agent_address, target=target,
                                                   reason="off" if off else "manager_off")
                 return
+            operator = await self._router.completion_operator(target.channel_id) if routed else None
             batch = uuid.uuid4()
             rows = await db_manager_events.claim(*target.key, batch)
         except Exception:
@@ -2131,7 +2266,10 @@ class ManagerAgent:
             await self._bus.publish(completion_events.wake(self.agent_address, target))
             return
         if rows:
-            await self._tell_completion(rows, batch)
+            if routed:
+                self._router.dispatch_completion(envelope, rows, batch, operator)
+            else:
+                await self._tell_completion(rows, batch)
 
     async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -> None:
         """Run the completion turn of the claimed events (``batch``) within ``TURN_SECONDS``: its reply, with the
@@ -2272,7 +2410,7 @@ class ManagerAgent:
         if self._running_token is token:
             self._running_token = None
         self._publish_binding(None)
-        late, self._claude = self._claude, self._claude_runtime.resident_session(self.agent_id)
+        late, self._claude = self._claude, self._claude_runtime.resident_session(self._resident_label())
         self._process = None
         self._track_runtime_cleanup(late)
 
@@ -2315,7 +2453,7 @@ class ManagerAgent:
             self._lock_owner = token
             self._running_token = token
             if self.ops is not None:
-                self.ops.begin_turn(turn, binding=token.binding)
+                self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
             prepared = await self._prepare_turn(token, context, ask=Ask(message, "", turn))
             if prepared.action is not None:  # turned off since: it does not act as the Manager
                 raise _CompletionNotTaken()
@@ -2381,7 +2519,9 @@ class ManagerAgent:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
         cannot be read (the built-in defaults before any). Without ``fallback`` the read error stays, so a turn
         never runs on a profile the user did not choose."""
-        agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id, wait=wait)
+        # The profile chosen for the session (``select_session_profile``) is main's: the others follow the settings.
+        own = {} if self._session_now().key == MAIN_SESSION else {"manager_session": False}
+        agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id, wait=wait, **own)
         if agent_settings.error is not None:
             return (self._agent_settings or agent_settings) if fallback else agent_settings
         self._agent_settings = agent_settings
@@ -2621,7 +2761,8 @@ class ManagerAgent:
             # is reaped and the next message starts a new process that resumes the session.
             try:
                 if isinstance(self._claude, InProcessTools) and self.ops is not None:
-                    self._claude.set_turn_tools(ManagerTurnTools(self.ops, token.binding))
+                    self._claude.set_turn_tools(ManagerTurnTools(self.ops, token.binding,
+                                                               session_key=self._session_now().key))
                 if isinstance(self._claude, RunnerSession):
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=self._runner_limits)
@@ -2797,7 +2938,8 @@ class ManagerAgent:
         first. Tasks and their Planners are not touched."""
         session = self._session_now()
         origin = _message_origin(envelope)
-        chosen = envelope.payload.get("new_session_profile_id") or None
+        main = session.key == MAIN_SESSION
+        chosen = (envelope.payload.get("new_session_profile_id") or None) if main else None
         async with self._turn_lock, self._lifecycle_gate:
             name = None
             if chosen is not None:
@@ -2817,7 +2959,8 @@ class ManagerAgent:
             try:
                 async with db_connection.transaction() as conn:
                     await self._write_session_state(conn)
-                    await db_agent_sessions.select_profile(self.agent_id, chosen, pool=conn)
+                    if main:  # the profile chosen for the session is main's
+                        await db_agent_sessions.select_profile(self.agent_id, chosen, pool=conn)
             except Exception as exc:
                 # Nothing is dropped: the next message resumes the saved session in a new process.
                 session.session_id, self._session_totals, self._clean_start = previous
@@ -2826,9 +2969,10 @@ class ManagerAgent:
                 return
             self._pending_switch = self._pending_handoff = None
             self._stopped_notes = []
-            if self.ops is not None:
-                self.ops.forget_confirmations()
-            ops_leads.forget(self.agent_id)
+            if main:  # another session's /new leaves main's confirmations and remembered leads alone
+                if self.ops is not None:
+                    self.ops.forget_confirmations()
+                ops_leads.forget(self.agent_id)
             await self._record_new_session(envelope, origin, previous[0], chosen)
         logger.info("%s: a new session on /new from %s (sender %s); the previous one was %s", self._log,
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
@@ -2862,6 +3006,9 @@ class ManagerAgent:
 
     async def _handle_profile_command(self, envelope: MessageEnvelope, command: Any) -> None:
         """``/profile``: list the choices, or choose the session's profile; Claude is never asked."""
+        if self._session_now().key != MAIN_SESSION:
+            await self._send_reply(envelope, PROFILE_NOT_HERE_REPLY)
+            return
         if not self._session_loaded:
             await self._load_session_state()
         try:
@@ -3046,7 +3193,7 @@ class ManagerAgent:
         if session.session_runtime == "api":
             text = api_handoff_prompt(switch.describe(), HANDOFF_MAX_CHARS)
         recorder = ClaudeRunRecorder(
-            agent_id=self.agent_id, task_id=None, command=process.command, cwd=str(self._config.work_dir),
+            agent_id=self.agent_id, task_id=None, command=process.command, cwd=str(self._session_work_dir()),
             input_text=text, session_id=session.session_id, system_prompt=process.system_prompt,
             launch=process.launch, pid_of=lambda: self._claude.pid,
         )
@@ -3124,6 +3271,10 @@ class ManagerAgent:
             if not self._pending_handoff:
                 return ""
         switch, handoff = self._pending_switch, self._pending_handoff
+        if session.key != MAIN_SESSION:  # a group's or another sender's chat: only its own (``group_session``)
+            lines = await group_session.excerpt(_session_key(envelope), message, kind=session.route.kind)
+            return group_session.brief(session.route.kind, _message_origin(envelope)["channel"], lines,
+                                       switch=switch, handoff=handoff, new=session.session_id is None)
         conversations = await self._recent_conversations(envelope, message)
         if switch is None and not handoff and not conversations:
             return ""
@@ -3199,12 +3350,12 @@ class ManagerAgent:
             turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"])
             # ^ it answers no message: it only reads
             if self.ops is not None:
-                self.ops.begin_turn(turn)
+                self.ops.begin_turn(turn, session_key=session.key)
             recorder = ClaudeRunRecorder(
                 agent_id=self.agent_id,
                 task_id=None,
                 command=command,
-                cwd=str(self._config.work_dir),
+                cwd=str(self._session_work_dir()),
                 input_text=AUTONOMOUS_INPUT,
                 session_id=session.session_id,
                 system_prompt=system_prompt,
@@ -3261,8 +3412,12 @@ class ManagerAgent:
         """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
         session = self._session_now()
         runtime = launch.runtime
-        command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
-                                           prompt_file=prompt_file, launch=launch)
+        if session.key == MAIN_SESSION:
+            command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
+                                               prompt_file=prompt_file, launch=launch)
+        else:
+            command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._session_work_dir(),
+                                               prompt_file=prompt_file, launch=launch)
         if resume and session.session_id:
             command.extend(runtime.resume_args(session.session_id))
         return command
@@ -3275,17 +3430,32 @@ class ManagerAgent:
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
                                   envelope: MessageEnvelope | None = None, attachments: Sequence[Attachment] = (),
                                   quoted: Sequence[lark_quote.Quote] = (),
-                                  image_input: ImageInput = ImageInput.NONE, sections: bool = True) -> str:
+                                  image_input: ImageInput = ImageInput.NONE, sections: bool = True,
+                                  turn: Turn | None = None) -> str:
         parts = await self._sections(envelope) if sections else []
         if note:
             parts += [note, ""]
+        # The untrusted fence (``untrusted``): a chat message from someone other than the operator, its quotes and
+        # its attachments' names go in <untrusted> blocks, after one line saying how to read them.
+        fence = await untrusted_text.enabled()
         if channel:
-            parts += [channel, ""]
-        parts.append(user_message)
+            # Rebuild the channel label without the sender-controlled name. Its name belongs to the message's
+            # provenance, inside the same fence; off, keep even a caller-supplied label byte for byte.
+            parts += [channel_line(envelope, fence=True)
+                      if fence and envelope is not None and channel == channel_line(envelope) else channel, ""]
+        source = await _outside_source(turn) if fence and user_message.strip() else None  # no words: nothing to fence
+        lead = [untrusted_text.LEAD_LINE] if fence and (source or quoted or attachments) else []
+        if source is not None:
+            parts += [*lead, untrusted_text.fence(user_message, source=source,
+                                                  provenance=_message_provenance(envelope))]
+            lead = []
+        else:
+            parts.append(user_message)
         if quoted:
-            parts += ["", *lark_quote.section(quoted)]
+            parts += ["", *lead, *lark_quote.section(quoted, fence=fence)]
+            lead = []
         if attachments:
-            parts += ["", *chat_attachments.section(attachments, image_input)]
+            parts += ["", *lead, *chat_attachments.section(attachments, image_input, fence=fence)]
         return "\n".join(parts)
 
     async def _sections(self, envelope: MessageEnvelope | None) -> list[str]:
@@ -3519,8 +3689,11 @@ class ManagerAgent:
     def _group_safe(self, original: MessageEnvelope, text: str) -> str:
         """``text``, or ``WITHHELD_REPLY`` when it answers a group chat's message and quotes a message lead this
         Manager's session searched in the last day (RFC R-2: the session is shared by the user's chats and the
-        groups). A task's end notice and a gate's post are checked where the channel sends them."""
-        return ops_leads.for_group(text, manager_id=self.agent_id) if _message_origin(original)["group"] else text
+        groups), or a reply out of another sender's direct-chat session. A task's end notice and a gate's post are
+        checked where the channel sends them."""
+        other = self._session_now().route.kind is session_routing.SessionKind.DM
+        return ops_leads.for_group(text, manager_id=self.agent_id) if _message_origin(original)["group"] or other \
+            else text
 
     async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
         """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""

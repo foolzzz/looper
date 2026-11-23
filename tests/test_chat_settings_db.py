@@ -85,6 +85,35 @@ def test_the_research_order_setting_is_stored_alone_and_loaded(monkeypatch: pyte
     run_db(test, monkeypatch, timeout=30)
 
 
+def test_outbound_is_operator_controlled_and_survives_restart(monkeypatch: pytest.MonkeyPatch,
+                                                            tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        monkeypatch.setattr(chat_settings, "_outbound_enabled", False)
+        async with _api(tmp_path, pool, None) as (call, _):
+            await chat_settings.load()
+            assert chat_settings.outbound_enabled() is False
+            status, answer = await call("outbound_gateway.update", {"outbound_enabled": True}, client=True)
+            assert status == 403 and answer["error"]["code"] == "forbidden"
+            status, answer = await call("outbound_gateway.update", {"outbound_enabled": True})
+            assert status == 200 and answer["result"] == {"outbound_enabled": True, **chat_settings.OUTBOUND_DEFAULTS}
+            assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1",
+                                       chat_settings.OUTBOUND_ENABLED_KEY) == "true"
+            status, answer = await call("chat_settings.update", {"ledger_enabled": True})
+            assert status == 200 and answer["result"]["ledger_enabled"] is True
+            assert "outbound_enabled" not in answer["result"]
+            chat_settings.set_outbound_enabled(False)
+            await chat_settings.load()
+            assert chat_settings.outbound_enabled() is True
+            status, answer = await call("outbound_gateway.update", {"outbound_enabled": None})
+            assert status == 200 and answer["result"] == {"outbound_enabled": False, **chat_settings.OUTBOUND_DEFAULTS}
+            view = await chat_settings.settings_view()
+            assert view["ledger_enabled"] is True and "outbound_enabled" not in view
+            assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key=$1",
+                                       chat_settings.OUTBOUND_ENABLED_KEY) == 0
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_a_client_cannot_set_ledger_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """``ledger_enabled`` is operator-only. The rest of the body is not applied."""
 

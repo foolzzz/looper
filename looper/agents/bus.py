@@ -185,6 +185,12 @@ class MessageBus:
         """Mark a message delivered although it is still queued (the user stopped it): a restart does not replay it."""
         self._journal.mark_delivered(message_id)
 
+    def settle_handled(self, envelope: MessageEnvelope) -> None:
+        """A message from a ``settle=False`` subscription has been handled: marked delivered as ``subscribe`` would
+        have marked it (a transient one never is)."""
+        if _journaled(envelope):
+            self._journal.mark_delivered(envelope.message_id)
+
     async def _journal_io(self, operation: Callable[..., _T], *args: Any) -> _T:
         if self._journal_executor is None:
             self._journal_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="message-journal")
@@ -275,13 +281,14 @@ class MessageBus:
             self._queues[agent_id] = asyncio.Queue()
         return self._queues[agent_id]
 
-    async def subscribe(self, agent_id: str) -> AsyncIterator[MessageEnvelope]:
-        """Yield messages for the given agent. Marks each as delivered after yield."""
+    async def subscribe(self, agent_id: str, *, settle: bool = True) -> AsyncIterator[MessageEnvelope]:
+        """Yield messages for the given agent. Marks each as delivered after yield; with ``settle=False`` the caller
+        settles each one (``settle``) once it has handled it, so one handed on and not finished replays at restart."""
         q = self.get_queue(agent_id)
         while True:
             envelope = await q.get()
             yield envelope
-            if _journaled(envelope):
+            if settle and _journaled(envelope):
                 self._journal.mark_delivered(envelope.message_id)
 
     async def request(
