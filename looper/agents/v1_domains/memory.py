@@ -23,7 +23,10 @@ CANDIDATE = _object(_CANDIDATE_FIELDS, closed=True)
 _SOURCE = _object({"kind": _STR, "source_class": _STR, **dict.fromkeys(
     ("quote", "channel", "chat", "message_id", "said_at", "task_id", "lead"), _NULL_STR)}, closed=True)
 _REVISION = _object({"revision": _INT, "made_by": _STR, "title": _STR, "changes": _array(_OBJ), "diff_stats": _OBJ,
-                     "large_removal": _BOOL, "content_hash": _STR, "created_at": _STR}, closed=True)
+                     "large_removal": _BOOL, "content_hash": _STR, "created_at": _STR,
+                     "diffs": {"type": "object", "additionalProperties": _STR}, "diffs_problem": _NULL_STR},
+                    ["revision", "made_by", "title", "changes", "diff_stats", "large_removal", "content_hash",
+                     "created_at"], closed=True)
 _EVENT = _object({"action": _STR, "actor": _STR, "via": _STR, "revision": _NULL_INT, "content_hash": _NULL_STR,
                   "note": _NULL_STR, "at": _STR}, closed=True)
 DETAIL = _object({**_CANDIDATE_FIELDS, "current": {"anyOf": [_REVISION, {"type": "null"}]},

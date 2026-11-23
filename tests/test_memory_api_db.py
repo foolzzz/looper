@@ -2,6 +2,7 @@
 memory_write setting and the preflight check over a real loopback server; API clients get none of them, and the API
 gains no tool."""
 
+import json
 import subprocess
 
 import pytest
@@ -153,5 +154,44 @@ def test_candidate_edits_use_only_their_erasable_event_trail(monkeypatch, tmp_pa
             status, answer = await call("memory.confirm", {"candidate": "M-9999", "content_hash": "0" * 64})
             assert status == 403, answer
             assert await pool.fetchval("SELECT count(*) FROM manager_actions") == before
+
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_memory_get_adds_a_code_made_diff_per_file_and_nothing_else(monkeypatch, tmp_path):
+    from looper.agents import memory
+    from looper.db import memory as db_memory
+
+    repo = sup.synthetic_vault(tmp_path)
+
+    async def check(pool):
+        settings = await sup.configure_write(repo, pool)
+        number = await sup.candidate(pool)
+        await sup.revise_current(pool, number, settings)
+        candidate = f"M-{number}"
+        recorded = memory.detail_view(await db_memory.get(number, db=pool))
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("memory.get", {"candidate": candidate})
+            assert status == 200, answer
+            shown = answer["result"]["candidate"]
+            diffs = shown["current"].pop("diffs")
+            assert shown["current"].pop("diffs_problem") is None
+            # Every other field is what the function the page used before returns.
+            assert shown == json.loads(json.dumps(recorded))
+            assert set(diffs) == {"mem/prefs/weekly.md", "mem/prefs/_index.md"}
+            assert diffs["mem/prefs/weekly.md"].startswith("--- /dev/null\n+++ b/mem/prefs/weekly.md\n")
+            assert "+Conclusion first." in diffs["mem/prefs/weekly.md"]
+            assert "+- [[weekly]] conclusion first" in diffs["mem/prefs/_index.md"]
+            assert "--- a/mem/prefs/_index.md" in diffs["mem/prefs/_index.md"]
+            # The diff is made from the vault file as it is now: an anchor that went missing is said in words.
+            (repo / "mem/prefs/_index.md").write_text("no heading any more\n")
+            status, answer = await call("memory.get", {"candidate": candidate})
+            current = answer["result"]["candidate"]["current"]
+            assert current["diffs"] == {} and "anchor_missing" in current["diffs_problem"]
+            # A missing setting is said in words too.
+            await pool.execute("DELETE FROM system_settings WHERE key='memory_write'")
+            status, answer = await call("memory.get", {"candidate": candidate})
+            current = answer["result"]["candidate"]["current"]
+            assert current["diffs"] == {} and "not configured" in current["diffs_problem"]
 
     run_db(check, monkeypatch, timeout=60)
