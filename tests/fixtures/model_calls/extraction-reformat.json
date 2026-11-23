@@ -652,7 +652,8 @@
         "target_channel": null,
         "target_chat": null,
         "to_seq": 1,
-        "window_mode": "cursor"
+        "window_mode": "cursor",
+        "window_seqs": null
       }
     ],
     "subscriptions": [
