@@ -128,3 +128,7 @@ registry, the API document and tool levels. Recorder/enforce comparisons ran
 under that selection. Fresh and bridge schemas passed; order, pending order and
 online order 1430 belong only to `cost_holds`. Frontend: **23 passed** across cost
 settings and settings-page API contracts; the production build passed.
+
+A subsequent main update contained only the v2.15.28 release metadata, version
+and documentation. It merged without conflicts; the same CI marker selection
+reran recorder/enforce comparisons on that version: **61 passed**, no skips.
