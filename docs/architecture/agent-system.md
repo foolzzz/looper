@@ -21,11 +21,8 @@ bounded background tasks and failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature, successfully sent delivery reply rates
-for 1–30 days. Its independent `outbound` group and the dashboard show current
-channel queues, 24-hour backoffs, breaker openings and state, failures by class
-and uncertain deliveries; gateway events retain at most 10,000 entries for 24
-hours in memory, with a since-start label until the service has been up for a day.
-Housekeeping retains proactive rows for 90 days. This feature owns the table's single named migration:
+for 1–30 days. Housekeeping retains proactive rows for 90 days. Proactive delivery
+recording owns the table's single named migration:
 one row per message, with the send receipt in `outcome`. `source` includes
 `completion` and `user_reminder`; `chat_kind` is `direct` or `group`.
 Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
@@ -42,6 +39,15 @@ confirmation; Settings → Chat confirms the change before saving it. Both retur
 Existing `chat_settings` views, schemas and writes stay unchanged for clients.
 The generated CLI exposes the same operations; Lark and Telegram need no new
 control because configuration is operator-only. Dashboard metric widgets are separate.
+
+The independent `outbound` group in `manager_metrics.get` and the dashboard show
+current channel queues, 24-hour backoffs, breaker openings and state, failures
+and uncertain deliveries. The API groups failures by error class; the dashboard
+shows their total per channel. Failed and uncertain rows use a 24-hour window by
+their `terminal_at` transition time, including recovery after downtime; legacy
+rows without that timestamp fall back to `created_at`. Queue counts include pending and sending
+rows of any age. Gateway events retain at most 10,000 entries for 24 hours in
+memory, with a since-start label until the service has been up for a day.
 
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
