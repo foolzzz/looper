@@ -77,17 +77,19 @@ async def review_finished(attempt_id: int, passed: bool, blocking_findings: int,
         attempt_id, passed, blocking_findings, required, int(ran))
 
 
-async def decide_attempt(attempt_id: int, decision: str, record_id: int | None = None, adjudicated: bool = False, *, pool: Database | None = None) -> None:
+async def decide_attempt(attempt_id: int, decision: str, record_id: int | None = None, adjudicated: bool = False,
+                         failure_kind: str | None = None, *, pool: Database | None = None) -> None:
     await (pool or get_pool()).execute(
         "WITH settled AS (UPDATE step_attempts SET decision=$2,decided_at=now(), "
         "failure_kind=CASE WHEN $2='accept' THEN NULL "
+        "WHEN $2 IN ('retry','replan','fail') AND $5::text IS NOT NULL THEN $5::text "
         "WHEN $2 IN ('retry','replan','fail') AND review_outcome='not_passed' THEN 'review_rejected' "
         "WHEN run_outcome IN ('contract','files_mismatch','reported_failed','run_error','timeout','run_cap','crash') "
         "THEN run_outcome END, adjudicated=adjudicated OR $4, "
         "review_outcome=CASE WHEN $4 AND $2='accept' AND review_outcome='not_passed' "
         "THEN 'passed_by_adjudication' ELSE COALESCE(review_outcome,'none') END WHERE id=$1 AND decision IS NULL RETURNING id) "
         "UPDATE llm_records SET attempt_id=$1 WHERE id=$3 AND EXISTS (SELECT 1 FROM settled)",
-        attempt_id, decision, record_id, adjudicated)
+        attempt_id, decision, record_id, adjudicated, failure_kind)
 
 
 async def close_attempts(task_id: str, decision: str, failure_kind: str | None = None, step_key: str | None = None,

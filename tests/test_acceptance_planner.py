@@ -1,13 +1,15 @@
-"""Acceptance collection runs after successful work, without changing Planner decisions."""
+"""Acceptance collection precedes and constrains Planner decisions."""
 from __future__ import annotations
 
+import ast
 import asyncio
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import system_prompt
+from looper.agents import acceptance_checks, system_prompt
 from looper.agents.project_execution import AcceptanceChecksMode, ProjectExecution
 from looper.agents.tiers import planner, planner_protocol, worker
 from looper.db import plans, projects, tasks
@@ -22,7 +24,7 @@ from tests.db_support import DSN, run_db
     ("local", False, True, False), ("local", True, False, False),
     ("off", True, False, False),
 ])
-def test_worker_result_collects_before_decision_without_changing_allowed_actions(
+def test_worker_result_collects_before_decision_and_blocks_failed_checks(
     planner_claude, agent_db, monkeypatch, mode, succeeded, has_checks, expected,
 ):
     from looper.agents import acceptance_runner
@@ -46,7 +48,7 @@ def test_worker_result_collects_before_decision_without_changing_allowed_actions
     result = WORK_OK if succeeded else WORK_FAILED
     h = drive(claude, lambda _: {**result, "acceptance_baseline": {"head_sha": "forged"}})
     assert bool(observed) is expected
-    assert h.final().payload["status"] == ("completed" if succeeded else "failed")
+    assert h.final().payload["status"] == ("completed" if succeeded and not expected else "failed")
     if expected:
         call = observed[0]
         assert call["task_id"] == "t1" and call["attempt"] == 1
@@ -54,9 +56,10 @@ def test_worker_result_collects_before_decision_without_changing_allowed_actions
         assert call["mode"] is AcceptanceChecksMode(mode)
         assert tuple(call["runtime_paths"]) == (".venv", "node_modules")
         assert call["base_commit"] is None  # report-only directory; the Worker cannot forge a baseline
-        decision = claude.turns()[-1]["text"]
-        assert "Allowed decisions now: accept" in decision
-        assert "Acceptance evidence" not in decision and "recheck" not in decision
+        decision = next(turn["text"] for turn in claude.turns()
+                        if "Allowed decisions now:" in turn["text"])
+        assert "Allowed decisions now: retry" in decision
+        assert "Acceptance evidence" in decision and "recheck" not in decision
 
 
 def test_dispatch_captures_protected_baseline_and_keeps_it_across_same_attempt_restart(
@@ -117,7 +120,8 @@ def test_resumed_success_collects_again_before_asking_the_saved_decision(tmp_pat
         monkeypatch.setattr(acceptance_runner, "run_step_checks", AsyncMock(side_effect=lambda **k:
             events.append(("checks", k["base_commit"]))))
         await agent._decide_again(task, current)
-        assert events == ["saved", ("checks", "abc"), "decision"]
+        assert events[0] == "saved" and events[-1] == "decision"
+        assert ("checks", "abc") in events
 
     asyncio.run(run())
 
@@ -165,15 +169,26 @@ def test_saved_network_checks_can_be_loaded_after_permission_changes(tmp_path, m
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("status", ["pending", "dispatched", "deciding", "completed", "verified"])
 def test_switch_off_stored_rows_and_prompts_match_pinned_main_bytes(tmp_path, monkeypatch, status):
-    # Reuse the fixture's recorded main source as the independent default-off baseline.
-    baseline = _main_modules(BASELINE["main_revision"])
     current = SimpleNamespace(planner=planner, protocol=planner_protocol, prompt=system_prompt,
                               tasks=tasks, worker=worker)
+    # Off: the recorded main source, with the Planner's text frozen per section like its other renderings.
+    baseline = _main_modules(BASELINE["main_revision"])
     outputs = _outputs(current, tmp_path, ProjectExecution.from_row({"acceptance_checks": "off"}))
     pinned = _outputs(baseline, tmp_path)
     assert {name: text for name, text in outputs.items() if name not in _PLANNER_TEXT} == (
         {name: text for name, text in pinned.items() if name not in _PLANNER_TEXT})
     _assert_planner_text(outputs)
+    # Network: the pinned source that already has the checks contract; its Planner text legitimately differs
+    # from the off text, so the whole outputs are compared byte for byte.
+    execution = ProjectExecution.from_row({"acceptance_checks": "network"})
+    pin = "ecc2eedbf2ac4a1b44ff9078e634002c228458c1"
+    checked = _main_modules(pin)
+    # The baseline modules import the current acceptance_checks, so its protocol text is pinned directly.
+    tree = ast.parse(subprocess.check_output(["git", "show", f"{pin}:looper/agents/acceptance_checks.py"], text=True))
+    pinned_section, = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                       and any(getattr(target, "id", "") == "PROTOCOL_SECTION" for target in node.targets)]
+    assert acceptance_checks.PROTOCOL_SECTION == pinned_section
+    assert _outputs(current, tmp_path, execution) == _outputs(checked, tmp_path, execution)
 
     async def check(pool):
         owner = await projects.create_project(name="Default-off compatibility", pool=pool)

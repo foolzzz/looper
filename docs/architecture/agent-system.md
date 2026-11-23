@@ -3335,7 +3335,25 @@ set it; omission preserves the target permission. With it enabled, Planner work 
 `command` or `artifact` checks bound to a criterion; definitions persist in
 `task_steps.checks` through plan edits and restarts. After a successful Worker,
 the Planner runs checks before asking for its decision and stores append-only
-`step_check_runs` evidence. This stage does not change decisions or Reviewer prompts.
+`step_check_runs` evidence. A pure evidence gate removes `accept` (including adjudicated acceptance)
+and `review` until every required check passes on the current content hash (a commit that leaves the content unchanged,
+such as a review freeze, keeps the measured version; HEAD decides only for a directory without one).
+Missing, failed, errored and stale evidence cannot be accepted, even after a passing Reviewer verdict
+or a failed Planner turn. Advisory checks do not block. Steps without required review can be accepted
+by the gate without starting a Reviewer.
+
+A required check error offers `recheck` up to twice per step: only the checks run again, with the same
+Worker attempt and a new run number, without consuming a Worker retry. Each ordinary retry appends
+failed required checks, their criteria, commands, exit codes and fenced output after the Planner's
+feedback. Reviewer messages include one code-rendered Acceptance evidence section for every seat,
+and a conditional contract asks them to assess uncovered criteria and check coverage rather than
+override measured results. The verdict JSON is unchanged.
+
+Before review and acceptance, version changes append stale rows and rerun checks at most twice,
+separately from rechecks. A changed version invalidates its previous review round. Counts and pending
+rerun intent persist in the step result so restarts resume a partially completed rerun. Turning checks
+off stops new launches but retains a previously blocked step's gate; only a logged replan that removes
+or rewrites the checks can replace that obligation.
 The operator-only `task_evidence.get` operation (also available through `loopercli`)
 accepts `task` and optional `step`, returning definitions and all evidence attempts,
 including history retained after disabling checks. It returns no artifact bytes and
@@ -3384,8 +3402,7 @@ Commands receive an OS-only subset of `child_env.inherited()`, without runtime
 credentials, proxies or SSH agents. This is not a file sandbox: commands retain the
 service user's file access.
 
-The runner allows two checks service-wide, a cumulative 900 seconds per step
-attempt, and a 16 MiB output read limit; commands have their declared timeout
+The runner allows two checks service-wide, a cumulative 900 seconds per step across attempts, and a 16 MiB output read limit; commands have their declared timeout
 (default 300 seconds, maximum 1800). Output stores a redacted 4000-character tail,
 captured byte count and SHA-256; activities contain status and exit code only.
 Artifacts are content-typed PNG/JPEG/WebP/UTF-8 text/JSON, at most three files of
@@ -3409,8 +3426,7 @@ while off, Planner contracts and prompts remain byte-identical, including plan
 views of previously enabled projects with saved checks. Definitions remain in
 the database for operator evidence reads. See the
 [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
-and 13, for the protocol and subsequent stages (decision gates, Reviewer evidence,
-and result or channel evidence lines are still pending).
+and 13, for the protocol and remaining result or channel evidence summaries.
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it

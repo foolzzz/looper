@@ -147,11 +147,21 @@ after it:
   later task of this project as {"text": "...", "scope": "project"}."""
 
 
-def review_contract(severity: bool = False) -> str:
+def review_contract(severity: bool = False, *, evidence: bool = False) -> str:
     """The panel's structured verdict; the original contract for ordinary reviews."""
+    contract = REVIEW_CONTRACT
+    if evidence:
+        # A local, not a module constant: the default-off prompt digests cover every uppercase constant.
+        evidence_contract = (
+            "Acceptance evidence above was measured by Looper, not by you: do not override\n"
+            "it with your own runs. Judge criteria with no check, and whether the checks actually measure\n"
+            "their criteria (including checks that always pass). Report check gaps or ineffective checks\n"
+            "as findings; with structured severity, use blocking or suggestion and the step label as where.\n"
+            "Looper combines the evidence gate with your verdict; a passing verdict cannot override failed evidence.")
+        contract += "\n\n" + evidence_contract
     if not severity:
-        return REVIEW_CONTRACT
-    return REVIEW_CONTRACT.replace(
+        return contract
+    return contract.replace(
         '"findings": ["..."]',
         '"findings": [{"severity": "blocking", "where": "path:line", "text": "..."}]',
     ).replace(
@@ -217,14 +227,15 @@ def _template_lines(template: Mapping[str, Any] | None) -> list[str]:
     return lines
 
 
-def _workflow_lines(workflow: Mapping[str, Any] | None) -> list[str]:
+def _workflow_lines(workflow: Mapping[str, Any] | None, checks: bool = False) -> list[str]:
     if not workflow:
         return []
     lines = [f"Workflow: {workflow['name']} (set by the operator for this task)",
              "Workflow rules (code enforces these):"]
     if workflow.get("max_step_retries") is not None:
         lines.append(f"- At most {workflow['max_step_retries']} retries per step.")
-    lines.append("- Every work step requires review." if workflow.get("review_all")
+    lines.append(("- Every work step requires review, except a step with required checks: its measured evidence "
+                  "decides it." if checks else "- Every work step requires review.") if workflow.get("review_all")
                  else "- The Planner chooses which work steps require review.")
     lines.append("- Dependency conditions are enabled." if workflow.get("dependency_conditions")
                  else "- Dependency conditions are disabled.")
@@ -255,7 +266,7 @@ def _workflow_lines(workflow: Mapping[str, Any] | None) -> list[str]:
 def plan_task_section(
     *, task_id: str, requirement: str, project_name: str, work_dir: str, project_description: str = "",
     template: Mapping[str, Any] | None = None,
-    workflow: Mapping[str, Any] | None = None,
+    workflow: Mapping[str, Any] | None = None, checks: bool = False,
 ) -> str:
     """The Planner's task: the whole task it plans and sees through. ``template`` is what the task template it was
     created from said then (its name, inputs and Planner instructions); a task from none has no such lines."""
@@ -268,7 +279,7 @@ def plan_task_section(
         f"Project: {project}",
         f"Working directory: {prompt_name(work_dir)}",
         *_template_lines(template),
-        *_workflow_lines(workflow),
+        *_workflow_lines(workflow, checks),
         "Requirement:",
         _requirement(requirement),
     ])
@@ -337,6 +348,7 @@ def review_task_section(
     workspace: Mapping[str, Any] | None = None,
     review_role: str = "",
     retry_notes: Sequence[str] = (),
+    evidence: str = "",
 ) -> str:
     """A Reviewer's task: the step under review, after the task it belongs to (as context) and its supplements,
     with the notes the Planner retried it with (``retry_notes``, oldest first: the Planner's changes to the step,
@@ -361,6 +373,8 @@ def review_task_section(
         lines += ["", f"This step ran in its own git worktree, on branch {prompt_name(workspace.get('branch'))}; your working "
                       "directory is that checkout. To see the step's changes, including the uncommitted ones: "
                       f"`git diff {workspace.get('base_commit')}`."]
+    if evidence:
+        lines += ["", evidence]
     return "\n".join(lines)
 
 

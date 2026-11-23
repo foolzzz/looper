@@ -45,6 +45,7 @@ from enum import Enum
 from typing import Any
 
 from ..acceptance_checks import Check, PROTOCOL_SECTION, parse_checks
+from ..acceptance_gate import Gate
 from ..project_execution import AcceptanceChecksMode
 from ..project_execution import DEFAULT_STEP_RETRIES
 from ..task_roles import RoleKind
@@ -149,6 +150,7 @@ class Decision(str, Enum):
     ACCEPT = "accept"
     REVIEW = "review"
     RETRY = "retry"
+    RECHECK = "recheck"
     REPLAN = "replan"
     FAIL = "fail"
     # With the advisor on (the advisor RFC, section 11): ask it, and, after a checkpoint's answer, start the step.
@@ -476,14 +478,23 @@ class DecisionContext:
     advise: bool = False
     checkpoint: bool = False
     answered: bool = False
+    evidence: Gate | None = None
 
     @property
     def acceptable(self) -> bool:
+        if self.evidence is not None and not self.evidence.passed:
+            return False
         if self.result is ResultKind.REVIEW:
             return self.succeeded
         return self.succeeded and not self.review_required
 
     def allowed(self) -> tuple[Decision, ...]:
+        if self.evidence is not None and not self.evidence.passed:
+            allowed = [Decision.RETRY] if self.retries < self.max_retries else []
+            # A budget error means the step's whole checking budget is spent: another run would only repeat it.
+            if self.evidence.errored and self.evidence.rechecks_used < 2 and not self.evidence.budget_spent:
+                allowed.append(Decision.RECHECK)
+            return (*allowed, Decision.REPLAN, Decision.FAIL)
         if self.checkpoint:
             return (Decision.PROCEED, Decision.REPLAN, Decision.FAIL) if self.answered else (Decision.ADVISE,)
         if self.escalate or self.verification_repair_required:
@@ -584,7 +595,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjud
     known = [d for d in Decision if plan.advisor or d not in ADVISOR_DECISIONS]
     decision = next((d for d in known if d.value == raw), None)
     if decision is None:
-        choices = ", ".join(d.value for d in known)
+        choices = ", ".join(d.value for d in known if d is not Decision.RECHECK or d in context.allowed())
         raise ProtocolError(f"decision must be one of {choices}; got {raw!r}")
     reason = _optional_text(data, "reason")
     summary = _optional_text(data, "summary")
@@ -1014,7 +1025,11 @@ def _refusal(decision: Decision, context: DecisionContext) -> str:
     allowed = ", ".join(d.value for d in context.allowed())
     if context.adjudication_findings:
         allowed = "; ".join([ADJUDICATED_ACCEPT, *(d.value for d in context.allowed())])
-    if context.verification_repair_required:
+    if context.evidence is not None and not context.evidence.passed:
+        why = "required acceptance evidence has not passed on the current version"
+    elif decision is Decision.RECHECK:
+        why = "recheck needs a required check error and fewer than two rechecks"
+    elif context.verification_repair_required:
         why = "verification_changed_code requires a replan with a reviewed non-verification repair"
     elif context.checkpoint:
         why = (f"step {context.step} has the advisor's review of its plan: proceed, replan or fail" if context.answered
