@@ -1385,3 +1385,60 @@ def test_sent_thread_bookkeeping_failure_does_not_retry_successful_send(monkeypa
         assert len(sends) == 1
 
     asyncio.run(asyncio.wait_for(run(), 5))
+
+
+def test_disabled_outbound_pool_exhaustion_keeps_start_receive_and_catchup_working(tmp_path, monkeypatch):
+    from looper.agents import chat_settings
+    from tests.db_support import run_db
+
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, '_outbound_enabled', False)
+        now = time.time()
+        await seed_boundary(tmp_path, now - 60)
+        transport = HistoryTransport()
+        transport.pages['oc_synthetic_group'] = [{'chat_type': 'group', 'messages': [
+            history_message('om_synthetic_pool_gap', at=now - 30)], 'has_more': False}]
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            async with pool.acquire():
+                # The only connection remains occupied throughout startup and ingress.
+                await asyncio.wait_for(instance.start(bus), .5)
+                await catchup_done(instance, transport)
+                await transport.incoming.put(_event(
+                    chat_id='oc_synthetic_group', chat_type='group', message_id='om_synthetic_pool_live',
+                    content='@HelperBot hello', mentions=[BOT_MENTION]))
+                await asyncio.wait_for(transport.live_handled.wait(), 2)
+                ids = [m.payload['channel_context']['message_id'] for m in bus.journal.undelivered()]
+                assert ids == ['om_synthetic_pool_gap', 'om_synthetic_pool_live']
+                assert (await instance._send_message('oc_synthetic_group', 'hello')).success
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    run_db(check, monkeypatch, max_size=1, timeout=10)
+
+
+def test_disabled_outbound_recovery_failure_adds_no_warning(tmp_path, monkeypatch, caplog):
+    from looper.agents import chat_settings
+    from looper.db import channel_outbox
+
+    async def unavailable(*args):
+        raise OSError('synthetic recovery unavailable')
+
+    async def run():
+        monkeypatch.setattr(chat_settings, '_outbound_enabled', False)
+        monkeypatch.setattr(channel_outbox, 'has_unfinished', unavailable)
+        transport = HistoryTransport()
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            assert not [r for r in caplog.records
+                        if r.name == 'looper.agents.channels.outbound' and r.levelno >= 30]
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
