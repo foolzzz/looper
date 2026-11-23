@@ -2146,7 +2146,7 @@ CREATE TABLE IF NOT EXISTS intents (
     merged_into   BIGINT,                              -- its key and its detaching are the intent merges block's
     task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     flagged       BOOLEAN NOT NULL DEFAULT false,      -- one of its sources is in its run's instructions_seen
-    expires_at    TIMESTAMPTZ,                         -- 24 hours after its latest push; NULL while never pushed
+    expires_at    TIMESTAMPTZ,                         -- 24 hours after creation or latest successful push/progress; NULL falls back to creation + 24 hours
     handled_at    TIMESTAMPTZ,
     handled_via   TEXT CHECK (handled_via IN ('dashboard', 'lark', 'telegram', 'system')),
     reject_reason TEXT CHECK (char_length(reject_reason) <= 200),

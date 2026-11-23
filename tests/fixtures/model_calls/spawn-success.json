@@ -1,0 +1,370 @@
+{
+  "baseline": "1f2ac843e01adac83448c09a329df01a4dbb8566",
+  "launches": [
+    {
+      "argv": [
+        "<test-root>/claude",
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--input-format",
+        "stream-json",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--settings",
+        "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"/model-call-test/system-temp/looper-advisor/CLAUDE.md\",\"/model-call-test/system-temp/looper-advisor/.claude/CLAUDE.md\",\"/model-call-test/system-temp/looper-advisor/.claude/rules/**\",\"/model-call-test/system-temp/looper-advisor/AGENTS.md\",\"/model-call-test/system-temp/looper-advisor/.claude/AGENTS.md\",\"/model-call-test/system-temp/CLAUDE.md\",\"/model-call-test/system-temp/.claude/CLAUDE.md\",\"/model-call-test/system-temp/.claude/rules/**\",\"/model-call-test/system-temp/AGENTS.md\",\"/model-call-test/system-temp/.claude/AGENTS.md\",\"/model-call-test/CLAUDE.md\",\"/model-call-test/.claude/CLAUDE.md\",\"/model-call-test/.claude/rules/**\",\"/model-call-test/AGENTS.md\",\"/model-call-test/.claude/AGENTS.md\",\"/CLAUDE.md\",\"/.claude/CLAUDE.md\",\"/.claude/rules/**\",\"/AGENTS.md\",\"/.claude/AGENTS.md\",\"/model-call-user/.claude/CLAUDE.md\",\"/model-call-user/.claude/rules/**\",\"/model-call-user/.claude/AGENTS.md\"],\"crossSessionInbound\":\"refuse\",\"disableAllHooks\":true}",
+        "--system-prompt-file",
+        "<test-root>/runtime/.local/prompts/d094f11bd5ab63a3e068d9b48d95b2b3ae088b3e1e513976bcbcc4aee56b9b16.md",
+        "--system-prompt-snapshot",
+        "off",
+        "--permission-mode",
+        "manual",
+        "--permission-prompts",
+        "none",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+        "--model",
+        "opus",
+        "--max-budget-usd",
+        "0.2",
+        "--max-turns",
+        "2"
+      ],
+      "cwd": "<test-root>/system-temp/looper-advisor/000000000001",
+      "files": [],
+      "stdin": "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"Which execution strategy bounds CPU concurrency?\"}}\n",
+      "system_prompt": "Answer from the request alone."
+    }
+  ],
+  "outcome": {
+    "child": {
+      "cost_usd": 0.004,
+      "detail": "",
+      "failure": null,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "output": "Use a bounded process pool.",
+      "record_id": 2
+    },
+    "row": {
+      "attempt": 1,
+      "brief": {
+        "why": "Choose an execution strategy."
+      },
+      "budget_usd": 0.2,
+      "cancel_reason": null,
+      "child_process": null,
+      "child_record_id": 2,
+      "created_at": "<timestamp>",
+      "delivered_at": null,
+      "delivery": null,
+      "detail": null,
+      "failure_cause": null,
+      "failure_class": null,
+      "finished_at": "<timestamp>",
+      "id": 1,
+      "idempotency_key": null,
+      "inputs": {
+        "language": "Python"
+      },
+      "kind": "advisor",
+      "parent_record_id": 1,
+      "parent_spend_known": null,
+      "profile_id": null,
+      "result": {
+        "failure": null,
+        "output": "Use a bounded process pool.",
+        "rounds": [
+          {
+            "cost_usd": 0.004,
+            "failure": null,
+            "models": [
+              "claude-opus-5-5"
+            ],
+            "record_id": 2
+          }
+        ]
+      },
+      "returns": 0,
+      "rounds": 1,
+      "spawner": null,
+      "spent_usd": 0.004,
+      "state": "answered",
+      "step_id": "step-golden",
+      "task_id": "task-golden",
+      "updated_at": "<timestamp>"
+    }
+  },
+  "tables": {
+    "agent_spawns": [
+      {
+        "attempt": 1,
+        "brief": {
+          "why": "Choose an execution strategy."
+        },
+        "budget_usd": 0.2,
+        "cancel_reason": null,
+        "child_process": null,
+        "child_record_id": 2,
+        "created_at": "<timestamp>",
+        "delivered_at": null,
+        "delivery": null,
+        "detail": null,
+        "failure_cause": null,
+        "failure_class": null,
+        "finished_at": "<timestamp>",
+        "id": 1,
+        "idempotency_key": null,
+        "inputs": {
+          "language": "Python"
+        },
+        "kind": "advisor",
+        "parent_record_id": 1,
+        "parent_spend_known": null,
+        "profile_id": null,
+        "result": {
+          "failure": null,
+          "output": "Use a bounded process pool.",
+          "rounds": [
+            {
+              "cost_usd": 0.004,
+              "failure": null,
+              "models": [
+                "claude-opus-5-5"
+              ],
+              "record_id": 2
+            }
+          ]
+        },
+        "returns": 0,
+        "rounds": 1,
+        "spawner": null,
+        "spent_usd": 0.004,
+        "state": "answered",
+        "step_id": "step-golden",
+        "task_id": "task-golden",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "llm_record_events": [
+      {
+        "created_at": "<timestamp>",
+        "event": {
+          "mcp_servers": [],
+          "model": "claude-opus-5-5",
+          "session_id": "session-golden",
+          "subtype": "init",
+          "tools": [],
+          "type": "system"
+        },
+        "record_id": 2,
+        "seq": 1
+      },
+      {
+        "created_at": "<timestamp>",
+        "event": {
+          "message": {
+            "content": [
+              {
+                "text": "Use a bounded process pool.",
+                "type": "text"
+              }
+            ],
+            "id": "message-golden",
+            "model": "claude-opus-5-5",
+            "role": "assistant",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 30,
+              "output_tokens": 9
+            }
+          },
+          "session_id": "session-golden",
+          "type": "assistant"
+        },
+        "record_id": 2,
+        "seq": 2
+      },
+      {
+        "created_at": "<timestamp>",
+        "event": {
+          "is_error": false,
+          "modelUsage": {
+            "claude-opus-5-5": {
+              "costUSD": 0.004
+            }
+          },
+          "result": "Use a bounded process pool.",
+          "session_id": "session-golden",
+          "stop_reason": "end_turn",
+          "subtype": "success",
+          "total_cost_usd": 0.004,
+          "type": "result",
+          "usage": {
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "input_tokens": 30,
+            "output_tokens": 9
+          }
+        },
+        "record_id": 2,
+        "seq": 3
+      }
+    ],
+    "llm_records": [
+      {
+        "agent_id": "planner-task-golden",
+        "cache_creation_tokens": null,
+        "cache_read_tokens": null,
+        "compactions": null,
+        "context_tokens": null,
+        "cost_source": null,
+        "cost_usd": null,
+        "created_at": "<timestamp>",
+        "duration_ms": null,
+        "error": null,
+        "failure_cause": null,
+        "failure_class": null,
+        "finished_at": null,
+        "id": 1,
+        "input_summary": null,
+        "input_text": null,
+        "input_tokens": null,
+        "last_output_at": null,
+        "metadata": null,
+        "model": null,
+        "output_summary": null,
+        "output_text": null,
+        "output_tokens": null,
+        "parent_record_id": null,
+        "run_kind": "planner",
+        "session_id": null,
+        "status": "running",
+        "task_id": "task-golden"
+      },
+      {
+        "agent_id": "advisor-000000000001",
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "compactions": [],
+        "context_tokens": 30,
+        "cost_source": "runtime",
+        "cost_usd": 0.004,
+        "created_at": "<timestamp>",
+        "duration_ms": 0,
+        "error": null,
+        "failure_cause": null,
+        "failure_class": null,
+        "finished_at": "<timestamp>",
+        "id": 2,
+        "input_summary": "Which execution strategy bounds CPU concurrency?",
+        "input_text": "Which execution strategy bounds CPU concurrency?",
+        "input_tokens": 30,
+        "last_output_at": "<timestamp>",
+        "metadata": {
+          "command": [
+            "<test-root>/claude",
+            "--print",
+            "--verbose",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--input-format",
+            "stream-json",
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--settings",
+            "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"/model-call-test/system-temp/looper-advisor/CLAUDE.md\",\"/model-call-test/system-temp/looper-advisor/.claude/CLAUDE.md\",\"/model-call-test/system-temp/looper-advisor/.claude/rules/**\",\"/model-call-test/system-temp/looper-advisor/AGENTS.md\",\"/model-call-test/system-temp/looper-advisor/.claude/AGENTS.md\",\"/model-call-test/system-temp/CLAUDE.md\",\"/model-call-test/system-temp/.claude/CLAUDE.md\",\"/model-call-test/system-temp/.claude/rules/**\",\"/model-call-test/system-temp/AGENTS.md\",\"/model-call-test/system-temp/.claude/AGENTS.md\",\"/model-call-test/CLAUDE.md\",\"/model-call-test/.claude/CLAUDE.md\",\"/model-call-test/.claude/rules/**\",\"/model-call-test/AGENTS.md\",\"/model-call-test/.claude/AGENTS.md\",\"/CLAUDE.md\",\"/.claude/CLAUDE.md\",\"/.claude/rules/**\",\"/AGENTS.md\",\"/.claude/AGENTS.md\",\"/model-call-user/.claude/CLAUDE.md\",\"/model-call-user/.claude/rules/**\",\"/model-call-user/.claude/AGENTS.md\"],\"crossSessionInbound\":\"refuse\",\"disableAllHooks\":true}",
+            "--system-prompt-file",
+            "<test-root>/runtime/.local/prompts/d094f11bd5ab63a3e068d9b48d95b2b3ae088b3e1e513976bcbcc4aee56b9b16.md",
+            "--system-prompt-snapshot",
+            "off",
+            "--permission-mode",
+            "manual",
+            "--permission-prompts",
+            "none",
+            "--tools",
+            "",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--model",
+            "opus",
+            "--max-budget-usd",
+            "0.2",
+            "--max-turns",
+            "2"
+          ],
+          "cwd": "<test-root>/system-temp/looper-advisor/000000000001",
+          "llm_model": {
+            "model_id": "model-84f4b69e-12a7-5fd7-b665-a9b7d01568eb",
+            "name": "opus",
+            "path": "direct",
+            "protocol": "anthropic-messages",
+            "provider_id": "prov-claude-subscription"
+          },
+          "max_budget_usd": 0.2,
+          "model_choice": {
+            "effort": null,
+            "model": "opus",
+            "source": "builtin"
+          },
+          "model_reported": "claude-opus-5-5",
+          "pricing": {
+            "builtin_prices_as_of": "2026-10-14",
+            "cost_source": "runtime",
+            "rule": "runtime_reported"
+          },
+          "profile": {
+            "custom_prompt": "",
+            "id": "agent-claude-code-opus",
+            "model": "opus",
+            "model_id": "model-84f4b69e-12a7-5fd7-b665-a9b7d01568eb",
+            "name": "claude-code/opus",
+            "provider": {
+              "auth": "oauth",
+              "id": "prov-claude-subscription",
+              "name": "claude-subscription"
+            },
+            "runtime": {
+              "id": "rt-claude-code",
+              "name": "claude-code",
+              "type": "claude-code"
+            },
+            "source": "builtin"
+          },
+          "project_instructions": [],
+          "prompt_layers": {},
+          "read_only": "permissions",
+          "settings_sources": {
+            "effort": "builtin",
+            "env": {},
+            "harness": "builtin",
+            "profile": "builtin",
+            "run_budget_usd": "builtin"
+          },
+          "step_id": "step-golden",
+          "system_prompt": "Answer from the request alone.",
+          "system_prompt_mode": "replace",
+          "system_prompt_sha256": "d094f11bd5ab63a3e068d9b48d95b2b3ae088b3e1e513976bcbcc4aee56b9b16"
+        },
+        "model": "claude-opus-5-5",
+        "output_summary": "Use a bounded process pool.",
+        "output_text": "Use a bounded process pool.",
+        "output_tokens": 9,
+        "parent_record_id": 1,
+        "run_kind": "advisor",
+        "session_id": "session-golden",
+        "status": "completed",
+        "task_id": "task-golden"
+      }
+    ]
+  }
+}

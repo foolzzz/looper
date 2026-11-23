@@ -60,7 +60,7 @@ ALTER TABLE projects
     ADD CONSTRAINT projects_subagents_per_task_check CHECK (subagents_per_task BETWEEN 0 AND 100) NOT VALID;
 ALTER TABLE llm_records DROP CONSTRAINT llm_records_run_kind_check,
     ADD CONSTRAINT llm_records_run_kind_check CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer',
-        'processor', 'consult', 'advisor', 'advice_check', 'outbound_check', 'explorer')) NOT VALID;
+        'processor', 'consult', 'advisor', 'advice_check', 'outbound_check', 'explorer', 'leads_check')) NOT VALID;
 ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check,
     ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', 'reviewer',
         'processor', 'advisor', 'advice_check', 'leads_check', 'outbound_check', 'explorer')) NOT VALID;
