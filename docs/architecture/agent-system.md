@@ -6550,9 +6550,12 @@ list or command line changes either way.
 - **API:** `POST /api/v1/attention/summary`, read-only and operator-only:
   `{read_at, total, sections: [{kind, state, count, items, error}]}`, each
   item `{key, title, context, since, href, ref, facts}`.
+  `POST /api/v1/attention/settings_get` returns `{enabled}` to the operator,
+  including while off, without reading summary sources.
 - **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
-  only while the summary answers. Failing logins that were read are left to
-  the startup-check banner every page shows; a confirmation asked in the
+  only while the setting is on. The sidebar reads the setting rather than
+  requesting the summary on every page load. Failing logins that were read
+  are left to the startup-check banner every page shows; a confirmation asked in the
   dashboard chat links to that conversation.
 - **Chat:** `/todo` (and Telegram's `/todo@bot`) is answered by code next to
   `/new` and `/gates`, only in the operator's own turns

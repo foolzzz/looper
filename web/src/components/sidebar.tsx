@@ -22,7 +22,7 @@ import { SignOut } from "@/components/sign-out";
 import { ProjectDialog } from "@/components/project-dialog";
 import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { fetchOverview } from "@/lib/api";
-import { fetchAttention } from "@/lib/api-attention";
+import { attentionSettingsGet } from "@/lib/api-attention";
 import { intentsSettingsGet } from "@/lib/api-leads";
 import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
@@ -78,11 +78,14 @@ export function Sidebar({
     );
     return () => { live = false; };
   }, []);
-  // The "needs you" summary answers only while it is on (409 otherwise): its page is listed only then.
+  // Read the switch without collecting a summary (which correctly returns 409 while off).
   const [todoOn, setTodoOn] = useState(false);
   useEffect(() => {
     let live = true;
-    fetchAttention().then(() => { if (live) setTodoOn(true); }, () => { if (live) setTodoOn(false); });
+    attentionSettingsGet().then(
+      (settings) => { if (live) setTodoOn(settings.enabled === true); },
+      () => { if (live) setTodoOn(false); },
+    );
     return () => { live = false; };
   }, []);
   const navItems = [
