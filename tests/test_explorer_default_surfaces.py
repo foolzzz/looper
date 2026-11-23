@@ -1,6 +1,6 @@
 """Existing roles keep the exact pre-explorer runtime inputs.
 
-Digests were captured from origin/main before the explorer implementation. They
+Digests were captured from the pinned main revision before the explorer implementation. They
 cover argv, generated configuration, reported catalog tools and prompt blocks.
 """
 from dataclasses import replace
@@ -17,6 +17,10 @@ from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
 from tests.runtime_model_helpers import builtin_launch, resolved_profile
+
+
+BASELINE_SHA = "9e416f798214f86ca22097021ee20aa9bd7951ff"
+# main before #1554 merged; update only with an intentional off-path change, and say why in the PR.
 
 
 def surfaces(kind, role):
@@ -47,7 +51,7 @@ def surfaces(kind, role):
     return text.replace(str(Path(__file__).resolve().parents[1]), '<checkout>').encode()
 
 
-# Captured from origin/main; updating these requires an intentional existing-role change.
+# Captured from BASELINE_SHA; updating these requires an intentional existing-role change.
 BASELINE = {
     "claude-code/manager": "4043e724214ec5ccf03576be7371e9eebdfe483e7b5c572f01baa2d53eba1f65",
     "claude-code/planner": "e3a8c00cca444fb0eea5a8a0e6c4e4e10a65faabc72fa512a280efa3ca1cc9da",
@@ -81,9 +85,9 @@ def test_existing_role_runtime_inputs_byte_identical(kind, role):
 
 @pytest.mark.parametrize('role', ['manager', 'planner'])
 def test_resident_process_signature_inputs_match_main(role):
-    """Together with argv/prompt snapshots, pin the resident restart boundary to main."""
+    """Together with argv/prompt snapshots, pin the resident restart boundary to recorded main."""
     path = f'looper/agents/tiers/{role}.py'
-    baseline = subprocess.run(['git', 'show', f'origin/main:{path}'],
+    baseline = subprocess.run(['git', 'show', f'{BASELINE_SHA}:{path}'],
                               capture_output=True, check=True, text=True).stdout
     current = (Path(__file__).resolve().parents[1] / path).read_text()
 

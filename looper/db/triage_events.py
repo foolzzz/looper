@@ -30,10 +30,10 @@ async def get(event_id: int, *, db: Db | None = None) -> TriageEvent | None:
 
 
 async def for_message(event_seq: int, *, db: Db | None = None) -> list[TriageEvent]:
-    """Events citing this message, in id order; an uncited window is not an event citation."""
+    """Events citing this message, highest category first then earliest id; an uncited window is not an event citation."""
     rows = await _db(db).fetch(
         "SELECT e.* FROM triage_events e JOIN triage_event_sources s ON s.event_id = e.id "
-        "WHERE s.event_seq = $1 ORDER BY e.id", event_seq)
+        "WHERE s.event_seq = $1 ORDER BY CASE e.category WHEN 'important' THEN 0 WHEN 'digest' THEN 1 ELSE 2 END, e.id", event_seq)
     return [_event(row) for row in rows]
 
 
@@ -56,3 +56,23 @@ async def source_rows(event_ids: Sequence[int], *, db: Db | None = None) -> dict
     for row in rows:
         found.setdefault(row["event_id"], []).append(dict(row))
     return found
+
+
+async def owned_counts(run_id: str, *, db: Db | None = None) -> dict[int, int]:
+    """How many of the run's window messages each of its events owns; an event that owns none is absent.
+
+    A message belongs to one event: the highest category that cites it, then the earliest id (the order ``for_message``
+    reads in). An event fully covered by a higher one owns nothing, so it has no handoff of its own and no brief
+    entry of its own: its messages are told once, under the event that owns them. Context citations outside the
+    run's window own nothing.
+    """
+    rows = await _db(db).fetch(
+        "SELECT owner, count(*) AS n FROM ("
+        "SELECT DISTINCT ON (w.seq) w.seq, s.event_id AS owner "
+        "FROM subscription_runs r CROSS JOIN LATERAL unnest(r.window_seqs) AS w(seq) "
+        "JOIN triage_event_sources s ON s.event_seq = w.seq "
+        "JOIN triage_events e ON e.id = s.event_id AND e.run_id = r.run_id "
+        "WHERE r.run_id = $1 "
+        "ORDER BY w.seq, CASE e.category WHEN 'important' THEN 0 WHEN 'digest' THEN 1 ELSE 2 END, e.id) owned "
+        "GROUP BY owner", run_id)
+    return {row["owner"]: row["n"] for row in rows}

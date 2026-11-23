@@ -18,6 +18,7 @@ from looper.agents.runtimes.api import ApiRuntime, Descriptor, KEY_ENV
 from looper.agents.runtimes.api.adapter import RUNTIME_NOTE
 from looper.agents.runtimes.api.session import ApiSession
 from tests.runtime_model_helpers import resolved_profile
+from tests.role_support import EVERY_ROLE, ROLES_WITH_TOOLS, RUN_ONLY_ROLES
 
 
 PROVIDER = LegacyProviderSpec("provider-test", "Test account", AuthKind.API_KEY,
@@ -67,13 +68,12 @@ def test_api_profile_refuses_other_roles(runtime, role):
 def test_servable_roles_preserves_capabilities_and_applies_runtime_restriction(runtime, runtime_type):
     adapter = runtimes.ADAPTERS[runtime_type]
     assert registry.servable_roles(adapter.capabilities, runtime_type) == (
-        {"api": ["manager"], "claude-code": ["manager", "planner", "worker", "explorer", "reviewer", "processor", "advisor", "advice_check",
-                                             "leads_check", "outbound_check"],
-         "codex": ["manager", "planner", "worker", "explorer", "reviewer"]}[runtime_type])
+        {"api": ["manager"], "claude-code": EVERY_ROLE,
+         "codex": ROLES_WITH_TOOLS}[runtime_type])
     # A registered older version's recorded capabilities remain authoritative.
     assert registry.servable_roles([], runtime_type) == []
     assert registry.servable_roles([runtimes.Capability.RUN], runtime_type) == (
-        [] if runtime_type == "api" else ["worker", "explorer", "reviewer"])
+        [] if runtime_type == "api" else RUN_ONLY_ROLES)
 
 
 @pytest.mark.parametrize("changes,message", [

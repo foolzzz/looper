@@ -14,6 +14,7 @@ from looper.agents.runtimes.api import ApiRuntime
 from looper.db import profile_registry as db
 from tests.db_support import DSN, run_db
 from tests.test_profile_registry_db import _call
+from tests.role_support import RUN_ONLY_ROLES
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -199,7 +200,7 @@ def test_existing_runtime_keeps_stored_capabilities_and_unrestricted_roles(api, 
         row = await db.get_runtime(f"rt-{runtime_type}")
         view = service.runtime_view(row)
         assert view["capabilities"] == capabilities
-        assert view["roles"] == ["worker", "explorer", "reviewer"]
+        assert view["roles"] == RUN_ONLY_ROLES
         assert service.runtime_spec(row).capabilities == frozenset({runtimes.Capability.RUN})
         assert view["in_process"] is False
 

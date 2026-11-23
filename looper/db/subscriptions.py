@@ -271,6 +271,8 @@ _EXTRACTION_SCOPE = {
                 "(SELECT a.app_id FROM intent_alert_senders a WHERE a.source_id = e.source_id)))"),
 }
 
+_EXTRACTION_SCOPE["triage"] = _EXTRACTION_SCOPE["intents"]
+
 
 def extraction_scope(output_kind: str) -> str:
     """The SQL condition of what ``output_kind`` reads, over ``source_events e``, ``source_chats c`` and
@@ -370,7 +372,9 @@ async def runs_for_message(seq: int, *, db: Db | None = None) -> list[dict[str, 
 
     A seq between from_seq and to_seq is not necessarily selected. No source text is read or retained here.
     """
-    rows = await _db(db).fetch("SELECT * FROM subscription_runs WHERE $1 = ANY(window_seqs) ORDER BY run_id", seq)
+    # Array containment is the operator the GIN index on window_seqs serves.
+    rows = await _db(db).fetch(
+        "SELECT * FROM subscription_runs WHERE window_seqs @> ARRAY[$1]::bigint[] ORDER BY run_id", seq)
     return [_run_row(row) for row in rows]
 
 
