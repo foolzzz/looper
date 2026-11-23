@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from ..message import AgentAddress, MessageEnvelope, manager_address
 
 if TYPE_CHECKING:
+    from ..turn_context import SpeakerKind
     from ..delivery_guard import DeliveryDebt
     from .service import OpsScope
 
@@ -155,8 +156,13 @@ class Turn:
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
     # Why the turn runs; by default a user's when it answers a message, else Claude's own.
     origin: TurnOrigin | None = None
+    # Unset until per-turn context is wired; None preserves the existing authorization behavior.
+    speaker: SpeakerKind | None = None
+    operator_id_missing: bool = False
     # Initialized explicitly by delivery-guard wiring; absent when disabled.
     debt: DeliveryDebt | None = None
+    # The outside content its calls brought in (source, text), as the outbound review reads it: the leads it found.
+    outside: list[tuple[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.origin is None:

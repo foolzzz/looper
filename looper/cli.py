@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_msgflow_parser(commands)
     _add_ledger_parser(commands)
     _add_leads_parser(commands)
+    _add_memory_parser(commands)
     _add_decisions_parser(commands)
     commands.add_parser(
         "mcp-server",
@@ -204,6 +205,31 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
     export.add_argument("--out", required=True, help="The JSONL file to write (mode 600).")
     export.add_argument("--sample", type=int, default=20, help="Active leads to add, 0 to 500 (default 20).")
     for command in (search, mark, delete, export):
+        _add_location_flags(command)
+
+
+def _add_memory_parser(commands: argparse._SubParsersAction) -> None:
+    memory = commands.add_parser(
+        "memory", allow_abbrev=False, help="Read memory candidates and check what a memory write needs.",
+        description="Read memory candidates (what Looper may write to the knowledge vault once the operator confirms "
+                    "it) directly in PostgreSQL, also with the service stopped. Confirming is the dashboard's or the "
+                    "operator's direct chat's only. Exit codes: 0 done, 1 nothing found or a check failed, 2 usage, "
+                    "3 not configured, 4 refused (inside an agent run), 5 no such candidate, 6 database unusable.")
+    sub = memory.add_subparsers(dest="memory_command", required=True)
+    listing = sub.add_parser("list", allow_abbrev=False, help="List memory candidates, newest first.")
+    listing.add_argument("--state", default="open",
+                         help="open (default: not written, rejected or dropped), all, or one state.")
+    listing.add_argument("--kind", help="preference, feedback, decision, lesson, fact, commitment, person or project.")
+    listing.add_argument("--limit", type=int, default=50, help="1 to 200 (default 50).")
+    listing.add_argument("--json", action="store_true")
+    show = sub.add_parser("show", allow_abbrev=False,
+                          help="Show a candidate: its current revision's changes, its sources and events.")
+    show.add_argument("candidate", help="M-0042 or M-42.")
+    show.add_argument("--json", action="store_true")
+    check = sub.add_parser("check", allow_abbrev=False,
+                           help="Check what a write needs now (setting, git, branch, worktree folder); changes nothing.")
+    check.add_argument("--json", action="store_true")
+    for command in (listing, show, check):
         _add_location_flags(command)
 
 
@@ -335,6 +361,10 @@ def main(argv: list[str] | None = None) -> int:
         from .agents import leads_commands
 
         return leads_commands.run(args, _load_ops)
+    if args.command == "memory":
+        from .agents import memory_commands
+
+        return memory_commands.run(args, _load_ops)
     if args.command == "decisions":
         from .agents import decision_commands
 
