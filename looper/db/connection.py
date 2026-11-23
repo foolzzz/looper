@@ -165,6 +165,7 @@ _PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
 _CHANNEL_OUTBOX = "channel_outbox"
 _LEDGER = "ledger"
+_MANAGER_SESSIONS = "manager_sessions"
 _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
@@ -281,6 +282,7 @@ _SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
 _PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
+_MANAGER_SESSIONS_BLOCK = re.compile(r"-- manager sessions begin\n(.*?)-- manager sessions end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 _DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
 
@@ -632,6 +634,14 @@ def _proactive_deliveries_ddl() -> str:
     found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its proactive deliveries block")
+    return found.group(1)
+
+
+def _manager_sessions_ddl() -> str:
+    """The Manager session table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _MANAGER_SESSIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its manager sessions block")
     return found.group(1)
 
 
@@ -1208,6 +1218,12 @@ async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
         return False
     return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
+
+
+async def _manager_sessions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_SESSIONS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('manager_sessions') IS NOT NULL")
 
 
 async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
@@ -1846,6 +1862,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _channel_outbox_pending(conn):
             await conn.execute(_channel_outbox_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _CHANNEL_OUTBOX)
+        if await _manager_sessions_pending(conn):
+            await conn.execute(_manager_sessions_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_SESSIONS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1919,4 +1938,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
             or await _mid_turn_input_pending(conn)
-            or await _reminders_pending(conn)))
+            or await _reminders_pending(conn) or await _manager_sessions_pending(conn)))

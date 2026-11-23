@@ -28,11 +28,17 @@ second copy. Turning it on names the enabled bots that have no operator id.
 out; off by default (proactive delivery RFC section 2). Operator-only, through ``proactive_delivery.get`` and
 ``proactive_delivery.update``, like the delivery guard.
 
+``manager.session_routing.enabled`` and ``manager.sessions.max_resident``: whether the default Manager gives each
+group and each other sender's direct chat a session of its own, and how many sessions keep a process resident
+(``session_routing``; off, and 2). Operator-only. Turning routing on names the enabled bots that have no operator
+id: their direct chats stay in the main session. Configured through ``session_routing.get/update``.
+
 Turn context, timezone and reply language have separate operator-only
 ``turn_context_settings.get/update`` operations; they are not client chat settings.
 
-Stop, completion turns, research order, metrics, delivery guard, outbound writes, turn context and the delivery
-layer are kept in memory: ``load`` reads them at startup and updates refresh them. Until loaded, all are off.
+Stop, completion turns, research order, metrics, delivery guard, outbound writes, turn context, the delivery
+layer and session routing are kept in memory: ``load`` reads them at startup and updates refresh them. Until
+loaded, all are off.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ import math
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import session_routing
 from ..db import ledger as db_ledger
 from ..db import system_settings as db_settings
 
@@ -64,6 +71,8 @@ OUTBOUND_FIELDS = ("outbound_enabled", *OUTBOUND_DEFAULTS)
 DELIVERY_ENABLED_KEY = "delivery.enabled"
 DEFAULT_DELIVERY_ENABLED = False
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
+OPERATOR_FIELDS = ("ledger_enabled",)  # only the operator sets the ledger
+SESSION_ROUTING_FIELDS = ("session_routing_enabled", "max_resident")
 
 TURN_CONTEXT_KEY = "manager.turn_context.enabled"
 TIMEZONE_KEY = "user.timezone"
@@ -233,8 +242,10 @@ async def load() -> bool:
     stored = await db_settings.get_settings([
         STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
         TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY, DELIVERY_ENABLED_KEY,
+        session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY,
         *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
     ])
+    session_routing.apply_stored(stored)
     _turn_context_enabled = stored.get(TURN_CONTEXT_KEY) == "true"
     _timezone = stored.get(TIMEZONE_KEY)
     _reply_language = stored.get(REPLY_LANGUAGE_KEY, "zh-CN")
@@ -323,6 +334,49 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     await load()
     view = await settings_view()
     if values.get("ledger_enabled") is True:
+        from .channels.operator_ids import missing
+
+        view["missing_operator_ids"] = [
+            {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
+            for bot in await missing()]
+    return view
+
+
+def session_routing_view() -> dict[str, Any]:
+    return {"session_routing_enabled": session_routing.routing_enabled(),
+            "max_resident": session_routing.max_resident()}
+
+
+def checked_session_routing(body: Mapping[str, Any]) -> dict[str, Any]:
+    if unknown := [key for key in body if key not in SESSION_ROUTING_FIELDS]:
+        raise ValueError(f"unknown session routing setting {unknown[0]!r}")
+    if not body:
+        raise ValueError(f"give at least one of {', '.join(SESSION_ROUTING_FIELDS)} (null: the default)")
+    values: dict[str, Any] = {}
+    if "session_routing_enabled" in body:
+        value = body["session_routing_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("session_routing_enabled must be true, false or null")
+        values["session_routing_enabled"] = value
+    if "max_resident" in body:
+        value = body["max_resident"]
+        values["max_resident"] = None if value is None else session_routing.checked_max_resident(value)
+    return values
+
+
+async def update_session_routing(body: Mapping[str, Any]) -> dict[str, Any]:
+    values = checked_session_routing(body)
+    stored: dict[str, str | None] = {}
+    if "session_routing_enabled" in values:
+        value = values["session_routing_enabled"]
+        stored[session_routing.ROUTING_KEY] = None if value is None else ("true" if value else "false")
+    if "max_resident" in values:
+        value = values["max_resident"]
+        stored[session_routing.MAX_RESIDENT_KEY] = None if value is None else str(value)
+    await db_settings.put_settings(stored)
+    await load()
+    view = session_routing_view()
+    if values.get("session_routing_enabled") is True:
         from .channels.operator_ids import missing
 
         view["missing_operator_ids"] = [

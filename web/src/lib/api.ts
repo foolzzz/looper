@@ -565,7 +565,7 @@ export interface ChatSettings {
   completion_turns: CompletionTurns;
   /** Whether the ledger records what waits, what was decided and who does what. Off by default. */
   ledger_enabled: boolean;
-  /** Bots with no operator id, returned when enabling the ledger. */
+  /** Present when an update turns the ledger on: bots with no operator id. */
   missing_operator_ids?: MissingOperatorBot[];
 }
 
@@ -573,6 +573,33 @@ export interface ChatSettingsUpdate {
   stop_enabled?: boolean | null;
   completion_turns?: CompletionTurns | null;
   ledger_enabled?: boolean | null;
+}
+
+/** Operator-only session routing controls, independent of client chat settings. */
+export interface SessionRoutingSettings {
+  /** Whether the default Manager gives each group and each other sender's direct chat a session of its own. Off by default. */
+  session_routing_enabled: boolean;
+  /** How many sessions keep a process running (1..16, default 2). */
+  max_resident: number;
+  /** Present when an update turns session routing on: bots with no operator id. Empty when every bot has one. */
+  missing_operator_ids?: MissingOperatorBot[];
+}
+
+export interface SessionRoutingSettingsUpdate {
+  session_routing_enabled?: boolean | null;
+  max_resident?: number | null;
+}
+
+export async function fetchSessionRoutingSettings(): Promise<SessionRoutingSettings> {
+  const result = await callV1<SessionRoutingSettings>("/api/v1/session_routing/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateSessionRoutingSettings(body: SessionRoutingSettingsUpdate): Promise<SessionRoutingSettings> {
+  const result = await callV1<SessionRoutingSettings>("/api/v1/session_routing/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Operator-only turn-context settings; independent of client chat controls. */

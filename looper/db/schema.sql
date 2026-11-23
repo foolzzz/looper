@@ -1885,6 +1885,30 @@ ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_claim UUID;
 ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT
     REFERENCES manager_events(id) ON DELETE SET NULL;
 -- manager events end
+-- The default Manager's group and other-sender direct-chat sessions (the main one stays in agent_sessions).
+-- manager sessions begin
+CREATE TABLE IF NOT EXISTS manager_sessions (
+    manager_id      TEXT NOT NULL REFERENCES managers(id) ON DELETE CASCADE,
+    session_key     TEXT NOT NULL,
+    kind            TEXT NOT NULL CHECK (kind IN ('group', 'dm')),
+    channel_id      TEXT NOT NULL,
+    chat            TEXT NOT NULL,
+    session_id      TEXT,
+    session_totals  JSONB NOT NULL DEFAULT '{}',
+    runtime_type    TEXT,
+    profile_id      TEXT,
+    provider_id     TEXT,
+    clean_start     BOOLEAN NOT NULL DEFAULT false,
+    pending_handoff TEXT,
+    context_tokens  INTEGER,
+    last_turn_cost_usd DOUBLE PRECISION,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_active_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (manager_id, session_key),
+    CONSTRAINT manager_sessions_key CHECK (session_key = kind || ':' || channel_id || ':' || chat)
+);
+CREATE INDEX IF NOT EXISTS idx_manager_sessions_active ON manager_sessions (manager_id, last_active_at DESC);
+-- manager sessions end
 -- A database that gets the column above later builds this index online (connection.py ``_ONLINE_STEPS``).
 CREATE INDEX IF NOT EXISTS idx_schedule_notifications_manager_event ON schedule_notifications (manager_event_id)
     WHERE manager_event_id IS NOT NULL;

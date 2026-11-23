@@ -47,14 +47,85 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   to its conversation (the resident runtime and its lifecycle lock, the saved
   session, the turn lock and the turn holding it, the turn's research sources,
   what the next turn is told) is one `ManagerSession`
-  (`looper/agents/tiers/manager_session.py`), `main`, the only one so far: a
-  group chat's turns run in the operator's session, which
-  `session_routing.group_isolation` reports as `shared` for a feature that
-  must not reach a group through it. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  (`looper/agents/tiers/manager_session.py`). Every Manager has `main`; by
+  default it is the only one, and a group chat's turns run in the operator's
+  session. [Session routing](#manager-session-routing) gives the default
+  Manager more. `session_routing.group_isolation` tells a feature that must
+  not reach a group through the operator's context how far a group's turns
+  are kept apart: `shared`, `routed` or `isolated`. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
   otherwise
+- <a id="manager-session-routing"></a>**Session routing**
+  (`manager.session_routing.enabled`, off by default; Settings → Chat;
+  operator-only, like `manager.sessions.max_resident`): the default Manager
+  runs each conversation in the session its key names
+  (`session_routing.session_key_for`). The dashboard chat (with or without an
+  API client) and the operator's own direct chats are `main`. A Lark or
+  Telegram group (its topics included) is `group:<channel id>:<chat>`, and
+  another allowed sender's direct chat is `dm:<channel id>:<chat>`. A bot
+  with no operator id cannot tell its operator apart, so its direct chats stay
+  in `main`; turning routing on lists such bots.
+  - The operator-only `session_routing.get/update` operations read and store
+    `session_routing_enabled` and `max_resident`; null restores off and 2.
+    Update is high risk and declares confirmation. Turning routing on returns
+    `missing_operator_ids` for bots whose direct chats stay in main. The
+    dashboard and generated CLI use these operations; `chat_settings` keeps
+    only reply stopping, completion turns, research order and the ledger.
+    Lark and Telegram need no new configuration command.
+  - Sessions run in parallel; inside one, messages run in order. The message
+    loop hands each user message to its session's worker. Completion wake-ups
+    resolve the bot's identity before claiming events, then use the event
+    actually claimed to select their worker
+    (`tiers/manager_routing.py`). The worker runs it on that session and only
+    then settles it on the bus (`subscribe(settle=False)`), so a message cut
+    off replays at restart. Messages that run no model turn stay in the loop.
+    An identity read failure retains a previously known identity or pauses
+    processing for retry; it never counts as an unconfigured identity.
+  - `main` stays in `agent_sessions`; the others are rows of
+    `manager_sessions`. A read or write there that fails gives the turn a new
+    session, never `main`'s.
+  - Each non-main resident has its own label (`manager.<kind>.<digest>`,
+    for its logs and session directory), workspace, runtime state, caches, prompts,
+    MCP configuration and binding file under
+    `.local/manager-sessions/<digest>/`. Its MCP entry carries a distinct
+    credential: the server checks that a binding belongs to that credential's
+    session, so learning another binding cannot authorize its calls. Only
+    Looper's platform tools are available: no local file or shell tools,
+    catalog MCP servers, plugins, skills or subagents. Claude Code and the
+    in-process API runtime support this mode; other runtimes refuse a
+    non-main turn without falling back to main. Main's launch is unchanged.
+    Claude Code shares only its CLI login with the operator (the original
+    keychain namespace on macOS), keeping settings and histories separate.
+    A default macOS keychain login retains the original `HOME` so its native
+    refresh locks are shared; the session's explicit Claude configuration,
+    XDG and temporary directories keep its conversation state separate.
+    This tool boundary runs under the
+    server's OS user; it does not sandbox a compromised runtime executable.
+    Calls remain bound until the routed turns end, even after routing is
+    switched off, whatever `chat.stop_enabled` says.
+  - At most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
+    process. Starts reserve capacity atomically, including saved-session
+    restores; successful, failed and cancelled starts release their reservation.
+    A session other than main that would start one at the cap stops
+    the least recently active idle one other than main; its session id stays
+    saved and resumes on its next message. When none is idle, the message
+    waits, with the status 「排队中：其他会话正忙」, until a turn ends. Main
+    never waits and is never stopped for another. With a cap of 1, a session
+    other than main still runs its turn when only main holds a process, and
+    stops it once the turn is over.
+  - `/new` resets only the session it was sent in. In a group or dm session
+    it leaves main's pending confirmations and remembered leads alone. The
+    profile chosen for the session (`/profile`, `select_session_profile`) is
+    main's: another session follows the settings and refuses `/profile`.
+  - Switched off, new messages go to `main` again. Turns under way finish,
+    what main's worker holds keeps its order, and the other sessions'
+    processes stop once idle (the fleet's idle sweep). Their rows and saved
+    runtime histories stay, including across a restart while routing is off.
+  - What a new group or dm session's first turn sees is not trimmed yet: its
+    resume brief still carries every chat's recent messages, so routing is
+    not for production use before that lands.
 - Acts on Looper only through its platform tools
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells
@@ -178,7 +249,7 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   types are rejected, and member wording follows the chat kind. **Manager integration is pending:** saving these
   settings does not yet replace the `Channel:` line, inject the contract or set a turn's speaker. The dashboard, Lark, Telegram and API-client
   turns therefore retain their current prompt and authorization behavior until that integration lands.
-- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads), so
+- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads; with [session routing](#manager-session-routing) on, groups and other senders' direct chats have their own), so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
   direct message`, `Channel: a Lark group chat, from <sender>` (the name the
@@ -6509,7 +6580,8 @@ off; `outbound_review.get` and `outbound_review.update`).
   `POST /api/agent/v1/outbound/check` with the Manager's token, waits for the answer at most `CHECK_TIMEOUT_SEC`
   (60 s), and denies when it gets none; Claude Code waits for the hook `HOOK_TIMEOUT_SEC` (90 s), since it runs a
   call whose hook failed or timed out. Its config (the URL, the token, the waits) is
-  `<runtime root>/.local/outbound-hook/<manager>.json`, readable by the operator only.
+  `<runtime root>/.local/outbound-hook/<manager>.json`, readable by the operator only. Routed sessions have their own
+  config and credential; calls, loaded MCP trust and recent file excerpts stay within that session.
   - **What runs at once** is decided by the tool's type (`outbound_hook.level_of`): Claude Code's built-in tools have
     a level each (`BUILTIN_LEVELS`: `Bash` and `Monitor` are `unknown`; `WebSearch`, `WebFetch`, `RemoteTrigger` and
     `SendMessage` `external`); a tool not listed is `unknown`. Looper's own tools are `inside` here (`ManagerOps.call`
@@ -6775,6 +6847,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; its chats (kind, name, inclusion, `bridge_*` file state); thread cursors and people names (not used yet); one row per ingest run with its counts; and the events, each unique per source by `external_id`, with its `seq`, send time, `text`, raw `body` and `origin` |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
+| `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)` (`session_key` = `kind:channel_id:chat`): the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), and `last_active_at`. `main` stays in `agent_sessions` |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
@@ -7280,6 +7353,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/manager_session/{get,select_profile}` | POST | `manager_session.{get,select_profile}` |
 | `/api/v1/operator_chat/{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` | POST | `operator_chat.{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` |
 | `/api/v1/chat_settings/{get,update}` | POST | `chat_settings.{get,update}` |
+| `/api/v1/session_routing/{get,update}` | POST | `session_routing.{get,update}` |
 | `/api/v1/clients/{list,create,revoke}` | POST | `clients.{list,create,revoke}` |
 | `/api/v1/roles/{list,get,update,reset_prompt}` | POST | `roles.{list,get,update,reset_prompt}` |
 | `/api/v1/agent_settings/{get,update_system,update_role}` | POST | `agent_settings.{get,update_system,update_role}` |
