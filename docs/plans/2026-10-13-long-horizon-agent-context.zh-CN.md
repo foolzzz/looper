@@ -63,7 +63,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
-| P4.7 花费守卫 | PR 1：运行前预留、历史 P95 与每日计数重算、全部模型回合及调度触发的观察接线、操作者只读展示已实现；默认关闭，仅支持 `off/observe`；定向测试 433 通过，隔离服务及替身 Manager 回合已验证，真实模型验证待批准；执行拦截、等待、通知、暂停与用量窗口按 RFC 后续 PR 交付 | [RFC](../architecture/rfcs/cost-guard-v0.zh-CN.md) |
+| P4.7 花费守卫 | 运行前预留、观察模式与操作者只读展示已交付；任务和全局每日上限的 `enforce`、`ask` 等待、持久化决定/到期、操作者管家回合例外、私聊回复与最小花费界面已实现，默认仍为 `off`。角色每日额度、定时预算动作、无人回复推送与用量窗口仍按 RFC 后续阶段交付；[替身服务验收](../validation/cost-guard/run.md) | [RFC](../architecture/rfcs/cost-guard-v0.zh-CN.md) |
 | 热升级 v0 | 组件规划、排空、Claude Code 看护与跨重启接管 | 默认关闭；macOS launchd 替身链路已验证，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍有缺口（[证据](../validation/kept-runs/README.md)） | M9a、M9c |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发和控制台命令型表单 | 现有定时任务；热升级排空功能 |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发，以及管家创建、配置展示与确认命令型定时任务 | 现有定时任务；热升级排空功能 |
