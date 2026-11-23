@@ -196,3 +196,26 @@ def test_a_supplement_read_back_from_the_journal_keeps_who_gave_it(monkeypatch: 
         assert (entry.from_operator, entry.via, entry.outside) == (False, "manager:lark", True)
 
     run_db(test, monkeypatch)
+
+
+def test_on_a_new_sessions_gate_threads_fence_outside_messages_and_authors() -> None:
+    from looper.agents.tiers.planner import _message_line, _thread_lines
+
+    off, on = _thread_lines(_messages(), 10_000), _thread_lines(_messages(), 10_000, fence=True)
+    assert off == [_message_line(m) for m in _messages()]
+    assert on[0] == untrusted.LEAD_LINE and on[1] == _message_line(_messages()[0])
+    assert sum(line.count("</untrusted>") for line in on) == 3 and "<ignore" not in "\n".join(on)
+    assert not any("Mallory" in line and "<untrusted" not in line for line in on)  # no author outside a block
+
+
+def test_on_the_lessons_journal_fences_an_outside_supplement() -> None:
+    from looper.agents.tiers import journal
+    from looper.agents.tiers.journal import JournalEntry, JournalKind
+
+    entries = [JournalEntry("", "", HOSTILE, kind=JournalKind.SUPPLEMENT, via="manager:lark", from_operator=False),
+               JournalEntry("s1", "s1", "Built it.", kind=JournalKind.STEP_ACCEPTED)]
+    assert f"- {HOSTILE}" in journal.lessons_journal(entries)
+    on = journal.lessons_journal(entries, fence=True)
+    assert untrusted.LEAD_LINE in on and f"- {HOSTILE}" not in on
+    assert "- " + untrusted.fence(HOSTILE, source=untrusted.Source.SUPPLEMENT, provenance={
+        "via": "manager:lark"}).replace("\n", "\n  ") in on

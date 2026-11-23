@@ -454,10 +454,12 @@ def progress_notes(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return notes
 
 
-def lessons_journal(entries: Sequence[JournalEntry]) -> list[str]:
-    """The journal a LESSONS turn distills: the supplements, then every other kind."""
+def lessons_journal(entries: Sequence[JournalEntry], *, fence: bool = False) -> list[str]:
+    """The journal a LESSONS (or VAULT) turn distills: the supplements, then every other kind. With ``fence``, an
+    outside supplement is a ``supplement`` block, so nothing it says goes into lasting knowledge as the user's."""
     kinds = tuple(kind for kind in _HEADINGS if kind not in _REVIEW_KINDS or any(e.kind is kind for e in entries))
-    lines = supplements(entries, title="Supplements (what the user added to the task while it ran, oldest first)")
+    lines = supplements(entries, title="Supplements (what the user added to the task while it ran, oldest first)",
+                        fence=fence)
     journal = _by_kind("Task journal (newest first under each heading)", _newest_first_by_priority(entries, kinds),
                        LESSONS_JOURNAL_MAX_CHARS, kinds, _ENTRIES)
     if lines and journal:

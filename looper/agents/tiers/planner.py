@@ -763,14 +763,19 @@ def _message_line(message: Mapping[str, Any], *, fenced: bool = False) -> str:
     return f"- ({', '.join(filter(None, [who, *where]))}) {text}".rstrip()
 
 
+def _outside_message(message: Mapping[str, Any]) -> bool:
+    """A user's gate message the operator did not write in their own turn (``from_operator`` not TRUE); an empty one
+    (an end of the discussion) too, as its author is outside content as well."""
+    return str(message.get("role") or MessageRole.USER.value) == MessageRole.USER.value \
+        and message.get("from_operator") is not True
+
+
 def _message_lines(messages: Sequence[Mapping[str, Any]], *, fence: bool) -> list[str]:
-    """A gate turn's new messages (``_message_line``); with ``fence`` (the untrusted fence is on), a user's message
-    the operator did not write in their own turn has its text in a ``gate_message`` block, after one lead line."""
-    # An empty one (an end of the discussion) too: its author is outside content as well, named inside the block.
-    outside = [m for m in messages if fence and str(m.get("role") or MessageRole.USER.value) == MessageRole.USER.value
-               and m.get("from_operator") is not True]
-    lead = [untrusted.LEAD_LINE] if outside else []
-    return [*lead, *(_message_line(message, fenced=any(message is m for m in outside)) for message in messages)]
+    """A gate turn's new messages (``_message_line``); with ``fence`` (the untrusted fence is on), an outside one
+    (``_outside_message``) has its text and author in a ``gate_message`` block, after one lead line."""
+    outside = fence and any(_outside_message(m) for m in messages)
+    return [*([untrusted.LEAD_LINE] if outside else []),
+            *(_message_line(message, fenced=fence and _outside_message(message)) for message in messages)]
 
 
 def _retry_due(gate: Gate, now: datetime) -> bool:
@@ -826,19 +831,21 @@ def _tail_text(text: str, limit: int) -> str:
     return tail[start:].decode("utf-8", errors="ignore")
 
 
-def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int) -> list[str]:
+def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int, *, fence: bool = False) -> list[str]:
     """``messages`` as ``_message_line`` shows them, the newest that fit in ``limit`` characters, oldest first,
-    after a note on how many older ones were left out."""
+    after a note on how many older ones were left out. With ``fence``, an outside one (``_outside_message``) is in a
+    ``gate_message`` block, and one lead line comes before them."""
     shown: list[str] = []
     used = 0
     for message in reversed(messages):
-        line = _message_line(message)
+        line = _message_line(message, fenced=fence and _outside_message(message))
         if used + len(line) > limit:
             break
         shown.insert(0, line)
         used += len(line)
     omitted = len(messages) - len(shown)
-    return ([f"({omitted} older message(s) left out)"] if omitted else []) + shown
+    lead = [untrusted.LEAD_LINE] if fence and any(_outside_message(m) for m in messages[omitted:]) else []
+    return ([f"({omitted} older message(s) left out)"] if omitted else []) + lead + shown
 
 
 def _verdict_reason(verdict: Mapping[str, Any], findings: str, summary: str) -> str:
@@ -5157,6 +5164,7 @@ class PlannerAgent:
         """The resume brief's lines on each waiting gate's discussion so far: what the earlier session had of it
         (the user's messages no turn had come in their [GATE] turn)."""
         lines: list[str] = []
+        fence = await untrusted.enabled()
         for step in plan.waiting_gates():
             gate = step.gate
             assert gate is not None
@@ -5169,7 +5177,7 @@ class PlannerAgent:
             had = [m for m in thread if m.get("role") != MessageRole.USER.value or m["id"] <= gate.delivered_through]
             if any(m.get("role") != MessageRole.LOOPER.value for m in had):
                 lines += ["", f"The discussion so far in gate {step.label} \"{_clip(gate.topic, 200)}\" (your earlier "
-                              "session had it; oldest first):", *_thread_lines(had, THREAD_MAX_CHARS)]
+                              "session had it; oldest first):", *_thread_lines(had, THREAD_MAX_CHARS, fence=fence)]
         return lines
 
     def _resume_brief(self, plan: TaskPlan, gate_threads: Sequence[str] = ()) -> str:
@@ -5739,6 +5747,7 @@ class PlannerAgent:
                 await self._activity("error", f"Warning: {problem}"[:500])
             try:
                 self._vault_closed = True
+                self._fence = await untrusted.enabled()
                 line = await self._ask(TurnKind.VAULT, self._vault_message(plan, ended, config, rules), parse_vault)
             except PlannerTurnError as exc:
                 await self._activity("error", f"Warning: the Planner's vault closeout failed: {exc}"[:500])
@@ -5765,7 +5774,7 @@ class PlannerAgent:
                 "The vault has no rules file: keep notes short, one topic each, and update a note rather than "
                 "add a near-duplicate."]),
             "",
-            *journal.lessons_journal(plan.journal),
+            *journal.lessons_journal(plan.journal, fence=self._fence),
             "",
             "End your reply with exactly one ```json block, and nothing after it:",
             "```json",
@@ -5786,6 +5795,7 @@ class PlannerAgent:
                                           f"${format_usd(cap)} cap (task_budget_usd)")
             return
         try:
+            self._fence = await untrusted.enabled()
             lessons = await self._ask(TurnKind.LESSONS, self._lessons_message(plan), parse_lessons)
         except PlannerTurnError as exc:
             await self._activity("error", f"Warning: the Planner could not write the task's lessons: {exc}"[:500])
@@ -5815,7 +5825,7 @@ class PlannerAgent:
             "project's knowledge, which later tasks of the project read: the findings, pitfalls, commands and "
             "conventions that will still hold. Leave out what mattered to this task only. Do not change any files.",
             "",
-            *journal.lessons_journal(plan.journal),
+            *journal.lessons_journal(plan.journal, fence=self._fence),
             "",
             f"Write the document in Markdown, at most {journal.LESSONS_MAX_CHARS} characters. End your reply with "
             "exactly one ```json block, and nothing after it:",

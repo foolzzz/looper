@@ -6434,10 +6434,12 @@ writes what it wrote before, byte for byte.
   call is when it ran in the operator's own turn or with the operator's token (`ops.service.operator_call`); the
   dashboard's are, a `/gate` command there too unless an API client sent it. A message that reached a closed gate
   keeps it as the supplement it becomes. The Planner's [GATE] turn fences a user's message whose `from_operator`
-  is not TRUE (`gate_message`, an empty end of the discussion too, its author inside the block). Such a supplement
-  is a `supplement` block wherever the journal shows it: the [CHAT] and [RESTART] turns' new and earlier ones,
-  the plan view's progress, the PLAN turn and the Workers' and Reviewers' task section (not the Planner's own gate
-  conclusion). NULL (rows from before the column) is fenced too.
+  is not TRUE (`gate_message`, an empty end of the discussion too, its author inside the block), and so does a new
+  session's resume brief when it replays a waiting gate's earlier discussion. Such a supplement is a `supplement`
+  block wherever the journal shows it: the [CHAT] and [RESTART] turns' new and earlier ones, the plan view's
+  progress, the PLAN turn, the Workers' and Reviewers' task section, and the [LESSONS] and [VAULT] turns that turn
+  the journal into lasting knowledge (not the Planner's own gate conclusion). NULL (rows from before the column) is
+  fenced too.
 
 ### Turns Claude runs on its own
 
