@@ -9,6 +9,7 @@ from looper.agents import profile_registry as service
 from looper.agents.runtimes import AuthKind, VendorType
 from looper.db import agent_setting_layers as layers, connection, profile_registry as db
 from tests.db_support import DSN, run_db
+from tests.role_support import EVERY_ROLE
 
 SECRET = "sk-synthetic-registry-read-test-only"
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -123,8 +124,7 @@ def test_every_layer_and_usage_reads_the_same_model_reference(monkeypatch):
         assert usage['allowed_in'] == ['Test project']
         view = service.profile_view(profile, usage)
         assert view['profile_id'] == 'agent-test' and view['used_by'] == usage
-        assert view['roles'] == ['manager', 'planner', 'worker', 'explorer', 'reviewer', 'processor', 'advisor', 'advice_check',
-                                 'leads_check', 'outbound_check']
+        assert view['roles'] == EVERY_ROLE
         assert view['cost']['source'] == 'provider_price'
         assert view['cost']['unpriced'] == ['unknown-model'] and view['warnings']
         assert SECRET not in repr((rows, view))
@@ -215,8 +215,7 @@ def test_profile_view_preserves_usage_cost_and_warnings_from_normalized_settings
     assert view['profile_id'] == 'agent-test' and view['model_id'] == 'model-test'
     assert view['model']['name'] == 'unknown-model[1m]'
     assert view['provider']['provider_id'] == 'prov-test' and view['provider_name'] == 'Saved account'
-    assert view['roles'] == ['manager', 'planner', 'worker', 'explorer', 'reviewer', 'processor', 'advisor', 'advice_check',
-                             'leads_check', 'outbound_check'] and view['used_by'] == used
+    assert view['roles'] == EVERY_ROLE and view['used_by'] == used
     assert view['cost'] == {'source': 'provider_price', 'equivalent': False, 'unpriced': ['unknown-model[1m]']}
     assert view['warnings'] and view['custom_prompt'] == 'Saved prompt'
     assert 'wrong-model' not in repr(view)
