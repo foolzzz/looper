@@ -35,7 +35,7 @@ def current_evidence(runs: Iterable[Mapping[str, Any]]) -> tuple[Mapping[str, An
     return tuple(latest.values())
 
 
-def gate(checks: Sequence[Check], current: Iterable[Mapping[str, Any]], head: Version | str) -> Gate:
+def gate(checks: Sequence[Check], current: Iterable[Mapping[str, Any]], head: Version) -> Gate:
     """A step passes exactly when all required checks passed on its current version.
 
     ``current`` belongs to one step. Counters are supplied by the caller from
@@ -53,7 +53,7 @@ def gate(checks: Sequence[Check], current: Iterable[Mapping[str, Any]], head: Ve
             continue
         state = row["state"]
         measured = (row.get("head_sha"), row.get("content_sha"))
-        matches = measured[0] == head if isinstance(head, str) else measured == head
+        matches = measured == head
         if state == CheckState.ERROR:
             errored.append(check.id)
         elif state == CheckState.STALE or not matches:
@@ -61,4 +61,4 @@ def gate(checks: Sequence[Check], current: Iterable[Mapping[str, Any]], head: Ve
         elif state != CheckState.PASSED or row.get("protected_changed"):
             failed.append(check.id)
     return Gate(not (failed or errored or stale), tuple(failed), tuple(errored), tuple(stale),
-                current=rows, head=(head, None) if isinstance(head, str) else head)
+                current=rows, head=head)
