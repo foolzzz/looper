@@ -21,10 +21,12 @@ bounded background tasks and failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature, successfully sent delivery reply rates
-for 1–30 days. Housekeeping retains proactive rows for 90 days. Proactive delivery
-recording owns the table's single named migration:
+for 1–30 days. Housekeeping retains proactive rows for 90 days whether or not
+metrics are on, because delivery writes the same table while that switch is off.
+Proactive delivery recording owns the table's single named migration:
 one row per message, with the send receipt in `outcome`. `source` includes
-`completion` and `user_reminder`; `chat_kind` is `direct` or `group`.
+`completion`, `user_reminder` and `morning_brief` (the digest itself); `chat_kind`
+is `direct` or `group`.
 Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
 idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries update
 only the receipt, preserving the first decision. Nullable `decision`, `reason`,
@@ -6299,7 +6301,8 @@ again keeps its first decision and the channel's receipt lands on the same
 row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
 `sent`, `rejected` or `unknown`, `sent_at`, `external_id`) on the same row as
-the metrics. Off, the layer writes nothing. Wired so far: gate
+the metrics. A later try of the same message replaces a `rejected` receipt.
+Off, a send point that switch controls writes nothing. Wired so far: gate
 reminders, task notices to Lark and Telegram, subscription digest pushes, and
 initial and new-evidence intent pushes. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
 user is `blocking`, like its reminders. The channel checks a task-end notice
@@ -6319,9 +6322,46 @@ the next poll. Deferred or dropped intents retain their post without claiming
 it or consuming a send attempt, and uncertain sends are never retried. Final
 intent edits and fallback replies, subscription alerts and failure notices,
 task progress, completion turns, the dashboard chat and other senders retain
-their existing paths. Keep the switch off until the briefing can read deferred messages; digest consumption
-and the delivery settings UI are not delivered here.
+their existing paths. The delivery settings UI is not delivered here.
 Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+A morning brief (`source` `morning_brief`) is sent uncounted and is never
+deferred: it is the digest. The brief has its own switch and still calls `deliver`
+while the delivery switch is off.
+
+### Morning brief
+
+On a workday (Monday to Friday; a weekday holiday still sends), at
+`morning_brief.time` (09:15 by default) in `user.timezone` (else the server's
+zone, `turn_context.zone()`), one brief goes to each enabled bot's operator
+direct chat. It names what waits (the needs-you summary), reminders due that
+local day, and proactive messages deferred into the digest (`decision`
+`digest`). Every brief reads from the first attempt's dates (Monday also
+Saturday and Sunday) through the day being sent, except digest rows already
+recorded by id in `morning_brief_consumed`. The claim stores the ids that
+read returned, in that same write. A sent or uncertain brief records them in
+the same transaction as its row. A refusal records none and clears the stored
+ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
+that stops before the record is `uncertain` on restart, and that recovery
+consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
+insert had not committed is therefore still read once, on the next brief.
+`consumed_until` is the check time, not a watermark. Every section empty means
+nothing is sent. The switch, whether the
+channel is enabled and who the operator is are read again after the summary is
+collected and again immediately before the post. The switch is read again after
+the operator
+query returns. A fresh claim that then fails that check is deleted; a claim
+that continued a refusal is put back as that refusal, with the attempt count
+it had. The switch
+`morning_brief.enabled` is off by default and operator-only
+(`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
+switch and does nothing else. One `morning_briefs` row per local date and chat
+makes a restart and a second server send it at most once. A send that stops
+mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
+decision and the channel receipt share one `proactive_deliveries` row. A later
+successful try replaces a rejected receipt on that row (`outcome`, `sent_at`,
+`external_id`). A receipt already recorded as `sent` or `unknown` keeps those
+three fields. Design:
+[morning brief RFC](rfcs/morning-brief-v0.zh-CN.md).
 
 ### Card buttons
 

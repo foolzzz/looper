@@ -62,6 +62,7 @@ from .source_service import SourceService, own_bot_app_ids
 from .intent_push import IntentPushService
 from .memory_write import MemoryWriteService
 from .reminders import ReminderService
+from .morning_brief import MorningBriefService
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
@@ -1001,6 +1002,7 @@ async def _run_agent_system_watched(
             scheduler.manager_busy = lambda manager_id: bool((agent := fleet.get(manager_id)) is not None
                                                              and agent.busy)
             await fleet.load()
+            morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
             from .completion_service import CompletionService
             completion_service = CompletionService(
                 bus=bus, manager_running=fleet.is_running, drain=drain,
@@ -1118,6 +1120,7 @@ async def _run_agent_system_watched(
         await intent_push_service.start()
         await memory_writer.start()
         await reminder_service.start()  # idle while reminders are off
+        await morning_brief_service.start()  # idle while the morning brief is off
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
@@ -1188,6 +1191,7 @@ async def _run_agent_system_watched(
             await intent_push_service.stop()
             await memory_writer.stop()
             await reminder_service.stop()
+            await morning_brief_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()
             await scheduler.stop()
