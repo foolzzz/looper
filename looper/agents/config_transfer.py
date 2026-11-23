@@ -137,6 +137,8 @@ _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_p
                     "notify", "notify_format", "user_gates")
 _COMMAND_FIELDS = ("command", "env", "env_file")
 _ALERT_FIELDS = ("success_deadline", "alert_failures_after", "alert_stale_after_seconds", "alert_overlap_after")
+# The throttle fields: in the file only when set (a schedule without them exports as before).
+_THROTTLE_FIELDS = ("active_hours", "idle_only")
 _AGENT_SCHEDULE_FIELDS = ("requirement", "gate_command", "gate_timeout_seconds", "run_budget_usd",
                           "daily_budget_usd", "user_gates")
 
@@ -456,6 +458,7 @@ def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> 
         for name in (*_AGENT_SCHEDULE_FIELDS, "profiles", "task_limits"):
             entry.pop(name)
     entry.update({name: row[name] for name in _ALERT_FIELDS if row.get(name) is not None})
+    entry.update({name: row[name] for name in _THROTTLE_FIELDS if row.get(name)})
     if row.get("template_key"):
         entry["template_key"] = row["template_key"]
         entry["template_inputs"] = dict(row.get("template_inputs") or {})
@@ -2409,7 +2412,7 @@ class _Importer:
         from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 
         entry = _mapping(entry, "a schedule")
-        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS,
+        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS, *_THROTTLE_FIELDS,
                                       "notify_target", "profiles", "task_limits", "repoint", "manager",
                                       "template_key", "template_inputs"})
         if unknown:
@@ -2440,7 +2443,7 @@ class _Importer:
                         continue
                 if name not in ("cron", "timezone", "run_timeout_seconds"):
                     values[name] = schedules._PARSERS[name](entry.get(name, defaults.get(name)))
-            for name in (*_COMMAND_FIELDS, *_ALERT_FIELDS):
+            for name in (*_COMMAND_FIELDS, *_ALERT_FIELDS, *_THROTTLE_FIELDS):
                 if name in _COMMAND_FIELDS and kind == "agent" and name not in entry:
                     continue
                 raw = entry.get(name)
@@ -2556,7 +2559,7 @@ class _Importer:
             current = None
             if row is not None:
                 current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS,
-                                                        "run_timeout_mode", "notify_channel",
+                                                        *_THROTTLE_FIELDS, "run_timeout_mode", "notify_channel",
                                                         "notify_chat", "manager_id", "template_key", "template_inputs")}
                 current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
                 current["task_limits"] = dict(row["task_limits"])
