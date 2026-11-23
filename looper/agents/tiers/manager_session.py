@@ -8,6 +8,9 @@ sets (``ManagerAgent._current``), else main.
 from __future__ import annotations
 
 import asyncio
+import logging
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
@@ -26,7 +29,31 @@ if TYPE_CHECKING:
     from .turn_token import TurnToken
     from .manager_budget import BudgetTurn
 
+logger = logging.getLogger(__name__)
+
 MAIN_SESSION = "main"
+
+
+_REPLACED: list[weakref.WeakMethod[Callable[[str], None]]] = []
+
+
+def on_session_replaced(listener: Callable[[str], None]) -> None:
+    """Call ``listener(key)`` whenever a Manager session's saved session is cleared or replaced: /new, the dashboard
+    reset, a switch of agent, a rebuild after a failed resume. Held weakly. The key is the session's, not its
+    Manager's, so a listener drops what it kept for that key, whichever Manager's session it was."""
+    _REPLACED.append(weakref.WeakMethod(listener))  # type: ignore[arg-type]
+
+
+def _session_replaced(key: str) -> None:
+    for ref in list(_REPLACED):
+        listener = ref()
+        if listener is None:
+            _REPLACED.remove(ref)
+            continue
+        try:
+            listener(key)
+        except Exception:  # a listener must never abort the reset that called it
+            logger.exception("a listener of the reset of Manager session %s failed", key)
 
 
 @dataclass(frozen=True)
@@ -93,6 +120,13 @@ class ManagerSession:
     last_activity: float
     turn_ended_at: float | None = None  # this session's own worker/loop end, for main's idle-check clock
     budget: BudgetTurn | None = None  # enabled turn only; retained through reply and session maintenance
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # The one primitive every reset path goes through: a saved session cleared or replaced by another.
+        old = self.__dict__.get("session_id") if name == "session_id" else None
+        object.__setattr__(self, name, value)
+        if old is not None and value != old:
+            _session_replaced(self.key)
 
 
 _FIELDS = frozenset(f.name for f in fields(ManagerSession))

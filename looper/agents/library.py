@@ -407,6 +407,8 @@ class AgentLibrary:
     project_id: str | None = None
     # The tools of a scoped Manager's own MCP server (None: the default Manager's, every one); DSH checks them.
     manager_tools: tuple[str, ...] | None = None
+    # Names of deprecated installs this load dropped. Not part of view() or record().
+    skipped_deprecated: tuple[str, ...] = ()
 
     @property
     def sha256(self) -> str | None:
@@ -599,8 +601,12 @@ async def load_installed(runtime_root: Path, role: str, project_id: str | None =
     except Exception:
         logger.warning("cannot read the installed items; the agent runs without them", exc_info=True)
         return AgentLibrary(error="the installed items could not be read", role=role, project_id=project_id)
+    # One filter, before resolve, so a deprecated skill cannot shadow another of the same name.
+    from .skill_lifecycle import partition_deprecated
+
+    rows, skipped = partition_deprecated(rows)
     if not rows:
-        return AgentLibrary(role=role, project_id=project_id)
+        return AgentLibrary(role=role, project_id=project_id, skipped_deprecated=skipped)
     resolved = resolve_installed(rows, project_id)
     items = tuple(item for _, item in resolved)
     try:
@@ -623,8 +629,9 @@ async def load_installed(runtime_root: Path, role: str, project_id: str | None =
     except Exception as exc:
         logger.warning("cannot prepare the installed items; the agent runs without them", exc_info=True)
         return AgentLibrary(error=f"the installed items could not be prepared: {exc}", role=role,
-                            project_id=project_id)
-    return AgentLibrary(items, tuple(plugin_dirs), mcp_config=mcp_config, role=role, project_id=project_id)
+                            project_id=project_id, skipped_deprecated=skipped)
+    return AgentLibrary(items, tuple(plugin_dirs), mcp_config=mcp_config, role=role, project_id=project_id,
+                        skipped_deprecated=skipped)
 
 
 async def _mcp_config(runtime_root: Path, servers: Sequence[tuple[Mapping[str, Any], LoadedItem]]) -> str:

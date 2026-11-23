@@ -367,9 +367,12 @@ def test_pi_main_and_nested_shell_keep_personal_config_and_server_secrets_out(
         "import json, os, subprocess, sys\nfrom pathlib import Path\n"
         "home = Path(os.environ['HOME'])\nagent = Path(os.environ['PI_CODING_AGENT_DIR'])\n"
         "settings = json.loads((agent / 'settings.json').read_text())\n"
+        "shell_env = {**os.environ, 'PI_SESSION_ID': 'private-session', 'PI_SESSION_FILE': '/private/session.jsonl',\n"
+        "             'PI_PROVIDER': 'looper', 'PI_MODEL': 'selected', 'PI_REASONING_LEVEL': 'high'}\n"
         f"nested = settings['shellCommandPrefix'] + {shlex.quote(sys.executable)!r} + "
         f"' -c ' + {shlex.quote('import json, os; print(json.dumps(dict(os.environ)))')!r}\n"
-        "shell = subprocess.run(['/bin/sh', '-c', nested], capture_output=True, text=True, check=True, timeout=10)\n"
+        "shell = subprocess.run(['/bin/sh', '-c', nested], env=shell_env,\n"
+        "                       capture_output=True, text=True, check=True, timeout=10)\n"
         "print(json.dumps({'env': dict(os.environ), 'shell': json.loads(shell.stdout),\n"
         " 'personal': any((home / name).exists() for name in "
         "('.pi/agent/auth.json', '.claude/settings.json', '.codex/auth.json', '.grok/settings.json'))}))\n")
@@ -435,5 +438,8 @@ console.log(result.structuredContent.output);
                           capture_output=True, text=True, check=True, timeout=20)
     nested = json.loads(done.stdout)
     assert nested["HOME"] == env["HOME"] != server_environment["HOME"]
-    assert not any(name.startswith(("PI_", "LOOPER_", "LOOPX_", "PROVIDER_")) for name in nested)
+    # This role marker makes `looper ledger` refuse agent writes; it carries no credentials or session data.
+    # Keep it, while rejecting every other variable in these namespaces, including Pi's injected session metadata.
+    assert {name: value for name, value in nested.items()
+            if name.startswith(("PI_", "LOOPER_", "LOOPX_", "PROVIDER_"))} == {child_env.AGENT_RUN_ENV: "agent"}
     assert not set(DROPPED) & nested.keys()

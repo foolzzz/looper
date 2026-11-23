@@ -21,6 +21,7 @@ vi.mock("@/lib/status-card", async (original) => ({
   ...await original<typeof import("@/lib/status-card")>(), fetchStatusCard: vi.fn(),
 }));
 vi.mock("@/components/manager-sessions", () => ({ ManagerSessions: () => null }));
+vi.mock("@/components/task-quality-section", () => ({ TaskQualitySection: () => null }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -160,6 +161,23 @@ describe("Dashboard waiting gates", () => {
     await act(async () => (metricsSection().querySelector('button[aria-pressed="false"]') as HTMLButtonElement).click());
     expect(vi.mocked(fetchManagerMetrics).mock.calls.at(-1)![0]).toBe(1);
     expect(window.localStorage.getItem("looper.dashboard.managerMetricsDays")).toBe("1");
+  });
+
+  it("shows the writes by category with the failed ones", async () => {
+    vi.mocked(fetchManagerMetrics).mockResolvedValue({
+      ...METRICS_OFF, enabled: true,
+      actions: { by_category: { create: { ok: 3 }, control: { ok: 2, error: 1 } } },
+    });
+    await show();
+    expect(metricsSection().querySelector('[aria-label="Writes"]')!.textContent)
+      .toBe("Writes: created 3 · controlled 2 (1 failed)");
+  });
+
+  it("shows no writes line while no write has a category", async () => {
+    vi.mocked(fetchManagerMetrics).mockResolvedValue({ ...METRICS_OFF, enabled: true, actions: { by_category: {} } });
+    await show();
+    expect(metricsSection().querySelector('[aria-label="Writes"]')).toBeNull();
+    expect(metricsSection().textContent).toContain("Ack");
   });
 
   it("says the metrics are off, with the way to Settings → Chat, and shows no figures", async () => {
