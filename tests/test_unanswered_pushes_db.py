@@ -12,7 +12,7 @@ import pytest
 from looper.agents import attention, cost_guard, cost_guard_settings as settings, cost_holds, unanswered_pushes
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.db import connection, cost_holds as store, schedules as db_schedules
-from looper.db.migrations import cost_holds_unanswered, schedule_pause_reasons
+from looper.db.migrations import cost_holds_unanswered, printed_check, schedule_pause_reasons
 from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -411,6 +411,14 @@ def test_a_reply_after_the_question_expires_a_push_sent_earlier(monkeypatch):
 
 
 def test_a_question_that_times_out_is_resent_after_restart_and_does_not_pause(monkeypatch):
+    root = Path(__file__).parents[1]
+    serve = (root / "looper/agents/serve.py").read_text()
+    holds = (root / "looper/agents/cost_holds.py").read_text()
+    assert serve.index("await cost_guard.initialize(") < serve.index(
+        "await cost_holds.deliver_unsent_questions(")
+    initialize = holds.split("async def initialize", 1)[1].split("\nasync def ", 1)[0]
+    assert "resume_unanswered_questions" not in initialize
+
     async def body(pool):
         await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
         await _schedule(pool, "sched-timeout")
@@ -436,7 +444,13 @@ def test_a_question_that_times_out_is_resent_after_restart_and_does_not_pause(mo
         await unanswered_pushes.check(_MOMENT + timedelta(days=4))
         assert calls["n"] == 1
         assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-timeout'") is True
-        await cost_holds.initialize(pool=pool)
+        # Same order as serve: cost guard starts while the sender is still unset, then the sender is configured.
+        cost_holds.configure(sender=None, dashboard_url="")
+        await cost_guard.initialize(day_start=lambda now: now, pool=pool)
+        assert calls["n"] == 1
+        assert await pool.fetchval("SELECT asked_at FROM cost_holds WHERE id=$1", hold_id) is None
+        await cost_holds.deliver_unsent_questions(
+            sender=sender, dashboard_url="https://console.example", pool=pool)
         assert calls["n"] == 2
         assert await pool.fetchval("SELECT asked_at FROM cost_holds WHERE id=$1", hold_id) is not None
         assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-timeout'") is True
@@ -525,6 +539,54 @@ def test_migration_pending_sees_a_dropped_check_while_the_marker_remains(monkeyp
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='cost_holds_reason_shape'")
 
     run_db(body, monkeypatch, timeout=60)
+
+
+def test_pending_matches_the_whole_check_and_restores_a_dropped_scope(monkeypatch):
+    async def body(pool):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO schema_migrations (name) VALUES ('schedule_pause_reasons'), ('cost_holds_unanswered') "
+                "ON CONFLICT DO NOTHING")
+            assert not await schedule_pause_reasons.pending(conn)
+            assert not await cost_holds_unanswered.pending(conn)
+            await conn.execute("ALTER TABLE cost_holds DROP CONSTRAINT cost_holds_scope_check")
+            assert await cost_holds_unanswered.pending(conn)
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await cost_holds_unanswered.pending(conn)
+        with pytest.raises(Exception, match="cost_holds_scope_check"):
+            await pool.execute(
+                "INSERT INTO cost_holds(scope,scope_ref,currency,limit_usd,spent_usd,reason) "
+                "VALUES ('nope','x','provider_priced_usd',1,0,'budget')")
+
+        await pool.execute("ALTER TABLE schedules DROP CONSTRAINT schedules_pause_pair_check")
+        await pool.execute(
+            "ALTER TABLE schedules ADD CONSTRAINT schedules_pause_pair_check "
+            "CHECK ((pause_reason IS NULL) OR (paused_at IS NULL)) NOT VALID")
+        async with pool.acquire() as conn:
+            assert await schedule_pause_reasons.pending(conn)
+            await schedule_pause_reasons.apply(conn, sql=None, state=None)
+            assert not await schedule_pause_reasons.pending(conn)
+        pair = await pool.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='schedules_pause_pair_check'")
+        assert printed_check(pair) == printed_check(schedule_pause_reasons._PAIR_DEF)
+
+        await pool.execute("ALTER TABLE cost_holds DROP CONSTRAINT cost_holds_reason_shape")
+        await pool.execute(
+            "ALTER TABLE cost_holds ADD CONSTRAINT cost_holds_reason_shape CHECK ("
+            "(reason = 'unanswered') = (pushes IS NOT NULL) OR "
+            "(reason = 'unanswered') = (limit_usd IS NULL) OR "
+            "(limit_usd IS NULL) = (currency IS NULL) OR "
+            "(limit_usd IS NULL) = (spent_usd IS NULL)) NOT VALID")
+        async with pool.acquire() as conn:
+            assert await cost_holds_unanswered.pending(conn)
+            await cost_holds_unanswered.apply(conn, sql=None, state=None)
+            assert not await cost_holds_unanswered.pending(conn)
+        shape = await pool.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='cost_holds_reason_shape'")
+        assert printed_check(shape) == printed_check(cost_holds_unanswered._SHAPE_DEF)
+
+    run_db(body, monkeypatch, timeout=120)
 
 
 def test_fresh_and_upgraded_holds_keep_budget_rows_valid(monkeypatch):

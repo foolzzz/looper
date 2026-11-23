@@ -68,3 +68,16 @@ def schema_sql(base_sql: str, modules: Iterable[ModuleType]) -> str:
         for module in modules
         if getattr(module, "fresh_ddl", "")
     )
+
+
+def printed_check(definition: str) -> str:
+    """``pg_get_constraintdef`` with ``NOT VALID``, casts and spacing removed.
+
+    Validation is the online step, so a validated check and the ``NOT VALID`` check
+    taken under the schema lock are the same predicate. Callers compare this text,
+    not a list of words inside it.
+    """
+    text = " ".join((definition or "").split())
+    if text.upper().endswith("NOT VALID"):
+        text = text[: -len("NOT VALID")].rstrip()
+    return "".join(text.lower().replace("::text", "").split())

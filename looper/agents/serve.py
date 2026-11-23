@@ -1015,7 +1015,9 @@ async def _run_agent_system_watched(
             platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                                 supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
             from . import cost_holds
-            cost_holds.configure(platform, sender=registry.notify, dashboard_url=dashboard_url)
+            # initialize ran above, while this sender did not exist yet.
+            await cost_holds.deliver_unsent_questions(
+                platform, sender=registry.notify, dashboard_url=dashboard_url, pool=pool)
             tools_ready = asyncio.Event()
             fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                                  url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
