@@ -1044,6 +1044,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **默认关闭对照固定基线**（✅ 已完成）：Worker 启动和 Explorer 常驻签名使用注明来源的完整 commit SHA；可执行验收 Planner 复用现有 fixture 的 `main_revision`，不随 `origin/main` 移动。后续对照沿用 fixture 或固定 SHA 模式。
+
 - **记忆写入路径**（[RFC](../architecture/rfcs/memory-write-path-v0.zh-CN.md)）：本分支在确认后的 worktree 写入基础上实现操作者私聊推送、精确回复「记 / 驳回 / 重试」、结果通知、原推送状态更新和受阻告警，默认关闭。起草、来源和 dashboard 界面仍按 RFC 第 13 节后续切片推进。后续待维护者确认：记忆推送接入 `proactive_delivery`，新增 `ProactiveSource.MEMORY` 并与晨报等来源共同扩展 `proactive_deliveries.source` 约束。
 
 - **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消已实现，项目开关仍默认关，见[Worker 工具验收](../validation/platform-subagents-worker-tools.zh-CN.md)；真实模型运行与评测待授权执行。项目设置表单、操作者 `runs.tree`、运行树与等待时间线、费用分份、Agents 分组和 Pipeline 计数已在本分支实现（[界面与读取验收](../validation/run-tree/README.md)）。规划者入口、账号准入和运行树单节点取消仍待后续阶段。首次启用走项目设置表单及项目管理 API；Manager 工具列表和 schema 保持基线字节一致，从聊天修改设置及 Manager 对话对比留给后续 PR。

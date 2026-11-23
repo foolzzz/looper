@@ -11,7 +11,7 @@ from looper.agents import system_prompt
 from looper.agents.project_execution import AcceptanceChecksMode, ProjectExecution
 from looper.agents.tiers import planner, planner_protocol, worker
 from looper.db import plans, projects, tasks
-from test_acceptance_checks_off import _main_modules, _outputs, _step
+from test_acceptance_checks_off import BASELINE, _main_modules, _outputs, _step
 from test_planner_agent import WORK_FAILED, WORK_OK, decide, drive, plan, step
 from test_planner_workspaces import git, init_repo, project
 from tests.db_support import DSN, run_db
@@ -142,7 +142,7 @@ def test_saved_network_checks_can_be_loaded_after_permission_changes(tmp_path, m
         assert agent._plan is not None
         saved = agent._plan.steps[0]
         assert saved.checks[0].network is True
-        baseline = _main_modules("ecc2eedbf2ac4a1b44ff9078e634002c228458c1")
+        baseline = _main_modules(BASELINE["main_revision"])
         old = baseline.planner.PlannerAgent(task_id="task-saved", runtime_root=tmp_path)
         context = planner_protocol.DecisionContext("s1", planner_protocol.ResultKind.WORK, True, False, 0)
         messages = [agent._decision_message(agent._plan, saved, context, ["Worker finished."]),
@@ -166,9 +166,9 @@ def test_saved_network_checks_can_be_loaded_after_permission_changes(tmp_path, m
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("status", ["pending", "dispatched", "deciding", "completed", "verified"])
-def test_switch_off_stored_rows_and_prompts_match_current_main_bytes(tmp_path, monkeypatch, status):
-    # Compare with the pinned source, independent of subsequent merges.
-    baseline = _main_modules("ecc2eedbf2ac4a1b44ff9078e634002c228458c1")
+def test_switch_off_stored_rows_and_prompts_match_pinned_main_bytes(tmp_path, monkeypatch, status):
+    # Reuse the fixture's recorded main source as the independent default-off baseline.
+    baseline = _main_modules(BASELINE["main_revision"])
     current = SimpleNamespace(planner=planner, protocol=planner_protocol, prompt=system_prompt,
                               tasks=tasks, worker=worker)
     for mode in ("off", "network"):
