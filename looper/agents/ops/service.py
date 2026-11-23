@@ -72,6 +72,7 @@ from . import API_CHANNEL, Audience, Call, ErrorCode, OpError, RestrictedTool, R
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from . import reminders as reminder_tools
+from . import skill_proposals as skill_proposal_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_tool
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
@@ -164,7 +165,7 @@ READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Manager's while leads are on, the vault's reads while it lets the Manager read it, session search while it is on,
 # and the reminder tools while reminders are on (``ManagerOps._with_operator_tools``).
 _MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH,
-                                                    *reminder_tools.TOOLS)}
+                                                    *reminder_tools.TOOLS, skill_proposal_tools.TOOL)}
 # The default Manager's tools that only the user's own turns run, each behind its own switch.
 _OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH, *reminder_tools.TOOLS)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
@@ -341,6 +342,7 @@ class ManagerOps:
             self._scope = scope
         scope = await self._with_ledger_tools(scope)
         scope = await self._with_operator_tools(scope)
+        scope = await self._with_skill_proposal_tool(scope)
         if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
             return scope
         try:
@@ -359,6 +361,7 @@ class ManagerOps:
         if definition is None or not definition.enabled:
             raise OpError(ErrorCode.FORBIDDEN, "this Manager was turned off")
         current = scope_for(definition, keys or (), [row["key"] for row in await db_workflows.list_workflows()])
+        current = await self._with_skill_proposal_tool(current)
         if self._scope is scope:  # not replaced meanwhile by the fleet
             self.set_scope(current)
         return current
@@ -400,6 +403,17 @@ class ManagerOps:
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name not in _OPERATOR_TOOLS]
         adjusted = replace(scope, tools=_tool_map([*kept, *wanted]))
+        if self._scope is scope:
+            self._scope = adjusted
+        return adjusted
+
+    async def _with_skill_proposal_tool(self, scope: OpsScope) -> OpsScope:
+        """Any Manager may propose within its project scope, while one of those projects opts in."""
+        wanted = scope.tool_scope is ManagerTools.ALL and await skill_proposal_tools.enabled(scope.tasks.project_ids)
+        if wanted == (skill_proposal_tools.TOOL_NAME in scope.tools):
+            return scope
+        kept = [tool for tool in scope.tools.values() if tool.name != skill_proposal_tools.TOOL_NAME]
+        adjusted = replace(scope, tools=_tool_map([*kept, *((skill_proposal_tools.TOOL,) if wanted else ())]))
         if self._scope is scope:
             self._scope = adjusted
         return adjusted
@@ -527,6 +541,11 @@ class ManagerOps:
             risk = tool.risk_of(arguments)
             if tool.name != CONFIRM_TOOL:
                 tool = await self._authorize(scope, name, arguments)
+            if tool.name == skill_proposal_tools.TOOL_NAME:
+                if turn.autonomous:
+                    raise OpError(ErrorCode.NEEDS_USER_TURN, "a skill proposal needs the operator's own turn")
+                if not await _operator_turn(turn):
+                    raise _OperatorOnly(turn)
             if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
                 raise OpError(ErrorCode.FORBIDDEN, cast(RestrictedTool, tool).refusal)
             _check_answering(turn)

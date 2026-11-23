@@ -207,6 +207,7 @@ from ..message import (
 )
 from . import decisions, journal
 from .plan_view import PLAN_FULL_EVERY_TURNS, PlanItem, PlanShown, render as render_plan_view
+from .. import skill_proposal_sources
 from .conditions import State, StepOutcome, evaluate, leaves, parse as parse_condition, render, to_json
 from .journal import JournalEntry, JournalKind, LearningScope
 from .planner_protocol import (
@@ -2076,7 +2077,7 @@ class PlannerAgent:
         step.status = gate.state.step_status
         step.result = {"status": GateState.PASSED.value, "summary": conclusion}
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         summary = reply.summary
         how = "the user ended the discussion" if forced else "the Planner closed it"
         change = ", ".join(f"{name} {'+'.join(labels)}" for name, labels in gate.plan_change.items() if labels)
@@ -2303,7 +2304,7 @@ class PlannerAgent:
         now = datetime.now(timezone.utc)
         action = reply.action
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         entries: list[JournalEntry] = []
         if action is WaitAction.EXTEND:
             seconds = int(reply.max_wait_seconds or 0)
@@ -3400,7 +3401,7 @@ class PlannerAgent:
         if keeps_work and not await self._merged(plan, step):
             return  # the decision turn on the failed merge took over
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
 
         if self._execution.advisor_on and context.result is ResultKind.WORK and context.succeeded \
                 and not context.review_required and not context.checkpoint and decision is not Decision.REVIEW:
@@ -4010,7 +4011,7 @@ class PlannerAgent:
             waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
             cancelled = gates_cancelled or waits_cancelled
         if reply is not None and reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         if reply is None or reply.action is ChatAction.NONE:
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
@@ -4141,7 +4142,7 @@ class PlannerAgent:
         waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
         cancelled = gates_cancelled or waits_cancelled
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         text = await self._apply_chat(plan, reply, envelope)
         # The answer to a change made on the task page has no chat to go to: the activity keeps it.
         await self._activity("phase", f"Planner answered a change to the task ({reply.action.value}): "
@@ -4205,7 +4206,7 @@ class PlannerAgent:
         waits_cancelled = await self._apply_wait_changes(plan, reply.waits)
         cancelled = gates_cancelled or waits_cancelled
         if reply.final is not None:
-            plan.final_summary = reply.final.markdown()
+            plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
         await self._activity("phase", f"Planner answered in the room ({reply.action.value}"
                                       f"{'' if posted else ', nothing posted'}): {reply.reply}"[:300])
         if reply.action is not ChatAction.NONE:
@@ -4548,6 +4549,7 @@ class PlannerAgent:
         """
         await self._read_run_deadline()
         run = run or self._turn
+        message = await skill_proposal_sources.plan_message(self, kind, message)
         reply = await run(message)
         await self._read_roles()  # a role the turn defined counts for its reply
         try:
@@ -4601,6 +4603,7 @@ class PlannerAgent:
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
         return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy(),
+                       skill_proposals=getattr(self, "_skill_proposals", False),
                        conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps,
                        review_panel=self._panel_on,
                        verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
@@ -5304,6 +5307,7 @@ class PlannerAgent:
             contract_name="REPLY_CONTRACT",
             # With its platform tools, how to use them follows the reply contract.
             contract=reply_contract(self._execution.step_retries,
+                                    skill_proposals=getattr(self, "_skill_proposals", False),
                                     roles=self._execution.roles_on,
                                     workflow_roles=bool((self._workflow or {}).get("roles")),
                                     gates=self._gate_policy is GatePolicy.ALLOWED
@@ -5983,6 +5987,7 @@ class PlannerAgent:
         plan.project_description = str(project.get("description") or "")
         plan.project_background = str(project.get("background") or "")
         plan.project_work_dir = str(project.get("work_dir") or "")
+        self._skill_proposals = project.get("skill_proposals") == "on"
         self._workflow = project.get("task_workflow")
         self._execution = ProjectExecution.from_row(project).overlaid(self._workflow)
         self._template = project.get("task_template")

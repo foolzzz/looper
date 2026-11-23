@@ -235,7 +235,7 @@ async def _note(conn: Any, row: Mapping[str, Any], text: str) -> None:
         steps = sorted({e["step"] for e in row["evidence"] if e["task"] == task_id and "step" in e})
         origin = f" from step {', '.join(steps)}" if steps else ""
         await activity.insert_activity(
-            task_id=task_id, kind="phase", summary=f"Skill proposal #{row['id']}{origin} {text}"[:500], pool=conn)
+            task_id=task_id, kind="phase", summary=f"Skill proposal p-{row['id']}{origin} {text}"[:500], pool=conn)
 
 
 async def _supersede(conn: Any, row: Mapping[str, Any], *, at: datetime, note: str) -> None:
@@ -278,7 +278,7 @@ async def propose(
         )
         await store.add_event(conn, row["id"], action="propose", actor_kind="agent", via=Via(via).value,
                               content_sha256=checked.sha256)
-        await _note(conn, row, f"for {checked.name!r} was created")
+        await _note(conn, row, f"created for {checked.name!r}")
     return ProposalResult(await view(row), superseded=tuple(superseded))
 
 
