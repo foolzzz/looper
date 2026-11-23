@@ -1,6 +1,7 @@
 """Full dashboard profiles and previews, alongside compact Manager results."""
 
 from .. import profile_registry, prompt_preview
+from ..acp_guards import refuse_client_selection
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL, _OBJ
 from ..ops.config import answered, profile_deletion_impact
 from .global_settings import ROLE
@@ -62,7 +63,18 @@ OPERATIONS = (
 )
 
 
+async def _selection(operation, arguments, principal):
+    name = operation.operation_id
+    if name not in ("profiles.create", "profiles.update"):
+        return
+    fields = arguments if name == "profiles.create" else arguments["fields"]
+    await refuse_client_selection(principal, name, profile_id=arguments.get("profile_id"),
+                                  runtime_id=fields.get("runtime_id"))
+    await refuse_client_selection(principal, name, profile_id=fields.get("fallback_profile_id"))
+
+
 async def impact(server, operation, arguments, principal, headers):
+    await _selection(operation, arguments, principal)
     if operation.operation_id != "profiles.delete":
         return None
     row = await answered(profile_registry.deletable_profile(arguments["profile_id"]))
@@ -70,6 +82,7 @@ async def impact(server, operation, arguments, principal, headers):
 
 
 async def run(server, operation, arguments, principal, headers):
+    await _selection(operation, arguments, principal)
     name = operation.operation_id
     if name == "profiles.prompt_preview":
         return await answered(prompt_preview.preview(arguments["profile_id"], arguments["role"],

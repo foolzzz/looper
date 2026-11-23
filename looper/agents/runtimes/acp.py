@@ -26,7 +26,9 @@ _KEY_VALUE = re.compile(r"(?i)\b(?:sk-[\w-]+|gh[pousr]_[\w]+|github_pat_[\w]+|xo
 
 
 def _secret_name(name: str) -> bool:
-    return bool(set(re.split(r"[-_]", name.lower().lstrip("-"))) & _SECRET_FIELDS)
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", name).lower().lstrip("-")
+    return (normalized in {"apikey", "accesstoken", "clientsecret", "authkey"}
+            or bool(set(re.split(r"[-_]", normalized)) & _SECRET_FIELDS))
 
 
 def record_command(command: Sequence[str]) -> list[str]:

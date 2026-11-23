@@ -53,6 +53,7 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..acp_guards import AcpFallbackError
 from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
@@ -2402,7 +2403,7 @@ class WorkerPool:
             try:
                 ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
                                           agent_settings=settings, fallbacks=fallbacks)
-            except RuntimeUnsupported as exc:
+            except AcpFallbackError as exc:
                 return _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
             if isinstance(ctx, dict):
                 result = ctx
@@ -2437,7 +2438,7 @@ class WorkerPool:
             try:
                 settings = await self._fallback_profile(ctx.launch.settings, ctx.launch.role, fallbacks,
                                                         ctx.fallback_reason, ctx.parent_task_id, ctx.worker_id)
-            except RuntimeUnsupported as exc:
+            except AcpFallbackError as exc:
                 result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
                 break
             if settings is None:
@@ -2467,7 +2468,7 @@ class WorkerPool:
                                 task_id: str, worker_id: str) -> AgentSettings | None:
         target = settings.profile.fallback_profile_id
         if target and settings.profile.runtime.type == "acp":
-            raise RuntimeUnsupported("ACP Reviewer pilot cannot enter or leave a Profile fallback")
+            raise AcpFallbackError("ACP Reviewer pilot cannot enter or leave a Profile fallback")
         if not target or len(fallbacks) >= 3 or target in {entry["from"] for entry in fallbacks} \
                 or target == settings.profile.id:
             return None

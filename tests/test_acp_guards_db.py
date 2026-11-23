@@ -69,6 +69,11 @@ async def _seed(pool):
             ('model-acp','prov-acp','review-model','openai-responses');
         INSERT INTO agent_profiles(id,name,runtime_id,model_id) VALUES
             ('profile-acp','ACP review','rt-acp','model-acp');
+        INSERT INTO system_settings(key,value) VALUES
+            ('acp_reviewer.enabled','true'),
+            ('acp_reviewer.command','["grok","agent","stdio"]'),
+            ('acp_reviewer.model','review-model'),
+            ('acp_reviewer.account','Review account');
     """)
 
 
@@ -270,3 +275,44 @@ def test_acp_prices_never_borrow_builtin_prices_for_a_matching_model_name():
                                ADAPTERS["acp"].capabilities), provider, "gpt-6-sol")
     price = Launch(AgentSettings(profile=profile)).price.model_price(profile.model)
     assert price.input_usd_per_mtok is None and price.output_usd_per_mtok is None
+
+
+@pytest.mark.parametrize("entry", ["profile_create", "profile_update", "profile_retarget", "global_role",
+                                   "global_system", "project_role", "project_defaults"])
+def test_dashboard_domains_refuse_client_selection_of_acp(monkeypatch, tmp_path, entry):
+    from tests.db_support import v1_api
+
+    async def check(pool):
+        await _seed(pool)
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('project-review', 'Review project')")
+        builtin_model = await pool.fetchval("SELECT model_id FROM agent_profiles WHERE id='agent-claude-code-opus'")
+        requests = {
+            "profile_create": ("profiles.create", {"name": "Client ACP", "runtime_id": "rt-acp", "model_id": "model-acp"}),
+            "profile_update": ("profiles.update", {"profile_id": "profile-acp", "fields": {"custom_prompt": "Client change"}}),
+            "profile_retarget": ("profiles.update", {"profile_id": "agent-claude-code-opus", "fields": {
+                "runtime_id": "rt-acp", "model_id": "model-acp"}}),
+            "global_role": ("agent_settings.update_role", {"role": "reviewer", "values": {"profile_id": "profile-acp"}}),
+            "global_system": ("agent_settings.update_system", {"values": {"profile_id": "profile-acp"}}),
+            "project_role": ("project_agent_settings.update_role", {"project_id": "project-review", "role": "reviewer",
+                                                                     "values": {"profile_id": "profile-acp"}}),
+            "project_defaults": ("project_agent_settings.update", {"project_id": "project-review",
+                                                                     "values": {"profile_id": "profile-acp"}}),
+        }
+        operation, body = requests[entry]
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call(operation, body, client=True)
+            assert status == 403 and answer["error"]["code"] == "forbidden", answer
+            assert "ACP" in answer["error"]["message"]
+            # A normal Profile still uses this same dashboard operation for a client.
+            if entry == "profile_create":
+                normal = {"name": "Client regular", "runtime_id": "rt-claude-code", "model_id": builtin_model}
+                status, answer = await call("profiles.create", normal, client=True)
+                assert status == 200, answer
+            # An operator can still configure the Reviewer through its dashboard domain.
+            if entry == "global_role":
+                status, answer = await call(operation, body)
+                assert status == 200, answer
+        if entry != "global_role":
+            assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE profile_id='profile-acp'") == 0
+        assert await pool.fetchval("SELECT custom_prompt FROM agent_profiles WHERE id='profile-acp'") == ""
+    run_db(check, monkeypatch)

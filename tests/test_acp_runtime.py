@@ -74,6 +74,8 @@ def test_record_command_masks_secret_flags_urls_and_registered_values(monkeypatc
     assert safe[7:9] == ["--model", "declared-model"]
     assert safe[-2:] == ["***", "***"]
     assert record_command([]) == ["acp"]
+    assert record_command(["grok", "agent", "stdio", "--apiKey", "synthetic-key", "--apikey=synthetic-key"]) == [
+        "grok", "agent", "stdio", "--apiKey", "***", "--apikey=***"]
 
 
 @pytest.mark.parametrize("error", [ValueError("acp_reviewer.command is not a JSON array"), RuntimeError("DB failed")])

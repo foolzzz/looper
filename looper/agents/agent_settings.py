@@ -834,9 +834,9 @@ async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSe
 
     target = settings.profile.fallback_profile_id
     if target and settings.profile.runtime.type == "acp":
-        from .runtimes import RuntimeUnsupported
+        from .acp_guards import AcpFallbackError
 
-        raise RuntimeUnsupported("ACP Reviewer pilot cannot enter or leave a Profile fallback")
+        raise AcpFallbackError("ACP Reviewer pilot cannot enter or leave a Profile fallback")
     if not target:
         return None
     try:
@@ -848,9 +848,9 @@ async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSe
         return None
     profile = _stored_profile(row)
     if "acp" in (settings.profile.runtime.type, profile.runtime.type):
-        from .runtimes import RuntimeUnsupported
+        from .acp_guards import AcpFallbackError
 
-        raise RuntimeUnsupported("ACP Reviewer pilot cannot enter or leave a Profile fallback")
+        raise AcpFallbackError("ACP Reviewer pilot cannot enter or leave a Profile fallback")
     return await _check_profile_settings(replace(settings, profile=profile,
                                                  profile_error=None, pricing_catalog=()), role)
 

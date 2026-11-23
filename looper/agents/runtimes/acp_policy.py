@@ -101,7 +101,11 @@ def report_inspect_roots(work_result: Any, cwd: str | Path) -> tuple[str, ...]:
             directory(path.parent)
             if field == "changed_files":
                 try:
-                    resolved = path.resolve()
+                    try:
+                        resolved = path.resolve(strict=True)
+                    except FileNotFoundError:
+                        # A reported deletion/missing file still protects its containing directory.
+                        resolved = path.resolve()
                 except (OSError, RuntimeError, ValueError):
                     # A loop/unresolvable changed path must not disappear from
                     # the protected set merely because its parent exists.

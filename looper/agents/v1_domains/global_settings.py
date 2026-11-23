@@ -5,6 +5,7 @@ These DTOs are shared by settings domains; the compact Manager tools stay unchan
 
 from ...db import role_configs
 from .. import agent_settings, api_v1
+from ..acp_guards import refuse_client_selection
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _OBJ, _NULL_OBJ
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
@@ -137,6 +138,7 @@ async def layer_impact(place, values):
 async def impact(server, operation, arguments, principal, headers):
     if not operation.operation_id.startswith("agent_settings.update_"):
         return None
+    await refuse_client_selection(principal, operation.operation_id, profile_id=arguments["values"].get("profile_id"))
     role = agent_settings.AgentType(arguments["role"]) if "role" in arguments else None
     place = _Place(agent_settings.Layer.ROLE if role else agent_settings.Layer.SYSTEM, role, None)
     return await layer_impact(place, arguments["values"])
@@ -164,6 +166,7 @@ async def run(server, operation, arguments, principal, headers):
     if name == "agent_settings.get":
         return await answered(agent_settings.settings_view())
     values = arguments["values"]
+    await refuse_client_selection(principal, name, profile_id=values.get("profile_id"))
     if name == "agent_settings.update_system":
         return await answered(agent_settings.update_system(values))
     result = await answered(agent_settings.update_role(arguments["role"], values))
