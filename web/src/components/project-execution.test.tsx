@@ -36,3 +36,15 @@ describe("Sub-agents project settings", () => {
     } finally { act(() => root.unmount()); }
   });
 });
+
+it("offers an explicit ask-at-cap action while retaining fail as the inherited action", async () => {
+  const host = document.createElement("div"); const root = createRoot(host);
+  try {
+    await act(async () => root.render(<ProjectExecutionFields idPrefix="budget" draft={executionDraft(project)} onChange={() => {}} />));
+    const select = host.querySelector("#budget-task_budget_action") as HTMLSelectElement;
+    expect(select.value).toBe("");
+    expect(select.querySelector('option[value="ask"]')?.textContent).toContain("enforce");
+    expect(executionChanges({ ...executionDraft(project), task_budget_action: "ask" }, project))
+      .toEqual({ task_budget_action: "ask" });
+  } finally { act(() => root.unmount()); }
+});

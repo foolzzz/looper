@@ -179,7 +179,7 @@ export interface ProjectExecution {
   /** The most one task may spend over all its runs. */
   task_budget_usd: number | null;
   /** At the task cap: fail at once (also when null) or after the Planner sums up. */
-  task_budget_action: "wrap_up" | "fail" | null;
+  task_budget_action: "wrap_up" | "fail" | "ask" | null;
   /** How often the Planner checks running Workers; 0 = never. */
   supervise_interval_seconds: number | null;
   /** "planner": the Planner decides which steps are reviewed; "all": every step is. */

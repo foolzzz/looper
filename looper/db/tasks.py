@@ -46,6 +46,7 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
     "stopping": TaskGroup.IN_PROGRESS,
     # What the Planner reports while a user gate of the plan waits for the user (other steps may run meanwhile).
     "waiting_user": TaskGroup.NEEDS_YOU,
+    "awaiting_budget": TaskGroup.NEEDS_YOU,
     # No gate waits: a wait step holds the task and no step is running (plan-wait-step RFC, D8).
     "waiting": TaskGroup.IN_PROGRESS,
     # Started, its Planner starting (it used to wait here for room under its project's Planner limit).
@@ -79,7 +80,7 @@ STATUS_FILTERS: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "running": tuple(status for status, group in STATUS_GROUPS.items()
                      if group is TaskGroup.IN_PROGRESS and status not in ("waiting", "pending")),
     **{status: (status,) for status in (
-        READY, "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+        READY, "waiting", "waiting_user", "awaiting_budget", "pending", "completed", "failed", "cancelled", "stopped",
     )},
 })
 

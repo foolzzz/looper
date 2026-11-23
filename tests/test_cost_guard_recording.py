@@ -8,6 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -74,7 +75,7 @@ def test_off_record_payload_is_byte_identical_to_the_pinned_main_recorder(monkey
     from tests.runtime_model_helpers import builtin_launch
 
     root = Path(__file__).resolve().parents[1]
-    revision = "4b602aeed"
+    revision = "6613380fa"
     source = subprocess.check_output(
         ["git", "show", f"{revision}:looper/agents/claude_cli.py"], cwd=root, text=True)
     original = next(node for node in ast.parse(source).body
@@ -208,3 +209,28 @@ def test_review_allows_only_a_successful_classifier_and_a_successful_audit(monke
             assert g.problem and g.day is None
             assert cost_guard.store.history.await_count == 2
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('mode', ['off', 'observe', 'enforce'])
+def test_subscription_reservation_adds_an_in_run_cap_only_when_enforced(monkeypatch, mode):
+    from looper.agents.cost_guard_settings import Config, Mode
+    from tests.runtime_model_helpers import builtin_launch
+    launch = builtin_launch()
+    assert cost_guard.currency_of(launch) is cost_guard.Currency.EQUIVALENT
+    guard = cost_guard.Guard(Config(mode=Mode(mode)))
+    monkeypatch.setattr(cost_guard, '_guard', guard)
+    reservation = cost_guard.Reservation(.25, cost_guard.Currency.EQUIVALENT, (), {},
+                                          datetime.now(timezone.utc))
+    monkeypatch.setattr(cost_guard, 'before_run', AsyncMock(return_value=reservation if mode!='off' else None))
+    monkeypatch.setattr(cost_guard, 'bind', AsyncMock())
+    monkeypatch.setattr(llm_records, 'start_record', AsyncMock(return_value=42))
+    recorder = ClaudeRunRecorder(agent_id='planner-synthetic',task_id='task-synthetic',command=['claude'],
+        cwd='/synthetic',input_text='Synthetic',launch=launch)
+    asyncio.run(recorder.start())
+    try:
+        if mode=='enforce':
+            assert recorder._spend is not None and recorder._spend.cap==.25
+        else:
+            assert recorder._spend is None
+    finally:
+        recorder._untrack()

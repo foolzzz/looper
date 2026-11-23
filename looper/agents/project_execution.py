@@ -171,6 +171,7 @@ class ReviewPolicy(str, Enum):
 class TaskBudgetAction(str, Enum):
     WRAP_UP = "wrap_up"
     FAIL = "fail"
+    ASK = "ask"
 
 
 class StepWorkspaces(str, Enum):

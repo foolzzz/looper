@@ -1624,7 +1624,19 @@ class ClaudeRunRecorder:
                                  role.value if role is not None else llm_records.run_kind_of(self._agent_id))
         # Review reservations must persist before classification; recorder errors must not swallow this boundary.
         reservation = await cost_guard.before_run(launch=self._launch, run_kind=kind, task_id=self._task_id,
-                                                  schedule_id=self._schedule_id)
+                                                  schedule_id=self._schedule_id,
+                                                  **({'step_id': self._step_id} if self._step_id is not None and
+                                                     cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE else {}))
+        if (reservation is not None and cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE
+                and reservation.currency is cost_guard.Currency.EQUIVALENT and self._launch is not None):
+            from .runtimes.pricing import RunSpend, pricer
+
+            if self._spend is None:
+                price = pricer(self._launch.settings.resolved_model, catalog=self._launch.settings.pricing_catalog)
+                if price is not None:
+                    self._spend = RunSpend(price, self._launch.model, reservation.usd)
+            elif self._spend.cap is None or self._spend.cap > reservation.usd:
+                self._spend.cap = reservation.usd
         self._track(datetime.now(timezone.utc))
         try:
             self._record_id = await llm_records.start_record(

@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { callV1 } from "@/lib/v1";
+import { callV1, confirmV1, type V1PendingConfirmation } from "@/lib/v1";
 
 type Counter = { scope: string; scope_ref: string; currency: string; spent_usd: number; reserved_usd: number; limit_usd: number | null };
 type Observation = { at?: string; run_kind: string; currency: string; estimate_usd: number; estimate_source: string;
   decision?: string; scope: string | null; scope_ref: string | null; action: string | null };
-type View = { mode: "off" | "observe"; daily_usd: number | null; daily_equivalent_usd: number | null;
+type View = { mode: "off" | "observe" | "enforce"; daily_usd: number | null; daily_equivalent_usd: number | null;
   roles: Record<string, { daily_usd: number | null; daily_equivalent_usd: number | null }>;
   counters: Counter[]; recent: Observation[]; recommended_daily_usd: number | null;
   recommended_daily_equivalent_usd: number | null; problem: string | null };
@@ -17,10 +19,76 @@ const ACTIONS: Record<string, string> = { ask: "需询问", stop_role: "停到�
 const SOURCES: Record<string, string> = { run_cap: "单次上限", p95: "近 30 天 P95", floor: "角色下限", floor_no_samples: "无历史样本，使用下限" };
 const SCOPES: Record<string, string> = { task: "任务", schedule_day: "定时任务当天", role_day: "角色当天", global_day: "全局当天" };
 
-/** Settings → 花费: only observations; controls arrive with enforcement. */
+type Hold = { id: number; scope: string; scope_ref: string; currency: string; limit_usd: number;
+  spent_usd: number; created_at: string };
+
+/** One hold's explicit decision, including the existing operator confirmation when a cap is raised. */
+function HoldDecision({ hold, onDecided }: { hold: Hold; onDecided: () => void }) {
+  const [amount, setAmount] = useState("");
+  const [pending, setPending] = useState<V1PendingConfirmation | null>(null);
+  const [pendingDecision, setPendingDecision] = useState<"continue" | "stop">("continue");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function decide(decision: "continue" | "stop") {
+    const value = amount.trim() ? Number(amount) : undefined;
+    if (decision === "continue" && value !== undefined && (!Number.isFinite(value) || value < 0)) {
+      setError("请填写有效的美元上限。"); return;
+    }
+    setBusy(true); setError("");
+    try {
+      const result = await callV1<Record<string, unknown>>("/api/v1/cost_holds/decide", {
+        hold_id: hold.id, decision, ...(decision === "continue" && value !== undefined ? { new_limit_usd: value } : {}),
+        via: "dashboard",
+      });
+      if (result.status === "needs_confirmation") { setPendingDecision(decision); setPending(result as V1PendingConfirmation); }
+      else onDecided();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  }
+  async function confirm() {
+    if (!pending) return;
+    setBusy(true); setError("");
+    try {
+      const result = await confirmV1<Record<string, unknown>>(pending.confirmation_id, pending.session);
+      if (result.status === "needs_confirmation") setPending(result as V1PendingConfirmation);
+      else { setPending(null); onDecided(); }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  }
+  return <li className="space-y-3 py-4 first:pt-0 last:pb-0">
+    <p className="font-medium">C-{hold.id} · {SCOPES[hold.scope] ?? hold.scope} {hold.scope_ref}</p>
+    <p className="text-sm text-muted-foreground">{currency(hold.currency)}已花及预留 {money(hold.spent_usd)} / 上限 {money(hold.limit_usd)}。24 小时未回答会停下任务。</p>
+    {pending ? <div className="space-y-2" role="status">
+      <p className="text-sm">{pending.impact}</p>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" disabled={busy} onClick={() => void confirm()}>{pendingDecision === "stop" ? "确认停下" : "确认提高上限"}</Button>
+        <Button type="button" variant="outline" disabled={busy} onClick={() => setPending(null)}>取消</Button>
+      </div>
+    </div> : <div className="flex flex-wrap items-end gap-2">
+      <label className="space-y-1 text-sm">新上限（美元）
+        <Input className="w-40" aria-label={`C-${hold.id} 新上限（美元）`} inputMode="decimal" value={amount}
+          onChange={(event) => setAmount(event.target.value)} placeholder="继续时可提高" disabled={busy} />
+      </label>
+      <Button type="button" disabled={busy} onClick={() => void decide("continue")}>继续</Button>
+      <Button type="button" variant="outline" disabled={busy} onClick={() => void decide("stop")}>停</Button>
+    </div>}
+    {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+  </li>;
+}
+
+/** Settings → 花费: observations and the operator's pending spend decisions. */
 export function CostGuardSettingsSection() {
   const [view, setView] = useState<View | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [holds, setHolds] = useState<Hold[] | null>(null);
+  const [holdsError, setHoldsError] = useState("");
+  async function readHolds() {
+    try {
+      const result = await callV1<{ holds: Hold[] }>("/api/v1/cost_holds/list", {});
+      if ("status" in result) throw new Error("无法读取等待决定的花费。");
+      setHolds(result.holds); setHoldsError("");
+    } catch (reason) { setHoldsError(reason instanceof Error ? reason.message : String(reason)); }
+  }
   useEffect(() => {
     let alive = true;
     callV1<View>("/api/v1/cost_guard/get", {}).then((result) => {
@@ -31,14 +99,18 @@ export function CostGuardSettingsSection() {
     return () => { alive = false; };
   }, []);
 
+  useEffect(() => { if (view?.mode === "enforce") void readHolds(); }, [view?.mode]);
+
   if (error) return <p role="alert" className="text-sm text-destructive">{error}</p>;
   if (!view) return <p role="status" className="text-sm text-muted-foreground">正在读取花费观察…</p>;
   return <div className="space-y-6">
     {view.problem && <p role="alert" className="text-sm text-destructive">{view.problem}</p>}
     <Card>
-      <CardHeader><CardTitle className="flex flex-wrap items-center gap-3">花费守卫 <Badge variant="outline">{view.mode === "off" ? "已关闭" : "仅观察"}</Badge></CardTitle></CardHeader>
+      <CardHeader><CardTitle className="flex flex-wrap items-center gap-3">花费守卫 <Badge variant="outline">{view.mode === "off" ? "已关闭" : view.mode === "enforce" ? "执行限制" : "仅观察"}</Badge></CardTitle></CardHeader>
       <CardContent className="space-y-4 text-sm">
-        <p>先观察一周，再根据实际花费决定上限。目前只记录预留和本来会被拦下的运行，不拦截、不提问、不发消息。</p>
+        <p>{view.mode === "enforce"
+          ? "任务按已花和预留检查上限；选择询问时等待你决定，全局当天上限会暂停新的任务运行。已经在跑的运行继续。后台角色和定时任务的花费上限仍仅观察。"
+          : "先观察一周，再根据实际花费决定上限。目前只记录预留和本来会被拦下的运行，不拦截、不提问、不发消息。"}</p>
         <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div><dt className="text-muted-foreground">全局每日真钱上限</dt><dd className="mt-1 font-mono">{money(view.daily_usd)}</dd></div>
           <div><dt className="text-muted-foreground">全局每日等价花费上限</dt><dd className="mt-1 font-mono">{money(view.daily_equivalent_usd)}</dd></div>
@@ -54,6 +126,16 @@ export function CostGuardSettingsSection() {
           : <p className="text-muted-foreground">观察满一周后才提供每日上限建议；建议不会自动生效。</p>}
       </CardContent>
     </Card>
+    {view.mode === "enforce" && <Card>
+      <CardHeader><CardTitle>花费等你决定</CardTitle></CardHeader>
+      <CardContent>
+        {holdsError ? <div role="alert" className="space-y-2 text-sm text-destructive"><p>{holdsError}</p>
+          <Button type="button" variant="outline" onClick={() => void readHolds()}>重试</Button></div>
+          : holds === null ? <p role="status" className="text-sm text-muted-foreground">正在读取等待决定的花费…</p>
+          : holds.length === 0 ? <p className="text-sm text-muted-foreground">没有等待决定的花费。</p>
+          : <ul className="divide-y divide-border">{holds.map((hold) => <HoldDecision key={hold.id} hold={hold} onDecided={() => void readHolds()} />)}</ul>}
+      </CardContent>
+    </Card>}
     <Card>
       <CardHeader><CardTitle>今天已花与预留</CardTitle></CardHeader>
       <CardContent>

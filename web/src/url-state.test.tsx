@@ -188,7 +188,7 @@ describe("the dashboard keeps its place in the URL", () => {
       await open("#tasks");
       expect(hash()).toBe("#tasks");
       const body = pageBodies().at(-1);
-      expect(body?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
+      expect(body?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending"]);
       expect(body).not.toHaveProperty("status");
       expect(body?.exclude_scheduled).toBe(true);
     });
@@ -198,7 +198,7 @@ describe("the dashboard keeps its place in the URL", () => {
       expect(hash()).toBe("#tasks?project=p1");
       const body = pageBodies().at(-1);
       expect(body?.project_id).toBe("p1");
-      expect(body?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
+      expect(body?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending"]);
       expect(body).not.toHaveProperty("status");
     });
 
@@ -241,9 +241,9 @@ describe("the dashboard keeps its place in the URL", () => {
       await open("#tasks?project=p1");
       await click("Failed");
       const params = new URLSearchParams(hash().split("?")[1]);
-      expect(params.get("status")).toBe("init,running,waiting,waiting_user,pending,failed");
+      expect(params.get("status")).toBe("init,running,waiting,waiting_user,awaiting_budget,pending,failed");
       expect(params.get("project")).toBe("p1");
-      expect(pageBodies().at(-1)?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending", "failed"]);
+      expect(pageBodies().at(-1)?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending", "failed"]);
       await click("All");
       expect(hash()).toBe("#tasks?project=p1&status=all");
       const all = pageBodies().at(-1);
@@ -276,7 +276,7 @@ describe("the dashboard keeps its place in the URL", () => {
         .map(([, options]) => JSON.parse(String(options?.body)));
       expect(bodies.some((body) => body.exclude_scheduled === true)).toBe(true);
       expect(bodies.at(-1)).not.toHaveProperty("exclude_scheduled");
-      expect(bodies.at(-1)?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
+      expect(bodies.at(-1)?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending"]);
     });
 
     it("lists every task for an unknown status", async () => {

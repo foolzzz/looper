@@ -58,7 +58,7 @@ from types import MappingProxyType
 from typing import Any, cast
 
 from ... import child_env
-from .. import card_actions, chat_settings
+from .. import card_actions, chat_settings, cost_manager
 from ...db import card_actions as db_cards
 from ...db import ledger as db_ledger, manager_actions as db_actions, managers as db_managers, tasks as db_tasks, workflows as db_workflows
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
@@ -984,6 +984,7 @@ class ManagerOps:
         word ('' otherwise). That operation may be confirmed in this turn only.
 
         A turn begun again after it ended is live again, and its calls run; one the user stopped stays stopped."""
+        cost_manager.begin_turn(turn)
         if turn.state is TurnState.ENDED:
             turn.state = TurnState.ANSWERING
         self._turn = turn
@@ -1019,6 +1020,7 @@ class ManagerOps:
 
     def end_turn(self, turn: Turn) -> None:
         """``turn`` is over: an operation it could have confirmed and did not lapses."""
+        cost_manager.end_turn(turn)
         if turn.state is TurnState.ANSWERING:
             turn.state = TurnState.ENDED
         if self._turn is turn:

@@ -17,7 +17,8 @@ The sections, in this order (``KINDS``):
 - ``ledger``: the ledger's own open items that wait for the user (a to-do, a decision to confirm, anything overdue),
   while the ledger is on;
 - ``deliveries``: messages of the last ``DELIVERY_WINDOW`` that may not have arrived (``uncertain``: never sent
-  again, so the operator checks).
+  again, so the operator checks);
+- ``cost``: pending spend holds, while the cost guard enforces limits.
 
 A section is ``ok`` (read; possibly empty), ``error`` (its source could not be read: never shown as empty) or
 ``unknown`` (this caller cannot read it, e.g. ``logins`` without a status reader). A feature that is off leaves its
@@ -39,13 +40,13 @@ from urllib.parse import urlencode
 
 from ..db import attention as store, ledger as db_ledger, schedules as db_schedules, tasks as db_tasks
 from ..db import system_settings as db_settings
-from . import card_actions, gate_routing, gate_service, leads_model, operator_identity
+from . import card_actions, cost_guard_settings, gate_routing, gate_service, leads_model, operator_identity
 from .message import MessageEnvelope, is_lark, parse_channel_id
 
 logger = logging.getLogger(__name__)
 
 ENABLED_KEY = "attention.enabled"
-KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries")
+KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries", "cost")
 SHOWN = 20
 DELIVERY_WINDOW = timedelta(hours=72)
 # The checks the dashboard's banner shows as a login that fails (web/src/components/claude-check-banner.tsx).
@@ -229,6 +230,27 @@ async def _deliveries(_: Any) -> Read:
     return [_delivery_item(row) for row in rows], count
 
 
+def _cost_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    label = "任务花费" if row["scope"] == "task" else "全局当天花费"
+    return _item(f"cost:{row['id']}", f"{label}等你决定", context=row["scope_ref"], since=row["created_at"],
+                 href="#settings/cost", ref=f"C-{row['id']}", currency=row["currency"],
+                 limit_usd=row["limit_usd"], spent_usd=row["spent_usd"])
+
+
+async def _cost(_: Any) -> Read:
+    if cost_guard_settings.cached().mode is not cost_guard_settings.Mode.ENFORCE:
+        return NotRead.OFF
+    from ..db import cost_holds
+
+    rows = await cost_holds.list_pending()
+    return [_cost_item(row) for row in rows[:SHOWN]], len(rows)
+
+
+async def _earliest_cost(_: Any) -> dict[str, Any] | None:
+    read = await _cost(None)
+    return _oldest(read[0]) if isinstance(read, tuple) else None
+
+
 def _oldest(items: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """The earliest item by ``since``; the first when none is dated (logins have no clock)."""
     dated = [item for item in items if isinstance(item.get("since"), datetime)]
@@ -282,10 +304,10 @@ async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
 
 
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
-            "intents": _intents, "ledger": _ledger, "deliveries": _deliveries}
+            "intents": _intents, "ledger": _ledger, "deliveries": _deliveries, "cost": _cost}
 _EARLIEST = {"gates": _earliest_gates, "confirmations": _earliest_confirmations, "schedules": _earliest_schedules,
              "logins": _earliest_logins, "intents": _earliest_intents, "ledger": _earliest_ledger,
-             "deliveries": _earliest_deliveries}
+             "deliveries": _earliest_deliveries, "cost": _earliest_cost}
 
 
 async def earliest(kind: str, *, managers: Any = None) -> dict[str, Any] | None:
@@ -332,13 +354,14 @@ FORBIDDEN = "「需要你处理」只给你本人看：在你和机器人的私�
 NOTHING = "现在没有需要你处理的事。"
 _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的操作", "schedules": "失败的定时任务",
            "logins": "登录失效", "intents": "待处理的意图", "ledger": "账本里等你的事",
-           "deliveries": "可能没送到的消息"}
+           "deliveries": "可能没送到的消息", "cost": "花费等你决定"}
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠"}
 _LEDGER_KINDS = {"pending": "待办", "decision": "待确认的决定", "work_item": "在做的事"}
 _DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知"}
 _HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
           "confirmations": "在提问的那个聊天里回复「确认」，或回复别的放弃。",
+          "cost": "回复「继续 {ref} <新上限美元>」提高上限并继续，或「停 {ref}」。",
           "intents": "回复「建 {ref}」建任务，「驳回 {ref}」驳回。"}
 
 
@@ -384,6 +407,9 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
         return f"- {title}：{facts['detail']}" + (f"。修复：{facts['fix']}" if facts["fix"] else "")
     if kind == "intents":
         return f"- {item['ref']} {title}（{context}" + ("，紧急" if facts["priority"] == "urgent" else "") + "）"
+    if kind == "cost":
+        money = "等价花费" if facts["currency"] == "equivalent_usd" else "真钱"
+        return f"- {item['ref']} {title}（{context}；{money} ${facts['spent_usd']:.2f} / 上限 ${facts['limit_usd']:.2f}）"
     if kind == "ledger":
         label = "已过期" if facts["overdue"] else _LEDGER_KINDS[facts["kind"]]
         return f"- {item['ref']} {title}（{label}）"

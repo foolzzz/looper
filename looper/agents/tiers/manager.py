@@ -103,7 +103,7 @@ from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_fie
 from . import manager_budget
 from .manager_routing import SessionRouter
 from . import group_session
-from .. import session_routing
+from .. import session_routing, cost_guard, cost_hold_routing, cost_manager
 from ..mid_turn_input import MidTurnInputs
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
@@ -1625,7 +1625,7 @@ class ManagerAgent:
             elif (reply := manager_budget.cap_reply(self._session_now(), exc)) is not None:
                 await self._send_reply(envelope, _with_blocks(reply, turn.blocks), error=str(exc))
                 return
-            elif isinstance(exc, TurnFailed):
+            elif isinstance(exc, (TurnFailed, cost_guard.Denied)):
                 logger.error("%s failed to answer %s: %s", self._log, envelope.message_id, exc.error)
                 await self._send_reply(envelope, _with_blocks(exc.reply, turn.blocks), error=exc.error)
                 return
@@ -1705,7 +1705,7 @@ class ManagerAgent:
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
             try:
-                intent = await token.keep("route_intent", self._route_intent(envelope), 60)
+                intent = await token.keep("route_intent", cost_hold_routing.before_intent(self, envelope), 60)
                 if intent is not None:
                     await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
                     self._acting(token)
@@ -2067,6 +2067,7 @@ class ManagerAgent:
         if self.ops is not None:
             self.ops.publish_binding(token.binding if token is not None else None, session_key=self._session_now().key)
 
+    @cost_manager.defer_maintenance
     async def _run_prepared(self, token: TurnToken, prepared: Prepared) -> str:
         """Start the prepared turn and run it; the turn's record ends however it ends."""
         notice = "能力变更待应用：已保存的 skills 将在 /new 后生效；当前会话继续使用原有能力。"
@@ -3313,6 +3314,7 @@ class ManagerAgent:
             session.session_id, self._session_totals, self._pending_switch, self._pending_handoff = previous
             raise
 
+    @cost_manager.maintenance
     async def _handoff(self, switch: SessionSwitch, process: _Process, cancel: TurnCancel) -> str | None:
         """The handoff the running session writes before ``switch``; None when it writes none in time. A stop
         ends it with ``TurnStopped``: the old session and its process stay, and the next turn switches again."""

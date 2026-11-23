@@ -1,12 +1,13 @@
 """Operator-only cost observation; agent settings and tools never expose guard controls."""
 
-from .. import cost_guard, cost_guard_settings as settings
+from .. import cost_guard, cost_guard_settings as settings, cost_holds
+from ...db import cost_holds as holds_store
 from ..action_levels import ActionLevel
-from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR
+from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
 from ..ops import ErrorCode, OpError
 
 _CAP = {"type": ["number", "null"], "minimum": 0}
-_MODE = {"type": "string", "enum": ["off", "observe"]}
+_MODE = {"type": "string", "enum": ["off", "observe", "enforce"]}
 _LIMITS = _object(dict.fromkeys(settings.CAPS, _CAP), closed=True)
 _ROLES = _object(dict.fromkeys(settings.ROLES, _LIMITS), [], closed=True)
 _COUNTER = _object({"scope": _STR, "scope_ref": _STR, "currency": _STR, "spent_usd": {"type": "number"},
@@ -20,19 +21,36 @@ VIEW = _object({"mode": _MODE, **dict.fromkeys(settings.CAPS, _CAP), "roles": _R
                 "problem": _NULL_STR}, closed=True)
 _PATCH_ROLES = _object({role: _object(dict.fromkeys(settings.CAPS, _CAP), [], closed=True)
                         for role in settings.ROLES}, [], closed=True)
-PATCH = _object({"mode": {"type": ["string", "null"], "enum": ["off", "observe", None]},
+PATCH = _object({"mode": {"type": ["string", "null"], "enum": ["off", "observe", "enforce", None]},
                  **dict.fromkeys(settings.CAPS, _CAP), "roles": _PATCH_ROLES}, [], closed=True)
+HOLD = _object({"id": _INT, "scope": _STR, "scope_ref": _STR, "currency": _STR,
+                "limit_usd": {"type": "number"}, "spent_usd": {"type": "number"}, "reason": _STR,
+                "state": _STR, "created_at": _STR, "decided_at": _NULL_STR, "decided_via": _NULL_STR}, closed=True)
+_DECIDE = _object({"hold_id": {"type": "integer", "minimum": 1},
+                   "decision": {"type": "string", "enum": ["continue", "stop"]},
+                   "new_limit_usd": {"type": "number", "minimum": 0},
+                   "via": {"type": "string", "enum": ["dashboard", "api"]}},
+                  ["hold_id", "decision"], closed=True)
 RESULTS = {}
 OPERATIONS = (
     Operation("cost_guard.get", "POST", "/api/v1/cost_guard/get", "Read cost guard observations.",
               "Read cost guard observations. Shows separate real and equivalent spend, reservations and the latest "
               "20 admission observations. All daily caps are unset by default.", _object({}, closed=True), VIEW,
               operator_only=True, level=ActionLevel.INSIDE),  # reads only Looper's own settings and observations
-    Operation("cost_guard.update", "POST", "/api/v1/cost_guard/update", "Configure cost guard observation.",
-              "Configure cost guard observation. Only off and observe are available; neither blocks, asks or sends "
-              "messages. Null restores the default; daily caps have no default. Observe for a week before choosing caps.",
+    Operation("cost_guard.update", "POST", "/api/v1/cost_guard/update", "Configure cost guard admission.",
+              "Configure cost guard admission. Off and observe preserve execution. Enforce holds task dispatches "
+              "at task and global daily caps and refuses other senders' Manager turns; operator turns still pass. "
+              "Background-role and schedule budget enforcement is not enabled. Null restores the default.",
               PATCH, VIEW, risk="high", confirms=True, operator_only=True,
-              level=ActionLevel.INSIDE),  # changes only Looper's own observation settings
+              level=ActionLevel.INSIDE),  # changes only Looper's own admission settings
+    Operation("cost_holds.list", "POST", "/api/v1/cost_holds/list", "List pending spend holds.",
+              "List pending spend holds. Only the operator can read these decisions.", _object({}, closed=True),
+              _object({"holds": _array(HOLD)}, closed=True), risk="read", operator_only=True,
+              level=ActionLevel.INSIDE),  # reads only Looper's waiting states
+    Operation("cost_holds.decide", "POST", "/api/v1/cost_holds/decide", "Continue or stop a spend hold.",
+              "Continue or stop a spend hold. Raising a limit requires confirmation; existing running work is not "
+              "interrupted by admission holds.", _DECIDE, HOLD, risk="high", confirms=True, operator_only=True,
+              level=ActionLevel.INSIDE),  # changes only Looper's caps and task lifecycle
 )
 
 
@@ -42,17 +60,42 @@ def _view():
 
 
 async def impact(server, operation, arguments, principal, headers):
+    if operation.operation_id == "cost_holds.decide":
+        row = await holds_store.get(arguments["hold_id"])
+        if row is None or row['state'] != 'pending':
+            raise OpError(ErrorCode.INVALID, "The spend hold does not exist or has already been decided.")
+        if arguments.get('new_limit_usd') is not None:
+            return (f"Raise {row['scope']} {row['scope_ref']}'s {row['currency']} limit to "
+                    f"${arguments['new_limit_usd']:g} and continue C-{row['id']}?")
+        return f"{arguments['decision'].capitalize()} spend hold C-{row['id']} and its waiting tasks?"
     if operation.operation_id != "cost_guard.update":
         return None
     try:
         settings.checked(arguments)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
-    return ("Update cost guard settings? Only off and observe are available (no enforcement). "
-            "Observe records reservations and simulated refusals without blocking runs or sending messages.")
+    return ("Update cost guard settings? Enforce holds task dispatches at task and global daily caps and refuses "
+            "other senders' Manager turns. Operator turns still pass with a daily notice. Off and observe do not "
+            "block runs or send hold questions; background-role and schedule budget enforcement remains inactive.")
+
+
+def _hold(row):
+    return {key: row[key].isoformat() if hasattr(row[key], 'isoformat') else row[key] for key in HOLD['properties']}
 
 
 async def run(server, operation, arguments, principal, headers):
+    if operation.operation_id == 'cost_holds.list':
+        return {'holds': [_hold(row) for row in await holds_store.list_pending()]}
+    if operation.operation_id == 'cost_holds.decide':
+        from ..ops.service import Platform
+
+        try:
+            row = await cost_holds.decide(arguments['hold_id'], arguments['decision'], arguments.get('new_limit_usd'),
+                via=arguments.get('via', 'api'), platform=Platform(bus=server._supervisor.bus,
+                                                                 task_router=server._task_router))
+        except ValueError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+        return _hold(row)
     if operation.operation_id == "cost_guard.update":
         try:
             await settings.update(arguments)

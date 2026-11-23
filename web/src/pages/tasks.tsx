@@ -50,13 +50,13 @@ import { TaskDetailRoute } from "./task-detail";
 
 // Chip order only; the backend defines the statuses each filter covers and counts them.
 const STATUS_FILTERS = [
-  "all", "init", "running", "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+  "all", "init", "running", "waiting", "waiting_user", "awaiting_budget", "pending", "completed", "failed", "cancelled", "stopped",
 ] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 type StatusChip = Exclude<StatusFilter, "all">;
 
 /** Shown when the address has neither `status` nor `group` nor `schedule`. Change this to change the page's default view. */
-export const DEFAULT_STATUS_FILTERS = ["init", "running", "waiting", "waiting_user", "pending"] as const satisfies readonly StatusChip[];
+export const DEFAULT_STATUS_FILTERS = ["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending"] as const satisfies readonly StatusChip[];
 
 const STATUS_CHIPS: readonly StatusChip[] = STATUS_FILTERS.filter((name): name is StatusChip => name !== "all");
 
@@ -80,6 +80,8 @@ function statusBadge(status: string) {
       return <Badge variant="outline">{READY_LABEL}</Badge>;
     case "executing":
       return <Badge variant="default">Executing</Badge>;
+    case "awaiting_budget":
+      return <Badge variant="warning">等你决定花费</Badge>;
     case "waiting_user":
       return <Badge variant="warning">Waiting for you</Badge>;
     default:
@@ -101,6 +103,7 @@ function statusIcon(status: string) {
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     case "stopped":
       return <Pause className="h-4 w-4 text-warning" />;
+    case "awaiting_budget":
     case "waiting_user":
       return <MessageCircleQuestionMark className="h-4 w-4 text-warning" />;
     case READY_STATUS:
@@ -115,6 +118,7 @@ const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", READY_STATUS];
 /** A status filter's name. */
 function filterLabel(filter: string): string {
   if (filter === READY_STATUS) return "Ready";
+  if (filter === "awaiting_budget") return "等你决定花费";
   if (filter === "waiting_user") return "Waiting for you";
   return filter.charAt(0).toUpperCase() + filter.slice(1);
 }
@@ -717,7 +721,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
             const pressed = f === "all" ? selected.length === 0 : selected.includes(f);
             // Only a project with user gates has tasks that wait for the user.
             // An empty chip stays hidden unless this filter is the only selection; it can still be selected.
-            if (f === "waiting_user" && count === 0 && !(selected.length === 1 && selected[0] === "waiting_user")) return null;
+            if ((f === "waiting_user" || f === "awaiting_budget") && count === 0 && !(selected.length === 1 && selected[0] === f)) return null;
             return (
               <button
                 key={f}
