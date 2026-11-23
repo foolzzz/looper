@@ -9,7 +9,8 @@ import pytest
 from looper.agents.channels.base import DeliveryReceipt
 from looper.agents.channels.down_alerts import Monitor
 from looper.agents.channels.registry import ChannelRegistry
-from looper.db import channel_configs
+from looper.agents.schedule_notify import Notifier
+from looper.db import channel_configs, schedules
 from tests.db_support import run_with_channel_configs
 
 
@@ -23,6 +24,44 @@ async def configured(pool):
         registry._channels[f'channel-{kind}'] = SimpleNamespace(
             healthcheck=lambda: {'healthy': True}, notify=AsyncMock(return_value=DeliveryReceipt(kind, True)))
     return registry
+
+
+@pytest.mark.parametrize('outcome', ['deleted_target', 'no_sender', 'send_failed', 'send_raised'])
+def test_only_attempted_schedule_sends_contribute_to_down_alerts(monkeypatch, outcome):
+    async def test(pool):
+        registry = await configured(pool)
+        clock = [datetime.now(timezone.utc)]
+        monkeypatch.setattr(registry, '_delivery_clock', lambda: clock[0])
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('edge-project', 'Synthetic')")
+        await pool.execute("INSERT INTO schedules "
+            "(id, project_id, name, cron, timezone, requirement, notify, notify_channel, notify_chat) "
+            "VALUES ('edge-schedule', 'edge-project', 'Synthetic', '*/5 * * * *', 'UTC', 'Synthetic', "
+            "'always', 'lark', 'ou_synthetic00001')")
+        if outcome == 'deleted_target':
+            await channel_configs.set_config('channel-lark', {'config': {
+                'allowed_open_ids': [], 'operator_sender_id': 'ou_synthetic00001'}}, pool=pool)
+        lark = registry.get('channel-lark')
+        lark.notify.return_value = DeliveryReceipt('lark', False, error='synthetic send failure')
+        if outcome == 'send_raised':
+            lark.notify.side_effect = RuntimeError('synthetic transport failure')
+        sender = AsyncMock(wraps=registry.notify)
+        notifier = Notifier(sender=None if outcome == 'no_sender' else sender, clock=lambda: clock[0])
+        run_id = await schedules.insert_run(pool, schedule_id='edge-schedule', scheduled_for=clock[0],
+                                            trigger='manual', status='failed', finished_at=clock[0])
+        await notifier.run_ended(run_id)
+        monitor = Monitor(registry, clock=lambda: clock[0])
+        await monitor.tick()
+        clock[0] += timedelta(minutes=11)
+        await monitor.tick()
+        attempted = outcome in ('send_failed', 'send_raised')
+        assert bool(registry.down_checks) is attempted
+        assert registry.get('channel-telegram').notify.await_count == int(attempted)
+        assert sender.await_count == int(attempted)
+        [note] = await schedules.list_notifications('edge-schedule', limit=10, pool=pool)
+        assert note['status'] == ('failed' if attempted else 'dashboard')
+        assert note['error']
+
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_success_between_checks_restarts_failure_deadline(monkeypatch):
