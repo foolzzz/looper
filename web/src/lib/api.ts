@@ -1446,6 +1446,16 @@ export interface SubscriptionRunInfo {
   skip_reason?: "blocked_by_hook" | "invalid_reply" | null;
   /** Each message of its push: pending, sending, sent, failed or uncertain. */
   deliveries?: { segment: number; state: string; attempts: number; error: string | null }[];
+  /** Present on a triage run: category counts for that window. Absent on push, leads and intents runs. */
+  extract_counts?: {
+    important: number;
+    digest: number;
+    ignore: number;
+    uncited: number;
+    raised: number;
+    none?: boolean;
+    dropped?: Record<string, number>;
+  } | null;
 }
 
 /** One firing of a schedule (or a "Run now"), and the task it started. */
@@ -1551,6 +1561,8 @@ export interface ScheduleInfo {
   enabled: boolean;
   /** Null while disabled. */
   next_fire_at: string | null;
+  /** Set while a firing waits for a usage window. The instant is the stored reset or cooldown, not a locale clock. */
+  usage_hold?: { until: string; reason: string; reset_known: boolean; window: string | null };
   last_fired_at: string | null;
   last_success_at: string | null;
   consecutive_failures: number;
@@ -3619,6 +3631,28 @@ export const previewMessageStreamDeletion = async (fields: MessageStreamDeletion
 };
 export const deleteMessageStream = (fields: MessageStreamDeletion & { confirmation_token: string }, session: string) =>
   messageStreamOperation<{ source_id: string; deleted: number; deletion_id: number }>("delete", fields, undefined, session);
+
+export interface TriageWhy {
+  case: "triage_off" | "out_of_scope" | "not_yet" | "skipped" | "event" | "uncited" | "unknown";
+  cause?: "disabled" | "no_subscription";
+  rule?: "chat_excluded" | "imported_history" | "own_app" | "sender_kind";
+  next_run_at?: string | null;
+  cursor_seq?: number;
+  skip_reason?: string;
+  run_id?: string;
+  event_id?: string;
+  category?: "important" | "digest" | "ignore";
+  reason?: string;
+  reason_kind?: "model" | "uncited" | "raised";
+  handling?: string;
+  checked?: string[];
+}
+
+export async function triageWhy(message: string): Promise<TriageWhy> {
+  const result = await callV1<TriageWhy>("/api/v1/triage/why", { message });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
 
 export interface LlmrecSettingsUpdate {
   enabled?: boolean;

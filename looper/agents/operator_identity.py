@@ -8,6 +8,8 @@ from the turn's typed fields; no model can claim it. Setting and checking the fi
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 OPERATOR_KEY = "operator_sender_id"
 
 
@@ -28,3 +30,33 @@ def is_operator(*, channel: str | None, group: bool, sender: str | None, client_
     if channel == "web":
         return client_id is None
     return not group and operator_id is not None and sender is not None and sender == operator_id
+
+
+_DM_LABELS = {"telegram": "Telegram", "lark": "Lark", "lark_bot": "Lark"}
+
+
+@dataclass(frozen=True)
+class DmTarget:
+    """The operator's direct chat Looper writes to unasked: the bot (``channel_id``), the operator's id on it
+    (``chat``) and how the operator is told where (``where``)."""
+
+    channel_id: str
+    chat: str
+    where: str
+
+
+async def operator_dm_target() -> DmTarget | None:
+    """The default Manager's first enabled bot that names its operator (the built-in bots first), or None when
+    there is none. A reminder set from the dashboard and an idle check both go there."""
+    from ..db import channel_configs as db_configs
+    from .managers_api import DEFAULT_MANAGER_ID
+    from .message import parse_channel_id
+
+    for row in await db_configs.list_configs():
+        parsed = parse_channel_id(row["channel_id"])
+        value = (row.get("config") or {}).get(OPERATOR_KEY)
+        operator = value.strip() if isinstance(value, str) and value.strip() else None
+        if parsed is not None and row["enabled"] and row["manager_id"] == DEFAULT_MANAGER_ID and operator:
+            name = "" if parsed.builtin or not row.get("display_name") else f"（{row['display_name']}）"
+            return DmTarget(row["channel_id"], operator, f"你的 {_DM_LABELS[parsed.channel_type]} 私聊{name}")
+    return None

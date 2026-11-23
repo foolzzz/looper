@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ScheduleDetail } from "@/components/schedule-detail";
-import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge, RunHistory, LastRun, SubscriptionStatus } from "@/components/project-schedules";
+import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge, RunHistory, LastRun, SubscriptionStatus, listNextRun, usageWindowWait } from "@/components/project-schedules";
+import { SchedulesPage } from "@/pages/schedules";
 import type { Project, ScheduleInfo, ScheduleRunInfo } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -492,6 +493,39 @@ describe("command run history", () => {
     expect(container.textContent).toContain("fresh tail");
   });
 
+  it("shows a disabled schedule waiting in its own zone, on the project, the detail and the list", async () => {
+    const until = "2026-01-15T21:00:00+00:00";
+    const stored = storedSchedule();
+    stored.timezone = "America/Los_Angeles";
+    stored.usage_hold = { until, reason: "rejected", reset_known: true, window: "five_hour" };
+    const waiting = usageWindowWait(until, stored.timezone);
+    expect(waiting).toContain("Waiting for a usage window until ");
+    expect(waiting).not.toContain(until);
+    expect(listNextRun(stored)).toBe(`Disabled · ${waiting}`);
+    stub((path) => {
+      if (path === "schedule_admin/project_list") return { schedules: [stored], limits: {
+        default_timezone: "UTC", roles: [], notify_targets: [], name_max_chars: 80, requirement_max_chars: 10000,
+      } };
+      if (path === "schedule_admin/get") return { schedule: stored };
+      if (path === "schedule_admin/runs") return { runs: [], next_before: null, routine_skips: {} };
+      if (path === "schedule_admin/list") return { schedules: [{ ...stored, project_id: "project", project_name: "Example" }] };
+      if (path === "project_admin/list") return { projects: [{ project_id: "project", name: "Example" }], projects_root: "/tmp" };
+      if (path === "managers/list") return { managers: [] };
+      if (path === "registry/view") return { providers: [], profiles: [] };
+    });
+    await act(async () => root.render(<ProjectSchedulesSection project={{ project_id: "project" } as Project}
+      linked="" onLink={() => {}} />));
+    expect(container.textContent).toContain(`Disabled · ${waiting}`);
+    expect(container.textContent).not.toContain(until);
+    await act(async () => root.render(<ScheduleDetail scheduleId={stored.schedule_id} onDeleted={() => {}} />));
+    expect(container.textContent).toContain("Disabled: it does not run on its rule");
+    expect(container.textContent).toContain(waiting);
+    expect(container.textContent).not.toContain(until);
+    await act(async () => root.render(<SchedulesPage sub="" query="" onNavigate={() => {}} />));
+    expect(container.textContent).toContain(`Disabled · ${waiting}`);
+    expect(container.textContent).not.toContain(until);
+  });
+
   it("opens the schedule and target run from its nested project link", async () => {
     stub((path) => {
       if (path === "schedule_admin/project_list") return { schedules: [storedSchedule("command")], limits: {
@@ -900,6 +934,38 @@ describe("subscription schedules", () => {
     }));
     await act(async () => root.render(<RunHistory schedule={subscription(null)} open version={0} />));
     expect(container.textContent).toContain("Skipped (a prompt hook blocked it)");
+  });
+
+  it("shows triage category counts on a triage run and leaves other runs unchanged", async () => {
+    const base = { from_seq: 10, to_seq: 31, events_in_window: 21, events_selected: 18, events_too_old: 2,
+      events_over_cap: 1, record_id: null, notification_id: null, output_text: null };
+    const triage = {
+      run_id: "run-triage", status: "completed", trigger: "scheduled", firings: 1, scheduled_for: "2026-11-19T10:05:00Z",
+      subscription: { ...base, outcome: "extracted", extract_counts: {
+        important: 1, digest: 0, ignore: 2, uncited: 1, raised: 0, dropped: { missing_source: 3 } } },
+    } as unknown as ScheduleRunInfo;
+    const page = (run: ScheduleRunInfo) => vi.fn(async (url: RequestInfo | URL) => {
+      if (url === "/api/v1/schedule_admin/runs") return Response.json({ status: "ok", result: { runs: [run],
+        next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 } } });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", page(triage));
+    await act(async () => root.render(<RunHistory schedule={subscription(null)} open version={0} />));
+    const text = container.textContent ?? "";
+    expect(text).toContain("18 of 21 messages read (2 too old, 1 over the cap)");
+    expect(text).toContain("events 11–31");
+    expect(text).toContain("important 1 · digest 0 · ignore 2 · uncited 1 · raised 0 · dropped 3");
+    const leads = {
+      run_id: "run-leads", status: "completed", trigger: "scheduled", firings: 1, scheduled_for: "2026-11-19T10:05:00Z",
+      subscription: { ...base, outcome: "extracted", extract_counts: { new: 4, merged: 1 } },
+    } as unknown as ScheduleRunInfo;
+    vi.stubGlobal("fetch", page(leads));
+    await act(async () => root.render(<RunHistory schedule={subscription(null)} open version={1} />));
+    const again = container.textContent ?? "";
+    // The run line recorded before triage counts: a non-triage count object leaves this region unchanged.
+    expect(again).toContain("Extracted · 18 of 21 messages read (2 too old, 1 over the cap) · events 11–31");
+    expect(again).not.toContain("important 1");
+    expect(again).not.toContain("uncited");
   });
 
   it("offers the subscription type for a new schedule and sends its stream with the create", async () => {

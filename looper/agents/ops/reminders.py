@@ -14,27 +14,20 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from ...db import channel_configs as db_configs, reminders as store
+from ...db import reminders as store
 from .. import cron
-from ..managers_api import DEFAULT_MANAGER_ID
-from ..message import BOT_CHANNEL_TYPES, builtin_channel_id, parse_channel_id
-from ..operator_identity import OPERATOR_KEY
+from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
+from ..operator_identity import operator_dm_target
 from ..reminders import TEXT_MAX, default_timezone, resolve_due, when
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Turn
 
 CREATE, LIST, CANCEL = "looper_reminder_create", "looper_reminder_list", "looper_reminder_cancel"
 TOOL_NAMES = (CREATE, LIST, CANCEL)
 _SHOWN = "Looper adds a line after your reply with the reminder as stored; do not repeat it."
-_LABELS = {"telegram": "Telegram", "lark": "Lark", "lark_bot": "Lark"}
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _operator(row: Mapping[str, Any]) -> str | None:
-    value = (row.get("config") or {}).get(OPERATOR_KEY)
-    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 async def _target(turn: Turn) -> tuple[str, str, str]:
@@ -43,13 +36,8 @@ async def _target(turn: Turn) -> tuple[str, str, str]:
         if not turn.sender:
             raise OpError(ErrorCode.FORBIDDEN, "this message names no sender to remind")
         return turn.channel_id or builtin_channel_id(turn.channel), turn.sender, "这个私聊"
-    for row in await db_configs.list_configs():
-        parsed = parse_channel_id(row["channel_id"])
-        operator = _operator(row)
-        if parsed is not None and row["enabled"] and row["manager_id"] == DEFAULT_MANAGER_ID and operator:
-            label = _LABELS[parsed.channel_type]
-            name = "" if parsed.builtin or not row.get("display_name") else f"（{row['display_name']}）"
-            return row["channel_id"], operator, f"你的 {label} 私聊{name}"
+    if (found := await operator_dm_target()) is not None:
+        return found.channel_id, found.chat, found.where
     raise OpError(ErrorCode.CONFLICT, "there is no direct chat to send a reminder to: the user names themselves as "
                                       "a bot's operator in Settings → Channels, or asks from their direct chat with "
                                       "the bot")
