@@ -128,8 +128,8 @@ class SubscriptionRuns:
         if subscriptions.output_kind(sub) == "triage":
             from . import triage_settings
 
-            return {"skip_reason": (triage_settings.NOT_IMPLEMENTED if await triage_settings.enabled(conn)
-                                    else triage_settings.TURNED_OFF)}
+            if not await triage_settings.enabled(conn):
+                return {"skip_reason": triage_settings.TURNED_OFF}
         if subscriptions.is_extraction(sub):
             return await extraction.plan(conn, schedule, now=now, own_apps=await self._own_apps())
         to_seq = await db_subs.committed_seq(conn, sub["source_id"])
@@ -199,11 +199,10 @@ class SubscriptionRuns:
         stream = await db_subs.get_run(run_id)
         if run is None or schedule is None or stream is None or run["status"] != db_schedules.RUNNING:
             return False
-        if subscriptions.output_kind(schedule["subscription"]) == "triage":
-            # A recovered run cannot fall through to the intents processor before triage execution exists.
-            from . import triage_settings
-
-            await self._end(run_id, status="cancelled", outcome="failed", error=triage_settings.NOT_IMPLEMENTED)
+        if run["fired_at"] is None:
+            # Without the original age cutoff, a recovered attempt cannot reproduce its planned window.
+            await self._end(run_id, status="cancelled", outcome="failed",
+                            error="the run has no firing time; the next run reads its window again")
             return False
         if subscriptions.is_extraction(schedule["subscription"]):
             pool = db_connection.get_pool()
