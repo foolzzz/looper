@@ -34,6 +34,7 @@ from typing import Any
 from .. import vault
 from ..vault import VaultConfig
 from . import vault as vault_ops
+from . import subagents as subagent_ops
 from .vault import TOOL_NAMES as VAULT_TOOL_NAMES, VaultUsage
 from ..room import POSTABLE, MemberKind, MessageKind, RoomInput, RoomService, Seat
 from . import ErrorCode, OpError, RetrySafety, Risk, Tool, check_arguments
@@ -102,7 +103,9 @@ TOOLS: tuple[Tool, ...] = (
         description="Earlier room messages you can see, newest first, marking nothing read: by kind, from (a seat "
                     "or role), about (a message id: its whole thread), unanswered questions, before (a message id).",
         schema={"type": "object", "additionalProperties": False, "properties": {
-            "kind": {"type": "string", "enum": [k.value for k in MessageKind]},
+            "kind": {"type": "string", "enum": [k.value for k in (MessageKind.INFO, MessageKind.QUESTION, MessageKind.ANSWER,
+                                                      MessageKind.INTERFACE, MessageKind.ANNOUNCE, MessageKind.NOTICE,
+                                                      MessageKind.ESCALATION)]},
             "from": {"type": "string"},
             "about": {"type": "integer", "minimum": 1},
             "unanswered": {"type": "boolean"},
@@ -201,6 +204,8 @@ def validate_grant(record: Any, *, run_id: str, task_id: str) -> None:
         raise ValueError("invalid run grant seat kind") from exc
     if type(record.get("room")) is not bool:
         raise ValueError("invalid run grant room flag")
+    if "subagents" in record and type(record["subagents"]) is not bool:
+        raise ValueError("invalid run grant subagents flag")
     try:
         RoomInput(record.get("mode", RoomInput.PULL))
     except (ValueError, TypeError) as exc:
@@ -225,6 +230,7 @@ class _Grant:
     usage: VaultUsage = field(default_factory=VaultUsage)
     state: GrantState = GrantState.ACTIVE
     kept: bool = False
+    subagents: bool = False
 
 
 class RoomOps:
@@ -233,6 +239,7 @@ class RoomOps:
         self._url = url.rstrip("/")
         self._grants: dict[str, _Grant] = {}  # a token's hash -> what it is good for
         self._files: dict[str, set[str]] = {}  # a run -> the MCP configuration files that carry its token
+        self.subagents: subagent_ops.WorkerSubagents | None = None
         # A run whose calls the outbound review's hook checks -> where its reviews run, the files it wrote last, and
         # whether the operator was told of a block (once a run).
         self._reviews: dict[str, tuple[Path, str, Any]] = {}
@@ -242,10 +249,11 @@ class RoomOps:
     # --- Tokens ---
 
     def issue(self, task_id: str, seat: Seat, *, room: bool = True, vault: VaultConfig | None = None,
-              kept: bool = False, mode: RoomInput = RoomInput.PULL) -> str:
+              kept: bool = False, mode: RoomInput = RoomInput.PULL, subagents: bool = False) -> str:
         """A new token for ``seat``'s run in ``task_id``."""
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
         self._grants[_digest(token)] = _Grant(task_id, seat, room=room, kept=kept, mode=mode,
+                                               subagents=subagents and seat.kind is MemberKind.WORK,
                                                vault_tools=vault_ops.tools_for(vault) if vault else ())
         return token
 
@@ -266,7 +274,8 @@ class RoomOps:
                 return {"format": 1, "digest": digest, "task_id": grant.task_id,
                         "seat": asdict(grant.seat), "room": grant.room, "mode": grant.mode.value,
                         "vault_tools": [tool.name for tool in grant.vault_tools],
-                        "mcp_files": sorted(self._files.get(run, ()))}
+                        "mcp_files": sorted(self._files.get(run, ())),
+                        **({"subagents": True} if grant.subagents else {})}
         return None
 
     def import_pending(self, record: dict) -> None:
@@ -278,6 +287,7 @@ class RoomOps:
         validate_grant(record, run_id=run, task_id=record.get("task_id"))
         seat = Seat(**{**record["seat"], "kind": MemberKind(record["seat"]["kind"])})
         grant = _Grant(record["task_id"], seat, room=record["room"], mode=RoomInput(record.get("mode", RoomInput.PULL)),
+                       subagents=record.get("subagents", False) and seat.kind is MemberKind.WORK,
                        vault_tools=tuple(tool for tool in vault_ops.TOOLS if tool.name in record["vault_tools"]),
                        state=GrantState.PENDING_ADOPTION, kept=True)
         self._grants[record["digest"]] = grant
@@ -300,6 +310,21 @@ class RoomOps:
     def authorized(self, header: str | None) -> bool:
         return self._grant(header) is not None
 
+    def bind_subagents(self, run: str, recorder: Any, launch: Any) -> None:
+        grant = next((g for g in self._grants.values() if g.seat.run == run and g.subagents), None)
+        if grant is not None and self.subagents is not None:
+            self.subagents.bind(grant.task_id, grant.seat, recorder, launch)
+
+    async def end_subagents(self, run: str) -> None:
+        if self.subagents is None:
+            return
+        # No new call can enter while the per-run admission lock drains.
+        self.revoke_run(run)
+        try:
+            await self.subagents.end(run)
+        except Exception:
+            logger.exception("worker %s explorer cancellation deferred to recovery", run)
+
     def grant_state(self, header: str | None) -> GrantState | None:
         grant = self._grant(header)
         return grant.state if grant is not None else None
@@ -311,7 +336,8 @@ class RoomOps:
         if grant is None:
             return []
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
-        listed = [tool.listing() for tool in (*room_tools, *grant.vault_tools)]
+        agent_tools = subagent_ops.TOOLS if grant.subagents else ()
+        listed = [tool.listing() for tool in (*room_tools, *grant.vault_tools, *agent_tools)]
         if grant.mode is not RoomInput.PULL:
             for tool in listed:
                 if tool["name"] == INBOX:
@@ -339,14 +365,19 @@ class RoomOps:
         if grant is None or not grant.kept:
             return None
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
-        safety = {**RETRY_SAFETY, **vault_ops.RETRY_SAFETY}
+        agent_tools = subagent_ops.TOOLS if grant.subagents else ()
+        safety = {**RETRY_SAFETY, **vault_ops.RETRY_SAFETY, **subagent_ops.RETRY_SAFETY}
         return {tool.name: safety.get(tool.name, RetrySafety.NOT_RETRYABLE).value
-                for tool in (*room_tools, *grant.vault_tools)}
+                for tool in (*room_tools, *grant.vault_tools, *agent_tools)}
 
-    async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
+    async def call(self, header: str | None, name: str, raw: Any, *, call_id: str | None = None) -> dict[str, Any]:
         grant = self._grant(header)
         if grant is None:
             return _error(ErrorCode.FORBIDDEN, "this run's token no longer works: its run ended")
+        if name in subagent_ops.TOOL_NAMES and grant.subagents:
+            if grant.state is not GrantState.ACTIVE or self.subagents is None:
+                return _error(ErrorCode.UNAVAILABLE, "this run's explorer tools are awaiting adoption")
+            return await self.subagents.call(grant.task_id, grant.seat, name, raw, call_id=call_id)
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
         tools = {tool.name: tool for tool in (*room_tools, *grant.vault_tools)}
         tool = tools.get(name)

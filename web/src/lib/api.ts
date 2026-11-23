@@ -243,7 +243,12 @@ export interface ProjectExecution {
 }
 
 /** A group of tasks with an optional default work directory and background. */
+export type AcceptanceChecksMode = "off" | "local" | "network";
+export interface AcceptanceChecksSettings { acceptance_checks: AcceptanceChecksMode }
+
 export interface Project extends ProjectExecution {
+  /** Omitted while off; permission is changed only through acceptance_checks operations. */
+  acceptance_checks?: "local" | "network";
   project_id: string;
   name: string;
   description: string;
@@ -1244,6 +1249,20 @@ export async function fetchProjectsList(): Promise<ProjectsList> {
 
 export async function fetchProjects(): Promise<Project[]> {
   return (await fetchProjectsList()).projects;
+}
+
+export async function fetchAcceptanceChecks(projectId: string): Promise<AcceptanceChecksSettings> {
+  const result = await callV1<AcceptanceChecksSettings>("/api/v1/acceptance_checks/get", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateAcceptanceChecks(projectId: string, mode: AcceptanceChecksMode): Promise<AcceptanceChecksSettings> {
+  const result = await callV1<AcceptanceChecksSettings>("/api/v1/acceptance_checks/update",
+    { project_id: projectId, acceptance_checks: mode });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  notifyProjectsChanged();
+  return result;
 }
 
 export async function createProject(fields: NewProjectFields): Promise<Project> {
