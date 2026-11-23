@@ -359,6 +359,7 @@ async def seed_role_configs(pool: Any = None) -> None:
     from .advice import ADVISOR_ROLE_PROMPT, JUDGE_ROLE_PROMPT
     from .advisor import ADVISOR_TIMEOUT_SEC, JUDGE_TIMEOUT_SEC
     from .leads_check import CHECK_TIMEOUT_SEC, LEADS_CHECK_ROLE_PROMPT
+    from .explorer import EXPLORER_MAX_TURNS, EXPLORER_ROLE_PROMPT, EXPLORER_TIMEOUT_SEC
     from .outbound import OUTBOUND_ROLE_PROMPT, REVIEW_TIMEOUT_SEC as OUTBOUND_TIMEOUT_SEC
     from .processor import PROCESSOR_ROLE_PROMPT, PROCESSOR_TIMEOUT_SEC
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
@@ -419,6 +420,13 @@ async def seed_role_configs(pool: Any = None) -> None:
             "timeout_seconds": CHECK_TIMEOUT_SEC,  # at most, per check
             # Its instructions and reply contract follow it.
             "system_prompt": LEADS_CHECK_ROLE_PROMPT,
+        },
+        {
+            "role": "explorer",
+            "display_name": "Explorer",
+            "timeout_seconds": EXPLORER_TIMEOUT_SEC,
+            "max_turns": EXPLORER_MAX_TURNS,
+            "system_prompt": EXPLORER_ROLE_PROMPT,
         },
         {
             "role": "outbound_check",
