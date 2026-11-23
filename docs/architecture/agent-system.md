@@ -92,19 +92,24 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
   A scenario Manager never gets the section. Off, the prompt, the tool list and the process signature are what they
   were before. The section is composed per turn, so the prompt preview only notes it
-- **Delivery guard policy** (`delivery_guard.py`, `manager.delivery_guard.enabled`, default off):
+- **Delivery guard** (`delivery_guard.py`, `delivery_guard_manager.py`, `manager.delivery_guard.enabled`, default off):
   the pure policy defines a user's delivery debt (`owed`, then `paid` on non-empty top-level text),
   exempts completion and autonomous turns, and permits at most two hidden follow-ups after a successful
   empty reply. A failed follow-up selects the fixed failure notice; a stop retains normal stop behavior.
   Initial errors, process exits, spend caps, unavailable tools and refused tokens never start follow-ups.
   Six consecutive top-level tool calls select a same-turn reminder, at most twice per turn, only when
-  the runtime declares `MID_TURN_INPUT`. Only Claude Code declares this verified capability. Reminders
-  are model input, with no separate interim channel message.
+  the configured runtime declares `MID_TURN_INPUT` and the active session is a direct resident stream-json
+  process. Keeper and runner-hosted sessions are excluded. Only Claude Code declares this verified
+  capability. Reminders are model input, with no separate interim channel message.
   The operator-only v1 operations `delivery_guard.get` and `delivery_guard.update` read or store the
   switch (`enabled`, null restores off); existing chat settings responses and Manager tools stay unchanged.
-  **Manager wiring is pending:** storing the switch currently changes no replies, prompts, records or
-  channel calls. The policy, turn debt field and capability declaration are groundwork for that wiring;
-  dashboard controls, follow-up records/metrics and runtime reminder injection come with it.
+  Hidden turns send only the fixed follow-up message in the same session, without user-turn context,
+  sections or a channel line. Each has its own run record (`metadata.delivery_guard.followup` and `for`),
+  but adds no user message to chat history; reminders record their count in `metadata.delivery_guard.reminders`.
+  The original user's status and stop token stay active through recovery. Two empty follow-ups, or a failed
+  follow-up, produce the fixed failure notice with the turn's existing blocks. Off, replies, prompts,
+  command lines, record writes and channel calls retain their existing behavior. Dashboard controls and
+  turn metrics await their respective UI and metrics work.
 - **Session budget rules** (`session_budget.py`, `manager.turn_budget_usd`, default off; assistant-layer RFC
   section 5.4): `decide` takes a turn's context and cost and keeps the session, compacts it (a runtime with
   `HEADLESS_COMPACTION`) or rotates it. It uses #1473's `schedule_session.session_bound` and the threshold
