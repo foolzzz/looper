@@ -247,3 +247,10 @@ async def set_allowed_profiles(project_id: str, profile_ids: list[str], *, pool:
                                "AND k.project_id = $1 AND NOT c.profile_id = ANY($2)", project_id, profile_ids)
         await conn.executemany("INSERT INTO project_allowed_profiles (project_id, profile_id) VALUES ($1, $2) "
                                "ON CONFLICT DO NOTHING", [(project_id, profile_id) for profile_id in profile_ids])
+
+
+async def set_acceptance_checks(project_id: str, mode: str | None, *, pool: Any = None) -> bool:
+    """Store the operator's permission separately from agent-writable execution fields; NULL means off."""
+    result = await (pool or get_pool()).execute(
+        "UPDATE projects SET acceptance_checks = $2, updated_at = now() WHERE id = $1", project_id, mode)
+    return result == "UPDATE 1"
