@@ -27,31 +27,24 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .turn_metrics import ProactiveSource
+
 logger = logging.getLogger(__name__)
 
-ENABLED_KEY = "delivery.enabled"
-# The user's IANA timezone, which the quiet hours and the day of the cap are in; without it, the server's own.
-TIMEZONE_KEY = "user.timezone"
 DEFAULT_QUIET_START = time(22, 0)
 DEFAULT_QUIET_END = time(8, 0)
 DEFAULT_DM_DAILY_CAP = 5
 DEFAULT_RECENT_REPLY = timedelta(minutes=5)
 
 
-class DeliveryKind(StrEnum):
-    """What a proactive message is: its send point."""
-
-    GATE_REMINDER = "gate_reminder"
-    TASK_NOTICE = "task_notice"
-    SUBSCRIPTION = "subscription"
-    INTENT = "intent"
-    COMPLETION = "completion"  # a completion turn
-    USER_REMINDER = "user_reminder"
+# What a proactive message is, its send point: the source the proactive-message metrics record it by (one enum for
+# ``proactive_deliveries.source``).
+DeliveryKind = ProactiveSource
 
 
 class Urgency(StrEnum):
@@ -140,7 +133,7 @@ class DeliveryPolicy:
     """The operator's rules: the quiet hours (None: none) in ``timezone`` (``user.timezone``), how many counted
     proactive messages a direct chat gets a day, and how long after the user wrote a message passes anyway."""
 
-    timezone: ZoneInfo
+    timezone: tzinfo  # an IANA zone, or a fixed offset when the server has no zone name
     quiet_hours: DailyWindow | None = DailyWindow(DEFAULT_QUIET_START, DEFAULT_QUIET_END)
     dm_daily_cap: int = DEFAULT_DM_DAILY_CAP
     recent_reply: timedelta = DEFAULT_RECENT_REPLY
@@ -233,46 +226,41 @@ def _later(reason: Reason, policy: DeliveryPolicy, state: DeliveryState) -> Deci
 # --- What a send point calls: the policy and the chat's count read, the decision made and recorded once ---
 
 
-async def load_policy() -> DeliveryPolicy:
-    """The operator's policy: the built-in rules in ``user.timezone``, else in the server's own zone (an unknown
-    name is logged and ignored)."""
-    from ..db import system_settings
-    from . import cron
+def load_policy() -> DeliveryPolicy:
+    """The operator's policy: the built-in rules in the user's timezone (``user.timezone``, kept by the turn context
+    settings; else the server's own zone)."""
+    from . import turn_context
 
-    name = (await system_settings.get_settings([TIMEZONE_KEY])).get(TIMEZONE_KEY)
-    if name:
-        try:
-            return DeliveryPolicy(timezone=cron.zone(name))
-        except ValueError:
-            logger.warning("%s is not a timezone (%r); the server's own applies", TIMEZONE_KEY, name)
-    return DeliveryPolicy(timezone=cron.zone(cron.local_zone_name()))
+    return DeliveryPolicy(timezone=turn_context.zone())
 
 
 async def decide(delivery: Delivery, *, dedupe_key: str, channel_id: str, chat: str,
-                 last_user_message_at: datetime | None, task_id: str | None = None, step_id: str | None = None,
-                 schedule_id: str | None = None, now: datetime | None = None) -> Decision:
-    """Decide on one proactive message and record the decision (``proactive_deliveries``). A message already
-    decided on (``dedupe_key``: the send point and its message, tried again) keeps its first decision. The decisions
-    on one chat are taken one at a time, so its daily cap holds across send points."""
+                 last_user_message_at: datetime | None, source_ref: str | None = None, manager_id: str | None = None,
+                 task_id: str | None = None, step_id: str | None = None, schedule_id: str | None = None,
+                 now: datetime | None = None) -> Decision:
+    """Decide on one proactive message and record the decision in its ``proactive_deliveries`` row
+    (``dedupe_key``: the send point's key for the message, the one its channel receipt is recorded under). A message
+    already decided on (tried again) keeps its first decision; a row the metrics recorded before the layer was on
+    gets one. The decisions on one chat are taken one at a time, so its daily cap holds across send points."""
     from ..db import connection, proactive_deliveries as db
 
-    policy = await load_policy()
+    policy = load_policy()
     async with connection.get_pool().acquire() as conn, conn.transaction():
         await db.lock_chat(conn, channel_id, chat)
-        if (row := await db.get(conn, dedupe_key)) is not None:
+        if (row := await db.get(conn, dedupe_key)) is not None and row["decision"] is not None:
             return _decision(row)
         now = now or datetime.now(timezone.utc)
         local_date = now.astimezone(policy.timezone).date()
         state = DeliveryState(now, await db.counted_on(conn, channel_id, chat, local_date), last_user_message_at)
         decision = deliver(delivery, policy, state)
-        row = await db.insert(conn, {
-            "dedupe_key": dedupe_key, "kind": delivery.kind.value, "urgency": delivery.urgency.value,
-            "channel_id": channel_id, "chat": chat, "chat_kind": delivery.chat.value, "task_id": task_id,
-            "step_id": step_id, "schedule_id": schedule_id, "outcome": decision.outcome.value,
-            "reason": decision.reason.value, "counted": decision.counted, "local_date": local_date,
-            "digest_date": decision.digest_date, "decided_at": now})
+        row = await db.insert_decision(conn, {
+            "dedupe_key": dedupe_key, "source": delivery.kind.value, "source_ref": source_ref,
+            "manager_id": manager_id, "urgency": delivery.urgency.value, "channel_id": channel_id, "chat": chat,
+            "chat_kind": delivery.chat.value, "task_id": task_id, "step_id": step_id, "schedule_id": schedule_id,
+            "decision": decision.outcome.value, "reason": decision.reason.value, "counted": decision.counted,
+            "local_date": local_date, "digest_date": decision.digest_date, "decided_at": now})
     return _decision(row)
 
 
 def _decision(row: Mapping[str, Any]) -> Decision:
-    return Decision(Outcome(row["outcome"]), Reason(row["reason"]), row["counted"], row["digest_date"])
+    return Decision(Outcome(row["decision"]), Reason(row["reason"]), row["counted"], row["digest_date"])

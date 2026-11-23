@@ -15,6 +15,7 @@ import {
   type OverviewSchedules,
   type TaskGroup,
 } from "@/lib/api";
+import { fetchManagerMetrics, type ManagerMetrics as Metrics } from "@/lib/manager-metrics";
 import { historyHref } from "@/pages/agent-history";
 import { formatTpm, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
@@ -418,6 +419,172 @@ function Spend({ spend }: { spend: Overview["spend_today"] }) {
   );
 }
 
+/** The Manager group's windows, in days; the choice is remembered per browser. */
+const METRIC_WINDOWS = [{ days: 1, label: "24 h" }, { days: 7, label: "7 d" }] as const;
+const METRIC_WINDOW_KEY = "looper.dashboard.managerMetricsDays";
+const METRICS_REFRESH_MS = 60_000;
+
+function savedWindow(): number {
+  try {
+    return window.localStorage.getItem(METRIC_WINDOW_KEY) === "1" ? 1 : 7;
+  } catch {
+    return 7;
+  }
+}
+
+/** What each proactive source is, in words; an unknown one shows its key. */
+const PROACTIVE_SOURCES: Record<string, string> = {
+  task_notice: "task notices", completion: "completion turns", progress: "progress", gate: "gates",
+  gate_reminder: "gate reminders", subscription: "subscriptions", intent: "intents", schedule: "schedules",
+  advisor_alert: "advisor alerts", autonomous: "autonomous turns", user_reminder: "reminders",
+};
+const sourceLabel = (source: string) => PROACTIVE_SOURCES[source] ?? source;
+
+/** Milliseconds as seconds with one decimal; a dash when unknown, never 0. */
+const seconds = (ms: number | null) => (ms === null ? "—" : `${(ms / 1000).toFixed(1)} s`);
+/** A ratio as a whole percent; a dash when unknown. */
+const percent = (ratio: number | null | undefined) => (ratio == null ? "—" : `${Math.round(ratio * 100)}%`);
+
+function Stat({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="rounded-lg border border-border px-4 py-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-xl font-bold tabular-nums">{value}</p>
+      {detail && <p className="mt-0.5 text-xs text-muted-foreground">{detail}</p>}
+    </div>
+  );
+}
+
+
+/** A date as YYYY-MM-DD in the browser's zone (the server's, on the machine that serves the dashboard). */
+function localDate(when: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`;
+}
+
+/** Every local day the window touches, newest first: a window of N days spans N + 1 dates (today and N back), and
+ * a day the answer names that falls outside them is kept too, so nothing it counted is dropped. */
+function windowDays(windowDays: number, named: string[], now = new Date()): string[] {
+  const days = new Set(named);
+  for (let back = 0; back <= windowDays; back++) {
+    days.add(localDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - back)));
+  }
+  return [...days].sort().reverse();
+}
+
+function MetricFigures({ metrics }: { metrics: Metrics }) {
+  const turns = Object.values(metrics.turns.by_delivery).reduce((sum, n) => sum + n, 0);
+  const days = metrics.proactive.per_day;
+  const sent = days.reduce((sum, day) => sum + Object.values(day.by_source).reduce((a, n) => a + n, 0), 0);
+  const perDay = sent / metrics.window_days;
+  const bySource = new Map(days.map((day) => [day.date, day.by_source]));
+  const rows = windowDays(metrics.window_days, days.map((day) => day.date))
+    .map((date) => ({ date, by_source: bySource.get(date) ?? {} }));
+  const rates = Object.entries(metrics.proactive.reply_rate.by_source);
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label="Ack (P50)" value={seconds(metrics.ack.p50_ms)} detail={`P95 ${seconds(metrics.ack.p95_ms)}`} />
+        <Stat label="First reply (P50)" value={seconds(metrics.first_reply.p50_ms)}
+          detail={`P95 ${seconds(metrics.first_reply.p95_ms)}`} />
+        <Stat label="Empty deliveries" value={metrics.empty.ratio === null ? "—" : `${metrics.empty.count} · ${percent(metrics.empty.ratio)}`}
+          detail={turns > 0 ? `turns that delivered no reply, of ${turns}` : "no turn measured"} />
+        <Stat label="Proactive messages" value={`${perDay.toFixed(1)} / day`}
+          detail={`reply rate ${percent(metrics.proactive.reply_rate.all)}`} />
+      </div>
+      <table className="w-full text-sm">
+        <caption className="sr-only">Proactive messages by day</caption>
+        <thead>
+          <tr className="border-b border-border text-left text-xs text-muted-foreground">
+            <th scope="col" className="py-1.5 pr-3 font-normal">Day</th>
+            <th scope="col" className="py-1.5 pr-3 font-normal">By source</th>
+            <th scope="col" className="py-1.5 text-right font-normal">Messages</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border">
+          {rows.map((day) => (
+            <tr key={day.date}>
+              <td className="whitespace-nowrap py-1.5 pr-3 tabular-nums">{day.date}</td>
+              <td className="py-1.5 pr-3 text-muted-foreground">
+                {Object.entries(day.by_source).map(([source, n]) => `${sourceLabel(source)} ${n}`).join(" · ") || "—"}
+              </td>
+              <td className="py-1.5 text-right tabular-nums">
+                {Object.values(day.by_source).reduce((a, n) => a + n, 0)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rates.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          Replied within 30 minutes: {rates.map(([source, rate]) => `${sourceLabel(source)} ${percent(rate)}`).join(" · ")}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The Manager's turns and proactive messages (`manager_metrics.get`), read on its own: a failed read shows here
+ * and leaves the rest of the page alone. */
+function ManagerMetricsSection() {
+  const [days, setDays] = useState(savedWindow);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    return startPolling(async (signal) => {
+      await fetchManagerMetrics(days, signal)
+        .then((m) => { if (!signal.aborted) { setMetrics(m); setError(""); } })
+        .catch((e) => { if (!signal.aborted) setError(e instanceof Error ? e.message : String(e)); });
+    }, METRICS_REFRESH_MS);
+  }, [days]);
+
+  const choose = (next: number) => {
+    if (next === days) return;
+    setDays(next);
+    setMetrics(null);  // the other window's figures are not this one's
+    setError("");
+    try {
+      window.localStorage.setItem(METRIC_WINDOW_KEY, String(next));
+    } catch {
+      // A browser that keeps nothing keeps the default.
+    }
+  };
+
+  return (
+    <Section
+      title="Manager"
+      meta={metrics?.enabled === false ? undefined : (
+        <span role="group" aria-label="Metrics window" className="inline-flex gap-1">
+          {METRIC_WINDOWS.map((w) => (
+            <button key={w.days} type="button" aria-pressed={days === w.days} onClick={() => choose(w.days)}
+              className={cn("rounded-md px-2 py-0.5 pointer-coarse:min-h-11 pointer-coarse:px-3", focusable,
+                days === w.days ? "bg-primary/10 text-primary" : "hover:text-foreground")}>
+              {w.label}
+            </button>
+          ))}
+        </span>
+      )}
+    >
+      {error && (
+        <p role="alert" className={cn("text-xs text-destructive", metrics && "mb-3")}>
+          Cannot load the Manager&apos;s metrics ({error}){metrics ? "; these are the last numbers read." : "."}
+        </p>
+      )}
+      {error && !metrics ? null : !metrics ? (
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      ) : !metrics.enabled ? (
+        <p className="text-sm text-muted-foreground">
+          Metrics are off. Turn on “记录管家体验指标” in{" "}
+          <a href="#settings/chat" className={cn("text-primary", linkClass)}>Settings → Chat</a> to start recording.
+        </p>
+      ) : (
+        <MetricFigures metrics={metrics} />
+      )}
+    </Section>
+  );
+}
+
 export function DashboardPage() {
   const waitingGates = useWaitingGates();
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -474,6 +641,7 @@ export function DashboardPage() {
       <TaskCounts tasks={overview.tasks} />
       <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
       <Agents overview={overview} />
+      <ManagerMetricsSection />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
       {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}
       <Spend spend={overview.spend_today} />

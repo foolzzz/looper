@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from ..message import AgentAddress, MessageEnvelope, manager_address
 
 if TYPE_CHECKING:
+    from ..turn_context import SpeakerKind
     from ..delivery_guard import DeliveryDebt
     from .service import OpsScope
 
@@ -132,6 +133,8 @@ class Turn:
     group: bool = False  # the chat is a group chat
     envelope: MessageEnvelope | None = None
     blocks: list[str] = field(default_factory=list)
+    # The cards with buttons Looper sends with the reply (``card_actions.Card.to_dict``); each is one of ``blocks``.
+    cards: list[dict[str, Any]] = field(default_factory=list)
     # Created in this turn: their ready configuration blocks can change after a successful start.
     created_task_blocks: dict[str, str] = field(default_factory=dict)
     # What this turn's calls created (a schedule's id): the user sees it only after this turn's reply.
@@ -153,6 +156,9 @@ class Turn:
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
     # Why the turn runs; by default a user's when it answers a message, else Claude's own.
     origin: TurnOrigin | None = None
+    # Unset until per-turn context is wired; None preserves the existing authorization behavior.
+    speaker: SpeakerKind | None = None
+    operator_id_missing: bool = False
     # Initialized explicitly by delivery-guard wiring; absent when disabled.
     debt: DeliveryDebt | None = None
 

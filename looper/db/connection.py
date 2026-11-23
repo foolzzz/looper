@@ -145,6 +145,7 @@ _SUBSCRIPTIONS = "subscriptions"
 _SUBSCRIPTION_RULES = "subscription_rules"
 _SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
+_PROACTIVE_DELIVERIES = "proactive_deliveries"
 _SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
 _MANAGER_EVENT_REASONS_MIGRATION = "manager_event_reasons"
 _MANAGER_EVENT_DELIVERY = "manager_event_delivery"
@@ -164,7 +165,6 @@ _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
 _LEADS_CHECK_ONLINE = "leads_check_online"
-_PROACTIVE_DELIVERIES = "proactive_deliveries"
 _RUN_SKIPS = "run_skips"
 _RUN_SKIPS_ONLINE = "run_skips_online"
 _LLM_REQUESTS = "llm_requests"
@@ -173,6 +173,8 @@ _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
+_CARD_ACTIONS = "card_actions"
+
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
 _UNCERTAIN_DELIVERY_INDEXES = (
@@ -180,6 +182,7 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_intent_posts_uncertain", "ON intent_posts (updated_at) WHERE state = 'uncertain'"),
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
+_REMINDERS = "reminders"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -269,6 +272,7 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
 _SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source deletions end", re.S)
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
+_PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 _DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
@@ -497,7 +501,6 @@ def _subscriptions_ddl() -> str:
 
 
 _LEDGER_BLOCK = re.compile(r"-- ledger begin\n(.*?)-- ledger end", re.S)
-_PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MESSAGE_LEADS_BLOCK = re.compile(r"-- message leads begin\n(.*?)-- message leads end", re.S)
 
 
@@ -540,6 +543,23 @@ def _message_leads_ddl() -> str:
     return found.group(1)
 
 
+_CARD_ACTIONS_BLOCK = re.compile(r"-- card actions begin\n(.*?)-- card actions end", re.S)
+
+
+def _card_actions_ddl() -> str:
+    """The card buttons table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _CARD_ACTIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its card actions block")
+    return found.group(1)
+
+
+async def _card_actions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CARD_ACTIONS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('card_actions') IS NOT NULL")
+
+
 def _ledger_ddl() -> str:
     """The ledger tables as schema.sql defines them, so a database that predates them gets the same text."""
     found = _LEDGER_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -548,19 +568,29 @@ def _ledger_ddl() -> str:
     return found.group(1)
 
 
-def _proactive_deliveries_ddl() -> str:
-    """The delivery decisions table as schema.sql defines it, so a database that predates it gets the same text."""
-    found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
-    if found is None:
-        raise RuntimeError("schema.sql lost its proactive deliveries block")
-    return found.group(1)
-
-
 def _manager_events_ddl() -> str:
     """The completion event table as schema.sql defines it, so a database that predates it gets the same text."""
     found = _MANAGER_EVENTS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its manager events block")
+    return found.group(1)
+
+
+_REMINDERS_BLOCK = re.compile(r"-- reminders begin\n(.*?)-- reminders end", re.S)
+
+
+def _reminders_ddl() -> str:
+    """The reminders table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _REMINDERS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its reminders block")
+    return found.group(1)
+
+
+def _proactive_deliveries_ddl() -> str:
+    found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its proactive deliveries block")
     return found.group(1)
 
 
@@ -1005,10 +1035,10 @@ async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
 
 
-async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
-    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
+async def _reminders_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _REMINDERS):
         return False
-    return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
+    return not await conn.fetchval("SELECT to_regclass('reminders') IS NOT NULL")
 
 
 async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
@@ -1100,6 +1130,12 @@ async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_EVENTS):
         return False
     return not await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
+
+
+async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
 
 
 async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
@@ -1572,6 +1608,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _ledger_pending(conn):
             await conn.execute(_ledger_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
+        if await _card_actions_pending(conn):
+            await conn.execute(_card_actions_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CARD_ACTIONS)
         if await _manager_events_pending(conn):
             await conn.execute(_manager_events_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
@@ -1596,9 +1635,6 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                 "ADD CONSTRAINT manager_events_delivery_check CHECK (delivery IN ('pending', 'sending', 'sent', "
                 "'failed', 'uncertain')) NOT VALID")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_DELIVERY)
-        if await _proactive_deliveries_pending(conn):
-            await conn.execute(_proactive_deliveries_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():
                 await conn.execute(ddl)
@@ -1744,6 +1780,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
         if await _uncertain_deliveries_pending(conn):
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
+        if await _reminders_pending(conn):
+            await conn.execute(_reminders_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REMINDERS)
+        if await _proactive_deliveries_pending(conn):
+            await conn.execute(_proactive_deliveries_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1791,10 +1833,10 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
             or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
-            or await _ledger_pending(conn)
+            or await _ledger_pending(conn) or await _card_actions_pending(conn)
+            or await _proactive_deliveries_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
-            or await _proactive_deliveries_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)
@@ -1814,4 +1856,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
-            or await _mid_turn_input_pending(conn)))
+            or await _mid_turn_input_pending(conn)
+            or await _reminders_pending(conn)))

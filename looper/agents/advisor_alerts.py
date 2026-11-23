@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from ..db import system_settings
+from . import turn_metrics
 from ..db.connection import get_pool
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ FAILURES_IN_A_ROW = 3
 # Ends that are not the advisor failing.
 _NOT_FAILURES = ("withdrawn", "no_request", "interrupted")
 
-Sender = Callable[[str, str, str], Awaitable[tuple[bool, str | None]]]
+Sender = Callable[..., Awaitable[tuple[bool, str | None]]]
 _sender: Sender | None = None
 SENT_KEY = "advisor_alert_sent:"  # + the kind: the local day it was last sent
 
@@ -56,7 +57,7 @@ async def consult_ended(task_id: str) -> None:
         today = datetime.now().astimezone().date().isoformat()
         for kind, text in await _due(task_id):
             if await system_settings.claim(SENT_KEY + kind, today):
-                await _send(text)
+                await _send(text, task_id)
     except Exception:
         logger.warning("cannot check the advisor's alerts after a consult of task %s", task_id, exc_info=True)
 
@@ -89,13 +90,16 @@ async def _due(task_id: str) -> list[tuple[str, str]]:
     return due
 
 
-async def _send(text: str) -> None:
+async def _send(text: str, task_id: str | None = None) -> None:
     from .gate_service import dashboard_target
 
     logger.warning("advisor alert: %s", text)
     chat = await dashboard_target()
     if chat is None or _sender is None:
         return
-    sent, error = await _sender(chat.channel_id, chat.target.id, text)
+    proactive = turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.ADVISOR_ALERT, task_id)
+    sent, error = await _sender(
+        chat.channel_id, chat.target.id, text,
+        **({**proactive, "group": chat.target.group} if proactive else {}))
     if not sent:
         logger.warning("cannot send the advisor alert to %s: %s", chat.channel_id, error)
