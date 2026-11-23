@@ -65,6 +65,7 @@ from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
+from .message import MessageType
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerConfig
@@ -924,6 +925,7 @@ async def _run_agent_system_watched(
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
                                   message_backup=db_backup.message_backup_for(ops, runtime_root))
+            bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook
             advisor_alerts.configure(registry.notify)
@@ -970,6 +972,9 @@ async def _run_agent_system_watched(
             if ownership is not None:
                 ownership.push_async_callback(fleet.stop)
             task_router.manager_running = fleet.is_running
+            # An idle_only schedule skips a firing while its Manager answers a message.
+            scheduler.manager_busy = lambda manager_id: bool((agent := fleet.get(manager_id)) is not None
+                                                             and agent.busy)
             await fleet.load()
             from .completion_service import CompletionService
             completion_service = CompletionService(

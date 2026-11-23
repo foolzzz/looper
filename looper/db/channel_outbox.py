@@ -62,6 +62,19 @@ async def get(id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | 
     return _row(await (pool or get_pool()).fetchrow("SELECT * FROM channel_outbox WHERE id=$1", id))
 
 
+async def replace_rejected_body(id: int, body: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+    """Replace one explicitly refused payload; possible or completed delivery is immutable."""
+    pool = pool or get_pool()
+    await pool.execute("""
+        UPDATE channel_outbox SET body=$2::jsonb, state='pending', next_attempt_at=now(),
+          error_class=NULL, error=NULL, first_possible_at=NULL, claim_token=NULL
+        WHERE id=$1 AND state='failed' AND error_class='rejected' AND body<>$2::jsonb
+        """, id, json.dumps(body))
+    row = await get(id, pool=pool)
+    assert row is not None
+    return row
+
+
 async def next_due(channel_id: str, now: datetime, *, expired_before: datetime | None = None, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     return _row(await (pool or get_pool()).fetchrow("""
         SELECT o.* FROM channel_outbox o
@@ -92,9 +105,11 @@ async def mark_sent(id: int, external_id: str | None, *, pool: asyncpg.Pool | No
                                       "error_class=NULL, error=NULL WHERE id=$1", id, external_id)
 
 
-async def retry_later(id: int, at: datetime, error_class: str, error: str, *, pool: asyncpg.Pool | None = None) -> None:
+async def retry_later(id: int, at: datetime, error_class: str, error: str, *, clear_possible: bool = False, pool: asyncpg.Pool | None = None) -> None:
     await (pool or get_pool()).execute("UPDATE channel_outbox SET state='pending', next_attempt_at=$2, "
-        "error_class=$3, error=$4, sent_at=NULL WHERE id=$1", id, at, error_class, error[:500])
+        "error_class=$3, error=$4, sent_at=NULL, "
+        "first_possible_at=CASE WHEN $5 THEN NULL ELSE first_possible_at END WHERE id=$1",
+        id, at, error_class, error[:500], clear_possible)
 
 
 async def mark_failed(id: int, error_class: str, error: str, *, pool: asyncpg.Pool | None = None) -> None:
@@ -118,7 +133,7 @@ async def mark_attempted(id: int, now: datetime, *, pool: asyncpg.Pool | None = 
 async def recover(channel_id: str, now: datetime, keyed_window: float, *, pool: asyncpg.Pool | None = None) -> None:
     await (pool or get_pool()).execute("""
         UPDATE channel_outbox SET
-          state=CASE WHEN first_possible_at IS NULL OR ($4 AND first_possible_at > $3)
+          state=CASE WHEN $4 AND (first_possible_at IS NULL OR first_possible_at > $3)
                      THEN 'pending' ELSE 'uncertain' END,
           next_attempt_at=$2, claim_token=NULL,
           terminal_at=CASE WHEN first_possible_at IS NULL OR ($4 AND first_possible_at > $3)
