@@ -164,3 +164,18 @@ async def saved_sessions(*, pool: asyncpg.Pool | asyncpg.Connection | None = Non
     pool = pool or get_pool()
     rows = await pool.fetch("SELECT agent_id, runtime_type FROM agent_sessions WHERE session_id IS NOT NULL")
     return [(row["agent_id"], row["runtime_type"]) for row in rows]
+
+
+async def leads_session(agent_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> str | None:
+    """The session of ``agent_id`` (a Manager) in which a leads search found leads, if any."""
+    pool = pool or get_pool()
+    return await pool.fetchval("SELECT leads_session_id FROM agent_sessions WHERE agent_id = $1", agent_id)
+
+
+async def set_leads_session(agent_id: str, session_id: str, *,
+                            pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
+    """A leads search found leads in ``session_id`` of ``agent_id`` (a Manager): its later task writes are marked."""
+    pool = pool or get_pool()
+    await pool.execute("INSERT INTO agent_sessions (agent_id, leads_session_id) VALUES ($1, $2) "
+                       "ON CONFLICT (agent_id) DO UPDATE SET leads_session_id = EXCLUDED.leads_session_id", agent_id,
+                       session_id)
