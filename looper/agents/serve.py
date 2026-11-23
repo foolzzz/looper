@@ -52,7 +52,7 @@ from .channels.registry import ChannelRegistry
 from .channels.chat_routing import ChatResolver, ChatStop
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
-from . import db_backup, keeper, self_check
+from . import admission, db_backup, keeper, self_check
 from .kept_run import KeeperSettings
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
@@ -810,7 +810,6 @@ async def _run_agent_system_watched(
                 await chat_settings.load()
                 from . import lanes_settings
                 await lanes_settings.load()
-                from . import admission
                 await admission.initialize()
                 await persona.load()
                 from .channels import down_alert_settings
@@ -1300,6 +1299,8 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
         (("provider_limits", "Provider quotas"),),
     )
+    if admission.enabled():
+        groups += ((("admission", "Account admission"),),)
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
 
@@ -1333,8 +1334,10 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),
             self_check.provider_limit_checks(),
-            self_check.admission_checks(),
         )
+        # Keep the disabled path's checks unchanged; every enabled probe needs its own slots.
+        if admission.enabled():
+            probes += (self_check.admission_checks(),)
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])
     except Exception:
