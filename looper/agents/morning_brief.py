@@ -9,10 +9,12 @@ A refusal does not record that boundary. Until one is recorded, a later day stil
 attempt's dates, so a Tuesday brief that was rejected is still in Wednesday's. Nothing in any section means
 nothing is sent. The switch, the channel and the operator are read again after the summary and again
 immediately before the post. The switch is read once more after the operator query returns: it can be turned
-off while that query runs, and a claim that then fails the check is deleted. A brief with something to say is
-sent uncounted and never deferred: it is the digest. ``decide`` records that only while ``delivery.enabled``
-is on, under the same key as the post, and the channel receipt is written on that row. A later try replaces a
-rejected receipt on that row.
+off while that query runs. A fresh claim that then fails the check is deleted. A claim that continued a refusal
+is put back as that refusal, with the attempt count it had, so a later day still sees the first attempt. A
+brief with something to say is sent uncounted and never deferred: it is the digest. ``decide`` records that
+only while ``delivery.enabled`` is on, under the same key as the post, and the channel receipt is written on
+that row. A later try replaces a rejected receipt on that row. One already recorded as sent or unknown keeps
+its outcome, sent time and external id.
 
 ``morning_brief.enabled`` is off by default. While it is off a tick reads the in-memory switch and stops. One
 row of ``morning_briefs`` per local date and direct chat makes a restart and a second server send it at most

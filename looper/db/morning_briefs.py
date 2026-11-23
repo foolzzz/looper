@@ -6,7 +6,8 @@ was lost) and is never sent again. ``failed`` is a refusal, tried again while ``
 The delivery (``agents.morning_brief``) is the only writer. Weekends write nothing. ``consumed_until`` is how far
 that chat's briefs have read: a sent, skipped or uncertain brief sets it to the check's time, and the next brief
 reads digests decided after it. A refusal leaves it unset, so the retry reads the same digests. Until a boundary
-is recorded, a later day still starts from the first attempt's date.
+is recorded, a later day still starts from the first attempt's date. Releasing a retry puts that refusal back,
+attempt count included; only a fresh claim is deleted.
 """
 
 from __future__ import annotations
@@ -49,7 +50,8 @@ async def skip(conn: Any, local_date: date, channel_id: str, chat: str, now: dat
 async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
                 attempts_limit: int) -> bool:
     """Take this date's brief for one send (committed before the channel is asked). A refusal under
-    ``attempts_limit`` is taken again; anything else is left as it is."""
+    ``attempts_limit`` is taken again and keeps its detail, so releasing the claim can put that refusal back;
+    anything else is left as it is."""
     row = await get(conn, local_date, channel_id, chat)
     if row is None:
         return await conn.fetchval(
@@ -59,7 +61,7 @@ async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: da
             local_date, channel_id, chat, now) is True
     if row["status"] == "failed" and row["attempts"] < attempts_limit:
         return await conn.fetchval(
-            "UPDATE morning_briefs SET status = 'sending', attempts = attempts + 1, detail = NULL, updated_at = $4 "
+            "UPDATE morning_briefs SET status = 'sending', attempts = attempts + 1, updated_at = $4 "
             "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'failed' AND attempts < $5 "
             "RETURNING true",
             local_date, channel_id, chat, now, attempts_limit) is True
@@ -67,7 +69,18 @@ async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: da
 
 
 async def release(conn: Any, local_date: date, channel_id: str, chat: str) -> None:
-    """Drop a claim that was not sent, so a later tick can take the day."""
+    """Drop a claim that was not sent, so a later tick can take the day.
+
+    A fresh claim (this date had no row; its attempt count is 1) is deleted. A claim that continued a refusal
+    is put back as that refusal, with the attempt count it had before this claim. Deleting it would hide the
+    first attempt, and the next day would no longer read that attempt's digests."""
+    restored = await conn.fetchval(
+        "UPDATE morning_briefs SET status = 'failed', attempts = attempts - 1 "
+        "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' AND attempts > 1 "
+        "RETURNING true",
+        local_date, channel_id, chat)
+    if restored:
+        return
     await conn.execute(
         "DELETE FROM morning_briefs WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending'",
         local_date, channel_id, chat)

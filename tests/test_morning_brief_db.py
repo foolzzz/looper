@@ -423,6 +423,65 @@ def test_turning_the_brief_off_during_the_last_operator_check_drops_the_claim(
     run_with_channel_configs(test, monkeypatch)
 
 
+def test_a_refused_retry_switched_off_keeps_that_days_digest_for_the_next(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tuesday's first brief is refused. The same day's retry claims the row, then the switch goes off during the
+    last operator check. That claim is put back as the refusal, attempt count included, so Wednesday still reads
+    Tuesday's digest: the one the refusal already read, and the one held after it."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        chat_settings.set_morning_brief_time("07:00")
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        tuesday = datetime(2026, 11, 24, 7, 0, tzinfo=ZONE)
+        await _digest(pool, "early", tuesday.date(), hour=6, minute=30)
+        channel = _Channel(PostOutcome.REJECTED)
+        service = _service(channel, tuesday)
+        await service.run_once()
+        assert "11-24 06:30" in channel.posts[0]["text"]
+        refused = {"status": "failed", "attempts": 1, "detail": "the channel answered rejected",
+                   "consumed_until": None}
+        assert dict(await pool.fetchrow(
+            "SELECT status, attempts, detail, consumed_until FROM morning_briefs")) == refused
+
+        taken = False
+        real_claim = morning_brief.store.claim
+        real_targets = morning_brief.operator_targets
+
+        async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
+                        attempts_limit: int) -> bool:
+            nonlocal taken
+            ok = await real_claim(conn, local_date, channel_id, chat, now, attempts_limit=attempts_limit)
+            taken = taken or bool(ok)
+            return ok
+
+        async def targets() -> list[tuple[str, str]]:
+            found = await real_targets()
+            if taken:
+                chat_settings.set_morning_brief_enabled(False)
+            return found
+
+        monkeypatch.setattr(morning_brief.store, "claim", claim)
+        monkeypatch.setattr(morning_brief, "operator_targets", targets)
+        await service.run_once()
+        assert taken
+        assert len(channel.posts) == 1
+        row = await pool.fetchrow("SELECT status, attempts, detail, consumed_until FROM morning_briefs")
+        assert row is not None and dict(row) == refused
+        assert await pool.fetchval("SELECT count(*) FROM morning_briefs") == 1
+
+        monkeypatch.setattr(morning_brief.store, "claim", real_claim)
+        monkeypatch.setattr(morning_brief, "operator_targets", real_targets)
+        await _digest(pool, "held", tuesday.date(), hour=7, minute=30)
+        wednesday = datetime(2026, 11, 25, 7, 0, tzinfo=ZONE)
+        await _service(channel, wednesday).run_once()
+        assert "11-24 06:30" in channel.posts[1]["text"]
+        assert "11-24 07:30" in channel.posts[1]["text"]
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def test_a_message_held_after_an_early_brief_is_read_by_a_later_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tuesday's brief is 07:00. A 07:30 message quiet hours put in Tuesday's digest is still unread on Thursday
     when Wednesday did not run, and Friday does not repeat it."""
@@ -543,6 +602,34 @@ def test_a_successful_retry_replaces_a_rejected_receipt_when_metrics_are_off(
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE dedupe_key = $1", key) == 1
 
     run_with_channel_configs(test, monkeypatch)
+
+
+def test_sent_and_unknown_receipts_keep_outcome_sent_at_and_external_id(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later ``record_receipt`` leaves a receipt already recorded as ``sent`` or ``unknown`` alone: outcome,
+    sent_at and external_id all stay as they were."""
+
+    async def test(pool: Any) -> None:
+        from looper.db import proactive_deliveries
+
+        for outcome, external, sent_at in (
+                ("sent", "om_kept_sent", datetime(2020, 1, 1, tzinfo=timezone.utc)),
+                ("unknown", "om_kept_unknown", datetime(2020, 1, 2, tzinfo=timezone.utc))):
+            key = f"morning_brief:receipt:{outcome}"
+            await pool.execute(
+                "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, "
+                "decision, reason, counted, local_date, outcome, external_id, sent_at) "
+                "VALUES ($1, 'morning_brief', 'normal', 'channel-lark', $2, 'direct', 'send', "
+                "'within_limits', false, $3, $4, $5, $6)",
+                key, OP, MONDAY.date(), outcome, external, sent_at)
+            before = dict(await pool.fetchrow(
+                "SELECT outcome, sent_at, external_id FROM proactive_deliveries WHERE dedupe_key = $1", key))
+            await proactive_deliveries.record_receipt(key, "sent", "om_later")
+            after = dict(await pool.fetchrow(
+                "SELECT outcome, sent_at, external_id FROM proactive_deliveries WHERE dedupe_key = $1", key))
+            assert after == before == {"outcome": outcome, "sent_at": sent_at, "external_id": external}
+
+    run_db(test, monkeypatch)
 
 
 def test_a_clock_gap_sends_on_the_next_tick_and_a_repeated_hour_sends_once(
