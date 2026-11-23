@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...db import manager_actions as db_actions, projects as db_projects, tasks as db_tasks, user_gates as db_user_gates
-from .. import gate_service, projects
+from .. import gate_service, projects, receipts, receipts_settings
 from ..managers_api import DEFAULT_MANAGER_ID
 from ..message import CancelBy, channel_address
 from ..tiers.journal import clip
@@ -223,6 +223,7 @@ class ClientOps:
         turn = self._turn(principal, session)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        watch = receipts.Watch()
         try:
             arguments = validator(tool.schema, raw)
             risk = tool.risk_of(arguments)
@@ -230,7 +231,7 @@ class ClientOps:
                     and (blocked := await self._outbound_check(principal, turn, tool, arguments, risk, level_of)):
                 return blocked
             call = Call(arguments, turn, self._platform)
-            impact = await tool.escalate(call) if tool.escalate is not None else None
+            impact = await receipts.escalate(tool, call, watch)
             if impact is not None:
                 risk = Risk.HIGH
             if impact is not None and require_confirmation:
@@ -238,23 +239,25 @@ class ClientOps:
                 await self._record(turn, tool, arguments, risk, "needs_confirmation", confirmation_id=pending.id)
                 return {"status": "needs_confirmation", "confirmation_id": pending.id,
                         "expires_in_seconds": CONFIRMATION_SECONDS, "impact": impact}
-            result = await self._run(tool, call)
+            result = await self._run(tool, call, watch)
         except OpError as exc:
+            _refused(watch, turn, tool, arguments, exc)
             await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
-                               result={"message": str(exc)})
+                               result={"message": str(exc)}, watch=watch)
             answer = _error(exc.code, str(exc))
             if exc.details is not None:
                 answer["error"]["details"] = exc.details
             if exc.field is not None:
                 answer["error"]["field"] = exc.field
-            return answer
+            return _with_notes(answer, turn)
         except Exception as exc:
             logger.exception("an API client's call of %s failed", name)
+            _refused(watch, turn, tool, arguments, OpError(ErrorCode.UNAVAILABLE, "unavailable"))
             await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.UNAVAILABLE.value,
-                               result={"message": f"{type(exc).__name__}: {exc}"})
-            return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); try "
-                                                 "again later")
-        await self._record(turn, tool, arguments, risk, "ok", result=result)
+                               result={"message": f"{type(exc).__name__}: {exc}"}, watch=watch)
+            return _with_notes(_error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: "
+                                                             f"{exc}); try again later"), turn)
+        await self._record(turn, tool, arguments, risk, "ok", result=result, watch=watch)
         return _ok(result, turn)
 
     async def confirm(self, principal: Principal, session: str, confirmation_id: str) -> dict[str, Any]:
@@ -267,29 +270,40 @@ class ClientOps:
             return _error(ErrorCode.NOT_FOUND, f"no operation waits for confirmation {confirmation_id} for this "
                                                "client and session; call the operation again")
         del self._pending[key]
-        if self._clock() - pending.at > CONFIRMATION_SECONDS:
-            return _error(ErrorCode.EXPIRED, f"confirmation {confirmation_id} lapsed after "
-                                             f"{CONFIRMATION_SECONDS // 60} minutes; call the operation again")
         turn = self._turn(principal, session)
+        watch = receipts.Watch()
+        if self._clock() - pending.at > CONFIRMATION_SECONDS:
+            expired = OpError(ErrorCode.EXPIRED, f"confirmation {confirmation_id} lapsed after "
+                                                 f"{CONFIRMATION_SECONDS // 60} minutes; call the operation again")
+            _refused(watch, turn, pending.tool, pending.arguments, expired)
+            if watch.receipt is not None:  # the receipt is the one thing this exit adds to the trail
+                await self._record(turn, pending.tool, pending.arguments, Risk.HIGH, "error", error_code="expired",
+                                   result={"message": str(expired)}, confirmation_id=pending.id, watch=watch)
+            return _with_notes(_error(expired.code, str(expired)), turn)
         tool, arguments = pending.tool, pending.arguments
         try:
-            result = await self._run(tool, Call(arguments, turn, self._platform, confirmation=pending.confirmation))
+            result = await self._run(tool, Call(arguments, turn, self._platform, confirmation=pending.confirmation),
+                                     watch)
         except OpError as exc:
+            _refused(watch, turn, tool, arguments, exc)
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=exc.code.value,
-                               result={"message": str(exc)}, confirmation_id=pending.id)
+                               result={"message": str(exc)}, confirmation_id=pending.id, watch=watch)
             answer = _error(exc.code, str(exc))
             if exc.details is not None:
                 answer["error"]["details"] = exc.details
             if exc.field is not None:
                 answer["error"]["field"] = exc.field
-            return answer
+            return _with_notes(answer, turn)
         except Exception as exc:
             logger.exception("an API client's confirmed call of %s failed", tool.name)
+            _refused(watch, turn, tool, arguments, OpError(ErrorCode.UNAVAILABLE, "unavailable"))
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=ErrorCode.UNAVAILABLE.value,
-                               result={"message": f"{type(exc).__name__}: {exc}"}, confirmation_id=pending.id)
-            return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); call "
-                                                 "the operation again later")
-        await self._record(turn, tool, arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
+                               result={"message": f"{type(exc).__name__}: {exc}"}, confirmation_id=pending.id,
+                               watch=watch)
+            return _with_notes(_error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: "
+                                                             f"{exc}); call the operation again later"), turn)
+        await self._record(turn, tool, arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id,
+                           watch=watch)
         return _ok(result, turn)
 
     async def _outbound_check(self, principal: Principal, turn: Turn, tool: Tool, arguments: Mapping[str, Any],
@@ -327,8 +341,10 @@ class ClientOps:
         return _error(ErrorCode.BLOCKED, message)
 
     @staticmethod
-    async def _run(tool: Tool, call: Call) -> Any:
-        result = _plain(await tool.run(call))
+    async def _run(tool: Tool, call: Call, watch: receipts.Watch | None = None) -> Any:
+        answer = await (receipts.run_watched(tool, call, watch) if watch is not None and receipts_settings.enabled()
+                        else tool.run(call))
+        result = _plain(answer)
         if isinstance(result, dict):
             result.pop("shown_to_user", None)  # for the Manager's reply; a client has none
         return result
@@ -347,7 +363,7 @@ class ClientOps:
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
                       error_code: str | None = None, result: Any = None,
-                      confirmation_id: str | None = None) -> int | None:
+                      confirmation_id: str | None = None, watch: receipts.Watch | None = None) -> int | None:
         if risk is Risk.READ:  # a read is not in the trail
             return
         try:
@@ -355,10 +371,23 @@ class ClientOps:
                 channel=API_CHANNEL, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
                 confirmation_id=confirmation_id, task_id=tool.task_id(arguments) or _created_task(result),
-                manager_id=DEFAULT_MANAGER_ID, client_id=turn.client_id,
+                manager_id=DEFAULT_MANAGER_ID, client_id=turn.client_id, **receipts.row_fields(watch),
             )
         except Exception:
             logger.warning("could not record an API client's call of %s", tool.name, exc_info=True)
+
+
+def _refused(watch: receipts.Watch, turn: Turn, tool: Tool, arguments: Mapping[str, Any], error: OpError) -> None:
+    """With receipts on, the failed-write receipt of a call that ended in ``error`` before it produced one."""
+    if receipts_settings.enabled() and watch.receipt is None:
+        receipts.record_refusal(watch, turn, tool.name, arguments, error)
+
+
+def _with_notes(answer: dict[str, Any], turn: Turn) -> dict[str, Any]:
+    """An error answer with the turn's lines (the receipt) in ``notes`` while receipts are on; as it was when off."""
+    if receipts_settings.enabled() and turn.blocks:
+        answer["notes"] = list(turn.blocks)
+    return answer
 
 
 def _ok(result: Any, turn: Turn) -> dict[str, Any]:

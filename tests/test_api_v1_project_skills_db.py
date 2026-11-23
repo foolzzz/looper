@@ -202,3 +202,46 @@ def test_retired_routes_are_404_with_authenticated_v1_positive_control(tmp_path,
             status, answer = await call(action, body)
             assert status == 200 and answer["status"] == "ok", answer
     run_db(run, monkeypatch, timeout=30)
+
+
+def test_a_client_cannot_deprecate_restore_or_read_the_budget(tmp_path, monkeypatch):
+    async def run(pool):
+        project = await projects.create_project(name="Example")
+        added = await project_skills.add_skill(project["id"], SKILL)
+        skill_id = added["skill"]["skill_id"]
+        before = await library.get_item(skill_id)
+        body = {"project_id": project["id"], "skill_id": skill_id}
+        async with _api(tmp_path, pool) as call:
+            for action, arguments in (
+                ("deprecate", {**body, "reason": "old"}),
+                ("restore", body),
+                ("context_budget", {"project_id": project["id"]}),
+            ):
+                status, answer = await call(action, arguments, client=True)
+                assert status == 403 and answer["error"] == {
+                    "code": "forbidden", "message": "operator identity is required"}, answer
+            assert (await library.get_item(skill_id))["sha256"] == before["sha256"]
+            assert (await library.get_item(skill_id))["lifecycle"] == "active"
+            status, deprecated = await call("deprecate", {**body, "reason": "too broad"})
+            assert status == 200, deprecated
+            assert deprecated["result"]["skill"]["lifecycle"] == "deprecated"
+            assert "reason" not in deprecated["result"]["skill"]
+            stored = await pool.fetchval(
+                "SELECT arguments FROM manager_actions WHERE tool = 'project_skills.deprecate' AND status = 'ok'")
+            arguments = json.loads(stored) if isinstance(stored, str) else stored
+            assert arguments["reason"] == "too broad"
+            assert deprecated["result"]["affected_projects"] == [
+                {"project_id": project["id"], "project_name": "Example"}]
+            _, installs = await call("/api/v1/installs/project", {"project_id": project["id"]})
+            assert installs["result"]["installs"][0]["item"]["lifecycle"] == "deprecated"
+            budget = (await call("context_budget", {"project_id": project["id"]}))[1]["result"]
+            assert budget["counts_plugin_skills"] is False
+            assert budget["roles"]["worker"]["skills"] == 0
+            restored = (await call("restore", body))[1]["result"]
+            assert restored["skill"]["lifecycle"] == "active"
+            shown = (await call("get", body))[1]["result"]
+            assert shown["skill"]["lifecycle"] == "active"
+            loaded = (await call("context_budget", {"project_id": project["id"]}))[1]["result"]
+            assert loaded["roles"]["worker"] == {
+                "chars": len(SKILL["name"]) + len(SKILL["description"]), "skills": 1, "over": False}
+    run_db(run, monkeypatch, timeout=30)

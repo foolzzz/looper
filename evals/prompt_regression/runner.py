@@ -668,6 +668,8 @@ def run_task(
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
             api.post("/api/v1/allowed_profiles/replace",
                      {"project_id": created["project_id"], "profile_ids": [chosen_profile_id]})
+        if task.skill_proposals:
+            api.post("/api/v1/project_skills/proposals/set_mode", {"project_id": created["project_id"], "mode": "on"})
         if task.dependency_conditions:
             api.post("/api/v1/project_admin/update", {
                 "project_id": created["project_id"], "fields": {"dependency_conditions": "on"}})["result"]["project"]
@@ -767,6 +769,9 @@ def run_task(
             attempts_view = None
         if not isinstance(attempts_view, dict):
             attempts_view = None
+        if task.skill_proposals:
+            detail = {**detail, "skill_proposals": api.post("/api/v1/project_skills/proposals/list",
+                      {"project_id": created["project_id"]})["result"]["proposals"]}
         result = metrics.task_metrics(
             detail=detail,
             activity=_all_activity(api, task_id),
