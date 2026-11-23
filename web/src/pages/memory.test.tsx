@@ -157,9 +157,9 @@ describe("Memory page detail", () => {
   });
 
   it("says why there is no diff and shows large removals and flags", async () => {
-    details["M-0001"] = detail({ flagged: true, current: { ...detail().current!, diffs: {}, diffs_problem: "the vault no longer matches", large_removal: true } });
+    details["M-0001"] = detail({ flagged: true, current: { ...detail().current!, diffs: {}, diffs_problem: "base_changed", large_removal: true } });
     await render("M-0001");
-    expect(text()).toContain("看不到和知识库现状的差异：the vault no longer matches");
+    expect(text()).toContain("看不到和知识库现状的差异：要改的笔记在提议之后被改过");
     expect(text()).toContain("大段删除");
   });
 
@@ -222,6 +222,30 @@ describe("Memory page detail", () => {
     await click(button("编辑"));
     await click(button("保存并写入"));
     expect(vi.mocked(memory.memoryEdit).mock.calls[1][3]).toBe(true);
+  });
+
+  it("saves an edit against the version the draft was made from, not a refreshed one, and says when it is out of date", async () => {
+    vi.mocked(memory.memoryEdit).mockRejectedValue(new V1Error(409, "conflict", "this candidate changed since it was shown"));
+    await render("M-0001");
+    await click(button("编辑"));
+    const area = container.querySelector("#memory-edit-0") as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "My draft of the old version\n");
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // Meanwhile the candidate is revised elsewhere and the page re-reads it (the poll, or the refresh button).
+    const NEW = "c".repeat(64);
+    const revised = detail({ revision: 2, content_hash: NEW });
+    details["M-0001"] = { ...revised, current: { ...revised.current!, content_hash: NEW,
+      diffs: { "mem/prefs/weekly.md": "+++ b/mem/prefs/weekly.md\n+Newer text from the other window.\n" },
+      changes: [{ op: "create_note", path: "mem/prefs/weekly.md", content: "Newer text from the other window.\n" }] } };
+    await click(button("刷新"));
+    await click(button("保存"));
+    expect(vi.mocked(memory.memoryEdit).mock.calls[0][1]).toBe(HASH);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("这个版本已经过期");
+    expect(text()).toContain("Newer text from the other window.");
+    expect(text()).toContain("你没保存的修改");
+    expect(container.querySelector("#memory-edit-0")).toBeNull();
   });
 
   it("offers retry, revive and delete only where the state allows", async () => {

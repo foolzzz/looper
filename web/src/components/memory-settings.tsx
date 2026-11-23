@@ -149,7 +149,7 @@ export function MemorySettingsSection() {
           <div className="flex items-center gap-3">
             <Switch label="打开记忆写入" checked={draft.enabled} disabled={saving} onChange={(enabled) => update({ enabled })} />
             <span className="text-sm">打开记忆写入</span>
-            <span className="text-xs text-muted-foreground">打开时会先列出影响，由你确认。</span>
+            <span className="text-xs text-muted-foreground">打开记忆写入，或改推送目标时，会先列出影响，由你确认。</span>
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
@@ -263,11 +263,11 @@ export function MemorySettingsSection() {
         </form>
       )}
       {asking && (
-        <ConfirmDialog title="打开记忆写入" onClose={() => setAsking(null)}>
+        <ConfirmDialog title="确认这次保存" onClose={() => setAsking(null)}>
           <p className="whitespace-pre-wrap break-words text-sm">{asking.impact}</p>
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => setAsking(null)}>取消</Button>
-            <Button type="button" disabled={saving} onClick={() => finish(memoryConfirmSave(asking))}>确认打开</Button>
+            <Button type="button" disabled={saving} onClick={() => finish(memoryConfirmSave(asking))}>确认并保存</Button>
           </div>
         </ConfirmDialog>
       )}

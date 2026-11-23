@@ -48,6 +48,13 @@ const REASON_ZH: Record<string, string> = {
   interrupted: "写入被服务重启打断了好几次。检查仓库后点重试。",
   draft_failed: "起草失败了。",
 };
+const DIFF_PROBLEM_ZH: Record<string, string> = {
+  not_configured: "记忆写入还没有配置。",
+  vault_problem: "知识库的设置现在有问题。",
+  base_changed: "要改的笔记在提议之后被改过。",
+  anchor_missing: "要追加或替换的那一行在笔记里找不到了。",
+  unreadable: "读不了知识库里的文件。",
+};
 const EVENT_ZH: Record<string, string> = {
   propose: "提议", draft: "起草", edit: "编辑", push: "推送", confirm: "确认", reject: "驳回", expire: "过期",
   revive: "恢复", claim: "开始写入", write: "写入完成", conflict: "冲突", block: "受阻", retry: "重试",
@@ -275,8 +282,10 @@ function Row({ item, active, checked, canAct, result, onToggle, onOpen }: {
   return (
     <li className={cn("flex items-start gap-3 p-3", active && "bg-primary/5")}>
       {item.state === "pending" && (
-        <input type="checkbox" checked={checked} disabled={!canAct} onChange={onToggle}
-               aria-label={`选择 ${item.id}`} className="mt-1 h-4 w-4 shrink-0 pointer-coarse:h-6 pointer-coarse:w-6" />
+        <label className="-m-1 flex h-6 w-6 shrink-0 items-center justify-center pointer-coarse:m-0 pointer-coarse:h-11 pointer-coarse:w-11">
+          <input type="checkbox" checked={checked} disabled={!canAct} onChange={onToggle}
+                 aria-label={`选择 ${item.id}`} className="h-4 w-4 pointer-coarse:h-6 pointer-coarse:w-6" />
+        </label>
       )}
       <div className="min-w-0 flex-1 space-y-1">
         <button type="button" onClick={onOpen} aria-current={active ? "true" : undefined}
@@ -320,7 +329,9 @@ function Detail({ id, tick, canAct, onBack, onChanged }: { id: string; tick: num
   const [notice, setNotice] = useState("");
   const [ask, setAsk] = useState<Pending>(null);
   const [reason, setReason] = useState("");
-  const [drafts, setDrafts] = useState<MemoryChange[] | null>(null);
+  // The draft and the hash of the version it was made from are frozen together when editing starts.
+  const [drafts, setDrafts] = useState<{ base: string; changes: MemoryChange[] } | null>(null);
+  const [lostDraft, setLostDraft] = useState<MemoryChange[] | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -333,6 +344,12 @@ function Detail({ id, tick, canAct, onBack, onChanged }: { id: string; tick: num
 
   const failed = (err: unknown) => {
     setActionError(err instanceof V1Error && err.status === 403 ? `${DISABLED}${err.message}` : staleOrText(err));
+    if (err instanceof V1Error && err.status === 409 && drafts) {
+      // Someone changed it after the draft's version: show the new version, keep the unsaved text to copy from.
+      setActionError(`这个版本已经过期：${err.message}。下面是新版本，你的修改没有保存。`);
+      setLostDraft(drafts.changes);
+      setDrafts(null);
+    }
     // A stale answer means the page shows an old version: read the new one.
     if (err instanceof V1Error && err.status === 409) setAttempt((n) => n + 1);
     onChanged();
@@ -381,8 +398,8 @@ function Detail({ id, tick, canAct, onBack, onChanged }: { id: string; tick: num
   const reasonText = detail.reason ? REASON_ZH[detail.reason] : null;
 
   const saveDrafts = (confirm: boolean) => {
-    if (!drafts || !hash) return;
-    void act(confirm ? "已保存并确认，等待写入" : "已保存为新版本", () => memoryEdit(detail.id, hash, drafts, confirm));
+    if (!drafts) return;
+    void act(confirm ? "已保存并确认，等待写入" : "已保存为新版本", () => memoryEdit(detail.id, drafts.base, drafts.changes, confirm));
   };
 
   return (
@@ -418,7 +435,7 @@ function Detail({ id, tick, canAct, onBack, onChanged }: { id: string; tick: num
         {!current ? (
           <p role="status" className="text-sm text-muted-foreground">还没有起草出具体改动。</p>
         ) : drafts ? (
-          <EditChanges changes={drafts} onChange={setDrafts} disabled={off} />
+          <EditChanges changes={drafts.changes} onChange={(changes) => setDrafts({ ...drafts, changes })} disabled={off} />
         ) : (
           <Changes revision={current} />
         )}
@@ -463,6 +480,12 @@ function Detail({ id, tick, canAct, onBack, onChanged }: { id: string; tick: num
         </p>
       )}
       {notice && <p role="status" className="text-sm text-success">{notice}</p>}
+      {lostDraft && (
+        <details className="text-sm">
+          <summary className="cursor-pointer">你没保存的修改</summary>
+          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border p-2 font-mono text-xs">{lostDraft.map(changeText).join("\n\n")}</pre>
+        </details>
+      )}
 
       <div className="flex flex-wrap gap-2">
         {drafts ? (
@@ -477,7 +500,7 @@ function Detail({ id, tick, canAct, onBack, onChanged }: { id: string; tick: num
               <Button type="button" disabled={off} onClick={() => void act("已确认，等待写入", () => memoryConfirm(detail.id, hash))}>确认写入</Button>
             )}
             {state === "pending" && current && (
-              <Button type="button" variant="outline" disabled={off} onClick={() => setDrafts(current.changes.map((c) => ({ ...c })))}>编辑</Button>
+              <Button type="button" variant="outline" disabled={off} onClick={() => { setLostDraft(null); setDrafts({ base: current.content_hash, changes: current.changes.map((c) => ({ ...c })) }); }}>编辑</Button>
             )}
             {state === "blocked" && (
               <Button type="button" disabled={off} onClick={() => void act("已重试，等待写入", () => memoryRetry(detail.id))}>重试</Button>
@@ -528,7 +551,7 @@ function Changes({ revision }: { revision: NonNullable<MemoryDetail["current"]> 
   const paths = [...new Set(revision.changes.map((change) => change.path))];
   return (
     <div className="space-y-3">
-      {revision.diffs_problem && <p role="status" className="break-words text-sm text-warning">看不到和知识库现状的差异：{revision.diffs_problem}</p>}
+      {revision.diffs_problem && <p role="status" className="break-words text-sm text-warning">看不到和知识库现状的差异：{DIFF_PROBLEM_ZH[revision.diffs_problem] ?? revision.diffs_problem}</p>}
       {paths.map((path) => {
         const stats = revision.diff_stats[path];
         const ops = revision.changes.filter((change) => change.path === path).map((change) => OP_ZH[change.op] ?? change.op);

@@ -56,7 +56,7 @@ export interface MemoryRevision {
   created_at: string;
   /** A unified diff per path, made by the server from the vault file as it is now. */
   diffs?: Record<string, string>;
-  /** Why `diffs` is empty although the revision has changes. */
+  /** A stable code for why `diffs` is empty although the revision has changes (see `DIFF_PROBLEM_ZH` on the page). */
   diffs_problem?: string | null;
 }
 

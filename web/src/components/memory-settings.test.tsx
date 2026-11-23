@@ -108,7 +108,7 @@ describe("Memory settings section", () => {
     const dialog = container.querySelector('[role="dialog"]')!;
     expect(dialog.textContent).toContain("写入会提交到 main 分支");
     expect(memory.memoryConfirmSave).not.toHaveBeenCalled();
-    await click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "确认打开")!);
+    await click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "确认并保存")!);
     expect(memory.memoryConfirmSave).toHaveBeenCalledWith(pending);
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(text()).toContain("已保存");
