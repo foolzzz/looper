@@ -15,6 +15,24 @@ persistence, export/import and operator/client authorization. Imports may set th
 permission only with operator identity; an omitted permission preserves the
 target, including when a client imports a legacy or disabled export.
 
+Enabled plan edits replace check definitions (omission clears them); while off,
+a replan must omit `checks` and preserves the stored definitions. Plan views echo
+existing definitions. Restore validates stored checks against the current project
+permission inside the saved-plan read handler: incompatible or corrupt definitions
+are logged and the plan is not loaded, leaving the database untouched. Default-off
+plans without definitions still restore normally. Planner prompt previews use the
+project's permission; off retains the original contract and preview notes.
+
+`acceptance_checks.update` declares high risk and confirmation, with an impact
+summary describing the project, selected mode and future file/network access.
+Operator calls still execute once, matching `delivery_guard.update`; client tokens
+remain forbidden. The existing dashboard save confirmation needs no change.
+
+The review follow-up ran seven touched test files with two workers on disposable
+PostgreSQL: 492 tests passed, including main-byte plan-view comparisons and bridge
+upgrades after synchronizing the migration registry. No real-model call was made
+for this follow-up; the real protocol results below predate these fixes.
+
 The default-off fixture pins public main revision
 `bc0e118d404b464bf7dcf6fbfbb42c2f031864a3`. Its 13 SHA-256 comparisons cover the
 complete Planner contract/system prompt, PLAN and four DECISION messages,
