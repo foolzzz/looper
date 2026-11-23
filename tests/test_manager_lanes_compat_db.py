@@ -1,4 +1,5 @@
 """The disabled switch preserves the recorded pre-lanes contract."""
+import hashlib
 import json
 from pathlib import Path
 
@@ -18,6 +19,10 @@ def test_disabled_lanes_match_recorded_inputs_records_replies_and_settles(monkey
 
     async def run(pool):
         actual, _ = await capture(pool, tmp_path, monkeypatch, routing=routing)
-        assert actual == baseline["routing_on" if routing else "routing_off"]
+        expected = baseline["routing_on" if routing else "routing_off"]
+        # The attempts migration adds a nullable link; these Manager-only runs have no attempt.
+        for record in expected["records"]:
+            record["attempt_id"] = hashlib.sha256(b"null").hexdigest()
+        assert actual == expected
 
     run_db(run, monkeypatch, timeout=60)
