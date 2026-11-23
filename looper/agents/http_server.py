@@ -1381,7 +1381,7 @@ class AgentHTTPServer:
         if target.agent_type == "planner":
             return await projects.add_task_supplement(
                 target.agent_id.removeprefix("planner-"), text, via=projects.VIA_CHAT,
-                wake=deliver, best_effort=True)
+                wake=deliver, best_effort=True, from_operator=client is None)  # the dashboard's, not a client's
         return await deliver(None)
 
     async def _foreign_thread_error(self, owner: str) -> OpError:
