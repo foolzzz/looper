@@ -2587,9 +2587,11 @@ usage, cap accounting, consults and cost metrics. The Claude Code alias table fo
 source in this repository, so it stays unknown; the Haiku 4.5 price is not reused. Known model rates retain their
 existing sources in `runtimes/pricing.py`; provider/protocol catalog overrides still take precedence.
 
-Unknown prices never make a run free. The recorder logs the actual unpriced model at WARNING and stops further
-calls when a per-run cap (including the Manager session budget) is configured. Dollars remain null, and an ended
-record carries `metadata.cost_status = unknown` (plus `unknown_price_models` when event models are available).
+Unknown prices never make a run free. With a per-run cap (including the Manager session budget), the recorder
+warns once per unpriced event model and stops further calls. An authoritative runtime-reported cost still counts
+for task, daily and guard totals; a missing catalog estimate is recorded separately as `catalog_cost_status` and
+`catalog_unknown_price_models`. When the bill itself is unknown, dollars remain null and the ended record carries
+`metadata.cost_status = unknown` (plus `unknown_price_models` when event models are available).
 This is a soft stop after usage arrives, not a hard billing ceiling. Consult, processor and spawned-run postflight
 checks reject unknown costs; their preflight model checks remain in place. Explorer parent budgets report unknown
 coverage rather than repricing multi-model usage as the parent model.
@@ -2602,8 +2604,10 @@ global day, role day and schedule day scopes (separately per billing currency). 
 Unknown history is excluded from price-based estimate samples. This alert policy does not introduce estimated
 prices or extend which scopes enforce mode stops. With the guard off it adds no guard I/O or reservations.
 
-Task/model and daily cost API summaries mark incomplete totals with `cost_status = unknown` alongside
-`unpriced_runs`; numeric totals remain known subtotals. The existing dashboard shows these unpriced-run counts,
+Task/model, Manager, schedule, spend and metric API summaries always carry `cost_status = known | unknown`.
+Incomplete aggregate totals retain their known subtotal and unknown-run counts; an unknown individual turn cost
+is null. Subscription daily totals include both extraction and check records, and advisor booking preserves
+unknown costs for daily alerts. The existing dashboard shows these unpriced-run counts,
 model rows with unknown cost, and metric unknown counts; metrics exclude unknown cases from cost averages.
 CLI cost reads share the same API. Telegram and Lark share the recorder and cap behavior and need no new commands.
 
