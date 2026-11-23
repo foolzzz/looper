@@ -119,6 +119,7 @@ def _parser() -> argparse.ArgumentParser:
 
     talk = sub.add_parser("dialogs", help="Run the Manager's dialogs and check what Looper did after each reply.")
     talk.add_argument("--mode", choices=("fake", "real"), default="fake")
+    talk.add_argument("--claude", help="the Claude Code executable (default: claude on PATH)")
     talk.add_argument("--model", default="haiku", help="real mode: every role runs Claude Code with this model "
                       "(default haiku; ignored with --agent or --register-agent)")
     talk.add_argument("--agent", help="every role runs this agent, by name, instead")
@@ -137,6 +138,8 @@ def _parser() -> argparse.ArgumentParser:
                       help="turn manager.stable_context on in every dialog's database (the Manager's state block)")
     talk.add_argument("--leads-fulltext", action="store_true",
                       help="set leads.search_mode to fulltext in every dialog's database (the leads' full-text search)")
+    talk.add_argument("--untrusted-fence", action="store_true",
+                      help="turn untrusted_fence.enabled on in every dialog's database (outside content fenced)")
     talk.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
     talk.add_argument("--jobs", type=_jobs, default=1, help=_JOBS_HELP)
     talk.add_argument("--case-budget-usd", type=_case_budget, help=_CASE_BUDGET_HELP)
@@ -270,6 +273,8 @@ def _dialogs(args: argparse.Namespace) -> int:
             dsh_runtime=_selected_runtime(args, "dsh"),
             stable_context=args.stable_context,
             leads_fulltext=args.leads_fulltext,
+            untrusted_fence=args.untrusted_fence,
+            claude_bin=args.claude,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
