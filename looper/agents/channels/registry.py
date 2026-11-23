@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -201,6 +202,16 @@ class ChannelRegistry:
             raise
         self.record_delivery(channel_id, receipt.success)
         return receipt
+
+    async def post_card(self, channel_id: str, target: NotifyTarget, card: Any, *,
+                        reply_to: str | None = None, idempotency_key: str | None = None) -> PostReceipt:
+        """Post ``card`` (``card_actions.Card``) to ``target`` like ``post`` (``ChannelAdapter.post_card``)."""
+        adapter = self._channels.get(channel_id)
+        if adapter is None:
+            return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
+        if target.group and (checked := for_group(card.text)) != card.text:
+            card = replace(card, text=checked, buttons=())
+        return await adapter.post_card(target, card, reply_to=reply_to, idempotency_key=idempotency_key)
 
     async def edit(self, channel_id: str, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         """Edit one message through its running adapter, preserving the platform's delivery result."""

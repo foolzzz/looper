@@ -675,6 +675,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
     from unittest.mock import AsyncMock, MagicMock
 
     import looper.db as db
+    from looper import components
     from looper.agents import (
         consult, managers, operator_auth, operator_notes, proc_tree, profile_registry, read_only_copies, room,
         scheduler_settings, serve, step_workspaces, task_workspaces,
@@ -701,8 +702,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
 
             return SimpleNamespace(start=start, stop=stop, start_all=start, stop_all=stop,
                                    register=MagicMock(), resume_all=AsyncMock(), notify=AsyncMock(),
-                                   post=AsyncMock(), read_quote=AsyncMock(), task_ended=AsyncMock(),
-                                   list_channels=lambda: [])
+                                   post=AsyncMock(), post_card=AsyncMock(), read_quote=AsyncMock(),
+                                   task_ended=AsyncMock(), list_channels=lambda: [])
 
         bus = SimpleNamespace(shutdown=AsyncMock(), queue_ids=lambda: [])
         router = SimpleNamespace(has_planner=lambda task_id: task_id == "task-active")
@@ -747,6 +748,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         monkeypatch.setattr(db, "init_pool", AsyncMock(return_value=pool))
         monkeypatch.setattr(db, "ensure_schema", AsyncMock())
         monkeypatch.setattr(db, "close_pool", AsyncMock())
+        # This checks service composition, independently of the source manifest's cold disk scan.
+        monkeypatch.setattr(components, "prepare_loaded_manifest", AsyncMock())
         monkeypatch.setattr(operator_auth, "ensure_token", lambda _: "unused-test-token")
         monkeypatch.setattr(operator_notes, "configure_root", lambda _: None)
         for module, name, result in (
