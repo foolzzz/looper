@@ -49,7 +49,8 @@ export function ProjectAcceptanceChecks({ project }: { project: Project }) {
           <option value="network">Network — only when a check requests it</option>
         </select>
         <p id={`${id}-help`} className="text-xs text-muted-foreground">
-          Runs command and artifact checks after Worker success and stores evidence. Evidence does not affect decisions yet.
+          Runs command and artifact checks after Worker success and stores evidence. Required checks must pass before review or acceptance.
+          Disabling checks does not unblock an already blocked step.
           Commands run as the server&apos;s user and can read that user&apos;s files;
           a private checkout is not a sandbox. Local denies network access. Network permits it only for checks that explicitly request it.
         </p>

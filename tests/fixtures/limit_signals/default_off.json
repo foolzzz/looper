@@ -1,9 +1,28 @@
 {
-  "baseline": "2b77afb16",
-  "sha256": {
-    "prompts": "113dcfc6ecb667fd2d45c4ba855505e86ded3941ffafa669091bed02b221ff28",
-    "tools": "76a6006374afaae65cb1525742bf74c3c99dc0a7954e441d51844e7668655346",
-    "commands": "ffa690af5ea1ec7ba96144ba67ef3f524d311981e6a8fdd6e41a5fe97b5f1c8d",
-    "records": "1812cf4af77fb76794dc13f390b0fad237bec3cef525285306ae49c8361aba99"
+  "commands": {
+    "order": [
+      "manager",
+      "planner",
+      "worker"
+    ],
+    "each": {
+      "manager": "cbf4d2b9d086adfdf143963b0e088977b52669a4118e1409c7e79b72e424afcd",
+      "planner": "dd0cf346632e793eec34ce88c382d536ff88518d7077cbc210aaf17b8a5a6444",
+      "worker": "cbf4d2b9d086adfdf143963b0e088977b52669a4118e1409c7e79b72e424afcd"
+    }
+  },
+  "records": {
+    "order": [
+      "start_record",
+      "append_events",
+      "finish_record",
+      "touch_record"
+    ],
+    "each": {
+      "start_record": "8dd02930a24bdd9b9f866f1e1583a6ea50d8f9db04328a9be9b7452637b6d99d",
+      "append_events": "bf193238c4c6ba6019209c5e7f0266db5e7175485f64d2940196184bf34837eb",
+      "finish_record": "22926800ed3609df6dab66aa0fd0211c513255083defe6d7083f08e60fbe9c71",
+      "touch_record": "cf373277a5f8b154b7026fb4cf6895a03b58d53379189f5bf9d4aaa21b288343"
+    }
   }
 }
