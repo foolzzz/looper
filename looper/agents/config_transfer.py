@@ -601,7 +601,8 @@ async def export_chunks(
             entry = {
                 "name": project["name"], "description": project["description"], "background": project["background"],
                 "default_workflow": project["default_workflow"],
-                "execution": {column: project[column] for column in EXECUTION_COLUMNS},
+                "execution": {column: project[column] for column in EXECUTION_COLUMNS} | (
+                    {"acceptance_checks": project["acceptance_checks"]} if project.get("acceptance_checks") else {}),
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
                 "items": owned,
@@ -1972,7 +1973,7 @@ class _Importer:
     async def project(self, entry: Mapping[str, Any]) -> str | None:
         """Add or update a project's own fields; its id (``new:...`` in a preview), or None when skipped."""
         from ..db.projects import EXECUTION_COLUMNS
-        from .project_execution import execution_fields
+        from .project_execution import execution_fields, acceptance_checks_mode, AcceptanceChecksMode
         from .projects import RequestError, _create_project_row, project_background, project_name, project_work_dir
 
         raw_name = entry.get("name") if isinstance(entry, Mapping) else None
@@ -1983,6 +1984,8 @@ class _Importer:
                 background = project_background(entry.get("background", ""))
                 execution = execution_fields({column: _mapping(entry.get("execution", {}), "execution").get(column)
                                               for column in EXECUTION_COLUMNS})
+                mode = acceptance_checks_mode(_mapping(entry.get("execution", {}), "execution").get("acceptance_checks"))
+                acceptance = None if mode is AcceptanceChecksMode.OFF else mode.value
             except ValueError as exc:
                 raise _Skip(str(exc)) from None
             if name.lower() in self.seen_projects:
@@ -1999,6 +2002,8 @@ class _Importer:
             self.record("projects", str(raw_name), Action.SKIPPED, reason=str(exc))
             return None
         row = self.target.projects.get(name.lower())
+        if "acceptance_checks" in entry.get("execution", {}):
+            values["acceptance_checks"] = acceptance
         if row is None:
             try:
                 values["work_dir"] = project_work_dir(entry.get("work_dir", ""))
@@ -2023,6 +2028,8 @@ class _Importer:
 
             await update_project(row["id"], description=values["description"], background=background,
                                  execution=execution, default_workflow=default, pool=self.conn)
+        if self.apply and action in (Action.ADDED, Action.CHANGED) and "acceptance_checks" in values:
+            await self.conn.execute("UPDATE projects SET acceptance_checks = $2 WHERE id = $1", project_id, acceptance)
         self.project_ids[name.lower()] = project_id
         self.project_values[project_id] = {**(row or {}), "id": project_id, "name": name, **values}
         from .project_execution import ProjectExecution

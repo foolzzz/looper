@@ -32,6 +32,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_task_role_set": INSIDE, "looper_task_concurrency": ORIGIN,
     "looper_room_roster": INSIDE, "looper_room_post": INSIDE, "looper_room_inbox": INSIDE, "looper_room_read": INSIDE,
     "looper_room_watch": INSIDE,
+    "looper_agent_spawn": INSIDE, "looper_agent_wait": INSIDE, "looper_agent_cancel": INSIDE,
     "looper_vault_search": INSIDE, "looper_vault_read": INSIDE, "looper_vault_write": MACHINE,
 }
 
@@ -145,6 +146,10 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    # Stores permission only; the runner executes checks separately after Worker success.
+    "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
+    "task_evidence.get": INSIDE,  # reads only stored check definitions and measured evidence
+
     "manager_persona.get": INSIDE,  # reads Looper's stored persona; sends nothing
     "manager_persona.update": INSIDE,  # changes Looper's stored persona; sends nothing
     "manager_sessions.list": INSIDE,  # reads the default Manager's stored sessions; sends nothing
@@ -163,8 +168,11 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "memory.check": INSIDE,  # checks prerequisites without changing files or sending messages
     "outbound_review.get": INSIDE,  # reads Looper's own review setting
     "outbound_review.update": INSIDE,  # changes Looper's own review setting
+    "project_skills.rollback": INSIDE,  # writes a new stored skill version inside Looper; sends nothing and does not touch the machine outside the catalog
+    "project_skills.versions": INSIDE,  # reads stored skill versions; sends nothing
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
     "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
+
     "manager_chat_bindings.put": EXTERNAL,  # a bound chat's people talk to a Manager, which answers them there
     "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
     # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard
