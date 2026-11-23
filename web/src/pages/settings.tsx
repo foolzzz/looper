@@ -52,7 +52,8 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
   gateway: "Let Anthropic clients on this machine use your OpenAI Chat Completions models through local aliases.",
   transfer:
     "One file with the role settings, the providers and Agent Profiles, the catalog with its files and MCP servers, " +
-    "global installs, channels, scenario Managers, their task templates and the scheduler's settings.",
+    "global installs, channels, scenario Managers, their task templates, the scheduler's settings and the " +
+    "default Manager's persona.",
 };
 
 /** One Settings page (#settings/<page>[/<sub>]); the sidebar's Settings group lists them. */

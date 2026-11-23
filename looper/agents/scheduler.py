@@ -31,6 +31,11 @@ limits; its own spend cap) and starts it at once with ``TASK_START``: enabling
 the schedule was the approval (D6). "Run now" is the same firing with
 ``trigger`` manual, leaving ``next_fire_at`` alone.
 
+Throttle fields (``schedule_throttle``): a scheduled or catch-up firing whose fire time or now is outside the
+schedule's ``active_hours`` does not happen (no run; ``next_fire_at`` moves on, as if the rule had not fired), and
+one of an ``idle_only`` schedule while its Manager answers a message (``manager_busy``) is ``skipped_busy``. A
+manual run is never throttled.
+
 Before the task (S2): a schedule with a ``daily_budget_usd`` whose runs fired
 since the server's local midnight cost that much records ``skipped_budget``.
 A schedule with a ``gate_command`` records the run ``gating`` and runs the
@@ -73,6 +78,7 @@ from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lo
 from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .schedule_gate import GateResult, run_gate
+from .schedule_throttle import ScheduleThrottle
 from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
 from . import subscriptions
@@ -244,6 +250,7 @@ _STATUS_WORDS = {
     "completed": "完成", "failed": "失败", "stopped": "已停止", "cancelled": "已取消", "timed_out": "超时被停止",
     "skipped_overlap": "跳过（上一次运行还没结束）", "skipped_missed": "跳过（错过了触发时刻）",
     "gate_failed": "前置检查失败", "skipped_gate": "跳过（前置检查没有输出）", "skipped_budget": "跳过（已到每日花费上限）",
+    "skipped_busy": "跳过（管家正在回复消息）",
 }
 _TRIGGER_WORDS = {Trigger.SCHEDULED: "按时触发", Trigger.CATCH_UP: "补跑", Trigger.MANUAL: "手动「立即运行」"}
 
@@ -455,9 +462,15 @@ class Scheduler:
         self._subscriptions = SubscriptionRuns(poster=poster, own_apps=own_apps or no_apps, runtime_root=runtime_root,
                                                clock=clock, claude_bin=claude_bin, day_start=self.day_start)
         self._catch_ups: dict[str, int] = {}  # an extraction's catch-up firings in a row, by schedule
+        # Whether a Manager (by id) answers a message now: an ``idle_only`` schedule of its skips the firing. Set by
+        # ``looper serve`` once the Managers run; until then none is.
+        self.manager_busy: Callable[[str], bool] = lambda manager_id: False
 
     def drain_waiting(self) -> dict[str, int]:
         return {"gates": self._gates, "starting": self._starting}
+
+    def observe_user(self, envelope: MessageEnvelope) -> None:
+        self._subscriptions.observe_user(envelope)
 
     @contextmanager
     def _admit_start(self, kind: str = "agent") -> Iterator[bool]:
@@ -694,6 +707,11 @@ class Scheduler:
             await db_schedules.update_schedule(conn, schedule["id"], {"next_fire_at": next_at})
             return None
         firing = decision.firing
+        throttle = ScheduleThrottle.of(schedule)
+        if not (throttle.in_effect(firing.scheduled_for) and throttle.in_effect(now)):
+            # Outside its active hours the schedule is not in effect: as if its rule had not fired.
+            await db_schedules.update_schedule(conn, schedule["id"], {"next_fire_at": next_at})
+            return None
         await db_schedules.set_fired(conn, schedule["id"], last_fired_at=firing.scheduled_for, next_fire_at=next_at)
         if decision.action is Action.SKIP:
             await self._skip(
@@ -705,6 +723,15 @@ class Scheduler:
                       f"at {_local(firing.scheduled_for, tz)}, was more than {int(GRACE.total_seconds() // 60)} "
                       "minutes ago (catch-up: skip)",
             )
+            return None
+        if throttle.idle_only and self.manager_busy(schedule.get("manager_id") or "manager"):
+            await self._skip(
+                conn, "skipped_busy", now,
+                {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
+                 "trigger": firing.trigger.value, "missed": firing.missed, "missed_since": firing.missed_since,
+                 "created_at": now},
+                kind=schedule["kind"], fired_at=now,
+                error="its Manager was answering a message (idle_only); the next firing tries again")
             return None
         return await self._fire(conn, schedule, firing, now)
 

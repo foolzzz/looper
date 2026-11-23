@@ -456,7 +456,7 @@ export interface OverviewSchedules {
     last_status: ScheduleRunStatus | null;
   })[];
   /** Runs since the server's local midnight. */
-  skipped_today: Record<"skipped_gate" | "skipped_overlap" | "skipped_missed" | "skipped_budget", number>;
+  skipped_today: Record<"skipped_gate" | "skipped_overlap" | "skipped_missed" | "skipped_budget" | "skipped_busy", number>;
 }
 
 export async function fetchOverview(): Promise<Overview> {
@@ -741,6 +741,26 @@ export async function updateOutboundGateway(
   body: { [K in keyof OutboundGatewaySettings]?: OutboundGatewaySettings[K] | null },
 ): Promise<OutboundGatewaySettings> {
   const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** The default Manager's persona (Settings → Chat). Empty strings are unset. */
+export interface ManagerPersona {
+  name: string;
+  address: string;
+  tone: string;
+  notes: string;
+}
+
+export async function fetchManagerPersona(): Promise<ManagerPersona> {
+  const result = await callV1<ManagerPersona>("/api/v1/manager_persona/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateManagerPersona(body: ManagerPersona): Promise<ManagerPersona> {
+  const result = await callV1<ManagerPersona>("/api/v1/manager_persona/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
@@ -1322,7 +1342,8 @@ export type ScheduleRunStatus =
   | "skipped_missed"
   | "skipped_gate"
   | "gate_failed"
-  | "skipped_budget";
+  | "skipped_budget"
+  | "skipped_busy";
 export type ScheduleNotifyFormat = "report" | "deliverable";
 /** "failures": failed runs and the two alerts with their recoveries; "alerts": the alerts and their recoveries
  * only; "always": every run that ran a task, and the alerts; "never": nothing is sent. */
@@ -1449,6 +1470,10 @@ export interface ScheduleInfo {
   env: Record<string, string>;
   env_file: string | null;
   success_deadline: string | null;
+  /** HH:MM-HH:MM in the schedule's timezone: firings outside it do not happen; null: all day. */
+  active_hours?: string | null;
+  /** A firing is skipped (skipped_busy) while the schedule's Manager answers a message. */
+  idle_only?: boolean;
   alert_policy: {
     failures_after: { value: number; default: boolean };
     stale_after_seconds: { value: number | null; default: boolean };
@@ -2069,6 +2094,70 @@ export async function deleteProjectSkill(
 ): Promise<ProjectInstalls & { deleted: string }> {
   const result = await callV1<ProjectInstalls & { deleted: string }>(
     "/api/v1/project_skills/delete", { project_id: projectId, skill_id: skillId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export type SkillAuthorKind = "operator" | "proposal" | "rollback";
+
+/** One saved version of a project skill. The list leaves out the body. */
+export interface SkillVersion {
+  version: number;
+  name: string;
+  description: string;
+  sha256: string;
+  author_kind: SkillAuthorKind;
+  author_ref: string | null;
+  reason: string;
+  created_at: string;
+}
+
+/** The difference between two versions: names, descriptions, and a unified diff of the bodies. */
+export interface SkillVersionDiff {
+  from_version: number;
+  to_version: number;
+  name: { from: string; to: string };
+  description: { from: string; to: string };
+  content: string;
+}
+
+export interface SkillVersions {
+  skill_id: string;
+  current_version: number | null;
+  versions: SkillVersion[];
+  affected_projects: { project_id: string; project_name: string }[];
+  diff: SkillVersionDiff | null;
+}
+
+/** List one project skill's versions. Pass both ends of a range to also get their difference. */
+export async function fetchSkillVersions(
+  projectId: string,
+  skillId: string,
+  range?: { fromVersion: number; toVersion: number },
+): Promise<SkillVersions> {
+  const result = await callV1<SkillVersions>("/api/v1/project_skills/versions", {
+    project_id: projectId,
+    skill_id: skillId,
+    ...(range ? { from_version: range.fromVersion, to_version: range.toVersion } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export interface ProjectSkillRollback extends ProjectInstalls {
+  skill: ProjectSkill;
+  version: number;
+  affected_projects: SkillVersions["affected_projects"];
+}
+
+/** Write a new version whose content is an older version's. Answers with the project's installs. */
+export async function rollbackProjectSkill(
+  projectId: string,
+  skillId: string,
+  version: number,
+): Promise<ProjectSkillRollback> {
+  const result = await callV1<ProjectSkillRollback>(
+    "/api/v1/project_skills/rollback", { project_id: projectId, skill_id: skillId, version });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }

@@ -101,7 +101,8 @@ def test_the_extraction_switch_the_output_kinds_and_the_builtin_types(monkeypatc
         await pool.execute("UPDATE source_chats SET extraction = 'excluded', extraction_excluded_at = now() "
                            "WHERE chat_id = 'oc_release'")
         checks = {row["conname"]: row["def"] for row in await pool.fetch(
-            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = ANY($1::text[])",
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = ANY($1::text[]) "
+            "AND connamespace = current_schema()::regnamespace",
             ["subscriptions_output_kind_check", "subscription_runs_outcome_check"])}
         assert all(word in checks["subscriptions_output_kind_check"] for word in ("'push'", "'leads'", "'intents'"))
         assert "'extracted'" in checks["subscription_runs_outcome_check"]
@@ -392,7 +393,8 @@ def test_an_intent_merged_into_a_deleted_one_is_pending_again_whatever_deletes_i
                                    [target, same_message]) == 0
         assert await pool.fetchval("SELECT state FROM intents WHERE id = $1", elsewhere) == "pending"
         # The key itself never cascades: without the trigger, deleting a merge target fails instead.
-        assert await pool.fetchval("SELECT confdeltype FROM pg_constraint WHERE conname = 'intents_merged_into_fkey'") in ("a", b"a")
+        assert await pool.fetchval("SELECT confdeltype FROM pg_constraint WHERE conname = 'intents_merged_into_fkey' "
+                                   "AND connamespace = current_schema()::regnamespace") in ("a", b"a")
 
     run_db(check, monkeypatch, timeout=20)
 

@@ -351,7 +351,7 @@ async def press_gate(row: dict[str, Any], event: Press, choice: str, *, bus: Any
                      has_planner: Callable[[str], bool]) -> Answer:
     """An option, or ending the discussion, into the gate as the presser's message (``gate_commands`` does the same
     for ``/gate N``)."""
-    from .gate_service import HTTP_400, post_message, receipt, task_name
+    from .gate_service import HTTP_400, post_message, receipt, sender_is_operator, task_name
     from .projects import RequestError
 
     payload, token = row["payload"], row["token"]
@@ -378,7 +378,9 @@ async def press_gate(row: dict[str, Any], event: Press, choice: str, *, bus: Any
     try:
         posted = await post_message(task_id, label, data, has_planner=has_planner(task_id), bus=bus,
                                     source=manager_address(row.get("manager_id") or "manager"),
-                                    via=f"button:{channel}", end=end, origin=origin)
+                                    via=f"button:{channel}", end=end, origin=origin,
+                                    from_operator=await sender_is_operator(row["channel_id"], channel, group=group,
+                                                                           sender=event.presser))
     except RequestError as exc:
         await db_cards.finish(token, "error")
         if exc.status == HTTP_400:

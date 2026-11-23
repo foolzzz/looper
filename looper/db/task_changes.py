@@ -33,6 +33,7 @@ class Supplement:
     text: str
     via: str
     created_at: datetime | None = None
+    from_operator: bool | None = None  # whether the operator gave it in their own turn (None: not known)
 
 
 @dataclass(frozen=True)
@@ -59,15 +60,16 @@ class TaskChanges:
 
 
 async def add_supplement(
-    task_id: str, text: str, *, via: str, delivered: bool = False, pool: asyncpg.Pool | None = None,
+    task_id: str, text: str, *, via: str, delivered: bool = False, from_operator: bool | None = None,
+    pool: asyncpg.Pool | None = None,
 ) -> int:
     """Add a supplement to ``task_id``, not yet delivered to its Planner unless ``delivered`` (a note for the record
     that the Planner needs no turn for, such as a rename); its journal id."""
     pool = pool or get_pool()
     return await pool.fetchval(
-        "INSERT INTO task_journal (task_id, step_id, kind, summary, via, delivered_at) "
-        "VALUES ($1, '', $2, $3, $4, CASE WHEN $5 THEN now() END) RETURNING id",
-        task_id, SUPPLEMENT, text, via, delivered,
+        "INSERT INTO task_journal (task_id, step_id, kind, summary, via, delivered_at, from_operator) "
+        "VALUES ($1, '', $2, $3, $4, CASE WHEN $5 THEN now() END, $6) RETURNING id",
+        task_id, SUPPLEMENT, text, via, delivered, from_operator,
     )
 
 
@@ -101,7 +103,7 @@ async def pending(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | Non
     """The task's changes its Planner has not had yet."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT id, summary, via, created_at FROM task_journal "
+        "SELECT id, summary, via, created_at, from_operator FROM task_journal "
         "WHERE task_id = $1 AND kind = $2 AND delivered_at IS NULL ORDER BY id", task_id, SUPPLEMENT)
     versions = await pool.fetch(
         "SELECT version, text, delivered_at FROM task_requirement_versions WHERE task_id = $1 ORDER BY version",
@@ -114,7 +116,17 @@ async def pending(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | Non
         latest = undelivered[-1]
         requirement = RequirementEdit(latest["version"], latest["text"], before["version"], before["text"])
     return TaskChanges(
-        tuple(Supplement(row["id"], row["summary"], row["via"], row["created_at"]) for row in rows), requirement)
+        tuple(Supplement(row["id"], row["summary"], row["via"], row["created_at"], row["from_operator"])
+              for row in rows), requirement)
+
+
+async def supplements(task_id: str, *, limit: int, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The task's latest ``limit`` supplements, delivered or not, oldest first: ``summary`` and ``via``."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT summary, via FROM (SELECT id, summary, via FROM task_journal WHERE task_id = $1 AND kind = $2 "
+        "ORDER BY id DESC LIMIT $3) latest ORDER BY id", task_id, SUPPLEMENT, limit)
+    return [dict(row) for row in rows]
 
 
 async def versions(task_id: str, *, pool: asyncpg.Pool | None = None) -> tuple[int, int]:

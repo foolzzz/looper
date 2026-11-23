@@ -103,7 +103,8 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
             await connection.ensure_schema(old)
             expected = {line.strip().split()[0]: None for line in _SCHEDULE_COLUMNS.splitlines()}
             expected.update({line.strip().split()[0]: None for line in _SESSION_COLUMNS.splitlines()})
-            expected.update(kind="agent", env="{}", consecutive_overlaps=0, notify_format="report")
+            expected.update(kind="agent", env="{}", consecutive_overlaps=0, notify_format="report", active_hours=None,
+                            idle_only=False)
             assert dict(await old.fetchrow("SELECT * FROM schedules")) == {**before["schedules"][0], **expected}
             run_defaults = {line.strip().split()[0]: None for line in _RUN_COLUMNS.splitlines()}
             run_defaults.update({line.strip().split()[0]: None for line in _SESSION_RUN_COLUMNS.splitlines()})

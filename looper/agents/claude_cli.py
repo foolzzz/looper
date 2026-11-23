@@ -671,6 +671,7 @@ class _UserTurn:
     capped: CapStop | None = None  # the turn was ended at its soft cap
     stopping: bool = False  # the user's stop was asked of Claude; its next result ends the turn
     answered: bool = False  # its result had come when the stop was asked: that result is a whole turn's
+    result_received: bool = False  # before on_event awaits: its input window has already closed
 
     def starts_with(self, event: dict[str, Any]) -> bool:
         """Claude began this message's turn: its "started" lifecycle event, or its replay."""
@@ -763,6 +764,8 @@ class _Output:
         if turn is not None and turn.started:
             if _is_init(event):
                 turn.session_started = True
+            if event.get("type") == "result":
+                turn.result_received = True
             if not turn.stopping:
                 await turn.on_event(event)  # (R1: a stopped turn's events go nowhere; its result still ends it)
             if event.get("type") == "result":
@@ -1137,6 +1140,46 @@ class ResidentClaude:
             prompt_sent=sent,
         )
 
+    async def write_mid_turn(self, text: str) -> bool:
+        """Write another input into the current user turn, without starting a new one.
+
+        A prompt queued behind an autonomous turn is not running yet. Give buffered
+        output a chance to close admission before and after writing. If the result races
+        the write, retire this process and let the owner queue the input on a fresh one;
+        the old pipe must never consume it alongside that queued turn.
+        """
+        process, output, turn, cancel = self._process, self._output, self._user_turn, self._cancel
+        def accepting() -> bool:
+            return (process is not None and self._process is process and process.returncode is None
+                    and process.stdin is not None and not process.stdin.is_closing()
+                    and output is not None and not output.ended and not output.discard
+                    and turn is not None and self._user_turn is turn and output.turn is turn
+                    and turn.started and not turn.result_received and not turn.done.done()
+                    and not turn.stopping and cancel is not None and cancel.prompt_sent and not cancel.requested)
+
+        if not accepting():
+            return False
+        # Poll can enqueue a transport callback behind this task's continuation;
+        # that callback in turn wakes the output reader. Let all three stages run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        if not accepting():
+            return False
+        async with asyncio.timeout(5):
+            await write_user_turn(process.stdin, text)
+        # A short write's drain() need not suspend. Observe stdout independently.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        if not accepting():
+            # The write has no acknowledgement tying it to the completed result.
+            # Discard its pipe before the queued owner can send the input again.
+            if self._process is process:
+                await self.stop(kill=True)
+            return False
+        return True
+
     async def _stopped_by_user(self) -> StopMethod | None:
         """How the user's stop of the running turn ended it, once it has (bounded); None when none was asked."""
         from .runtimes import StopMethod
@@ -1150,6 +1193,11 @@ class ResidentClaude:
             return task.result()
         logger.warning("%s: the stopped turn's interrupt did not finish in %.1fs", self._label, bound)
         return StopMethod.KILL
+
+    @property
+    def can_write_mid_turn(self) -> bool:
+        """Only the direct stream-json transport is verified; a keeper's KeptProcess is excluded."""
+        return isinstance(self._process, asyncio.subprocess.Process)
 
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         """A turn's own cost and tokens: its result's running totals less the previous ones."""
@@ -1468,6 +1516,7 @@ class ClaudeRunRecorder:
         run_kind: str | None = None,
         parent_record_id: int | None = None,
         keep_output: bool = True,
+        spend: RunSpend | None = None,
     ) -> None:
         self._agent_id = agent_id
         # What kind of run it is (None: what its agent id says) and the run that started it (``llm_records``).
@@ -1529,6 +1578,8 @@ class ClaudeRunRecorder:
 
             self._spend = RunSpend(price, launch.model if launch is not None else "",
                                    launch.max_budget_usd if launch is not None else None)
+        if spend is not None:
+            self._spend = spend
 
     @classmethod
     async def resume(

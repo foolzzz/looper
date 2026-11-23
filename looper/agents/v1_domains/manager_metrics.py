@@ -1,5 +1,8 @@
 """Read-only Manager turn and proactive-delivery measurements."""
+from datetime import datetime, timedelta, timezone
+
 from ...db import proactive_deliveries
+from ..channels import outbound_metrics
 from ...db.connection import get_pool
 from .. import chat_settings
 from ..action_levels import ActionLevel
@@ -10,7 +13,12 @@ _NUMBER = {"type": ["number", "null"]}
 _PERCENTILES = _object({"p50_ms": _NUMBER, "p95_ms": _NUMBER}, closed=True)
 _LATENCY = _object({**_PERCENTILES["properties"], "by_chat": {
     "type": "object", "additionalProperties": _PERCENTILES}}, closed=True)
-SUMMARY = _object({"enabled": _BOOL, "window_days": _INT, "turns": _object({"by_delivery": _COUNTS}),
+_OUTBOUND_ROW = _object({"channel_id": _STR, "name": _STR, "queued": _INT,
+    "backoffs_24h": _INT, "breaker_opens_24h": _INT, "failed_24h": _COUNTS, "uncertain_24h": _INT,
+    "breaker_state": {"enum": ["closed", "open", "half_open", None]}}, closed=True)
+SUMMARY = _object({"enabled": _BOOL, "window_days": _INT,
+    "outbound": {"oneOf": [_array(_OUTBOUND_ROW), _object({"enabled": {"const": False}}, closed=True)]},
+    "outbound_started_at": _STR, "outbound_since_start": _BOOL, "turns": _object({"by_delivery": _COUNTS}),
     "ack": _LATENCY, "first_reply": _LATENCY,
     "empty": _object({"count": _INT, "ratio": _NUMBER}),
     "proactive": _object({"per_day": _array(_object({"date": _STR, "by_source": _COUNTS})),
@@ -57,4 +65,7 @@ async def run(server, operation, arguments, principal, headers):
     total, empty = sum(by_delivery.values()), by_delivery.get("empty", 0)
     result["empty"] = {"count": empty, "ratio": empty / total if total else None}
     result["proactive"] = await proactive_deliveries.summary(days)
+    result["outbound"] = await outbound_metrics.summary(server, db)
+    result["outbound_started_at"] = server._started_at.isoformat()
+    result["outbound_since_start"] = datetime.now(timezone.utc) - server._started_at < timedelta(days=1)
     return result

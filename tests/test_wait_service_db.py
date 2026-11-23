@@ -703,9 +703,12 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
             return SimpleNamespace(start=start, stop=stop, start_all=start, stop_all=stop,
                                    register=MagicMock(), resume_all=AsyncMock(), notify=AsyncMock(),
                                    post=AsyncMock(), post_card=AsyncMock(), read_quote=AsyncMock(),
-                                   task_ended=AsyncMock(), list_channels=lambda: [])
+                                   task_ended=AsyncMock(), list_channels=lambda: [],
+                                   observe_user=MagicMock())
 
-        bus = SimpleNamespace(shutdown=AsyncMock(), queue_ids=lambda: [])
+        bus = SimpleNamespace(shutdown=AsyncMock(), queue_ids=lambda: [],
+                              subscribe_topic=lambda *args, **kwargs: None,
+                              unsubscribe_topic=lambda *args, **kwargs: None)
         router = SimpleNamespace(has_planner=lambda task_id: task_id == "task-active")
         for name in ("Broadcaster", "ManagerConfig", "WorkerConfig"):
             monkeypatch.setattr(serve, name, MagicMock())

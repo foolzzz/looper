@@ -54,8 +54,8 @@ WHERE task_user_gates.state NOT IN {CLOSED!r}
 
 _ADD_MESSAGE = """
 INSERT INTO task_user_gate_messages (step_id, task_id, role, kind, text, author, via, agenda_item, option, channel,
-                                     chat, external_id, channel_id, post_state)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CASE WHEN $3 = 'user' THEN 'none' END)
+                                     chat, external_id, channel_id, from_operator, post_state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CASE WHEN $3 = 'user' THEN 'none' END)
 RETURNING *
 """
 
@@ -78,7 +78,7 @@ FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id
 # The user's messages in a closed gate that no turn of the Planner had: they reached it while the turn that closed
 # it ran.
 _LATE = f"""
-SELECT m.id, m.kind, m.text, m.agenda_item, m.option, s.step_key
+SELECT m.id, m.kind, m.text, m.agenda_item, m.option, m.from_operator, s.step_key
 FROM task_user_gates g
 JOIN task_user_gate_messages m ON m.step_id = g.step_id AND m.role = 'user' AND m.id > g.delivered_through
 JOIN task_steps s ON s.id = g.step_id
@@ -120,7 +120,8 @@ def _gate(row: Mapping[str, Any]) -> dict[str, Any]:
 def _message_args(task_id: str, message: Mapping[str, Any]) -> tuple[Any, ...]:
     return (message["step_id"], task_id, message["role"], message["kind"], message.get("text") or "",
             message.get("author"), message.get("via") or "", message.get("agenda_item"), message.get("option"),
-            message.get("channel"), message.get("chat"), message.get("external_id"), _message_channel_id(message))
+            message.get("channel"), message.get("chat"), message.get("external_id"), _message_channel_id(message),
+            message.get("from_operator"))
 
 
 def _message_channel_id(message: Mapping[str, Any]) -> str | None:
@@ -168,11 +169,13 @@ async def _keep_late(conn: asyncpg.Connection, task_id: str, step_id: str) -> No
     late = await conn.fetch(_LATE, step_id)
     if not late:
         return
-    texts = [text for row in late if (text := late_text(row["step_key"], row))]
+    # Each keeps whether the operator wrote it (the untrusted fence).
+    texts = [(text, row["from_operator"]) for row in late if (text := late_text(row["step_key"], row))]
     if texts:
         await conn.executemany(
-            "INSERT INTO task_journal (task_id, step_id, kind, summary, via) VALUES ($1, $2, 'supplement', $3, $4)",
-            [(task_id, step_id, text, LATE_VIA) for text in texts])
+            "INSERT INTO task_journal (task_id, step_id, kind, summary, via, from_operator) "
+            "VALUES ($1, $2, 'supplement', $3, $4, $5)",
+            [(task_id, step_id, text, LATE_VIA, from_operator) for text, from_operator in texts])
         await conn.execute(_ADD_MESSAGE.replace("RETURNING *", ""), *_message_args(task_id, {
             "step_id": step_id, "role": "looper", "kind": "late",
             "text": f"{len(texts)} message(s) reached this gate as it closed: the Planner gets them as a supplement "
@@ -211,6 +214,16 @@ async def pending(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | Non
         "SELECT m.* FROM task_user_gate_messages m JOIN task_user_gates g ON g.step_id = m.step_id "
         "WHERE g.task_id = $1 AND g.state = ANY($2::text[]) AND m.role = 'user' AND m.id > g.delivered_through "
         "ORDER BY m.id", task_id, list(WAITING))
+    return [dict(row) for row in rows]
+
+
+async def answers(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """The user's messages in all the task's gates (not the ends of a discussion), oldest first, each with its
+    gate's ``step_key``."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT m.*, s.step_key FROM task_user_gate_messages m JOIN task_steps s ON s.id = m.step_id "
+        "WHERE m.task_id = $1 AND m.role = 'user' AND m.kind = 'message' ORDER BY m.id", task_id)
     return [dict(row) for row in rows]
 
 

@@ -108,6 +108,11 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
         if stable:  # last, as ManagerAgent._composed_prompt adds it
             contract_name += "+STABLE_CONTEXT_CONTRACT"
             contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
+        if chat_settings.turn_context_enabled():
+            from .turn_context import TURN_CONTEXT_CONTRACT
+
+            contract_name += "+TURN_CONTEXT_CONTRACT"
+            contract += "\n" + TURN_CONTEXT_CONTRACT
         if recommended:
             role_text = root_adjusted(role_text)
     elif agent is AgentType.PLANNER:

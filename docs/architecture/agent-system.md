@@ -23,7 +23,7 @@ counts, P50/P95 latencies excluding replayed and completion turns, daily proacti
 counts in the server timezone and mature, successfully sent delivery reply rates
 for 1–30 days. Housekeeping retains proactive rows for 90 days whether or not
 metrics are on, because delivery writes the same table while that switch is off.
-This feature owns the table's single named migration:
+Proactive delivery recording owns the table's single named migration:
 one row per message, with the send receipt in `outcome`. `source` includes
 `completion`, `user_reminder` and `morning_brief` (the digest itself); `chat_kind`
 is `direct` or `group`.
@@ -41,6 +41,15 @@ confirmation; Settings → Chat confirms the change before saving it. Both retur
 Existing `chat_settings` views, schemas and writes stay unchanged for clients.
 The generated CLI exposes the same operations; Lark and Telegram need no new
 control because configuration is operator-only. Dashboard metric widgets are separate.
+
+The independent `outbound` group in `manager_metrics.get` and the dashboard show
+current channel queues, 24-hour backoffs, breaker openings and state, failures
+and uncertain deliveries. The API groups failures by error class; the dashboard
+shows their total per channel. Failed and uncertain rows use a 24-hour window by
+their `terminal_at` transition time, including recovery after downtime; legacy
+rows without that timestamp fall back to `created_at`. Queue counts include pending and sending
+rows of any age. Gateway events retain at most 10,000 entries for 24 hours in
+memory, with a since-start label until the service has been up for a day.
 
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
@@ -122,6 +131,10 @@ control because configuration is operator-only. Dashboard metric widgets are sep
     it leaves main's pending confirmations and remembered leads alone. The
     profile chosen for the session (`/profile`, `select_session_profile`) is
     main's: another session follows the settings and refuses `/profile`.
+    The dashboard's Manager section lists these sessions (name, kind, whether
+    a process is running, last activity, cost) and can reset one. That reset
+    clears the session the same way `/new` does and does not post into the
+    chat. `loopercli manager-sessions list` reads the same list.
   - Switched off, new messages go to `main` again. Turns under way finish,
     what main's worker holds keeps its order, and the other sessions'
     processes stop once idle (the fleet's idle sweep). Their rows and saved
@@ -165,6 +178,21 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   with `looper_task_gate_reply`, which sends the user's own message (asking
   first which gate when it could be more than one), and nothing else does; refer to what Looper writes itself instead
   of repeating it; and never say an operation ran unless its answer was `ok`
+- With `manager.turn_context.enabled` on (default off), each user turn replaces
+  its `Channel:` line with the existing `[Turn context]` renderer's local clock,
+  zone, speaker, chat and reply language, after state and pending-confirmation
+  notes. The system contract adds `TURN_CONTEXT_CONTRACT`; the time stays out of
+  the stable state and process signature. `manager_turn_context` reads the bot's
+  configured operator and allowlist and sets `Turn.speaker`, enabling the existing
+  ops checks: other allowlisted senders and group members cannot request an
+  escalation or confirm one, and a refused confirmation is discarded. A bot
+  identity lookup failure grants no operator authority. Operator messages in
+  groups and API clients can authorize, while private tools keep their separate
+  operator-turn audience checks. Completion and autonomous turns keep their
+  existing messages and no speaker. Off, prompts, tools and launches are unchanged.
+  Dashboard and generated CLI configuration use the existing operator-only
+  `turn_context_settings.get/update`, separate from `chat_settings`; Lark and
+  Telegram need no new command. See [the assistant RFC](rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文).
 - With the system setting `manager.stable_context` `true` (default off), those
   sections and the active goals are one block, `Looper state (rev R)`, R a
   hash of its lines (`tiers/state_view.py`), so the resident session's growing
@@ -191,6 +219,25 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   turn's record has `metadata.looper_state` (`view`, `rev`, `reason`). Off,
   the turns, the prompt, the tool list and the process signature are as they
   were without the setting
+- **Manager persona** (`looper/agents/persona.py`; Settings → Chat, `manager.persona`, unset by default).
+  A JSON object: `name` and `address` (20 characters each), `tone` (200) and `notes` (400), 600 characters
+  in total. Whitespace-only is unset and the row is removed. Only the operator reads or changes it
+  (`manager_persona.get`, risk read, level inside; `manager_persona.update`, risk write, level inside; both
+  operator-only). The Manager's `looper_settings` tool does not list it. `manager_persona_context.section`
+  prepends the default Manager's first `_sections()` entry: `Persona (set by the operator: your name and tone; Looper's rules still apply):`,
+  then nonempty indented `Name`, `Tone` and `Notes` lines, and a blank line. The stored `address` remains
+  compatible with the settings API but is not injected; there is no working-hours field. Routed group and
+  other-sender DM sessions receive only `Name`, with a name-only heading. Groups and non-operator direct
+  messages sharing main receive no persona, based on the message's source; the dashboard, API clients and the
+  operator's own direct chats keep `Name`, `Tone` and `Notes`. An unknown or unreadable operator identity grants
+  no private fields. With `manager.stable_context` on, shared group/other-sender turns get a persona-free whole
+  block without diffing or overwriting main's last shown state. Other edits follow its whole/changes/unchanged
+  rules on the next user turn; off,
+  each user turn includes the section. An unset persona adds no bytes. System contracts, tools, commands
+  and process signatures do not depend on it. Scenario Managers, Planners and Workers do not inherit it.
+  Configuration export carries a readable persona under
+  `settings.system`; import checks it with the same limits. An unreadable stored value adds no section and logs
+  `manager.persona is unreadable` once for that payload
 - **Research order** (`looper/agents/research_order.py`; Settings → Chat, `manager.research_order`, off by default,
   `chat_settings.update` `research_order`). On, the default Manager's contract gets a `## Looking things up`
   section (`+RESEARCH_ORDER` in its contract layer; before `STABLE_CONTEXT_CONTRACT`, which stays last). It says where to look when an answer needs facts the Manager
@@ -207,31 +254,69 @@ control because configuration is operator-only. Dashboard metric widgets are sep
 
   A scenario Manager never gets the section. Off, the prompt, the tool list and the process signature are what they
   were before. The section is composed per turn, so the prompt preview only notes it
-- **Delivery guard policy** (`delivery_guard.py`, `manager.delivery_guard.enabled`, default off):
+- **Mid-turn operator input** (`mid_turn_input.py`, `manager.mid_turn_input.enabled`, default off):
+  operator-only `mid_turn_input.get/update` operations control the switch (`enabled`; null restores off),
+  independently of delivery guard and `chat_settings`. The generated CLI exposes these operations; no chat
+  command or Manager tool changes the switch. On, the default Manager dispatches user messages even without
+  session routing. At most three plain-text operator messages join an operator's running user turn, only on a
+  runtime declaring `MID_TURN_INPUT` and a resident implementing the native input interface (currently the
+  non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
+  commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
+  path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
+  Admission lets OS read callbacks and the output reader run, then rechecks before and after writing,
+  even when a short line's drain returns immediately. A failed or late write queues the message.
+  If a result arrives after the write, the resident process is retired before queue
+  fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
+  merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
+  path. The original tool binding stays in place. The final reply goes to
+  the original chat and each addition from another chat; same-chat web additions get a terminal acknowledgement,
+  while same-chat Lark/Telegram additions need no duplicate reply. Any participating chat can stop the turn.
+  Additions settle only after reply handoff; shutdown before handoff leaves them replayable. Explicit stop
+  follows the existing withdrawal rule and settles all associated messages immediately, preventing replay of
+  stopped work. Typed additions record `metadata.merged` (kind, message id, chat, receipt time), plus each
+  addition's ack and first-reply metrics when metrics are on. A failed resume carries accepted additions into
+  its retry even if the switch has since been turned off. Off, prompt/system text, tools, command and process
+  signature retain their main-baseline bytes, and later messages remain separate turns. Dashboard controls and
+  config-transfer support are not part of this change; operator API/CLI configuration is available now.
+- **Delivery guard** (`delivery_guard.py`, `delivery_guard_manager.py`, `manager.delivery_guard.enabled`, default off):
   the pure policy defines a user's delivery debt (`owed`, then `paid` on non-empty top-level text),
   exempts completion and autonomous turns, and permits at most two hidden follow-ups after a successful
   empty reply. A failed follow-up selects the fixed failure notice; a stop retains normal stop behavior.
   Initial errors, process exits, spend caps, unavailable tools and refused tokens never start follow-ups.
   Six consecutive top-level tool calls select a same-turn reminder, at most twice per turn, only when
-  the runtime declares `MID_TURN_INPUT`. Only Claude Code declares this verified capability. Reminders
-  are model input, with no separate interim channel message.
+  the configured runtime declares `MID_TURN_INPUT` and the active session is a direct resident stream-json
+  process. Keeper and runner-hosted sessions are excluded. Only Claude Code declares this verified
+  capability. Reminders are model input, with no separate interim channel message.
   The operator-only v1 operations `delivery_guard.get` and `delivery_guard.update` read or store the
   switch (`enabled`, null restores off); existing chat settings responses and Manager tools stay unchanged.
-  **Manager wiring is pending:** storing the switch currently changes no replies, prompts, records or
-  channel calls. The policy, turn debt field and capability declaration are groundwork for that wiring;
-  dashboard controls, follow-up records/metrics and runtime reminder injection come with it.
-- **Session budget rules** (`session_budget.py`, `manager.turn_budget_usd`, default off; assistant-layer RFC
-  section 5.4): `decide` takes a turn's context and cost and keeps the session, compacts it (a runtime with
-  `HEADLESS_COMPACTION`) or rotates it. It uses #1473's `schedule_session.session_bound` and the threshold
-  `scheduler.session_context_max_tokens` that schedule Planners use. A turn with an unknown context is kept, and
-  so is every turn while the budget is unset. Unlike #1473, an unknown turn cost skips the cost rule; context
-  alone can still compact or rotate. `after_compaction` rotates when the `/compact` failed, had no
-  `compact_boundary` or left the context over the threshold. `turn_cap` caps a turn at the budget when its model
-  has a price (`no_price` otherwise), and `over_cap_reply` is the fixed reply to a turn stopped there. The
-  operator-only v1 operations `session_budget.get` and `session_budget.update` read or store the budget (a
-  positive number of US dollars, null for off; the recommended value is $4.00) and report a stored value that is
-  not a budget. **Manager wiring is pending:** storing the budget changes no turn, prompt, record or command line
-  yet.
+  Hidden turns send only the fixed follow-up message in the same session, without user-turn context,
+  sections or a channel line. Each has its own run record (`metadata.delivery_guard.followup` and `for`),
+  but adds no user message to chat history; reminders record their count in `metadata.delivery_guard.reminders`.
+  The original user's status and stop token stay active through recovery. Two empty follow-ups, or a failed
+  follow-up, produce the fixed failure notice with the turn's existing blocks. Off, replies, prompts,
+  command lines, record writes and channel calls retain their existing behavior. Dashboard controls and
+  turn metrics await their respective UI and metrics work.
+- **Session budget** (`session_budget.py`, `tiers/manager_budget.py`, `manager.turn_budget_usd`, default off;
+  assistant-layer RFC section 5.4): after handing a user or completion turn's reply to its channel, the Manager
+  keeps that session's lock while it records the final main-loop context and turn cost and applies `decide`.
+  It shares #1473's `schedule_session.session_bound` and `scheduler.session_context_max_tokens` with schedule
+  Planners. Unknown context keeps the session; unknown cost skips the cost rule. Over the context threshold,
+  a running session with `HEADLESS_COMPACTION` gets one recorded maintenance `/compact`. A failed exchange,
+  missing `compact_boundary` or context still over the threshold queues a rotation; a runtime without the
+  capability rotates directly. At half the context threshold or more, a turn costing over half its budget
+  also rotates. Rotation stops the process; the next turn resumes the old session for its handoff and starts
+  a new one with that handoff. Main also receives the Manager's three latest ended task results, newest first;
+  group and DM sessions keep only their own chat excerpt. Measurements are stored in each session's own
+  row, and maintenance and handoff reopening use its isolated directory and environment. Compactions and
+  rotations carry `metadata.session_bound` with the action, reason and before/after token counts.
+  The budget also supplies a per-turn soft cap, including subscription runs priced from the model catalog;
+  the existing process budget is unchanged. A capped turn gets the fixed `over_cap_reply`, and its next message
+  starts a process that resumes the session. An unpriced model gets no additional soft cap and logs a warning
+  once per profile/model; the Settings price warning and dashboard controls are not implemented yet.
+  Operator-only v1 operations `session_budget.get` and `session_budget.update` read or store a positive dollar
+  budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
+  is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
+  command lines stay unchanged.
 - **Operator profile** (`operator_profile.py`, `manager.profile.source`, default unset): a deterministic compiler
   reads `关于我.md` (or `记忆/关于我.md`, but not both) and `偏好/**/*.md` from the folder the operator names.
   That folder must resolve, symlinks included, inside the configured knowledge vault; save and read both check.
@@ -3028,6 +3113,15 @@ skill loads in the generated plugin `project`, so Claude Code names it
 `project:<name>`; a project cannot hold two of one name, so installing,
 writing or renaming one onto a name that would clash there is a 409.
 
+Writing, editing or deleting one appends `skill_versions`.
+`library_items.skill_version` points at the current row.
+`project_skills.rollback` writes a new row with the chosen version's content
+and the same `sha256`. Deleting the skill, or deleting its project, leaves
+those rows (`tombstone_at` set) and housekeeping removes them 90 days later.
+A run's library record, launch arguments and prompts gain no field from a
+version. A skill uploaded, taken from git, imported from this machine or
+written in Settings has no versions.
+
 **Caps.** Each is refused with a 400 that states it:
 
 - a name: at most 64 characters, Claude Code's limit for a skill name;
@@ -3426,6 +3520,20 @@ evaluation is required before the original schedule requirement is complete.
   `next_fire_at` the next one after now. Enabling a schedule, or changing the
   rule of an enabled one, sets `next_fire_at` from now: nothing missed before
   runs.
+- **Throttle fields** (`schedule_throttle`, default off). `active_hours`
+  (`HH:MM-HH:MM` in the schedule's timezone, may cross midnight; null all
+  day): a scheduled or catch-up firing whose fire time or now is outside it
+  does not happen at all (no run, `last_fired_at` unchanged, `next_fire_at`
+  the next one), as if the rule had not fired. `idle_only`: a firing while the
+  schedule's Manager answers a message (`ManagerAgent.busy`) is recorded
+  `skipped_busy` and the next firing tries again. "Run now" is never throttled.
+  The schedule's view has them as `throttle` with the two the schedule already
+  had: `allows_silence` (a subscription's quiet word; else `notify` other than
+  `always`) and `pre_check` (`gate_command` for an agent schedule with a gate,
+  `window` for a subscription, else `none`). API, generated CLI and config
+  export carry `active_hours` and `idle_only` (the export only when set); the
+  dashboard form does not edit them yet, and the Manager's `looper_schedules`
+  does not list them.
 - **A firing** while one of the schedule's tasks is still active (running,
   or created and about to start) is recorded `skipped_overlap`, or,
   with `overlap` `queue`, waits as the one `queued` run, which starts when that
@@ -3585,7 +3693,7 @@ evaluation is required before the original schedule requirement is complete.
   that stopped is `gate_failed` at the next start. A gate never runs twice at
   once: a firing while the schedule's run is `gating` is `skipped_overlap`.
 - **Repeated skips are counted, not stored.** A skipped firing (`skipped_gate`,
-  `skipped_overlap`, `skipped_missed`, `skipped_budget`) whose schedule's latest
+  `skipped_overlap`, `skipped_missed`, `skipped_budget`, `skipped_busy`) whose schedule's latest
   run is a skip for the same reason recorded the same day (the scheduler's day)
   is counted on that run (`schedule_runs.firings` one more, `finished_at` the
   latest firing), and a gate that found nothing leaves no row of its own
@@ -5437,7 +5545,18 @@ Manager's `looper_schedules` cannot create or change one.
 - **The push** goes through the channel's `post` as the bot, to the target the
   run started with (`subscription_runs.target_channel`, `target_chat`, pinned
   only when the target was confirmed for the configuration then in force:
-  `config_version`). The output is split at 4,000 characters by the group
+  `config_version`). With `delivery.enabled` on, the whole digest gets one
+  delivery decision (`kind=subscription`, `urgency=digest`) before its first
+  eligible segment is claimed; its segments and retries share that decision
+  and one daily slot. A deferred digest keeps its full output on the dashboard,
+  advances its cursor, and records its reason and `digest_date`; it is not
+  posted. Keep the switch off until a morning-report reader can surface those
+  deferred outputs. Recent Lark direct replies are observed from admitted
+  user messages, keyed by bot and user (history uses a native chat id instead).
+  This five-minute exemption is memory-only and resets on restart; existing
+  digest decisions still survive. Native-chat histories supply the other
+  targets' last user message. Off, the posts and existing run, segment and notification
+  writes are unchanged. The output is split at 4,000 characters by the group
   notice's splitter and cut at three messages, and each message is a row of
   `subscription_deliveries` (`pending`, `sending`, `sent`, `failed`,
   `uncertain`) with an idempotency key, the run id and, for a later part, the
@@ -5862,6 +5981,20 @@ subscription's current configuration is confirmed. Quiet types stay on the
 operator's intents list. New evidence replies to the original push, extending
 a pending suggestion's expiry to 24 hours after that delivery.
 
+With `delivery.enabled` on (off by default), the initial push and new-evidence
+reply ask `proactive_delivery.decide` before claiming a send. Both are `intent`
+with `normal` urgency, including a type whose display priority is `urgent`:
+neither is a blocking gate or a reminder the user set. The target chat's most
+recent user message supplies the five-minute grace. A `send` keeps the exact
+text, target, reply and idempotency key; its channel receipt records `outcome`,
+`external_id` and `sent_at`. Retries reuse `intent-<intent id>-<post id>` and
+its first decision, refreshing the receipt on the same row. A digest or drop
+keeps the original `intent_posts` text without spending a send attempt; a
+decision failure logs and waits for the next poll. Final edits and their
+fallback replies keep their existing path. With the switch off there are no
+additional decision reads or writes. Keep delivery off until the briefing can
+surface deferred intents, as required by the [delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md#3-发送点的接入顺序).
+
 `建 I-0042` (or `建` quoting a push) creates and starts one task;
 `驳回 I-0042` rejects the suggestion. Code handles these before the Manager's
 model and checks the operator's typed identity, including dashboard turns.
@@ -5993,7 +6126,7 @@ writes nothing.
 ### Proactive messages: the delivery layer
 
 A proactive message is one Looper sends without being asked in that moment (a
-gate reminder; later a task notice, a subscription's push, an intent, a
+gate reminder, a task notice; later a subscription's push, an intent, a
 completion turn, a reminder the user set). With the system setting
 `delivery.enabled` on (operator-only `proactive_delivery.update`; off by
 default, and then no send point asks), a send point asks
@@ -6011,17 +6144,38 @@ message's `digest_date` is the local date the next quiet hours end on. The
 decision goes into the message's row of `proactive_deliveries`, the table the
 proactive-message metrics keep (`decision`, `reason`, `counted`, `local_date`,
 `digest_date`, `decided_at`), under the send point's key for the message (a
-gate's `gate-<message id>`, its posts' idempotency key), so a message tried
+gate's `gate-<message id>` or an intent's `intent-<intent id>-<post id>`,
+its posts' idempotency key), so a message tried
 again keeps its first decision and the channel's receipt lands on the same
 row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
-`sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
-did. A later try of the same message replaces a `rejected` receipt. A morning brief (`source` `morning_brief`) is sent uncounted and is never
-deferred: it is the digest. Off, a send point that switch controls writes
-nothing; the brief has its own switch and still calls `deliver`. Wired so far:
-gate reminders, which are always `blocking`, and the morning brief; a decision
-that fails is logged and the message posted as with the switch off. Design:
-[proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+`sent`, `rejected` or `unknown`, `sent_at`, `external_id`) on the same row as
+the metrics. A later try of the same message replaces a `rejected` receipt.
+Off, a send point that switch controls writes nothing. Wired so far: gate
+reminders, task notices to Lark and Telegram, subscription digest pushes, and
+initial and new-evidence intent pushes. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
+user is `blocking`, like its reminders. The channel checks a task-end notice
+immediately before sending it, retaining its text and target; a completion
+fallback keeps the original notice's decision key. Recent user messages are
+looked up by bot and chat, including its routed Manager histories. Only a
+successful channel receipt records the receipt; a deferred notice records its
+decision without calling the channel. A decision that fails is logged and
+the notice posted as with the switch off. Subscription digest pushes use
+`digest` urgency, subject to the ordinary quiet hours and cap. Digest decisions
+use `subscription_run:<run id>` across retries and restarts, with the receipt
+on the first accepted segment; an uncertain channel outcome is never marked
+sent. A failed digest decision prevents the channel call; a failed receipt
+write is logged without changing an accepted send. Intent pushes use `normal`
+urgency even when their display urgency is high; a decision failure waits for
+the next poll. Deferred or dropped intents retain their post without claiming
+it or consuming a send attempt, and uncertain sends are never retried. Final
+intent edits and fallback replies, subscription alerts and failure notices,
+task progress, completion turns, the dashboard chat and other senders retain
+their existing paths. The delivery settings UI is not delivered here.
+Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+A morning brief (`source` `morning_brief`) is sent uncounted and is never
+deferred: it is the digest. The brief has its own switch and still calls `deliver`
+while the delivery switch is off.
 
 ### Morning brief
 
@@ -6801,6 +6955,36 @@ off; `outbound_review.get` and `outbound_review.update`).
   row cannot be written in time is blocked. Its free text (the target, the summary, the model's reason) is stored
   masked. The run's record has `run_kind` `outbound_check` and the asking run as its
   `parent_record_id`; in a task its cost is the Planner's share of `task_costs`.
+- **Looper's own tools** (layer 1, `ops/review.py`). While the review is on, a write call whose level is
+  `external` (`ops.levels`, `Operation.level`) is reviewed after its turn checks and before `escalate` and the
+  user's confirmation, which it never replaces. A blocked call does not run: the model gets the error `blocked`
+  (HTTP 403 for an API client) with the reason, the action trail records it (`error_code` `blocked`, linked from
+  the review's `manager_action_id`), and the operator is told once per turn. In a Manager turn that is not the
+  operator's, and for every API client (never the operator), code blocks it. The operator's own calls on the
+  dashboard and with the operator token are not reviewed. `looper_confirm` runs a call reviewed when it asked, so it
+  is not reviewed again. A task's Planner has no `external` tool, so its entry has no check.
+- **Tasks outside content went into** (`tasks.untrusted_inputs`).
+  - **How a task gets marked:**
+    - When a Manager's leads search finds leads, its session is marked (`agent_sessions.leads_session_id`).
+    - In that session, the tasks it creates or writes into get `leads`: `looper_task_create`,
+      `looper_task_instruct`, `looper_task_gate_reply`, and `looper_task_update` with a new requirement, confirmed
+      ones too. A new session drops the mark.
+    - A mark that cannot be written fails its call: a leads search hands on no leads, and a task write reports
+      that it was made but not marked.
+    - A task an intent builds gets `intent`. Marks are only added.
+  - **While the review is on,** each Worker and Reviewer run of a marked task carries the hook with its run's token
+    (`RoomOps.tool_hook`; the token's grant has no room tools when the room is off). Its calls are checked as its
+    task's (`outbound_hook.task_placed`):
+    - the operator's for a schedule, the dashboard, or the operator's own direct chat (a Lark one stored as its user,
+      a Telegram one as its chat, whose id is the user's); else a group's or another person's, which code blocks;
+    - the message the review sees is the task's original request; the requirement and the task's latest 5
+      supplements are its outside content;
+    - what was answered in the task's user gates goes with it word for word: the operator's own (the dashboard, the
+      web chat, their own Lark or Telegram direct chat) each as `operator confirmation at gate <label>`, evidence for
+      the review, not an allow; an API client's, a group's or another person's as an answer from someone else.
+  - **A run on a runtime without a hook** does not start: its attempt fails with `review_unsupported_runtime` and the
+    Planner decides, while the operator is told. The run's hook config goes when the run ends. A run adopted after a
+    restart has no review state, so its checked calls are blocked.
 - **The Managers' hook** (`looper/agents/outbound_hook.py`). While the review is on, each Manager's Claude Code
   carries a PreToolUse hook in its `--settings` (matcher `*`) and reads no settings file (`--setting-sources ""`),
   so nothing it writes in its working directory turns the hook off. Turning the review on or off changes the
@@ -6871,6 +7055,23 @@ writes what it wrote before, byte for byte.
   (`message_stream` source, because a batch can mix chat types) instead of a separate `<messages>` block.
   Each input or tool answer with fenced content carries the lead line once. Off, the original processor and
   vault output is byte-identical.
+- **A task's entries:** the task an intent builds (`intents.build`) carries its background and sources in one
+  `intent` block after the notes that say what they are (the switch is read before the build takes its
+  connection). In the Planner's [WAIT] turn a GitHub check's output (`gh pr view`: other people's comments and
+  reviews) is a `github` block naming the pull request; a command check's output, the operator's own command,
+  is not fenced.
+- **Gate messages and supplements:** code records whether the operator wrote each one in their own turn
+  (`from_operator`): a Lark or Telegram message, button or `/gate` command is when it came from the operator's own
+  direct chat (`gate_service.sender_is_operator`; not when the operator's id cannot be read); a Manager or client
+  call is when it ran in the operator's own turn or with the operator's token (`ops.service.operator_call`); the
+  dashboard's are, a `/gate` command there too unless an API client sent it. A message that reached a closed gate
+  keeps it as the supplement it becomes. The Planner's [GATE] turn fences a user's message whose `from_operator`
+  is not TRUE (`gate_message`, an empty end of the discussion too, its author inside the block), and so does a new
+  session's resume brief when it replays a waiting gate's earlier discussion. Such a supplement is a `supplement`
+  block wherever the journal shows it: the [CHAT] and [RESTART] turns' new and earlier ones, the plan view's
+  progress, the PLAN turn, the Workers' and Reviewers' task section, and the [LESSONS] and [VAULT] turns that turn
+  the journal into lasting knowledge (not the Planner's own gate conclusion). NULL (rows from before the column) is
+  fenced too.
 
 ### Turns Claude runs on its own
 
@@ -7106,14 +7307,14 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column); `difficulty` (`routine`, `hard`, `critical`, null when unset; a critical step's plan is reviewed by the advisor before it starts: [Consults of the advisor](#consults-of-the-advisor)) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
-| `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
+| `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, in a group chat the author, and for a user's message `from_operator` (whether the operator wrote it in their own turn, decided by code as it is stored; NULL: not known) |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
 | `subscriptions`, `subscription_runs` | A subscription's stream and what each of its runs read and made ([Subscriptions](#subscriptions-a-message-stream-on-a-time-rule)): the schedule's source, filter, window limits, rendering, quiet word, header, `cursor_seq` and `target_confirmed_at`; per run, the window (`from_seq`, `to_seq`), the counts, the processor's record, the `outcome`, the output and its notification |
 | `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; its chats (kind, name, inclusion, `bridge_*` file state); thread cursors and people names (not used yet); one row per ingest run with its counts; and the events, each unique per source by `external_id`, with its `seq`, send time, `text`, raw `body` and `origin` |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)` (`session_key` = `kind:channel_id:chat`): the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), and `last_active_at`. `main` stays in `agent_sessions` |
-| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
+| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via`, `delivered_at` and `from_operator` (whether the operator gave it in their own turn; NULL: not known, or Looper's own note); `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
@@ -7147,12 +7348,13 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_mode` (`inherit`, `seconds` or `none`) and `run_timeout_seconds` (with `seconds`), `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `user_gates` (`off` by default, or `on` to opt its tasks into user gates), `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
-| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
+| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`, `skipped_busy`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`, `manager_event_id` (the completion event that told a run's message: the Manager's reply or its fallback; NULL otherwise; a partial index, built online on an existing database); going with its schedule |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report and the scheduler's `scheduler.min_interval_seconds` and `scheduler.run_timeout_seconds` |
-| `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
+| `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at`, `skill_version` (the current project-skill version; null when the item has none) |
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
+| `skill_versions` | Append-only history of a project skill: item id (no foreign key, so the rows stay after the item is deleted), version number, name, description, `SKILL.md` body, `sha256`, author kind (`operator`, `proposal` or `rollback`), author ref, reason, `created_at`, `tombstone_at` (set when the item is deleted; housekeeping deletes the row 90 days later) |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
 | `channel_configs` | Telegram/Lark settings, one row per bot (top-level `bound_chats_only BOOLEAN NOT NULL DEFAULT false`, separate from JSON settings and preserved by ordinary config import; `manager_id`, fixed when the bot is added; the built-in rows belong to the default Manager; a trigger refuses to delete a Manager that has bots; `channel_bot_seq` numbers the added `channel-<type>-<n>` rows; enabled flag, Telegram's token env var name, Lark's lark-cli `profile`, the sender allowlist, and for Lark the app it was made for) |
 | `task_user_gate_posts`, `task_user_gate_messages` | Each also has `channel_id`, the bot a gate message was posted through or received from. The bridge upgrade removed `UNIQUE (channel, chat, external_id)` on gate posts. There is no downgrade that puts it back |
@@ -7334,7 +7536,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`. Its message box stays usable while the Manager replies: Enter queues the message in a staging area above the box (up to 20; the Edit button or ↑ pulls them back into the box, ahead of what is typed), and once a reply ends as `answered` the queued messages go as one message joined by a blank line; after a failed, stopped or confirm reply they go back into the box instead, and they survive a reload (kept per chat in `sessionStorage`). ↑ and ↓ in the box walk the thread's earlier messages (the latest 100, adjacent duplicates collapsed). Esc, or the Stop button that replaces Send while the box is empty, calls `POST /api/chat/stop`; typing `/stop` and Enter does the same. When the Manager's runtime cannot interrupt a reply (`can_interrupt` false), the Stop button shows disabled with "This runtime cannot interrupt a reply." and Esc does nothing. After a reload the page asks `GET /api/chat/turn` whether a reply is still running. A planner's chat has the queue and the history but no Stop. Beside the Manager, a list shows its conversations on every channel (`POST /api/v1/operator_chat/sessions`), grouped as Dashboard chat, loopercli (conversations an API client opened, with the client's name), Lark and Telegram, each the most recently active first, with its last message's start, sender and time and its message count; it is re-read every 10 s and after each answer, and a failed read shows its error. Picking a dashboard chat opens it as the web chat thread; picking a Lark or Telegram conversation shows its newest messages read-only, with their times and no message box, re-read every 10 s, and says when only the newest 200 of more are shown; an answer its channel did not deliver says so under it, with the channel's reason. Below the md breakpoint the list opens from a button in the header.
 - **Tasks**: Task list, newest first, 50 at a time with Load more ("Showing N of M"; the newest page is re-read every 3 s and the older pages loaded stay below it), with project and status filters (several chips at once, listed in the address in chip order, for example `status=init,running,waiting,waiting_user,pending`; with neither `status` nor `group` nor `schedule` the page shows Ready, Running, Waiting, Waiting for you and Pending, and `status=all` shows every task; a single value such as `status=failed` still selects that one filter; `Ready` is ready tasks; `Running` covers tasks whose Planner is planning, executing, verifying or winding down, including the assigned and running statuses; `POST /api/v1/tasks/page` takes `statuses`, one to ten of the same filter names, and returns their union, or `status` for one name, not both; counts stay per filter and count every task under the other filters), time display, each task's cost so far, a "Scheduled" badge linking to the schedule that created the task (with "continues the schedule's Planner session" on the detail page when `continues_schedule_session` is true), Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. On a stopped, failed or cancelled task, Start (here and on its detail page) goes on from its saved plan, and Start over, after an inline confirm, plans it anew (`POST /api/tasks/start` with `start_over`). `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page; `#tasks?group=<group>` lists one task group, shown as a chip that clears it, `#tasks?schedule=<id>` one schedule's tasks, shown as a chip too. With no `status`, a group or a schedule lists every task in it; an explicit `status` still narrows that list. A project link keeps the unfinished default. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
-- **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|schedules|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then six tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers, Reviewers and processor, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer, Processor; the processor's row has no harness field and says when its profile cannot run it), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, spend cap and environment (a project sets no concurrency limit), where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Schedules**: a line saying a schedule runs an agent task or shell command of the project, or reads a message stream, on a time rule and starts disabled, New schedule (its Type: Agent task, Command or Subscription, whose form takes the message source, the chats and senders it reads, the look-back, the cap and the cut of the text, the processor's instructions, the quiet word and title, the spend caps and where it pushes), then one collapsible row per schedule. A closed row shows the name, the rule in words, the next run in the schedule's zone (or Disabled), the last run's status and the failures in a row, with the enable switch, Run now and Reset Planner session beside it (outside the row's button); reset asks for confirmation that the next run starts fresh and a run in flight keeps its own session without writing back. Its session status is "Planner session: none yet", or "Planner session: continuing since <time>, last used by run <task name>", with time in the schedule's zone and no session id, also for a parallel schedule. A closed row also shows "Failing" or "No success lately" while an alert is active. An open row edits every field (the gate command and timeout, the daily budget with today's spend, notify and the chat to send to, or Dashboard only, under "Before each run and after"), previews the rule's next 5 fire times as it is typed (an invalid rule says why and disables Save), saves with one Save, deletes after a confirmation, and lists the run history (the same one as a schedule's detail view): 20 runs at a time, newest first, with "Show older runs", the routine skips (nothing new, busy) hidden by a checkbox that is on at first and says how many firings there have been; each run with when it was due (the fire time on hover), how it fired (Scheduled, Catch-up with the missed count, Manual), the status, for a repeated skip ×N and until when (instead of how long it took), how long it took, the cost, the summary or error, a collapsed gate output, a note when the run carries the previous run's input, and its task by title with the task's status, linking to it. A subscription's row shows a Subscription badge instead of the Planner session, and under its last run: where it pushes and when the operator confirmed it, or "Push target not confirmed: output stays on this page" with "Confirm push target…" (the facts the server gives, then Confirm), and its cursor with "Reset cursor…" (a time in the browser's zone, then Reset: the answer says how many events the next run reads); each of its runs adds what it read and made (the outcome, messages read of those in the window, how many were too old or over the cap, the events it covers, and its output folded). `#projects/<id>/schedules/<schedule id>` opens that row, and a task's Scheduled badge links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, always offered with task, running-task and schedule counts. Inline confirmation deletes schedules and their run history, stops running tasks, then removes all tasks and the project; result branches stay. While it runs, the button shows “Stopping and deleting…”. A conflict shows the server's reason and leaves Delete available to retry; success refreshes the task lists.
+- **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|schedules|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then six tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. History lists each saved version (author kind, time, reason) and rolls back by writing that version's content as a new version, after showing the difference and the projects that install the skill. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers, Reviewers and processor, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer, Processor; the processor's row has no harness field and says when its profile cannot run it), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, spend cap and environment (a project sets no concurrency limit), where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Schedules**: a line saying a schedule runs an agent task or shell command of the project, or reads a message stream, on a time rule and starts disabled, New schedule (its Type: Agent task, Command or Subscription, whose form takes the message source, the chats and senders it reads, the look-back, the cap and the cut of the text, the processor's instructions, the quiet word and title, the spend caps and where it pushes), then one collapsible row per schedule. A closed row shows the name, the rule in words, the next run in the schedule's zone (or Disabled), the last run's status and the failures in a row, with the enable switch, Run now and Reset Planner session beside it (outside the row's button); reset asks for confirmation that the next run starts fresh and a run in flight keeps its own session without writing back. Its session status is "Planner session: none yet", or "Planner session: continuing since <time>, last used by run <task name>", with time in the schedule's zone and no session id, also for a parallel schedule. A closed row also shows "Failing" or "No success lately" while an alert is active. An open row edits every field (the gate command and timeout, the daily budget with today's spend, notify and the chat to send to, or Dashboard only, under "Before each run and after"), previews the rule's next 5 fire times as it is typed (an invalid rule says why and disables Save), saves with one Save, deletes after a confirmation, and lists the run history (the same one as a schedule's detail view): 20 runs at a time, newest first, with "Show older runs", the routine skips (nothing new, busy) hidden by a checkbox that is on at first and says how many firings there have been; each run with when it was due (the fire time on hover), how it fired (Scheduled, Catch-up with the missed count, Manual), the status, for a repeated skip ×N and until when (instead of how long it took), how long it took, the cost, the summary or error, a collapsed gate output, a note when the run carries the previous run's input, and its task by title with the task's status, linking to it. A subscription's row shows a Subscription badge instead of the Planner session, and under its last run: where it pushes and when the operator confirmed it, or "Push target not confirmed: output stays on this page" with "Confirm push target…" (the facts the server gives, then Confirm), and its cursor with "Reset cursor…" (a time in the browser's zone, then Reset: the answer says how many events the next run reads); each of its runs adds what it read and made (the outcome, messages read of those in the window, how many were too old or over the cap, the events it covers, and its output folded). `#projects/<id>/schedules/<schedule id>` opens that row, and a task's Scheduled badge links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, always offered with task, running-task and schedule counts. Inline confirmation deletes schedules and their run history, stops running tasks, then removes all tasks and the project; result branches stay. While it runs, the button shows “Stopping and deleting…”. A conflict shows the server's reason and leaves Delete available to retry; success refreshes the task lists.
 - **Task Detail**: Overview (status, phase, times, steps ("n/m done": the accepted steps of those not skipped, then how many are in review and how many skipped; the step list's badges use the Pipeline's names) and the task's cost with its run count; the requirement, with Edit while the task has not ended and its earlier versions under History, then the supplements, each with how it came and whether the Planner has seen it; then Progress: once the task has ended, its final summary (completed) or closing note (failed, stopped) as Markdown, then the Planner's latest progress note (done, now, next, risks, estimate, and when) and the earlier ones under a disclosure; then "Cost by agent and model": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost, and below it (beside it on a very wide screen) the By model table: each model's runs, input, output and cache read and write tokens (compact) and cost ("–" when none of its runs has one), adding up to the task's cost, then the Manager's turns about the task on rows of their own, marked as not counted in the task's cost or its spend cap; a one-line summary of each role's Agent Profile that opens the Agents tab; steps, agent timeline, live activity feed), Pipeline (React Flow: the plan as its dependency graph, each step a node by its label and status, under the steps in its `depends_on` or the Planner, in rows by dependency depth; the steps nothing live depends on lead to the result. Done steps keep their place and edges when the plan changes, so steps a replan or a restart adds hang off them; dropped steps stay as dashed, muted history on the right of their row, with the decision that dropped them in the tooltip, which also has the instruction and the Worker and Reviewer ids), Agents (each role's Agent Profile and the Worker and Reviewer limits, each with where it comes from (a limit: this task, Settings → Roles default or built-in default), changed there until the task completes and read-only after; the roles its Planner defined with their kind and profile, marking one the project no longer allows; and every Worker and Reviewer run of its steps, in plan order, with its role (Worker, Reviewer or the defined role it ran as), the Agent Profile it ran on, where that came from and its status, each linking to its history: `runs.for_task {task_id}`, read again whenever a step changes), Sessions, Conversation
 - **Schedules** (`#schedules`, below User Gates in the sidebar): every project's schedules from `GET /api/schedules`, re-read every 10 s, grouped by project (each group with how many of the project's schedules are on and a link to the project's Schedules tab to add or edit one). A filter bar above it: Project (All, or any project) and Status (All, Enabled, Disabled), which combine and are kept in the address (`#schedules?project=<id>&enabled=true|false`, so a link and a reload keep them; an unknown value is All), filtered in the page; while one is set it says "Showing K of N" with Clear filters, and when nothing matches the list says so, with Clear filters. Each row shows the name (opening its detail view), the rule in words, the next run in the schedule's zone (or Disabled), the last run's status, time and task, "Failing" or "No success lately" while an alert is on, and today's spend (against the daily budget when set); a disabled schedule is dimmed (a dashed edge, a muted name). Beside it, the enable switch (`POST /api/v1/schedule_admin/update` with `schedule_id` and `fields.enabled`: the switch shows the new value while it saves, then "Turned on" or "Turned off"; a refusal puts it back and says why) Run now (its answer, as on the project tab) and Delete schedule, which asks inline first ("Delete <name>? Its tasks stay.", as on the project tab) and takes the row out of the list. Loading, empty and error states, and a failed refresh keeps the last list with the error. **A schedule** (`#schedules/<id>`): back to all schedules; its name, project (a link), rule in words, the switch, Run now, "Edit on the project" (its row on the project's Schedules tab, where it is edited) and Delete schedule (the same inline confirmation; once it is deleted, back to all schedules); the next run, the last run with the alerts, and today's spend against the daily budget; its settings (rule and cron, time zone, work directory, gate and its timeout, notify and to whom, the budgets per run and per day, run timeout, overlap and catch-up, the Agent Profiles it sets, by name) with the requirement folded; and the run history, the same as on the project tab. Re-read every 10 s; an unknown id says it was not found.
 - **Message stream** (`#messages`, below Schedules): each source's state in words (healthy, degraded, stale, off), its counts and its recent passes with their errors, a switch that turns reading on or off, and, with no source, a form for the collector's directory. It also shows searchable chats with include/exclude switches and seven-day event counts, storage and retention stats, and two-step deletion for a message, a sent-time range or a whole chat, with the external copies that remain. It shows counts only, never message text.
@@ -8204,11 +8406,11 @@ implementation supplies it and is retested.
   attachment paths, including filenames with spaces and Unicode. Dashboard
   turns with attachments show the final answer without streaming text deltas,
   so a path split across chunks cannot escape redaction. With `channels.outbound.enabled` off (the default),
-  both Lark transports retain their original calls and write no outbox rows. Settings → Chat reads and updates
+  Lark and Telegram retain their original calls and write no new outbox rows. Settings → Chat reads and updates
   `outbound_enabled` through the separate operator-only `outbound_gateway.get/update` operations; the existing
   `chat_settings` response fields, accepted writes and Manager tools remain unchanged. Gateway updates are
   high-risk operations with confirmation for callers that require it; null restores each field's default.
-  On, `GatedLarkTransport` routes every write through
+  On, `GatedLarkTransport` routes every Lark write through
   one gateway per channel, sharing its in-flight cap and both send/reply and total-write token buckets
   by the verified app id across CLI/Bot channels (defaults 5/s and 15/s),
   at most four platform calls in flight, classified errors, up to five retries with jitter and
@@ -8222,7 +8424,7 @@ implementation supplies it and is retested.
   the gateway. Answers, progress, notices, notifications and posts first enter
   `channel_outbox`, ordered per chat and concurrent across chats. Caller keys win; otherwise envelope ids
   and part numbers derive stable keys. The first possibly delivered attempt is saved before platform I/O.
-  Every retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
+  Every Lark retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
   persistence; expired possibly delivered rows become `uncertain` and are never resent. Older rows without
   an attempt timestamp conservatively use their creation time on upgrade. A delivery past its total deadline
   becomes `uncertain` if attempted, otherwise `failed`, releasing the chat head even if a saved retry is far
@@ -8236,9 +8438,23 @@ implementation supplies it and is retested.
   and cannot block legacy startup, receiving or catch-up. An empty disabled outbox performs no recovery writes. Waiters share in-process
   completion futures; the scanner sleeps until the earliest unblocked retry or new work. Notifications can
   carry a caller-supplied event key to deduplicate retries. An insert failure logs a warning and falls back to the gateway. Status
-  lines and reactions use the gateway alone. Housekeeping retains sent rows for seven days and other rows
-  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Telegram wiring
-  and dashboard metrics follow separately; the standalone probe remains independent.
+  edits and reactions use the gateway alone; Telegram's first status message uses the outbox.
+  Housekeeping retains sent rows for seven days and other rows
+  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Dashboard metrics
+  follow separately; the standalone probe remains independent.
+
+  | Telegram path | With `channels.outbound.enabled` on |
+  | --- | --- |
+  | Non-polling `GatedRequest(HTTPXRequest)` | `sendMessage`, `editMessageText`, `setMessageReaction`, `sendDocument`, `sendPhoto`, `sendChatAction`, `setMyCommands` and `answerCallbackQuery` use the gateway, with limits shared by bot identity. Edits use `chat_id:message_id`. Reads and durable `PollingRequest` bypass it. |
+  | Answers, notices, progress, command replies, posts, cards and notifications | Each chunk enters the outbox. Envelope ids derive stable per-chunk keys; caller keys win for posts and notifications. A rejected formatted chunk or card can replace only its own row's body with plain text. Earlier chunks are retained. The existing MarkdownV2 format stays in use; the same outbox rule covers HTML bodies. |
+  | Lost responses and restart | Telegram has no platform idempotency key: unknown attempts become `uncertain`, and every row left `sending` after a crash becomes `uncertain`, without resending. Its platform dedupe window is zero. Explicit 429s (including JSON `parameters.retry_after`) and pre-send connection failures can retry; other 4xx responses are rejected. |
+
+  Telegram uses the same configurable per-bot limits; there are no hardcoded per-chat caps.
+  The [official FAQ](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this)
+  advises roughly 30 bulk messages per second per bot, one per second per chat and 20 per minute per group
+  (paid broadcasts can differ). These are guidance, not guaranteed capacity; tune the operator controls
+  and honor runtime 429 responses. Telegram has no stand-in serve: validation uses real PTB adapters
+  with fake HTTP responses, and never calls the real Bot API.
   The CLI transport sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a

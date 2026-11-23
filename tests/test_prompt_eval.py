@@ -1927,6 +1927,7 @@ def test_case_allowances_fit_the_reservations_and_total_cap(jobs: int) -> None:
     ("failed", "harness"), ("budget_words_only", "harness"), ("incomplete", "harness"),
     ("missing", "harness"), ("failed_after_completed", "harness"),
     ("autonomous_after_failed", "harness"), ("autonomous_after_completed", "pass"),
+    ("maintenance_after_failed", "harness"), ("maintenance_after_completed", "pass"),
     ("error_result_completed", "harness"), ("typed_budget", "spending_cap"),
     ("paged_budget", "spending_cap"),
 ])
@@ -1980,8 +1981,11 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
                     if case.startswith("autonomous_after_"):
                         rows.append({"id": final_id + 1, "status": "completed" if status == "failed" else "running",
                                      "error": None, "metadata": {"autonomous": True}})
+                    if case.startswith("maintenance_after_"):
+                        rows.append({"id": final_id + 1, "status": "completed" if status == "failed" else "failed",
+                                     "error": None, "metadata": {"maintenance": "session_bound"}})
                 return {"records": list(reversed(rows))}
-            event_ids = {final_id, final_id + 1} if case.startswith("autonomous_after_") else {final_id}
+            event_ids = {final_id, final_id + 1} if case.startswith(("autonomous_after_", "maintenance_after_")) else {final_id}
             assert path == "/api/v1/runs/events" and query["record_id"] in event_ids
             after = int(query.get("after", 0))
             limit = int(query.get("limit", 1000))
@@ -2307,7 +2311,7 @@ _MISBEHAVING = EvalTask(
 
 # What each fake-mode task is run through: (steps, retries, reviews, chat turns), and how its steps sit side by side.
 _FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
-         "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
+         "wait_pr_rereview": (3, 0, 0, 0), "wait_pr_comment_injection": (2, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
          "any_of_ready": (3, 0, 0, 0), "conditions_not_needed": (2, 0, 0, 0),
          "parallel_parts": (3, 0, 0, 0),
          "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
@@ -2324,7 +2328,7 @@ _FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_
          "roles_template_unfit": (1, 0, 0, 0),
          "schedule_template_report": (1, 0, 1, 0),
          # A gate is a step; the steps its closing turn added follow it.
-         "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
+         "gate_ambiguous": (2, 0, 0, 0), "gate_outside_answer": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
          "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
          "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0),
          "vault_closeout_keeps": (1, 0, 0, 0), "vault_closeout_nothing": (1, 0, 0, 0),
@@ -2337,7 +2341,7 @@ _FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
 _SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
-          "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
+          "wait_pr_rereview": (0, 0, 1), "wait_pr_comment_injection": (0, 0, 1), "wait_not_needed": (0, 0, 1),
           "any_of_ready": (1, 0, 2), "conditions_not_needed": (0, 0, 1),
           "parallel_parts": (1, 0, 2),
           "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
@@ -2354,7 +2358,7 @@ _SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step"
           "schedule_template_report": (0, 0, 1),
           # Its four platform steps run side by side between the interface step and the check.
           "roles_multi_platform": (6, 6, 4),
-          "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
+          "gate_ambiguous": (0, 0, 1), "gate_outside_answer": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
           # The clear part runs beside the gate and then beside the step the gate's answer planned.
           "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
           "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
@@ -2392,14 +2396,14 @@ _COUNTS = {
     "planner_profile_runs": {"profile_choice": 1},
     # Only the two changes that make the second step wrong change the plan.
     "plan_changes": {"supplement_replan": 1, "requirement_edit": 1},
-    "waits_opened": {"wait_pr_rereview": 1},
+    "waits_opened": {"wait_pr_rereview": 1, "wait_pr_comment_injection": 1},
 }
 # Only the gate tasks open gates. The scripted user answers (or ends the discussion), the gate passes on what was
 # settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels the gate
 # that waits on it before it opens, so no gate asked.
 _GATE_KEYS = ("gates_opened", "gate_turns", "gates_passed", "gates_ended_by_user", "gates_cancelled",
               "assumptions_stated", "gate_parallel_runs", "conclusion_reads")
-_GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
+_GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_outside_answer": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
           "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
 # Only the room tasks' agents use the room: room_interface's store posts its interface, its client asks the Planner,
 # which answers in a [ROOM] turn; room_consult's second step asks the first, whose run has ended, and a consult of

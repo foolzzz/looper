@@ -84,6 +84,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from looper.agents.ops import API_CHANNEL
+from looper.agents.delivery_guard import FOLLOWUP_MESSAGE
 from looper.agents.tiers.manager import _looper_call
 
 from .compare import outcome
@@ -2570,6 +2571,42 @@ def _follows_settings(look: Look) -> str | None:
     return None if chosen is None else f"the session still has {chosen} selected"
 
 
+BOUND_TASK_TITLE = "会话预算验收"
+BOUND_TASK_SUMMARY = "已生成校验报告"
+
+
+def _seed_session_bound_task(database_url: str, project_id: str) -> None:
+    """One ended task, created after startup so no task agent or recovery turn ever runs for it."""
+    import asyncpg
+
+    from looper.db.tasks import create_task, update_task_status
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            task_id = f"task-{uuid.uuid4().hex[:12]}"
+            await create_task(task_id=task_id, project_id=project_id, requirement="Generate a verification report.",
+                              title=BOUND_TASK_TITLE, status="completed", pool=conn)
+            await update_task_status(task_id, "completed", result_summary=BOUND_TASK_SUMMARY, pool=conn)
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+
+
+def _remembered_after_session_bound(look: Look) -> str | None:
+    if BOUND_TASK_TITLE not in look.reply or BOUND_TASK_SUMMARY not in look.reply:
+        return "the reply did not recover the ended task's title and result from the resume brief"
+    runs = _manager_runs(look)
+    if not any((row.get("metadata") or {}).get("session_bound", {}).get("action") == "rotated" for row in runs):
+        return "no session-bound rotation was recorded"
+    record = look.api.post("/api/v1/runs/get", {"record_id": runs[-1]["id"]})["result"]["record"]
+    text = _input(record)
+    if not all(part in text for part in ("[RESUME]", "Recent task results", BOUND_TASK_TITLE, BOUND_TASK_SUMMARY)):
+        return "the next Manager turn did not receive the ended task in its session-bound resume brief"
+    return None
+
+
 def _remembered_after_switching_back(look: Look) -> str | None:
     if not look.fake and "TEAL-42" not in look.reply:
         return "the reply lacks TEAL-42"
@@ -2620,7 +2657,38 @@ def _created_with_workflow(look: Look, *, expected: str | None) -> str | None:
     return None
 
 
+def _seed_delivery_guard(api: Api, project_id: str) -> None:
+    api.post("/api/v1/delivery_guard/update", {"enabled": True})
+
+
+def _tools_only_replied(look: Look) -> str | None:
+    if not look.reply.strip():
+        return "the Manager delivered no reply"
+    actions = look.actions()
+    if not any(a["tool"] == "looper_projects" and a["status"] == "ok" for a in actions):
+        return "the Manager did not read the projects"
+    if any(a.get("risk") != "read" for a in actions):
+        return "the Manager made a non-read call"
+    if not look.fake:  # Real models may reply at once; the stand-in forces recovery.
+        return None
+    runs = _manager_runs(look)
+    if len(runs) != 2:
+        return f"expected the empty turn and one follow-up record, got {len(runs)}"
+    initial, followup = runs
+    annotation = (followup.get("metadata") or {}).get("delivery_guard") or {}
+    if (initial.get("output_chars") != 0 or not followup.get("output_chars")
+            or annotation.get("followup") != 1 or not annotation.get("for")
+            or _input(followup) != FOLLOWUP_MESSAGE
+            or not initial.get("session_id") or initial["session_id"] != followup.get("session_id")):
+        return "the recovery is not a recorded follow-up in the same session"
+    return None
+
+
 DIALOGS: tuple[Dialog, ...] = (
+    Dialog("tools_only_no_text", (
+        Say("现在有哪些项目？请查一下并给出结果。", _tools_only_replied,
+            (("looper_projects", {"action": "list"}), ("__reply__", {"text": ""}))),
+    ), seed=_seed_delivery_guard, tags=("manager", "tools", "replies", "delivery_guard")),
     Dialog("workflow_named", (
         Say("在 eval-calc 项目里用 Reviewed 做一个计算器，先建任务不要启动。", _restated_and_asked),
         Say("确认", lambda look: _created_with_workflow(look, expected="reviewed"),
@@ -3115,12 +3183,24 @@ DIALOGS: tuple[Dialog, ...] = (
 )
 
 
-def _runnable(dialog: Dialog) -> bool:
-    """Whether the dialog's feature can take effect on this checkout: the session search waits for group chats to
-    run in sessions of their own (``ops.session_search.group_sessions``)."""
-    from looper.agents.ops import session_search
+# Context measurements are scripted here, so these cases are selected explicitly in fake mode only.
+FAKE_DIALOGS: tuple[Dialog, ...] = (
+    Dialog("session_bound_rotate", (
+        Say("先记住这一轮。", lambda look: None,
+            (("__context__", {"tokens": 40001}), ("__reply__", {"text": "已记住。"}))),
+        Say("刚才结束的任务叫什么，结果是什么？", _remembered_after_session_bound,
+            (("__recent_task_results__", {}),)),
+    ), tags=("manager", "session_budget")),
+)
 
-    return not dialog.sessions or session_search.group_sessions() is session_search.GroupSessions.OWN
+
+def _runnable(dialog: Dialog) -> bool:
+    """Whether this checkout supports the dialog's features.
+
+    Session routing is implemented; session-search dialogs enable it in their disposable server. The eval
+    driver's default-off routing setting does not describe that server's isolation.
+    """
+    return True
 
 
 def select(ids: list[str] | None) -> tuple[Dialog, ...]:
@@ -3128,14 +3208,15 @@ def select(ids: list[str] | None) -> tuple[Dialog, ...]:
     cannot run here."""
     if not ids:
         return tuple(dialog for dialog in DIALOGS if _runnable(dialog))
-    known = {dialog.id for dialog in DIALOGS}
+    cases = (*DIALOGS, *FAKE_DIALOGS)
+    known = {dialog.id for dialog in cases}
     unknown = sorted(set(ids) - known)
     if unknown:
         raise ValueError(f"unknown dialog id(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
-    if waiting := sorted(dialog.id for dialog in DIALOGS if dialog.id in ids and not _runnable(dialog)):
+    if waiting := sorted(dialog.id for dialog in cases if dialog.id in ids and not _runnable(dialog)):
         raise ValueError(f"{', '.join(waiting)}: the session search takes effect only once group chats run in "
                          "sessions of their own (session routing); these dialogs cannot run before")
-    return tuple(dialog for dialog in DIALOGS if dialog.id in ids)
+    return tuple(dialog for dialog in cases if dialog.id in ids)
 
 
 # --- Running them ---
@@ -3198,10 +3279,11 @@ def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bo
     from looper.agents.claude_cli import BUDGET_SUBTYPE
 
     records = api.post("/api/v1/runs/list", {"agent_id": agent_id, "limit": 500})["result"]["records"]
-    # Neither Claude's own turns nor a completion turn (a task that ended meanwhile) answer the message.
+    # Autonomous, completion and maintenance turns do not answer this message.
     new = [record for record in records if record["id"] > since
            and not (record.get("metadata") or {}).get("autonomous")
-           and not (record.get("metadata") or {}).get("completion")]
+           and not (record.get("metadata") or {}).get("completion")
+           and (record.get("metadata") or {}).get("maintenance") != "session_bound"]
     if not new and withdraw:
         return
     if not new:
@@ -3610,6 +3692,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _enable_ledger(database_url)
         if dialog.id == "reminder_tools":
             _seed_reminders(database_url)
+        if dialog.id == "session_bound_rotate":
+            if mode != "fake":
+                raise EvalError("session_bound_rotate uses fake-mode context measurements")
+            api.post("/api/v1/session_budget/update", {"turn_budget_usd": 4})
+            api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": 40000})
+            _seed_session_bound_task(database_url, project_id)
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
@@ -3631,6 +3719,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 data = json.loads(scenarios.read_text(encoding="utf-8"))
                 data.setdefault("manager", {})[text] = [[name, json.loads(json.dumps(arguments).replace(
                     "<task>", task or ""))] for name, arguments in say.fake]
+                if dialog.id == "tools_only_no_text":
+                    data["manager"][FOLLOWUP_MESSAGE] = [["__reply__", {"text": "已查到项目：eval-calc。"}]]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url, agent)
             expects_api = api_turn and not (say.code_only or say.stop or say.withdraw)
@@ -3779,6 +3869,7 @@ def run(
     dsh_runtime: str = "cli",
     stable_context: bool = False,
     leads_fulltext: bool = False,
+    delivery_guard: bool = False,
     untrusted_fence: bool = False,
     claude_bin: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
@@ -3789,7 +3880,9 @@ def run(
     every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only. With
     ``stable_context`` every dialog's database has ``manager.stable_context`` on, and each row lists what the
     Manager's turns started with (``state_views``). With ``leads_fulltext`` it has ``leads.search_mode``
-    ``fulltext``. With ``untrusted_fence`` every dialog's database has ``untrusted_fence.enabled`` on."""
+    ``fulltext``. ``delivery_guard`` enables the operator-only recovery setting in each disposable server and
+    reports how many hidden follow-ups ran. With ``untrusted_fence`` every dialog's database has
+    ``untrusted_fence.enabled`` on."""
     if manager_agent is not None and mode != "real":
         raise EvalError("--manager-agent needs --mode real; the api runtime's fake runs are its own tests")
     if reps < 1:
@@ -3864,12 +3957,19 @@ def run(
                         _turn_on(database_url, "manager.stable_context")
                     if leads_fulltext:
                         _turn_on(database_url, "leads.search_mode", "fulltext")
+                    if delivery_guard:
+                        _seed_delivery_guard(api, project_id)
                     if untrusted_fence:
                         _turn_on(database_url, "untrusted_fence.enabled")
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,
                                      switch_spec=switch_agent, manager_profile=configs[dialog.id, rep][1])
+                    if delivery_guard or dialog.id == "tools_only_no_text":
+                        manager_id = f"manager-{dialog.manager}" if dialog.manager else "manager"
+                        records = api.post("/api/v1/runs/list", {"agent_id": manager_id, "limit": 500})["result"]["records"]
+                        row["followups"] = sum(bool((r.get("metadata") or {}).get("delivery_guard", {}).get("followup"))
+                                               for r in records)
                     if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
                         row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)
@@ -3903,6 +4003,7 @@ def run(
             "stable_context": stable_context, "leads_fulltext": leads_fulltext,
             "untrusted_fence": untrusted_fence, "stopped_by_cap": stopped,
             "aborted": aborted,
+            **({"delivery_guard": True} if delivery_guard else {}),
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6), "dialogs": results,
         }, path, roots=(root, raw_root), rows="dialogs")
         if aborted:
@@ -3917,6 +4018,7 @@ def markdown(result: dict[str, Any]) -> str:
              f"{(result['git'].get('commit') or '')[:9]}{'+local changes' if result['git'].get('dirty') else ''}"
              f"{', manager.stable_context on' if result.get('stable_context') else ''}"
              f"{', leads.search_mode fulltext' if result.get('leads_fulltext') else ''}"
+             f"{', delivery guard on' if result.get('delivery_guard') else ''}"
              f"{', untrusted_fence on' if result.get('untrusted_fence') else ''}",
              "", "| dialog | rep | outcome | turns | tool calls | cost (USD) |", "|---|---|---|---|---|---|"]
     for dialog in result["dialogs"]:
@@ -3934,4 +4036,6 @@ def markdown(result: dict[str, Any]) -> str:
                      f"| {dialog['cost_usd']:.4f} |")
     lines.append(f"| **total** | | {sum(outcome(d) == Outcome.PASS for d in result['dialogs'])}/"
                  f"{len(result['dialogs'])} | | | {result['total_cost_usd']:.4f} |")
+    if any("followups" in dialog for dialog in result["dialogs"]):
+        lines.extend(["", f"Delivery guard hidden follow-ups: {sum(d.get('followups', 0) for d in result['dialogs'])}."])
     return "\n".join(lines)

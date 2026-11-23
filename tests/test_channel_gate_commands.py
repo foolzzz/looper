@@ -195,6 +195,24 @@ class TestAnswer:
         assert post["origin"]["external_id"] == "om_9"
         assert text == "已交给 报表 的 g2" and not stored and world.model == []
 
+    def test_the_operators_answer_is_marked_as_theirs_and_no_one_elses(self, world: _World,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """Whether the operator wrote it (the untrusted fence): their own Lark chat, the dashboard without a client."""
+        from looper.agents import operator_identity
+
+        async def operator(channel_id: str) -> str:
+            return "ou_me"
+
+        monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
+        web = channel_address("web")
+        for context, source, own in [({}, LARK, True), ({"sender_id": "ou_other", "chat_id": "ou_other"}, LARK, False),
+                                     ({"session_id": "s-1"}, web, True),
+                                     ({"session_id": "s-1", "client": {"id": "c-1", "name": "helper"}}, web, False)]:
+            world.gates = [_gate("t1", "g1", "登录重构")]
+            world.send("/gates", source=source, **context)
+            world.send("/gate 1 好", source=source, **context)
+            assert world.posts[-1]["from_operator"] is own, (source, context)
+
     def test_the_number_is_the_snapshot_not_the_live_order(self, world: _World) -> None:
         self._listed(world)
         world.gates.insert(0, _gate("t9", "g1", "新来的"))  # a newer gate; the snapshot is unchanged

@@ -2135,7 +2135,7 @@ function CommandRun({ run, timeZone, linked }: { run: ScheduleRunInfo; timeZone:
     ["Scheduled", formatInZone(run.scheduled_for, timeZone)],
     ["Started", formatInZone(run.started_at, timeZone)],
     ["Finished", formatInZone(run.finished_at, timeZone)],
-    ["Duration", !run.started_at || ["skipped_overlap", "skipped_missed", "skipped_gate", "skipped_budget"].includes(run.status) ? "—" : durationText(run) ?? "—"],
+    ["Duration", !run.started_at || ["skipped_overlap", "skipped_missed", "skipped_gate", "skipped_budget", "skipped_busy"].includes(run.status) ? "—" : durationText(run) ?? "—"],
     ["Trigger", triggerText(run)],
   ] as const;
   return (

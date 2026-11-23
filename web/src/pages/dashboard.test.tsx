@@ -6,6 +6,8 @@ import { DashboardPage } from "@/pages/dashboard";
 import { Sidebar } from "@/components/sidebar";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchManagerMetrics, type ManagerMetrics } from "@/lib/manager-metrics";
+import { fetchStatusCard } from "@/lib/status-card";
+import { V1Error } from "@/lib/v1";
 import { fetchGates, fetchOverview, fetchProjectsList, fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS,
   type GateList, type AgentProcess, type Overview, type TaskDetail, type UserGate, type GatePosted } from "@/lib/api";
 
@@ -15,6 +17,10 @@ vi.mock("@/lib/api", async (original) => ({
   fetchGates: vi.fn(), fetchProjectsList: vi.fn(),
 }));
 vi.mock("@/lib/manager-metrics", () => ({ fetchManagerMetrics: vi.fn() }));
+vi.mock("@/lib/status-card", async (original) => ({
+  ...await original<typeof import("@/lib/status-card")>(), fetchStatusCard: vi.fn(),
+}));
+vi.mock("@/components/manager-sessions", () => ({ ManagerSessions: () => null }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -49,6 +55,7 @@ describe("Dashboard waiting gates", () => {
     vi.setSystemTime(new Date("2026-10-20T10:12:00Z"));
     vi.resetAllMocks();
     vi.mocked(fetchManagerMetrics).mockResolvedValue(METRICS_OFF);
+    vi.mocked(fetchStatusCard).mockRejectedValue(new V1Error(409, "conflict", "off"));
     window.localStorage.clear();
     details = [];
     waitingGates = 1;
@@ -110,6 +117,13 @@ describe("Dashboard waiting gates", () => {
     expect(agentsSection().querySelector('[title*="Cache read 9,000"]')).not.toBeNull();
   });
 
+  it("shows no Status card while the switch is off and keeps the other sections", async () => {
+    await show();
+    expect(container.querySelector('section[aria-label="Status"]')).toBeNull();
+    expect(fetchStatusCard).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('nav[aria-label="Tasks by group"]')).not.toBeNull();
+  });
+
   const metricsSection = () => container.querySelector('section[aria-label="Manager"]')!;
   /** The browser-local date `back` days before now, as the group names days. */
   const day = (back: number) => {
@@ -137,7 +151,8 @@ describe("Dashboard waiting gates", () => {
     expect(tiles.slice(tiles.indexOf("First reply (P50)") + 1, tiles.indexOf("First reply (P50)") + 3))
       .toEqual(["—", "P95 —"]);
     // Every local day of the 7-day window, today and 7 back, a day without messages too.
-    const rows = [...metricsSection().querySelectorAll("tbody tr")].map((r) => [...r.children].map((c) => c.textContent));
+    const metricsTable = [...metricsSection().querySelectorAll("table")].find((table) => table.textContent?.includes(day(0)))!;
+    const rows = [...metricsTable.querySelectorAll("tbody tr")].map((r) => [...r.children].map((c) => c.textContent));
     expect(rows.map((r) => r[0])).toEqual([0, 1, 2, 3, 4, 5, 6, 7].map(day));
     expect(rows[1]).toEqual([day(1), "task notices 3", "3"]);
     expect(rows[2]).toEqual([day(2), "—", "0"]);

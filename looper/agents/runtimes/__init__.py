@@ -341,6 +341,18 @@ class ReportsContext(Protocol):
     def context_full(self) -> bool: ...
 
 
+@runtime_checkable
+class MidTurnInput(Protocol):
+    """A verified resident transport that can admit input to its running user turn.
+
+    Check ``Capability.MID_TURN_INPUT`` too. False means no input was written;
+    a write failure propagates so the owner can retain the message for a later turn.
+    Keeper- and runner-hosted sessions have not verified this contract.
+    """
+
+    async def write_mid_turn(self, text: str) -> bool: ...
+
+
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.

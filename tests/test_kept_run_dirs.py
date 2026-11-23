@@ -297,7 +297,7 @@ def test_startup_retries_keeper_start_times_before_deciding_liveness(tmp_path, m
 
 def test_serve_refuses_unknown_liveness_before_interrupting_records(tmp_path, monkeypatch, caplog):
     from looper import db
-    from looper.agents import chat_settings, profile_registry, scheduler_settings, serve, waits
+    from looper.agents import chat_settings, persona, profile_registry, scheduler_settings, serve, waits
     from looper.agents.channels import down_alert_settings
     from looper.db import llm_records
     from looper.ops_config import OpsConfig
@@ -306,7 +306,7 @@ def test_serve_refuses_unknown_liveness_before_interrupting_records(tmp_path, mo
         monkeypatch.setattr(db, name, AsyncMock())
     for name in ("_back_up_before_schema_change", "seed_role_configs", "seed_channel_configs", "tasks_left_running"):
         monkeypatch.setattr(serve, name, AsyncMock())
-    for settings in (scheduler_settings, waits, chat_settings, down_alert_settings):
+    for settings in (scheduler_settings, waits, chat_settings, down_alert_settings, persona):
         monkeypatch.setattr(settings, "load", AsyncMock())
     monkeypatch.setattr(profile_registry, "register_found_runtimes", AsyncMock(return_value=[]))
     monkeypatch.setattr(serve.self_check, "check_database",

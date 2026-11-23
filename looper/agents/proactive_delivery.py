@@ -53,6 +53,7 @@ class Urgency(StrEnum):
     """Why a message may not wait. ``BLOCKING`` and ``USER_SET`` are never throttled."""
 
     NORMAL = "normal"
+    DIGEST = "digest"  # a subscription's digest: subject to the ordinary quiet hours and daily cap
     BLOCKING = "blocking"  # a gate waits for the user and holds back its task
     USER_SET = "user_set"  # a reminder the user asked for themselves
 

@@ -374,13 +374,34 @@ def _message(data: Mapping[str, Any], gate: Mapping[str, Any] | None, *, end: bo
             "agenda_item": item_id, "option": option}
 
 
+async def sender_is_operator(channel_id: str | None, channel: str, *, group: bool, sender: str | None) -> bool:
+    """Whether a Lark or Telegram user wrote as the operator: in a direct chat, with the operator's sender id
+    (``operator_identity.is_operator``). Not when the operator's id cannot be read: the message counts as outside
+    content, which only fences it."""
+    from .message import builtin_channel_id
+    from .operator_identity import is_operator, operator_sender_id
+
+    if group or not sender:
+        return False  # never the operator's own turn, whoever it is
+    try:
+        operator = await operator_sender_id(channel_id or builtin_channel_id(channel))
+    except Exception:
+        logger.warning("could not read the operator's sender id of %s; the message counts as someone else's",
+                       channel_id or channel, exc_info=True)
+        return False
+    return is_operator(channel=channel, group=group, sender=sender, client_id=None, operator_id=operator)
+
+
 async def post_message(
     task_id: str, label: str, data: Mapping[str, Any], *, has_planner: bool, bus: MessageBus, source: AgentAddress,
     via: str = VIA_DASHBOARD, end: bool = False, origin: Mapping[str, Any] | None = None,
+    from_operator: bool | None = None,
 ) -> dict[str, Any]:
     """Add the user's message (``end``: their end of the discussion) to the task's gate ``label``, and wake its
     Planner when it runs (``has_planner``). ``origin`` is the channel message it is, when it came from one
-    (``author`` in a group chat, ``channel``, ``channel_id``, ``chat``, ``external_id``: the Planner's reply goes under it). 404 for
+    (``author`` in a group chat, ``channel``, ``channel_id``, ``chat``, ``external_id``: the Planner's reply goes under it).
+    ``from_operator`` is whether the operator wrote it in their own turn, as its caller's code decides (None: not
+    known; the untrusted fence takes any but True as outside content). 404 for
     no such task or gate, 409 for a gate that does not wait for the user or a task that completed, 400 for a
     message that is not right. ``delivered`` says what happens to it: ``queued`` (the Planner takes it next), or
     ``kept`` (the task is not running: its restart gives it)."""
@@ -392,7 +413,7 @@ async def post_message(
     current = await db_user_gates.get(task_id, label)
     if current is None:
         raise RequestError(HTTP_404, f"task {task_id} has no gate {label}")
-    message = {**_message(data, current, end=end), "via": via,
+    message = {**_message(data, current, end=end), "via": via, "from_operator": from_operator,
                **{key: origin.get(key) for key in ("author", "channel", "channel_id", "chat", "external_id") if origin}}
     gate, added = await db_user_gates.add_user_message(task_id, label, message)
     if gate is None:

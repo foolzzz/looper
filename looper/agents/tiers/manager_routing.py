@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .. import session_routing
+from .. import mid_turn_input, session_routing
 from ..message import MessageEnvelope, MessageType
 from ..runtimes import CLAUDE_CODE
 from ..session_routing import SessionKey, SessionKind
@@ -75,7 +75,8 @@ class SessionRouter:
             return None
         main = self._agent._sessions[MAIN_SESSION]
         if not session_routing.routes(self._agent.agent_id):
-            return main if self.holds(main) else None  # switched off: what main's worker holds keeps its order
+            return main if self.holds(main) or (kind is MessageType.USER_MESSAGE
+                and mid_turn_input.enabled(self._agent.agent_id)) else None
         if kind is MessageType.COMPLETION_DUE:
             return None  # claim first in the handler; only that event can name the session
         from .. import completion_events
@@ -196,6 +197,16 @@ class SessionRouter:
                 del self._workers[session.key]
             if session.key != MAIN_SESSION and not session_routing.routes(agent.agent_id):
                 await self._stop_idle(session)
+
+    def queued(self, session: ManagerSession) -> bool:
+        """A queued command or message must run before later input can merge."""
+        queue = self._queues.get(session.key)
+        return queue is not None and not queue.empty()
+
+    def queued_count(self, session: ManagerSession) -> int:
+        """How many messages wait in ``session``'s queue. The one a worker has already taken is not in it."""
+        queue = self._queues.get(session.key)
+        return 0 if queue is None else queue.qsize()
 
     def holds(self, session: ManagerSession) -> bool:
         """Whether ``session``'s worker has a message: queued, or being handled."""

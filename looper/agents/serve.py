@@ -67,6 +67,7 @@ from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
+from .message import MessageType
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerConfig
@@ -719,7 +720,7 @@ async def _run_agent_system_watched(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
-    from . import chat_settings, links, operator_notes, projects, scheduler_settings, waits
+    from . import chat_settings, links, operator_notes, persona, projects, scheduler_settings, waits
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
@@ -783,6 +784,7 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
+                await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
             except ValueError as exc:
@@ -927,11 +929,13 @@ async def _run_agent_system_watched(
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
                                   message_backup=db_backup.message_backup_for(ops, runtime_root))
+            bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook
             advisor_alerts.configure(registry.notify)
-            # So do the outbound review's block notices.
+            # So do the outbound review's block notices; its switch is read once here, and kept by its operations.
             outbound_hook.configure(registry.notify)
+            await outbound_hook.enabled()
             # It notes the user gates that have waited for the user for their project's reminder interval; the courier
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()
@@ -975,6 +979,9 @@ async def _run_agent_system_watched(
             if ownership is not None:
                 ownership.push_async_callback(fleet.stop)
             task_router.manager_running = fleet.is_running
+            # An idle_only schedule skips a firing while its Manager answers a message.
+            scheduler.manager_busy = lambda manager_id: bool((agent := fleet.get(manager_id)) is not None
+                                                             and agent.busy)
             await fleet.load()
             morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
             from .completion_service import CompletionService

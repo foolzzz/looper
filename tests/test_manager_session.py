@@ -35,7 +35,7 @@ def test_a_new_manager_has_only_main_with_the_old_defaults(tmp_path: Path) -> No
         "session_profile": None, "session_provider": None, "process": None, "pending_switch": None,
         "pending_handoff": None, "clean_start": False, "session_loaded": False, "state_shown": None,
         "state_lost": "no whole block yet", "state_generation": 0, "stopped_notes": [], "lock_owner": None,
-        "running_token": None, "research": None, "agent_settings": None, "last_activity": 7.0}
+        "running_token": None, "research": None, "agent_settings": None, "last_activity": 7.0, "budget": None}
     assert not main.lifecycle_gate.locked() and main.lifecycle_gate is not main.turn_lock
 
 

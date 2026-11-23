@@ -28,7 +28,7 @@ FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max
           "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
           "daily_budget_usd", "notify", "notify_format", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs",
           "kind", "command", "env", "env_file", "success_deadline", "alert_failures_after",
-          "alert_stale_after_seconds", "alert_overlap_after")
+          "alert_stale_after_seconds", "alert_overlap_after", "active_hours", "idle_only")
 
 _JSON_FIELDS = ("template_inputs", "env")
 
@@ -43,7 +43,7 @@ FAILURES = ("failed", "timed_out", "gate_failed", "interrupted")
 # A success or a gate that found nothing to do ends a failure streak and updates last_ok_at.
 OK = (*SUCCESS, "skipped_gate")
 # Runs that ran nothing: they neither carry an unfinished input nor hide one.
-NOTHING_RAN = ("skipped_overlap", "skipped_missed", "skipped_budget")
+NOTHING_RAN = ("skipped_overlap", "skipped_missed", "skipped_budget", "skipped_busy")
 # Firings that created no task; one that repeats the schedule's latest run is counted on it (``count_skip``).
 SKIPPED = ("skipped_gate", *NOTHING_RAN)
 # A run whose input was not done: the next run is given its gate output.
@@ -656,6 +656,22 @@ async def running_runs(*, pool: Db | None = None) -> list[dict[str, Any]]:
         SELECT r.*, t.status AS task_status, t.result_summary, t.error AS task_error, s.project_id, s.kind, s.timezone
         FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
         WHERE r.status = 'running'
+        """,
+    )
+    return [dict(row) for row in rows]
+
+
+async def named_running(*, pool: Db | None = None) -> list[dict[str, Any]]:
+    """Running schedule runs with the schedule's name, its timezone and its project's name."""
+    db = pool or get_pool()
+    rows = await db.fetch(
+        """
+        SELECT r.id, r.schedule_id, r.fired_at, s.name, s.timezone, p.name AS project_name
+        FROM schedule_runs r
+        JOIN schedules s ON s.id = r.schedule_id
+        JOIN projects p ON p.id = s.project_id
+        WHERE r.status = 'running'
+        ORDER BY r.fired_at, r.id
         """,
     )
     return [dict(row) for row in rows]

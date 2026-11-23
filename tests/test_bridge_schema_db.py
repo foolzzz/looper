@@ -111,6 +111,9 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     assert after[table] == expected
                 elif table == "agent_runtimes":
                     assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
+                elif table == "library_items":
+                    # Machine imports have no project-skill version; every historical field stays intact.
+                    assert after[table] == [{**r, "skill_version": None} for r in before[table]]
                 elif table == "agent_profiles":
                     # The advisor's, its judge's and the leads check's built-in profiles are added as a fresh
                     # database has them.
@@ -166,13 +169,15 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert sessions["manager-bridge"]["session_totals"] == original["manager-bridge"]["session_totals"]
             assert sessions["manager-bridge"]["pending_handoff"] == "Keep the handoff"
             for key in ("manager-empty", "manager-codex", "manager-provider"):
-                assert sessions[key] == original[key]
+                assert sessions[key] == {**original[key], "leads_session_id": None, "context_tokens": None, "last_turn_cost_usd": None}  # no leads search marked it
             for row in after["channel_configs"]:
                 assert json.loads(row["config"])["allowed_user_ids"] == ["7", "8"]
             metadata = json.loads(after["llm_records"][0]["metadata"])
             assert metadata["agent"] == metadata["profile"] == {"name": "Original evidence"}
             assert metadata["accounting_basis"] == "subscription_equivalent"
-            assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
+            # A message from before the column: not known whether the operator wrote it.
+            assert after["task_user_gate_messages"] == [{**r, "from_operator": None}
+                                                        for r in before["task_user_gate_messages"]]
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
             assert {"schedule_user_gates", "command_schedules", "runtime_launcher", "proactive_deliveries",
@@ -234,7 +239,8 @@ def test_deleted_custom_bot_preserves_gate_posts_and_reply_identity(bridge_sourc
             await connection.ensure_schema(conn)
             after = await witness(conn)
             assert after["task_user_gate_posts"] == before["task_user_gate_posts"]
-            assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
+            assert after["task_user_gate_messages"] == [{**r, "from_operator": None}
+                                                        for r in before["task_user_gate_messages"]]
             gate = await user_gates.find_reference("telegram", "7", ["11"],
                                                   channel_id="channel-telegram-201", pool=conn)
             assert gate is not None and gate["step_id"] == "step-bridge"

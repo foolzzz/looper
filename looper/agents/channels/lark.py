@@ -36,6 +36,7 @@ from ..message import (
     parse_channel_id,
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
+from .. import task_notice_delivery
 from ..ops.leads import for_group
 from .. import chat_settings
 from .allowlist import SenderAllowlist
@@ -330,7 +331,7 @@ class LarkChannelAdapter(ChannelAdapter):
         route = raw_route if isinstance(raw_route, dict) else {}
         chat = self._correlation_chat.get(envelope.correlation_id) or route.get("chat_id")
         with self._transport.message_scope(envelope.message_id, source=source, chat=chat):
-            return await self._deliver(envelope)
+            return await task_notice_delivery.send(envelope, self._deliver)
 
     async def _deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of

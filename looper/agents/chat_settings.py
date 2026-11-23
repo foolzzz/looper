@@ -20,6 +20,9 @@ Lark is wired first; Telegram follows separately.
 ``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
 The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
 
+``manager.mid_turn_input.enabled``: whether the default Manager merges eligible operator messages into a
+running user turn; disabled by default, configured only through ``mid_turn_input.get/update``.
+
 ``ledger.enabled``: whether the ledger records what waits for the user, what was decided and who does what
 (off by default). The ledger reads it from the database (``db.ledger.enabled``); this module does not keep a
 second copy. Turning it on names the enabled bots that have no operator id.
@@ -67,6 +70,8 @@ METRICS_ENABLED_KEY = "manager.metrics.enabled"
 DEFAULT_METRICS_ENABLED = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
+MID_TURN_INPUT_KEY = "manager.mid_turn_input.enabled"
+DEFAULT_MID_TURN_INPUT_ENABLED = False
 OUTBOUND_ENABLED_KEY = "channels.outbound.enabled"
 DEFAULT_OUTBOUND_ENABLED = False
 OUTBOUND_DEFAULTS = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
@@ -122,6 +127,7 @@ _metrics_enabled = DEFAULT_METRICS_ENABLED
 _outbound_enabled = DEFAULT_OUTBOUND_ENABLED
 _outbound_limits = dict(OUTBOUND_DEFAULTS)
 _delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
+_mid_turn_input_enabled = DEFAULT_MID_TURN_INPUT_ENABLED
 _delivery_enabled = DEFAULT_DELIVERY_ENABLED
 _morning_brief_enabled = DEFAULT_MORNING_BRIEF_ENABLED
 _morning_brief_time = DEFAULT_MORNING_BRIEF_TIME
@@ -223,6 +229,28 @@ async def update_delivery_guard(value: bool | None) -> dict[str, bool]:
     return delivery_guard_view()
 
 
+def mid_turn_input_enabled() -> bool:
+    return _mid_turn_input_enabled
+
+
+def set_mid_turn_input_enabled(value: bool) -> None:
+    global _mid_turn_input_enabled
+    _mid_turn_input_enabled = value
+
+
+def mid_turn_input_view() -> dict[str, bool]:
+    return {"enabled": _mid_turn_input_enabled}
+
+
+async def update_mid_turn_input(value: bool | None) -> dict[str, bool]:
+    """Persist the operator's merge switch without extending the client chat settings contract."""
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({MID_TURN_INPUT_KEY: None if value is None else ("true" if value else "false")})
+    set_mid_turn_input_enabled(DEFAULT_MID_TURN_INPUT_ENABLED if value is None else value)
+    return mid_turn_input_view()
+
+
 def delivery_enabled() -> bool:
     return _delivery_enabled
 
@@ -300,11 +328,14 @@ async def update_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
+    from . import status_card
+
     global _turn_context_enabled, _timezone, _reply_language
     stored = await db_settings.get_settings([
         STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
+        MID_TURN_INPUT_KEY,
         TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY, DELIVERY_ENABLED_KEY,
-        session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY,
+        session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY, status_card.ENABLED_KEY,
         *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
         MORNING_BRIEF_ENABLED_KEY, MORNING_BRIEF_TIME_KEY,
     ])
@@ -318,6 +349,7 @@ async def load() -> bool:
     set_metrics_enabled(stored.get(METRICS_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
+    set_mid_turn_input_enabled(stored.get(MID_TURN_INPUT_KEY) == "true")
     set_delivery_enabled(stored.get(DELIVERY_ENABLED_KEY) == "true")
     set_morning_brief_enabled(stored.get(MORNING_BRIEF_ENABLED_KEY) == "true")
     raw_time = stored.get(MORNING_BRIEF_TIME_KEY)
@@ -342,6 +374,7 @@ async def load() -> bool:
     except ValueError:
         turns = DEFAULT_COMPLETION_TURNS
     set_completion_turns(turns)
+    status_card.apply_stored(stored.get(status_card.ENABLED_KEY))
     return _stop_enabled
 
 

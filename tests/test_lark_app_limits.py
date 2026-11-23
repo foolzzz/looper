@@ -89,3 +89,53 @@ def test_different_apps_have_independent_allowances(monkeypatch):
         assert peak == 2
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('reuse_gateway', [False, True])
+def test_app_allowances_are_local_to_each_event_loop(reuse_gateway):
+    def limits():
+        return dict(send_qps=100, write_qps=100, edit_interval_seconds=0, max_in_flight=1)
+
+    # Construction may happen before a loop starts; keep old gateways alive deliberately.
+    original = outbound.Gateway('cli', settings=limits, app_id='cli_loop_test')
+    retained = [original]
+
+    async def run():
+        gateway = original if reuse_gateway else outbound.Gateway(
+            'cli', settings=limits, app_id='cli_loop_test')
+        sibling = outbound.Gateway('bot', settings=limits, app_id='cli_loop_test')
+        retained.extend((gateway, sibling))
+        entered, release, queued = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def hold():
+            calls.append('first')
+            entered.set()
+            await release.wait()
+
+        async def follow():
+            calls.append('second')
+
+        async def waiting_write():
+            queued.set()
+            await sibling.write('send', follow)
+
+        first = asyncio.create_task(gateway.write('send', hold))
+        second = None
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            second = asyncio.create_task(waiting_write())
+            await asyncio.wait_for(queued.wait(), 1)
+            assert calls == ['first']
+            release.set()
+            await asyncio.wait_for(asyncio.gather(first, second), 1)
+            assert calls == ['first', 'second']
+        finally:
+            release.set()
+            for task in (first, second):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)
+
+    asyncio.run(run())
+    asyncio.run(run())

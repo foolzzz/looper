@@ -326,7 +326,8 @@ def test_an_event_is_unique_by_its_dedupe_key_and_goes_with_its_task(monkeypatch
 
 FRESH_INDEX = None
 HAS_EVENT_COLUMN = ("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = "
-                    "'schedule_notifications' AND column_name = 'manager_event_id')")
+                    "'schedule_notifications' AND column_name = 'manager_event_id' "
+                    "AND table_schema = current_schema())")
 
 
 @pytest.mark.parametrize("before", ["no_table", "no_column"])
@@ -334,7 +335,7 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
     async def check(pool):
         global FRESH_INDEX
         FRESH_INDEX = await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = "
-                                          "'idx_schedule_notifications_manager_event'")
+                                          "'idx_schedule_notifications_manager_event' AND schemaname = current_schema()")
         assert FRESH_INDEX and "WHERE (manager_event_id IS NOT NULL)" in FRESH_INDEX
         await pool.execute("ALTER TABLE schedule_notifications DROP COLUMN manager_event_id; "
                            "DELETE FROM schema_migrations WHERE name IN ('schedule_notification_events', "
@@ -350,7 +351,7 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
         assert await pool.fetchval(HAS_EVENT_COLUMN)
         # The outbox's new foreign key is indexed (built online), as a new database has it.
         assert await pool.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = "
-                                   "'idx_schedule_notifications_manager_event'") == FRESH_INDEX
+                                   "'idx_schedule_notifications_manager_event' AND schemaname = current_schema()") == FRESH_INDEX
 
     run_db(check, monkeypatch, timeout=30)
 
@@ -440,7 +441,7 @@ def test_a_hanging_database_call_does_not_hold_back_the_notice(monkeypatch, tmp_
 def test_the_foreign_keys_that_are_cleared_or_cascaded_have_indexes(monkeypatch):
     async def check(pool):
         found = {row["indexname"] for row in await pool.fetch(
-            "SELECT indexname FROM pg_indexes WHERE tablename = 'manager_events'")}
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'manager_events' AND schemaname = current_schema()")}
         assert {"idx_manager_events_task", "idx_manager_events_schedule_run", "idx_manager_events_record"} <= found
 
     run_db(check, monkeypatch, timeout=30)

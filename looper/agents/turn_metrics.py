@@ -123,8 +123,8 @@ def _warn() -> None:
         logger.warning('metrics write failed or capacity exceeded; observation dropped', exc_info=True)
 
 
-def background(work: Coroutine[Any, Any, Any]) -> None:
-    """Bound outstanding writes and their duration; a delivery never awaits a metrics write."""
+def background(work: Coroutine[Any, Any, Any]) -> asyncio.Task[None] | None:
+    """Bound writes and their duration; return the task for callers retaining a session lock after delivery."""
     if len(_pending) >= PENDING_MAX:
         work.close()
         _warn()
@@ -145,6 +145,7 @@ def background(work: Coroutine[Any, Any, Any]) -> None:
     task = loop.create_task(write())
     _pending.add(task)
     task.add_done_callback(_pending.discard)
+    return task
 
 
 def record_proactive(ref: ProactiveRef, *, channel_id: str, chat: str, group: bool,
