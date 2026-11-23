@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .. import untrusted
 from ..session_routing import SessionKind
 from .journal import clip
 
@@ -38,10 +39,11 @@ def opening(kind: SessionKind, channel: str | None, lines: list[str]) -> list[st
     return [f"{head} {_EXCERPT.format(count=len(lines))}", *lines]
 
 
-async def excerpt(session_id: str | None, message: str) -> list[str]:
+async def excerpt(session_id: str | None, message: str, *, kind: SessionKind) -> list[str]:
     """The chat's most recent stored messages, oldest first, one line each (``- user: ...``, at most
     ``EXCERPT_MESSAGE_CHARS`` characters), without the message this turn answers; [] when none are stored (a
-    Telegram group's are not) or they cannot be read."""
+    Telegram group's are not) or they cannot be read. With the fence on, only the stored user messages are
+    outside content; the session kind determines their source, and internal assistant messages stay as they were."""
     from ...db import chat as db_chat
 
     if not session_id:
@@ -54,8 +56,23 @@ async def excerpt(session_id: str | None, message: str) -> list[str]:
     last = rows[-1] if rows else None
     if last and last["role"] == "user" and str(last["content"]).strip() == message.strip():
         rows = rows[:-1]  # the message this turn answers
-    return [f"- {row['role']}{' (not delivered)' if row.get('delivery_failure') else ''}: "
-            f"{clip(row['content'], EXCERPT_MESSAGE_CHARS)}" for row in rows[-EXCERPT_MESSAGES:]]
+    fenced = await untrusted.enabled()
+    lines: list[str] = []
+    lead = True
+    for row in rows[-EXCERPT_MESSAGES:]:
+        content = clip(row["content"], EXCERPT_MESSAGE_CHARS)
+        outside = fenced and row["role"] == "user"
+        if outside:
+            source = {SessionKind.GROUP: untrusted.Source.GROUP_MESSAGE,
+                      SessionKind.DM: untrusted.Source.DIRECT_MESSAGE}[kind]
+            content = untrusted.fence(content, source=source,
+                                      provenance={"chat": session_id, "at": str(row["created_at"])})
+        line = f"- {row['role']}{' (not delivered)' if row.get('delivery_failure') else ''}: {content}"
+        if outside and lead:
+            line = f"{untrusted.LEAD_LINE}\n{line}"
+            lead = False
+        lines.append(line)
+    return lines
 
 
 def brief(kind: SessionKind, channel: str | None, lines: list[str], *, switch: Any, handoff: str | None,
