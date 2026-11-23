@@ -205,7 +205,8 @@ class IntentPushService:
         elif row["state"] == "merged" and not any(post["kind"] == "progress" for post in posts):
             parent = await conn.fetchrow("SELECT * FROM intents WHERE id=$1", row["merged_into"])
             push = await conn.fetchrow("SELECT * FROM intent_posts WHERE intent_id=$1 AND kind='push' "
-                                      "AND state='sent' AND external_id IS NOT NULL ORDER BY id DESC LIMIT 1", row["merged_into"])
+                                      "AND ((state='sent' AND external_id IS NOT NULL) OR (state='pending' AND $2)) "
+                                      "ORDER BY id DESC LIMIT 1", row["merged_into"], chat_settings.delivery_enabled())
             if (parent and parent["state"] in ("pending", "tasked") and push
                     and (push["channel_id"], push["chat"]) == target and row["created_at"] >= now-timedelta(hours=24)):
                 text = progress_text(view, await intents.intent_view(parent, db=conn), timezone=timezone)
@@ -254,8 +255,6 @@ class IntentPushService:
                     return
             reply = await conn.fetchval("SELECT external_id FROM intent_posts WHERE intent_id=$1 AND kind='push' "
                                         "AND state='sent' ORDER BY id DESC LIMIT 1", parent_id)
-            if not reply:
-                return
         now = self._clock()
         decided = None
         delivery_key = f"intent_post:{post['id']}"
@@ -276,6 +275,9 @@ class IntentPushService:
                 return
             if decided.outcome is not delivery.Outcome.SEND:
                 return
+        # Record new evidence for the briefing even while its parent is deferred; sending needs its receipt.
+        if post["kind"] in ("progress", "final") and not reply:
+            return
         claimed = await conn.fetchval("UPDATE intent_posts SET state='sending', attempts=attempts+1, updated_at=$2 "
                                       "WHERE id=$1 AND state IN ('pending','failed') AND attempts<$3 RETURNING id",
                                       post["id"], now, db_subs.DELIVERY_ATTEMPTS)

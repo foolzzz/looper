@@ -170,6 +170,74 @@ def test_failed_delivery_decision_waits_without_spending_a_send_attempt(monkeypa
     run_db(check, monkeypatch)
 
 
+def test_new_evidence_for_a_digested_parent_gets_its_own_digest_decision(monkeypatch):
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        env = await setup(pool, monkeypatch)
+        now = NOW.replace(hour=23)
+        env.service._clock = lambda: now
+        parent = await env.create()
+        await env.service.run_once()
+        evidence = await env.create(state="merged", merged_into=parent)
+        await env.service.run_once()
+        # Both texts stay available to the briefing, with stable decisions across polls.
+        env.service._clock = lambda: now + timedelta(hours=10)
+        await env.service.run_once()
+        rows = await pool.fetch(
+            "SELECT p.intent_id,p.kind,p.state,p.attempts,p.external_id,d.outcome,d.digest_date,d.sent_at "
+            "FROM intent_posts p JOIN proactive_deliveries d ON d.dedupe_key='intent_post:' || p.id "
+            "ORDER BY p.id")
+        assert [tuple(row) for row in rows] == [
+            (parent, "push", "pending", 0, None, "digest", now.date()+timedelta(days=1), None),
+            (evidence, "progress", "pending", 0, None, "digest", now.date()+timedelta(days=1), None)]
+        view = await intents.intent_view(await pool.fetchrow("SELECT * FROM intents WHERE id=$1", evidence), db=pool)
+        target = await intents.intent_view(await pool.fetchrow("SELECT * FROM intents WHERE id=$1", parent), db=pool)
+        assert await pool.fetchval("SELECT text FROM intent_posts WHERE intent_id=$1", evidence) == (
+            intent_push.progress_text(view, target, timezone="Asia/Shanghai"))
+        assert env.channels.posts == []
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("parent_first", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_progress_waits_for_parent_receipt_in_either_order(monkeypatch, parent_first, enabled):
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, "_delivery_enabled", enabled)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES('user.timezone','UTC')")
+        env = await setup(pool, monkeypatch)
+        env.service._clock = lambda: NOW.replace(hour=14)
+        parent = await env.create()
+        # Polling the evidence first must still record its SEND decision without a channel call.
+        async with pool.acquire() as conn:
+            await env.service._insert(conn, parent, "push", "channel-lark", DM, "Synthetic parent")
+        if parent_first:
+            await env.service._locked(parent)
+        evidence = await env.create(state="merged", merged_into=parent)
+        await env.service._locked(evidence)
+        if not parent_first:
+            assert env.channels.posts == []
+            if enabled:
+                rows = await pool.fetch(
+                    "SELECT p.state,p.attempts,d.outcome,d.sent_at FROM intent_posts p "
+                    "JOIN proactive_deliveries d ON d.dedupe_key='intent_post:' || p.id "
+                    "WHERE p.intent_id=$1", evidence)
+                assert [tuple(row) for row in rows] == [("pending", 0, "send", None)]
+            else:
+                assert await pool.fetchval("SELECT count(*) FROM intent_posts WHERE intent_id=$1", evidence) == 0
+            await env.service._locked(parent)
+        await env.service.run_once()
+        await env.service.run_once()
+        assert len(env.channels.posts) == 2
+        progress = await pool.fetchrow("SELECT * FROM intent_posts WHERE intent_id=$1", evidence)
+        assert env.channels.posts[1][3] == {
+            "reply_to": "om_push_1", "idempotency_key": f"intent-{evidence}-{progress['id']}"}
+        assert (progress["state"], progress["attempts"], progress["external_id"]) == ("sent", 1, "om_push_2")
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 2 * int(enabled)
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE sent_at IS NOT NULL") == 2 * int(enabled)
+    run_db(check, monkeypatch)
+
+
 class Channels:
     def __init__(self):
         self.posts = []
