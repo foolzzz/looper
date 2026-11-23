@@ -30,6 +30,11 @@ def _receipts_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(receipts_settings, "_enabled", False)
 
 
+def _begin(ops: ManagerOps, turn: Turn, *args: Any, **kwargs: Any) -> str:
+    """What ``begin_turn`` tells the turn, as it reads in the input sent (the notes stand where its token was)."""
+    return ops.live_note(turn, ops.begin_turn(turn, *args, **kwargs))
+
+
 def _web(message_id: str = "m1", **extra: Any) -> Turn:
     return Turn(channel="web", chat="chat-1", message_id=message_id, **extra)
 
@@ -230,7 +235,7 @@ def test_a_press_shows_the_receipt_on_the_card_and_tells_the_next_user_turn_only
         completion = Turn(channel="lark_bot", chat="oc_dm", channel_id=BOT, message_id="done-1",
                           origin=TurnOrigin.COMPLETION)
         assert ops.begin_turn(completion) == ""
-        note = ops.begin_turn(_turn("om_next"))
+        note = _begin(ops, _turn("om_next"))
         assert note == (f"[Looper] After your last reply, the operator answered confirmation {asked['confirmation_id']} "
                         "with its card: it ran (✅ 已删除项目「sample」).")
         assert ops.begin_turn(_turn("om_after")) == ""  # told once
@@ -248,14 +253,14 @@ def test_a_cancelled_or_failed_press_is_told_to_the_next_turn_too(monkeypatch: p
         press = _presser(monkeypatch, ops)
         asked, turn = await _ask(ops)
         assert (await press(_value(turn, "cancel"))).toast == "已取消"
-        assert ops.begin_turn(_turn("om_1")) == (
+        assert _begin(ops, _turn("om_1")) == (
             f"[Looper] After your last reply, the operator answered confirmation {asked['confirmation_id']} with its "
             "card: it was cancelled; it did not run.")
         asked, turn = await _ask(ops)
         await pool.execute("DELETE FROM projects WHERE id = $1", project["id"])  # gone before the press
         failed = await (await press(_value(turn))).later
         assert failed.text.endswith("\n\n❌ 没做成：删除项目「sample」（没找到）") and "没有执行：" not in failed.text
-        assert ops.begin_turn(_turn("om_2")) == (
+        assert _begin(ops, _turn("om_2")) == (
             f"[Looper] After your last reply, the operator answered confirmation {asked['confirmation_id']} with its "
             "card: it failed (没找到).")
 
@@ -284,7 +289,7 @@ def test_notes_are_kept_per_chat_at_most_three_and_only_while_on() -> None:
     receipts_settings.set_enabled(True)
     for index in range(5):
         ops._note_button(key, ASKER, f"c-{index}", "it was cancelled; it did not run")
-    note = ops.begin_turn(_turn("om_1"))
+    note = _begin(ops, _turn("om_1"))
     assert [line.split()[9] for line in note.splitlines()] == ["c-2", "c-3", "c-4"]
 
 
@@ -446,7 +451,7 @@ def test_notes_go_only_to_the_person_who_pressed_and_not_across_a_session_reset(
         member = _turn("om_m")
         member.speaker = SpeakerKind.MEMBER
         assert ops.begin_turn(member) == ""
-        assert ops.begin_turn(_turn("om_mine")).startswith("[Looper] After your last reply")  # still there for them
+        assert _begin(ops, _turn("om_mine")).startswith("[Looper] After your last reply")  # still there for them
         await _sample(pool)
         _, turn = await _ask(ops)
         await (await press(_value(turn))).later
@@ -719,7 +724,7 @@ def test_a_reset_named_session_does_not_read_the_notes_left_in_it(monkeypatch: p
 
         await ask_and_press()
         assert ops.begin_turn(_turn("om_main"), session_key="main") == ""  # another session never reads it
-        assert ops.begin_turn(_turn("om_g1"), session_key="group:g1").startswith("[Looper] After your last reply")
+        assert _begin(ops, _turn("om_g1"), session_key="group:g1").startswith("[Looper] After your last reply")
         await _sample(pool)
         await ask_and_press()
         ops.forget_session("group:g1")  # what the Manager does when that session is reset

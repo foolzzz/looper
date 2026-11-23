@@ -265,7 +265,7 @@ class ManagerOps:
                                         list[tuple[str | None, str, int, int, str]]] = OrderedDict()
         on_session_replaced(self.forget_session)  # every reset path clears a session's id (``ManagerSession``)
         self._session_gen: dict[str, int] = {}  # bumped when a session is reset: its older notes are never told
-        self._told: dict[int, tuple[str, int, int, list[str]]] = {}  # per turn: the notes its input carries
+        self._told: dict[int, tuple[str, str, int, int, list[str]]] = {}  # per turn: token, session, gens, notes
         self._chat_sessions: dict[tuple[str | None, str | None, str | None], str] = {}  # the session a chat runs in
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
         # later shell command may run one), and the turns already told the operator of a block.
@@ -1030,23 +1030,30 @@ class ManagerOps:
             self._button_notes[turn.chat_key] = rest
         else:
             self._button_notes.pop(turn.chat_key, None)
-        if mine:  # what this turn was told, to take back if its session is reset before the input is sent
-            self._told[id(turn)] = (session_key, self._session_gen.get(session_key, 0), receipts_settings.generation(),
-                                    [entry[4] for entry in mine])
-        return [entry[4] for entry in mine]
+        if not mine:
+            return []
+        # The notes are not put into the input here, but a token only code can name stands where they go; the
+        # input as it is sent (``live_note``) has them put in, if their session still stands, or the token out.
+        earlier = self._told.get(id(turn))
+        token = earlier[0] if earlier is not None else f"[[looper-button-notes:{uuid.uuid4().hex}]]"
+        texts = [*(earlier[4] if earlier is not None else []), *(entry[4] for entry in mine)]
+        gens = earlier[1:4] if earlier is not None else (
+            session_key, self._session_gen.get(session_key, 0), receipts_settings.generation())
+        self._told[id(turn)] = (token, *gens, texts)
+        return [token]
 
-    def live_note(self, turn: Turn, note: str) -> str:
-        """``note`` (``begin_turn``'s) as it should be sent now: the card-button notes it carries are taken out when
-        their session was reset, or the switch turned off, since the turn was prepared. Only the one
-        ``begin_turn`` that put them there is looked at; any other text is as it was."""
+    def live_note(self, turn: Turn, text: str) -> str:
+        """``text``, the input about to be sent, with the card-button notes of this turn put where ``begin_turn``
+        left their token, if their session was not reset and the switch was not turned off since; else with the
+        token taken out. Nothing else in ``text`` is touched, whatever it says."""
         told = self._told.get(id(turn))
-        if told is None:
-            return note
-        session_key, session_gen, switch_gen, texts = told
+        if told is None or told[0] not in text:
+            return text
+        token, session_key, session_gen, switch_gen, texts = told
         if session_gen == self._session_gen.get(session_key, 0) and switch_gen == receipts_settings.generation() \
                 and receipts_settings.enabled():
-            return note
-        return "\n".join(line for line in note.split("\n") if line not in texts)
+            return text.replace(token, "\n".join(texts), 1)
+        return text.replace(token + "\n", "", 1) if token + "\n" in text else text.replace(token, "", 1)
 
     def forget_session(self, session_key: str) -> None:
         """The Manager session ``session_key`` was reset: the card-button notes left in it are never told."""
