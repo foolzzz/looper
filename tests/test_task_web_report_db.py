@@ -292,3 +292,80 @@ def test_a_task_a_client_asked_reports_into_its_conversation(monkeypatch: pytest
             assert texts == ["任务「计算器」已分解为 2 个步骤，开始执行。", "任务「计算器」已完成：done"]
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("path,status,cause,failure", [
+    ("planner", "completed", "planner_end", None),
+    ("planner", "failed", "planner_end", "planner_failed"),
+    ("steps", "failed", "planner_end", "steps_failed"),
+    ("error", "failed", "planner_end", "error"),
+    ("invalid", "failed", "planner_end", "planner_failed"),
+    ("budget", "failed", "task_budget", "task_budget"),
+    ("stop", "stopped", "user_stop", None),
+    ("user", "cancelled", "user_cancel", None),
+    ("manager", "cancelled", "manager_cancel", None),
+    ("teardown", "completed", "teardown", None),
+])
+def test_task_terminal_paths_record_one_outcome(monkeypatch, tmp_path, path, status, cause, failure):
+    from looper.agents.bus import MessageBus
+    from looper.agents.tiers.task import Task, TaskRouter
+    from looper.db import tasks
+
+    async def test(pool):
+        project = await _project(pool)
+        await tasks.create_task(task_id="task-result", requirement="synthetic", project_id=project["id"],
+                                status="running", work_dir=str(tmp_path), pool=pool)
+        router = TaskRouter(runtime_root=tmp_path)
+        router._bus = MessageBus(runtime_root=tmp_path)
+        router._tasks["task-result"] = Task.from_row("task-result", await tasks.get_task("task-result", pool=pool))
+        envelope = MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.GOAL_STATUS,
+            metadata={"cancel_by": path} if path in ("user", "manager") else {},
+            payload={"task_id": "task-result", "status": status,
+                     **({"fail_kind": "task_budget"} if path == "budget" else {}),
+                     **({"outcome_failure_kind": failure} if path in ("steps", "error") else {}),
+                     **({"outcome_failure_kind": "not-a-failure"} if path == "invalid" else {})})
+        if path in ("planner", "budget", "steps", "error", "invalid"):
+            await router._handle_planner_status(envelope)
+        elif path == "stop":
+            await router._handle_stop(envelope)
+        elif path in ("user", "manager"):
+            await router._handle_cancel(envelope)
+        else:
+            await router._teardown_task("task-result")
+        await router._teardown_task("task-result")
+        rows = await pool.fetch("SELECT run_no,outcome,stop_cause,failure_kind FROM task_outcomes")
+        assert [tuple(row) for row in rows] == [(1, status, cause, failure)]
+        await router._bus.shutdown()
+
+    run_db(test, monkeypatch)
+
+
+def test_restart_closes_attempts_before_incrementing_the_run(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    from looper.agents import attempts
+    from looper.agents.bus import MessageBus
+    from looper.agents.tiers.task import TaskRouter
+    from looper.db import tasks
+
+    async def test(pool):
+        project = await _project(pool)
+        await tasks.create_task(task_id="restart-task", requirement="Synthetic restart", project_id=project["id"],
+                                status="stopped", work_dir=str(tmp_path), pool=pool)
+        await pool.execute("INSERT INTO task_steps(id,task_id,step_index,instruction,step_key) "
+                           "VALUES ('restart-step','restart-task',0,'Synthetic work','s1')")
+        attempt_id = await attempts.dispatch_attempt("restart-task", "restart-step", "s1")
+        router = TaskRouter(runtime_root=tmp_path)
+        router._bus = MessageBus(runtime_root=tmp_path)
+        monkeypatch.setattr(router, "_start", AsyncMock())
+        try:
+            await router._handle_restart(MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_RESTART,
+                payload={"task_id": "restart-task"}))
+            row = await pool.fetchrow("SELECT task_run_no,decision,failure_kind FROM step_attempts WHERE id=$1", attempt_id)
+            assert tuple(row) == (1, "task_ended", "stopped")
+            assert await pool.fetchval("SELECT run_no FROM tasks WHERE id='restart-task'") == 2
+        finally:
+            await router._bus.shutdown()
+
+    run_db(test, monkeypatch)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +15,8 @@ import asyncpg
 
 from . import journal as db_journal
 from .connection import get_pool
+
+logger = logging.getLogger(__name__)
 
 # A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
 # (``start_ready_task``); a server start never resumes it.
@@ -511,7 +514,7 @@ async def reset_task_for_restart(
     result = await pool.execute(
         """
         UPDATE tasks
-        SET status = 'pending', phase = 'pending',
+        SET status = 'pending', phase = 'pending', run_no = run_no + 1,
             error = NULL, completed_at = NULL, attempt_ended_at = NULL, fail_kind = NULL,
             result_summary = NULL, process_record = NULL, updated_at = now()
         WHERE id = $1
@@ -550,16 +553,28 @@ async def mark_orphaned_tasks_stopped(
 ) -> int:
     """Mark the tasks a previous server left running as stopped, except ``keep`` (resumed instead)."""
     pool = pool or get_pool()
-    result = await pool.execute(
+    rows = await pool.fetch(
         """
         UPDATE tasks
         SET status = 'stopped', updated_at = now(), attempt_ended_at = now()
         WHERE status = ANY($1::text[]) AND completed_at IS NULL AND NOT (id = ANY($2::text[]))
+        RETURNING id
         """,
         list(ACTIVE_STATUSES), list(keep or []),
     )
-    count = int(result.split()[-1]) if result else 0
-    return count
+    from . import step_attempts, task_outcomes
+
+    task_ids = [row["id"] for row in rows]
+    if task_ids:
+        try:
+            await step_attempts.close_attempts_batch(task_ids, "task_ended", "stopped", pool=pool)
+        except Exception:
+            logger.exception("Failed to close orphaned task attempts")
+        try:
+            await task_outcomes.record_outcomes(task_ids, "stopped", "restart", pool=pool)
+        except Exception:
+            logger.exception("Failed to record orphaned task outcomes")
+    return len(rows)
 
 
 async def set_task_title(task_id: str, title: Any, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:

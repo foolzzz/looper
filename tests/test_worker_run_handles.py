@@ -77,8 +77,10 @@ async def _pool(root: Path, monkeypatch: pytest.MonkeyPatch, *runs: ScriptedRun,
         await bus.shutdown()
 
 
-async def _finish(pool: WorkerPool, root: Path, worker_id: str = "w1") -> None:
-    await pool._dispatch(_item(root, worker_id))
+async def _finish(pool: WorkerPool, root: Path, worker_id: str = "w1", *, attempt_id: int | None = None) -> None:
+    item = _item(root, worker_id)
+    item.payload["attempt_id"] = attempt_id
+    await pool._dispatch(item)
     await pool._tasks[worker_id]
     await asyncio.sleep(0)  # the done callback releases the slot
     assert worker_id not in pool._slots and worker_id not in pool._active
@@ -140,6 +142,11 @@ def test_run_lifecycle_logs_name_the_task_and_step(tmp_path, monkeypatch, agent_
 @pytest.mark.parametrize("reason", ["kill", "timeout", "cap"])
 def test_hosted_run_is_ended_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                 agent_db: Any, reason: str) -> None:
+    from looper.agents import attempts
+
+    finished = AsyncMock()
+    monkeypatch.setattr(attempts, "worker_started", AsyncMock())
+    monkeypatch.setattr(attempts, "worker_finished", finished)
     events = _events()
     if reason == "cap":
         events.insert(1, usage_event(None, Usage(input_tokens=1_000_000, output_tokens=0,
@@ -155,9 +162,12 @@ def test_hosted_run_is_ended_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
                 assert await pool.kill("w1")
                 assert results == []
             else:
-                await _finish(pool, tmp_path)
+                await _finish(pool, tmp_path, attempt_id=41)
                 assert results[0].payload["status"] == "failed"
                 assert ("timeout_seconds" if reason == "timeout" else "per-run spend cap") in results[0].payload["error"]
+                finished.assert_awaited_once_with(
+                    41, worker.RunOutcome.RUN_FAILED,
+                    attempts.RunFailure.TIMEOUT if reason == "timeout" else attempts.RunFailure.RUN_CAP)
             assert run.end_calls == 1 and not pool._slots
         assert run.end_calls == 1
 
