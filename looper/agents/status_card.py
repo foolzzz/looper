@@ -272,7 +272,7 @@ def session_activity(agent: Any) -> list[SessionActivity]:
             state = SessionState.ANSWERING if origin in (None, "user") else SessionState.BACKGROUND
             channel, chat, group, client_id = _session_place(token)
             started = token.received_at if token is not None else None
-        queued = agent._router.queued(session)
+        queued = agent._router.queued_count(session)
         if not routing and session.key == MAIN_SESSION:
             pending = agent._bus.pending_count(agent.agent_id) if agent._bus is not None else 0
             handling = agent._handling

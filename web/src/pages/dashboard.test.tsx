@@ -15,6 +15,7 @@ vi.mock("@/lib/api", async (original) => ({
   fetchGates: vi.fn(), fetchProjectsList: vi.fn(),
 }));
 vi.mock("@/lib/manager-metrics", () => ({ fetchManagerMetrics: vi.fn() }));
+vi.mock("@/components/manager-sessions", () => ({ ManagerSessions: () => null }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -137,7 +138,8 @@ describe("Dashboard waiting gates", () => {
     expect(tiles.slice(tiles.indexOf("First reply (P50)") + 1, tiles.indexOf("First reply (P50)") + 3))
       .toEqual(["—", "P95 —"]);
     // Every local day of the 7-day window, today and 7 back, a day without messages too.
-    const rows = [...metricsSection().querySelectorAll("tbody tr")].map((r) => [...r.children].map((c) => c.textContent));
+    const metricsTable = [...metricsSection().querySelectorAll("table")].find((table) => table.textContent?.includes(day(0)))!;
+    const rows = [...metricsTable.querySelectorAll("tbody tr")].map((r) => [...r.children].map((c) => c.textContent));
     expect(rows.map((r) => r[0])).toEqual([0, 1, 2, 3, 4, 5, 6, 7].map(day));
     expect(rows[1]).toEqual([day(1), "task notices 3", "3"]);
     expect(rows[2]).toEqual([day(2), "—", "0"]);

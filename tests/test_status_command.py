@@ -182,8 +182,9 @@ def test_only_the_operator_is_answered_and_the_reply_is_not_stored(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("mid_turn_enabled", [False, True])
 def test_status_answers_during_a_turn_without_waiting_for_it(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        mid_turn_enabled: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A turn that has already run for five minutes does not delay ``/status``, and the model is not asked."""
     from datetime import datetime, timedelta, timezone
 
@@ -201,6 +202,7 @@ def test_status_answers_during_a_turn_without_waiting_for_it(
         return "7"
 
     monkeypatch.setattr(status_card, "_enabled", True)
+    monkeypatch.setattr("looper.agents.mid_turn_input.enabled", lambda _: mid_turn_enabled)
     monkeypatch.setattr(ManagerAgent, "_prepare_turn", prepare)
     monkeypatch.setattr("looper.agents.operator_identity.operator_sender_id", operator_id)
 

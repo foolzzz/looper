@@ -745,6 +745,26 @@ export async function updateOutboundGateway(
   return result;
 }
 
+/** The default Manager's persona (Settings → Chat). Empty strings are unset. */
+export interface ManagerPersona {
+  name: string;
+  address: string;
+  tone: string;
+  notes: string;
+}
+
+export async function fetchManagerPersona(): Promise<ManagerPersona> {
+  const result = await callV1<ManagerPersona>("/api/v1/manager_persona/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateManagerPersona(body: ManagerPersona): Promise<ManagerPersona> {
+  const result = await callV1<ManagerPersona>("/api/v1/manager_persona/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 /** The processor's system setting, and the hooks the machine's administrator set for its runtime (they run in every
  * processor run and see the messages it processes; null for none). */
 export interface ProcessorSettings {

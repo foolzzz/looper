@@ -619,9 +619,11 @@ def test_queue_accounting_folds_the_bus_into_main_only_while_routing_is_off(tmp_
         manager._sessions[key.text] = other
         manager._router._queues[MAIN_SESSION] = asyncio.Queue()
         manager._router._queues[key.text] = asyncio.Queue()
+        assert manager._router.queued(main) is False
         manager._router._queues[MAIN_SESSION].put_nowait(object())
         manager._router._queues[key.text].put_nowait(object())
         manager._router._queues[key.text].put_nowait(object())
+        assert manager._router.queued(other) is True
         manager._bus = SimpleNamespace(pending_count=lambda agent_id: 1)
         manager._handling = SimpleNamespace(message_id="handling-1")
 

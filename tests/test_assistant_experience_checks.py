@@ -120,3 +120,29 @@ def test_documented_baseline_commands_use_approved_tiers(model, reps):
     copy = next(cmd for cmd in commands if cmd[0] == 'cp' and cmd[-1].endswith(f'assistant-real-{model}.json'))
     assert copy[1].endswith('-assistant-real.json')
     assert '-fake' not in copy[1]
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_turn_context_eval_uses_operator_settings_only_when_requested(monkeypatch, tmp_path, enabled):
+    class SettingsRead(Exception):
+        pass
+
+    calls = []
+
+    class Api:
+        def post(self, path, body):
+            calls.append((path, body))
+            if path.endswith('/get'):
+                raise SettingsRead
+            return {'result': {}}
+
+    monkeypatch.setattr(e.runner, 'select_agent', lambda *args, **kwargs: None)
+    args = SimpleNamespace(model='sonnet', manager_model=None, turn_context=enabled, session_routing=False)
+    session = e.Session(args, e.CASES[0], None, False, None)
+    with pytest.raises(SettingsRead):
+        session.run(Api(), '', tmp_path / 'world', tmp_path / 'log', {}, tmp_path)
+    if enabled:
+        assert calls[1:] == [('/api/v1/turn_context_settings/update', {'turn_context_enabled': True}),
+                             ('/api/v1/turn_context_settings/get', {})]
+    else:
+        assert calls[1:] == [('/api/v1/chat_settings/get', {})]
