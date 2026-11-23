@@ -74,7 +74,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook, turn_metrics
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from .. import delivery_guard_manager as delivery_guard
 from ..delivery_guard import GuardState
@@ -817,7 +817,8 @@ class GoalSnapshot:
 
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
-                   snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> MessageEnvelope:
+                   snapshot: str | None = None, cards: list[dict[str, Any]] | None = None,
+                   ephemeral: bool = False) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
     the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
@@ -832,7 +833,8 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
         reply_to=original.message_id,
         metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original), **record,
                   **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {}),
-                  **({"cards": cards} if cards else {})},
+                  **({"cards": cards} if cards else {}),
+                  **({status_card.EPHEMERAL_CHAT: True} if ephemeral else {})},
     )
 
 
@@ -921,6 +923,7 @@ class ManagerAgent:
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
+        self._status_tasks: set[asyncio.Task[Any]] = set()
         # Completion turns past their deadline that did not end, and the stops of their runtimes (``_tell_completion``).
         self._late_turns: set[asyncio.Task[Any]] = set()
         # Retired runtimes' tree cleanup, separate from turns that can ignore cancellation indefinitely.
@@ -1103,6 +1106,10 @@ class ManagerAgent:
                     await self._stop_from_chat(envelope)
                     bus.settle(envelope.message_id)
                     continue
+                if isinstance(text, str) and chat_commands.is_status(text) and status_card.enabled():
+                    await self._status_from_chat(envelope)
+                    bus.settle(envelope.message_id)
+                    continue
                 self._register_turn(envelope)
             queue.put_nowait(envelope)
         self._task = asyncio.create_task(self._message_loop())
@@ -1146,22 +1153,31 @@ class ManagerAgent:
         except Exception:
             logger.debug("could not read leads.enabled; keeping the last value", exc_info=True)
 
+    def activity(self) -> list[status_card.SessionActivity]:
+        """What this Manager's sessions are doing, for the status card."""
+        return status_card.session_activity(self)
+
     def _receive(self, envelope: MessageEnvelope) -> bool:
         """Bus consumer, run in ``bus.publish`` before the queue: take a ``/stop`` addressed to the Manager out of
-        its queue and handle it at once; give any other user message its turn token, so a stop finds it from here
-        on, queued or not."""
+        its queue and handle it at once; while the status card is on, answer ``/status`` the same way. Give any
+        other user message its turn token, so a stop finds it from here on, queued or not."""
         if envelope.target.agent_id != self.agent_id:
             return False
         if self._drain is not None and self._drain.draining:
             return False
         text = envelope.payload.get("text")
-        if not isinstance(text, str) or not is_stop_command(text):
-            self._register_turn(envelope)
-            return False
-        task = asyncio.create_task(self._stop_from_chat(envelope))
-        self._stop_tasks.add(task)
-        task.add_done_callback(self._stop_tasks.discard)
-        return True
+        if isinstance(text, str) and is_stop_command(text):
+            task = asyncio.create_task(self._stop_from_chat(envelope))
+            self._stop_tasks.add(task)
+            task.add_done_callback(self._stop_tasks.discard)
+            return True
+        if isinstance(text, str) and chat_commands.is_status(text) and status_card.enabled():
+            task = asyncio.create_task(self._status_from_chat(envelope))
+            self._status_tasks.add(task)
+            task.add_done_callback(self._status_tasks.discard)
+            return True
+        self._register_turn(envelope)
+        return False
 
     def _register_turn(self, envelope: MessageEnvelope) -> TurnToken:
         self._last_activity = self._clock()
@@ -1213,6 +1229,21 @@ class ManagerAgent:
             await self._send_reply(envelope, reply, persist=False)
         except Exception:
             logger.exception("%s: could not handle /stop %s", self._log, envelope.message_id)
+
+    async def _status_from_chat(self, envelope: MessageEnvelope) -> None:
+        """Answer ``/status`` from the snapshot. Not stored, and not waited on behind the running turn."""
+        try:
+            platform = self.ops.platform if self.ops is not None else None
+            managers = platform.managers if platform is not None else None
+            fleet = managers if managers is not None else status_card.SoloFleet(self)
+            text = await status_card.command_reply(
+                envelope, fleet=fleet,
+                task_router=platform.task_router if platform is not None else None,
+                worker_pool=platform.worker_pool if platform is not None else None,
+                now=datetime.now(timezone.utc))
+            await self._send_reply(envelope, text, persist=False, ephemeral=True)
+        except Exception:
+            logger.exception("%s: could not answer /status %s", self._log, envelope.message_id)
 
     async def stop(self) -> None:
         self._running = False
@@ -3757,11 +3788,13 @@ class ManagerAgent:
             logger.warning("%s: could not persist a %s chat turn", self._log, channel, exc_info=True)
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
-                          persist: bool = True, outcome: ReplyOutcome | None = None,
+                          persist: bool = True, ephemeral: bool = False, outcome: ReplyOutcome | None = None,
                           snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
-        history (a user gate keeps its own discussion). Web replies always retain their recovery identity.
+        history (a user gate keeps its own discussion). ``ephemeral`` is an enabled ``/status``: the web channel
+        shows it and stores neither it nor, with the send path, the command. Web replies always retain their
+        recovery identity.
         ``outcome`` is how the turn ended; by default
         failed with an ``error``, else answered."""
         assert self._bus is not None
@@ -3769,7 +3802,7 @@ class ManagerAgent:
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
-                                               record=record, snapshot=snapshot, cards=cards))
+                                               record=record, snapshot=snapshot, cards=cards, ephemeral=ephemeral))
         await self._mid_turn.reply(original, text, error=error, outcome=outcome)
         token = self._turns.find(original.message_id) or self._metrics_reply_tokens.get(original.message_id)
         if token is not None and token.message_id == original.message_id and token.times is not None and text and error is None:
