@@ -3971,6 +3971,75 @@ start finishes any unmarked steps. A caller that already holds a transaction
 also defers the online steps with a warning until a start outside one. The lock
 is released on completion, failure or cancellation (and on connection loss).
 
+#### Adding a named migration
+
+Add one public Python module under `looper/db/migrations/`, named after the
+migration. Discovery imports those modules; there is no registration list to
+edit. Keep helpers private (`_` prefix). A module declares:
+
+- `name`: the stable `schema_migrations` marker, unique across modules.
+- `order`: the transactional execution order. Existing migrations use 10–580;
+  append after their prerequisites. Independent migrations may use the same
+  number: ties sort by `name`, never filesystem order. Use distinct numbers
+  when one migration depends on another. Do not renumber released migrations.
+- `pending_order`: the backup-admission probe order. Existing probes use
+  10–570; new probes normally append. The legacy `gateway_aliases` migration
+  alone uses `None`, preserving its historical absence from that check.
+- `async pending(conn)`: a read-only catalog/marker probe. An applied marker
+  must suppress replay, including when someone later removes a column.
+- `async apply(conn, *, sql, state)`: the original guarded migration, called
+  inside the schema transaction after admission and bridge conversion.
+  Recheck `pending` under the lock, apply the DDL and record the marker only
+  after success. `state` is `empty`, `bridge` or `current`; `sql` is the
+  composed fresh schema. Keep fresh installs baseline-only when their DDL
+  already provides the migration.
+- Optional `fresh_ddl`: SQL appended to the frozen `schema.sql` baseline in
+  transactional order, before the guarded migrations. Put new tables and
+  schema additions here instead of appending to `schema.sql`. Ensure that
+  the fresh and upgrade definitions agree.
+- Optional `online_order` and `online`: a tuple of `OnlineStep` values for
+  post-commit constraint validation and concurrent index builds. Existing
+  online orders use 10–110. Each step names its prerequisite migration marker
+  and its own completion marker. Preserve resumability, and validate fresh
+  constraints inside the fresh transaction when it records only the baseline
+  (the `run_skips` module shows this pattern).
+
+For example, a small table migration can own both paths in the same new file:
+
+```python
+name = "example_items"
+order = 590
+pending_order = 580
+fresh_ddl = "CREATE TABLE IF NOT EXISTS example_items (id BIGSERIAL PRIMARY KEY);"
+
+
+async def pending(conn):
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", name):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('example_items') IS NOT NULL")
+
+
+async def apply(conn, *, sql, state):
+    if await pending(conn):
+        await conn.execute(fresh_ddl)
+        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+```
+
+The existing modules reuse the unchanged legacy catalog probes and DDL helpers
+in `connection.py`; new migrations keep their code and SQL in their own module.
+Do not add constants, dispatch branches or online entries to `connection.py`.
+Document migration-specific details in that module rather than adding rows to
+a shared migration inventory. The fixed order snapshot in
+`tests/fixtures/schema_migration_order.json` covers only the released migrations;
+new migrations do not edit it. The bridge test derives added sequences from
+the fresh catalog, so it needs no per-migration expected-list update either.
+Add a dedicated regression test for the new migration's fresh, upgrade,
+reopen and failure paths, then run it along with
+`tests/test_bridge_schema_db.py`, `tests/test_online_schema_db.py` and
+`tests/test_schema_migration_registry.py` against a disposable PostgreSQL
+database. This refactor changes no dashboard, Telegram, Lark or CLI operations;
+all entry points continue to use the same schema startup path.
+
 Rollback means stopping the new service, leaving the upgraded database
 unchanged, restoring the verified schema-change backup into a separate database
 (it has the `source_events` schema and not its rows), and
