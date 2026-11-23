@@ -34,7 +34,7 @@
 3. 检查命令和配置来源，见下一节。
 4. 在 Looper 自有临时目录创建文件探针，记录 inode；绝不在 Worker 报告的目录中创建文件或写打开报告中的路径。沙箱探针对文件类型和 inode 做比对，再以 `O_NONBLOCK | O_NOFOLLOW` 尝试写打开，必须得到 EPERM，不写任何字节；scratch 写入必须成功。只读 inspect root 和 FIFO 不会阻塞预检。
 5. Looper 创建 Unix socket 和回环监听器，宿主进程先成功连接，作为正向对照。沙箱内的两个固定连接探针都必须以 EPERM 失败；任一成功、超时或其他错误均记 `write_policy_unavailable`，拒绝启动。探针和监听器随作用域退出清理。
-6. 对服务环境中每个不同的代理，从宿主显式发出到 Looper 自建监听器的 CONNECT，分别使用 `127.0.0.1`、`::1` 和 `localhost`，不受 NO_PROXY 影响；每个监听器都先完成并清空正向对照连接。代理返回 2xx，或监听器收到代理转发的连接（即使返回 403），均以 `proxy_loopback_allowed` 拒绝启动。只有明确的 403 且监听器无连接才通过；断连、超时、认证失败及其他响应均以 `proxy_preflight_unavailable` 拒绝。HTTP(S) 代理支持 URL 中的 Basic 认证；未知协议和无效 URL 以 `unknown_cli_config` 拒绝，不在记录里保存代理地址或凭据。宿主探针避免沙箱自身的网络拒绝掩盖代理能力。
+6. 对服务环境中每个不同的代理，从宿主显式发出到 Looper 自建监听器的 CONNECT 和普通 HTTP GET（绝对 URI），分别使用 `127.0.0.1`、`::1`、`localhost` 和 `0.0.0.0`，不受 NO_PROXY 影响；每次请求都使用独立监听器，先按目标地址完成并清空正向对照连接。代理返回 2xx，或监听器收到代理转发的连接（即使返回 403），均以 `proxy_loopback_allowed` 拒绝启动。只有明确的 403 且监听器无连接才通过；断连、超时、认证失败及其他响应均以 `proxy_preflight_unavailable` 拒绝。HTTP(S) 代理支持 URL 中的 Basic 认证；未知协议和无效 URL 以 `unknown_cli_config` 拒绝，不在记录里保存代理地址或凭据。宿主探针避免沙箱自身的网络拒绝掩盖代理能力。
 
 这些探针证明的是启动时所测目标被拒绝；它们不能代替代理端持续执行目标访问控制，或证明所有地址别名和未来配置都安全。操作者仍需使用拒绝本地目标的代理。
 
@@ -61,7 +61,7 @@ args = []
 
 ## 回归证据与缺口
 
-`tests/test_acp_policy.py` 覆盖大小写路径双向重叠、runtime/vault/HOME、配置白名单、选项值、文件 inode、只读/FIFO、子孙进程写保护和 IPv4/IPv6 代理端口例外。新增回归在修复前观察到 6 项失败；修复后覆盖真实 Reviewer 启动路径中的角色层代理注入、全部六个服务代理变量、安全代理可用、CONNECT 转发和伪装 403、断连、未知协议、认证与 NO_PROXY 绕过探针的防护。分别移除 Unix socket 和回环拒绝规则，预检必须拒绝启动。固定 Python 探针不运行模型。
+`tests/test_acp_policy.py` 覆盖大小写路径双向重叠、runtime/vault/HOME、配置白名单、选项值、文件 inode、只读/FIFO、子孙进程写保护和 IPv4/IPv6 代理端口例外。覆盖真实 Reviewer 启动路径中的角色层代理注入、全部六个服务代理变量、安全代理可用、CONNECT 转发和伪装 403、断连、未知协议、认证与 NO_PROXY 绕过探针的防护。普通 HTTP 回归使用拒绝全部 CONNECT、仅对指定目标的 GET 转发或返回异常响应的本地替身代理；四种目标各覆盖实际转发、转发后伪装 403、无转发但返回 200、502 和断连，共 20 例在修复前全部错误放行。安全代理必须对全部八次请求返回拒绝，认证头也覆盖 GET。分别移除 Unix socket 和回环拒绝规则，预检必须拒绝启动。固定 Python 探针不运行模型。
 
 任务 Profile 选择在共同的 `profile_choices` 入口拒绝 ACP；Manager 创建/更新工具、task agents API 和 create-time profile_overrides 均有参数化拒绝与数据库无写入回归。ACP channel 的 `fs/write_text_file` 与 `terminal/*` 请求均有拒绝测试。
 
