@@ -206,7 +206,7 @@ v2.13.165 含有全部历史迁移，并保持为固定桥。比它更早的安�
 
 只通过升级器的数据库不能证明文件系统、服务、提示词或浏览器这些步骤已经做完。已有的用户文件和历史行都保留。升级器是校验过的备份之后的一次转换，不会重放一条历史迁移链。
 
-旧配置文件在 v2.13.165 上导入，升级那次安装和数据库，再由本版本导出 `looper-config/v4`。一次性的 v2.13.165 安装可以做导入。v2.13.165 仍可能导出 v3，在那里再导出不会得到 v4。本版本拒绝任何其他格式，也在写入前拒绝层上已退役的 `model` 或 `effort`，以及提供方已退役的 `protocols`、`base_url` 或 `models`。任务对照只接受 `looper-prompt-eval/v2`，对话对照只接受 `looper-manager-dialogs/v2`。
+旧配置文件在 v2.13.165 上导入，升级那次安装和数据库，再由本版本导出 `looper-config/v4`。一次性的 v2.13.165 安装可以做导入。v2.13.165 仍可能导出 v3，在那里再导出不会得到 v4。本版本拒绝任何其他格式，也在写入前拒绝层上已退役的 `model` 或 `effort`，以及提供方已退役的 `protocols`、`base_url` 或 `models`。任务对照接受 `looper-prompt-eval/v2` 和 `looper-prompt-eval/v3`（新运行写出 v3），对话对照只接受 `looper-manager-dialogs/v2`。
 
 空库运行一次当前 schema，并记下 `post_bridge_baseline`。当前库不重放那份 DDL。每次启动都应用 `seeds.sql`，它不改变已保存的选择。回退是把那份 schema 变更备份恢复到另一个数据库（不含 `source_events` 的行），再让受保护的旧版本指向那个库。
 
