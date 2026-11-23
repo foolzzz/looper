@@ -6,11 +6,13 @@ and a held leads check stores every item unchecked.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import asyncpg
 import pytest
 
 from tests.db_support import DSN, run_db
@@ -173,8 +175,17 @@ def test_rejected_holds_until_the_reset_and_notifies_once(monkeypatch: pytest.Mo
         from looper.agents import gate_service, usage_windows
 
         sent: list[tuple[str, str, str]] = []
+        locked: list[str] = []
 
         async def sender(channel, chat, text, **_kwargs):
+            try:
+                async with env.pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '500ms'")
+                        await conn.fetchrow("SELECT id FROM schedules WHERE id = $1 FOR UPDATE", sid)
+                locked.append("ok")
+            except asyncpg.exceptions.LockNotAvailableError:
+                locked.append("locked")
             sent.append((channel, chat, text))
             return True, None
 
@@ -194,10 +205,12 @@ def test_rejected_holds_until_the_reset_and_notifies_once(monkeypatch: pytest.Mo
             assert await env.runs(sid) == []
             assert len(sent) == 1 and sent[0][0] == "channel-lark" and "后台工作会等待" in sent[0][2]
             assert BUILTIN in sent[0][2] and "重置时间未知" not in sent[0][2]
-            status, payload = await env.call("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid})
-            assert status == 409, payload
-            assert payload["error"]["message"].startswith("usage window on hold until ")
-            assert "draining" not in payload["error"]["message"]
+            assert locked == ["ok"]
+            started = await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid})
+            assert started["run"]["trigger"] == "manual"
+            waiting = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+            assert waiting["usage_hold"]["reason"] == "rejected"
+            assert datetime.fromisoformat(waiting["usage_hold"]["until"]) == resets
         finally:
             await _quiet()
 
@@ -437,6 +450,135 @@ def test_subscription_cursor_stays_and_outbound_blocks_while_leads_pass_through(
             await _quiet()
 
     run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("catch_up", ["skip", "once"])
+def test_a_hold_longer_than_grace_stays_due_and_then_fires_on_time(
+        catch_up: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import cost_guard
+
+        def held_rows() -> list[dict[str, Any]]:
+            return [row for row in cost_guard.current().snapshot()["recent"]
+                    if row.get("decision") == "hold" or row.get("would_hold_until")]
+
+        def waits() -> list[logging.LogRecord]:
+            return [record for record in caplog.records if "waits for a usage window" in record.getMessage()]
+
+        try:
+            caplog.set_level(logging.INFO)
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            sid = (await env.enabled(cron="0 12 * * *", timezone="America/Los_Angeles", catch_up=catch_up))["schedule_id"]
+            await env.pool.execute(
+                "UPDATE schedules SET next_fire_at = $2, last_fired_at = NULL WHERE id = $1", sid, NOON)
+            resets = NOON + timedelta(minutes=10)
+            env.clock.now = NOON + timedelta(minutes=3)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=resets, observed_at=NOON)
+            next_at = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid)
+            await env.scheduler.tick()
+            row = await env.pool.fetchrow("SELECT last_fired_at, next_fire_at FROM schedules WHERE id = $1", sid)
+            assert await env.runs(sid) == []
+            assert row["last_fired_at"] is None and row["next_fire_at"] == next_at
+            assert len(held_rows()) == 1 and len(waits()) == 1
+
+            env.clock.now += timedelta(seconds=20)
+            await env.scheduler.tick()
+            assert await env.runs(sid) == []
+            assert len(held_rows()) == 1 and len(waits()) == 1
+            still = await env.pool.fetchrow("SELECT last_fired_at, next_fire_at FROM schedules WHERE id = $1", sid)
+            assert still["last_fired_at"] is None and still["next_fire_at"] == next_at
+
+            extended = resets + timedelta(minutes=5)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=extended, observed_at=env.clock.now)
+            env.clock.now += timedelta(seconds=20)
+            await env.scheduler.tick()
+            assert len(held_rows()) == 2 and len(waits()) == 2
+            assert await env.runs(sid) == []
+
+            # The cached window already ends at ``extended``. Clearing it would also drop the deferral note.
+            env.clock.now = extended + timedelta(seconds=1)
+            await env.scheduler.tick()
+            runs = await env.runs(sid)
+            started = [run for run in runs if run["trigger"] == "scheduled"]
+            assert len(started) == 1 and started[0]["missed"] == 0
+            assert all(run["trigger"] != "catch_up" and run["status"] != "skipped_missed" for run in runs)
+            fired = await env.pool.fetchrow("SELECT last_fired_at, next_fire_at FROM schedules WHERE id = $1", sid)
+            assert fired["last_fired_at"] == NOON and fired["next_fire_at"] != next_at
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_an_operator_run_now_starts_during_a_high_utilization_hold(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            fresh = (await env.enabled())["schedule_id"]
+            resets = env.clock.now + timedelta(minutes=10)
+            await _window(env.pool, utilization=0.95, resets_at=resets, observed_at=env.clock.now)
+            started = await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": fresh})
+            assert started["run"]["trigger"] == "manual"
+            alone = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": fresh}))["schedule"]
+            assert "usage_hold" not in alone
+
+            sid = (await env.enabled())["schedule_id"]
+            await env.due(sid)
+            await _window(env.pool, utilization=0.95, resets_at=resets, observed_at=env.clock.now)
+            await env.scheduler.tick()
+            assert await env.runs(sid) == []
+            next_at = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid)
+            manual = await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid})
+            assert manual["run"]["trigger"] == "manual"
+            waiting = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+            assert waiting["usage_hold"]["reason"] == "high_utilization"
+            assert await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid) == next_at
+            assert not any(run["status"] == "skipped_missed" for run in await env.runs(sid))
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_hold_notice_keeps_one_settings_row_per_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool) -> None:
+        from looper.agents import gate_service, usage_windows
+
+        sent: list[str] = []
+
+        async def sender(_channel, _chat, text, **_kwargs):
+            sent.append(text)
+            return True, None
+
+        async def target():
+            return SimpleNamespace(channel_id="channel-lark", target=SimpleNamespace(id="ou_synthetic"))
+
+        try:
+            usage_windows.configure(sender)
+            monkeypatch.setattr(gate_service, "dashboard_target", target)
+            day = datetime(2026, 1, 15, 20, tzinfo=UTC)
+            provider = "prov-synthetic"
+            await usage_windows.notify_hold(provider, usage_windows.Hold(
+                day + timedelta(minutes=5), usage_windows.HoldReason.QUOTA_COOLDOWN, False, None))
+            await usage_windows.notify_hold(provider, usage_windows.Hold(
+                day + timedelta(minutes=6), usage_windows.HoldReason.QUOTA_COOLDOWN, False, None))
+            await usage_windows.notify_hold(provider, usage_windows.Hold(
+                day + timedelta(hours=1), usage_windows.HoldReason.REJECTED, True, "five_hour"))
+            await usage_windows.notify_hold(provider, usage_windows.Hold(
+                day + timedelta(hours=2), usage_windows.HoldReason.REJECTED, True, "five_hour"))
+            assert len(sent) == 3
+            rows = await pool.fetch(
+                "SELECT key FROM system_settings WHERE key LIKE $1 ORDER BY key",
+                "cost_guard_hold:prov-synthetic:%")
+            assert [row["key"] for row in rows] == [
+                "cost_guard_hold:prov-synthetic:failure",
+                "cost_guard_hold:prov-synthetic:five_hour",
+            ]
+        finally:
+            usage_windows.configure(None)
+
+    run_db(test, monkeypatch)
 
 
 def test_settings_get_lists_a_current_hold_and_omits_it_while_off(monkeypatch: pytest.MonkeyPatch) -> None:

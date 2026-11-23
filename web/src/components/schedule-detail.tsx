@@ -3,7 +3,7 @@ import { ArrowLeft, ArrowRight, Loader2, Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { DeleteSchedule, LastRun, NoticeText, RunHistory, ScheduleTime } from "@/components/project-schedules";
+import { DeleteSchedule, LastRun, NoticeText, RunHistory, ScheduleTime, usageWindowWait } from "@/components/project-schedules";
 import { fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo, type TaskRole } from "@/lib/api";
 import { channelLabel } from "@/lib/chat-channels";
 import { roleLabel } from "@/lib/runtime-catalog";
@@ -191,7 +191,10 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
         <span className="text-muted-foreground">
           {schedule.usage_hold ? (
-            <>Waiting for a usage window until {schedule.usage_hold.until}</>
+            <>
+              {!schedule.enabled && "Disabled: it does not run on its rule · "}
+              {usageWindowWait(schedule.usage_hold.until, schedule.timezone)}
+            </>
           ) : schedule.enabled ? (
             schedule.next_fire_at ? (
               <>

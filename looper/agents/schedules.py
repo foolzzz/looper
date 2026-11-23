@@ -1223,12 +1223,16 @@ def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str
 
 async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None = None,
                   expected_version: str | None = None) -> dict[str, Any]:
-    """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays."""
+    """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays.
+
+    A manual run is not held for a usage window; the observation still records one. The schedule's own firing
+    keeps a hold note that was already there.
+    """
     from .usage_windows import ScheduleDeferred
 
     try:
-        run_id = await scheduler.run_now(schedule_id, **({"expected_version": expected_version}
-                                                       if expected_version is not None else {}))
+        run_id = await scheduler.run_now(schedule_id, operator=True, **({"expected_version": expected_version}
+                                                                      if expected_version is not None else {}))
     except db_schedules.ConfigurationChanged as exc:
         raise RequestError(HTTP_409, str(exc)) from None
     except ScheduleDeferred as exc:

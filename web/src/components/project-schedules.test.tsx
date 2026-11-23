@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ScheduleDetail } from "@/components/schedule-detail";
-import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge, RunHistory, LastRun, SubscriptionStatus } from "@/components/project-schedules";
+import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge, RunHistory, LastRun, SubscriptionStatus, listNextRun, usageWindowWait } from "@/components/project-schedules";
+import { SchedulesPage } from "@/pages/schedules";
 import type { Project, ScheduleInfo, ScheduleRunInfo } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -490,6 +491,39 @@ describe("command run history", () => {
     expect(container.querySelector('[data-run-id="srun-target"] button')?.getAttribute("aria-expanded")).toBe("true");
     expect(container.querySelector('[data-run-id="srun-target"]')?.textContent).toContain("signal 15");
     expect(container.textContent).toContain("fresh tail");
+  });
+
+  it("shows a disabled schedule waiting in its own zone, on the project, the detail and the list", async () => {
+    const until = "2026-01-15T21:00:00+00:00";
+    const stored = storedSchedule();
+    stored.timezone = "America/Los_Angeles";
+    stored.usage_hold = { until, reason: "rejected", reset_known: true, window: "five_hour" };
+    const waiting = usageWindowWait(until, stored.timezone);
+    expect(waiting).toContain("Waiting for a usage window until ");
+    expect(waiting).not.toContain(until);
+    expect(listNextRun(stored)).toBe(`Disabled · ${waiting}`);
+    stub((path) => {
+      if (path === "schedule_admin/project_list") return { schedules: [stored], limits: {
+        default_timezone: "UTC", roles: [], notify_targets: [], name_max_chars: 80, requirement_max_chars: 10000,
+      } };
+      if (path === "schedule_admin/get") return { schedule: stored };
+      if (path === "schedule_admin/runs") return { runs: [], next_before: null, routine_skips: {} };
+      if (path === "schedule_admin/list") return { schedules: [{ ...stored, project_id: "project", project_name: "Example" }] };
+      if (path === "project_admin/list") return { projects: [{ project_id: "project", name: "Example" }], projects_root: "/tmp" };
+      if (path === "managers/list") return { managers: [] };
+      if (path === "registry/view") return { providers: [], profiles: [] };
+    });
+    await act(async () => root.render(<ProjectSchedulesSection project={{ project_id: "project" } as Project}
+      linked="" onLink={() => {}} />));
+    expect(container.textContent).toContain(`Disabled · ${waiting}`);
+    expect(container.textContent).not.toContain(until);
+    await act(async () => root.render(<ScheduleDetail scheduleId={stored.schedule_id} onDeleted={() => {}} />));
+    expect(container.textContent).toContain("Disabled: it does not run on its rule");
+    expect(container.textContent).toContain(waiting);
+    expect(container.textContent).not.toContain(until);
+    await act(async () => root.render(<SchedulesPage sub="" query="" onNavigate={() => {}} />));
+    expect(container.textContent).toContain(`Disabled · ${waiting}`);
+    expect(container.textContent).not.toContain(until);
   });
 
   it("opens the schedule and target run from its nested project link", async () => {

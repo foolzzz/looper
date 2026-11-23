@@ -82,6 +82,22 @@ describe("花费观察", () => {
     expect(container.querySelectorAll("input,select,button,textarea")).toHaveLength(0);
   });
 
+  it("暂缓显示到重置时刻，观察记录带上本来会暂缓到的时间和说明", async () => {
+    const until = "2026-01-15T21:00:00+00:00";
+    result = { ...result, mode: "enforce", recent: [
+      { run_kind: "schedule", currency: "equivalent_usd", estimate_usd: 0.1, estimate_source: "floor",
+        decision: "hold", scope: "schedule_day", scope_ref: "sched", action: null, would_hold_until: until,
+        note: `hold until ${until}` },
+      { run_kind: "schedule", currency: "equivalent_usd", estimate_usd: 0.1, estimate_source: "floor",
+        decision: "admit", scope: "schedule_day", scope_ref: "sched", action: null, would_hold_until: until,
+        note: `would hold until ${until}` },
+    ] };
+    await render();
+    expect(container.textContent).toContain(`暂缓到 ${until}`);
+    expect(container.textContent).toContain(`本来会放行 · ${until} · would hold until ${until}`);
+    expect(container.textContent).not.toContain("超出上限");
+  });
+
   it("读取失败展示错误而不是成功或空数据", async () => {
     unavailable = true;
     await render();

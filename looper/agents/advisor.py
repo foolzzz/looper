@@ -199,8 +199,14 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
                     done.reason)
         again = replace(child, run_id=uuid.uuid4().hex[:12],
                         timeout_s=child.timeout_s if left is None else min(child.timeout_s, left))
-        done = await call(ChildCall(again, _parent(brief), settings, round(cap_usd - spent, 6), runtime_root,
-                                    claude_bin, on_record=started, on_result=booked), parse=parse)
+        try:
+            done = await call(ChildCall(again, _parent(brief), settings, round(cap_usd - spent, 6), runtime_root,
+                                        claude_bin, on_record=started, on_result=booked), parse=parse)
+        except Held as held:
+            # The retry is the same usage window, not another runtime error. Keep the first run's spend.
+            failed = CallFailed(execution=Execution(None, failure=CallFailure.UNAVAILABLE, reason=str(held)),
+                                failure=CallFailure.UNAVAILABLE, reason=str(held))
+            return failed, spent
         spent = round(spent + (done.cost_usd or 0.0), 6)
     return done, spent
 

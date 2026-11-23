@@ -5,7 +5,8 @@ import { callV1 } from "@/lib/v1";
 
 type Counter = { scope: string; scope_ref: string; currency: string; spent_usd: number; reserved_usd: number; limit_usd: number | null };
 type Observation = { at?: string; run_kind: string; currency: string; estimate_usd: number; estimate_source: string;
-  decision?: string; scope: string | null; scope_ref: string | null; action: string | null };
+  decision?: string; scope: string | null; scope_ref: string | null; action: string | null;
+  would_hold_until?: string; note?: string };
 type Hold = { provider: string; reason: string; until: string; window: string | null; reset_known: boolean };
 type View = { mode: "off" | "observe" | "enforce"; daily_usd: number | null; daily_equivalent_usd: number | null;
   roles: Record<string, { daily_usd: number | null; daily_equivalent_usd: number | null }>;
@@ -19,6 +20,15 @@ const HOLD_REASONS: Record<string, string> = {
   rejected: "账号被拒", high_utilization: "用量过高", quota_failure: "配额失败", quota_cooldown: "配额冷却",
 };
 const modeLabel = (mode: View["mode"]) => mode === "off" ? "已关闭" : mode === "enforce" ? "执行中" : "仅观察";
+function outcomeText(row: Observation): string {
+  if (row.decision === "hold") return row.would_hold_until ? `暂缓到 ${row.would_hold_until}` : "暂缓";
+  if (row.decision === "admit" && (row.would_hold_until || row.note)) {
+    return ["本来会放行", row.would_hold_until, row.note].filter(Boolean).join(" · ");
+  }
+  if (row.decision === "admit") return "本来会放行";
+  if (row.action) return ACTIONS[row.action] ?? row.action;
+  return "超出上限";
+}
 const SOURCES: Record<string, string> = { run_cap: "单次上限", p95: "近 30 天 P95", floor: "角色下限", floor_no_samples: "无历史样本，使用下限" };
 const SCOPES: Record<string, string> = { task: "任务", schedule_day: "定时任务当天", role_day: "角色当天", global_day: "全局当天" };
 
@@ -89,7 +99,7 @@ export function CostGuardSettingsSection() {
       <CardContent>
         {view.recent.length === 0 ? <p className="text-sm text-muted-foreground">暂无观察记录。</p>
           : <ul className="divide-y divide-border text-sm">{view.recent.slice(0, 20).map((row, index) => <li key={`${row.at}:${index}`} className="space-y-1 py-3 first:pt-0 last:pb-0">
-            <p>{row.run_kind} · {currency(row.currency)} {money(row.estimate_usd)} · {row.decision === "admit" ? "本来会放行" : row.action ? ACTIONS[row.action] ?? row.action : "超出上限"}</p>
+            <p>{row.run_kind} · {currency(row.currency)} {money(row.estimate_usd)} · {outcomeText(row)}</p>
             <p className="text-xs text-muted-foreground">{SCOPES[row.scope ?? ""] ?? row.scope} {row.scope_ref} · {SOURCES[row.estimate_source] ?? row.estimate_source}{row.at ? ` · ${new Date(row.at).toLocaleString()}` : ""}</p>
           </li>)}</ul>}
       </CardContent>

@@ -3,7 +3,7 @@ import { ArrowRight, Loader2, Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { DeleteSchedule, LastRun, NoticeText, ScheduleTime } from "@/components/project-schedules";
+import { DeleteSchedule, LastRun, NoticeText, ScheduleTime, listNextRun } from "@/components/project-schedules";
 import { ScheduleDetail } from "@/components/schedule-detail";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import { fetchAllSchedules, fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo } from "@/lib/api";
@@ -61,12 +61,12 @@ const byLowerName = (a: { name: string }, b: { name: string }) => a.name.toLower
 
 /** When it runs next, in its own zone; a disabled one does not. */
 function NextRun({ schedule }: { schedule: ScheduleInfo }) {
-  if (schedule.usage_hold) return <span>Waiting for a usage window until {schedule.usage_hold.until}</span>;
-  if (!schedule.enabled) return <span>Disabled</span>;
-  if (!schedule.next_fire_at) return <span>No next run</span>;
+  const label = listNextRun(schedule);
+  const when = schedule.next_fire_at;
+  if (label || !when) return <span>{label ?? "No next run"}</span>;
   return (
     <span>
-      Next <ScheduleTime iso={schedule.next_fire_at} timeZone={schedule.timezone} className="tabular-nums text-foreground/90" />
+      Next <ScheduleTime iso={when} timeZone={schedule.timezone} className="tabular-nums text-foreground/90" />
     </span>
   );
 }

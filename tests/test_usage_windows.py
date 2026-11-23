@@ -1,7 +1,6 @@
 """Usage-window holds: which signal waits, and which callers only record it.
 
-Expectations for ``mode = off`` are pinned to parent revision dd2f99f62: a hold reads neither
-``provider_limit_windows`` nor ``llm_records``, and a schedule or background run is unchanged.
+``mode = off`` matches the recorded baseline: no window read, no deferral, an empty observation list.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -17,8 +16,14 @@ from looper.agents.usage_windows import Hold, HoldReason
 
 NOW = datetime(2026, 1, 15, 20, tzinfo=timezone.utc)
 PROVIDER = "prov-synthetic"
-# Parent of this branch. Off-mode behavior below is that revision's: no hold read, no deferral, no raise.
-PARENT = "dd2f99f62"
+# Recorded while the guard is off: the same calls read nothing and change nothing.
+OFF_MODE = {
+    "before_run": None,
+    "observe_schedule": None,
+    "recent": [],
+    "hold_reads": 0,
+    "window_reads": 0,
+}
 
 
 def _window(*, status="allowed", utilization=0.1, resets_at=None, observed_at=None, name="five_hour"):
@@ -33,8 +38,32 @@ def _failure(*, resets_at=None, finished_at=None, created_at=None, error="retry 
     return {"finished_at": finished_at, "created_at": created_at, "metadata": metadata, "error": error}
 
 
-def test_parent_revision_is_the_off_mode_baseline():
-    assert PARENT == "dd2f99f62"
+def test_off_mode_matches_the_recorded_baseline(monkeypatch):
+    async def check():
+        g = _guard(monkeypatch, Mode.OFF)
+        reads = {"hold": 0, "windows": 0}
+
+        async def hold_for(*_args, **_kwargs):
+            reads["hold"] += 1
+            raise AssertionError("off read a usage window")
+
+        async def windows_read(*_args, **_kwargs):
+            reads["windows"] += 1
+            raise AssertionError("off read provider_limit_windows")
+
+        monkeypatch.setattr(windows, "hold_for", hold_for)
+        monkeypatch.setattr(windows.provider_limits, "windows", windows_read)
+        before = await cg.before_run(launch=_launch(), run_kind="processor")
+        observed = await cg.observe_schedule({"id": "schedule-1", "kind": "agent", "project_id": None,
+                                               "run_budget_usd": 1})
+        assert {
+            "before_run": before,
+            "observe_schedule": observed,
+            "recent": g.snapshot()["recent"],
+            "hold_reads": reads["hold"],
+            "window_reads": reads["windows"],
+        } == OFF_MODE
+    asyncio.run(check())
 
 
 def test_rejected_window_holds_until_its_reset_and_a_past_reset_holds_nothing():
@@ -208,6 +237,34 @@ def test_limit_signals_off_skips_the_window_table_and_still_reads_a_quota_failur
     asyncio.run(check())
 
 
+def test_usage_window_reads_stay_outside_the_admission_lock(monkeypatch):
+    from looper.agents import agent_settings
+    from tests.runtime_model_helpers import builtin_launch
+
+    async def check():
+        g = _guard(monkeypatch, Mode.ENFORCE)
+        future = NOW + timedelta(minutes=10)
+        seen: list[bool] = []
+
+        async def hold_for(*_args, **_kwargs):
+            seen.append(g._lock.locked())
+            return Hold(future, HoldReason.REJECTED, True, "five_hour")
+
+        async def load_settings(*_args, **_kwargs):
+            return builtin_launch().settings
+
+        monkeypatch.setattr(windows, "hold_for", hold_for)
+        monkeypatch.setattr(windows, "notify_hold", AsyncMock())
+        monkeypatch.setattr(agent_settings, "load_agent_settings", load_settings)
+        admission = await cg.observe_schedule({"id": "schedule-1", "kind": "agent", "project_id": None,
+                                                "run_budget_usd": 1})
+        assert admission is not None and admission.decision is cg.Decision.HOLD
+        with pytest.raises(cg.Held):
+            await cg.before_run(launch=_launch(), run_kind="processor")
+        assert seen == [False, False]
+    asyncio.run(check())
+
+
 def test_an_advisor_consult_returns_no_advice_and_does_not_run_again(monkeypatch, tmp_path):
     from looper.agents import advisor
     from looper.agents.advisor import Brief, Source
@@ -228,6 +285,34 @@ def test_an_advisor_consult_returns_no_advice_and_does_not_run_again(monkeypatch
         done, spent = await advisor._run(child, spawn_id=1, brief=brief, settings=SimpleNamespace(), cap_usd=1,
                                          runtime_root=tmp_path, claude_bin="claude", parse=lambda text: text)
         assert calls == [1] and spent == 0
+        assert done.failure is CallFailure.UNAVAILABLE
+        assert str(done.reason).startswith("usage window on hold until ")
+    asyncio.run(check())
+
+
+def test_an_advisor_retry_stops_when_the_usage_window_holds(monkeypatch, tmp_path):
+    from looper.agents import advisor
+    from looper.agents.advisor import Brief, Source
+    from looper.agents.model_call import CallFailed, CallFailure, Execution
+    from looper.agents.spawn import ChildRun, SpawnKind
+    from looper.agents.system_prompt import SystemPrompt
+
+    calls = []
+
+    async def boom(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return CallFailed(execution=Execution(None, cost_usd=0.0, failure=CallFailure.RUNTIME, reason="runtime"),
+                              failure=CallFailure.RUNTIME, reason="runtime")
+        raise cg.Held(NOW + timedelta(minutes=5), "quota_cooldown")
+
+    async def check():
+        monkeypatch.setattr(advisor, "call", boom)
+        child = ChildRun(SpawnKind.ADVISOR, SystemPrompt("prompt"), "ask", 30)
+        brief = Brief("task-1", "step-1", 1, Source.OPTIONAL)
+        done, spent = await advisor._run(child, spawn_id=1, brief=brief, settings=SimpleNamespace(), cap_usd=1,
+                                         runtime_root=tmp_path, claude_bin="claude", parse=lambda text: text)
+        assert calls == [1, 1] and spent == 0
         assert done.failure is CallFailure.UNAVAILABLE
         assert str(done.reason).startswith("usage window on hold until ")
     asyncio.run(check())

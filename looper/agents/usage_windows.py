@@ -39,7 +39,7 @@ class HoldReason(str, Enum):
 
 
 class ScheduleDeferred(Exception):
-    """A manual firing waited. The schedule view carries the same hold; nothing was started."""
+    """A firing the operator did not start waited. Nothing was started."""
 
     def __init__(self, until: datetime, reason: str):
         self.until = until
@@ -86,6 +86,11 @@ def note_schedule(schedule_id: str, *, until: datetime, reason: str, reset_known
 
 def clear_schedule(schedule_id: str) -> None:
     _deferred.pop(schedule_id, None)
+
+
+def noted_schedule(schedule_id: str) -> dict[str, Any] | None:
+    """The deferral note, including after ``until`` has passed. The schedule view hides an expired one."""
+    return _deferred.get(schedule_id)
 
 
 def schedule_hold(schedule_id: str, *, now: datetime | None = None) -> dict[str, Any] | None:
@@ -227,13 +232,24 @@ def notice_text(provider_id: str, hold: Hold) -> str:
     return f"用量窗口暂停：账号 {provider_id} 的 {label} 重置时间未知，最多等待到 {when}。后台工作会等待。"
 
 
+def _notice_claim(provider_id: str, hold: Hold) -> tuple[str, str]:
+    """One ``system_settings`` row per account and window (or the failure signal).
+
+    The value is ``until`` when the reset is known, and the local date when it is not, so a new
+    ``observed_at`` on that day does not send another notice or insert another row.
+    """
+    key = f"{_CLAIM}{provider_id}:{hold.window or 'failure'}"
+    value = hold.until.isoformat() if hold.reset_known else hold.until.astimezone().date().isoformat()
+    return key, value
+
+
 async def notify_hold(provider_id: str | None, hold: Hold | None) -> None:
-    """One direct message per (account, window or failure, until). A missing target is logged once."""
+    """One direct message per account and window (or failure signal). A missing target is logged once."""
     if not provider_id or hold is None or not notifies(hold):
         return
-    key = f"{_CLAIM}{provider_id}:{hold.window or 'failure'}:{hold.until.isoformat()}"
+    key, value = _notice_claim(provider_id, hold)
     try:
-        claimed = await system_settings.claim(key, "sent")
+        claimed = await system_settings.claim(key, value)
     except Exception:
         logger.exception("could not claim the usage-window notice for %s", provider_id)
         return
