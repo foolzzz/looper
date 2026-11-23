@@ -126,6 +126,8 @@
  "manager_metrics.get": "inside",
  "manager_metrics_settings.get": "inside",
  "manager_metrics_settings.update": "inside",
+ "manager_persona.get": "inside",
+ "manager_persona.update": "inside",
  "manager_session.get": "inside",
  "manager_session.select_profile": "inside",
  "manager_templates.delete": "inside",
