@@ -193,3 +193,29 @@ def test_off_does_not_check_or_write_measurements(monkeypatch, tmp_path):
             assert "session_bound" not in metadata
             assert tuple(await pool.fetchrow("SELECT context_tokens, last_turn_cost_usd FROM agent_sessions")) == (None, None)
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_hidden_delivery_followup_keeps_the_budget_reply_and_metrics(monkeypatch, tmp_path):
+    from looper.agents.delivery_guard import FOLLOWUP_MESSAGE
+
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, "_delivery_guard_enabled", True)
+        monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+        await session_budget.update({"turn_budget_usd": 0.01})
+        async with manager(pool, tmp_path, monkeypatch, context=100) as chat:
+            script = tmp_path / "claude.py"
+            body = script.read_text()
+            body = body.replace("answer = 'handoff facts' if text.startswith('[HANDOFF]') else 'answer'",
+                                f"answer = 'answer' if text == {FOLLOWUP_MESSAGE!r} else ''")
+            body = body.replace("cost += 0.1", f"cost += 0.1 if text == {FOLLOWUP_MESSAGE!r} else 0")
+            body = body.replace("over_cap = False and text != '/compact'",
+                                f"over_cap = text == {FOLLOWUP_MESSAGE!r}")
+            script.write_text(body)
+            assert await chat.ask() == [session_budget.over_cap_reply(0.01)]
+            await asyncio.gather(*turn_metrics._pending)
+            records = await pool.fetch("SELECT input_text, metadata FROM llm_records ORDER BY id")
+            assert len(records) == 2 and records[1]["input_text"] == FOLLOWUP_MESSAGE
+            assert json.loads(records[1]["metadata"])["turn_metrics"]["delivery"] == "over_cap"
+            assert not chat.manager._turn_lock.locked()
+
+    run_db(check, monkeypatch, timeout=30)

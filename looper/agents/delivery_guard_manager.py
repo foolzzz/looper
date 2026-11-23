@@ -42,7 +42,7 @@ def metadata(prepared: Prepared, *, reminders: int = 0) -> dict[str, Any]:
 
 async def run(manager: ManagerAgent, token: TurnToken, prepared: Prepared) -> str:
     """One user reply, with separately recorded hidden turns and the original cancellation token."""
-    from .tiers.manager import NoReply, RunState, TurnFailed
+    from .tiers.manager import NoReply, OverCap, RunState, TurnFailed
     from .tiers.turn_token import TurnStopped
 
     try:
@@ -65,6 +65,8 @@ async def run(manager: ManagerAgent, token: TurnToken, prepared: Prepared) -> st
         except TurnStopped:
             raise
         except Exception as exc:
+            if isinstance(exc, OverCap) and prepared.session.budget is not None:
+                raise
             ending = ending_for(exc)
     token.check()
     token.settle()
