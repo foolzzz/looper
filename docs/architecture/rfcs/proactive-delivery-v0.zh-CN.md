@@ -83,18 +83,21 @@
 - **只判断一次：** 写判断用 `ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL`：已有判断的行原样返回（重试沿用第一次的判断）；度量在送达层打开之前记下、还没有判断的行补上判断。
 - **关闭时：** 送达层一行都不写；度量是否写回执由它自己的开关决定。
 
-## 5. 定时任务和订阅的节制字段（第二个 PR）
+## 5. 定时任务和订阅的节制字段
 
-产品设计给定时任务和订阅加四个节制字段。和现有字段的对应：
+产品设计给定时任务和订阅加四个节制字段。订阅本身是 `kind = subscription` 的定时任务，所以新列只加在 `schedules` 上（命名迁移 `schedule_throttle`：两列可空或有默认值；`active_hours` 的检查和放宽后的 `schedule_runs` 状态检查以 `NOT VALID` 加上，提交后在线校验）。四个字段在代码里是一个类型化视图 `ScheduleThrottle`（`looper/agents/schedule_throttle.py`），API 的定时任务视图里是 `throttle`：
 
-| 字段 | 落在哪里 |
-|---|---|
-| 生效时段 | 新列 `schedules.active_hours`（`HH:MM-HH:MM`，按定时任务自己的时区，空即全天）：时段外的触发跳过、不调模型；时段外才产生的推送由第 1.2 节第 3 条进摘要 |
-| 只在空闲时运行 | 新列 `schedules.idle_only`：默认 Manager 有回合在进行时跳过这次触发 |
-| 允许不说话 | 订阅已有：静默词 `quiet_word`（规则里「不能静默」的由代码兜底）；判断里是 `silent` |
-| 触发前检查 | 定时任务已有的 `gate_command`；订阅已有：窗口里没有选中的事件时以 `skipped_gate` 结束，不调模型 |
+| 字段 | 落在哪里 | 行为 |
+|---|---|---|
+| 生效时段 | 新列 `active_hours`（`HH:MM-HH:MM`，按定时任务自己的时区，可跨午夜，空即全天） | 按时或补跑的触发，触发时刻或此刻在时段外就不触发：不记运行、`last_fired_at` 不变、`next_fire_at` 移到下一次，和时间规则本身没触发一样；之后接入订阅推送时，时段外才产生的推送由第 1.2 节第 3 条进摘要 |
+| 只在空闲时运行 | 新列 `idle_only`（默认 `false`） | 定时任务所属的 Manager 正在回复消息（`ManagerAgent.busy`）时，这次触发记 `skipped_busy`，下一次再试；同一天重复的计在同一条运行上 |
+| 允许不说话 | 已有字段，`allows_silence` | 订阅：静默词 `quiet_word`（规则里「不能静默」的由代码兜底）；其余：`notify` 不是 `always` |
+| 触发前检查 | 已有字段，`pre_check` | 定时任务：`gate_command`（没有输出即 `skipped_gate`）；订阅：窗口里没有选中的事件时以 `skipped_gate` 结束；都不调模型 |
 
-订阅本身是 `kind = subscription` 的定时任务，所以新列只加在 `schedules` 上。
+- 「立即运行」不受节制：那一刻是用户要的。
+- 两项都默认关闭：没设的定时任务触发、运行上下文、通知和导出都和原来一样。
+- 入口：API、生成的命令行和配置导入导出（导出只在设了时带上）；仪表盘只显示 `skipped_busy`，表单暂不编辑这两项；Manager 的 `looper_schedules` 不列它们（工具说明不变）。
+- 模型可见的只有一处：开了 `idle_only` 的定时任务，下一次运行的上下文里「最近的运行」可能出现「跳过（管家正在回复消息）」，和已有的跳过原因同一格式。
 
 ## 6. 不在 v0
 
