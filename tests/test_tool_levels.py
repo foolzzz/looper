@@ -148,6 +148,8 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    # Confirmation, including save-and-confirm, and retry can commit to the operator's vault.
+    **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
     "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters
     "cost_guard.update": INSIDE,  # changes only Looper's observation configuration
     # Stores permission only; the runner executes checks separately after Worker success.

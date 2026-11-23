@@ -21,10 +21,12 @@ bounded background tasks and failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature, successfully sent delivery reply rates
-for 1–30 days. Housekeeping retains proactive rows for 90 days. Proactive delivery
-recording owns the table's single named migration:
+for 1–30 days. Housekeeping retains proactive rows for 90 days whether or not
+metrics are on, because delivery writes the same table while that switch is off.
+Proactive delivery recording owns the table's single named migration:
 one row per message, with the send receipt in `outcome`. `source` includes
-`completion` and `user_reminder`; `chat_kind` is `direct` or `group`.
+`completion`, `user_reminder` and `morning_brief` (the digest itself); `chat_kind`
+is `direct` or `group`.
 Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
 idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries update
 only the receipt, preserving the first decision. Nullable `decision`, `reason`,
@@ -2995,8 +2997,9 @@ only the operator's confirmation of its exact content lets Looper write it
 into the vault's memory folder
 ([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
 PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
-part is the foundation: the tables, the vocabulary, the setting and the
-reads. Nothing proposes, drafts, confirms or writes a candidate yet.
+part includes the foundation and the confirmed write path. Sources, drafting,
+pushes, private-chat replies and the dashboard memory page follow separately.
+The write path adds no model-visible prompt, contract or tool.
 
 - **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
   `M-0042`; its kind, state and reason, the least trusted class of its
@@ -3041,6 +3044,49 @@ reads. Nothing proposes, drafts, confirms or writes a candidate yet.
   the database directly, refused inside an agent run (exit codes: 0, 1 none
   found or a check failed, 2 usage, 3 not configured, 4 refused, 5 no such
   candidate, 6 database unusable).
+- **Operator actions:** `/api/v1/memory/confirm`, `confirm_many`, `reject`,
+  `edit`, `retry`, `revive` and `delete` are operator-only. Confirmation
+  names the current content hash; a stale hash is a conflict. Batch
+  confirmation returns a result for each selected item. Editing stores a
+  new revision and clears confirmation; saving and confirming it is one
+  transaction. Only the dashboard and the operator's direct-chat handler may
+  confirm. OpenAPI marks confirmation and editing `x-looper-cli: false`, so
+  the official `loopercli` generates no confirmation or save-and-confirm command.
+  The CLI adds `looper memory reject | retry | delete`, never
+  `confirm`; exit code 7 means the state does not allow the action. Deleting
+  a candidate leaves its fingerprint as a tombstone and leaves vault notes
+  alone.
+- **Writing** (`looper/agents/memory_write.py`): `looper serve` polls and
+  wakes after confirmation or retry. With `memory_write` absent or disabled
+  it writes nothing. A PostgreSQL session advisory lock per git repository
+  serializes writers across processes; the vault's existing thread lock
+  also prevents interleaving with direct vault writes. After claiming one
+  candidate it checks the settings, branch, absence of an ongoing git
+  operation and cleanliness of the target paths; unrelated dirty files
+  stay as they are. A new `looper/memory/M-0042-a<n>` branch and worktree
+  under the configured `worktree_root` hold the changes, with descriptors
+  that refuse links and atomic file replacements. Only explicit paths are
+  staged and committed, using the vault's author and hooks. The subject
+  starts with the configured prefix and identifies the candidate; the body
+  records its source and confirmation, followed by exact candidate,
+  revision, attempt and content-hash trailers. Before fast-forwarding, and
+  again afterwards, the writer checks the committed paths and bytes against
+  the confirmed operations. A branch advance outside those paths can be
+  rebased; touching a target requires new drafting and confirmation.
+- **Failure and recovery:** a blocked write keeps its confirmation and waits
+  for the operator's retry; a content conflict clears confirmation and
+  requests redrafting once. No write stashes, resets or commits somebody
+  else's changes. Startup checks interrupted writes against typed trailers
+  in the latest 500 branch commits and verifies their content before marking
+  them written. Unmerged attempts retry at most three times; cleanup removes
+  only owned memory worktrees and branches under the configured root.
+  Cleanup failure after a successful merge is a warning, and later
+  housekeeping retries it. Git failures use fixed reasons, with no git
+  output in logs. Existing git timeouts and index-lock retries apply.
+- **Known limits:** unsaved editor buffers do not block a write and a later
+  editor save can overwrite it; the content hash and commit trailers allow
+  checking what was written. An agent with a shell has the same system-user
+  access to the vault; this supported write path does not isolate that user.
 
 ### Project skills: skills a project writes
 
@@ -6285,7 +6331,8 @@ again keeps its first decision and the channel's receipt lands on the same
 row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
 `sent`, `rejected` or `unknown`, `sent_at`, `external_id`) on the same row as
-the metrics. Off, the layer writes nothing. Wired so far: gate
+the metrics. A later try of the same message replaces a `rejected` receipt.
+Off, a send point that switch controls writes nothing. Wired so far: gate
 reminders, task notices to Lark and Telegram, subscription digest pushes, and
 initial and new-evidence intent pushes. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
 user is `blocking`, like its reminders. The channel checks a task-end notice
@@ -6305,9 +6352,46 @@ the next poll. Deferred or dropped intents retain their post without claiming
 it or consuming a send attempt, and uncertain sends are never retried. Final
 intent edits and fallback replies, subscription alerts and failure notices,
 task progress, completion turns, the dashboard chat and other senders retain
-their existing paths. Keep the switch off until the briefing can read deferred messages; digest consumption
-and the delivery settings UI are not delivered here.
+their existing paths. The delivery settings UI is not delivered here.
 Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+A morning brief (`source` `morning_brief`) is sent uncounted and is never
+deferred: it is the digest. The brief has its own switch and still calls `deliver`
+while the delivery switch is off.
+
+### Morning brief
+
+On a workday (Monday to Friday; a weekday holiday still sends), at
+`morning_brief.time` (09:15 by default) in `user.timezone` (else the server's
+zone, `turn_context.zone()`), one brief goes to each enabled bot's operator
+direct chat. It names what waits (the needs-you summary), reminders due that
+local day, and proactive messages deferred into the digest (`decision`
+`digest`). Every brief reads from the first attempt's dates (Monday also
+Saturday and Sunday) through the day being sent, except digest rows already
+recorded by id in `morning_brief_consumed`. The claim stores the ids that
+read returned, in that same write. A sent or uncertain brief records them in
+the same transaction as its row. A refusal records none and clears the stored
+ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
+that stops before the record is `uncertain` on restart, and that recovery
+consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
+insert had not committed is therefore still read once, on the next brief.
+`consumed_until` is the check time, not a watermark. Every section empty means
+nothing is sent. The switch, whether the
+channel is enabled and who the operator is are read again after the summary is
+collected and again immediately before the post. The switch is read again after
+the operator
+query returns. A fresh claim that then fails that check is deleted; a claim
+that continued a refusal is put back as that refusal, with the attempt count
+it had. The switch
+`morning_brief.enabled` is off by default and operator-only
+(`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
+switch and does nothing else. One `morning_briefs` row per local date and chat
+makes a restart and a second server send it at most once. A send that stops
+mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
+decision and the channel receipt share one `proactive_deliveries` row. A later
+successful try replaces a rejected receipt on that row (`outcome`, `sent_at`,
+`external_id`). A receipt already recorded as `sent` or `unknown` keeps those
+three fields. Design:
+[morning brief RFC](rfcs/morning-brief-v0.zh-CN.md).
 
 ### Card buttons
 

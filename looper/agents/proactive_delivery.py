@@ -2,24 +2,26 @@
 typed inputs, so every rule has a table-driven test and every send point decides the same way.
 
 A proactive message is one Looper sends without being asked in that moment: a gate reminder, a task notice, a
-subscription's push, an intent, a completion turn, a reminder the user set. Before one goes out, its send point
-calls ``deliver`` with what it is (``Delivery``), the operator's policy (``DeliveryPolicy``) and the chat's state
-now (``DeliveryState``), and gets a ``Decision``: an outcome and the one rule that settled it, so "why didn't you
-tell me" has an answer. The rules, first match wins:
+subscription's push, an intent, a completion turn, a reminder the user set, the morning brief. Before one goes
+out, its send point calls ``deliver`` with what it is (``Delivery``), the operator's policy (``DeliveryPolicy``)
+and the chat's state now (``DeliveryState``), and gets a ``Decision``: an outcome and the one rule that settled
+it, so "why didn't you tell me" has an answer. The rules, first match wins:
 
 1. a source that said it has nothing to tell (``silent``): dropped;
-2. a gate that holds back a task, or a reminder the user set themselves: sent, never throttled, not counted;
-3. outside the source's own active hours (a schedule's or subscription's throttle field): into the digest;
-4. the user wrote in this chat in the last ``recent_reply`` (5 minutes): sent, not counted;
-5. inside the quiet hours (22:00–08:00 in the user's timezone): into the digest;
-6. a direct chat that already had ``dm_daily_cap`` (5) counted messages today: into the digest;
-7. otherwise sent, and counted when the chat is direct.
+2. the morning brief (``morning_brief``), which is the digest: sent, never throttled, not counted;
+3. a gate that holds back a task, or a reminder the user set themselves: sent, never throttled, not counted;
+4. outside the source's own active hours (a schedule's or subscription's throttle field): into the digest;
+5. the user wrote in this chat in the last ``recent_reply`` (5 minutes): sent, not counted;
+6. inside the quiet hours (22:00–08:00 in the user's timezone): into the digest;
+7. a direct chat that already had ``dm_daily_cap`` (5) counted messages today: into the digest;
+8. otherwise sent, and counted when the chat is direct.
 
 The digest a deferred message goes into (``Decision.digest_date``) is named by the local date pushes resume on:
 the end of the next quiet hours (the next local day when there are none). With the system setting
-``delivery.enabled`` off (the default) no send point calls ``deliver``; on, a send point calls ``decide``, which
-reads the policy and the chat's count, decides and records the decision in ``proactive_deliveries`` once per
-message.
+``delivery.enabled`` off (the default) a send point that switch controls does not call ``deliver``. The morning
+brief has its own switch: it calls ``deliver`` when it runs, and ``decide`` records the decision only while
+``delivery.enabled`` is on. On, a send point calls ``decide``, which reads the policy and the chat's count,
+decides and records the decision in ``proactive_deliveries`` once per message.
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ DEFAULT_RECENT_REPLY = timedelta(minutes=5)
 
 
 # What a proactive message is, its send point: the source the proactive-message metrics record it by (one enum for
-# ``proactive_deliveries.source``).
+# ``proactive_deliveries.source``). ``morning_brief`` is the digest itself.
 DeliveryKind = ProactiveSource
 
 
@@ -201,6 +203,9 @@ def deliver(delivery: Delivery, policy: DeliveryPolicy, state: DeliveryState) ->
     """Decide what happens to ``delivery`` now (the module docstring has the rules)."""
     if delivery.silent:
         return Decision(Outcome.DROP, Reason.SILENT)
+    # The morning brief is the digest. Quiet hours and the daily cap must not defer it or count it.
+    if delivery.kind is DeliveryKind.MORNING_BRIEF:
+        return Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)
     if delivery.urgency in EXEMPT:
         return Decision(Outcome.SEND, Reason.URGENT)
     source = delivery.source
