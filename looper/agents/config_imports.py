@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..db.channel_configs import BUILTIN_CHANNEL_IDS
-from . import chat_settings, config_transfer, scheduler_settings
+from . import chat_settings, config_transfer, persona, scheduler_settings
 from .config_transfer import ConfigFileError
 from .library import LIBRARY_MAX_BYTES
 from .ops import ErrorCode, OpError
@@ -121,6 +121,7 @@ async def _run(data: dict[str, Any], *, apply: bool) -> config_transfer.Plan:
             raise ImportConflict(str(exc)) from None
     if apply:
         await scheduler_settings.load()  # a minimum interval in the file applies at once
+        await persona.load()  # the default Manager's persona applies at once
         await chat_settings.load()
     return plan
 
