@@ -84,6 +84,7 @@ class Skip(StrEnum):
     QUIET_HOURS = "quiet_hours"
     DAY_LIMIT = "day_limit"
     TOO_SOON = "too_soon"
+    MORNING_BRIEF_RECENT = "morning_brief_recent"
     NO_TARGET = "no_target"
     DM_CAP_FULL = "dm_cap_full"
     NO_NEW_ITEMS = "no_new_items"
@@ -94,6 +95,7 @@ class Need(StrEnum):
 
     COUNTS = "counts"  # today's checks and when the last began
     TARGET = "target"  # the operator's direct chat
+    MORNING_BRIEF = "morning_brief"  # when this target last received its morning brief
     DM_COUNT = "dm_count"  # what that chat was sent today
     ITEMS = "items"  # the new items
 
@@ -121,6 +123,7 @@ class IdleState:
     checks_today: int | Unread = UNREAD
     since_last_check: float | None | Unread = UNREAD  # seconds; None: no check before
     target: DmTarget | None | Unread = UNREAD
+    since_morning_brief: float | None | Unread = UNREAD
     dm_counted: int | Unread = UNREAD
     new_items: int | Unread = UNREAD
 
@@ -165,6 +168,10 @@ def plan(state: IdleState) -> IdlePlan:
         return _read(Need.TARGET)
     if state.target is None:
         return _skip(Skip.NO_TARGET)
+    if state.since_morning_brief is UNREAD:
+        return _read(Need.MORNING_BRIEF)
+    if state.since_morning_brief is not None and state.since_morning_brief < MIN_GAP.total_seconds():
+        return _skip(Skip.MORNING_BRIEF_RECENT)
     if state.dm_counted is UNREAD:
         return _read(Need.DM_COUNT)
     if state.dm_counted >= state.dm_cap:
@@ -446,7 +453,7 @@ async def _remember(check: Mapping[str, Any], text: str, *, failure: str | None 
 
 
 async def deliver_result(check: Mapping[str, Any], reply: str, *, post: PostFn, record_id: int | None = None,
-                         now: datetime | None = None) -> str:
+                         now: datetime | None = None, cancelled: Callable[[], bool] | None = None) -> str:
     """End a ``running`` check with the Manager's ``reply``: ``silent``; ``failed`` (``invalid_reply``,
     ``delivery_failed``, ``send_rejected``); ``deferred`` when the delivery layer says digest; or ``sent`` /
     ``uncertain`` after the send (``post``: ``ChannelRegistry.post``). Answers the state the check ended in."""
@@ -469,6 +476,9 @@ async def deliver_result(check: Mapping[str, Any], reply: str, *, post: PostFn, 
         logger.warning("idle check %s: the delivery decision failed", check_id, exc_info=True)
         await settle(check_id, "failed", reason="delivery_failed", reply=reply, record_id=record_id)
         return "failed"
+    if cancelled is not None and cancelled():
+        await settle(check_id, "preempted", record_id=record_id)
+        return "preempted"
     if decided.outcome is not delivery.Outcome.SEND:
         await settle(check_id, "deferred", reply=reply, record_id=record_id)
         return "deferred"
@@ -534,14 +544,13 @@ class IdleCheckService:
         self.skips: Counter[Skip] = Counter()
         self._logged: dict[Skip, date] = {}
 
+    async def recover(self) -> None:
+        """Before bus replay, fail checks the previous process left running. A failed write blocks startup."""
+        if count := await store.settle_running("restart", manager_id=MANAGER_ID):
+            logger.info("idle checks: %d check(s) left running by the server before this one failed (restart)", count)
+
     async def start(self) -> None:
-        """Checks a server before this one left ``running`` were not finished: they fail as ``restart``."""
-        try:
-            if count := await store.settle_running("restart", manager_id=MANAGER_ID):
-                logger.info("idle checks: %d check(s) left running by the server before this one failed (restart)",
-                            count)
-        except Exception:
-            logger.warning("idle checks: could not settle the checks of the server before", exc_info=True)
+        """Start ticks after recovery and the Manager consumers are ready."""
         self._stopping.clear()
         self._task = asyncio.create_task(self._loop(), name="idle-checks")
 
@@ -614,6 +623,11 @@ class IdleCheckService:
                                  since_last_check=None if last is None else (now - last).total_seconds())
             elif decided.need is Need.TARGET:
                 state = replace(state, target=await operator_dm_target())
+            elif decided.need is Need.MORNING_BRIEF:
+                last = await conn.fetchval(
+                    "SELECT max(updated_at) FROM morning_briefs WHERE channel_id = $1 AND chat = $2 "
+                    "AND status = 'sent'", state.target.channel_id, state.target.chat)
+                state = replace(state, since_morning_brief=None if last is None else (now - last).total_seconds())
             elif decided.need is Need.DM_COUNT:
                 state = replace(state, dm_counted=await db_deliveries.counted_on(
                     conn, state.target.channel_id, state.target.chat, local_date))

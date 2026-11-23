@@ -171,7 +171,12 @@ class SessionRouter:
 
         for wake in queue.take_idle_checks():
             # A failed write leaves the wake unacknowledged; restart marks its running row failed.
-            await idle_checks.settle(wake.payload["check_id"], "preempted")
+            try:
+                await idle_checks.settle(wake.payload["check_id"], "preempted")
+            except Exception as exc:
+                logger.warning("could not void idle check %s; restart will recover it: %s",
+                               wake.payload["check_id"], exc, exc_info=True)
+                continue
             if self._agent._bus is not None:
                 self._agent._bus.settle_handled(wake)
 

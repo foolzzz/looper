@@ -122,6 +122,7 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
     async def check(pool):
         await pool.execute(
             memory.DROP_MEMORY +  # memory candidates point at leads: a database without leads predates them too
+            "DROP TABLE intent_final_notices; DELETE FROM schema_migrations WHERE name = 'intent_final_notices'; "
             "DROP TABLE intent_posts, intent_sources, intents, intent_alert_senders, message_chat_projects, "
             "intent_type_projects, intent_type_versions, intent_types, message_lead_people, message_lead_sources, "
             "message_leads; ALTER TABLE source_chats DROP CONSTRAINT source_chats_extraction_check, "

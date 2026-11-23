@@ -61,8 +61,11 @@ from .wait_service import WaitService
 from .ledger_reconciler import LedgerReconciler
 from .source_service import SourceService, own_bot_app_ids
 from .intent_push import IntentPushService
+from .memory_write import MemoryWriteService
+from .memory_push import MemoryPushService
 from .reminders import ReminderService
 from .idle_checks import IdleCheckService, PostFn
+from .morning_brief import MorningBriefService
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
@@ -78,14 +81,14 @@ from .tiers.worker import WorkerConfig, WorkerPool
 logger = logging.getLogger(__name__)
 
 
-async def _start_idle_checks(bus: MessageBus, fleet: ManagerFleet, drain: DrainState, *, post: PostFn) -> IdleCheckService:
-    """Start after the Managers; resolve the current default after a settings-driven replacement too."""
+async def _prepare_idle_checks(bus: MessageBus, fleet: ManagerFleet, drain: DrainState, *, post: PostFn) -> IdleCheckService:
+    """Recover before bus replay; callbacks also follow a settings-driven Manager replacement."""
     from .tiers import idle_check_turn
 
     idle_check_turn.configure(post)
     service = IdleCheckService(bus, idle_for=lambda: fleet.default.idle_for(),
                                manager_running=lambda: fleet.is_running("manager"), drain=drain)
-    await service.start()
+    await service.recover()
     return service
 
 
@@ -769,6 +772,8 @@ async def _run_agent_system_watched(
     advisory_checks: asyncio.Task[None] | None = None
     http_server: AgentHTTPServer | None = None
     control = None
+    memory_writer: MemoryWriteService | None = None
+    memory_push_service: MemoryPushService | None = None
     mode = ShutdownMode.END_RUNS
     if ops.keeper_mode is KeeperMode.ON:
         with startup.measure("lease"):
@@ -979,6 +984,9 @@ async def _run_agent_system_watched(
             completion_events.set_scheduler(scheduler)
             source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
             intent_push_service = IntentPushService(registry, drain=drain)
+            memory_writer = MemoryWriteService(runtime_root=runtime_root, drain=drain)
+            memory_push_service = MemoryPushService(registry, drain=drain, dashboard_url=dashboard_url)
+            drain.add_source(lambda: {"starting": memory_writer.drain_waiting()})
             reminder_service = ReminderService(registry, drain=drain)
             ledger_reconciler = LedgerReconciler()
             supervisor.register(task_router)
@@ -1013,6 +1021,7 @@ async def _run_agent_system_watched(
             scheduler.manager_busy = lambda manager_id: bool((agent := fleet.get(manager_id)) is not None
                                                              and agent.busy)
             await fleet.load()
+            morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
             from .completion_service import CompletionService
             completion_service = CompletionService(
                 bus=bus, manager_running=fleet.is_running, drain=drain,
@@ -1088,6 +1097,7 @@ async def _run_agent_system_watched(
                 startup_steps=startup.steps,
                 loop_watch=loop_watch,
             )
+            http_server._memory_writer = memory_writer
         fence.http_server = http_server
         with startup.measure("http"):
             await http_server.start()
@@ -1108,6 +1118,7 @@ async def _run_agent_system_watched(
 
             if interrupted := await fail_interrupted():
                 logger.warning("%d consult(s) of the advisor were interrupted by the restart and failed", interrupted)
+            idle_check_service = await _prepare_idle_checks(bus, fleet, drain, post=registry.post)
             await supervisor.start_all()
             await fleet.sweep()
             await carry_on_tasks(task_router, left_running)
@@ -1127,9 +1138,12 @@ async def _run_agent_system_watched(
         # Sources that are off (the default) cost one query per tick.
         await source_service.start()
         await intent_push_service.start()
+        await memory_writer.start()
+        await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
-        idle_check_service = await _start_idle_checks(bus, fleet, drain, post=registry.post)
         triage_background.configure(registry.post)
+        await idle_check_service.start()
+        await morning_brief_service.start()  # idle while the morning brief is off
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
@@ -1198,8 +1212,11 @@ async def _run_agent_system_watched(
             await completion_service.stop()
             await source_service.stop()
             await intent_push_service.stop()
+            await memory_push_service.stop()
+            await memory_writer.stop()
             await reminder_service.stop()
             await idle_check_service.stop()
+            await morning_brief_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()
             await scheduler.stop()
@@ -1235,6 +1252,10 @@ async def _run_agent_system_watched(
             with contextlib.suppress(asyncio.CancelledError):
                 await advisory_checks
         try:
+            if memory_push_service is not None:
+                await memory_push_service.stop()
+            if memory_writer is not None:
+                await memory_writer.stop()
             if http_server is not None:
                 await http_server.stop()
         finally:

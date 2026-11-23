@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from looper.agents import idle_check_settings, idle_checks, proactive_delivery, serve
+from looper.agents import idle_check_settings, idle_checks, lanes_settings, proactive_delivery, serve
 from looper.agents.bus import MessageBus
 from looper.agents.drain import DrainState
 from looper.agents.message import MessageType
@@ -49,7 +50,8 @@ def test_enabling_idle_checks_reaches_the_next_tick_of_the_service_started_by_se
         async def no_send(*args, **kwargs):
             raise AssertionError("this startup test must not send a message")
 
-        service = await serve._start_idle_checks(bus, fleet, DrainState(), post=no_send)
+        service = await serve._prepare_idle_checks(bus, fleet, DrainState(), post=no_send)
+        await service.start()
         try:
             await until(lambda: service.skips[idle_checks.Skip.OFF] > 0, "the first disabled tick")
             assert await pool.fetchval("SELECT count(*) FROM idle_checks") == 0
@@ -79,7 +81,7 @@ def test_serve_service_tracks_the_current_default_manager_and_respects_drain(mon
         async def no_send(*args, **kwargs):
             raise AssertionError("this startup test must not send a message")
 
-        service = await serve._start_idle_checks(bus, fleet, drain, post=no_send)
+        service = await serve._prepare_idle_checks(bus, fleet, drain, post=no_send)
         try:
             assert service._idle_for() == 1.0
             fleet.default = SimpleNamespace(idle_for=lambda: 3600.0)
@@ -120,4 +122,75 @@ def test_turning_lanes_off_after_enabling_skips_checks_and_logs_once_per_day(mon
         finally:
             await bus.shutdown()
 
+    run_with_channel_configs(check, monkeypatch)
+
+
+def test_a_graceful_stop_mid_check_is_recovered_before_the_restart_replays_it(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    from looper.agents.supervisor import AgentSupervisor
+    from looper.agents.tiers import idle_check_turn
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import idle_checks as store
+    from tests.api_manager_support import USAGE, _manager
+    from tests.fake_model_api import ResponseScript, text_events
+
+    monkeypatch.setattr(lanes_settings, "enabled", lambda: True)
+    monkeypatch.setattr(proactive_delivery, "load_policy", lambda: proactive_delivery.DeliveryPolicy(
+        timezone=timezone.utc, quiet_hours=None))
+
+    async def check(pool):
+        post = AsyncMock()
+        monkeypatch.setattr(idle_check_turn, "_post", post)
+        held = ResponseScript(events=text_events("Do not send after restart", usage=USAGE), gate=asyncio.Event())
+        async with _manager(pool, tmp_path, monkeypatch, [held]) as chat:
+            item = {"section": "logins", "key": "login:synthetic", "since": None,
+                    "title": "Synthetic login", "facts": {}}
+            check_id = await store.insert_running(pool, manager_id="manager",
+                local_date=datetime.now(timezone.utc).date(), items=[item], channel_id="channel-lark",
+                chat="ou_idle_synthetic")
+            wake = idle_checks.due_envelope(check_id)
+            await chat.bus.start()
+            await chat.manager.start(chat.bus)
+            await chat.bus.publish(wake)
+            await asyncio.wait_for(held.gate_reached.wait(), 15)
+            await chat.manager.stop()
+            await chat.bus.shutdown()
+            assert (await store.get(check_id))["state"] == "running"
+
+            bus = MessageBus(runtime_root=tmp_path)
+            manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+            supervisor = AgentSupervisor(bus, tmp_path)
+            supervisor.register(manager)
+            fleet = SimpleNamespace(default=manager, is_running=lambda _: True)
+            service = await serve._prepare_idle_checks(bus, fleet, DrainState(), post=post)
+            assert service._task is None  # no tick can create a row before replay
+            try:
+                await supervisor.start_all()
+                await until(lambda: wake.message_id in bus.journal._delivered, "replayed wake settled")
+                row = await store.get(check_id)
+                assert (row["state"], row["reason"], row["items"]) == ("failed", "restart", [item])
+                assert await store.mentioned_items(pool, "manager", datetime.now(timezone.utc) - timedelta(days=7)) == []
+                assert len(chat.model.requests) == 1
+                post.assert_not_awaited()
+            finally:
+                await supervisor.stop_all()
+    run_with_channel_configs(check, monkeypatch)
+
+
+def test_idle_recovery_failure_blocks_startup_before_replay(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    from looper.db import idle_checks as store
+
+    async def check(pool):
+        monkeypatch.setattr(store, "settle_running", AsyncMock(side_effect=RuntimeError("synthetic recovery failure")))
+        bus = MessageBus(runtime_root=tmp_path)
+        fleet = SimpleNamespace(default=SimpleNamespace(idle_for=lambda: 3600.0), is_running=lambda _: True)
+        try:
+            with pytest.raises(RuntimeError, match="synthetic recovery failure"):
+                await serve._prepare_idle_checks(bus, fleet, DrainState(), post=AsyncMock())
+            assert not bus._started
+        finally:
+            await bus.shutdown()
     run_with_channel_configs(check, monkeypatch)

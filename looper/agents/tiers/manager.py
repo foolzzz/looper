@@ -74,7 +74,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook, status_card, turn_metrics
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from .. import delivery_guard_manager as delivery_guard
 from ..delivery_guard import GuardState
@@ -407,7 +407,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "attention_enabled", "route_to_gate", "route_memory", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message", "session_budget",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
@@ -1183,7 +1183,8 @@ class ManagerAgent:
             if self.stop_chat is not None:
                 from ..managers import chat_stop_reply
 
-                summary = await self.stop_chat(origin["channel_id"] or channel or "", chat or "", via=channel or "")
+                summary = await self.stop_chat(origin["channel_id"] or channel or "", chat or "", via=channel or "",
+                    sender_id=origin["sender"] if not origin["group"] else None)
                 reply = chat_stop_reply(summary)
                 # Only an empty fleet lookup falls back to the receiving runtime's legacy idle answer.
                 if summary.state == "enabled" and not summary.matched and not self.can_interrupt:
@@ -1196,8 +1197,8 @@ class ManagerAgent:
             if not self.can_interrupt:
                 await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
                 return
-            tokens = self._turns.live_for(origin["channel_id"] or channel, chat) if channel and chat else []
-            tokens.extend(idle_check_turn.stop_tokens(self, envelope, tokens))
+            tokens = self.live_for_chat(origin["channel_id"] or channel, chat,
+                sender_id=origin["sender"] if not origin["group"] else None) if channel and chat else []
             stopped = 0
             for token in tokens:
                 result = await self.stop_turn(token.message_id, via=channel)
@@ -1372,7 +1373,7 @@ class ManagerAgent:
                     self._handling = None
                     self._last_activity = self._clock()
                     if envelope.message_type in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE,
-                                                  MessageType.IDLE_CHECK_DUE):
+                                                  MessageType.IDLE_CHECK_DUE) and not self._router.holds_completion(envelope):
                         self._sessions[MAIN_SESSION].turn_ended_at = self._clock()
                 # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
                 if not self._running:
@@ -1699,6 +1700,10 @@ class ManagerAgent:
             if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
+            if (memory := await token.step("route_memory", memory_routing.route(envelope))) is not None:
+                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                self._acting(token)
+                return Prepared(action=lambda: self._answer_intent(envelope, memory))
             try:
                 intent = await token.keep("route_intent", self._route_intent(envelope), 60)
                 if intent is not None:
@@ -2135,9 +2140,9 @@ class ManagerAgent:
         """The live turn of a message, by the envelope's id or the web page's own."""
         return self._turns.find(message_id)
 
-    def live_for_chat(self, channel_id: str, chat_id: str) -> list[TurnToken]:
+    def live_for_chat(self, channel_id: str, chat_id: str, *, sender_id: str | None = None) -> list[TurnToken]:
         """Snapshot this bot/chat's live turns using its full channel identity."""
-        return self._turns.live_for(channel_id, chat_id)
+        return background_turn.live_tokens(self, channel_id, sender_id, self._turns.live_for(channel_id, chat_id))
 
     def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
         """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""

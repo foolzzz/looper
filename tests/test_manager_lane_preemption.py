@@ -222,7 +222,8 @@ def test_route_arrival_uses_target_runtime_and_retains_mid_turn_merge_rules():
 
     async def run():
         ops = Mock()
-        agent = SimpleNamespace(ops=ops, can_interrupt=False, _mid_turn=SimpleNamespace(merge=AsyncMock(return_value=True)))
+        agent = SimpleNamespace(ops=ops, can_interrupt=False, _mid_turn=SimpleNamespace(merge=AsyncMock(return_value=True)),
+                                _router=SimpleNamespace(void_idle_checks=AsyncMock()))
         token = _token()
         session = SimpleNamespace(running_token=token, claude=SimpleNamespace(can_interrupt=True))
         assert not await lanes.route_arrival(agent, session, envelope)
