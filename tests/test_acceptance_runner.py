@@ -171,6 +171,15 @@ def test_protected_paths_compare_to_step_start_commit(tmp_path, monkeypatch):
         await seed(pool, work, [check])
         row = (await invoke(tmp_path, [check], work=work, base_commit=head))[-1]
         assert row["state"] == "failed" and row["protected_changed"] == ["code.txt"]
+        from looper.agents.acceptance_gate import gate
+        from looper.agents.tiers.planner_protocol import Decision, DecisionContext, ResultKind
+        from looper.agents.tiers.worker import _verification_snapshot
+        version = _verification_snapshot(str(work))
+        measured = gate([check], [row], (version["head"], version["content_sha256"]))
+        context = DecisionContext("s1", ResultKind.REVIEW, True, True, 0, evidence=measured)
+        assert not measured.passed
+        assert Decision.ACCEPT not in context.offered(adjudicated_accept=True)
+        assert Decision.REVIEW not in context.allowed()
     run_db(run, monkeypatch)
 
 
