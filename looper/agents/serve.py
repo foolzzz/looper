@@ -952,11 +952,12 @@ async def _run_agent_system_watched(
             await cost_guard.initialize(day_start=scheduler.day_start, pool=pool)
             bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
-            from . import advisor_alerts, outbound_hook
+            from . import advisor_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
             # So does the daily note that skill proposals wait for the operator (names and reasons, never content).
             from . import skill_proposal_notice
             skill_proposal_notice.configure(registry.notify, dashboard_url=dashboard_url)
+            usage_windows.configure(registry.notify)
             # So do the outbound review's block notices; its switch is read once here, and kept by its operations.
             outbound_hook.configure(registry.notify)
             await outbound_hook.enabled()

@@ -33,6 +33,14 @@ export interface AttentionSummary {
   sections: AttentionSection[];
 }
 
+/** Read the feature setting without collecting a summary or provoking an off-state 409. */
+export async function attentionSettingsGet(): Promise<{ enabled: boolean }> {
+  const result = await callV1<{ enabled: boolean }>("/api/v1/attention/settings_get", {});
+  if ("status" in result && result.status === "needs_confirmation")
+    throw new V1Error(202, "unavailable", "The server asked to confirm a read.");
+  return result as { enabled: boolean };
+}
+
 /** The summary now; a 409 `V1Error` while `attention.enabled` is off. */
 export async function fetchAttention(signal?: AbortSignal): Promise<AttentionSummary> {
   const result = await callV1<AttentionSummary>("/api/v1/attention/summary", {}, { signal });
