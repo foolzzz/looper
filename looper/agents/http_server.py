@@ -1069,6 +1069,13 @@ class AgentHTTPServer:
                     session_key=ops.session_for(authorization))}))
             except OpError as exc:
                 writer.write(_json_response(HTTP_503, {"error": str(exc)}))
+        elif path == f"{AGENT_API}outbound/check" and method == "POST":
+            # The outbound review's hook in the Manager's Claude Code (outbound_hook): its answer for one tool call.
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(payload, session_key=ops.session_for(authorization))))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}

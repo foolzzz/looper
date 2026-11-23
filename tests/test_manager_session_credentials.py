@@ -156,3 +156,104 @@ def test_group_credential_lists_and_calls_only_its_own_turns_tools(tmp_path: Pat
         assert "synthetic-operator-note" not in writer.data.decode()
 
     asyncio.run(run())
+
+
+def test_outbound_hook_configs_use_each_sessions_credential(tmp_path: Path) -> None:
+    ops, _ = _ops(tmp_path)
+    main = ops.tool_hook(tmp_path, "claude")
+    group = ops.tool_hook(tmp_path, "claude", session_key=GROUP)
+    configs = [json.loads(path.read_text()) for path in (tmp_path / ".local" / "outbound-hook").glob("*.json")]
+    assert {config["token"] for config in configs} == {
+        "main-token", ops.server_config(session_key=GROUP)["env"][service.TOKEN_ENV]}
+    assert main.command != group.command
+    assert ops.tool_hook(tmp_path, "claude", session_key=GROUP).command == group.command
+
+
+@pytest.mark.parametrize("forged", [False, True])
+def test_outbound_hook_keeps_turn_context_and_file_excerpts_in_credential_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, forged: bool,
+) -> None:
+    from looper.agents import outbound, outbound_hook
+    from looper.agents.message import MessageEnvelope, MessageType
+
+    async def run() -> None:
+        ops, _ = _ops(tmp_path)
+        monkeypatch.setattr(service, "operator_sender_id", AsyncMock(return_value="synthetic-operator"))
+        monkeypatch.setattr(outbound_hook, "notify_blocked", AsyncMock())
+        seen = []
+
+        async def review(action: Any, asker: Any, origin: Any, **fields: Any) -> Any:
+            seen.append((asker, fields["context"]))
+            return SimpleNamespace(allowed=asker.who is outbound.Who.OPERATOR, reason="synthetic review",
+                                   review_id=None)
+
+        monkeypatch.setattr(outbound, "review", review)
+        for key, channel, text in (("main", "web", "synthetic private request"),
+                                   (GROUP, "lark", "synthetic group request")):
+            envelope = MessageEnvelope.create(source=channel, target=channel, message_type=MessageType.USER_MESSAGE,
+                                               payload={"text": text})
+            turn = Turn(channel, "synthetic-chat", message_id=envelope.message_id, envelope=envelope,
+                        group=key == GROUP, sender="synthetic-operator")
+            ops.begin_turn(turn, binding=key, session_key=key)
+            ops.activate_tool_hook(ops.tool_hook(tmp_path, "claude", session_key=key), session_key=key)
+
+        async def check(key: str, tool: str, call_id: str, **arguments: Any) -> dict[str, Any]:
+            server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
+                                     task_router=SimpleNamespace(), manager_ops=ops)
+            credential = ops.server_config(session_key=key)["env"][service.TOKEN_ENV]
+            writer = _Writer()
+            await server._handle_agent_api("POST", "/api/agent/v1/outbound/check",
+                {"authorization": f"Bearer {credential}"},
+                json.dumps({"tool_name": tool, "tool_input": arguments, "tool_use_id": call_id}).encode(), writer)
+            return json.loads(writer.data.partition(b"\r\n\r\n")[2])
+
+        for key in ("main", GROUP):
+            assert (await check(key, "Write", f"write-{key}", file_path=f"/synthetic/{key[:5]}.txt",
+                                content=f"excerpt from {key}"))["decision"] == "allow"
+        owner = "main" if forged else GROUP
+        ops.expect(owner, "Bash", {"command": "true"}, call_id="synthetic-call")
+        answer = await check(GROUP, "Bash", "synthetic-call", command="true")
+        assert answer["decision"] == "block"
+        asker, context = seen.pop()
+        assert asker.who is (outbound.Who.AUTONOMOUS if forged else outbound.Who.GROUP_MEMBER)
+        assert "synthetic private request" not in asker.message
+        assert "excerpt from main" not in str(context)
+        ops.expect("main", "Bash", {"command": "true"}, call_id="main-call")
+        assert (await check("main", "Bash", "main-call", command="true"))["decision"] == "allow"
+        asker, context = seen.pop()
+        assert asker.message == "synthetic private request"
+        assert "excerpt from main" in str(context) and f"excerpt from {GROUP}" not in str(context)
+
+    asyncio.run(run())
+
+
+def test_outbound_hook_trust_stays_with_each_residents_loaded_mcp_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import outbound, outbound_hook
+    from looper.agents.library import ItemKind
+    from looper.db import mcp_tool_levels
+
+    async def run() -> None:
+        ops, _ = _ops(tmp_path)
+        monkeypatch.setattr(outbound_hook, "notify_blocked", AsyncMock())
+        review = AsyncMock(return_value=SimpleNamespace(allowed=False, reason="synthetic refusal", review_id=None))
+        monkeypatch.setattr(outbound, "review", review)
+
+        async def declared(pairs: Any) -> bool:
+            return pairs == [("a", "b__c")]
+
+        monkeypatch.setattr(mcp_tool_levels, "declared_inside", declared)
+        for key, server_name in (("main", "a__b"), (GROUP, "a")):
+            library = SimpleNamespace(items=[SimpleNamespace(name=server_name, kind=ItemKind.MCP)])
+            ops.activate_tool_hook(ops.tool_hook(tmp_path, "claude", library, session_key=key), session_key=key)
+        # The same name refers to a different server/tool pair in each process. Activating the group's hook
+        # must leave main's existing process using its own server names.
+        ops.begin_turn(Turn("web", "main-chat", message_id="main-message"), binding="main-binding")
+        ops.expect("main-binding", "mcp__a__b__c", {}, call_id="main-call")
+        main = await ops.check_outbound({"tool_name": "mcp__a__b__c", "tool_input": {}, "tool_use_id": "main-call"})
+        group = await ops.check_outbound({"tool_name": "mcp__a__b__c", "tool_input": {}}, session_key=GROUP)
+        assert main["decision"] == "block" and group["decision"] == "allow"
+        assert review.await_count == 1
+
+    asyncio.run(run())

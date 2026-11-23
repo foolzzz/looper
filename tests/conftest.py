@@ -513,6 +513,7 @@ def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(chat_settings, "_stop_enabled", chat_settings.DEFAULT_STOP_ENABLED)
     monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.DEFAULT_COMPLETION_TURNS)
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", chat_settings.DEFAULT_METRICS_ENABLED)
 
 
 @pytest.fixture(scope="session", autouse=True)

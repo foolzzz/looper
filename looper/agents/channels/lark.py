@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 import re
+import uuid as _uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
@@ -22,6 +23,7 @@ from time import monotonic, time
 from typing import Any, Literal
 
 from ..bus import MessageBus
+from .. import card_actions
 from .. import chat_attachments as files
 from ..chat_attachments import Attachment, AttachmentKind, AttachmentState, TooLarge
 from ..message import (
@@ -35,13 +37,15 @@ from ..message import (
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from ..ops.leads import for_group
+from .. import chat_settings
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
+from .proactive import record_delivery
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
-from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
-from .lark_transport import CliTransport, LarkTransport
+from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, LarkCliOutputError, mention
+from .lark_transport import CliTransport, LarkTransport, LarkTransportKind, GatedLarkTransport
 from .lark_inbox import LarkInbox, history_event
 from .lark_quote import QuoteKind, QuoteRead, QuoteRef
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -128,6 +132,45 @@ def _check_lark_cli_available() -> bool:
     return bool(shutil.which("lark-cli"))
 
 
+class CardWrites:
+    """Every card write of a bot-token channel (send, reply, update) in one place. Given the outbound gateway
+    (``gateway``: ``write(kind, call, keyed=)`` and ``edit(message_id, call)``) and its switch (``enabled``), each
+    write goes through it as the channel's text writes do; without one, straight to the transport."""
+
+    def __init__(self, transport: Any, *, gateway: Any = None, enabled: Callable[[], bool] = lambda: False) -> None:
+        self._transport = transport
+        self._gateway = gateway
+        self._enabled = enabled
+
+    def _gated(self) -> bool:
+        return self._gateway is not None and self._enabled()
+
+    async def send(self, card: dict[str, Any], *, chat_id: str | None = None, user_id: str | None = None,
+                   idempotency_key: str | None = None) -> tuple[str | None, str | None]:
+        """The message the card became and the chat it is in."""
+        async def direct() -> tuple[str | None, str | None]:
+            return await self._transport.send_card(card, chat_id=chat_id, user_id=user_id,
+                                                   idempotency_key=idempotency_key)
+        return await self._gateway.write("send", direct, keyed=idempotency_key is not None) if self._gated() \
+            else await direct()
+
+    async def reply(self, message_id: str, card: dict[str, Any], *, idempotency_key: str | None = None,
+                    reply_in_thread: bool = False) -> tuple[str | None, str | None]:
+        async def direct() -> tuple[str | None, str | None]:
+            return await self._transport.reply_card(message_id, card, idempotency_key=idempotency_key,
+                                                    reply_in_thread=reply_in_thread)
+        return await self._gateway.write("reply", direct, keyed=idempotency_key is not None) if self._gated() \
+            else await direct()
+
+    async def update(self, message_id: str, card: dict[str, Any]) -> None:
+        async def direct() -> None:
+            await self._transport.update_card(message_id, card)
+        if self._gated():
+            await self._gateway.edit(message_id, direct)
+        else:
+            await direct()
+
+
 class LarkChannelAdapter(ChannelAdapter):
     """Bridge a Lark transport and the agent message bus."""
 
@@ -162,6 +205,18 @@ class LarkChannelAdapter(ChannelAdapter):
         self._stop_chat = stop_chat
         self._backoff = backoff
         self._transport = transport if transport is not None else CliTransport(profile)
+        from .. import chat_settings
+        from .outbound import Gateway, Outbox
+        from ...db import channel_outbox
+
+        self._gateway = Gateway(self._channel_id, app_id=bot_app_id)
+        self._channel_outbox = Outbox(self._channel_id, self._transport, self._gateway, channel_outbox,
+                                      enabled=chat_settings.outbound_enabled)
+        # Cards share the gateway while retaining the bot transport's card methods.
+        self._cards = CardWrites(self._transport, gateway=self._gateway, enabled=chat_settings.outbound_enabled) \
+            if hasattr(self._transport, "send_card") else None
+        self._transport = GatedLarkTransport(self._transport, self._gateway,
+                                             enabled=chat_settings.outbound_enabled, outbox=self._channel_outbox)
         self._allowlist = allowlist  # open_ids
         self._profile = profile  # lark-cli's --profile; "" for its active one
         # The bot's own open_id: a group message is handled only when it @-mentions this; none, none is.
@@ -212,8 +267,8 @@ class LarkChannelAdapter(ChannelAdapter):
 
         if self.channel_type == "lark":
             self._inbox = await LarkInbox.open(bus.runtime_root / ".local" / "lark" / self.channel_id / "inbox.sqlite3")
-            if isinstance(self._transport, CliTransport):
-                self._transport.on_thread_activity = self._remember_thread
+            if self._transport.kind is LarkTransportKind.CLI:
+                self._transport.inner.on_thread_activity = self._remember_thread
             boundary = self._inbox.boundary
             # Discovery itself can fail or be cancelled while live checkpoints advance.
             if boundary is not None and time() - boundary <= _CATCHUP_MAX_AGE:
@@ -231,6 +286,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     "%s: messages sent by other bots are not received on this channel type unless the app "
                     "has Lark's permission to receive bot messages; alternatively use the lark-cli channel's "
                     "polling", self.channel_id)
+        await self._channel_outbox.start_if_needed()
         self._bus = bus
         self._running = True
         self._outbound_task = asyncio.create_task(self._outbound_loop())
@@ -256,8 +312,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 except asyncio.CancelledError:
                     pass
         await self._reactions.stop()
-        if isinstance(self._transport, CliTransport):
-            self._transport.on_thread_activity = None
+        if self._transport.kind is LarkTransportKind.CLI:
+            self._transport.inner.on_thread_activity = None
+        await self._channel_outbox.stop()
         await self._transport.aclose()
         if self._inbox is not None:
             if clean:
@@ -267,19 +324,31 @@ class LarkChannelAdapter(ChannelAdapter):
         logger.info("%s adapter stopped", self.channel_id)
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
+        source = ("notice" if envelope.message_type is MessageType.CHAT_NOTICE else
+                  "progress" if envelope.message_type is MessageType.STATUS_UPDATE else "answer")
+        raw_route = envelope.metadata.get("reply_route")
+        route = raw_route if isinstance(raw_route, dict) else {}
+        chat = self._correlation_chat.get(envelope.correlation_id) or route.get("chat_id")
+        with self._transport.message_scope(envelope.message_id, source=source, chat=chat):
+            return await self._deliver(envelope)
+
+    async def _deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
         its own, or send the answer to the chat the message came from and close its status line."""
         envelope = replace(envelope, payload={
             key: files.redact(value, self._runtime_root, paths=envelope.metadata.get("attachment_paths", ()))
             if isinstance(value, str) else value for key, value in envelope.payload.items()
         })
+        receipt_kwargs = ({"return_id": True} if chat_settings.metrics_enabled()
+                          and isinstance(envelope.metadata.get("proactive"), dict) else {})
         if envelope.message_type is MessageType.CHAT_NOTICE:
             # A task's end, to who it recorded, in order behind its progress.
             notice = Notice.from_payload(envelope.payload)
             if notice is None:
                 return DeliveryReceipt(channel=self.channel_type, success=False, error="a notice without a Lark target")
             return await self._send_notice(notice.target,
-                                           for_group(notice.text) if notice.target.group else notice.text)
+                                           for_group(notice.text) if notice.target.group else notice.text,
+                                           **receipt_kwargs)
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None and envelope.target == self._address:
@@ -295,8 +364,11 @@ class LarkChannelAdapter(ChannelAdapter):
                     except LarkCliError as exc:
                         logger.warning("%s: a recovered task progress reply failed: %s", self.channel_id, exc)
                         if exc.code in MESSAGE_GONE_CODES:
-                            return await self._send_message(route["chat_id"], str(envelope.payload["text"]))
-                        return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+                            return await self._send_message(route["chat_id"], str(envelope.payload["text"]),
+                                                            **receipt_kwargs)
+                        return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if exc.refused
+                                            else PostOutcome.UNKNOWN))
                     return DeliveryReceipt(channel=self.channel_type, success=True)
                 chat_id = route["chat_id"]
                 self._correlation_chat[corr_id] = chat_id
@@ -316,17 +388,25 @@ class LarkChannelAdapter(ChannelAdapter):
                     await self._status.update(corr_id, corr_id, envelope.payload)
                 case StatusKind.PROGRESS:
                     # Task progress leaves the status line alone.
-                    return await self._send_message(chat_id, str(envelope.payload["text"]))
+                    return await self._send_message(chat_id, str(envelope.payload["text"]), **receipt_kwargs)
             return DeliveryReceipt(channel=self.channel_type, success=True)
 
         text = self._format_reply(envelope)
         if not text:
             return DeliveryReceipt(channel=self.channel_type, success=True)
 
-        if corr_id in self._group_message:
-            receipt = await self._send_reply(corr_id, text)
-        else:
-            receipt = await self._send_message(chat_id, text)
+        cards: list[card_actions.Card] = []
+        if self._cards is not None and envelope.metadata.get("cards"):
+            text, cards = card_actions.shown(text, envelope.metadata["cards"])
+        receipt = DeliveryReceipt(channel=self.channel_type, success=True)
+        if text and corr_id in self._group_message:
+            receipt = await self._send_reply(corr_id, text, **receipt_kwargs)
+        elif text:
+            receipt = await self._send_message(chat_id, text, **receipt_kwargs)
+        for card in cards:
+            sent = await self._answer_card(corr_id, chat_id, card)
+            if not text:
+                receipt = sent
         if not envelope.payload.get("autonomous"):
             await self._status.finish(corr_id, error=envelope.payload.get("error"),
                                       stopped=envelope.payload.get("outcome") == "stopped")
@@ -346,14 +426,118 @@ class LarkChannelAdapter(ChannelAdapter):
         return await self._transport.send(chat_id=self._correlation_chat[correlation_id], text=text, markdown=markdown,
                                           return_id=return_id)
 
-    async def _send_reply(self, correlation_id: str, text: str) -> DeliveryReceipt:
+    async def _metrics_id(self, send: Awaitable[str | None]) -> str | None:
+        try:
+            return await send
+        except LarkCliOutputError:
+            # The command succeeded: an unreadable receipt must not trigger a resend.
+            logger.warning("%s: sent a message without a readable receipt", self.channel_id)
+            return None
+
+    async def _send_reply(self, correlation_id: str, text: str, *, return_id: bool = False) -> DeliveryReceipt:
         """Answer a group message with a Markdown reply to it."""
         try:
-            await self._answer(correlation_id, markdown=text)
+            send = self._answer(correlation_id, markdown=text, **({"return_id": True} if return_id else {}))
+            message_id = await self._metrics_id(send) if return_id else await send
         except LarkCliError as exc:
             logger.warning("%s: a reply in a group chat failed: %s", self.channel_id, exc)
-            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if exc.refused
+                                            else PostOutcome.UNKNOWN))
+        return DeliveryReceipt(channel=self.channel_type, success=True, external_id=message_id)
+
+    async def _answer_card(self, correlation_id: str, chat_id: str, card: card_actions.Card) -> DeliveryReceipt:
+        """Send a card a reply carries where the reply went (under the group message it answers); its text alone
+        when the card cannot be sent, so the user can still answer it by typing."""
+        assert self._cards is not None
+        content = card_actions.lark_card(replace(card, text=files.redact(card.text, self._runtime_root)))
+        message_id = self._group_message.get(correlation_id)
+        try:
+            if message_id is not None:
+                sent = await self._cards.reply(message_id, content, reply_in_thread=message_id in self._thread_messages)
+            else:
+                sent = await self._cards.send(content, chat_id=chat_id)
+        except LarkCliError as exc:
+            logger.warning("%s: a card failed, sending its text: %s", self.channel_id, exc)
+            if message_id is not None:
+                return await self._send_reply(correlation_id, card.text)
+            return await self._send_message(chat_id, card.text)
+        await card_actions.bind(card, *sent)
         return DeliveryReceipt(channel=self.channel_type, success=True)
+
+    def _admits(self, sender: object, decision: RouteDecision | None, *, group: bool,
+                log_refusal: bool = True) -> bool:
+        """The admission rule of a message: a group bound explicitly with ``sender_policy`` ``chat`` admits everyone
+        in it; else the bot's allowlist or the binding's extra senders."""
+        chat_policy = group and decision is not None and decision.explicit and decision.sender_policy == "chat"
+        return chat_policy or self._allowlist.admits(
+            sender, chat_senders=decision.senders if decision is not None else frozenset(), log_refusal=log_refusal)
+
+    async def _card_action(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        """Answer a press of a card's button on the long connection (``card_actions.respond``): a toast and the card
+        as it is now, in time; a card whose action ends later is replaced then. None (the plain acknowledgement, as
+        before cards) while card buttons are off. A press is admitted as a message in that chat would be (a card
+        is in the chat it was sent to; in a direct chat only the user can press), and the card's own allowed
+        confirmers narrow it further."""
+        started = asyncio.get_running_loop().time()
+        try:
+            if not await asyncio.wait_for(card_actions.enabled(), card_actions.AUTHORIZE_SECONDS):
+                return None
+        except Exception:
+            logger.warning("%s: cannot tell whether card buttons are on; a press is not answered", self.channel_id,
+                           exc_info=True)
+            return None
+        presser, chat = str(event.get("operator_id") or ""), str(event.get("chat_id") or "")
+        decision = self._resolve_chat(self.channel_id, chat) if self._resolve_chat is not None and chat else None
+        if not self._admits(presser, decision, group=True, log_refusal=False):
+            logger.info("%s: a card press by an unlisted sender %s was refused", self.channel_id, presser)
+            return card_actions.lark_answer(card_actions.Answer(card_actions.NOT_ALLOWED["confirmation"], "error"))
+        message_id = str(event.get("message_id") or "")
+        cards = self._cards
+
+        async def direct() -> bool:
+            # Whether the press's chat is a direct chat (with the presser, then: a press comes from the bot's chats).
+            mode = getattr(self._transport, "chat_mode", None)
+            if mode is None or not chat:
+                return False
+            try:
+                return await mode(chat) == "p2p"
+            except LarkCliError as exc:
+                logger.info("%s: cannot tell the mode of chat %s: %s", self.channel_id, chat, exc)
+                return False
+
+        async def update(card: card_actions.Card) -> None:
+            if message_id and cards is not None:
+                await cards.update(message_id, card_actions.lark_card(card))
+
+        answer = await card_actions.respond(card_actions.Press(self.channel_id, presser, str(event.get("value") or ""),
+                                                               chat=chat, message_id=message_id, direct=direct),
+                                            update, started=started)
+        card_actions.follow(answer, update)  # sent after this answer's card unless the action outlasts its 3 s
+        return card_actions.lark_answer(answer)
+
+    async def post_card(self, target: NotifyTarget, card: Any, *, reply_to: str | None = None,
+                        idempotency_key: str | None = None) -> PostReceipt:
+        """Post ``card`` with its buttons through the bot token's transport (``post`` otherwise): a reply to
+        ``reply_to`` when given, else to the user or the group (the card @-mentions the requester)."""
+        if self._cards is None:
+            return await self.post(target, card.text, reply_to=reply_to, idempotency_key=idempotency_key)
+        content = card_actions.lark_card(replace(card, text=files.redact(card.text, self._runtime_root)))
+        try:
+            if reply_to:
+                message_id, chat = await self._cards.reply(reply_to, content, idempotency_key=idempotency_key,
+                                                           reply_in_thread=reply_to in self._thread_messages)
+            elif target.kind is TargetKind.USER:
+                message_id, chat = await self._cards.send(content, user_id=target.id, idempotency_key=idempotency_key)
+            else:
+                message_id, chat = await self._cards.send(content, chat_id=target.id, idempotency_key=idempotency_key)
+        except LarkCliError as exc:
+            logger.warning("%s: a card post to %s failed: %s%s", self.channel_id, target.id, type(exc).__name__,
+                           f" (code {exc.code})" if exc.code is not None else "")
+            return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
+                               outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
+        await card_actions.bind(card, message_id, chat)
+        return PostReceipt(True, external_ids=(message_id,) if message_id else ())
 
     async def _send_target(self, target: NotifyTarget, text: str, *,
                            idempotency_key: str | None = None, return_id: bool = False) -> str | None:
@@ -366,7 +550,7 @@ class LarkChannelAdapter(ChannelAdapter):
         return await self._transport.send(chat_id=target.id, markdown=body, idempotency_key=idempotency_key,
                                           return_id=return_id)
 
-    async def _send_notice(self, target: NotifyTarget, text: str) -> DeliveryReceipt:
+    async def _send_notice(self, target: NotifyTarget, text: str, *, return_id: bool = False) -> DeliveryReceipt:
         """Send a task's end notice as Markdown, like an answer: to a user in a direct message, or to a group chat
         @-mentioning the requester."""
         try:
@@ -379,12 +563,16 @@ class LarkChannelAdapter(ChannelAdapter):
             # requester. A part that fails ends the notice; the parts before it are not sent again.
             parts = split_message(rendered) if target.group else [rendered]
             for number, part in enumerate(parts):
-                await self._send_target(target if number == 0 else replace(target, mention=None), part)
+                send = self._send_target(target if number == 0 else replace(target, mention=None), part,
+                                         **({"return_id": True} if return_id else {}))
+                message_id = await self._metrics_id(send) if return_id else await send
         except LarkCliError as exc:
             logger.warning("%s: a task's end notice to %s failed%s: %s", self.channel_id, target.id,
                            f" at part {number + 1} of {len(parts)}" if len(parts) > 1 else "", exc)
-            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
-        return DeliveryReceipt(channel=self.channel_type, success=True)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if exc.refused
+                                            else PostOutcome.UNKNOWN))
+        return DeliveryReceipt(channel=self.channel_type, success=True, external_id=message_id)
 
     async def _turned_off(self, chat_id: str, group_message: str | None, *, manager_id: str,
                           explicit: bool = False, stop: bool = False) -> bool:
@@ -422,16 +610,23 @@ class LarkChannelAdapter(ChannelAdapter):
                   reason="disabled_target", outcome=outcome)
         return True
 
-    async def _send_message(self, chat_id: str, text: str) -> DeliveryReceipt:
+    async def _send_message(self, chat_id: str, text: str, *, return_id: bool = False) -> DeliveryReceipt:
         try:
-            await self._send_lark_message(chat_id, text)
-            return DeliveryReceipt(channel=self.channel_type, success=True)
+            message_id = None
+            if return_id:
+                message_id = await self._metrics_id(self._transport.send(chat_id=chat_id, markdown=text, return_id=True))
+            else:
+                await self._send_lark_message(chat_id, text)
+            return DeliveryReceipt(channel=self.channel_type, success=True, external_id=message_id)
         except Exception as exc:
             logger.warning("%s delivery failed: %s", self.channel_id, exc)
-            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if isinstance(exc, LarkCliError) and exc.refused
+                                            else PostOutcome.UNKNOWN))
 
     async def _send_status(self, correlation_id: str, text: str) -> str | None:
-        return await self._answer(correlation_id, text=text, return_id=True)
+        with self._transport.message_scope(correlation_id, durable=False):
+            return await self._answer(correlation_id, text=text, return_id=True)
 
     async def _edit_status(self, chat_id: str, message_id: str, text: str) -> None:
         await self._transport.edit(message_id, text=text)
@@ -439,7 +634,11 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _react(self, chat_id: str, message_id: str) -> None:
         await self._transport.react(message_id)
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
+        with self._transport.message_scope(idempotency_key or str(_uuid.uuid4()), source="notify", chat=chat):
+            return await self._notify(chat, text)
+
+    async def _notify(self, chat: str, text: str) -> DeliveryReceipt:
         """Send ``text`` as the bot to a Lark user (open_id) or native chat (chat_id)."""
         text = files.redact(text, self._runtime_root)
         try:
@@ -450,14 +649,23 @@ class LarkChannelAdapter(ChannelAdapter):
                 destination = {"user_id": chat}
             else:
                 raise LarkCliError("notification target must be a Lark chat ID (oc_) or user open ID (ou_)")
-            await self._transport.send(**destination, text=text)
+            send = self._transport.send(
+                **destination, text=text, **({"return_id": True} if chat_settings.metrics_enabled() else {}))
+            message_id = await self._metrics_id(send) if chat_settings.metrics_enabled() else await send
         except LarkCliError as exc:
             logger.warning("%s notification to %s failed: %s", self.channel_id, chat, exc)
-            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
-        return DeliveryReceipt(channel=self.channel_type, success=True)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc),
+                                   outcome=(PostOutcome.REJECTED if exc.refused
+                                            else PostOutcome.UNKNOWN))
+        return DeliveryReceipt(channel=self.channel_type, success=True, external_id=message_id)
 
     async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
                    idempotency_key: str | None = None) -> PostReceipt:
+        with self._transport.message_scope(str(_uuid.uuid4()), source="post", chat=target.id):
+            return await self._post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
+
+    async def _post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
+                    idempotency_key: str | None = None) -> PostReceipt:
         """Send ``text`` as Markdown: a reply to the message ``reply_to`` (``om_...``) when given, which @-mentions
         nobody; else to ``target`` like an end notice (a user, or a group @-mentioning the requester). Lark sends one
         message per ``idempotency_key`` within an hour, so a post retried after a lost answer is not sent twice."""
@@ -470,7 +678,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 message_id = await self._send_target(target, text, idempotency_key=idempotency_key, return_id=True)
         except LarkCliError as exc:
             # The error's text (lark-cli's own words, and whatever it printed) is in the receipt, not in the log.
-            logger.warning("%s: a post to %s failed: %s%s", self.channel_id, target.id, type(exc).__name__,
+            # Receipt parsing has a distinct type for metrics; keep the existing failed-post log classification.
+            error_type = LarkCliError.__name__ if isinstance(exc, LarkCliOutputError) else type(exc).__name__
+            logger.warning("%s: a post to %s failed: %s%s", self.channel_id, target.id, error_type,
                            f" (code {exc.code})" if exc.code is not None else "")
             return PostReceipt(False, error=str(exc), parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES,
                                outcome=PostOutcome.REJECTED if exc.refused else PostOutcome.UNKNOWN)
@@ -494,10 +704,10 @@ class LarkChannelAdapter(ChannelAdapter):
             "active_conversations": len(self._correlation_chat),
         }
 
-        if isinstance(self._transport, CliTransport):
+        if self._transport.kind is LarkTransportKind.CLI:
             info["lark_cli_available"] = self._transport.available()
         else:
-            info["transport"] = type(self._transport).__name__
+            info["transport"] = type(self._transport.inner).__name__
         return info
 
     # --- Inbound: transport events → Bus ---
@@ -865,6 +1075,11 @@ class LarkChannelAdapter(ChannelAdapter):
             return "handled" if handled else "ignored"
 
     async def _process_lark_event(self, event: dict[str, Any]) -> bool | None:
+        with self._transport.message_scope(event.get("message_id") or str(_uuid.uuid4()),
+                                           chat=event.get("chat_id")):
+            return await self._process_scoped_event(event)
+
+    async def _process_scoped_event(self, event: dict[str, Any]) -> bool | None:
         """Publish text, rich posts and merged forwards to the Bus, with a reference to what they quote
         (``payload["quote_ref"]``, read by the Manager), and answer other admitted message types. The event is
         lark-cli's flat one: ``chat_id``,
@@ -897,9 +1112,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     if admitted is not False and self._resolve_chat is not None else None)
         if not group and decision is not None:
             decision = replace(decision, sender_policy=SenderPolicy.LISTED)
-        chat_senders = decision.senders if decision is not None else frozenset()
         bot = event.get("sender_type") in {"app", "bot"}
-        chat_policy = group and decision is not None and decision.explicit and decision.sender_policy == "chat"
         log_refusal = True
         if bot:
             now = monotonic()
@@ -909,8 +1122,8 @@ class LarkChannelAdapter(ChannelAdapter):
         if admitted is False and log_refusal:
             logger.warning("%s: dropped a message from sender %r, refused by the stream prefilter",
                            self.channel_id, str(sender_open_id or "<unknown>")[:80])
-        if admitted is False or (admitted is not True and not chat_policy and not self._allowlist.admits(
-                sender_open_id, chat_senders=chat_senders, log_refusal=log_refusal)):
+        if admitted is False or (admitted is not True and not self._admits(sender_open_id, decision, group=group,
+                                                                           log_refusal=log_refusal)):
             if bot:
                 event["_bot_outcome"] = "refused"
                 if log_refusal:
@@ -1146,7 +1359,14 @@ class LarkChannelAdapter(ChannelAdapter):
                 if not self._running:
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
-                await record_reply(self.channel_type, envelope, await self.deliver(envelope),
+                receipt = await self.deliver(envelope)
+                if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
+                    route = envelope.metadata.get("reply_route")
+                    route = route if isinstance(route, dict) else {}
+                    chat = str(route.get("chat_id") or self._correlation_chat.get(envelope.correlation_id) or "")
+                    group = envelope.correlation_id in self._group_message or bool(route.get("reply_to"))
+                    record_delivery(self.channel_id, envelope, receipt, chat=chat, group=group)
+                await record_reply(self.channel_type, envelope, receipt,
                                    runtime_root=self._runtime_root)
         except asyncio.CancelledError:
             pass
