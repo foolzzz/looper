@@ -99,7 +99,7 @@ def test_task_end_releases_undelivered_dispatch_even_without_a_listener(monkeypa
     asyncio.run(check())
 
 
-@pytest.mark.provenance
+# Not marked provenance: this is the off/observe comparison itself, not a proof of where a fixture came from.
 @pytest.mark.parametrize('mode', [Mode.OFF, Mode.OBSERVE])
 @pytest.mark.parametrize('cap,spent', [(None,0), (2,1), (2,2)])
 def test_disabled_planner_funnel_matches_fixed_baseline(monkeypatch, tmp_path, mode, cap, spent):

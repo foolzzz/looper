@@ -65,7 +65,7 @@ def test_off_keeps_the_original_stored_fields(monkeypatch):
     recorder._untrack()
 
 
-@pytest.mark.provenance
+# Not marked provenance: this is the off/observe comparison itself, not a proof of where a fixture came from.
 @pytest.mark.parametrize("role", ["manager", "planner", "schedule", "processor"])
 @pytest.mark.parametrize("mode", ["off", "observe"])
 def test_record_payload_is_byte_identical_to_the_pinned_main_recorder(monkeypatch, tmp_path, role, mode):
