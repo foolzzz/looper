@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -56,8 +57,8 @@ def test_shards_partition_pr_collection(collection) -> None:
     combined: set[str] = set()
     file_owners: dict[str, int] = {}
     counts = []
-    for shard in range(1, 5):
-        nodes = collection(f"{shard}/4")
+    for shard in range(1, 7):
+        nodes = collection(f"{shard}/6")
         assert nodes, f"shard {shard} is empty"
         assert len(nodes) == len(set(nodes))
         assert combined.isdisjoint(nodes), f"shard {shard} overlaps another shard"
@@ -75,7 +76,7 @@ def test_single_shard_preserves_unsharded_collection(collection) -> None:
     assert collection("1/1", path) == collection(None, path)
 
 
-@pytest.mark.parametrize("shard", ["2", "0/4", "5/4", "1/0", ""])
+@pytest.mark.parametrize("shard", ["2", "0/6", "7/6", "1/0", ""])
 def test_invalid_shard_fails_at_configuration(shard: str) -> None:
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests/test_ci_shards.py"],
@@ -84,3 +85,20 @@ def test_invalid_shard_fails_at_configuration(shard: str) -> None:
     )
     assert result.returncode == pytest.ExitCode.USAGE_ERROR
     assert "LOOPER_TEST_SHARD must be N/TOTAL" in result.stderr
+
+
+def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
+    workflow = (ROOT / ".github/workflows/python-tests.yml").read_text(encoding="utf-8")
+    shards = workflow.split("  agent-system:\n", 1)[1].split("\n  bridge-schema-pg18:", 1)[0]
+    assert "shard: [1, 2, 3, 4, 5, 6]" in shards
+    assert "name: Agent system tests (shard ${{ matrix.shard }}/6)" in shards
+    assert "LOOPER_TEST_SHARD: ${{ matrix.shard }}/6" in shards
+    assert "timeout-minutes: 20" in shards
+    assert "fail-fast: false" in shards
+    result = workflow.split("  agent-system-result:\n", 1)[1].split("\n  dashboard:", 1)[0]
+    assert re.search(r"^    name: Agent system tests$", result, re.MULTILINE)
+    assert "needs: [agent-system, bridge-schema-pg18]" in result
+    assert "if: always()" in result
+    assert "SHARDS_RESULT: ${{ needs.agent-system.result }}" in result
+    assert 'test "$SHARDS_RESULT" = success' in result
+    assert 'test "$PG18_RESULT" = success' in result
