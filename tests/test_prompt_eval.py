@@ -13,6 +13,7 @@ import shutil
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -2176,6 +2177,18 @@ def test_ports_handed_out_in_one_process_are_distinct() -> None:
     with ThreadPoolExecutor(max_workers=8) as pool:
         ports = list(pool.map(lambda _: runner.free_port(), range(64)))
     assert len(set(ports)) == 64
+
+
+def test_a_port_handed_out_is_out_of_reach_of_other_processes() -> None:
+    port = runner.free_port()
+    # Below the dynamic ports Linux and macOS give a port-0 bind or an outgoing connection.
+    assert port < 32768
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", port))  # nothing listens on it: only the lock can keep another process off
+    claimed = subprocess.run(
+        [sys.executable, "-c", f"from evals.prompt_regression import runner; print(runner._claim({port}))"],
+        cwd=runner.REPO_ROOT, capture_output=True, text=True, timeout=60, check=True).stdout
+    assert claimed.strip() == "False"
 
 
 class _CostlyApi:
