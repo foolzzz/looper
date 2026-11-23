@@ -18,7 +18,7 @@ _NULL_OBJECT = {"type": ["object", "null"]}
 _COMPACTIONS = {"type": ["array", "null"], "items": {"type": "object"}}
 _STATUS = {"type": "string", "enum": [status.value for status in llm_records.RecordStatus]}
 TASK_RUN_ROW = _object({
-    "id": _INT, "role": {"type": "string", "enum": ["planner", "worker", "reviewer"]},
+    "id": _INT, "role": {"type": "string", "enum": ["planner", "worker", "reviewer", "explorer"]},
     "agent_id": _STR, "step_id": _NULL_STR, "status": _STATUS, "created_at": _STR,
     "runtime": _object({"type": _NULL_STR, "name": _NULL_STR}, closed=True),
     "model": _NULL_STR, "effort": _NULL_STR,

@@ -250,6 +250,30 @@ function ConsultRuns({ task, records }: { task: TaskDetail; records: TaskRuns | 
   );
 }
 
+/** Explorer runs grouped under their persisted spawner; absent when the task has none. */
+function ExplorerRuns({ task, records }: { task: TaskDetail; records: TaskRuns | null }) {
+  const explorers = records?.explorers ?? [];
+  if (!explorers.length) return null;
+  const parents = [...records!.planner, ...records!.worker, ...records!.reviewer, ...(records!.consults ?? []).map((run) => run.record)];
+  const parentIds = [...new Set(explorers.map((run) => run.parentId))];
+  return <section aria-labelledby="task-explorer-runs-title">
+    <h3 id="task-explorer-runs-title" className="mb-2 text-sm font-semibold">Sub-agent runs</h3>
+    <ul className="divide-y divide-border rounded-lg border border-border bg-card">
+      {parentIds.map((id) => {
+        const parent = parents.find((record) => record.id === id);
+        const consult = records!.consults?.find((run) => run.record === parent);
+        const role = parent && (consult ? roleLabel(consult.kind) : records!.planner.includes(parent) ? "Planner" : records!.worker.includes(parent) ? "Worker" : "Reviewer");
+        return <li key={id ?? "none"} className="space-y-2 px-4 py-3">
+          {parent ? <RunLine record={parent} label={role!} taskId={task.task_id} /> : <p className="text-xs text-muted-foreground">Spawner run not listed</p>}
+          <ul aria-label={`Runs run ${id ?? "unknown"} started`} className="ml-1.5 space-y-2 border-l border-border pl-3">
+            {explorers.filter((run) => run.parentId === id).map((run) => <li key={run.record.id}><RunLine record={run.record} label="Explorer" taskId={task.task_id} /></li>)}
+          </ul>
+        </li>;
+      })}
+    </ul>
+  </section>;
+}
+
 /** The roles the task's Planner defined, each with its kind and Agent Profile; their prompts and numbers are under
  * Overview → Roles. */
 function DefinedRoles({ roles }: { roles: PlannerRole[] }) {
@@ -291,6 +315,7 @@ export function TaskAgentsTab({ task, onAgents, runs = null, runsError = "" }: {
       {task.roles?.length ? <DefinedRoles roles={task.roles} /> : null}
       <StepRuns task={task} records={runs} error={runsError} />
       <ConsultRuns task={task} records={runs} />
+      <ExplorerRuns task={task} records={runs} />
     </div>
   );
 }
