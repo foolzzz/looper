@@ -94,7 +94,7 @@ def test_intent_push_keeps_measurements_for_cards_and_text(monkeypatch, tmp_path
         assert len(calls) == 1
         proactive = calls[0][3]["proactive"]
         assert proactive.source == turn_metrics.ProactiveSource.INTENT
-        assert proactive.source_ref == env.iid
+        assert proactive.source_ref == str(env.iid)
     run_db(check, monkeypatch)
 
 
