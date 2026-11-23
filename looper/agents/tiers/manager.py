@@ -3381,8 +3381,12 @@ class ManagerAgent:
         """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
         session = self._session_now()
         runtime = launch.runtime
-        command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._session_work_dir(),
-                                           prompt_file=prompt_file, launch=launch)
+        if session.key == MAIN_SESSION:
+            command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
+                                               prompt_file=prompt_file, launch=launch)
+        else:
+            command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._session_work_dir(),
+                                               prompt_file=prompt_file, launch=launch)
         if resume and session.session_id:
             command.extend(runtime.resume_args(session.session_id))
         return command
