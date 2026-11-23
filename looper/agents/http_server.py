@@ -1248,6 +1248,8 @@ class AgentHTTPServer:
         checks = [now.get(check.get("id"), check) if check.get("id") in now else
                   self._check_results.get(check.get("id"), check) if check.get("id") in self_check.CLAUDE_CHECK_IDS
                   else check for check in self._self_checks]
+        if (registry := getattr(self, "_channels", None)) is not None:
+            checks.extend(registry.start_checks())
         pool = self._worker_pool
         if pool is None or not (status := pool.keeper_status()):
             return checks

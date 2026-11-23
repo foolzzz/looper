@@ -83,7 +83,7 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import EMPTY_LIBRARY, load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, research_order, session_switch
+from .. import leads_model, research_order, session_switch, untrusted as untrusted_text
 from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
@@ -102,10 +102,11 @@ from . import group_session
 from .. import session_routing
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
-from ..ops.service import tools_down_reply
+from ..ops.service import _operator_turn, tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
 from ..ops.reminders import TOOL_NAMES as REMINDER_TOOLS
 from ..message import (
+    BOT_CHANNEL_TYPES,
     MANAGER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
@@ -527,7 +528,7 @@ CHANNEL_NAMES = {"web": "the Looper dashboard chat"}
 CHAT_CHANNEL_NAMES = {"telegram": "Telegram", "lark": "Lark", "lark_bot": "Lark"}
 
 
-def channel_line(envelope: MessageEnvelope) -> str:
+def channel_line(envelope: MessageEnvelope, *, fence: bool = False) -> str:
     """The line before a message that tells Claude where it came from, and so where its reply goes; in a group
     chat, who wrote it, when the channel names them (Lark: the sender's name, else their open_id)."""
     client_name = _message_client(envelope)[1]
@@ -540,7 +541,7 @@ def channel_line(envelope: MessageEnvelope) -> str:
         where = f"a {CHAT_CHANNEL_NAMES[channel]} {'group chat' if origin['group'] else 'direct message'}"
         context = envelope.payload.get("channel_context")
         name = context.get("sender_name") if origin["group"] and isinstance(context, dict) else None
-        if name:
+        if name and not fence:
             where += f", from {name}"
     else:
         where = CHANNEL_NAMES.get(channel, f"the {channel} channel")
@@ -589,6 +590,26 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
             group = False
     return {"channel": channel, "channel_id": getattr(envelope.source, "agent_id", None),
             "sender": str(sender) if sender else None, "chat": chat, "group": group}
+
+
+async def _outside_source(turn: Turn | None) -> untrusted_text.Source | None:
+    """What a turn's message is to the fence: a Lark or Telegram message from someone other than the operator (any
+    group chat's) is outside content; the operator's own, the dashboard's and an API client's are not."""
+    if turn is None or turn.channel not in BOT_CHANNEL_TYPES or await _operator_turn(turn):
+        return None
+    return untrusted_text.Source.GROUP_MESSAGE if turn.group else untrusted_text.Source.DIRECT_MESSAGE
+
+
+def _message_provenance(envelope: MessageEnvelope | None) -> dict[str, str]:
+    """Where a chat message came from, for its fence: who wrote it (the name the channel gave, else their id),
+    when it arrived and its message id."""
+    context = envelope.payload.get("channel_context") if envelope is not None else None
+    context = context if isinstance(context, dict) else {}
+    sender = context.get("sender_name") or context.get("sender_id") or context.get("username") or context.get("user_id")
+    found = {"from": untrusted_text.display_name(str(sender)) if sender else None,
+             "at": envelope.timestamp if envelope is not None else None,
+             "ref": context.get("message_id")}
+    return {key: str(value) for key, value in found.items() if value}
 
 
 def _group_task(envelope: MessageEnvelope) -> bool:
@@ -1782,7 +1803,7 @@ class ManagerAgent:
                 ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
                 attachments=[*attachments, *(ask.quoted.attachments if ask.quoted else ())],
                 quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input,
-                sections=state is None))
+                sections=state is None, turn=ask.turn))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
@@ -3279,7 +3300,7 @@ class ManagerAgent:
                 return ""
         switch, handoff = self._pending_switch, self._pending_handoff
         if session.key != MAIN_SESSION:  # a group's or another sender's chat: only its own (``group_session``)
-            lines = await group_session.excerpt(_session_key(envelope), message)
+            lines = await group_session.excerpt(_session_key(envelope), message, kind=session.route.kind)
             return group_session.brief(session.route.kind, _message_origin(envelope)["channel"], lines,
                                        switch=switch, handoff=handoff, new=session.session_id is None)
         conversations = await self._recent_conversations(envelope, message)
@@ -3419,8 +3440,12 @@ class ManagerAgent:
         """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
         session = self._session_now()
         runtime = launch.runtime
-        command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._session_work_dir(),
-                                           prompt_file=prompt_file, launch=launch)
+        if session.key == MAIN_SESSION:
+            command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
+                                               prompt_file=prompt_file, launch=launch)
+        else:
+            command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._session_work_dir(),
+                                               prompt_file=prompt_file, launch=launch)
         if resume and session.session_id:
             command.extend(runtime.resume_args(session.session_id))
         return command
@@ -3433,17 +3458,32 @@ class ManagerAgent:
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
                                   envelope: MessageEnvelope | None = None, attachments: Sequence[Attachment] = (),
                                   quoted: Sequence[lark_quote.Quote] = (),
-                                  image_input: ImageInput = ImageInput.NONE, sections: bool = True) -> str:
+                                  image_input: ImageInput = ImageInput.NONE, sections: bool = True,
+                                  turn: Turn | None = None) -> str:
         parts = await self._sections(envelope) if sections else []
         if note:
             parts += [note, ""]
+        # The untrusted fence (``untrusted``): a chat message from someone other than the operator, its quotes and
+        # its attachments' names go in <untrusted> blocks, after one line saying how to read them.
+        fence = await untrusted_text.enabled()
         if channel:
-            parts += [channel, ""]
-        parts.append(user_message)
+            # Rebuild the channel label without the sender-controlled name. Its name belongs to the message's
+            # provenance, inside the same fence; off, keep even a caller-supplied label byte for byte.
+            parts += [channel_line(envelope, fence=True)
+                      if fence and envelope is not None and channel == channel_line(envelope) else channel, ""]
+        source = await _outside_source(turn) if fence and user_message.strip() else None  # no words: nothing to fence
+        lead = [untrusted_text.LEAD_LINE] if fence and (source or quoted or attachments) else []
+        if source is not None:
+            parts += [*lead, untrusted_text.fence(user_message, source=source,
+                                                  provenance=_message_provenance(envelope))]
+            lead = []
+        else:
+            parts.append(user_message)
         if quoted:
-            parts += ["", *lark_quote.section(quoted)]
+            parts += ["", *lead, *lark_quote.section(quoted, fence=fence)]
+            lead = []
         if attachments:
-            parts += ["", *chat_attachments.section(attachments, image_input)]
+            parts += ["", *lead, *chat_attachments.section(attachments, image_input, fence=fence)]
         return "\n".join(parts)
 
     async def _sections(self, envelope: MessageEnvelope | None) -> list[str]:

@@ -688,6 +688,11 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
     await connection.init_pool(database_url, min_size=1, max_size=4)
     try:
         await connection.ensure_schema()
+        if getattr(args, "untrusted_fence", False):
+            from looper.agents import untrusted
+            from looper.db import system_settings
+
+            await system_settings.put_settings({untrusted.ENABLED_KEY: "true"})
         await _prepare(args)
         print("processor runs " + json.dumps(await processor.chosen_profile(), ensure_ascii=False), flush=True)
         from looper.agents.agent_settings import AgentType
@@ -924,6 +929,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=300, help="each run's deadline in seconds")
     parser.add_argument("--claude", default=shutil.which("claude"),
                         help="the Claude Code executable for a Claude Code runtime that names none of its own")
+    parser.add_argument("--untrusted-fence", action="store_true", help="fence the processor's input as untrusted data")
     parser.add_argument("--pg-url", default=os.environ.get("LOOPER_EVAL_DATABASE_URL"))
     parser.add_argument("--out", help="the run's JSON; default evals/runs/<time>-processor.json")
     parser.add_argument("--baseline", help="a run's JSON to compare with")
@@ -947,7 +953,8 @@ def main() -> int:
     commit = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"], capture_output=True,
                             text=True).stdout.strip()
     run = {"schema": SCHEMA, "commit": commit, "profile": args.profile or args.register_agent,
-           "check_profile": args.check_profile or args.check_register_agent, "reps": args.reps, "runs": runs}
+           "check_profile": args.check_profile or args.check_register_agent, "reps": args.reps,
+           "untrusted_fence": args.untrusted_fence, "runs": runs}
     out = Path(args.out) if args.out else HERE / "evals" / "runs" / time.strftime("%Y%m%d-%H%M%S-processor.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")

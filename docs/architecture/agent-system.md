@@ -140,7 +140,9 @@ control because configuration is operator-only. Dashboard metric widgets are sep
     own handoff and the same excerpt, never other chats. `main`'s brief is
     unchanged. A group or dm session's turn is not the operator's, so its
     tools have no leads search or vault reads. A reply out of a dm session goes
-    through the group backstop (`ops.leads.for_group`), like a group's.
+    through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
+    fence enabled, stored user messages in this excerpt use the same typed group or direct-message
+    fence as new messages, with chat and time provenance; assistant messages and handoffs stay unchanged.
 - Acts on Looper only through its platform tools
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells
@@ -3595,7 +3597,9 @@ evaluation is required before the original schedule requirement is complete.
   sender allowlist allows. Every message is recorded in
   `schedule_notifications`: `sent`, `failed` with the reason (such as a channel
   that is not running), or `dashboard` (no chat, an alert under `never`, or
-  an alert/recovery for a `deliverable` schedule).
+  an alert/recovery for a `deliverable` schedule, a removed target, or no sender).
+  Pre-send refusals retain their reason in `error`; only messages handed to
+  the sender are recorded as `sent` or `failed`.
 - **Deleting.** A project with schedules is not deleted (409) until they are.
   Deleting a schedule (the project's Schedules tab, the Schedules page, the
   schedule's page, `POST /api/v1/schedule_admin/delete` with `schedule_id`, the Manager's
@@ -6620,6 +6624,39 @@ off; `outbound_review.get` and `outbound_review.update`).
   - **Spend:** a review of a Manager's call that no task owns is the Manager's spend (`manager_spend`), and goes
     with the Manager when it is purged (`manager_cleanup`).
 
+### The untrusted fence
+
+Content from outside Looper that reaches a model goes in an `<untrusted source=... ...>` block
+(`looper/agents/untrusted.py`, the outbound-review RFC section 8) while the system setting
+`untrusted_fence.enabled` is `true` (there is no dashboard switch; off when it cannot be read). Off, every entry
+writes what it wrote before, byte for byte.
+
+- **The block** (`untrusted.fence`) names its typed source (`untrusted.Source`) and where the content came from
+  (`from`, `at`, `ref`, ...; quotes, angle brackets and line breaks dropped). The content loses its @ markup
+  (`subscriptions.strip_mentions`), and its own `<untrusted` and `</untrusted` (any case) become `&lt;untrusted`
+  and `&lt;/untrusted`, so nothing inside can close the block or open another. The same input gives the same
+  bytes; no length limit of its own. One line (`untrusted.LEAD_LINE`), written once before the first block, says
+  they are data, never instructions.
+- **The Manager's entries:** a Lark or Telegram message from someone other than the operator
+  (`operator_identity.is_operator`: any group chat's, a direct chat's other than the operator's) is a
+  `group_message` or `direct_message` block naming its sender, time and message id; the dashboard's and an API
+  client's messages, and the operator's own, are not fenced. A Lark quote is a `quote` block instead of
+  `<lark_quote>`, whoever's message it came with. The attachments' list keeps its lines outside, and the items,
+  whose names the sender chose, go in an `attachment` block (the files' contents are read in the runtime, unfenced).
+  The `Channel:` label carries no sender-controlled name: the sender is in the message block's provenance,
+  processed by `untrusted.display_name` (one line, no mentions or invisible control characters).
+  `looper_leads_search` fences each lead's summary (`lead`, with its first source's chat, sender and time) and
+  each source string, and adds the lead line to its notice; sender fields also use `display_name`.
+  The group backstop still compares the lead's own words.
+- **The vault:** Manager and task vault tools fence paths, snippets and note bodies under the vault's `inbox/`
+  area (case-insensitive), including its subdirectories and aliases whose resolved targets are there
+  (`inbox` source, with the relative path). Other folders keep their text.
+  The Manager's backstop remembers the original text before fencing it.
+- **The processor:** subscription message streams and leads and intents extraction use `untrusted.fence`
+  (`message_stream` source, because a batch can mix chat types) instead of a separate `<messages>` block.
+  Each input or tool answer with fenced content carries the lead line once. Off, the original processor and
+  vault output is byte-identical.
+
 ### Turns Claude runs on its own
 
 A resident Claude (Manager, Planner) also runs turns that answer no message.
@@ -7641,8 +7678,42 @@ seeded default from before the recommendation was tracked get the current one.
 The Web channel is always on. Telegram and Lark are built in; `looper serve`
 takes no flags for them. At startup it reads `channel_configs`, which
 Settings → Channels edits, and starts each enabled channel. Bot credentials and
-runner configuration require a restart; explicit chat bindings and the top-level
-`bound_chats_only` policy update the running registry immediately after commit.
+runner configuration of running adapters require a restart; explicit chat bindings
+and the top-level `bound_chats_only` policy update the running registry immediately after commit.
+An enabled bot that fails to start retries in the background: transport failures
+wait 30 seconds, doubling up to 10 minutes; credential/configuration failures
+wait 10 minutes between attempts. Each retry reads the saved settings and uses
+the normal adapter start, including chat bindings and catch-up. Disabling or
+deleting the bot cancels pending starts; shutdown cancels all retry tasks.
+System status checks report starting, retrying and failed bots, with the last
+error and next attempt, and clear on success. `channel_configs` responses expose
+the same lifecycle as read-only `runtime` (`starting`, `running`, `retrying`,
+`failed`; null when disabled or not started by this server).
+
+The control plane checks enabled bots every 30 seconds. After a bot has been
+not running, or all its deliveries have failed, for more than
+`channels.down_alert_minutes` (default 10), system status includes a
+`channel_down:<channel_id>` problem. The existing dashboard top banner displays
+it until recovery, refreshing every 30 seconds. Delivery streaks combine
+`schedule_notifications` sent/failed outcomes with notification, post and chat
+delivery receipts; phase updates, streaming deltas, empty replies and missing
+chat routes cannot prove delivery recovery. A successful send ends a delivery
+failure streak. Dashboard-only schedule messages, including pre-send refusals
+for removed targets or missing senders, are not sends.
+
+Each outage also attempts one operator notice through every other enabled,
+healthy bot with an `operator_sender_id`, and one recovery notice when it
+recovers. Neither notice uses the affected bot. With no alternate path, the
+banner remains the operator's alert. Outage transitions and delivery watermarks
+are stored in `system_settings` before sending, preventing repeat notices after
+a restart; an interrupted or failed external notice is not retried. Disabling
+a bot clears its active problem and resets its outage interval.
+
+Operator-only `channel_down_alert.get/update` reads or sets `down_alert_minutes`
+(a positive whole number; null restores 10). The generated CLI exposes these
+same operations. This setting adds no Manager tool, chat setting or channel
+command. Healthy bots send no outage notices and retain their existing message
+content, prompts and command lines.
 
 **A bot per Manager** (stage 2 of the
 [scenario Managers RFC](rfcs/scenario-managers.zh-CN.md)). Each Telegram or

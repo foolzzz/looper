@@ -1285,6 +1285,23 @@ CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_
 CREATE INDEX IF NOT EXISTS idx_llm_records_parent ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_llm_records_failures ON llm_records (created_at) WHERE failure_class IS NOT NULL;
 
+-- provider limit windows begin
+CREATE TABLE IF NOT EXISTS provider_limit_windows (
+    provider_id TEXT NOT NULL REFERENCES llm_providers(id) ON DELETE CASCADE,
+    window_name TEXT NOT NULL CHECK (window_name ~ '^[a-z0-9_]{1,40}$'),
+    status TEXT NOT NULL CHECK (status IN ('allowed', 'warning', 'rejected')),
+    utilization DOUBLE PRECISION CHECK (utilization BETWEEN 0 AND 1),
+    resets_at TIMESTAMPTZ,
+    window_minutes INTEGER CHECK (window_minutes > 0),
+    source TEXT NOT NULL CHECK (source IN ('claude_stream', 'codex_app_server', 'api_headers', 'proxy')),
+    record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (provider_id, window_name)
+);
+-- provider limit windows end
+CREATE INDEX IF NOT EXISTS idx_llm_records_provider_day
+    ON llm_records ((metadata->'profile'->'provider'->>'id'), created_at);
+
 -- The run's stream-json events, appended as they arrive.
 CREATE TABLE IF NOT EXISTS llm_record_events (
     record_id   BIGINT NOT NULL REFERENCES llm_records(id) ON DELETE CASCADE,
