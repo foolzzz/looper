@@ -58,7 +58,7 @@ from types import MappingProxyType
 from typing import Any, cast
 
 from ... import child_env
-from .. import card_actions, chat_settings
+from .. import card_actions, chat_settings, receipts, receipts_settings
 from ...db import card_actions as db_cards
 from ...db import ledger as db_ledger, manager_actions as db_actions, managers as db_managers, tasks as db_tasks, workflows as db_workflows
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
@@ -66,12 +66,13 @@ from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
 from .. import session_routing
 from ..reminders import reminders_on
-from ..tiers.manager_session import MAIN_SESSION
+from ..tiers.manager_session import MAIN_SESSION, on_session_replaced
 from ..turn_context import SpeakerKind
 from . import API_CHANNEL, Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from . import reminders as reminder_tools
+from . import skill_proposals as skill_proposal_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_tool
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
@@ -164,7 +165,7 @@ READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Manager's while leads are on, the vault's reads while it lets the Manager read it, session search while it is on,
 # and the reminder tools while reminders are on (``ManagerOps._with_operator_tools``).
 _MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH,
-                                                    *reminder_tools.TOOLS)}
+                                                    *reminder_tools.TOOLS, skill_proposal_tools.TOOL)}
 # The default Manager's tools that only the user's own turns run, each behind its own switch.
 _OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH, *reminder_tools.TOOLS)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
@@ -260,6 +261,14 @@ class ManagerOps:
         self._lapsing: set[asyncio.Task[None]] = set()
         # The confirmations a card's button answered (id -> what it did), so a typed confirmation of one is told so.
         self._pressed: OrderedDict[str, str] = OrderedDict()
+        # What a card button did, per chat, for the chat's next user turn (``_note_button``).
+        # Per chat: (who pressed, session, that session's generation, the switch's generation, the note).
+        self._button_notes: OrderedDict[tuple[str | None, str | None, str | None],
+                                        list[tuple[str | None, str, int, int, str]]] = OrderedDict()
+        on_session_replaced(self.forget_session)  # every reset path clears a session's id (``ManagerSession``)
+        self._session_gen: dict[str, int] = {}  # bumped when a session is reset: its older notes are never told
+        self._told: dict[int, tuple[str, str, int, int, list[str]]] = {}  # per turn: token, session, gens, notes
+        self._chat_sessions: dict[tuple[str | None, str | None, str | None], str] = {}  # the session a chat runs in
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
         # later shell command may run one), and the turns already told the operator of a block.
         from ..outbound_hook import Trusted
@@ -280,7 +289,7 @@ class ManagerOps:
         """Admitted executions, independent of the HTTP connection or the lifetime of their turn."""
         return self._executing > 0
 
-    async def _run_tool(self, tool: Tool, call: Call) -> Any:
+    async def _run_tool(self, tool: Tool, call: Call, watch: receipts.Watch | None = None) -> Any:
         fleet = self._platform.managers
         admitted = False
         try:
@@ -291,6 +300,8 @@ class ManagerOps:
                 _check_answering(call.turn)
                 self._executing += 1
                 admitted = True
+            if watch is not None and receipts_settings.enabled():
+                return await receipts.run_watched(tool, call, watch)
             return await tool.run(call)
         finally:
             if admitted:
@@ -341,6 +352,7 @@ class ManagerOps:
             self._scope = scope
         scope = await self._with_ledger_tools(scope)
         scope = await self._with_operator_tools(scope)
+        scope = await self._with_skill_proposal_tool(scope)
         if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
             return scope
         try:
@@ -359,6 +371,7 @@ class ManagerOps:
         if definition is None or not definition.enabled:
             raise OpError(ErrorCode.FORBIDDEN, "this Manager was turned off")
         current = scope_for(definition, keys or (), [row["key"] for row in await db_workflows.list_workflows()])
+        current = await self._with_skill_proposal_tool(current)
         if self._scope is scope:  # not replaced meanwhile by the fleet
             self.set_scope(current)
         return current
@@ -400,6 +413,17 @@ class ManagerOps:
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name not in _OPERATOR_TOOLS]
         adjusted = replace(scope, tools=_tool_map([*kept, *wanted]))
+        if self._scope is scope:
+            self._scope = adjusted
+        return adjusted
+
+    async def _with_skill_proposal_tool(self, scope: OpsScope) -> OpsScope:
+        """Any Manager may propose within its project scope, while one of those projects opts in."""
+        wanted = scope.tool_scope is ManagerTools.ALL and await skill_proposal_tools.enabled(scope.tasks.project_ids)
+        if wanted == (skill_proposal_tools.TOOL_NAME in scope.tools):
+            return scope
+        kept = [tool for tool in scope.tools.values() if tool.name != skill_proposal_tools.TOOL_NAME]
+        adjusted = replace(scope, tools=_tool_map([*kept, *((skill_proposal_tools.TOOL,) if wanted else ())]))
         if self._scope is scope:
             self._scope = adjusted
         return adjusted
@@ -520,6 +544,7 @@ class ManagerOps:
             turn = bound or Turn(channel=None, chat=None)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        watch = receipts.Watch()
         try:
             scope = await self.current_scope()  # once: this call is judged by it throughout
             tool = scope.tools.get(name, tool)  # its schema too: a template added since lists in the new one
@@ -527,6 +552,11 @@ class ManagerOps:
             risk = tool.risk_of(arguments)
             if tool.name != CONFIRM_TOOL:
                 tool = await self._authorize(scope, name, arguments)
+            if tool.name == skill_proposal_tools.TOOL_NAME:
+                if turn.autonomous:
+                    raise OpError(ErrorCode.NEEDS_USER_TURN, "a skill proposal needs the operator's own turn")
+                if not await _operator_turn(turn):
+                    raise _OperatorOnly(turn)
             if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
                 raise OpError(ErrorCode.FORBIDDEN, cast(RestrictedTool, tool).refusal)
             _check_answering(turn)
@@ -550,7 +580,7 @@ class ManagerOps:
             if risk is not Risk.READ and (blocked := await self._outbound_check(tool, arguments, turn, risk)):
                 return blocked
             call = Call(arguments, turn, self._platform, scope=scope)
-            impact = await tool.escalate(call) if tool.escalate is not None else None
+            impact = await receipts.escalate(tool, call, watch)
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
                 risk = Risk.HIGH
@@ -565,7 +595,7 @@ class ManagerOps:
                         "expires_in_seconds": CONFIRMATION_SECONDS,
                         "shown_to_user": "Looper adds what this does and the request to confirm it after your reply. "
                                          "It has not run: do not say it did."}
-            answer = await self._run_tool(tool, call)
+            answer = await self._run_tool(tool, call, watch)
             result = _plain(answer)
             if tool.name == LEADS_TOOL and isinstance(result, Mapping) and result.get("leads"):
                 # What the outbound review of a later call in this turn sees came from the leads; and the session
@@ -577,20 +607,22 @@ class ManagerOps:
             audited = isinstance(tool, RestrictedTool) and tool.audit_result is not None
             audit = tool.audit_result(answer) if audited else None  # type: ignore[union-attr]
         except _Recorded as exc:
-            return _error(exc.code, str(exc))
+            return _error(exc.code, str(exc), exc.shown)
         except OpError as exc:
             await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
                                result={"reason": "operator_only"} if isinstance(exc, _OperatorOnly)
-                               else {"message": str(exc)})
-            return _error(exc.code, str(exc))
+                               else {"message": str(exc)}, watch=watch)
+            return _error(exc.code, str(exc), watch.shown)
         except Exception as exc:
             logger.exception("the Manager's call of %s failed", name)
             await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.UNAVAILABLE.value,
-                               result={"message": f"{type(exc).__name__}: {exc}"})
+                               result={"message": f"{type(exc).__name__}: {exc}"}, watch=watch)
             return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); tell "
-                                                 "the user, and try again later")
+                                                 "the user, and try again later", watch.shown)
         await self._record(turn, tool, arguments, risk, "ok",
-                           result=audit if audited else None if risk is Risk.READ else result)
+                           result=audit if audited else None if risk is Risk.READ else result, watch=watch)
+        if watch.shown is not None and isinstance(result, dict):
+            result.setdefault("shown_to_user", watch.shown)  # after the record: the trail keeps the tool's own result
         return {"status": "ok", "result": result}
 
     async def _confirm(self, confirmation_id: str, turn: Turn) -> dict[str, Any]:
@@ -621,16 +653,20 @@ class ManagerOps:
             if not claimed:
                 raise OpError(ErrorCode.CONFLICT, f"the user already answered confirmation {confirmation_id} with "
                                                   "its card's buttons; it does not run again")
+        watch = receipts.Watch()
         try:
-            result = await self._run_confirmed(pending, turn)
+            result = await self._run_confirmed(pending, turn, watch)
         except _Recorded:
             await self._finish_card(pending, "error")
             raise
         await self._finish_card(pending, "ok")
+        if watch.shown is not None and isinstance(result, dict):
+            result.setdefault("shown_to_user", watch.shown)
         return {"status": "ok", "result": result}
 
-    async def _run_confirmed(self, pending: _Pending, turn: Turn) -> Any:
+    async def _run_confirmed(self, pending: _Pending, turn: Turn, watch: receipts.Watch | None = None) -> Any:
         """Run the confirmed call in ``turn`` and record it; its result, or ``_Recorded``."""
+        watch = watch or receipts.Watch()
         tool = pending.tool
         try:
             scope = await self.current_scope()
@@ -640,7 +676,7 @@ class ManagerOps:
                 raise OpError(ErrorCode.FORBIDDEN, "the operation was not run: this Manager may no longer do "
                                                    "it") from None
             result = _plain(await self._run_tool(tool, Call(pending.arguments, turn, self._platform, scope=scope,
-                                                          confirmation=pending.confirmation)))
+                                                          confirmation=pending.confirmation), watch))
         except Exception as exc:
             if isinstance(exc, OpError):
                 error = exc
@@ -648,12 +684,15 @@ class ManagerOps:
                 logger.exception("the Manager's confirmed call of %s failed", tool.name)
                 error = OpError(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); "
                                                        "tell the user, and ask again later")
+            if receipts_settings.enabled() and watch.receipt is None and not isinstance(error, _OperatorOnly):
+                receipts.record_refusal(watch, turn, tool.name, pending.arguments, error)
             await self._record(turn, tool, pending.arguments, Risk.HIGH, "error", error_code=error.code.value,
-                               result={"message": str(error)}, confirmation_id=pending.id)
-            raise _Recorded(error) from None
+                               result={"message": str(error)}, confirmation_id=pending.id, watch=watch)
+            raise _Recorded(error, watch.shown) from None
         if tool.name in TAINTING_TOOLS and (tool.name != "looper_task_update" or "requirement" in pending.arguments):
             await self._mark_task(tool.task_id(pending.arguments) or _created_task(result))
-        await self._record(turn, tool, pending.arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
+        await self._record(turn, tool, pending.arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id,
+                           watch=watch)
         return result
 
     # --- Confirmation cards (``card_actions``) ---
@@ -739,6 +778,7 @@ class ManagerOps:
         while len(self._pressed) > CONFIRMATION_CHATS:
             self._pressed.popitem(last=False)
         if not confirm:
+            self._note_button(key, event.presser, pending.id, "it was cancelled; it did not run")  # type: ignore[arg-type]
             return card_actions.Answer("已取消", card=card.settled("已取消，没有执行。"))
         asker = pending.asker or Turn(channel=key[0], chat=key[2], channel_id=key[1])
         turn = Turn(channel=asker.channel, chat=asker.chat, message_id=pending.asked_in or f"card:{row['token']}",
@@ -748,12 +788,18 @@ class ManagerOps:
                                    later=self._run_pressed(pending, turn, card))
 
     async def _run_pressed(self, pending: _Pending, turn: Turn, card: card_actions.Card) -> card_actions.Card:
+        watch = receipts.Watch()
         try:
-            await self._run_confirmed(pending, turn)
+            await self._run_confirmed(pending, turn, watch)
         except _Recorded as exc:
             await self._finish_card(pending, "error")
+            self._note_button(turn.chat_key, turn.sender, pending.id, f"it failed ({receipts.reason(exc.code)})")
+            if turn.blocks:  # receipts on: the failed-write line code generated
+                return card.settled("\n\n".join(turn.blocks))
             return card.settled(f"❌ 没有执行：{exc}")
         await self._finish_card(pending, "ok")
+        self._note_button(turn.chat_key, turn.sender, pending.id,
+                          f"it ran ({receipts.render(watch.receipt)})" if watch.receipt is not None else "it ran")
         return card.settled("\n\n".join(("✅ 已执行。", *turn.blocks)))
 
     async def restore_confirmations(self) -> int:
@@ -799,18 +845,21 @@ class ManagerOps:
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
                       error_code: str | None = None, result: Any = None,
-                      confirmation_id: str | None = None) -> int | None:
+                      confirmation_id: str | None = None, watch: receipts.Watch | None = None) -> int | None:
         """Record the call; its row's id (None when it could not be written)."""
         task_id = tool.task_id(arguments)
         turn.task_ids.add(task_id)
         task_id = task_id or _created_task(result)
         try:
-            return await db_actions.record(
+            action_id = await db_actions.record(
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
                 confirmation_id=confirmation_id, task_id=task_id, manager_id=self._scope.manager_id,
-                client_id=turn.client_id,
+                client_id=turn.client_id, **receipts.row_fields(watch),
             )
+            if watch is not None and watch.receipt is not None:
+                watch.receipt = replace(watch.receipt, action_id=action_id)
+            return action_id
         except Exception:
             logger.warning("could not record the Manager's call of %s", tool.name, exc_info=True)
             return None
@@ -980,6 +1029,84 @@ class ManagerOps:
             raise
 
     def begin_turn(self, turn: Turn, binding: str | None = None, *, session_key: str = MAIN_SESSION) -> str:
+        """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the
+        operator's card buttons did in this chat since its last one (``_note_button``)."""
+        note = self._begin_turn(turn, binding, session_key=session_key)
+        return "\n".join(part for part in (note, *self._take_button_notes(turn, session_key)) if part)
+
+    def _take_button_notes(self, turn: Turn, session_key: str) -> list[str]:
+        """The notes this chat's card buttons left, for the user turn of the person who pressed, in the session
+        they were left in (RFC 6.5), once. Never while receipts are off or after they were turned off since (stale
+        ones are dropped), in a background turn, for another speaker, or after the session was reset."""
+        if not turn.autonomous:
+            self._chat_sessions[turn.chat_key] = session_key
+            while len(self._chat_sessions) > CONFIRMATION_CHATS:
+                del self._chat_sessions[next(iter(self._chat_sessions))]
+        if not receipts_settings.enabled():
+            self._button_notes.clear()
+            return []
+        live = [entry for entry in self._button_notes.get(turn.chat_key, [])
+                if entry[3] == receipts_settings.generation() and entry[2] == self._session_gen.get(entry[1], 0)]
+        if turn.autonomous or turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+            return []
+        mine = [entry for entry in live if entry[0] == turn.sender and entry[1] == session_key]
+        rest = [entry for entry in live if entry not in mine]
+        if rest:
+            self._button_notes[turn.chat_key] = rest
+        else:
+            self._button_notes.pop(turn.chat_key, None)
+        if not mine:
+            return []
+        # The notes are not put into the input here, but a token only code can name stands where they go; the
+        # input as it is sent (``live_note``) has them put in, if their session still stands, or the token out.
+        earlier = self._told.get(id(turn))
+        token = earlier[0] if earlier is not None else f"[[looper-button-notes:{uuid.uuid4().hex}]]"
+        texts = [*(earlier[4] if earlier is not None else []), *(entry[4] for entry in mine)]
+        gens = earlier[1:4] if earlier is not None else (
+            session_key, self._session_gen.get(session_key, 0), receipts_settings.generation())
+        self._told[id(turn)] = (token, *gens, texts)
+        return [token]
+
+    def live_note(self, turn: Turn, text: str) -> str:
+        """``text``, the input about to be sent, with the card-button notes of this turn put where ``begin_turn``
+        left their token, if their session was not reset and the switch was not turned off since; else with the
+        token taken out. Nothing else in ``text`` is touched, whatever it says."""
+        told = self._told.get(id(turn))
+        if told is None or told[0] not in text:
+            return text
+        token, session_key, session_gen, switch_gen, texts = told
+        if session_gen == self._session_gen.get(session_key, 0) and switch_gen == receipts_settings.generation() \
+                and receipts_settings.enabled():
+            return text.replace(token, "\n".join(texts), 1)
+        return text.replace(token + "\n", "", 1) if token + "\n" in text else text.replace(token, "", 1)
+
+    def forget_session(self, session_key: str) -> None:
+        """The Manager session ``session_key`` was reset: the card-button notes left in it are never told."""
+        self._session_gen[session_key] = self._session_gen.get(session_key, 0) + 1
+        for chat, entries in list(self._button_notes.items()):
+            kept = [entry for entry in entries if entry[1] != session_key]
+            if kept:
+                self._button_notes[chat] = kept
+            else:
+                del self._button_notes[chat]
+
+    def _note_button(self, key: tuple[str | None, str | None, str | None], sender: str | None,
+                     confirmation_id: str, what: str) -> None:
+        """Tell this chat's next user turn what a card button did to a confirmation (RFC 6.5): at most 3, newest
+        kept, for the person who pressed. Nothing while receipts are off."""
+        if not receipts_settings.enabled():
+            return
+        note = (f"[Looper] After your last reply, the operator answered confirmation {confirmation_id} with its "
+                f"card: {what}.")
+        session = self._chat_sessions.get(key, MAIN_SESSION)
+        entries = [entry for entry in self._button_notes.pop(key, [])
+                   if entry[3] == receipts_settings.generation() and entry[2] == self._session_gen.get(entry[1], 0)]
+        entries.append((sender, session, self._session_gen.get(session, 0), receipts_settings.generation(), note))
+        self._button_notes[key] = entries[-3:]
+        while len(self._button_notes) > CONFIRMATION_CHATS:
+            del self._button_notes[next(iter(self._button_notes))]
+
+    def _begin_turn(self, turn: Turn, binding: str | None = None, *, session_key: str = MAIN_SESSION) -> str:
         """``turn`` runs now; the note its message starts with when an operation in its chat waits for the user's
         word ('' otherwise). That operation may be confirmed in this turn only.
 
@@ -1024,6 +1151,7 @@ class ManagerOps:
         if self._turn is turn:
             self._turn = None
         self._routed_turns.pop(id(turn), None)
+        self._told.pop(id(turn), None)
         for key, active in list(self._session_turns.items()):
             if active is turn:
                 del self._session_turns[key]
@@ -1054,7 +1182,8 @@ class ManagerOps:
                 for (channel, channel_id, chat), pending in waiting]
 
     def forget_confirmations(self) -> None:
-        """Drop every waiting confirmation (the Manager's session was reset)."""
+        """Drop every waiting confirmation (the Manager's session was reset), and the card-button notes with them."""
+        self._button_notes.clear()
         for pending in self._pending.values():
             self._lapse(pending)
         self._pending.clear()
@@ -1260,12 +1389,15 @@ async def library_with_server(library: Any, runtime_root: Path, config: Mapping[
 class _Recorded(OpError):
     """An ``OpError`` of a confirmed call, already recorded."""
 
-    def __init__(self, error: OpError) -> None:
+    def __init__(self, error: OpError, shown: str | None = None) -> None:
         super().__init__(error.code, str(error))
+        self.shown = shown  # the ``shown_to_user`` text of its receipt, if it got one
 
 
 class _OperatorOnly(OpError):
     """A speaker refusal with a typed audit reason, without changing other forbidden errors."""
+
+    operator_only = True  # no receipt: the model tells the speaker (``receipts.escalate``)
 
     def __init__(self, turn: Turn) -> None:
         message = ("only the operator can authorize this: it was not run and nothing waits for confirmation; "
@@ -1353,8 +1485,11 @@ def _canonical(arguments: Mapping[str, Any]) -> str:
     return json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
-def _error(code: ErrorCode, message: str) -> dict[str, Any]:
-    return {"status": "error", "error": {"code": code.value, "message": message}}
+def _error(code: ErrorCode, message: str, shown: str | None = None) -> dict[str, Any]:
+    answer: dict[str, Any] = {"status": "error", "error": {"code": code.value, "message": message}}
+    if shown is not None:
+        answer["shown_to_user"] = shown
+    return answer
 
 
 def _plain(value: Any) -> Any:

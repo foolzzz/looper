@@ -736,7 +736,8 @@ def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkey
                "name": "sonnet", "protocol": "anthropic-messages"},
               {"model_id": "model-chat", "provider_id": "prov-test", "provider_name": "Claude account",
                "name": "sonnet", "protocol": "openai-chat"}]
-    profile = {"profile_id": "agent-test", "name": "recipe", "runtime_name": "Claude", "provider": provider,
+    profile = {"profile_id": "agent-test", "name": "recipe", "runtime_name": "Claude", "runtime_type": "claude-code",
+               "provider": provider,
                "model_id": "model-sonnet", "model": {k: v for k, v in models[0].items() if k != "provider_name"},
                "effort": "high", "model_path": "direct", "agent_teams": False, "custom_prompt": "Be concise.",
                "roles": ["manager", "planner", "worker", "reviewer"], "builtin": False,
