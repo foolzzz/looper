@@ -361,6 +361,32 @@ def test_switch_off_keeps_firing_byte_identical_and_never_reads_the_processor(mo
     scenario(check, monkeypatch, tmp_path)
 
 
+def test_a_triage_attempt_without_a_firing_time_is_cancelled_and_the_next_run_reads_its_window(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await triager(env)
+        before = await cursor(env, sid)
+        top = await add(env.pool, "My update", sender=DM, sent_at=minutes_ago(env, 5))
+        runner = env.scheduler._subscriptions
+        now = env.clock.now
+        async with env.pool.acquire() as conn, conn.transaction():
+            schedule = await db_schedules.get_schedule(sid, pool=conn)
+            launched = await env.scheduler._start_subscription(
+                conn, schedule, now, scheduled_for=now, run_id=None,
+                common={"schedule_id": sid, "scheduled_for": now, "trigger": "manual", "created_at": now}, timeout={})
+            await conn.execute("UPDATE schedule_runs SET fired_at = NULL WHERE id = $1", launched.run_id)
+        assert await runner.execute(launched.run_id) is False
+        ended = await db_schedules.get_run(launched.run_id, pool=env.pool)
+        assert ended["status"] == "cancelled" and "firing time" in ended["error"]
+        assert await cursor(env, sid) == before and fake.calls == []
+        assert await env.pool.fetchval("SELECT count(*) FROM triage_events") == 0
+        resumed = await fire(env, sid)
+        assert resumed["status"] == "completed" and await cursor(env, sid) == top
+        assert resumed["stream"]["window_seqs"] == [top]
+        assert len(fake.calls) == 1 and poster.sent == []
+
+    scenario(check, monkeypatch, tmp_path, reply="NONE")
+
+
 def test_an_orphaned_triage_run_is_interrupted_and_its_next_confirmed_run_reads_the_window(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await triager(env)
