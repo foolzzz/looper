@@ -1240,6 +1240,9 @@ uv run --extra test python -m evals.assistant_experience --model sonnet \
 Use `--claude ~/.local/bin/claude` explicitly: the PATH shim hangs inside serve.
 
 Use `--categories time,identity` or `--cases time_now,short_answer` for a subset.
+Add `--turn-context` to enable per-turn context through `turn_context_settings.update`
+on each disposable server and read its timezone through `turn_context_settings.get`;
+the default leaves that switch off. The result records the selected switch.
 `--manager-model` and `--manager-effort` override the selected Manager profile.
 `--jobs > 1` under a total cap requires `--case-budget-usd`, reserving that amount for
 in-flight cases. The runner stops admitting cases at the total cap and checks spending

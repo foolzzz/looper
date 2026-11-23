@@ -964,7 +964,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
-- **助理每轮上下文接线**：类型化分类、渲染、操作者设置入口和 ops 说话人授权检查已实现；Manager 接线尚未完成，开关默认关，暂不注入上下文或契约。接线后补回合 prompt 关闭基准、渠道真实链路与时间/身份评测（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
+- **助理每轮上下文接线**（本分支已实现，默认关）：Manager 用户回合用现有渲染器替换 `Channel:` 行，并按渠道发送者设置 `Turn.speaker`，接通现有升级和确认的授权检查；收尾、自主回合不注入。新增 main 的关闭路径固定基准及渠道身份、确认劫持、稳定块、隔离 serve 测试；真实模型的时间/身份评测未执行，待维护者批准后用 `evals.assistant_experience --turn-context --categories time,identity` 对比基线（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
 
 - **引擎可靠性：用量和限流信号**（[RFC](../architecture/rfcs/engine-reliability-v0.zh-CN.md)）：本分支实现默认关闭的 Claude Code / Codex app-server 窗口采集、账号七天用量、只读 `providers.limits`、额度块和自检；独立服务用替身事件验证，真实额度耗尽与重置未测。准入、冻结、失败处理和降级仍待后续实现。
 
