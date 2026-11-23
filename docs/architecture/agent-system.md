@@ -8786,7 +8786,8 @@ implementation supplies it and is retested.
   retries without consuming an attempt for an interrupted request. Pending and
   dropped windows survive restarts. Catch-up admission in `_handle_lark_event`
   rejects messages older than 15 minutes after filtering self-sent posts and
-  unmentioned group messages, without creating per-message drops. Admitted
+  unmentioned group messages. A remaining message that expires before handling
+  records a visible `stale` dropped window. Admitted
   messages carry their original send time in the turn's envelope timestamp.
   `system.status.channels.<channel-id>.catchup` reports `pending`, `dropped` and
   `windows` (chat id, start/end epoch seconds, state, attempts, reason and the
@@ -8811,6 +8812,8 @@ implementation supplies it and is retested.
   earlier of the cutoff and the owed endpoint. The drop and the advanced start
   (or removal of a fully expired window) are committed together, so a failed
   scan or restart cannot record the same expired prefix again.
+  Adjacent or overlapping dropped windows with the same chat, thread and reason
+  are merged, retaining the highest attempt count and the latest recording time.
   Each startup or retry pass logs one INFO
   `lark_catchup` summary: boundary, expired-window flag, chats scanned, messages
   found, handled, duplicate and too-old skips, failures, `threads_scanned`,
