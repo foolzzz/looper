@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..db import agent_spawns, room as db_room
@@ -104,10 +105,23 @@ async def planner_turn_note(task_id: str, *, on: bool = True, pool: Any = None) 
     return text[:TURN_NOTE_MAX_CHARS], shown
 
 
-def prompt_reached(turn: Any, *, reports: bool) -> bool:
-    """Whether a turn's message reached the runtime, so results attached to it may be claimed. Runners report it
-    (``prompt_sent``); other runtimes do not always, and a session that started and answered did get it."""
-    return bool(turn.prompt_sent if reports else (turn.prompt_sent or turn.session_started))
+def claim_when_sent(ids: Sequence[int]) -> tuple[dict[str, Any], Callable[[], Awaitable[None]]]:
+    """Claim ``ids`` (``mark_turn_delivered``) the moment the runtime sends the turn's prompt, whatever happens to the
+    turn afterwards; a turn that fails before sending claims nothing. Returns the keyword arguments for
+    ``run_turn`` (a cancel object the runtime marks as sent; none when there is nothing to claim) and a coroutine
+    function that waits for a claim in flight."""
+    claims: list[asyncio.Future[None]] = []
+    kwargs: dict[str, Any] = {}
+    if ids:
+        from .runtimes.cancel import TurnCancel
+
+        cancel = TurnCancel()
+        cancel.on_sent(lambda: claims.append(asyncio.ensure_future(mark_turn_delivered(ids))))
+        kwargs["cancel"] = cancel
+
+    async def settled() -> None:
+        await asyncio.gather(*claims, return_exceptions=True)
+    return kwargs, settled
 
 
 async def mark_turn_delivered(ids: Sequence[int], *, pool: Any = None) -> None:

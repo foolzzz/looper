@@ -248,6 +248,7 @@ class ApiSession:
 
         if not self._session:
             await api_sessions.create(sid, descriptor.protocol.value)
+        cancel.sent()  # the first request goes out now: nothing before this point reached the model
         try:
             result = await self._loop.run(target=self._target, system_prompt=self._prompt, user_text=text,
                         session_id=sid, transcript=transcript, tools=tools, cancel=cancel, emit=emit,

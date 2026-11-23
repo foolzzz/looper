@@ -620,3 +620,24 @@ async def test_first_request_context_overflow_retries_only_before_visible_output
             assert session.context_tokens > session.context_limit and session.context_full
         finally:
             await session.stop()
+
+
+@async_test
+async def test_prompt_is_marked_sent_only_when_the_first_request_goes_out(tmp_path):
+    class Unavailable(Tools):
+        async def specs(self):
+            raise OpError(ErrorCode.UNAVAILABLE, 'database unavailable')
+
+    async with FakeModelAPI([ResponseScript(events=text_events())]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            failed_cancel, fired = TurnCancel(), []
+            failed_cancel.on_sent(lambda: fired.append("failed"))
+            result, _ = await turn(session, tools=Unavailable(), cancel=failed_cancel)
+            assert result.result_event['is_error'] and not result.prompt_sent and not fired
+            ok_cancel = TurnCancel()
+            ok_cancel.on_sent(lambda: fired.append("ok"))
+            result, _ = await turn(session, cancel=ok_cancel)
+            assert result.prompt_sent and fired == ["ok"]
+        finally:
+            await session.stop()

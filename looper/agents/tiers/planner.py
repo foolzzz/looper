@@ -4937,6 +4937,7 @@ class PlannerAgent:
         note, delivered = await subagent_delivery.planner_turn_note(
             self._task_id, on=self._room is None and self._execution.subagents_on and not maintenance)
         text += note
+        turn_kwargs, claimed = subagent_delivery.claim_when_sent(delivered)
         recorder = self._recorder(plan, text, process)
         last_context: int | None = None
         compacted: dict[str, Any] | None = None
@@ -4993,8 +4994,9 @@ class PlannerAgent:
                     launch = process.launch
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=limits)
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
-                                              limit if limit > 0 else None)
+                turn = await asyncio.wait_for(
+                    self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop, **turn_kwargs),
+                    limit if limit > 0 else None)
             except TurnBlocked as exc:
                 await recorder.finish(output_text=None, result_event=None, error=str(exc))
                 raise
@@ -5008,6 +5010,7 @@ class PlannerAgent:
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error) from None
             finally:
+                await claimed()  # the results were claimed the moment the runtime sent the prompt, if it did
                 if self._ops is not None and self._token is not None:
                     self._ops.end_turn(self._token)
 
@@ -5030,8 +5033,6 @@ class PlannerAgent:
                     error += f": {ttadk_error}"
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise _SessionNotResumed(error)
-            if subagent_delivery.prompt_reached(turn, reports=isinstance(self._claude, RunnerSession)):
-                await subagent_delivery.mark_turn_delivered(delivered)  # only a sent prompt claims the results
 
             if resuming and resuming == self._schedule_session_id:
                 self._schedule_session_id = None
