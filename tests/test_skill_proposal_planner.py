@@ -21,6 +21,15 @@ DRAFT = {"action": "create", "name": "release-check", "description": "Before a r
 FINAL = {key: "done" for key in ("delivered", "how_to_use", "verification", "open_issues")}
 
 
+@pytest.mark.parametrize('name,expected', [
+    ('release-check', 'release-check'), (' release-check ', 'release-check'),
+    (None, '(draft)'), ('Not a slug', '(draft)'), ('x' * 65, '(draft)'),
+    ('AKIA' + 'A1B2' * 4, '(draft)'), ('sk-' + 'x' * 30, '(draft)'),
+])
+def test_safe_name_keeps_only_valid_nonsecret_slugs(name, expected):
+    assert skill_proposal_sources._safe_name({'name': name}) == expected
+
+
 def _reply(data):
     return '```json\n' + json.dumps(data) + '\n```'
 
@@ -105,7 +114,7 @@ def test_actual_ask_adds_feedback_only_to_opted_in_plan_turn(enabled, agent_db, 
         assert parsed.final is not None
         if enabled:
             assert note.await_count == 2
-            note.assert_awaited_with('project-fixture')
+            note.assert_awaited_with('project-fixture', claimed=[])
         else:
             note.assert_not_awaited()
     asyncio.run(run())

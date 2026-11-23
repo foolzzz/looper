@@ -58,7 +58,8 @@ async def _task(pool: Any, project_id: str, task_id: str = "task-1", step_key: s
 async def _propose(pool: Any, project_id: str, evidence: Any = None, **over: Any) -> sp.ProposalResult:
     if evidence is None:
         evidence = [await _task(pool, project_id, f"task-{await pool.fetchval('SELECT count(*) FROM tasks') + 1}")]
-    return await sp.propose(project_id, _item(**over), proposer="planner:task-1", evidence=evidence, now=T0)
+    return await sp.propose(project_id, _item(**over), proposer=f"planner:{evidence[0]['task']}",
+                            evidence=evidence, now=T0)
 
 
 async def _accepted(pool: Any, project_id: str, evidence: Any = None, **over: Any) -> dict[str, Any]:
@@ -143,6 +144,15 @@ def test_evidence_must_name_this_projects_tasks_and_steps(monkeypatch):
         assert accepted.proposal["evidence"] == [mine]
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("field", ["task", "step"])
+def test_evidence_shape_refuses_identifiers_over_64_characters(field):
+    valid = {"task": "task-one", field: "a" * 64}
+    assert sp._evidence_shape([valid]) == [valid]
+    with pytest.raises(sp.ProposalRefused) as error:
+        sp._evidence_shape([{"task": "task-one", field: "a" * 65}])
+    assert error.value.reason is sp.Refusal.EVIDENCE
 
 
 def test_twenty_skills_refuse_a_create_and_still_allow_an_update(monkeypatch):

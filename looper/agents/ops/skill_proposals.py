@@ -68,7 +68,7 @@ TOOL = RestrictedTool(
                 "skill": {"type": "string", "minLength": 1, "maxLength": 64},
                 "evidence": {"type": "array", "items": {"type": "object", "required": ["task"],
                     "additionalProperties": False, "properties": {
-                        "task": {"type": "string", "minLength": 1},
-                        "step": {"type": "string", "minLength": 1}}}},
+                        "task": {"type": "string", "minLength": 1, "maxLength": 64},
+                        "step": {"type": "string", "minLength": 1, "maxLength": 64}}}},
             }},
 )

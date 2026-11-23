@@ -4549,22 +4549,22 @@ class PlannerAgent:
         """
         await self._read_run_deadline()
         run = run or self._turn
-        message = await skill_proposal_sources.plan_message(self, kind, message)
-        reply = await run(message)
-        await self._read_roles()  # a role the turn defined counts for its reply
-        try:
-            return parse(reply)
-        except ProtocolError as first:
-            await self._activity("error", f"Planner reply broke the {kind.value} contract ({first}); asking again"[:500])
-            reply = await run(
-                f"[{kind.value}] Your last reply broke the reply contract: {first}\n"
-                f"Answer the same request again. End with exactly one ```json block in the {kind.value} shape."
-            )
-            await self._read_roles()
+        async with skill_proposal_sources.plan_message(self, kind, message) as message:
+            reply = await run(message)
+            await self._read_roles()  # a role the turn defined counts for its reply
             try:
                 return parse(reply)
-            except ProtocolError as second:
-                raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
+            except ProtocolError as first:
+                await self._activity("error", f"Planner reply broke the {kind.value} contract ({first}); asking again"[:500])
+                reply = await run(
+                    f"[{kind.value}] Your last reply broke the reply contract: {first}\n"
+                    f"Answer the same request again. End with exactly one ```json block in the {kind.value} shape."
+                )
+                await self._read_roles()
+                try:
+                    return parse(reply)
+                except ProtocolError as second:
+                    raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
 
     async def _template_lines(self, plan: TaskPlan) -> list[str]:
         """The project's role templates, one line each, for a turn that plans, where its project lets its Planner

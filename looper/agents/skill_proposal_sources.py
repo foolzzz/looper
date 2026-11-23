@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 from ..db import activity
@@ -29,7 +30,7 @@ async def _refused(project_id: str, item: Mapping[str, Any], result: proposals.P
             "INSERT INTO skill_proposal_events "
             "(project_id, name, action, actor_kind, via, refusal, note, record_id) "
             "VALUES ($1, $2, 'refuse', 'agent', $3, $4, $5, $6)",
-            project_id, _safe_name(item), via.value, result.refusal.value, result.detail[:500], record_id)
+            project_id, _safe_name(item), via.value, result.refusal.value, result.refusal.explanation, record_id)
 
 
 async def from_planner(task_id: str, project_id: str, items: Sequence[Any], record_id: int | None) -> None:
@@ -38,7 +39,8 @@ async def from_planner(task_id: str, project_id: str, items: Sequence[Any], reco
         return
     for draft in items:
         try:
-            item = draft.to_dict() if hasattr(draft, "to_dict") else dict(draft)
+            item = {} if isinstance(draft, proposals.ProposalResult) else (
+                draft.to_dict() if hasattr(draft, "to_dict") else dict(draft))
             evidence = item.get("evidence")
             if evidence is None:
                 steps = await get_pool().fetch(
@@ -46,11 +48,11 @@ async def from_planner(task_id: str, project_id: str, items: Sequence[Any], reco
                     task_id, proposals.EVIDENCE_MAX)
                 evidence = [{"task": task_id, "step": row["step_key"]} for row in steps]
                 evidence = evidence or [{"task": task_id}]
-            result = await proposals.propose(project_id, item, proposer=f"planner-{task_id}",
-                                             evidence=evidence, via=proposals.Via.PLANNER)
+            result = draft if isinstance(draft, proposals.ProposalResult) else await proposals.propose(
+                project_id, item, proposer=f"planner-{task_id}", evidence=evidence, via=proposals.Via.PLANNER)
             if result.proposal is None:
                 await _refused(project_id, item, result, proposals.Via.PLANNER, record_id)
-                summary = f"Skill proposal {_safe_name(item)} refused: {result.refusal.value} — {result.detail}"
+                summary = f"Skill proposal refused: {result.refusal.value} — {result.refusal.explanation}"
             else:
                 proposal = result.proposal
                 async with transaction() as conn:
@@ -70,17 +72,18 @@ async def manager_propose(project_id: str, item: Mapping[str, Any], *, proposer:
     result = await proposals.propose(project_id, item, proposer=proposer, via=proposals.Via.MANAGER)
     if result.proposal is None:
         await _refused(project_id, item, result, proposals.Via.MANAGER)
+        return proposals.ProposalResult(None, result.refusal, result.refusal.explanation)
     return result
 
 
-async def _feedback(project_id: str) -> list[str]:
+async def _feedback(project_id: str, *, claimed: list[int] | None = None) -> list[str]:
     """Claim project feedback atomically: concurrent Planners cannot tell the same event twice."""
     if not project_id:
         return []
     async with transaction() as conn:
         rows = await conn.fetch(
             "WITH selected AS (SELECT e.id FROM skill_proposal_events e WHERE e.told_at IS NULL AND "
-            "((e.project_id = $1 AND e.action = 'refuse') OR "
+            "((e.project_id = $1 AND e.action = 'refuse' AND e.via = 'planner') OR "
             "(e.proposal_id IN (SELECT id FROM skill_proposals WHERE project_id = $1) "
             "AND e.action IN ('confirm', 'reject', 'expire', 'supersede'))) "
             "ORDER BY e.id FOR UPDATE SKIP LOCKED), "
@@ -88,12 +91,17 @@ async def _feedback(project_id: str) -> list[str]:
             "WHERE e.id = s.id RETURNING e.*) "
             "SELECT e.*, COALESCE(p.name, e.name) AS skill_name FROM delivered e "
             "LEFT JOIN skill_proposals p ON p.id = e.proposal_id ORDER BY e.id", project_id)
-    verbs = {"confirm": "confirmed", "reject": "rejected", "expire": "expired", "supersede": "superseded",
-             "refuse": "refused"}
-    return [f"skill proposal " + (f"p-{row['proposal_id']} " if row["proposal_id"] is not None else "")
-            + f"{row['skill_name']}: {verbs[row['action']]}"
-            + (f" — {row['refusal']}: {row['note']}" if row["refusal"] else f" — {row['note']}" if row["note"] else "")
-            for row in rows]
+    if claimed is not None:
+        claimed.extend(row["id"] for row in rows)
+    verbs = {"confirm": "confirmed", "reject": "rejected", "expire": "expired", "supersede": "superseded"}
+    # Refusals use only code-owned text, including for events written before this validation rule.
+    def line(row: Mapping[str, Any]) -> str:
+        if row["action"] == "refuse":
+            reason = proposals.Refusal(row["refusal"])
+            return f"skill proposal refused — {reason.value}: {reason.explanation}"
+        return (f"skill proposal p-{row['proposal_id']} {row['skill_name']}: {verbs[row['action']]}"
+                + (f" — {row['note']}" if row["note"] else ""))
+    return [line(row) for row in rows]
 
 
 async def final_summary(planner: Any, plan: Any, reply: Any) -> str:
@@ -102,19 +110,29 @@ async def final_summary(planner: Any, plan: Any, reply: Any) -> str:
     return reply.final.markdown()
 
 
-async def planner_note(project_id: str) -> list[str]:
+async def planner_note(project_id: str, *, claimed: list[int] | None = None) -> list[str]:
     try:
-        return await _feedback(project_id)
+        return await _feedback(project_id, claimed=claimed)
     except Exception:
         logger.warning("project %s: could not read skill proposal feedback", project_id, exc_info=True)
         return []
 
 
-async def plan_message(planner: Any, kind: Any, message: str) -> str:
+@asynccontextmanager
+async def plan_message(planner: Any, kind: Any, message: str) -> AsyncIterator[str]:
     """Add project feedback only to an opted-in PLAN turn, leaving other messages byte-identical."""
     from .tiers.planner_protocol import TurnKind
 
     if kind is not TurnKind.PLAN or not getattr(planner, "_skill_proposals", False):
-        return message
-    notes = await planner_note(planner._plan.project_id)
-    return message + "\n\n" + "\n".join(notes) if notes else message
+        yield message
+        return
+    claimed: list[int] = []
+    try:
+        notes = await planner_note(planner._plan.project_id, claimed=claimed)
+        yield message + "\n\n" + "\n".join(notes) if notes else message
+    except BaseException:
+        # A timeout, cancellation or invalid repaired reply did not deliver feedback successfully.
+        if claimed:
+            await get_pool().execute("UPDATE skill_proposal_events SET told_at = NULL WHERE id = ANY($1::bigint[])",
+                                     claimed)
+        raise

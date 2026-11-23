@@ -49,7 +49,9 @@ from ..project_execution import AcceptanceChecksMode
 from ..project_execution import DEFAULT_STEP_RETRIES
 from ..task_roles import RoleKind
 from ..project_skills import CONTENT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS
-from ..skill_proposals import Action as SkillProposalAction, EVIDENCE_MAX, WHY_MAX_CHARS
+from ..skill_proposals import (
+    Action as SkillProposalAction, EVIDENCE_ID_MAX_CHARS, EVIDENCE_MAX, ProposalResult, Refusal, WHY_MAX_CHARS,
+)
 from ..user_gates import (
     ANSWER_MAX_CHARS,
     FINDINGS_MAX_CHARS,
@@ -334,7 +336,7 @@ class DecisionReply:
     advice_request: Mapping[str, Any] | None = None  # advise only: the request, checked when it is sent
     advice_bindings: Any = None  # advise only: what the request's aliases stand for, kept local
     adoption: Mapping[str, Any] | None = None  # the decision after the advisor's answer: what it takes of it
-    skill_proposals: tuple[SkillProposal, ...] = ()
+    skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -348,7 +350,7 @@ class ChatReply:
     gates: tuple[GateChange, ...] = ()  # applied before the action
     final: FinalSummary | None = None  # only when its cancels leave no step open and it adds none
     waits: tuple[WaitChange, ...] = ()
-    skill_proposals: tuple[SkillProposal, ...] = ()
+    skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -370,7 +372,7 @@ class GateReply:
     chat: ChatReply
     summary: GateSummary | None = None  # close only
     final: FinalSummary | None = None  # only when closing the gate completes the task
-    skill_proposals: tuple[SkillProposal, ...] = ()
+    skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -392,7 +394,7 @@ class WaitReply:
     resolution: str = ""
     reason: str = ""
     final: FinalSummary | None = None
-    skill_proposals: tuple[SkillProposal, ...] = ()
+    skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1635,12 +1637,19 @@ def _after_gates(plan: PlanView, changes: tuple[GateChange, ...]) -> PlanView:
     return replace(plan, started=started, pending=pending, done=plan.done | cancelled, gates=gates)
 
 
-def _skill_proposals(data: Mapping[str, Any], completes: bool) -> tuple[SkillProposal, ...]:
+def _skill_proposals(data: Mapping[str, Any], completes: bool) -> tuple[SkillProposal | ProposalResult, ...]:
     if "skill_proposals" not in data:
         return ()
     if not completes:
         raise ProtocolError("skill_proposals is only for a reply that completes the task")
-    raw = data["skill_proposals"]
+    try:
+        return _checked_skill_proposals(data["skill_proposals"])
+    except ProtocolError:
+        # Draft shape errors must not discard an otherwise valid final summary or quote model input.
+        return (ProposalResult(None, Refusal.SHAPE, Refusal.SHAPE.explanation),)
+
+
+def _checked_skill_proposals(raw: Any) -> tuple[SkillProposal, ...]:
     if not isinstance(raw, list) or len(raw) > 2:
         raise ProtocolError("skill_proposals must be a list of at most 2 proposals")
     proposals = []
@@ -1673,8 +1682,8 @@ def _skill_proposals(data: Mapping[str, Any], completes: bool) -> tuple[SkillPro
                 if not isinstance(entry, dict):
                     raise ProtocolError(f"{where}.evidence entries must be objects")
                 _only_keys(entry, {"task", "step"}, f"{where}.evidence")
-                task = _required_text(entry, "task")
-                step = _required_text(entry, "step") if "step" in entry else None
+                task = _limited_text(entry, "task", EVIDENCE_ID_MAX_CHARS, where, required=True)
+                step = _limited_text(entry, "step", EVIDENCE_ID_MAX_CHARS, where, required=True) if "step" in entry else None
                 evidence_items.append(SkillEvidence(task, step))
             evidence = tuple(evidence_items)
         proposals.append(SkillProposal(action, content=content, skill=skill, evidence=evidence, **values))
@@ -2075,20 +2084,19 @@ def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = Fal
     if acceptance_checks is not AcceptanceChecksMode.OFF:
         contract += PROTOCOL_SECTION
     if skill_proposals:
-        contract += "\n" + _SKILL_PROPOSAL_RULES
-    return contract
-
-
-_SKILL_PROPOSAL_RULES = """A reply that completes the task (the one carrying final) may also carry skill_proposals: a list
-of at most 2 objects {"action": "create" or "update", "name": "slug", "description": "...",
+        proposal_rules = """A reply that completes the task (the one carrying final) may also carry skill_proposals: a list
+of at most 2 objects per task {"action": "create" or "update", "name": "slug", "description": "...",
 "content": "full SKILL.md body without frontmatter", "why": "...", "evidence": [{"task": "t-...", "step": "s2"}]}.
 An update also names the existing skill in "skill". Name/skill: at most 64 characters; description: 1024;
 content: 65536 UTF-8 bytes; why: 500 characters. Evidence, if supplied, has 1 to 5 entries naming tasks
-and optional steps that exist in this project; otherwise the current task's steps provide the evidence.
+and optional steps (identifiers at most 64 characters) that exist in this project; otherwise the current
+task's steps provide the evidence.
 Propose only when a procedure was used or rediscovered repeatedly in this task and holds for future tasks
 in this project. Keep task-only details, secrets and one-off paths out. Worker/Reviewer learnings are only
 evidence, never proposals. A proposal waits for the operator's confirmation on the dashboard and has no
 effect on any run until confirmed. Agents cannot confirm, edit or delete skills."""
+        contract += "\n" + proposal_rules
+    return contract
 
 
 REPLY_CONTRACT = reply_contract()

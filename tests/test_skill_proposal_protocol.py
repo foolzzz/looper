@@ -12,6 +12,7 @@ from looper.agents.tiers.planner_protocol import (
 )
 from looper.agents.user_gates import AgendaItem, AgendaStatus, GatePolicy, GateState, GateView
 from looper.agents.waits import WaitState
+from looper.agents.skill_proposals import Refusal
 
 FINAL = {key: "done" for key in ("delivered", "how_to_use", "verification", "open_issues")}
 DRAFT = {"action": "create", "name": "release-check", "description": "Before a release",
@@ -83,7 +84,7 @@ def test_proposals_require_a_completing_reply_and_final(kind):
         _parse(kind, {**SHAPES[kind], "skill_proposals": [DRAFT]}, enabled=True, closing=False)
 
 
-@pytest.mark.parametrize("drafts,error", [
+@pytest.mark.parametrize("drafts", [pytest.param(drafts, id=case) for drafts, case in [
     ([DRAFT] * 3, "at most 2"), (None, "list"), (["draft"], "object"),
     ([{**DRAFT, "action": "delete"}], "create or update"),
     ([{**DRAFT, "action": "update"}], "skill"),
@@ -97,10 +98,29 @@ def test_proposals_require_a_completing_reply_and_final(kind):
     ([{**DRAFT, "evidence": [{"task": 1}]}], "task"),
     ([{**DRAFT, "evidence": [{"task": "t-one"}] * 6}], "5"),
     ([{**DRAFT, "extra": "x"}], "unknown keys"),
-])
-def test_structural_errors(drafts, error):
-    with pytest.raises(ProtocolError, match=error):
-        _parse("DECISION", {"decision": "accept", "final": FINAL, "skill_proposals": drafts}, enabled=True)
+]])
+def test_proposal_shape_errors_preserve_the_final_summary(drafts):
+    result = _parse("DECISION", {"decision": "accept", "final": FINAL, "skill_proposals": drafts}, enabled=True)
+    assert result.final is not None
+    assert result.skill_proposals[0].refusal is Refusal.SHAPE
+
+
+@pytest.mark.parametrize("field", ["task", "step"])
+@pytest.mark.parametrize("length", [64, 65])
+def test_evidence_identifiers_are_bounded(field, length):
+    draft = {**DRAFT, "evidence": [{"task": "t-one", field: "a" * length}]}
+    result = _parse("DECISION", {"decision": "accept", "final": FINAL, "skill_proposals": [draft]}, enabled=True)
+    if length == 64:
+        assert result.skill_proposals[0].to_dict() == draft
+    else:
+        assert result.skill_proposals[0].refusal is Refusal.SHAPE
+
+
+@pytest.mark.parametrize("kind", SHAPES)
+def test_all_closing_shapes_keep_final_when_only_the_proposal_is_malformed(kind):
+    result = _parse(kind, {**SHAPES[kind], "final": FINAL, "skill_proposals": [None]}, enabled=True)
+    assert result.final is not None
+    assert result.skill_proposals[0].refusal is Refusal.SHAPE
 
 
 def test_content_checks_belong_to_propose():

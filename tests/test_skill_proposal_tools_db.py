@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents.ops import Audience, Risk, Turn, check_arguments
+from looper.agents.ops import Audience, OpError, Risk, Turn, check_arguments
 from looper.agents.ops import skill_proposals as tools
 from looper.agents.ops.service import DEFAULT_SCOPE, ManagerOps, Platform
 from looper.agents.tiers.manager import TOOLS_CONTRACT
@@ -26,6 +26,17 @@ def test_object_evidence_support_keeps_legacy_string_array_validation():
     schema = {"properties": {"items": {"type": "array", "items": {"type": "string", "minLength": 1}}}}
     # Existing string arrays accepted empty strings before object evidence was introduced.
     assert check_arguments(schema, {"items": [""]}) == {"items": [""]}
+
+
+@pytest.mark.parametrize("field", ["task", "step"])
+def test_manager_evidence_identifiers_have_the_same_64_character_cap(field):
+    for length in (64, 65):
+        arguments = {"project": "Demo", **ITEM, "evidence": [{"task": "task-evidence", field: "x" * length}]}
+        if length == 64:
+            assert check_arguments(tools.TOOL.schema, arguments) == arguments
+        else:
+            with pytest.raises(OpError):
+                check_arguments(tools.TOOL.schema, arguments)
 
 
 async def _seed(pool: Any, *, mode: str | None = "on") -> None:
