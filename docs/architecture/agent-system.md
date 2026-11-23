@@ -155,6 +155,27 @@ memory, with a since-start label until the service has been up for a day.
     through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
     fence enabled, stored user messages in this excerpt use the same typed group or direct-message
     fence as new messages, with chat and time provenance; assistant messages and handoffs stay unchanged.
+- **Manager lanes** (`manager.lanes.enabled`, off by default): each session has
+  interactive and background FIFO lanes. User messages overtake queued completion
+  batches and interrupt a running completion turn when that session's runtime can
+  interrupt. The completion sends its code notices before its wake is settled;
+  the next user turn gets one explanation through the session's stopped notes.
+  With routing off, both kinds of turn use main's worker, keeping the message
+  loop available. Claimed, unstarted batches expire 15 minutes after their earliest
+  event was recorded, even while the interactive lane stays busy. Their deadline
+  callback and the worker claim a typed queue state atomically. The completion's
+  running token is registered before loading task facts, so arrivals can interrupt
+  preparation too. Control interrupts clean children first observed after the turn's
+  `system/init` checkpoint, preserving tools initialized by a cold resident;
+  uncertain process ownership or a missing checkpoint falls
+  back to killing the resident and resuming the session on the next turn.
+  The operator-only `manager_lanes.get/update` operations and generated
+  `loopercli manager-lanes get/update` commands manage the switch. Update is high
+  risk and requires confirmation; null restores off. Configuration export/import
+  carries it separately under `settings.manager_lanes`. Lark, Telegram and dashboard
+  chat share the behavior; status cards show both queue counts. Background records
+  add `metadata.lane` with the preempting message id, and more than 20 preemptions
+  in a UTC day produce one warning. Off, input, record and FIFO behavior stay unchanged.
 - Acts on Looper only through its platform tools
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells

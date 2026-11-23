@@ -794,6 +794,8 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
+                from . import lanes_settings
+                await lanes_settings.load()
                 await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
