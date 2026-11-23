@@ -1266,12 +1266,24 @@ CREATE TABLE IF NOT EXISTS llm_records (
     -- of run it is (llm_records.RUN_KINDS; NULL on rows from before it, whose readers take it from their agent id).
     parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     run_kind TEXT CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'consult', 'advisor',
-                                      'advice_check', 'outbound_check'))
+                                      'advice_check', 'outbound_check')),
+    -- Why a failed run failed (failures.FailureClass and FailureCause, each cause with its own class), recorded while
+    -- engine.failure_typing is on; NULL for every other run.
+    failure_class TEXT,
+    failure_cause TEXT,
+    CONSTRAINT llm_records_failure_check CHECK ((failure_class IS NULL AND failure_cause IS NULL) OR
+        (failure_class IS NOT NULL AND failure_cause IS NOT NULL AND
+        (failure_class, failure_cause) IN (('quota', 'usage_limit'), ('quota', 'rate_limit'),
+            ('transient', 'connection_failed'), ('transient', 'provider_overloaded'), ('transient', 'start_timeout'),
+            ('environment', 'runtime_missing'), ('environment', 'login'), ('environment', 'tls'),
+            ('environment', 'profile'), ('judgment', 'timeout'), ('judgment', 'context'), ('judgment', 'budget'),
+            ('judgment', 'report'), ('judgment', 'unknown'))))
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_parent ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_llm_records_failures ON llm_records (created_at) WHERE failure_class IS NOT NULL;
 
 -- The run's stream-json events, appended as they arrive.
 CREATE TABLE IF NOT EXISTS llm_record_events (
