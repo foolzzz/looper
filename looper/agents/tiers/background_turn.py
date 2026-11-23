@@ -187,6 +187,10 @@ async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -
     the way ``/stop`` stops it; one that cannot runs to its end, and its reply only stays on its record."""
     from .manager import NoReply, OverCap, _CompletionNotTaken
 
+    if rows[0].get("kind") == "triage":  # its own settling: no code notice, no task links
+        from . import triage_background
+
+        return await triage_background.tell(self, rows, batch)
     assert self._bus is not None
     started = time.monotonic()
     logger.info("completion turn started batch=%s manager=%s events=%d", batch, self.agent_id, len(rows))
@@ -298,6 +302,8 @@ def completion_context(row: dict[str, Any], manager: AgentAddress, batch: uuid.U
         context = {"chat_id": payload.get("chat_id") or row["chat"], "chat_type": "p2p"}
         if notice.get("kind") == "user":
             context["sender_id"] = notice.get("chat")
+        elif row.get("kind") == "triage":  # the operator's own direct chat: it runs on the main session
+            context["sender_id"] = row["chat"]
         metadata = {"origin_channel_id": row["channel_id"]}
     return MessageEnvelope.create(source=source, target=manager, message_type=MessageType.COMPLETION_DUE,
                                   payload={"text": "", "channel_context": context},

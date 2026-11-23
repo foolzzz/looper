@@ -100,7 +100,7 @@ from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered
 from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_field
-from . import background_turn, idle_check_turn, manager_budget
+from . import background_turn, idle_check_turn, manager_budget, triage_background
 from .background_turn import completion_context as _completion_context  # noqa: F401 (router compatibility)
 from .. import lanes, lanes_settings
 from .manager_routing import SessionRouter
@@ -2319,6 +2319,7 @@ class ManagerAgent:
         target = completion_events.Target.from_payload(envelope.payload)
         if target is None or target.manager_id != self.agent_id or self._bus is None:
             return
+        await triage_background.dispatch(self, envelope, target)  # its own batch, claimed apart from task ends
         off = chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
         routed = session_routing.routes(self.agent_id)
         try:

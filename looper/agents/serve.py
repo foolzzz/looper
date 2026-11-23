@@ -70,6 +70,7 @@ from .scheduler import Scheduler
 from .message import MessageType
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
+from .tiers import triage_background
 from .tiers.manager import ManagerConfig
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
@@ -1128,6 +1129,7 @@ async def _run_agent_system_watched(
         await intent_push_service.start()
         await reminder_service.start()  # idle while reminders are off
         idle_check_service = await _start_idle_checks(bus, fleet, drain, post=registry.post)
+        triage_background.configure(registry.post)
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
