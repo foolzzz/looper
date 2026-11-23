@@ -1,0 +1,88 @@
+{
+  "tools": {
+    "order": [
+      "looper_overview",
+      "looper_tasks",
+      "looper_task_create",
+      "looper_task_control",
+      "looper_task_instruct",
+      "looper_task_gate_reply",
+      "looper_task_update",
+      "looper_concurrency",
+      "looper_projects",
+      "looper_agent_profiles",
+      "looper_providers",
+      "looper_models",
+      "looper_catalog",
+      "looper_config_export",
+      "looper_costs",
+      "looper_settings",
+      "looper_schedules",
+      "looper_confirm"
+    ],
+    "each": {
+      "looper_overview": "b66b6b674b84ec043dc284f37c383c66e09de07921c3e4adba1a3cbf69a017b4",
+      "looper_tasks": "1cf607f175ac55fc3452401a16147d2c01edd0f6a7da64db217bbb95cc853bed",
+      "looper_task_create": "63b72865eba116705ca7c54253f63c2ce511bc2cc57a8c336ce8db95178fa3cd",
+      "looper_task_control": "929529095cc681d332e59987a66f9fc6d149145375bd8456ea2f19f42867ac04",
+      "looper_task_instruct": "6f9b7ead812d7731b80c92d238a487f808b6c656dfcac5af7e03dd1e36ed2242",
+      "looper_task_gate_reply": "17b377d2be0ad1c2f18b1138ce5c5ef8a0757f44ded045be4573a321c3eeeb7a",
+      "looper_task_update": "ca4da90306b7245224b7a6d60873149d845718d0c6b55eae1f084a2d0a6c3a9a",
+      "looper_concurrency": "83b67ee38de2d0be34100a902eeceffe0111cbca181a8689f1a14b860f562fd2",
+      "looper_projects": "ad16223196caacd33a79ed70424f0ae483605ad7b8ae5ddd535f95bf42a2ce83",
+      "looper_agent_profiles": "d01d1328263f3b485bd218afeb2e4aa4762894130abf8245e5bd26698ceccc05",
+      "looper_providers": "3d52bb75d39b29fbd6caf9732e3686b87aa2c9903a9fa1cd25d15435852c726e",
+      "looper_models": "a9077a7c1806ef5d5f3fdebcf1ee628ac5b70b8315a5fd424ed4ca3046bbcd09",
+      "looper_catalog": "500a6a8f8a9ba9ffba835996c77cf4837e33562a210dec4d5ccd6a260b6d6e3a",
+      "looper_config_export": "131c6fb5f301cc483b3655fde62f5022e153b36159da35fb68a49813c78f91a5",
+      "looper_costs": "561d5115317c07e7cb639f196b3c713f177641ec322c91a15471ae7a6676f2b4",
+      "looper_settings": "3a0650b974dce34feab0717c0a343ed0eeabf37d201971bf68e2f09b40b5a989",
+      "looper_schedules": "a7cd792824668d1aefee75e06ab55454e756f59cc2079bb0873cad6ade294f1d",
+      "looper_confirm": "12459f09aa11b746eecd4b201702e89cf92d05ce30a779fea02a5c49b6b03611"
+    }
+  },
+  "system": {
+    "default": {
+      "order": [
+        "## How you work",
+        "## Boundaries",
+        "## Communication",
+        "## Your Role",
+        "## Task Creation Flow (IMPORTANT)",
+        "## Rules",
+        "## Looper's tools (required)"
+      ],
+      "each": {
+        "## How you work": "356f22d139234fea9cc08fb8f90aedd902a21c5eb1bb8e40fb2f02ceb5413332",
+        "## Boundaries": "78af0c3efdd33717323b0a4ce317082fa02c5234801ebf5a8d784f99acdb59e0",
+        "## Communication": "5f9d1a1513a47892c74be6c8692a6251ab9e1cc67212109c73af4e65590bb7a9",
+        "## Your Role": "09e102c197c5f80fe08505fe5a76bdb4d81b68fd7412ebd455382b918ed95d38",
+        "## Task Creation Flow (IMPORTANT)": "ffe0ba0742d7b7dc601ddeb736829ee13dc5918125b6bba59d5ea018dfd06212",
+        "## Rules": "9dd8099718cbaa9fcc2f1eb1de3c24bdbe227970d8766104601087671c94e4d3",
+        "## Looper's tools (required)": "1e090fdc5192bb832cae52a6bf4f74033ad21c8d22bd3ab1cd533c6705090609"
+      }
+    },
+    "stable_context": {
+      "order": [
+        "## How you work",
+        "## Boundaries",
+        "## Communication",
+        "## Your Role",
+        "## Task Creation Flow (IMPORTANT)",
+        "## Rules",
+        "## Looper's tools (required)",
+        "## Looper state"
+      ],
+      "each": {
+        "## How you work": "356f22d139234fea9cc08fb8f90aedd902a21c5eb1bb8e40fb2f02ceb5413332",
+        "## Boundaries": "78af0c3efdd33717323b0a4ce317082fa02c5234801ebf5a8d784f99acdb59e0",
+        "## Communication": "5f9d1a1513a47892c74be6c8692a6251ab9e1cc67212109c73af4e65590bb7a9",
+        "## Your Role": "09e102c197c5f80fe08505fe5a76bdb4d81b68fd7412ebd455382b918ed95d38",
+        "## Task Creation Flow (IMPORTANT)": "ffe0ba0742d7b7dc601ddeb736829ee13dc5918125b6bba59d5ea018dfd06212",
+        "## Rules": "9dd8099718cbaa9fcc2f1eb1de3c24bdbe227970d8766104601087671c94e4d3",
+        "## Looper's tools (required)": "1e090fdc5192bb832cae52a6bf4f74033ad21c8d22bd3ab1cd533c6705090609",
+        "## Looper state": "0f98950d4b8d52483c448b87a9eaea26d43d0a00f3dbc75721dc30ffa6f45548"
+      }
+    }
+  }
+}
