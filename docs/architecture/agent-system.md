@@ -213,7 +213,11 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
   commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
   path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
-  A failed or late write queues the message. The original tool binding stays in place. The final reply goes to
+  Admission yields to buffered output and rechecks immediately before writing. A failed or late write queues
+  the message. If a result arrives during the write's drain, the resident process is retired before queue
+  fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
+  merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
+  path. The original tool binding stays in place. The final reply goes to
   the original chat and each addition from another chat; same-chat web additions get a terminal acknowledgement,
   while same-chat Lark/Telegram additions need no duplicate reply. Any participating chat can stop the turn.
   Additions settle only after reply handoff; shutdown before handoff leaves them replayable. Explicit stop
