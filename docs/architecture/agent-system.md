@@ -6384,16 +6384,19 @@ off; `outbound_review.get` and `outbound_review.update`).
     - In that session, the tasks it creates or writes into get `leads`: `looper_task_create`,
       `looper_task_instruct`, `looper_task_gate_reply`, and `looper_task_update` with a new requirement, confirmed
       ones too. A new session drops the mark.
+    - A mark that cannot be written fails its call: a leads search hands on no leads, and a task write reports
+      that it was made but not marked.
     - A task an intent builds gets `intent`. Marks are only added.
   - **While the review is on,** each Worker and Reviewer run of a marked task carries the hook with its run's token
     (`RoomOps.tool_hook`; the token's grant has no room tools when the room is off). Its calls are checked as its
     task's (`outbound_hook.task_placed`):
-    - the operator's for a schedule, the dashboard, or the operator's own direct chat; else a group's or another
-      person's, which code blocks;
-    - the message the review sees is the task's original request, and the requirement is its outside content;
-    - what the operator answered in the task's user gates in their own turn (the dashboard, the web chat, their own
-      Lark or Telegram direct chat) goes with it word for word, each as `operator confirmation at gate <label>`:
-      evidence for the review, not an allow. An API client's, a group's or another person's answer is left out.
+    - the operator's for a schedule, the dashboard, or the operator's own direct chat (a Lark one stored as its user,
+      a Telegram one as its chat, whose id is the user's); else a group's or another person's, which code blocks;
+    - the message the review sees is the task's original request; the requirement and the task's latest 5
+      supplements are its outside content;
+    - what was answered in the task's user gates goes with it word for word: the operator's own (the dashboard, the
+      web chat, their own Lark or Telegram direct chat) each as `operator confirmation at gate <label>`, evidence for
+      the review, not an allow; an API client's, a group's or another person's as an answer from someone else.
   - **A run on a runtime without a hook** does not start: its attempt fails with `review_unsupported_runtime` and the
     Planner decides, while the operator is told. The run's hook config goes when the run ends. A run adopted after a
     restart has no review state, so its checked calls are blocked.

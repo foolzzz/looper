@@ -1017,19 +1017,23 @@ class ManagerOps:
 
     async def _found_leads(self) -> None:
         """A leads search of this turn found leads: the Manager's session is marked, and so are the tasks it creates
-        or adds to from now on, until a new session starts. A mark that cannot be written is logged."""
+        or adds to from now on, until a new session starts. A mark that cannot be written fails the search: its
+        leads are not handed on unmarked."""
         from ...db import agent_sessions
 
         if (session := self._session()) is None:
             return
-        self._leads_session = session
         try:
             await agent_sessions.set_leads_session(self._scope.manager_id, session)
-        except Exception:
+        except Exception as exc:
             logger.warning("cannot mark %s's session as having found leads", self._scope.manager_id, exc_info=True)
+            raise OpError(ErrorCode.UNAVAILABLE, "Looper could not record that this session found leads, so it does "
+                                                 "not show them; tell the user, and try again later") from exc
+        self._leads_session = session
 
     async def _mark_task(self, task_id: str | None) -> None:
-        """Mark ``task_id`` as having taken leads when this session found some."""
+        """Mark ``task_id`` as having taken leads when this session found some. A mark that cannot be written fails
+        the call (the change itself was made): the task's runs would go unchecked."""
         from ...db import agent_sessions
 
         if task_id is None or (session := self._session()) is None:
@@ -1039,8 +1043,11 @@ class ManagerOps:
                 self._leads_session = await agent_sessions.leads_session(self._scope.manager_id) or ""
             if self._leads_session == session:
                 await db_tasks.mark_untrusted(task_id, "leads")
-        except Exception:
+        except Exception as exc:
             logger.warning("cannot mark task %s as having taken leads", task_id, exc_info=True)
+            raise OpError(ErrorCode.UNAVAILABLE, f"the change to task {task_id} was made, but Looper could not record "
+                                                 "that leads went into it, so its runs are not checked: tell the "
+                                                 "user") from exc
 
     # --- The outbound review's hook ---
 

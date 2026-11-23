@@ -390,19 +390,34 @@ async def task_placed(task_id: str) -> Placed:
         who = Who.GROUP_MEMBER
     else:
         operator = await operator_sender_id(task["origin_channel_id"])
-        person = task.get("chat_id") if task.get("chat_kind") == "user" else None
+        # A Lark direct chat is stored as its user; a Telegram one as its chat, whose id is the user's.
+        direct = task.get("chat_kind") == "user" or channel == "telegram"
+        person = task.get("chat_id") if direct else None
         who = Who.OPERATOR if operator is not None and person == operator else Who.ALLOWLISTED_PERSON
     sources = "、".join(task.get("untrusted_inputs") or ()) or "none"
     context = [(f"the task's requirement (outside content went into it: {sources})", str(task["requirement"]))]
-    context += await _operator_confirmations(task_id)
+    context += await _supplements(task_id)
+    context += await _gate_answers(task_id)
     return Placed(who, str(task.get("original_user_text") or ""), channel, task.get("chat_id"), tuple(context))
 
 
-async def _operator_confirmations(task_id: str) -> list[tuple[str, str]]:
-    """What the operator answered in the task's user gates, in their own turn, word for word: evidence for the
-    review, never an allow. The dashboard's and the operator's web chat's answers are the operator's; one from Lark
-    or Telegram is when its chat is the operator's own direct chat (``operator_sender_id``); an API client's, a
-    group's or another person's is not."""
+SUPPLEMENTS_SHOWN = 5  # the latest supplements a task run's review sees
+
+
+async def _supplements(task_id: str) -> list[tuple[str, str]]:
+    """The task's latest supplements, word for word: what went into the task besides its requirement (one the
+    Manager wrote in a session that found leads among them)."""
+    from ..db import task_changes
+
+    return [(f"a supplement to the task (via {row['via'] or 'unknown'})", str(row["summary"]))
+            for row in await task_changes.supplements(task_id, limit=SUPPLEMENTS_SHOWN)]
+
+
+async def _gate_answers(task_id: str) -> list[tuple[str, str]]:
+    """What was answered in the task's user gates, word for word. The operator's own (the dashboard's and the web
+    chat's; one from Lark or Telegram when its chat is the operator's own direct chat, ``operator_sender_id``) is
+    an operator confirmation: evidence for the review, never an allow. An API client's, a group's or another
+    person's is labelled as someone else's."""
     from ..db import user_gates
     from .gate_service import VIA_DASHBOARD
     from .message import BOT_CHANNEL_TYPES, builtin_channel_id
@@ -416,11 +431,10 @@ async def _operator_confirmations(task_id: str) -> list[tuple[str, str]]:
             own = operator is not None and answer.get("chat") == operator
         else:
             own = via in (VIA_DASHBOARD, "manager:web")
-        if not own:
-            continue
         chose = f" (chose \"{answer['option']}\" for {answer.get('agenda_item') or 'the agenda'})" \
             if answer.get("option") else ""
-        found.append((f"operator confirmation at gate {answer['step_key']}{chose}", str(answer.get("text") or "")))
+        label = "operator confirmation" if own else "an answer from someone other than the operator"
+        found.append((f"{label} at gate {answer['step_key']}{chose}", str(answer.get("text") or "")))
     return found
 
 

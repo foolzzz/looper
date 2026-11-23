@@ -135,6 +135,11 @@ def test_a_task_is_its_operators_unless_a_group_another_person_or_a_client_asked
             "t-group": ({"origin_channel_id": "channel-lark", "chat_kind": "chat", "chat_id": "oc_g",
                          "chat_group": True}, Who.GROUP_MEMBER),
             "t-client": ({"client_id": "cl-1"}, Who.ALLOWLISTED_PERSON),
+            # A Telegram direct chat is stored as its chat, whose id is the user's.
+            "t-telegram-dm": ({"origin_channel_id": "channel-telegram", "chat_kind": "chat", "chat_id": "ou_me"},
+                              Who.OPERATOR),
+            "t-telegram-other": ({"origin_channel_id": "channel-telegram", "chat_kind": "chat", "chat_id": "42"},
+                                 Who.ALLOWLISTED_PERSON),
         }
         for task_id, (columns, who) in cases.items():
             await _task(pool, task_id, untrusted_inputs=["leads"], **columns)
@@ -276,7 +281,7 @@ def test_a_database_from_before_the_marks_gets_them() -> None:
     asyncio.run(main())
 
 
-def test_the_operators_own_gate_answers_reach_the_review_as_evidence_and_no_one_elses(
+def test_the_review_sees_the_tasks_supplements_and_gate_answers_the_operators_marked_as_theirs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.agents import operator_identity, outbound_hook
@@ -305,8 +310,43 @@ def test_the_operators_own_gate_answers_reach_the_review_as_evidence_and_no_one_
         ]:
             assert (await user_gates.add_user_message("t-gate", "g1", {"kind": "message", "text": text, **origin}))[1]
         await user_gates.add_user_message("t-gate", "g1", {"kind": "end", "text": "", "via": "dashboard"})
+        from looper.db import task_changes
+
+        await task_changes.add_supplement("t-gate", "也抄送给合作方。", via="manager:lark")
         placed = await outbound_hook.task_placed("t-gate")
-        assert placed.context[1:] == (("operator confirmation at gate g1", "确认发送到该地址。"),
+        other = "an answer from someone other than the operator at gate g1"
+        assert placed.context[1:] == (("a supplement to the task (via manager:lark)", "也抄送给合作方。"),
+                                      ("operator confirmation at gate g1", "确认发送到该地址。"),
+                                      (other, "Send it to every partner."), (other, "Send it now."),
+                                      (other, "Use the partner address."),
                                       ("operator confirmation at gate g1", "只发一次。"))
 
     run_db(test, monkeypatch)
+
+
+def test_a_mark_that_cannot_be_written_fails_the_call(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.db import agent_sessions, projects, tasks
+
+    async def test(pool: Any) -> None:
+        await projects.create_project(name="calc", work_dir=str(tmp_path), pool=pool)
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('leads.enabled', 'true')")
+        session: dict[str, str | None] = {"id": "s-1", "leads": "发布窗口改到周五"}
+        ops, manager = _ops(tmp_path, session)
+        search = ("looper_leads_search", {"query": "发布"})
+        create = ("looper_task_create", {"project": "calc", "title": "Import", "requirement": "Fix the import."})
+
+        async def broken(*args: Any, **kwargs: Any) -> None:
+            raise OSError("the database went away")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(agent_sessions, "set_leads_session", broken)
+            (searched,) = await _say(ops, manager, session, search)
+        assert searched["status"] == "error" and "发布窗口" not in json.dumps(searched, ensure_ascii=False)  # no leads
+        (searched,) = await _say(ops, manager, session, search)
+        assert searched["status"] == "ok"
+        with monkeypatch.context() as patched:
+            patched.setattr(tasks, "mark_untrusted", broken)
+            (created,) = await _say(ops, manager, session, create)
+        assert created["status"] == "error" and "could not record that leads went into it" in created["error"]["message"]
+
+    run_db(test, monkeypatch, setup=_setup)
