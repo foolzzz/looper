@@ -407,7 +407,7 @@ NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
-    "build_user_message",
+    "build_user_message", "session_budget",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
@@ -1908,14 +1908,15 @@ class ManagerAgent:
             token.times.tool_calls = 0
             token.times.first_reply_at = None
         envelope = prepared.envelope
-        budget_options = await manager_budget.prepare(session, token, launch)
+        budget_options = await token.step("session_budget", manager_budget.prepare(session, token, launch))
         token.restart() if prepared.retried else token.advance(TurnPhase.STARTING)
         pre_context = (self._claude.context_tokens if prepared.switch is not None
                        and prepared.switch.reason is SwitchReason.CONTEXT_FULL else None)
         if prepared.switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
             # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
-            await manager_budget.reopen(self, prepared, token)
+            await token.keep("switch_session", manager_budget.reopen(self, prepared, token),
+                             HANDOFF_TIMEOUT_SEC + 30)
             await token.keep("switch_session", self._switch_session(prepared.switch, token.cancel),
                              HANDOFF_TIMEOUT_SEC + 30)
         # A process without the outbound review's hook, replaced by one with it, ends with its whole tree.
@@ -1955,7 +1956,7 @@ class ManagerAgent:
         )
         try:
             await token.keep("recorder_start", recorder.start(), 10)
-            await manager_budget.annotate(session, recorder)
+            await token.step("recorder_annotate", manager_budget.annotate(session, recorder))
             if prepared.delivery_followup:
                 await token.step("recorder_annotate", recorder.annotate(delivery_guard.metadata(prepared)))
             if run.state is not None:
