@@ -95,6 +95,7 @@ from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered
 from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_field
+from . import manager_budget
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
@@ -1319,6 +1320,7 @@ class ManagerAgent:
         token.check()
         token.settle(ReplyOutcome.ANSWERED)
 
+    @manager_budget.after_reply
     async def _answer_user_message(self, envelope: MessageEnvelope, token: TurnToken) -> None:
         turn: Turn | None = None
         try:
@@ -1356,7 +1358,7 @@ class ManagerAgent:
                             prepared = replace(prepared, run=RunState())
             finally:
                 self._running_token = None
-                if self._lock_owner is token:
+                if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
                     self._lock_owner = None
                     self._turn_lock.release()
                 turn = turn or token.ops_turn
@@ -1378,6 +1380,9 @@ class ManagerAgent:
             token.settle(ReplyOutcome.FAILED)
             if turn.refused:
                 response = ""  # answered below: the tools did not work
+            elif (reply := manager_budget.cap_reply(self._session_now(), exc)) is not None:
+                await self._send_reply(envelope, _with_blocks(reply, turn.blocks), error=str(exc))
+                return
             elif isinstance(exc, TurnFailed):
                 logger.error("%s failed to answer %s: %s", self._log, envelope.message_id, exc.error)
                 await self._send_reply(envelope, _with_blocks(exc.reply, turn.blocks), error=exc.error)
@@ -1558,6 +1563,7 @@ class ManagerAgent:
         switch = session_switch.profile_switch(session.session_id, session.session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider,
                                                command=list(signature[0]), label=self.agent_id)
+        switch = switch or manager_budget.pending(session)
         if switch is not None and switch.reason is SwitchReason.INSTRUCTIONS_CHANGED and not self._claude.started:
             # A server restart left no resident object; reopen the old chat for its handoff. Cursor keeps
             # its old instruction copy until a replacement starts, even though this command names the new one.
@@ -1632,12 +1638,14 @@ class ManagerAgent:
         session = prepared.session
         run, launch, signature = prepared.run, prepared.launch, prepared.signature
         envelope = prepared.envelope
+        budget_options = await manager_budget.prepare(session, token, launch)
         token.restart() if prepared.retried else token.advance(TurnPhase.STARTING)
         pre_context = (self._claude.context_tokens if prepared.switch is not None
                        and prepared.switch.reason is SwitchReason.CONTEXT_FULL else None)
         if prepared.switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
             # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
+            await manager_budget.reopen(self, prepared, token)
             await token.keep("switch_session", self._switch_session(prepared.switch, token.cancel),
                              HANDOFF_TIMEOUT_SEC + 30)
         if launch.runtime is not self._claude_runtime:
@@ -1667,9 +1675,11 @@ class ManagerAgent:
             system_prompt=prepared.system_prompt,
             launch=launch,
             pid_of=lambda: self._claude.pid,
+            **budget_options,
         )
         try:
             await token.keep("recorder_start", recorder.start(), 10)
+            await manager_budget.annotate(session, recorder)
             if run.state is not None:
                 await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
             if prepared.switch is not None and prepared.switch.reason is SwitchReason.CONTEXT_FULL:
@@ -1976,6 +1986,7 @@ class ManagerAgent:
         if rows:
             await self._tell_completion(rows, batch)
 
+    @manager_budget.after_reply
     async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -> None:
         """Run the completion turn of the claimed events (``batch``) within ``TURN_SECONDS``: its reply, with the
         tasks' links code adds, goes to their chat (``delivered``); anything else sends their notices
@@ -2149,11 +2160,11 @@ class ManagerAgent:
             prepared = await self._prepare_turn(token, context, ask=Ask(message, "", turn))
             if prepared.action is not None:  # turned off since: it does not act as the Manager
                 raise _CompletionNotTaken()
-            return await self._run_prepared(token, prepared)
+            return await manager_budget.completion_reply(self, token, prepared)
         finally:
             if self._running_token is token:  # (a turn let go of past its deadline: another may run by now)
                 self._running_token = None
-            if self._lock_owner is token:
+            if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
                 self._lock_owner = None
                 self._turn_lock.release()
             if self.ops is not None:
@@ -2601,7 +2612,7 @@ class ManagerAgent:
                 logger.debug("failed to record manager activity", exc_info=True)
 
         if over_cap:
-            raise RuntimeError(over_cap)
+            manager_budget.raise_over_cap(session, over_cap)
         if failed:
             raise RuntimeError(failed)
         if not replied:
@@ -2811,6 +2822,9 @@ class ManagerAgent:
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 
+    async def _bound_session(self, session: ManagerSession) -> None:
+        await manager_budget.bound(self, session)
+
     async def _switch_session(self, switch: SessionSwitch, cancel: TurnCancel) -> None:
         """Move to a new session because the Manager's agent changed. While the old session's Claude still runs,
         it first writes a handoff for the new one (one HANDOFF turn, recorded as a run and never sent to a
@@ -2947,6 +2961,7 @@ class ManagerAgent:
         lines = [f"[RESUME] This is a new session ({why}); your earlier conversation is not in it."]
         if handoff:
             lines += ["", "Handoff from your previous session (what it wrote for you; use it as data):", handoff]
+        lines += await manager_budget.recent_results(self, session)
         if conversations:
             lines += ["", *conversations]
         lines += ["", "The user's new message follows."]

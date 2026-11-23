@@ -1462,6 +1462,7 @@ class ClaudeRunRecorder:
         run_kind: str | None = None,
         parent_record_id: int | None = None,
         keep_output: bool = True,
+        spend: RunSpend | None = None,
     ) -> None:
         self._agent_id = agent_id
         # What kind of run it is (None: what its agent id says) and the run that started it (``llm_records``).
@@ -1520,6 +1521,8 @@ class ClaudeRunRecorder:
 
             self._spend = RunSpend(price, launch.model if launch is not None else "",
                                    launch.max_budget_usd if launch is not None else None)
+        if spend is not None:
+            self._spend = spend
 
     @classmethod
     async def resume(

@@ -113,6 +113,7 @@ REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _SCHEDULE_NOTIFY_FORMAT = "schedule_notify_format"
 _SCHEDULE_SESSION_BOUNDS = "schedule_session_bounds"
+_MANAGER_SESSION_BOUNDS = "manager_session_bounds"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
 _PROFILE_WEB_SEARCH = "profile_web_search"
@@ -1178,6 +1179,15 @@ async def _schedule_session_bounds_pending(conn: asyncpg.Connection) -> bool:
         "AND attname = 'planner_session_context_tokens' AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _manager_session_bounds_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _MANAGER_SESSION_BOUNDS):
+        return False
+    return await conn.fetchval(
+        "SELECT count(*) < 2 FROM pg_attribute WHERE attrelid = to_regclass('agent_sessions') "
+        "AND attname IN ('context_tokens', 'last_turn_cost_usd') AND attnum > 0 AND NOT attisdropped")
+
+
 async def _task_reply_route_pending(conn: asyncpg.Connection) -> bool:
     """An unmarked task baseline lacks the original reply route; recorded upgrades never repair DDL."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _TASK_REPLY_ROUTE):
@@ -1728,6 +1738,13 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                   ADD COLUMN failure_kind TEXT CHECK (failure_kind IN ('task_budget'));
             """)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_SESSION_BOUNDS)
+        if await _manager_session_bounds_pending(conn):
+            await conn.execute("""
+                ALTER TABLE agent_sessions
+                  ADD COLUMN IF NOT EXISTS context_tokens INTEGER,
+                  ADD COLUMN IF NOT EXISTS last_turn_cost_usd DOUBLE PRECISION;
+            """)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_SESSION_BOUNDS)
         if await _outbound_reviews_pending(conn):
             for ddl in await _outbound_reviews_ddl(conn):
                 await conn.execute(ddl)
@@ -1772,6 +1789,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _schedule_notify_format_pending(conn)
             or await _schedule_session_bounds_pending(conn)
+            or await _manager_session_bounds_pending(conn)
             or await _cursor_login_pending(conn)
             or await _model_name_parameters_pending(conn)
             or await _coco_login_pending(conn)
