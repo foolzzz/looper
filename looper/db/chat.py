@@ -10,6 +10,16 @@ import asyncpg
 from .connection import get_pool
 
 
+async def last_user_message_at(chat_session: str) -> datetime | None:
+    """Last user message in a bot/chat, across its routed Manager identities.
+
+    Channel thread ids append ``#manager-<key>`` when routed; the bot/chat before ``#`` remains the same.
+    """
+    return await get_pool().fetchval(
+        "SELECT max(created_at) FROM chat_messages WHERE split_part(session_id, '#', 1) = $1 AND role = 'user'",
+        chat_session)
+
+
 async def save_message(
     *,
     session_id: str,
