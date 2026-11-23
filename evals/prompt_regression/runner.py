@@ -72,6 +72,14 @@ _SERVE = (
     "import sys\n"
     "from pathlib import Path\n"
     "from looper.agents.serve import serve_agent\n"
+    "if len(sys.argv) > 4:\n"
+    "    from datetime import datetime\n"
+    "    from functools import partial\n"
+    "    from looper.agents import serve\n"
+    "    from looper.agents.ops import reminders\n"
+    "    now = datetime.fromisoformat(sys.argv[4])\n"
+    "    reminders._now = lambda: now\n"
+    "    serve.ReminderService = partial(serve.ReminderService, clock=lambda: now)\n"
     "serve_agent(host='127.0.0.1', port=int(sys.argv[1]), runtime_root=Path(sys.argv[2]), work_dir=Path(sys.argv[3]))\n"
 )
 
@@ -330,10 +338,12 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
                    gh_diffs: dict[str, str] | None = None,
                    startup_timeout: float = 90.0, env: dict[str, str] | None = None,
                    pi_runtime: str = "cli", dsh_runtime: str = "cli",
-                   keeper_mode: str = "off", port: int | None = None) -> Iterator[Api]:
+                   keeper_mode: str = "off", port: int | None = None,
+                   reminder_now: datetime | None = None) -> Iterator[Api]:
     """``looper serve`` on ``port`` (default: a free one), with an ops file of its own in ``runtime_root`` naming
     ``database_url``; stopped with SIGINT, as the operator would. ``notes_root`` stands in for the operator's ``~/.claude/projects``
-    (the operator's notes). ``env``: variables the server gets on top of this process's (a key read for it alone)."""
+    (the operator's notes). ``env``: variables the server gets on top of this process's (a key read for it alone).
+    ``reminder_now`` freezes only the reminder tools and delivery clock for a fake reminder dialog."""
     if port == RESERVED_PORT:
         raise EvalError(f"port {RESERVED_PORT} is the operator's own server")
     install_gh(bin_dir, diffs=gh_diffs)
@@ -355,7 +365,8 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
         server_env["HOME"] = str(home)
     log = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
-        [sys.executable, "-c", _SERVE, str(port), str(runtime_root), str(manager_dir)],
+        [sys.executable, "-c", _SERVE, str(port), str(runtime_root), str(manager_dir),
+         *([reminder_now.isoformat()] if reminder_now is not None else [])],
         cwd=str(runtime_root), env=server_env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
     )
     api = Api(f"http://127.0.0.1:{port}")

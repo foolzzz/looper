@@ -175,7 +175,7 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
-            assert {"schedule_user_gates", "command_schedules", "runtime_launcher"} <= {
+            assert {"schedule_user_gates", "command_schedules", "runtime_launcher", "proactive_deliveries"} <= {
                 r["name"] for r in after["schema_migrations"]}
             assert await conn.fetchval("SELECT planner_session_runtime FROM schedules") == "claude-code"
             # Added snapshot and command metadata preserve every historical run field.
