@@ -105,3 +105,17 @@ describe("modelRunCaveats", () => {
     expect(modelRunCaveats({ ...MODEL, running, unpriced_runs, interrupted_runs })).toBe(expected);
   });
 });
+
+
+describe("Sub-agent cost share", () => {
+  it("adds the explorer share only when supplied by task_costs", () => {
+    const before = renderToStaticMarkup(<TaskCostBreakdown cost={COST} />);
+    expect(before).not.toContain("Sub-agents");
+    expect(renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, by_role: { ...COST.by_role, explorer: { cost_usd: 0, runs: 0 } } }} />)).toBe(before);
+    const cost = { ...COST, by_role: { ...COST.by_role, explorer: { cost_usd: 0.1, runs: 2 } } };
+    const html = renderToStaticMarkup(<TaskCostBreakdown cost={cost} />);
+    expect(html).toContain("Sub-agents");
+    expect(html).toContain("$0.1000");
+    expect(renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, by_role: { ...COST.by_role } }} />)).toBe(before);
+  });
+});

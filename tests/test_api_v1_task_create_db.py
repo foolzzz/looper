@@ -288,8 +288,9 @@ def test_client_project_impact_discloses_execution_and_preserves_settings(monkey
             assert "新建项目「Execution」" in lines[0] and str(tmp_path) in lines[0] and "创建任务" in lines[0]
             assert all(f"- {text}" in lines for text in disclosures), asked["impact"]
             # Every accepted control is disclosed, including default and disabled controls.
-            from looper.agents.project_execution import FIELDS
-            assert [line.split("（")[0].removeprefix("- ") for line in lines[1:]] == list(FIELDS)
+            from looper.agents.project_execution import FIELDS, SUBAGENT_FIELDS
+            assert [line.split("（")[0].removeprefix("- ") for line in lines[1:]] == [
+                field for field in FIELDS if field not in SUBAGENT_FIELDS or field in settings]
             for field, raw in settings.items():
                 if raw is not None and raw != "" and field != "distill_lessons":
                     line = next(line for line in lines if line.startswith(f"- {field}（"))

@@ -57,10 +57,12 @@ export function useTaskRuns(task: TaskDetail | null): { runs: TaskRuns | null; e
         if (seq !== latest.current) return;
         // The advisor's and its judge's runs are the Planner's role's, but no Planner turn: a tree of their own.
         const consult = (r: TaskRunRow) => r.kind === "advisor" || r.kind === "advice_check";
-        const by = (role: TaskRunRow["role"]) => rows.filter((r) => r.role === role && !consult(r)).map(asRecord);
+        const by = (role: TaskRunRow["role"]) => rows.filter((r) => r.role === role && !consult(r) && r.kind !== "explorer").map(asRecord);
         const consults = rows.filter(consult).map((r) => ({
           record: asRecord(r), kind: r.kind as "advisor" | "advice_check", parentId: r.parent_record_id ?? null }));
-        setRuns({ planner: by("planner"), worker: by("worker"), reviewer: by("reviewer"), consults });
+        const explorers = rows.filter((r) => r.kind === "explorer").map((r) => ({ record: asRecord(r), parentId: r.parent_record_id ?? null }));
+        setRuns({ planner: by("planner"), worker: by("worker"), reviewer: by("reviewer"), consults,
+          ...(explorers.length ? { explorers } : {}) });
         setError("");
       },
       (err) => {

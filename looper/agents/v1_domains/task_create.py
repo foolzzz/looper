@@ -5,7 +5,8 @@ from .. import projects, workflows
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
-from ..project_execution import ADVISOR_BUDGETS, ADVISOR_COUNTS, FIELDS, ROOM_LIMITS, ProjectExecution, format_usd
+from ..project_execution import (ADVISOR_BUDGETS, ADVISOR_COUNTS, FIELDS, ROOM_LIMITS, SUBAGENT_FIELDS,
+                                 SUBAGENT_BUDGETS, SUBAGENT_COUNTS, ProjectExecution, format_usd)
 
 WORKSPACE_MODE = {"type": "string", "enum": ["in_place", "worktree"]}
 WORKSPACE_WARNING = _object({
@@ -48,11 +49,11 @@ NEW_PROJECT_FIELDS = _object({
     "advisor_fallback_profile": _inherit("string"),
     **{field: _choice("on", "off") for field in (
         "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room",
-        "advisor")},
+        "advisor", "subagents")},
     **{field: _inherit("integer") for field in (
         "supervise_interval_seconds", "max_step_retries", "role_text_max_chars", "gate_reminder_hours", *ROOM_LIMITS,
-        *ADVISOR_COUNTS)},
-    **{field: _inherit("number") for field in ("room_consult_budget_usd", *ADVISOR_BUDGETS)}}, ["name"], closed=True)
+        *ADVISOR_COUNTS, *SUBAGENT_COUNTS)},
+    **{field: _inherit("number") for field in ("room_consult_budget_usd", *ADVISOR_BUDGETS, *SUBAGENT_BUDGETS)}}, ["name"], closed=True)
 REQUEST = {**_object({
     "requirement": {"type": "string", "minLength": 1, "maxLength": 32_000, "pattern": r"\S"},
     "project_id": {"type": "string", "minLength": 1}, "project": NEW_PROJECT_FIELDS,
@@ -172,8 +173,20 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
         "advisor_internal_domains": ("请教包里算作 URL 的内部域名",
                                      ", ".join(execution.advisor_internal_domains or ()) or "无"),
     })
+    values["subagents"] = ("Planner 和 Worker 派只读 explorer（产生模型费用）", execution.subagents == "on")
+    subagent_labels = {
+        "subagent_budget_usd": "每个子 agent 预算，USD；默认跟随 explorer 角色，再默认 0.50",
+        "subagent_task_budget_usd": "每任务子 agent 总预算，USD",
+        "subagents_per_run": "每次运行最多派出的子 agent 数",
+        "subagents_per_task": "每任务最多派出的子 agent 数",
+    }
+    for field, (_, _, default, _) in (SUBAGENT_BUDGETS | SUBAGENT_COUNTS).items():
+        value = getattr(execution, field)
+        values[field] = (subagent_labels[field], default if value is None else value)
     lines = []
     for field in FIELDS:
+        if field in SUBAGENT_FIELDS and field not in submitted:
+            continue
         label, value = values[field]
         if isinstance(value, bool):
             value = "on" if value else "off"

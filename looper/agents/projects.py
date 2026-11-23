@@ -1083,6 +1083,9 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
         "result": clip(result or task.get("error") or "", 1_000) or None,
         **({"process_record": process_record_text(task["process_record"])} if task.get("process_record") else {}),
         "cost_usd": (cost or {}).get("cost_usd"),
+        # Historical explorer spend stays visible after the project switch is turned off.
+        **({"cost_by_role": cost["by_role"]}
+           if cost and cost.get("by_role", {}).get("explorer", {}).get("runs", 0) else {}),
         # How many of its Workers and Reviewers run at once, with the source; its own limits (task).
         "concurrency": {role: view["concurrency"] for role, view in agents["roles"].items()
                         if "concurrency" in view},

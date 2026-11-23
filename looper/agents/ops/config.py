@@ -25,7 +25,8 @@ from ...db import llm_records as db_llm_records, projects as db_projects, manage
 from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..model_names import MODEL_NAME_SCHEMA
-from ..project_execution import ADVISOR_FIELDS
+from ..project_execution import (ADVISOR_FIELDS, SUBAGENT_FIELDS, SUBAGENT_BUDGETS, SUBAGENT_COUNTS,
+                                 execution_fields)
 from ..projects import RequestError, project_name
 from ..llmrec.dialects import ChatDialect
 from ..runtimes import ApiProtocol, AuthKind, VendorType
@@ -132,9 +133,12 @@ def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 def _model_project(view: Mapping[str, Any]) -> dict[str, Any]:
     """A project as the Manager's tool gives it: without the advisor's settings while its switch is off, so the
     model sees what it saw before the advisor (the advisor RFC, section 13)."""
-    if view.get("advisor") == "on":
-        return dict(view)
-    return {key: value for key, value in view.items() if key not in ADVISOR_FIELDS}
+    hidden = set()
+    if view.get("advisor") != "on":
+        hidden.update(ADVISOR_FIELDS)
+    if view.get("subagents") != "on":
+        hidden.update(SUBAGENT_FIELDS)
+    return {key: value for key, value in view.items() if key not in hidden}
 
 
 async def _projects(call: Call) -> dict[str, Any]:
@@ -166,8 +170,8 @@ async def _project_action(call: Call) -> dict[str, Any]:
     if action == "get":
         return {"project": projects.project_view(project)}
     if action == "update":
-        fields = _given(arguments, ("name", "work_dir", "background", "dependency_conditions"),
-                        clears=("dependency_conditions",))
+        fields = _given(arguments, ("name", "work_dir", "background", "dependency_conditions", *SUBAGENT_FIELDS),
+                        clears=("dependency_conditions", *SUBAGENT_FIELDS))
         return {"project": await answered(projects.update_project(
             project["id"], fields, manager_id=call.manager_id if call.scoped else None,
             expected_directory_version=call.confirmation.get("directory_version")))}
@@ -254,10 +258,27 @@ async def _confirming_project(call: Call) -> str | None:
         move = await answered(projects.preview_project_move(project, _given(call.arguments, ("to", "link_old"))))
         call.confirmation.update(project_id=project["id"], move_version=move.version)
         return projects.project_move_impact(project, move)
-    if action != "update" or call.arguments.get("work_dir") is None:
+    if action != "update":
+        return None
+    subagents = {key: call.arguments[key] for key in SUBAGENT_FIELDS if key in call.arguments}
+    if not subagents and call.arguments.get("work_dir") is None:
         return None
     _required(call.arguments, "update", "project")
     project = await project_named(call.arguments["project"], manager_id=call.manager_id if call.scoped else None)
+    settings_impact = None
+    if subagents:
+        try:
+            normalized = execution_fields(subagents)
+        except ValueError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+        if any(project.get(key) != value for key, value in normalized.items()):
+            call.confirmation["project_id"] = project["id"]
+            lines = [f"要修改项目「{project['name']}」的子 agent 设置吗？"]
+            lines.extend(f"- {key}：{project.get(key)} → {value}" for key, value in normalized.items())
+            lines.append("开启后，Planner 和 Worker 可派只读 explorer；它们会产生模型费用，受这些预算和数量限制。")
+            settings_impact = "\n".join(lines)
+    if call.arguments.get("work_dir") is None:
+        return settings_impact
     change = await answered(projects.directory_change(project, call.arguments["work_dir"]))
     if call.scoped and any(row["manager_id"] != call.manager_id for row in change.schedules):
         raise OpError(ErrorCode.CONFLICT, f"project {project['name']!r}'s directory is also where command "
@@ -265,8 +286,8 @@ async def _confirming_project(call: Call) -> str | None:
     # Bind empty previews too: a command schedule can be enabled before execution takes the lock.
     call.confirmation.update(project_id=project["id"], directory_version=change.version)
     if not change.schedules:
-        return None
-    return directory_change_impact(project, change, call.arguments)
+        return settings_impact
+    return "\n".join(filter(None, (settings_impact, directory_change_impact(project, change, call.arguments))))
 
 
 # --- looper_agent_profiles and looper_providers ---
@@ -772,6 +793,14 @@ TOOLS: tuple[Tool, ...] = (
                 "background": {"type": "string", "description": "What its agents should know."},
                 "dependency_conditions": {"type": ["string", "null"], "enum": ["on", "off", None],
                                           "description": "update: enable, disable or inherit step readiness conditions."},
+                "subagents": {"type": ["string", "null"], "enum": ["on", "off", None],
+                              "description": "update, with confirmation: enable read-only explorers for Planner and Workers; they cost money. Null inherits off."},
+                **{field: {"type": ["number", "null"], "minimum": low, "maximum": high,
+                           "description": f"update, with confirmation: {what}; null uses the default ({default:g} USD, or the explorer role budget for subagent_budget_usd)."}
+                   for field, (low, high, default, what) in SUBAGENT_BUDGETS.items()},
+                **{field: {"type": ["integer", "null"], "minimum": low, "maximum": high,
+                           "description": f"update, with confirmation: {what}; null uses the default ({default})."}
+                   for field, (low, high, default, what) in SUBAGENT_COUNTS.items()},
                 "to": {"type": "string", "description": "move: absolute destination; omit for projects root / safe project name."},
                 "link_old": {"type": "boolean", "description": "move: retain the old path as a symbolic link (default true)."},
             },

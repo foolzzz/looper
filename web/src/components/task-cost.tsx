@@ -26,8 +26,8 @@ export function TaskCostBreakdown({ cost }: { cost: TaskCost }) {
       </div>
       <div className="mt-2 grid gap-4 2xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
         <div className="space-y-1.5">
-          {ROLES.map(([role, label]) => {
-            const share = cost.by_role[role];
+          {[...ROLES, ...((cost.by_role.explorer?.runs ?? 0) > 0 ? [["explorer", "Sub-agents"] as const] : [])].map(([role, label]) => {
+            const share = cost.by_role[role]!;
             const percent = cost.cost_usd > 0 ? (share.cost_usd / cost.cost_usd) * 100 : 0;
             return (
               <div key={role} className="grid grid-cols-[5.5rem_1fr_auto] items-center gap-3 text-xs">

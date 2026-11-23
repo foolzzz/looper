@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { NodeCardView } from "@/components/pipeline-node-card";
 import { type NodeCard, clipText, stepCard } from "@/lib/node-cards";
-import type { TaskStep } from "@/lib/api";
+import type { LlmRecord, TaskStep } from "@/lib/api";
 
 const LONG = Array.from({ length: 8 }, (_, i) => `line ${i + 1}`).join("\n");
 const card: NodeCard = {
@@ -75,4 +75,16 @@ describe("NodeCardView", () => {
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain("Show more");
   });
+});
+
+
+it("shows only the count of the step's explorers and leaves other steps unchanged", () => {
+  const step = { id: "work", step_key: "work", step_index: 0, kind: "work", status: "pending", instruction: "Read",
+    created_at: "2026-11-22T10:00:00Z", retries: 0, depends_on: [] } as unknown as TaskStep;
+  const context = { taskId: "t1", active: false, look: card.look, lookOf: () => card.look, stepsById: new Map([[step.id, step]]) };
+  const base = stepCard(step, context);
+  const explorers = [{ record: { id: 1, metadata: { step_id: "work" } } as LlmRecord, parentId: 2 }];
+  const counted = stepCard(step, { ...context, runs: { planner: [], worker: [], reviewer: [], explorers } });
+  expect(counted.sections).toContainEqual({ kind: "facts", title: "Sub-agents", facts: [{ label: "Explorers", value: "1" }] });
+  expect(stepCard(step, { ...context, runs: { planner: [], worker: [], reviewer: [], explorers: [] } })).toEqual(base);
 });
