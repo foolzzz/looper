@@ -72,7 +72,9 @@ class TurnEnd(StrEnum):
 
 _ENDS = {TurnEnd.FAILED: store.Reason.TURN_FAILED, TurnEnd.TIMEOUT: store.Reason.TURN_TIMEOUT,
          TurnEnd.STOPPED: store.Reason.TURN_STOPPED}
-_NO_REPLY_WORD = re.compile(rf"\b{NO_REPLY}\b")
+# ASCII word boundary: Python's \b is Unicode, so it would call "NO_REPLY暂时不用通知" a plain message.
+_NO_REPLY_WORD = re.compile(rf"(?<![A-Za-z0-9_]){NO_REPLY}(?![A-Za-z0-9_])")
+_PUNCTUATION = " \t\r\n.,;:!?。，；：！？'\"`*()（）[]【】"
 _OUTCOME = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "rejected", PostOutcome.UNKNOWN: "unknown"}
 
 # What the caller sends a message with: (text, idempotency key) -> the channel's receipt.
@@ -85,7 +87,7 @@ def parse_reply(text: str | None) -> Reply:
     reply = (text or "").strip()
     if not reply:
         return Reply(ReplyKind.INVALID)
-    if reply == NO_REPLY:
+    if reply.strip(_PUNCTUATION) == NO_REPLY:
         return Reply(ReplyKind.SILENT)
     if _NO_REPLY_WORD.search(reply):
         return Reply(ReplyKind.INVALID)
@@ -166,18 +168,16 @@ async def prepare(rows: Sequence[Mapping[str, Any]]) -> str | None:
 
 
 async def admit(batch: UUID, *, now: datetime | None = None) -> bool:
-    """Whether the Manager may take this triage turn today: fewer than ``max_turns_per_day`` triage turns started on
-    the local day. Past the cap the batch falls back (``daily_cap``) and False is answered. Only triage turns count:
-    idle checks have their own."""
+    """Whether the Manager may take this triage turn today: fewer than ``max_turns_per_day`` other triage turns were
+    admitted on the local day. Admission is taken serially and persisted; past the cap the batch falls back
+    (``daily_cap``) and False is answered. Only triage turns count: idle checks have their own."""
     now = now or datetime.now(timezone.utc)
     zone = delivery.load_policy().timezone
     today = now.astimezone(zone).date()
     start = datetime.combine(today, time.min, tzinfo=zone)
     end = datetime.combine(today + timedelta(days=1), time.min, tzinfo=zone)
-    if await store.triage_turns_between(start, end, except_batch=batch) < await triage_settings.max_turns_per_day():
-        return True
-    await store.fall_back(reason=store.Reason.DAILY_CAP.value, batch=batch)
-    return False
+    return await store.admit_triage_batch(batch, start=start, end=end, cap=await triage_settings.max_turns_per_day(),
+                                          now=now)
 
 
 # --- Where each outcome ends ---
@@ -196,6 +196,11 @@ async def _fall_back(batch: UUID, reason: store.Reason, record_id: int | None, *
     return Settled("fallback", reason.value)
 
 
+async def _existing(batch: UUID) -> Settled:
+    found = await store.batch_state(batch)
+    return Settled(*found) if found is not None else Settled("unknown")
+
+
 async def _last_user_message_at(row: Mapping[str, Any]) -> datetime | None:
     if row["target_kind"] == "web":
         return await db_chat.last_user_message_at(row["chat"])
@@ -212,6 +217,8 @@ async def finish(rows: Sequence[Mapping[str, Any]], *, end: TurnEnd, reply: str 
     turn that did not reply fall back. A fallback sends nothing.
     """
     batch, first = rows[0]["batch"], rows[0]
+    if not await store.reply_open(batch):  # settled already (a repeat, or a reply after the deadline's fallback)
+        return await _existing(batch)
     if end is not TurnEnd.REPLIED:
         return await _fall_back(batch, _ENDS[end], record_id)
     parsed = parse_reply(reply)
@@ -232,7 +239,8 @@ async def finish(rows: Sequence[Mapping[str, Any]], *, end: TurnEnd, reply: str 
     if decided.outcome is not delivery.Outcome.SEND:
         return await _fall_back(batch, store.Reason.DELIVERY_DEFERRED, record_id)
     text = parsed.text[:REPLY_MAX]
-    await store.claim_reply(batch)
+    if not await store.claim_reply(batch):  # another caller holds or has settled this send: only the winner sends
+        return await _existing(batch)
     external: str | None = None
     try:
         receipt = await send(text, key)

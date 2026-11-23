@@ -84,6 +84,11 @@ class Channel:
         return PostReceipt(ok, external_ids=("om_1",) if ok else (), outcome=self.result)
 
 
+async def admitted(pool, batch, at):
+    await pool.execute("UPDATE manager_events SET payload = payload || jsonb_build_object('admitted_at', $2::text) "
+                       "WHERE batch = $1", batch, at.isoformat())
+
+
 async def states(pool):
     return [(row["state"], row["reason"], row["delivery"]) for row in
             await pool.fetch("SELECT state, reason, delivery FROM manager_events ORDER BY id")]
@@ -234,8 +239,7 @@ def test_the_daily_cap_counts_only_triage_turns_of_the_local_day(monkeypatch, tm
         # Two triage turns started today, one yesterday, and a task end's turn today: only today's triage turns count.
         for hours in (3, 4, 30):
             rows = await claimed(pool)
-            await pool.execute("UPDATE manager_events SET started_at = $2 WHERE batch = $1", rows[0]["batch"],
-                               NOW - timedelta(hours=hours))
+            await admitted(pool, rows[0]["batch"], NOW - timedelta(hours=hours))
         project = await projects.create_project(name="calc", work_dir=str(tmp_path), pool=pool)
         await tasks.create_task(task_id="t1", requirement="r", project_id=project["id"], work_dir=str(tmp_path),
                                 status="completed", pool=pool)
@@ -244,15 +248,14 @@ def test_the_daily_cap_counts_only_triage_turns_of_the_local_day(monkeypatch, tm
                            state="pending", reason=None, pool=pool)
         await store.claim("manager", "channel-lark", DM, uuid.uuid4(), pool=pool)
         third = await claimed(pool)
-        await pool.execute("UPDATE manager_events SET started_at = $2 WHERE batch = $1", third[0]["batch"], NOW)
         assert await triage_turn.admit(third[0]["batch"], now=NOW) is False
         assert (await states(pool))[-1] == ("fallback", "daily_cap", None)
         # A capped batch never ran, so it does not use up a later turn's place; raising the cap admits the next.
         await triage_settings.update(max_turns=3)
         fourth = await claimed(pool)
-        await pool.execute("UPDATE manager_events SET started_at = $2 WHERE batch = $1", fourth[0]["batch"], NOW)
         assert await triage_turn.admit(fourth[0]["batch"], now=NOW) is True
         assert (await states(pool))[-1] == ("running", None, None)
+        assert await triage_turn.admit(fourth[0]["batch"], now=NOW) is True  # a replay is admitted again
         await triage_settings.update(max_turns=None)
         assert await triage_settings.max_turns_per_day() == 12
 
@@ -271,5 +274,56 @@ def test_the_cap_setting_is_typed_and_range_checked(monkeypatch):
         assert await triage_settings.max_turns_per_day() == 12
         await pool.execute("UPDATE system_settings SET value = '999' WHERE key = $1", triage_settings.MAX_TURNS_KEY)
         assert await triage_settings.max_turns_per_day() == 12
+
+    run_db(check, monkeypatch)
+
+
+def test_a_repeated_or_late_finish_sends_nothing_more(monkeypatch):
+    async def check(pool):
+        channel = Channel()
+        rows = await claimed(pool)
+        first = await triage_turn.finish(rows, end=TurnEnd.REPLIED, reply="Tell me", send=channel, now=NOW)
+        again = await triage_turn.finish(rows, end=TurnEnd.REPLIED, reply="Tell me", send=channel, now=NOW)
+        assert first.state == again.state == "delivered" and len(channel.sent) == 1
+        # The deadline's fallback came first: a reply that arrives later is not sent.
+        rows = await claimed(pool)
+        await triage_turn.finish(rows, end=TurnEnd.TIMEOUT, send=channel, now=NOW)
+        late = await triage_turn.finish(rows, end=TurnEnd.REPLIED, reply="Late news", send=channel, now=NOW)
+        assert (late.state, late.reason) == ("fallback", "turn_timeout") and len(channel.sent) == 1
+        # Two callers racing for the one send claim: one sends.
+        rows = await claimed(pool)
+        racing = Channel()
+        import asyncio
+        await asyncio.gather(*(triage_turn.finish(rows, end=TurnEnd.REPLIED, reply="Race", send=racing, now=NOW)
+                               for _ in range(3)))
+        assert len(racing.sent) == 1
+
+    run_db(check, monkeypatch, max_size=6)
+
+
+def test_concurrent_admission_takes_exactly_the_places_left(monkeypatch):
+    async def check(pool):
+        import asyncio
+        await triage_settings.update(max_turns=1)
+        first, second = await claimed(pool), await claimed(pool)
+        answers = await asyncio.gather(triage_turn.admit(first[0]["batch"], now=NOW),
+                                       triage_turn.admit(second[0]["batch"], now=NOW))
+        assert sorted(answers) == [False, True]
+        assert sorted(item[:2] for item in await states(pool)) == [("fallback", "daily_cap"), ("running", None)]
+
+    run_db(check, monkeypatch, max_size=6)
+
+
+@pytest.mark.parametrize("text", ["NO_REPLY暂时不用通知", "好的NO_REPLY", "NO_REPLY\n另外告诉他"])
+def test_mixed_chinese_output_with_no_reply_is_invalid_and_falls_back_as_empty_reply(monkeypatch, text):
+    assert triage_turn.parse_reply(text).kind is ReplyKind.INVALID
+    for silent in ("NO_REPLY.", "  NO_REPLY！ ", "`NO_REPLY`"):
+        assert triage_turn.parse_reply(silent).kind is ReplyKind.SILENT
+
+    async def check(pool):
+        channel = Channel()
+        rows = await claimed(pool)
+        done = await triage_turn.finish(rows, end=TurnEnd.REPLIED, reply=text, send=channel, now=NOW)
+        assert (done.state, done.reason) == ("fallback", "empty_reply") and channel.sent == []
 
     run_db(check, monkeypatch)

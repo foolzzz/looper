@@ -227,3 +227,24 @@ def test_claim_takes_one_kind_and_without_a_kind_is_what_it_was(monkeypatch, tmp
         assert stable(old) == stable(new) and len(new) == 2
 
     run_db(check, monkeypatch)
+
+
+def test_an_old_dashboard_chat_is_found_though_other_channels_have_many_newer_sessions(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await triager(env)
+        await env.pool.execute("INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at) "
+                               "VALUES ('web-old', 'm1', 'user', 'hello', 'web', now() - interval '3 days')")
+        for number in range(30):  # newer chats on a bot, an API client's thread and a Planner thread
+            session = f"lark-session-{number}"
+            await env.pool.execute("INSERT INTO chat_messages (session_id, message_id, role, content, channel) "
+                                   "VALUES ($1, 'm1', 'user', 'hi', 'lark')", session)
+        await env.pool.execute("INSERT INTO chat_threads (session_id, manager_id, client_id) VALUES ('web-api', "
+                               "'manager', 'client-x')")
+        await env.pool.execute("INSERT INTO chat_messages (session_id, message_id, role, content, channel) VALUES "
+                               "('web-api', 'm1', 'user', 'hi', 'web'), ('planner-1', 'm1', 'user', 'hi', 'web')")
+        await add(env.pool, "An urgent synthetic update", sender=DM, sent_at=minutes_ago(env, 5))
+        await fire(env, sid)
+        [row] = await triage_rows(env.pool)
+        assert (row["state"], row["target_kind"], row["chat"]) == ("pending", "web", "web-old")
+
+    scenario(check, monkeypatch, tmp_path, reply=reply(event("m1")))
