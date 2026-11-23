@@ -150,6 +150,8 @@
  "message_stream.delete_preview": "inside",
  "message_stream.runs": "inside",
  "message_stream.status": "inside",
+ "mid_turn_input.get": "inside",
+ "mid_turn_input.update": "inside",
  "models.add_many": "inside",
  "models.create": "inside",
  "models.delete": "inside",

@@ -162,6 +162,21 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   with `looper_task_gate_reply`, which sends the user's own message (asking
   first which gate when it could be more than one), and nothing else does; refer to what Looper writes itself instead
   of repeating it; and never say an operation ran unless its answer was `ok`
+- With `manager.turn_context.enabled` on (default off), each user turn replaces
+  its `Channel:` line with the existing `[Turn context]` renderer's local clock,
+  zone, speaker, chat and reply language, after state and pending-confirmation
+  notes. The system contract adds `TURN_CONTEXT_CONTRACT`; the time stays out of
+  the stable state and process signature. `manager_turn_context` reads the bot's
+  configured operator and allowlist and sets `Turn.speaker`, enabling the existing
+  ops checks: other allowlisted senders and group members cannot request an
+  escalation or confirm one, and a refused confirmation is discarded. A bot
+  identity lookup failure grants no operator authority. Operator messages in
+  groups and API clients can authorize, while private tools keep their separate
+  operator-turn audience checks. Completion and autonomous turns keep their
+  existing messages and no speaker. Off, prompts, tools and launches are unchanged.
+  Dashboard and generated CLI configuration use the existing operator-only
+  `turn_context_settings.get/update`, separate from `chat_settings`; Lark and
+  Telegram need no new command. See [the assistant RFC](rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文).
 - With the system setting `manager.stable_context` `true` (default off), those
   sections and the active goals are one block, `Looper state (rev R)`, R a
   hash of its lines (`tiers/state_view.py`), so the resident session's growing
@@ -217,31 +232,69 @@ control because configuration is operator-only. Dashboard metric widgets are sep
 
   A scenario Manager never gets the section. Off, the prompt, the tool list and the process signature are what they
   were before. The section is composed per turn, so the prompt preview only notes it
-- **Delivery guard policy** (`delivery_guard.py`, `manager.delivery_guard.enabled`, default off):
+- **Mid-turn operator input** (`mid_turn_input.py`, `manager.mid_turn_input.enabled`, default off):
+  operator-only `mid_turn_input.get/update` operations control the switch (`enabled`; null restores off),
+  independently of delivery guard and `chat_settings`. The generated CLI exposes these operations; no chat
+  command or Manager tool changes the switch. On, the default Manager dispatches user messages even without
+  session routing. At most three plain-text operator messages join an operator's running user turn, only on a
+  runtime declaring `MID_TURN_INPUT` and a resident implementing the native input interface (currently the
+  non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
+  commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
+  path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
+  Admission lets OS read callbacks and the output reader run, then rechecks before and after writing,
+  even when a short line's drain returns immediately. A failed or late write queues the message.
+  If a result arrives after the write, the resident process is retired before queue
+  fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
+  merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
+  path. The original tool binding stays in place. The final reply goes to
+  the original chat and each addition from another chat; same-chat web additions get a terminal acknowledgement,
+  while same-chat Lark/Telegram additions need no duplicate reply. Any participating chat can stop the turn.
+  Additions settle only after reply handoff; shutdown before handoff leaves them replayable. Explicit stop
+  follows the existing withdrawal rule and settles all associated messages immediately, preventing replay of
+  stopped work. Typed additions record `metadata.merged` (kind, message id, chat, receipt time), plus each
+  addition's ack and first-reply metrics when metrics are on. A failed resume carries accepted additions into
+  its retry even if the switch has since been turned off. Off, prompt/system text, tools, command and process
+  signature retain their main-baseline bytes, and later messages remain separate turns. Dashboard controls and
+  config-transfer support are not part of this change; operator API/CLI configuration is available now.
+- **Delivery guard** (`delivery_guard.py`, `delivery_guard_manager.py`, `manager.delivery_guard.enabled`, default off):
   the pure policy defines a user's delivery debt (`owed`, then `paid` on non-empty top-level text),
   exempts completion and autonomous turns, and permits at most two hidden follow-ups after a successful
   empty reply. A failed follow-up selects the fixed failure notice; a stop retains normal stop behavior.
   Initial errors, process exits, spend caps, unavailable tools and refused tokens never start follow-ups.
   Six consecutive top-level tool calls select a same-turn reminder, at most twice per turn, only when
-  the runtime declares `MID_TURN_INPUT`. Only Claude Code declares this verified capability. Reminders
-  are model input, with no separate interim channel message.
+  the configured runtime declares `MID_TURN_INPUT` and the active session is a direct resident stream-json
+  process. Keeper and runner-hosted sessions are excluded. Only Claude Code declares this verified
+  capability. Reminders are model input, with no separate interim channel message.
   The operator-only v1 operations `delivery_guard.get` and `delivery_guard.update` read or store the
   switch (`enabled`, null restores off); existing chat settings responses and Manager tools stay unchanged.
-  **Manager wiring is pending:** storing the switch currently changes no replies, prompts, records or
-  channel calls. The policy, turn debt field and capability declaration are groundwork for that wiring;
-  dashboard controls, follow-up records/metrics and runtime reminder injection come with it.
-- **Session budget rules** (`session_budget.py`, `manager.turn_budget_usd`, default off; assistant-layer RFC
-  section 5.4): `decide` takes a turn's context and cost and keeps the session, compacts it (a runtime with
-  `HEADLESS_COMPACTION`) or rotates it. It uses #1473's `schedule_session.session_bound` and the threshold
-  `scheduler.session_context_max_tokens` that schedule Planners use. A turn with an unknown context is kept, and
-  so is every turn while the budget is unset. Unlike #1473, an unknown turn cost skips the cost rule; context
-  alone can still compact or rotate. `after_compaction` rotates when the `/compact` failed, had no
-  `compact_boundary` or left the context over the threshold. `turn_cap` caps a turn at the budget when its model
-  has a price (`no_price` otherwise), and `over_cap_reply` is the fixed reply to a turn stopped there. The
-  operator-only v1 operations `session_budget.get` and `session_budget.update` read or store the budget (a
-  positive number of US dollars, null for off; the recommended value is $4.00) and report a stored value that is
-  not a budget. **Manager wiring is pending:** storing the budget changes no turn, prompt, record or command line
-  yet.
+  Hidden turns send only the fixed follow-up message in the same session, without user-turn context,
+  sections or a channel line. Each has its own run record (`metadata.delivery_guard.followup` and `for`),
+  but adds no user message to chat history; reminders record their count in `metadata.delivery_guard.reminders`.
+  The original user's status and stop token stay active through recovery. Two empty follow-ups, or a failed
+  follow-up, produce the fixed failure notice with the turn's existing blocks. Off, replies, prompts,
+  command lines, record writes and channel calls retain their existing behavior. Dashboard controls and
+  turn metrics await their respective UI and metrics work.
+- **Session budget** (`session_budget.py`, `tiers/manager_budget.py`, `manager.turn_budget_usd`, default off;
+  assistant-layer RFC section 5.4): after handing a user or completion turn's reply to its channel, the Manager
+  keeps that session's lock while it records the final main-loop context and turn cost and applies `decide`.
+  It shares #1473's `schedule_session.session_bound` and `scheduler.session_context_max_tokens` with schedule
+  Planners. Unknown context keeps the session; unknown cost skips the cost rule. Over the context threshold,
+  a running session with `HEADLESS_COMPACTION` gets one recorded maintenance `/compact`. A failed exchange,
+  missing `compact_boundary` or context still over the threshold queues a rotation; a runtime without the
+  capability rotates directly. At half the context threshold or more, a turn costing over half its budget
+  also rotates. Rotation stops the process; the next turn resumes the old session for its handoff and starts
+  a new one with that handoff. Main also receives the Manager's three latest ended task results, newest first;
+  group and DM sessions keep only their own chat excerpt. Measurements are stored in each session's own
+  row, and maintenance and handoff reopening use its isolated directory and environment. Compactions and
+  rotations carry `metadata.session_bound` with the action, reason and before/after token counts.
+  The budget also supplies a per-turn soft cap, including subscription runs priced from the model catalog;
+  the existing process budget is unchanged. A capped turn gets the fixed `over_cap_reply`, and its next message
+  starts a process that resumes the session. An unpriced model gets no additional soft cap and logs a warning
+  once per profile/model; the Settings price warning and dashboard controls are not implemented yet.
+  Operator-only v1 operations `session_budget.get` and `session_budget.update` read or store a positive dollar
+  budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
+  is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
+  command lines stay unchanged.
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a

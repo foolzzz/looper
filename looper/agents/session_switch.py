@@ -32,6 +32,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from .runtimes import can_resume
+from .schedule_session import BoundReason
 
 if TYPE_CHECKING:
     from .agent_settings import Launch
@@ -42,6 +43,7 @@ class SwitchReason(str, Enum):
     INSTRUCTIONS_CHANGED = "instructions_changed"
     SESSION_LOST = "session_lost"
     CONTEXT_FULL = "context_full"
+    SESSION_BOUND = "session_bound"
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,9 @@ class SessionSwitch:
     new_profile: str | None = None
     old_provider: str | None = None
     new_provider: str | None = None
+    bound_reason: BoundReason | None = None
+    before_tokens: int | None = None
+    after_tokens: int | None = None
 
     def describe(self) -> str:
         """One line for the task journal and the activity. Agents read it in their handoff and resume brief, so
@@ -68,6 +73,8 @@ class SessionSwitch:
                     f"{side(self.new_runtime, self.new_profile)}: {self.detail}")
         if self.reason is SwitchReason.CONTEXT_FULL:
             return f"context full: {self.detail}"
+        if self.reason is SwitchReason.SESSION_BOUND:
+            return f"session bound: {self.detail}"
         if self.reason is SwitchReason.INSTRUCTIONS_CHANGED:
             return f"instructions changed: {self.detail}"
         return f"session lost: {self.detail}"
@@ -115,3 +122,15 @@ def context_full(tokens: int, limit: int, *, runtime: str | None, profile: str |
         old_runtime=runtime, new_runtime=runtime, old_profile=profile, new_profile=profile,
         old_provider=provider, new_provider=provider,
     )
+
+
+def session_bound(reason: BoundReason, before: int, after: int | None, *, max_tokens: int,
+                  cost_usd: float | None, budget_usd: float, runtime: str | None, profile: str | None,
+                  provider: str | None) -> SessionSwitch:
+    """The budget's rotation, with the measured reason and numbers kept for the next turn's record."""
+    return SessionSwitch(
+        SwitchReason.SESSION_BOUND,
+        f"{reason.value}; context {before} tokens (limit {max_tokens}, after compaction {after}); "
+        f"last turn cost ${cost_usd}, turn budget ${budget_usd}",
+        old_runtime=runtime, new_runtime=runtime, old_profile=profile, new_profile=profile,
+        old_provider=provider, new_provider=provider, bound_reason=reason, before_tokens=before, after_tokens=after)
