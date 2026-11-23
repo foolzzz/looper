@@ -17,6 +17,12 @@ logical directory tree. No prompt or record field is dropped. The one explicit
 record difference is the newly assigned `leads_check` run kind; its original
 fixture stays unchanged.
 
+The later failure-typing migration adds `failure_class` and `failure_cause` to
+record rows even while typing is off. The newer snapshots additionally pin both
+columns to NULL; their original prompts, launches, outcomes and other fields stay
+unchanged. Validate these additive expectations against unchanged main on the
+migrated schema as well as against the migrated callers.
+
 To regenerate the newer fixtures, use a separate checkout of the recorded
 baseline with the golden test modules and `tests/model_call_support.py` copied
 in. Set `UPDATE_MODEL_CALL_GOLDENS=1` and run only those test modules against a

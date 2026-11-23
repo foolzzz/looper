@@ -300,12 +300,15 @@ async def finish_record(
     cost_source: str | None = None,
     outcome: str | None = None,
     metadata: dict[str, Any] | None = None,
+    failure_class: str | None = None,
+    failure_cause: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
     """Close a record with the run's outcome, its own usage and cost (and where the cost comes from), its final
     context and its compactions; a Worker's or Reviewer's run also keeps how its report or verdict read
     (``metadata.outcome``, ``worker.RunOutcome``), and ``metadata``'s keys are added to the record's (a run's
-    refused tool calls, ``permission_denials``)."""
+    refused tool calls, ``permission_denials``). A failed run's class and cause (``failures``) are NULL while
+    failure typing is off."""
     pool = pool or get_pool()
     await pool.execute(
         """
@@ -331,14 +334,16 @@ async def finish_record(
                                          ELSE jsonb_build_object('outcome', $17::text) END
                                  || COALESCE($18::jsonb, '{}'::jsonb) END,
             finished_at = now(),
-            last_output_at = COALESCE(last_output_at, now())
+            last_output_at = COALESCE(last_output_at, now()),
+            failure_class = $19,
+            failure_cause = $20
         WHERE id = $1
         """,
         record_id, status, output_text, output_text[:500] if output_text else None,
         session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
         cache_read_tokens, cache_creation_tokens, context_tokens,
         json.dumps(compactions) if compactions is not None else None, cost_source, outcome,
-        json.dumps(metadata, ensure_ascii=False) if metadata else None,
+        json.dumps(metadata, ensure_ascii=False) if metadata else None, failure_class, failure_cause,
     )
 
 
@@ -412,14 +417,21 @@ async def manager_spend(
     result = {m: {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0} for m in manager_ids}
     if not result:
         return result
+    # A Manager's runs, and the outbound reviews of its calls that no task owns (``outbound_reviews.record_id``).
     rows = await pool.fetch(
         """
         SELECT agent_id,
                COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $2), 0)::float8 AS today_usd,
                COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $3), 0)::float8 AS last_7d_usd,
                count(*) FILTER (WHERE created_at >= $2) AS runs_today
-        FROM llm_records
-        WHERE agent_id = ANY($1::text[]) AND created_at >= LEAST($2, $3)
+        FROM (
+            SELECT agent_id, cost_usd, created_at FROM llm_records WHERE agent_id = ANY($1::text[])
+            UNION ALL
+            SELECT o.agent_id, r.cost_usd, r.created_at FROM outbound_reviews o JOIN llm_records r ON r.id = o.record_id
+            WHERE o.agent_id = ANY($1::text[]) AND o.task_id IS NULL
+              AND o.created_at >= LEAST($2::timestamptz, $3::timestamptz)
+        ) runs
+        WHERE created_at >= LEAST($2, $3)
         GROUP BY agent_id
         """,
         list(result), since, datetime.now(timezone.utc) - timedelta(days=7),
@@ -544,7 +556,7 @@ async def list_records(
             COALESCE(char_length(output_text), 0) AS output_chars,
             input_tokens, output_tokens, duration_ms, model, error, metadata, created_at, status,
             cost_usd, finished_at, last_output_at, cache_read_tokens, cache_creation_tokens,
-            context_tokens, compactions, cost_source
+            context_tokens, compactions, cost_source, failure_class, failure_cause
             FROM llm_records {where} ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}""",
         *params,
     )
@@ -762,6 +774,30 @@ async def task_spend(since: datetime | None, until: datetime | None = None, *, p
                                                           requirement=row["requirement"], task_id=row["task_id"]),
              **{key: row[key] for key in row.keys() if key not in ("task_id", "title", "goal_id", "requirement")}}
             for row in rows]
+
+
+async def failure_stats(since: datetime, *, pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+    """The runs classified since ``since`` (``failures``): counted by UTC day, run kind, runtime, class and cause; by
+    class; and, of the Workers' and Reviewers' runs (a step's failures, which go to its Planner), how many were not a
+    judgment."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"""SELECT (created_at AT TIME ZONE 'UTC')::date AS day, {RUN_KIND} AS run_kind,
+                   COALESCE(metadata->'profile', metadata->'agent')->'runtime'->>'type' AS runtime,
+                   failure_class, failure_cause, count(*) AS runs
+            FROM llm_records WHERE failure_class IS NOT NULL AND created_at >= $1
+            GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5""", since)
+    from ..agents.failures import FailureClass
+
+    by_class = {cls.value: 0 for cls in FailureClass}
+    steps = {"failed": 0, "not_judgment": 0}
+    for row in rows:
+        by_class[row["failure_class"]] += row["runs"]
+        if row["run_kind"] in ("worker", "reviewer"):
+            steps["failed"] += row["runs"]
+            steps["not_judgment"] += row["runs"] if row["failure_class"] != "judgment" else 0
+    return {"runs": sum(by_class.values()), "by_class": by_class, "steps": steps,
+            "rows": [{**dict(row), "day": row["day"].isoformat()} for row in rows]}
 
 
 async def agent_usage(

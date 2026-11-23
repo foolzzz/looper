@@ -93,6 +93,8 @@
         "created_at": "<timestamp>",
         "duration_ms": 0,
         "error": "the processor run gave no result",
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": "<timestamp>",
         "id": 1,
         "input_summary": "{\"chars\":114,\"context\":0,\"events\":1,\"from_seq\":0,\"kind\":\"leads_backfill\",\"known\":0,\"schedule_id\":\"schedule-golden\",\"sha256\":\"7fee0294c05534da972c6ba607b7cc56893d70d1c38b2e4ac080ea6858998dc3\",\"to_seq\":1}",

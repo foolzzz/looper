@@ -95,6 +95,8 @@
         "created_at": "<timestamp>",
         "duration_ms": null,
         "error": null,
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": null,
         "id": 1,
         "input_summary": null,

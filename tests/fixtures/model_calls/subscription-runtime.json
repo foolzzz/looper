@@ -92,6 +92,8 @@
         "created_at": "<timestamp>",
         "duration_ms": 0,
         "error": "the processor run gave no result",
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": "<timestamp>",
         "id": 1,
         "input_summary": "{\"chars\":70,\"events\":1,\"from_seq\":0,\"kind\":\"subscription_window\",\"run_id\":\"run-golden\",\"schedule_id\":\"schedule-golden\",\"sha256\":\"3f866d37f031bd3291870e1ad90972200135dee5478168e2937df541348c0546\",\"to_seq\":1}",

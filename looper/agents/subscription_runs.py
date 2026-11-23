@@ -35,7 +35,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import cron, extraction, model_call, processor, subscription_rules, subscriptions
+from . import cron, extraction, model_call, processor, subscription_rules, subscriptions, turn_metrics
 from .agent_settings import AgentType
 from .channels.base import PostOutcome
 from .message import builtin_channel_id
@@ -323,7 +323,9 @@ class SubscriptionRuns:
                         raise _NoPoster
                     receipt = await self._poster(builtin_channel_id(channel), push_target(channel, chat), row["text"],
                                                  idempotency_key=subscriptions.idempotency_keys(
-                                                     run_id, segment)[segment - 1])
+                                                     run_id, segment)[segment - 1],
+                                                 **turn_metrics.proactive_kwargs(
+                                                     turn_metrics.ProactiveSource.SUBSCRIPTION, run_id))
                 except _NoPoster:
                     await db_subs.mark_segment(run_id, segment, "failed", error="this server cannot send messages")
                 except Exception as exc:  # whether the channel sent it is not known: it is not sent again

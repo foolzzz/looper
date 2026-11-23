@@ -1,0 +1,14 @@
+{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000001","model":"claude-sonnet-5-5"}
+{"type":"system","subtype":"status","session_id":"00000000-0000-4000-8000-000000000001","status":"requesting"}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":1,"max_retries":10,"error_status":null,"retry_delay_ms":500}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":2,"max_retries":10,"error_status":null,"retry_delay_ms":1000}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":3,"max_retries":10,"error_status":null,"retry_delay_ms":1500}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":4,"max_retries":10,"error_status":null,"retry_delay_ms":2000}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":5,"max_retries":10,"error_status":null,"retry_delay_ms":2500}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":6,"max_retries":10,"error_status":null,"retry_delay_ms":3000}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":7,"max_retries":10,"error_status":null,"retry_delay_ms":3500}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":8,"max_retries":10,"error_status":null,"retry_delay_ms":4000}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":9,"max_retries":10,"error_status":null,"retry_delay_ms":4500}
+{"type":"system","subtype":"api_retry","session_id":"00000000-0000-4000-8000-000000000001","error":"unknown","attempt":10,"max_retries":10,"error_status":null,"retry_delay_ms":5000}
+{"type":"assistant","session_id":"00000000-0000-4000-8000-000000000001","error":"server_error","api_error":"connection_failed","message":{"model":"<synthetic>","role":"assistant","type":"message","content":[{"type":"text","text":"API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"result","subtype":"success","is_error":true,"session_id":"00000000-0000-4000-8000-000000000001","num_turns":1,"result":"API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)","api_error":"connection_failed","terminal_reason":"api_error","api_error_status":null,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}
