@@ -123,14 +123,14 @@ Planner 收尾回合（任务结束时那一轮，沿用 `final` 的位置）：
 
 | 操作 | 风险 | 说明 |
 |---|---|---|
-| `project_skills.versions` | read | 一个 skill 的版本列表和某两版的差异（内容、作者种类、原因、时间） |
+| `project_skills.versions` | read，只限操作员 | 一个 skill 的版本列表和某两版的差异（内容、作者种类、原因、时间） |
 | `project_skills.rollback` | write | 以某个旧版本的内容写一个新版本；返回受影响的项目 |
 | `project_skills.deprecate` / `restore` | write | 弃用与恢复 |
 | `project_skills.proposals.list` / `get` | read | 待确认的提议及差异 |
 | `project_skills.proposals.confirm` / `reject` | write，operator 专用 | `confirm` 带操作员看到的提议哈希 `content_sha256`；与库里该提议当前的 `content_sha256` 不符（提议在看的时候被改了）返回 409 |
 | `project_skills.usage` | read | 第 7 节的使用与度量 |
 
-API 客户端令牌可以读，不能确认提议；确认只能来自操作员的仪表盘会话（确认事件的 `via` 只能是 `dashboard`，沿用记忆写入的约束，但去掉 `lark`、`telegram`）。
+`project_skills.versions` 和 `project_skills.context_budget` 的读只限操作员，API 客户端令牌不能读。确认只能来自操作员的仪表盘会话（确认事件的 `via` 只能是 `dashboard`，沿用记忆写入的约束，但去掉 `lark`、`telegram`）。
 
 ## 7. 使用与度量
 
@@ -224,7 +224,7 @@ ALTER TABLE projects ADD COLUMN skill_proposals TEXT;   -- NULL 即 off
 
 - **仪表盘：** 项目页 Skills 标签：每个 skill 一行，显示名字、状态（Active、Disabled in this project、Deprecated 用文字）、当前版本、安装它的项目数、使用（加载的尝试数、调用率）和「建议复核」的原因；展开显示历史（版本、作者种类、时间、原因）、差异、回滚、弃用、各运行时的加载状态。「待确认」一栏列提议。空状态、出错和样本不足都用文字说明，不显示成 0 或放心的摘要。上下文预算（D13）显示在标签顶部。
 - **Telegram、Lark：** 不新增命令，也不能在渠道里确认（D2）。提议待确认时是否给操作员私聊发一条只含名字、动机和页面链接的通知，见 D21；通知不带 skill 内容。
-- **CLI（`loopercli`）：** 读操作 `versions`、`usage`、`proposals.list/get` 可用，`rollback` 和弃用是写操作；`confirm` 不提供（D2）。
+- **CLI（`loopercli`）：** `versions` 和 `context_budget` 的读只限操作员；`usage`、`proposals.list/get` 仍是读操作。`rollback` 和弃用是写操作；`confirm` 不提供（D2）。
 - **Manager 工具：** 只有「提议」（打开项目设置后），没有写、改、删。
 
 ## 11. 观测

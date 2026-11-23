@@ -20,6 +20,7 @@ from tests.db_support import DSN, run_db
 from tests.test_profile_registry_db import (  # noqa: F401
     _call, _launch, _model_id, _ok, _provider, _runtime, stand_in,
 )
+from tests.builtin_support import BUILTIN_PROFILES
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -46,11 +47,10 @@ def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_take
                                           ("cc/off", "rt-claude-code", {"agent_teams": False}),
                                           ("si/default", other, {})]}
         listed = {p["name"]: p["agent_teams"] for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"]}
-        assert listed == {"claude-code/opus": True, "cc/default": True, "cc/off": False, "si/default": False,
-                          # the advisor's, its judge's and the leads check's built-in profiles: their runs have no
-                          # tools
-                          "claude-code/fable-5-2": False, "claude-code/sonnet-5-5": False,
-                          "claude-code/haiku-5-5": False}
+        # Each built-in profile has the agent teams its declaration gives it.
+        assert listed == {"cc/default": True, "cc/off": False, "si/default": False,
+                          **{name: profile.agent_teams for name, profile in BUILTIN_PROFILES.items()}}
+        assert listed["claude-code/opus"] is True
 
         off = created["cc/off"]["profile_id"]
         assert (await _ok("PUT", f"/api/agent-profiles/{off}", {"agent_teams": True}))["profile"]["agent_teams"]

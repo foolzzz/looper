@@ -10,6 +10,7 @@ from looper.agents import profile_registry as service
 from looper.agents import runtimes
 from looper.db import agent_setting_layers, profile_registry as db
 from tests.db_support import DSN, run_db
+from tests.builtin_support import BUILTIN_PROFILE_IDS
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -145,9 +146,7 @@ def test_invalid_writes_roll_back(changes, monkeypatch):
         with pytest.raises(service.RegistryError):
             await service.update_profile(profile_id, changes)
         assert await db.get_profile(profile_id) == before
-        assert {r["id"] for r in await db.list_profiles()} == {"agent-claude-code-opus", "agent-claude-code-fable-5-2",
-                                                                "agent-claude-code-sonnet-5-5",
-                                                                "agent-claude-code-haiku-5-5", profile_id}
+        assert {r["id"] for r in await db.list_profiles()} == {*BUILTIN_PROFILE_IDS, profile_id}
     _run(test, monkeypatch)
 
 

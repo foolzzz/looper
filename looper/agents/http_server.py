@@ -153,6 +153,9 @@ V1_HEADERS = {"Cache-Control": "no-store"}
 # The Manager's tools (``ops.service``).
 AGENT_API = "/api/agent/v1/"
 _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
+_RE_EVIDENCE = re.compile(r"^/api/v1/evidence/([^/]+)/([^/]+)/([^/]+)$")
+# asyncpg rejects a run id outside signed 64-bit as a database error. Refuse it before querying.
+_INT64_MAX = 2**63 - 1
 
 
 # The largest request body the server reads. The largest legitimate one is a
@@ -702,7 +705,8 @@ class AgentHTTPServer:
     async def _call_v1(self, principal: api_v1.Principal, session: str, name: str, data: Any,
                        **kwargs: Any) -> dict[str, Any]:
         # Opening chats or granting their Manager all tools also requires operator consent.
-        requires_consent = principal.kind == "client" or name in ("manager_chat_bindings.put", "managers.update")
+        requires_consent = principal.kind == "client" or name in (
+            "manager_chat_bindings.put", "managers.update", "memory.settings_put")
         return await self._client_ops.call(principal, session, name, data,
                                           require_confirmation=requires_consent, **kwargs)
 
@@ -1032,6 +1036,67 @@ class AgentHTTPServer:
 
     # --- API routing ---
 
+    async def _serve_evidence(self, method: str, task_id: str, run_id: str, index: str,
+                              writer: asyncio.StreamWriter, headers: Mapping[str, str]) -> None:
+        """Bytes of one stored artifact. The path is rebuilt from the run row, never from the URL.
+
+        The operator gate accepts an operator bearer. Bytes need a browser session (`browser=True`),
+        so a token and an API client never receive them.
+        """
+        from . import acceptance_artifacts
+        from ..db import step_check_runs
+
+        if method != "GET":
+            writer.write(_json_response(HTTP_405, {"error": "method not allowed"}))
+            await writer.drain()
+            return
+        if not self._is_operator(headers, browser=True):
+            writer.write(_json_response(HTTP_403, {"error": "operator session required"}))
+            await writer.drain()
+            return
+        try:
+            run_key, artifact_index = int(run_id), int(index)
+        except ValueError:
+            run_key, artifact_index = 0, -1
+        if self._runtime_root is None or not 1 <= run_key <= _INT64_MAX or artifact_index < 0:
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        row = await step_check_runs.get_run(run_key, task_id)
+        artifacts = row.get("artifacts") if row else None
+        artifact = artifacts[artifact_index] if isinstance(artifacts, list) and artifact_index < len(artifacts) else None
+        name = artifact.get("name") if isinstance(artifact, dict) else None
+        mime = acceptance_artifacts.mime_for_name(name) if isinstance(name, str) else None
+        if not isinstance(name, str) or mime is None or row is None:
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        try:
+            data = acceptance_artifacts.read_artifact(
+                self._runtime_root, task_id=row["task_id"], step_id=row["step_id"], attempt=row["attempt"],
+                check_id=row["check_id"], run=row["run"], name=name)
+        except acceptance_artifacts.ArtifactMissing:
+            writer.write(_json_response(HTTP_404, {"error": "file missing"}))
+            await writer.drain()
+            return
+        except (acceptance_artifacts.ArtifactRefused, acceptance_artifacts.ArtifactInvalid, OSError):
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        disposition = acceptance_artifacts.content_disposition(mime, name)
+        head = (
+            f"HTTP/1.1 {HTTP_200}\r\n"
+            f"Content-Type: {mime}\r\n"
+            f"Content-Length: {len(data)}\r\n"
+            f"X-Content-Type-Options: nosniff\r\n"
+            f"Content-Security-Policy: sandbox\r\n"
+            f"Content-Disposition: {disposition}\r\n"
+            f"Cache-Control: no-store\r\n"
+            f"\r\n"
+        )
+        writer.write(head.encode("utf-8") + data)
+        await writer.drain()
+
     async def _route_api(
         self,
         method: str,
@@ -1041,6 +1106,10 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
+        match = _RE_EVIDENCE.fullmatch(path)
+        if match:
+            await self._serve_evidence(method, *match.groups(), writer, headers or {})
+            return
         writer.write(_json_response(HTTP_404, {"error": "not found"}))
         await writer.drain()
 
@@ -1141,13 +1210,17 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_401, {"error": "this Planner's token no longer works: its task ended or "
                                                             "a new Planner took over"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
-            writer.write(_json_response(HTTP_200, {"tools": await ops.listing(header)}))
+            answer = {"tools": await ops.listing(header)}
+            if (retry_safety := await ops.retry_safety(header)) is not None:
+                answer["retry_safety"] = retry_safety
+            writer.write(_json_response(HTTP_200, answer))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
-            writer.write(_json_response(HTTP_200, await ops.call(header, m.group(1), arguments)))
+            writer.write(_json_response(HTTP_200, await ops.call(
+                header, m.group(1), arguments, call_id=headers.get("x-looper-call"))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()
