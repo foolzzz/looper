@@ -125,7 +125,7 @@ def test_main_user_preempts_the_check_and_gets_one_note_after_its_wake_is_settle
 
 def test_noninterruptible_idle_turn_uses_the_shared_late_end_before_answering_main(monkeypatch, tmp_path):
     assert idle_check_turn.IDLE_TURN_SECONDS == 90
-    monkeypatch.setattr(idle_check_turn, "IDLE_TURN_SECONDS", 0.05)
+    monkeypatch.setattr(idle_check_turn, "IDLE_TURN_SECONDS", 3.0)
     monkeypatch.setattr(completion_events, "END_SECONDS", 0.02)
     monkeypatch.setattr(ApiSession, "can_interrupt", False)
     async def run(pool):
@@ -134,11 +134,22 @@ def test_noninterruptible_idle_turn_uses_the_shared_late_end_before_answering_ma
         check = _script("Never sent", asyncio.Event())
         async with _manager(pool, tmp_path, monkeypatch, [check, _script("User answer")]) as chat:
             check_id = await _check(pool)
-            await chat.manager._handle(idle_checks.due_envelope(check_id))
+            from looper.agents.tiers import background_turn
+
+            end_late = background_turn.end_late
+            async def ending(*args, **kwargs):
+                row = await store.get(check_id)
+                assert (row["state"], row["reason"]) == ("failed", "turn_timeout")
+                assert check.gate_reached.is_set()  # the runtime, rather than preparation, reached the deadline
+                await end_late(*args, **kwargs)
+            monkeypatch.setattr(background_turn, "end_late", ending)
+            telling = asyncio.create_task(chat.manager._handle(idle_checks.due_envelope(check_id)))
+            await asyncio.wait_for(check.gate_reached.wait(), 15)
+            await asyncio.wait_for(telling, 15)
             row = await store.get(check_id)
             assert (row["state"], row["reason"]) == ("failed", "turn_timeout")
             assert not chat.manager.busy
-            await chat.manager._handle(_message())
+            await asyncio.wait_for(chat.manager._handle(_message()), 15)
             assert len(chat.model.requests) == 2
             post.assert_not_awaited()
     run_db(run, monkeypatch, timeout=60)
