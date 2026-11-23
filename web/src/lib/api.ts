@@ -461,7 +461,7 @@ export interface OverviewSchedules {
     last_status: ScheduleRunStatus | null;
   })[];
   /** Runs since the server's local midnight. */
-  skipped_today: Record<"skipped_gate" | "skipped_overlap" | "skipped_missed" | "skipped_budget", number>;
+  skipped_today: Record<"skipped_gate" | "skipped_overlap" | "skipped_missed" | "skipped_budget" | "skipped_busy", number>;
 }
 
 export async function fetchOverview(): Promise<Overview> {
@@ -746,6 +746,26 @@ export async function updateOutboundGateway(
   body: { [K in keyof OutboundGatewaySettings]?: OutboundGatewaySettings[K] | null },
 ): Promise<OutboundGatewaySettings> {
   const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** The default Manager's persona (Settings → Chat). Empty strings are unset. */
+export interface ManagerPersona {
+  name: string;
+  address: string;
+  tone: string;
+  notes: string;
+}
+
+export async function fetchManagerPersona(): Promise<ManagerPersona> {
+  const result = await callV1<ManagerPersona>("/api/v1/manager_persona/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateManagerPersona(body: ManagerPersona): Promise<ManagerPersona> {
+  const result = await callV1<ManagerPersona>("/api/v1/manager_persona/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
@@ -1341,7 +1361,8 @@ export type ScheduleRunStatus =
   | "skipped_missed"
   | "skipped_gate"
   | "gate_failed"
-  | "skipped_budget";
+  | "skipped_budget"
+  | "skipped_busy";
 export type ScheduleNotifyFormat = "report" | "deliverable";
 /** "failures": failed runs and the two alerts with their recoveries; "alerts": the alerts and their recoveries
  * only; "always": every run that ran a task, and the alerts; "never": nothing is sent. */
@@ -1468,6 +1489,10 @@ export interface ScheduleInfo {
   env: Record<string, string>;
   env_file: string | null;
   success_deadline: string | null;
+  /** HH:MM-HH:MM in the schedule's timezone: firings outside it do not happen; null: all day. */
+  active_hours?: string | null;
+  /** A firing is skipped (skipped_busy) while the schedule's Manager answers a message. */
+  idle_only?: boolean;
   alert_policy: {
     failures_after: { value: number; default: boolean };
     stale_after_seconds: { value: number | null; default: boolean };
