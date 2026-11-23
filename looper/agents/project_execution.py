@@ -41,6 +41,8 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   steps run as (``on``) or not (``off``, also when unset; ``task_roles``);
 - ``dependency_conditions``: whether Planners may compose typed step readiness
   conditions (``on``) or not (``off``, also when unset);
+- ``acceptance_checks``: operator-only permission for Planner check definitions,
+  ``off`` (also NULL), ``local`` or ``network``; omitted from views while off;
 - ``wait_commands``: whether a wait step of the project's Planners may run a
   shell command as its check (``on``) or not (``off``, also when unset;
   ``waits``): the command runs as the server's user;
@@ -77,7 +79,8 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   phase); ``advisor_internal_domains`` (at most 20 domains the code checks
   treat as URLs, hosts under them included).
 
-The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
+The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``, except
+operator-only ``acceptance_checks``); this
 module owns their types and validation. Agents read them when a run or turn
 starts, so a change reaches the next one. A project's harness, Agent Profile
 (its model and effort), environment and per-run cap are agent settings: its
@@ -180,6 +183,12 @@ class DependencyConditions(str, Enum):
     ON = "on"
 
 
+class AcceptanceChecksMode(str, Enum):
+    OFF = "off"
+    LOCAL = "local"
+    NETWORK = "network"
+
+
 class WaitCommands(str, Enum):
     OFF = "off"
     ON = "on"
@@ -268,6 +277,7 @@ class ProjectExecution:
     advisor_consults_per_step: int | None = None
     advisor_fallback_profile: str | None = None
     advisor_internal_domains: tuple[str, ...] | None = None
+    acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF
 
     def overlaid(self, workflow: Mapping[str, Any] | None) -> ProjectExecution:
         """Apply the immutable task workflow over the project's current settings."""
@@ -391,11 +401,13 @@ class ProjectExecution:
                 values[field] = _parse(field, raw)
             except ValueError as exc:
                 logger.warning("ignoring project %s's %s: %s", (row or {}).get("id"), field, exc)
+        values["acceptance_checks"] = acceptance_checks_mode((row or {}).get("acceptance_checks"))
         return cls(**values)
 
     def view(self) -> dict[str, Any]:
         """The fields for the API: plain JSON values, ``None`` where unset."""
-        return {field: _stored(getattr(self, field)) for field in FIELDS}
+        return {field: _stored(getattr(self, field)) for field in FIELDS} | (
+            {"acceptance_checks": self.acceptance_checks.value} if self.acceptance_checks is not AcceptanceChecksMode.OFF else {})
 
 
 def execution_fields(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -569,3 +581,13 @@ def _choice(field: str, raw: Any, kind: type[Enum]) -> Any:
     except ValueError:
         choices = ", ".join(str(member.value) for member in kind)
         raise ValueError(f"{field} must be one of {choices}, or null to inherit") from None
+
+
+def acceptance_checks_mode(raw: Any) -> AcceptanceChecksMode:
+    """NULL is the disabled default; explicit inputs must name a typed mode."""
+    if raw is None:
+        return AcceptanceChecksMode.OFF
+    try:
+        return AcceptanceChecksMode(raw)
+    except (ValueError, TypeError):
+        raise ValueError("acceptance_checks must be off, local or network") from None

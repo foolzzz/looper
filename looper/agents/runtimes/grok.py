@@ -212,7 +212,7 @@ class GrokRuntime(RuntimeAdapter):
         return [
             "--prompt-file", PROMPT_FILE, "--output-format", "streaming-messages-json",
             "--always-approve", "--trust", "--no-auto-update",
-            *(["--disable-web-search"] if not launch.profile.web_search else []),
+            *(["--disable-web-search"] if launch.explore or not launch.profile.web_search else []),
             *(["--tools", READ_ONLY_TOOLS] if launch.read_only else []),
             *binding.args,
         ]
@@ -393,7 +393,7 @@ class GrokRuntime(RuntimeAdapter):
 
     def web_tools(self, launch: Launch) -> bool:
         """Grok searches the web unless the profile turns it off (``--disable-web-search``)."""
-        return bool(launch.profile.web_search)
+        return not launch.explore and bool(launch.profile.web_search)
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """The skills Grok loads natively and what it does not get, when there are any (RFC P9)."""
