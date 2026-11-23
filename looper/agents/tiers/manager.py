@@ -73,7 +73,8 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook, turn_metrics
+from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
@@ -83,7 +84,7 @@ from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import leads_model, research_order, session_switch
 from ..research_order import ResearchSources
-from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext
+from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
 from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
@@ -99,6 +100,7 @@ from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vau
 from ..channels.base import PostOutcome
 from ..ops.service import tools_down_reply
 from ..task_notice import Notice, ends_task, web_end_text
+from ..ops.reminders import TOOL_NAMES as REMINDER_TOOLS
 from ..message import (
     MANAGER_ADDRESS,
     AgentAddress,
@@ -118,6 +120,7 @@ if TYPE_CHECKING:
     from ..runtimes.runner.turn import TurnLimits
 
 logger = logging.getLogger(__name__)
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 from ...db import activity as db_activity
 from ...db import connection as db_connection
@@ -390,7 +393,8 @@ QUOTE_READ_SEC = 80.0
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
-    "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
+    "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
+    "build_user_message",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
@@ -726,12 +730,19 @@ class StopResult(str, Enum):
     CANNOT_INTERRUPT = "cannot_interrupt"  # the Manager's runtime has no interrupt (``can_interrupt``)
 
 
+class OverCap(RuntimeError):
+    """The model turn reached its spending cap."""
+
+
 class NoReply(RuntimeError):
     """The runtime ended the turn without a word of reply (not an exit, a cap or an error)."""
 
 
 class _CompletionNotTaken(Exception):
     """The Manager was turned off before its completion turn ran."""
+
+
+OUTBOUND_UNHOOKED_REPLY = "对外动作审查刚刚打开，这次没有执行。请再发一次，管家会带着审查重新开始。"
 
 
 class TurnFailed(RuntimeError):
@@ -772,9 +783,9 @@ class GoalSnapshot:
 
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
-                   snapshot: str | None = None) -> MessageEnvelope:
+                   snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
-    the chat's history (``record``)."""
+    the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
         record = _chat_record(original, f"{original.message_id}:reply")
@@ -786,7 +797,8 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
         correlation_id=original.correlation_id,
         reply_to=original.message_id,
         metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original), **record,
-                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
+                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {}),
+                  **({"cards": cards} if cards else {})},
     )
 
 
@@ -811,6 +823,9 @@ class ManagerAgent:
     _stopped_notes = session_field("stopped_notes")
     _lock_owner = session_field("lock_owner")
     _running_token = session_field("running_token")
+    _lifecycle_gate = session_field("lifecycle_gate")
+    _research = session_field("research")
+    _agent_settings = session_field("agent_settings")
     _last_activity = session_field("last_activity")
 
     def __init__(
@@ -834,7 +849,6 @@ class ManagerAgent:
         self._has_templates = False  # from the last read of the Manager's task templates
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
         self._vault_on = False  # whether the default Manager reads the knowledge vault, from the last read
-        self._research: ResearchSources | None = None  # where the turn being prepared may look things up, when on
         self._stable_context = False  # manager.stable_context, from the last read
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
@@ -850,9 +864,9 @@ class ManagerAgent:
         self._prompt_recommended = True  # whether _system_prompt is the recommended one (default_prompt)
         if self._definition.id != DEFAULT_MANAGER_ID:  # until _load_db_config reads it again
             self._system_prompt, self._prompt_recommended = self._definition.system_prompt or "", False
-        # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
-        self._agent_settings: AgentSettings | None = None
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
+        self._metrics_started_at = _PROCESS_STARTED_AT
+        self._metrics_reply_tokens: dict[str, TurnToken] = {}
         self._last_task_progress: dict[tuple[str, str], str] = {}
         # The Manager's conversations by key, only main for now (``ManagerSession``), and the one a context runs
         # on; the attributes under their old names (``_claude``, ``_session_id``, …) read and write it
@@ -862,14 +876,14 @@ class ManagerAgent:
         self._sessions: dict[str, ManagerSession] = {MAIN_SESSION: ManagerSession(
             key=MAIN_SESSION, claude=CLAUDE_CODE.resident_session(self.agent_id), claude_runtime=CLAUDE_CODE,
             last_activity=clock())}
-        # Serializes resident admission, reset and idle close. An idle check never waits for a busy turn.
-        self._lifecycle_gate = asyncio.Lock()
         self._clock = clock
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
         # Completion turns past their deadline that did not end, and the stops of their runtimes (``_tell_completion``).
         self._late_turns: set[asyncio.Task[Any]] = set()
+        # Retired runtimes' tree cleanup, separate from turns that can ignore cancellation indefinitely.
+        self._runtime_cleanups: set[asyncio.Task[None]] = set()
         # Looper's platform tools (set by ``serve``): what Claude's calls in a turn act through.
         self.ops: ManagerOps | None = None
         # The envelope the message loop is handling, and the ones a stop found unfinished (the fleet settles or
@@ -1045,6 +1059,13 @@ class ManagerAgent:
         token = self._turns.receive(envelope, channel=origin["channel"] or "", chat=origin["chat"] or "",
                                     channel_id=origin["channel_id"],
                                     client_message_id=client_id if isinstance(client_id, str) and client_id else None)
+        if chat_settings.metrics_enabled():
+            received = datetime.fromisoformat(envelope.timestamp.replace("Z", "+00:00"))
+            if origin["channel"] == "web":
+                kind = ChatKind.CLIENT if _message_client(envelope)[0] else ChatKind.DASHBOARD
+            else:
+                kind = ChatKind.GROUP if origin["group"] else ChatKind.DIRECT
+            token.times = TurnTimes(received_at=received, chat=kind)
         return token
 
     async def _stop_from_chat(self, envelope: MessageEnvelope) -> None:
@@ -1107,8 +1128,8 @@ class ManagerAgent:
         self._turns.clear()
         async def close() -> None:
             # A cancelled turn can still own its lock. Idle close alone needs serialization here.
-            async with self._lifecycle_gate:
-                for session in self._sessions.values():  # every session's resident
+            for session in self._sessions.values():  # every session's resident
+                async with session.lifecycle_gate:
                     await session.claude.stop()
 
         closing = asyncio.create_task(close())
@@ -1132,8 +1153,9 @@ class ManagerAgent:
     @property
     def deletion_blocked(self) -> bool:
         """Include runtime background work as well as preparation, queued messages and resets."""
-        return (self._idle_blocked() or self._lifecycle_gate.locked()
-                or any(session.claude.started and not getattr(session.claude, "idle", False)
+        return (self._idle_blocked()
+                or any(session.lifecycle_gate.locked()
+                       or (session.claude.started and not getattr(session.claude, "idle", False))
                        for session in self._sessions.values()))  # any session's
 
     async def try_suspend_idle(self, now: float) -> bool:
@@ -1142,12 +1164,12 @@ class ManagerAgent:
         timeout = self._definition.idle_timeout_seconds
         if self.agent_id == DEFAULT_MANAGER_ID or not timeout or not self._running or self._turned_off:
             return False
-        if self._idle_blocked() or self._lifecycle_gate.locked():
+        if self._idle_blocked() or main.lifecycle_gate.locked():
             main.last_activity = now
             return False
         if now - main.last_activity < timeout or not main.claude.started:
             return False
-        async with self._lifecycle_gate:
+        async with main.lifecycle_gate:
             # No await between this last admission check and the runtime's atomic idle claim.
             if not self._running or self._turned_off or self._idle_blocked():
                 main.last_activity = now
@@ -1226,6 +1248,8 @@ class ManagerAgent:
 
     async def _handle_user_message(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
+        if chat_settings.metrics_enabled():
+            turn_metrics.background(self._mark_metrics_replied(envelope))
         if is_stop_command(envelope.payload.get("text", "")):
             await self._stop_from_chat(envelope)
             return
@@ -1318,7 +1342,57 @@ class ManagerAgent:
         token.check()
         token.settle(ReplyOutcome.ANSWERED)
 
+    async def _mark_metrics_replied(self, envelope: MessageEnvelope) -> None:
+        from ..operator_identity import operator_sender_id
+        from ...db import proactive_deliveries
+
+        origin = _message_origin(envelope)
+        channel = origin["channel"]
+        operator = channel == "web" and _message_client(envelope)[0] is None
+        if is_lark(channel) or channel == "telegram":
+            operator_id = await operator_sender_id(origin["channel_id"])
+            operator = operator_id is not None and origin["sender"] == operator_id
+        if operator:
+            context = envelope.payload.get("channel_context") or {}
+            quoted = context.get("reply_to") or context.get("root_id") or context.get("reply_to_message_id")
+            now = datetime.now(timezone.utc)
+            await proactive_deliveries.mark_replied("web" if channel == "web" else origin["channel_id"], origin["chat"] or "",
+                                                     str(quoted) if quoted else None, now)
+            if is_lark(channel) and not origin["group"] and origin["sender"] != origin["chat"]:
+                await proactive_deliveries.mark_replied(origin["channel_id"], origin["sender"],
+                                                         str(quoted) if quoted else None, now)
+
+    def _record_turn_metrics(self, token: TurnToken, prepared: Prepared | None, delivery: TurnDelivery) -> None:
+        if token.times is None or prepared is None or prepared.run.recorder is None:
+            return
+        if token.envelope is None:
+            metadata = token.times.to_metadata(delivery, TurnOrigin.COMPLETION, False)
+            turn_metrics.background(prepared.run.recorder.annotate({"turn_metrics": metadata}))
+            return
+        origin = _message_origin(token.envelope)
+        if (is_lark(origin["channel"]) or origin["channel"] == "telegram") and token.times.ack is AckKind.PENDING:
+            context = token.envelope.payload.get("channel_context") or {}
+            channel_id, message_id = origin["channel_id"], str(context.get("message_id") or "")
+            known = turn_metrics.ack_board.contains(channel_id, message_id)
+            token.times.ack_at = turn_metrics.ack_board.take(channel_id, message_id)
+            token.times.ack = AckKind.REACTION if token.times.ack_at is not None else (AckKind.NONE if known else AckKind.PENDING)
+        metadata = token.times.to_metadata(delivery, TurnOrigin.USER, token.times.received_at < self._metrics_started_at)
+        turn_metrics.background(prepared.run.recorder.annotate({"turn_metrics": metadata}))
+
     async def _answer_user_message(self, envelope: MessageEnvelope, token: TurnToken) -> None:
+        token.metrics_delivery = TurnDelivery.REPLY
+        if token.times is not None:
+            self._metrics_reply_tokens[token.message_id] = token
+        try:
+            await self._answer_user_message_impl(envelope, token)
+        except BaseException:
+            token.metrics_delivery = TurnDelivery.FAILED
+            raise
+        finally:
+            self._record_turn_metrics(token, token.metrics_prepared, token.metrics_delivery)
+            self._metrics_reply_tokens.pop(token.message_id, None)
+
+    async def _answer_user_message_impl(self, envelope: MessageEnvelope, token: TurnToken) -> None:
         turn: Turn | None = None
         try:
             try:
@@ -1328,12 +1402,15 @@ class ManagerAgent:
                         if prepared is None:
                             prepared = await self._prepare_turn(token, envelope, ask=token.prepared_ask)
                         turn = prepared.turn
+                        if token.times is not None:
+                            token.metrics_prepared = prepared
                         if prepared.action is not None:
                             await prepared.action()
                             return
                         if turn is None:
                             return
                         if prepared.tools_problem is not None:
+                            token.metrics_delivery = TurnDelivery.FAILED
                             await self._send_reply(envelope, tools_down_reply(prepared.tools_problem),
                                                    error=prepared.tools_problem)
                             return
@@ -1362,6 +1439,7 @@ class ManagerAgent:
                 if turn is not None and self.ops is not None:
                     self.ops.end_turn(turn)
         except TurnStopped as stopped:
+            token.metrics_delivery = TurnDelivery.STOPPED
             if turn is None:
                 raise
             if self.ops is not None:
@@ -1372,6 +1450,8 @@ class ManagerAgent:
             token.settle(ReplyOutcome.STOPPED)
             return
         except Exception as exc:
+            token.metrics_delivery = (TurnDelivery.EMPTY if isinstance(exc, NoReply) else
+                                      TurnDelivery.OVER_CAP if isinstance(exc, OverCap) else TurnDelivery.FAILED)
             if turn is None:
                 raise
             token.settle(ReplyOutcome.FAILED)
@@ -1390,6 +1470,7 @@ class ManagerAgent:
                     envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{cause}{hint}", turn.blocks), error=cause)
                 return
         if turn.refused:
+            token.metrics_delivery = TurnDelivery.FAILED
             problem = "Looper 拒绝了管家工具的令牌"
             logger.error("%s: Looper refused the tools' token in the turn answering %s; Claude's reply was not "
                          "sent", self._log, envelope.message_id)
@@ -1397,7 +1478,7 @@ class ManagerAgent:
             return
         asked = self.ops is not None and self.ops.asks_in(envelope.message_id)
         await self._send_reply(envelope, _with_blocks(response, turn.blocks),
-                               outcome=ReplyOutcome.CONFIRM if asked else None)
+                               outcome=ReplyOutcome.CONFIRM if asked else None, cards=turn.cards)
 
     async def _answer_gate_command(self, envelope: MessageEnvelope, text: str) -> None:
         answer = await self._gate_command(envelope, text)
@@ -1521,6 +1602,15 @@ class ManagerAgent:
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        if self.ops is not None and await token.step("outbound_review", outbound_hook.enabled()):
+            # The review hooks every tool call of the Manager; a runtime it cannot hook does not run while it is on.
+            if not launch.runtime.tool_hook:
+                raise ProfileUnavailable(
+                    f"the outbound review is on, and this Manager's Agent Profile runs on {launch.runtime.label}, "
+                    "which has no tool hook: choose a Claude Code profile, or turn the review off",
+                    agent_settings.profile_source)
+            launch = replace(launch, tool_hook=self.ops.tool_hook(self._runtime_root, self._config.claude_bin,
+                                                                   launch.library))
         launch = await token.step("llmrec_attach", llmrec.attach(
             launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
         if ask.turn is not None:
@@ -1547,7 +1637,9 @@ class ManagerAgent:
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
-        if self._has_templates or has_workflows or has_leads or has_ledger or self.agent_id != DEFAULT_MANAGER_ID:
+        has_reminders = any(t["name"] in REMINDER_TOOLS for t in tools)
+        if self._has_templates or has_workflows or has_leads or has_ledger or has_reminders \
+                or self.agent_id != DEFAULT_MANAGER_ID:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
@@ -1565,6 +1657,8 @@ class ManagerAgent:
                 command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
                 totals=self._session_totals, price=launch.price), 10, undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
+            if self.ops is not None:
+                self.ops.activate_tool_hook(launch.tool_hook)
         if switch is None and session.session_id and session.session_runtime == "api" \
                 and (self._claude_runtime is not launch.runtime or not self._claude.started):
             # Restore the API session's saved context before deciding whether it needs a handoff.
@@ -1577,6 +1671,8 @@ class ManagerAgent:
                     totals=self._session_totals, price=launch.price), seconds,
                     undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
+            if self.ops is not None:
+                self.ops.activate_tool_hook(launch.tool_hook)
         if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
             switch = session_switch.context_full(
@@ -1617,9 +1713,41 @@ class ManagerAgent:
                 cause = (pi_runner if kind == "pi" else dsh_runner)._opt_out(cause)
             raise OSError(cause) from None
 
-    async def _stop_replaced_session(self) -> None:
-        if isinstance(self._claude, ResidentClaude):
+    async def require_tool_hook(self) -> None:
+        """The outbound review was turned on: a process of this Manager started without its hook stops now, whatever
+        holds its lifecycle (a turn or a handoff it runs ends failed), with its whole tree and the cleanup of the
+        processes it replaced before; the next turn starts one with the hook."""
+        for session in self._sessions.values():
+            if session.claude.started and session.process is not None and session.process.launch.tool_hook is not None:
+                continue
+            if session.claude.started:
+                logger.warning("%s: stopping its process, which has no outbound review hook", self._log)
+            await session.claude.stop(kill=True)
+        while self._runtime_cleanups:
+            # A cancelled request must not cancel a retired runtime's cleanup. New retirements made while this
+            # waits also belong to activation; a failed cleanup prevents activation from reporting success.
+            await asyncio.gather(*(asyncio.shield(task) for task in self._runtime_cleanups))
+
+    def _track_runtime_cleanup(self, runtime: ResidentSession) -> None:
+        stopping = asyncio.create_task(runtime.stop(kill=True))
+        self._runtime_cleanups.add(stopping)
+        self._late_turns.add(stopping)
+        stopping.add_done_callback(self._late_turns.discard)
+
+        def ended(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is None:
+                self._runtime_cleanups.discard(task)
+            else:
+                logger.error("%s: retired runtime cleanup did not finish successfully", self._log)
+
+        stopping.add_done_callback(ended)
+
+    async def _stop_replaced_session(self, *, whole_tree: bool = False) -> None:
+        if isinstance(self._claude, ResidentClaude) and not whole_tree:
             await self._claude.stop(kill=True, wait_tree=False)
+            self._track_runtime_cleanup(self._claude)
+            # Let stop capture the retired process before this resident object may start a new one.
+            await asyncio.sleep(0)
         else:
             await self._claude.stop(kill=True)
 
@@ -1628,6 +1756,10 @@ class ManagerAgent:
         the resume brief, the record and Claude's start. ``prepared.run`` holds what the run needs afterwards."""
         session = prepared.session
         run, launch, signature = prepared.run, prepared.launch, prepared.signature
+        if token.times is not None:
+            token.metrics_prepared = prepared
+            token.times.tool_calls = 0
+            token.times.first_reply_at = None
         envelope = prepared.envelope
         token.restart() if prepared.retried else token.advance(TurnPhase.STARTING)
         pre_context = (self._claude.context_tokens if prepared.switch is not None
@@ -1637,12 +1769,14 @@ class ManagerAgent:
             # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
             await token.keep("switch_session", self._switch_session(prepared.switch, token.cancel),
                              HANDOFF_TIMEOUT_SEC + 30)
+        # A process without the outbound review's hook, replaced by one with it, ends with its whole tree.
+        unhooked = launch.tool_hook is not None and (self._process is None or self._process.launch.tool_hook is None)
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
-            await token.keep("claude_stop", self._stop_replaced_session(), 30)
+            await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
         if self._claude.stale(signature):
-            await token.keep("claude_stop", self._stop_replaced_session(), 30)
+            await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
         command = self._claude.command if self._claude.started else await token.step("claude_command", asyncio.to_thread(
             self._claude_command, prepared.prompt_file, launch))
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
@@ -1686,6 +1820,8 @@ class ManagerAgent:
                             price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
                     self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
+                    if self.ops is not None:
+                        self.ops.activate_tool_hook(launch.tool_hook)
                     raise
                 except OSError as exc:
                     cause = str(exc) or type(exc).__name__
@@ -1704,6 +1840,8 @@ class ManagerAgent:
                     command = self._claude.command
                     await token.step("recorder_annotate", recorder.annotate({"command": command}))
                 self._process = _Process(command, signature, prepared.system_prompt, launch)
+                if self.ops is not None:
+                    self.ops.activate_tool_hook(launch.tool_hook)
         except TurnStopped:
             # Stopped while the record was open: it ends as stopped, with no spend.
             await token.keep("recorder_finish", self._finish_stopped_early(token, recorder, prepared.turn), 10)
@@ -1731,10 +1869,13 @@ class ManagerAgent:
         try:
             async with self._lifecycle_gate:
                 previous = self._process
+                # A process without the outbound review's hook is never kept for a launch with it: the stale
+                # process stops below.
                 if previous is not None and prepared.switch is None and self._claude.started \
                         and self._claude.pid is not None \
                         and prepared.launch.runtime is self._claude_runtime \
-                        and previous.launch.library.sha256 != prepared.launch.library.sha256:
+                        and previous.launch.library.sha256 != prepared.launch.library.sha256 \
+                        and (previous.launch.tool_hook is None) == (prepared.launch.tool_hook is None):
                     close = getattr(self._claude, "try_stop_if_idle", None)
                     if close is None or not await token.keep("library_idle_close", close(), 10):
                         # A user result may leave background/autonomous work running. Keep the actual
@@ -1908,13 +2049,19 @@ class ManagerAgent:
                 message_type=MessageType.CHAT_NOTICE,
                 payload=notice.payload(),
                 correlation_id=envelope.correlation_id,
-                metadata={"origin_channel_id": origin},
+                metadata={"origin_channel_id": origin,
+                          **self._proactive_metadata(ProactiveSource.TASK_NOTICE, envelope.payload.get("task_id"))},
             ))
             await completion_events.mark_sent(recorded)
         elif origin and not _group_task(envelope):
             progress_text = envelope.payload.get("phase_text") or envelope.payload.get("summary", "")
             if progress_text:
                 await self._task_progress(envelope, progress_text)
+
+    def _proactive_metadata(self, source: ProactiveSource, source_ref: str | None = None) -> dict[str, Any]:
+        if not chat_settings.metrics_enabled():
+            return {}
+        return {"proactive": {"source": source.value, "source_ref": source_ref, "manager_id": self.agent_id}}
 
     async def _task_progress(self, envelope: MessageEnvelope, text: str) -> None:
         origin = envelope.metadata["origin_channel_id"]
@@ -1927,18 +2074,26 @@ class ManagerAgent:
             payload={"text": text},
             correlation_id=envelope.correlation_id,
             metadata={"origin_channel_id": origin,
+                      **self._proactive_metadata(ProactiveSource.PROGRESS, envelope.payload.get("task_id")),
                       **({"reply_route": envelope.metadata["reply_route"]}
                          if "reply_route" in envelope.metadata else {})},
         ))
 
     async def _web_thread_reply(self, envelope: MessageEnvelope, thread: str, text: str) -> None:
+        if ends_task(envelope.payload.get("status")) or envelope.payload.get("status") == "cancelled":
+            source = ProactiveSource.TASK_NOTICE
+        elif envelope.payload.get("gate_opened"):
+            source = ProactiveSource.GATE
+        else:
+            source = ProactiveSource.PROGRESS
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
             target=channel_address("web"),
             message_type=MessageType.AGENT_REPLY,
             payload={"text": text, "chat_session_id": thread},
             correlation_id=envelope.correlation_id,
-            metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
+            metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id"),
+                      **self._proactive_metadata(source, envelope.payload.get("task_id"))},
         ))
 
     # --- Completion turns: the Manager tells a chat that its tasks ended (``completion_events``) ---
@@ -1989,21 +2144,28 @@ class ManagerAgent:
             await cancel_and_wait(run)
             raise
         reason: str | None = None
+        delivery = TurnDelivery.REPLY
         rejected = False  # the channel refused the reply: its notices may go
         text = ""
         if not done:
             reason = "turn_timeout"
+            delivery = TurnDelivery.FAILED
             await self._fall_back_completion(batch, reason, state)
             await self._end_late_completion(run, batch, state)
         else:
             try:
                 text = run.result().strip()
             except TurnStopped:
+                delivery = TurnDelivery.STOPPED
                 reason = "turn_stopped"
             except _CompletionNotTaken:
                 reason = "manager_off"
             except NoReply:
+                delivery = TurnDelivery.EMPTY
                 reason = "empty_reply"
+            except OverCap:
+                delivery = TurnDelivery.OVER_CAP
+                reason = "turn_failed"
             except Exception as exc:
                 logger.error("%s: the completion turn %s failed: %s", self._log, batch, type(exc).__name__)
                 reason = "turn_failed"
@@ -2039,6 +2201,12 @@ class ManagerAgent:
             if reason is not None:
                 await self._fall_back_completion(batch, reason, state, rejected=rejected)
         cost = None
+        metrics_token = state.get("token")
+        if metrics_token is not None and metrics_token.times is not None and state.get("record_id") is not None:
+            if reason and delivery is TurnDelivery.REPLY:
+                delivery = TurnDelivery.EMPTY if reason == "empty_reply" else TurnDelivery.FAILED
+            turn_metrics.background(db_llm_records.add_metadata(state["record_id"], {"turn_metrics":
+                metrics_token.times.to_metadata(delivery, TurnOrigin.COMPLETION, False)}))
         if state.get("record_id") is not None:
             try:
                 cost = await db_connection.get_pool().fetchval("SELECT cost_usd FROM llm_records WHERE id = $1",
@@ -2101,9 +2269,7 @@ class ManagerAgent:
         self._publish_binding(None)
         late, self._claude = self._claude, self._claude_runtime.resident_session(self.agent_id)
         self._process = None
-        stopping = asyncio.create_task(late.stop(kill=True))
-        self._late_turns.add(stopping)
-        stopping.add_done_callback(self._late_turns.discard)
+        self._track_runtime_cleanup(late)
 
     async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any], *,
                                     rejected: bool = False) -> None:
@@ -2127,6 +2293,8 @@ class ManagerAgent:
             state["chat_record"] = {}
         token = self._turns.receive(context, channel=origin["channel"] or "", chat=origin["chat"] or "",
                                     channel_id=origin["channel_id"])
+        if chat_settings.metrics_enabled():
+            token.times = TurnTimes(received_at=datetime.now(timezone.utc))
         token.envelope = None  # no status line: the chat sees only the reply
         turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
                     sender=origin["sender"], envelope=context, origin=TurnOrigin.COMPLETION,
@@ -2322,7 +2490,8 @@ class ManagerAgent:
                     # Every tool call of the turn may come to the bridge, a subagent's too: each is expected,
                     # though only the Manager's own blocks are shown.
                     bare, arguments = _looper_call(block.get("name"), block.get("input"))
-                    self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
+                    self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"),
+                                    parent_call_id=payload.get("parent_tool_use_id"))
 
         async def on_event(payload: dict[str, Any]) -> None:
             if payload.get("type") == "system" and payload.get("subtype") == "transport" and not token.abandoned:
@@ -2411,6 +2580,8 @@ class ManagerAgent:
                                 if not streamed_partials:  # else already sent chunk by chunk
                                     await show(chunk, delta=True)
                         elif block_type == "tool_use":
+                            if token.times is not None:
+                                token.times.tool_calls += 1
                             tool_name = block.get("name", "tool")
                             await show(
                                 f"正在使用工具: {tool_name}",
@@ -2433,6 +2604,10 @@ class ManagerAgent:
             if token.cancel.requested:
                 await self._finish_stopped_early(token, recorder, ops_turn)
                 raise TurnStopped()
+            if outbound_hook.known_enabled() and (self._process is None or self._process.launch.tool_hook is None):
+                # Turned on after this turn was prepared: its process has no hook, and the next turn starts one that has.
+                raise TurnFailed(OUTBOUND_UNHOOKED_REPLY, "the outbound review is on and the Manager's process has no "
+                                 "tool hook")
             if self._claude.shares_bridge:
                 self._publish_binding(token)  # on disk before the runtime gets the prompt
             token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
@@ -2520,6 +2695,8 @@ class ManagerAgent:
                 stderr_note = f": {stderr}"
 
         if resume_lost:
+            if token.times is not None:
+                self._record_turn_metrics(token, prepared, TurnDelivery.FAILED)
             # An overflow rejects the new message, not the saved history. Hand that history over before
             # dropping it; only a genuinely lost session can be retried without its summary.
             failure = ("context full: its first request exceeded the context window" if context_overflow
@@ -2598,7 +2775,7 @@ class ManagerAgent:
                 logger.debug("failed to record manager activity", exc_info=True)
 
         if over_cap:
-            raise RuntimeError(over_cap)
+            raise OverCap(over_cap)
         if failed:
             raise RuntimeError(failed)
         if not replied:
@@ -2820,7 +2997,9 @@ class ManagerAgent:
         api_history = (session.session_runtime == "api" and session.session_id is not None
                        and await db_api_sessions.last_turn(session.session_id) is not None)
         # A failed first API request has no committed conversation to summarize.
+        # A process without the outbound review's hook writes no handoff while the review is on.
         if self._claude.started and process is not None and not self._claude.stale(process.signature) \
+                and not (outbound_hook.known_enabled() and process.launch.tool_hook is None) \
                 and (session.session_runtime != "api" or api_history):
             # The handoff's prompt is not the user's message: it gets a cancel of its own, requested with the turn's, so
             # that writing it does not make the turn "running" or its message "seen".
@@ -2886,8 +3065,11 @@ class ManagerAgent:
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=self._runner_limits)
                 options = {"stop": lambda: recorder.cap_stop} if isinstance(self._claude, RunnerSession) else {}
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, cancel=cancel, **options),
-                                              HANDOFF_TIMEOUT_SEC)
+                async with asyncio.timeout(HANDOFF_TIMEOUT_SEC):
+                    if outbound_hook.known_enabled() and process.launch.tool_hook is None:
+                        # The timeout context keeps the check and send in this task, including on Python 3.11.
+                        raise RuntimeError("the outbound review is on, and this process has no tool hook")
+                    turn = await self._claude.run_turn(text, on_event, cancel=cancel, **options)
             except TurnCancelled as exc:
                 await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
                                       status=RecordStatus.INTERRUPTED, usage=Usage())
@@ -3066,7 +3248,8 @@ class ManagerAgent:
             correlation_id=last.correlation_id,
             metadata={"origin_channel_id": last.metadata.get("origin_channel_id"),
                       **_reply_route(last),
-                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}")},
+                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}"),
+                      **self._proactive_metadata(ProactiveSource.AUTONOMOUS)},
         ))
 
     def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
@@ -3306,7 +3489,7 @@ class ManagerAgent:
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True, outcome: ReplyOutcome | None = None,
-                          snapshot: str | None = None) -> None:
+                          snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
         history (a user gate keeps its own discussion). Web replies always retain their recovery identity.
@@ -3317,7 +3500,11 @@ class ManagerAgent:
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
-                                               record=record, snapshot=snapshot))
+                                               record=record, snapshot=snapshot, cards=cards))
+        token = self._turns.find(original.message_id) or self._metrics_reply_tokens.get(original.message_id)
+        if token is not None and token.message_id == original.message_id and token.times is not None and text and error is None:
+            if token.times.first_reply_at is None:
+                token.times.first_reply_at = datetime.now(timezone.utc)
 
     @property
     def leads_withheld(self) -> int:
@@ -3392,3 +3579,11 @@ class ManagerAgent:
             reply_to=original.message_id,
             metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original)},
         ))
+
+        token = self._turns.find(original.message_id)
+        if token is not None and token.times is not None and token.times.chat in {ChatKind.DASHBOARD, ChatKind.CLIENT}:
+            now = datetime.now(timezone.utc)
+            if token.times.ack_at is None:
+                token.times.ack_at, token.times.ack = now, AckKind.STATUS
+            if delta and text and token.times.first_reply_at is None:
+                token.times.first_reply_at = now

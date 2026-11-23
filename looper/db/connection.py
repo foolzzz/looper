@@ -148,6 +148,7 @@ _SUBSCRIPTIONS = "subscriptions"
 _SUBSCRIPTION_RULES = "subscription_rules"
 _SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
+_PROACTIVE_DELIVERIES = "proactive_deliveries"
 _SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
 _MANAGER_EVENT_REASONS_MIGRATION = "manager_event_reasons"
 _MANAGER_EVENT_DELIVERY = "manager_event_delivery"
@@ -176,6 +177,9 @@ _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
+_CARD_ACTIONS = "card_actions"
+
+_MEMORY_CANDIDATES = "memory_candidates"
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
 _UNCERTAIN_DELIVERY_INDEXES = (
@@ -183,6 +187,9 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_intent_posts_uncertain", "ON intent_posts (updated_at) WHERE state = 'uncertain'"),
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
+_REMINDERS = "reminders"
+_MCP_TOOL_LEVELS = "mcp_tool_levels"
+_FAILURE_TYPING = "failure_typing"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -272,6 +279,7 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
 _SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source deletions end", re.S)
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
+_PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 _DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
@@ -307,7 +315,30 @@ def _decision_snapshots_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its decision snapshots block")
     return found.group(1)
+
+
+_MCP_TOOL_LEVELS_BLOCK = re.compile(r"-- mcp tool levels begin\n(.*?)-- mcp tool levels end", re.S)
+
+
+def _mcp_tool_levels_ddl() -> str:
+    """The MCP tool declarations as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _MCP_TOOL_LEVELS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its mcp tool levels block")
+    return found.group(1)
+
+
 _OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
+_MEMORY_CANDIDATES_BLOCK = re.compile(r"-- memory candidates begin\n(.*?)-- memory candidates end", re.S)
+
+
+def _memory_candidates_ddl() -> str:
+    """The memory candidate tables and their triggers as schema.sql defines them (idempotent), so a database that
+    predates them gets the same text."""
+    found = _MEMORY_CANDIDATES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its memory candidates block")
+    return found.group(1)
 
 
 # The checks that list the classifier: (table, constraint).
@@ -357,6 +388,18 @@ def _run_tree_ddl() -> tuple[str, ...]:
         f"ALTER TABLE llm_records ADD CONSTRAINT llm_records_run_kind_check CHECK (run_kind IN ({kinds})) NOT VALID, "
         "ADD CONSTRAINT llm_records_parent_record_id_fkey FOREIGN KEY (parent_record_id) REFERENCES llm_records(id) "
         "ON DELETE SET NULL NOT VALID",
+    )
+
+
+def _failure_typing_ddl() -> tuple[str, ...]:
+    """The failure columns of llm_records, as schema.sql defines them, added without a scan or a rewrite (as the run
+    tree's are): every older row is NULL, so the check holds; it comes NOT VALID and is validated, and the index
+    built, in ``_ONLINE_STEPS``."""
+    from ..agents.failures import check_sql
+
+    return (
+        "ALTER TABLE llm_records ADD COLUMN failure_class TEXT, ADD COLUMN failure_cause TEXT",
+        f"ALTER TABLE llm_records ADD CONSTRAINT llm_records_failure_check CHECK ({check_sql()}) NOT VALID",
     )
 
 
@@ -411,6 +454,9 @@ _ONLINE_STEPS = (
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
     # The delivery tables can be large: their partial indexes are built without blocking writes.
     _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
+    _OnlineStep(_FAILURE_TYPING, "failure_typing_online",
+                validate=(("llm_records", "llm_records_failure_check"),),
+                indexes=(("idx_llm_records_failures", "ON llm_records (created_at) WHERE failure_class IS NOT NULL"),)),
 )
 
 
@@ -538,6 +584,23 @@ def _message_leads_ddl() -> str:
     return found.group(1)
 
 
+_CARD_ACTIONS_BLOCK = re.compile(r"-- card actions begin\n(.*?)-- card actions end", re.S)
+
+
+def _card_actions_ddl() -> str:
+    """The card buttons table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _CARD_ACTIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its card actions block")
+    return found.group(1)
+
+
+async def _card_actions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CARD_ACTIONS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('card_actions') IS NOT NULL")
+
+
 def _ledger_ddl() -> str:
     """The ledger tables as schema.sql defines them, so a database that predates them gets the same text."""
     found = _LEDGER_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -551,6 +614,24 @@ def _manager_events_ddl() -> str:
     found = _MANAGER_EVENTS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its manager events block")
+    return found.group(1)
+
+
+_REMINDERS_BLOCK = re.compile(r"-- reminders begin\n(.*?)-- reminders end", re.S)
+
+
+def _reminders_ddl() -> str:
+    """The reminders table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _REMINDERS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its reminders block")
+    return found.group(1)
+
+
+def _proactive_deliveries_ddl() -> str:
+    found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its proactive deliveries block")
     return found.group(1)
 
 
@@ -905,6 +986,10 @@ async def _run_tree_pending(conn: asyncpg.Connection) -> bool:
     return await _column_pending(conn, _RUN_TREE, "llm_records", "run_kind")
 
 
+async def _failure_typing_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _FAILURE_TYPING, "llm_records", "failure_class")
+
+
 async def _step_difficulty_pending(conn: asyncpg.Connection) -> bool:
     return await _column_pending(conn, _STEP_DIFFICULTY, "task_steps", "difficulty")
 
@@ -921,6 +1006,12 @@ async def _decision_snapshots_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('decision_snapshots') IS NOT NULL")
 
 
+async def _mcp_tool_levels_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MCP_TOOL_LEVELS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('mcp_tool_levels') IS NOT NULL")
+
+
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _OUTBOUND_REVIEWS):
         return False
@@ -931,6 +1022,12 @@ async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
         if await _lacks_outbound_check(conn, table, constraint):
             return True
     return False
+
+
+async def _memory_candidates_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MEMORY_CANDIDATES):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('memory_candidates') IS NOT NULL")
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -1008,6 +1105,12 @@ async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
     return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
+
+
+async def _reminders_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _REMINDERS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('reminders') IS NOT NULL")
 
 
 async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
@@ -1099,6 +1202,12 @@ async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_EVENTS):
         return False
     return not await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
+
+
+async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
 
 
 async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
@@ -1542,12 +1651,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _subscription_lookback_pending(conn):
             await conn.execute(_SUBSCRIPTION_LOOKBACK_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SUBSCRIPTION_LOOKBACK)
-        if await _channel_outbox_pending(conn):
-            await conn.execute(_channel_outbox_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _CHANNEL_OUTBOX)
         if await _ledger_pending(conn):
             await conn.execute(_ledger_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LEDGER)
+        if await _card_actions_pending(conn):
+            await conn.execute(_card_actions_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CARD_ACTIONS)
         if await _manager_events_pending(conn):
             await conn.execute(_manager_events_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
@@ -1717,6 +1826,26 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
         if await _uncertain_deliveries_pending(conn):
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
+        if await _reminders_pending(conn):
+            await conn.execute(_reminders_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REMINDERS)
+        if await _proactive_deliveries_pending(conn):
+            await conn.execute(_proactive_deliveries_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
+        if await _mcp_tool_levels_pending(conn):
+            await conn.execute(_mcp_tool_levels_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MCP_TOOL_LEVELS)
+        if await _failure_typing_pending(conn):
+            for ddl in _failure_typing_ddl():
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _FAILURE_TYPING)
+        # After every table its keys point at (projects, managers, manager_actions, task_journal, message_leads).
+        if await _memory_candidates_pending(conn):
+            await conn.execute(_memory_candidates_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MEMORY_CANDIDATES)
+        if await _channel_outbox_pending(conn):
+            await conn.execute(_channel_outbox_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _CHANNEL_OUTBOX)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1763,14 +1892,18 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _project_activity_pending(conn) or await _message_stream_pending(conn)
             or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
-            or await _channel_outbox_pending(conn) or await _ledger_pending(conn)
+            or await _ledger_pending(conn) or await _card_actions_pending(conn)
+            or await _proactive_deliveries_pending(conn)
+            or await _channel_outbox_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn)
-            or await _uncertain_deliveries_pending(conn)
+            or await _uncertain_deliveries_pending(conn) or await _mcp_tool_levels_pending(conn)
+            or await _failure_typing_pending(conn)
+            or await _memory_candidates_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _decision_snapshots_pending(conn)
@@ -1785,4 +1918,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
-            or await _mid_turn_input_pending(conn)))
+            or await _mid_turn_input_pending(conn)
+            or await _reminders_pending(conn)))

@@ -628,3 +628,26 @@ describe("recorded model requests", () => {
     expect(button("Export JSONL").disabled).toBe(false);
   });
 });
+
+describe("run failure class", () => {
+  it("shows the class, the cause and the reset of a used-up window", () => {
+    const html = render(undefined, { failure: { signal: "typed", resets_at: "2027-01-15T08:00:00Z" } },
+      { status: "failed", error: "the turn did not succeed", failure_class: "quota", failure_cause: "usage_limit" });
+    expect(html).toContain("quota · usage limit");
+    expect(html).toContain("Failure: quota · usage limit (its account&#x27;s limit was reached)");
+    expect(html).toContain("the limit resets");
+    expect(html).not.toContain("read from the runtime");
+  });
+
+  it("says when the runtime's error text told it", () => {
+    const html = render(undefined, { failure: { signal: "text" } },
+      { status: "failed", failure_class: "transient", failure_cause: "connection_failed" });
+    expect(html).toContain("Failure: transient · connection failed (a passing fault)");
+    expect(html).toContain("read from the runtime&#x27;s error text");
+  });
+
+  it("shows nothing for a run without a class", () => {
+    expect(render(undefined, {}, { status: "failed", error: "boom" })).not.toContain("Failure:");
+    expect(render(undefined, {}, { status: "failed", failure_class: null, failure_cause: null })).not.toContain("Failure:");
+  });
+});

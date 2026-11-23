@@ -54,7 +54,8 @@ class LarkTransport(Protocol):
 # transport write cannot silently bypass the gateway even before it is added to the protocol.
 LARK_WRITE_METHODS: frozenset[str] = frozenset({'send', 'reply', 'edit', 'react'})
 _LARK_READ_ATTRIBUTES = frozenset({'download', 'events', 'names', 'available', 'consumer_started',
-                                 'get_message', 'list_messages', 'list_threads', 'list_thread_messages'})
+                                 'get_message', 'list_messages', 'list_threads', 'list_thread_messages',
+                                 'chat_mode'})  # card authorization checks whether the source chat is direct
 
 
 def _batch_items(batch: asyncio.Future[dict[str, Any]], message_id: str) -> list[dict[str, Any]] | None:
