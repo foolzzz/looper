@@ -135,9 +135,24 @@ def collect(work_dir: Path, paths: tuple[str, ...], runtime_root: Path, row: dic
     return metadata
 
 
-def content_disposition(mime: str) -> str:
-    """Images the dashboard can draw are inline; every other type is a download."""
-    return "inline" if mime in INLINE_TYPES else "attachment"
+# The extension `collect` writes is the only type the bytes route serves. A mime stored on the row is not.
+_MIME_BY_EXTENSION = {
+    "png": "image/png", "jpg": "image/jpeg", "webp": "image/webp", "gif": "image/gif",
+    "txt": "text/plain", "json": "application/json",
+}
+
+
+def mime_for_name(name: str) -> str | None:
+    """The type of a name `collect` writes, or None when the name is not one of those."""
+    match = _STORED_NAME.fullmatch(name)
+    return None if match is None else _MIME_BY_EXTENSION[match.group(1)]
+
+
+def content_disposition(mime: str, name: str) -> str:
+    """Images the dashboard can draw are inline; every other type downloads under the stored name."""
+    if mime in INLINE_TYPES:
+        return "inline"
+    return f'attachment; filename="{name}"'
 
 
 def read_artifact(runtime_root: Path, *, task_id: str, step_id: str, attempt: int, check_id: str,

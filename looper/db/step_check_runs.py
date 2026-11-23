@@ -104,8 +104,10 @@ async def failed_required_current(task_ids: Sequence[str], *, pool: asyncpg.Pool
 
     Current evidence is the greatest `run` of the latest `attempt` for each step and check.
     A later run that passed is the current one, so the earlier failure is not listed. An advisory
-    failure (`required` false), an error and a stale row are not listed. Tasks with none are absent.
-    Each task's items are ordered by step index, then check id.
+    failure (`required` false), an error and a stale row are not listed. A skipped step is not
+    listed, and neither is a check id the step's current `checks` no longer defines. The same
+    name is listed once, on its earliest step. Tasks with none are absent. Each task's items
+    are ordered by step index, then check id.
     """
     if not task_ids:
         return {}
@@ -114,7 +116,8 @@ async def failed_required_current(task_ids: Sequence[str], *, pool: asyncpg.Pool
         """
         WITH current AS (
             SELECT DISTINCT ON (r.step_id, r.check_id)
-                   r.task_id, r.step_id, r.check_id, r.required, r.state, s.step_index
+                   r.task_id, r.step_id, r.check_id, r.required, r.state, s.step_index,
+                   s.status AS step_status, s.checks
             FROM step_check_runs r
             JOIN task_steps s ON s.id = r.step_id
             WHERE r.task_id = ANY($1::text[])
@@ -122,12 +125,22 @@ async def failed_required_current(task_ids: Sequence[str], *, pool: asyncpg.Pool
         )
         SELECT task_id, step_id, check_id
         FROM current
-        WHERE required AND state = 'failed'
+        WHERE required AND state = 'failed' AND step_status <> 'skipped'
+          AND jsonb_typeof(checks) = 'array'
+          AND EXISTS (
+              SELECT 1 FROM jsonb_array_elements(checks) AS definition
+              WHERE definition->>'id' = check_id)
         ORDER BY task_id, step_index, check_id
         """, list(task_ids))
     found: dict[str, list[dict[str, str]]] = {}
+    seen: dict[str, set[str]] = {}
     for row in rows:
-        found.setdefault(row["task_id"], []).append({"step_id": row["step_id"], "check_id": row["check_id"]})
+        task_id, check_id = row["task_id"], row["check_id"]
+        names = seen.setdefault(task_id, set())
+        if check_id in names:
+            continue
+        names.add(check_id)
+        found.setdefault(task_id, []).append({"step_id": row["step_id"], "check_id": check_id})
     return found
 
 

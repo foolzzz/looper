@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from looper.agents import projects as view
 from looper.agents.acceptance_checks import CommandCheck
+from looper.agents.v1_domains.task_views import TASK_INFO
 from looper.db import plans, projects, step_check_runs as runs, tasks
 from tests.db_support import run_db
 
@@ -16,8 +17,8 @@ async def _steps(pool, task_id: str, steps: list[dict]) -> None:
     await plans.save(task_id, steps=steps, pool=pool)
 
 
-def _step(step_id: str, index: int, checks: list[CommandCheck]) -> dict:
-    return {"id": step_id, "index": index, "key": step_id, "instruction": step_id,
+def _step(step_id: str, index: int, checks: list[CommandCheck], status: str = "pending") -> dict:
+    return {"id": step_id, "index": index, "key": step_id, "instruction": step_id, "status": status,
             "acceptance_criteria": ["done"], "checks": [check.row() for check in checks]}
 
 
@@ -60,6 +61,23 @@ def test_failed_checks_follow_the_current_required_evidence(monkeypatch) -> None
 
         await _task(pool, "task-plain", "failed")
 
+        dropped = CommandCheck("c-old", 1, "false")
+        await _task(pool, "task-rewritten", "failed")
+        await _steps(pool, "task-rewritten", [_step("step-old", 0, [dropped])])
+        await _finish(pool, "task-rewritten", "step-old", dropped, runs.CheckState.FAILED)
+        await _steps(pool, "task-rewritten", [_step("step-old", 0, [CommandCheck("c-new", 1, "false")])])
+
+        skipped = CommandCheck("c-skip", 1, "false")
+        await _task(pool, "task-skipped", "failed")
+        await _steps(pool, "task-skipped", [_step("step-skip", 0, [skipped], status="skipped")])
+        await _finish(pool, "task-skipped", "step-skip", skipped, runs.CheckState.FAILED)
+
+        shared = CommandCheck("c1", 1, "false")
+        await _task(pool, "task-dup", "failed")
+        await _steps(pool, "task-dup", [_step("step-d1", 0, [shared]), _step("step-d2", 1, [shared])])
+        await _finish(pool, "task-dup", "step-d1", shared, runs.CheckState.FAILED)
+        await _finish(pool, "task-dup", "step-d2", shared, runs.CheckState.FAILED)
+
         page = {row["task_id"]: row for row in (await view.list_tasks_page())["tasks"]}
         assert page["task-fail"]["failed_checks"] == ["c1", "c2"]
         assert page["task-fail"]["failed_check_step"] == "step-a"
@@ -67,9 +85,13 @@ def test_failed_checks_follow_the_current_required_evidence(monkeypatch) -> None
         assert "c-err" not in page["task-fail"]["failed_checks"]
         assert "c-stale" not in page["task-fail"]["failed_checks"]
 
-        quiet = [page["task-clear"], page["task-advisory"], page["task-running"], page["task-plain"]]
+        quiet = [page["task-clear"], page["task-advisory"], page["task-running"], page["task-plain"],
+                 page["task-rewritten"], page["task-skipped"]]
         assert all("failed_checks" not in row and "failed_check_step" not in row for row in quiet)
+        assert set(page["task-plain"]) == set(TASK_INFO["properties"])
         assert set(page["task-plain"]) == set(page["task-clear"]) == set(page["task-advisory"])
+        assert page["task-dup"]["failed_checks"] == ["c1"]
+        assert page["task-dup"]["failed_check_step"] == "step-d1"
         assert set(page["task-fail"]) == set(page["task-plain"]) | {"failed_checks", "failed_check_step"}
 
         compact = await view.list_tasks_page(compact=True, limit=20)

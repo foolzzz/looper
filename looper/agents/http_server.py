@@ -154,8 +154,8 @@ V1_HEADERS = {"Cache-Control": "no-store"}
 AGENT_API = "/api/agent/v1/"
 _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
 _RE_EVIDENCE = re.compile(r"^/api/evidence/([^/]+)/([^/]+)/([^/]+)$")
-# A stored mime may be a header value and nothing else. No parameters, no CR/LF.
-_MIME = re.compile(r"^[\w.+-]+/[\w.+-]+$")
+# asyncpg rejects a run id outside signed 64-bit as a database error. Refuse it before querying.
+_INT64_MAX = 2**63 - 1
 
 
 # The largest request body the server reads. The largest legitimate one is a
@@ -1056,7 +1056,7 @@ class AgentHTTPServer:
             run_key, artifact_index = int(run_id), int(index)
         except ValueError:
             run_key, artifact_index = 0, -1
-        if self._runtime_root is None or run_key < 1 or artifact_index < 0:
+        if self._runtime_root is None or not 1 <= run_key <= _INT64_MAX or artifact_index < 0:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
             return
@@ -1064,8 +1064,8 @@ class AgentHTTPServer:
         artifacts = row.get("artifacts") if row else None
         artifact = artifacts[artifact_index] if isinstance(artifacts, list) and artifact_index < len(artifacts) else None
         name = artifact.get("name") if isinstance(artifact, dict) else None
-        mime = artifact.get("mime") if isinstance(artifact, dict) else None
-        if not isinstance(name, str) or not isinstance(mime, str) or _MIME.fullmatch(mime) is None or row is None:
+        mime = acceptance_artifacts.mime_for_name(name) if isinstance(name, str) else None
+        if not isinstance(name, str) or mime is None or row is None:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
             return
@@ -1081,12 +1081,13 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
             return
-        disposition = acceptance_artifacts.content_disposition(mime)
+        disposition = acceptance_artifacts.content_disposition(mime, name)
         head = (
             f"HTTP/1.1 {HTTP_200}\r\n"
             f"Content-Type: {mime}\r\n"
             f"Content-Length: {len(data)}\r\n"
             f"X-Content-Type-Options: nosniff\r\n"
+            f"Content-Security-Policy: sandbox\r\n"
             f"Content-Disposition: {disposition}\r\n"
             f"Cache-Control: no-store\r\n"
             f"\r\n"

@@ -90,6 +90,7 @@ def _headers(status: int, fields: dict[str, str], body: bytes, *, mime: str, dis
     assert status == 200
     assert fields["content-type"] == mime
     assert fields["x-content-type-options"] == "nosniff"
+    assert fields["content-security-policy"] == "sandbox"
     assert fields["content-disposition"] == disposition
     assert fields["cache-control"] == "no-store"
     assert fields["content-length"] == str(len(body))
@@ -106,7 +107,7 @@ def test_operator_session_serves_bytes_and_other_callers_get_none(tmp_path: Path
         assert body == PNG
 
         status, fields, body = await _exchange(server, note, _cookie(server))
-        _headers(status, fields, body, mime="text/plain", disposition="attachment")
+        _headers(status, fields, body, mime="text/plain", disposition='attachment; filename="2.txt"')
         assert body == TEXT
 
         for headers in ({"Authorization": f"Bearer {TOKEN}"}, {"Authorization": f"Bearer {CLIENT_TOKEN}"}, None):
@@ -149,8 +150,8 @@ def test_traversal_symlink_and_a_missing_file_return_no_bytes(tmp_path: Path, mo
             "UPDATE step_check_runs SET artifacts = $2::jsonb WHERE id = $1", run_id,
             json.dumps([{"name": "1.txt", "mime": "text/plain\r\nX-Injected: yes", "bytes": 3, "sha256": "aa"}]))
         status, fields, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/0", cookie)
-        assert status == 404 and json.loads(body) == {"error": "not found"}
-        assert "x-injected" not in fields and b"X-Injected" not in body
+        assert status == 404 and json.loads(body) == {"error": "file missing"}
+        assert "x-injected" not in fields and b"X-Injected" not in body and SECRET not in body
 
         for line in (
             "GET /api/evidence/../secret.txt/1/0",
@@ -160,5 +161,49 @@ def test_traversal_symlink_and_a_missing_file_return_no_bytes(tmp_path: Path, mo
         ):
             status, _, body = await _exchange(server, line, cookie)
             assert status == 404 and json.loads(body) == {"error": "not found"} and SECRET not in body
+
+    run_db(test, monkeypatch)
+
+
+def test_a_run_id_past_int64_is_not_found_before_the_query(tmp_path: Path, monkeypatch) -> None:
+    async def test(pool) -> None:
+        server, run_id = await _stored(pool, tmp_path)
+        cookie = _cookie(server)
+        seen: list[int] = []
+        original = runs.get_run
+
+        async def spy(run_key: int, task_id: str, **kwargs):
+            seen.append(run_key)
+            return await original(run_key, task_id, **kwargs)
+
+        monkeypatch.setattr(runs, "get_run", spy)
+        status, _, body = await _exchange(server, "GET /api/evidence/task-art/9223372036854775808/0", cookie)
+        assert status == 404 and json.loads(body) == {"error": "not found"} and seen == []
+
+        status, _, body = await _exchange(server, f"GET /api/evidence/task-art/{2**63 - 1}/0", cookie)
+        assert status == 404 and json.loads(body) == {"error": "not found"} and seen == [2**63 - 1]
+        assert run_id != 2**63 - 1
+
+    run_db(test, monkeypatch)
+
+
+def test_a_row_claiming_html_or_svg_is_served_as_its_stored_name(tmp_path: Path, monkeypatch) -> None:
+    async def test(pool) -> None:
+        server, run_id = await _stored(pool, tmp_path)
+        cookie = _cookie(server)
+        await pool.execute(
+            "UPDATE step_check_runs SET artifacts = $2::jsonb WHERE id = $1", run_id,
+            json.dumps([
+                {"name": "1.png", "mime": "text/html", "bytes": 3, "sha256": "aa"},
+                {"name": "2.txt", "mime": "image/svg+xml", "bytes": 3, "sha256": "bb"},
+            ]))
+        status, fields, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/0", cookie)
+        _headers(status, fields, body, mime="image/png", disposition="inline")
+        assert body == PNG and "text/html" not in fields["content-type"]
+
+        status, fields, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/1", cookie)
+        _headers(status, fields, body, mime="text/plain", disposition='attachment; filename="2.txt"')
+        assert body == TEXT and fields["content-type"] != "image/svg+xml"
+        assert "svg" not in fields["content-type"]
 
     run_db(test, monkeypatch)
