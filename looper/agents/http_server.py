@@ -1354,8 +1354,13 @@ class AgentHTTPServer:
         """Send ``text`` to ``target``: the one way a chat message goes in, for the dashboard and for an API client
         (``client``: its ``id`` and ``name``). Stores it as the Planner's supplement and as the thread's user message
         first; the adapter's answer has the ``correlation_id`` its reply streams under."""
+        from . import status_card
+
+        # An enabled /status to a Manager is not a chat turn: neither the command nor its card is stored.
+        ephemeral = status_card.ephemeral_status(text, target_type=target.agent_type)
+
         async def deliver(supplement_id: int | None) -> dict[str, Any]:
-            if session_id and message_id:
+            if session_id and message_id and not ephemeral:
                 try:
                     from ..db.chat import save_message
                     await save_message(
@@ -1374,6 +1379,7 @@ class AgentHTTPServer:
                 target=target,
                 message_id=message_id or None,
                 supplement_id=supplement_id,
+                persist=not ephemeral,
                 **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id is not None else {}),
                 **({"client": client} if client is not None else {}),
             )
