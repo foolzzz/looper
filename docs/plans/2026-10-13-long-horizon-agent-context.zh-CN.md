@@ -982,7 +982,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
-- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审。执行器、`step_check_runs` 与 operator-only `task_evidence.get` 已在本分支实现，复用私有检出及写通知，带资源限制、产物保留和重启恢复；Worker 成功后写证据，仍不影响决策。关闭状态按 `main` 对照 prompt 和步骤行。macOS local 使用网络与 job-creation 双重禁止并预检，Linux `unshare -rn` 尚未实测。证据门、Reviewer 证据、任务页展示与结果/渠道输出待后续阶段，真实模型评测未运行。
+- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审。执行器、`step_check_runs` 与 operator-only `task_evidence.get` 已在本分支实现，复用私有检出及写通知，带资源限制、产物保留和重启恢复；Worker 成功后写证据，仍不影响决策。异常证据收尾及保存检查后再关闭的计划文本已补回归；关闭状态按 `main` 对照 prompt 和步骤行，定义仍供操作者读回。macOS local 使用网络与 job-creation 双重禁止并预检，Linux `unshare -rn` 尚未实测。证据门、Reviewer 证据、任务页展示与结果/渠道输出待后续阶段，真实模型评测未运行。
 
 - **助理每轮上下文接线**（本分支已实现，默认关）：Manager 用户回合用现有渲染器替换 `Channel:` 行，并按渠道发送者设置 `Turn.speaker`，接通现有升级和确认的授权检查；收尾、自主回合不注入。新增 main 的关闭路径固定基准及渠道身份、确认劫持、稳定块、隔离 serve 测试；真实模型的时间/身份评测未执行，待维护者批准后用 `evals.assistant_experience --turn-context --categories time,identity` 对比基线（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
 

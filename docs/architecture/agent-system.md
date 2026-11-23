@@ -3144,6 +3144,7 @@ are excluded. No evidence tool is added to the Manager or Planner.
 Git checks reuse the verification runner's private checkout, runtime-path copying
 and kernel write notifications. Writing existing code, even restoring its bytes,
 records `error: changed_code`; the private baseline is restored and discarded.
+Protected paths touched by a check remain listed even if it restores their bytes.
 Non-Git directories run in place with `guarded: false` (report only). Protected paths
 are compared with the server-recorded step start commit; changed paths produce a
 failed row. Missing write monitoring or evidence storage prevents execution.
@@ -3172,10 +3173,18 @@ At startup, after orphan processes are swept, running evidence becomes
 interrupted or missing checks. Completed checks are not repeated for that attempt.
 The current project permission is checked before every new check, including after
 waiting for concurrency. Disabling it prevents new launches and retains history.
+Unexpected execution or preflight exceptions settle their row as
+`error: evidence_unavailable` before propagating. An uncertain terminal database
+write remains unfinished and cannot be skipped as completed in the same process.
+Exhausting the remaining step budget records `error: budget`; a command's own
+timeout records `error: timeout`. A saved network check refused after a downgrade
+to `local` records `error: could_not_start`, without launching it.
 
 Empty checks
 and the disabled permission are omitted from existing responses and exports;
-while off, Planner contracts and prompts remain byte-identical. See the
+while off, Planner contracts and prompts remain byte-identical, including plan
+views of previously enabled projects with saved checks. Definitions remain in
+the database for operator evidence reads. See the
 [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
 and 13, for the protocol and subsequent stages (decision gates, Reviewer evidence,
 artifact downloads and task-page evidence are still pending).
