@@ -392,14 +392,26 @@ async def insert_owned_skill(
 
 async def update_owned_skill(
     conn: asyncpg.Connection, item_id: str, *, name: str, description: str, file: Mapping[str, Any], sha256: str,
+    skill_version: int | None = None,
 ) -> dict[str, Any]:
-    """Replace a project-authored skill's name, description and SKILL.md; returns the item."""
+    """Replace a project-authored skill's name, description and SKILL.md; returns the item.
+
+    ``skill_version`` moves the current-version pointer in this same UPDATE.
+    """
     content = str(file["content"])
-    await conn.execute(
-        "UPDATE library_items SET name = $2, description = $3, sha256 = $4, size_bytes = $5, updated_at = now() "
-        "WHERE id = $1",
-        item_id, name, description, sha256, len(content.encode("utf-8")),
-    )
+    size = len(content.encode("utf-8"))
+    if skill_version is None:
+        await conn.execute(
+            "UPDATE library_items SET name = $2, description = $3, sha256 = $4, size_bytes = $5, updated_at = now() "
+            "WHERE id = $1",
+            item_id, name, description, sha256, size,
+        )
+    else:
+        await conn.execute(
+            "UPDATE library_items SET name = $2, description = $3, sha256 = $4, size_bytes = $5, "
+            "skill_version = $6, updated_at = now() WHERE id = $1",
+            item_id, name, description, sha256, size, skill_version,
+        )
     await conn.execute("DELETE FROM library_files WHERE item_id = $1", item_id)
     await conn.execute(
         "INSERT INTO library_files (item_id, path, content, sha256, executable) VALUES ($1, $2, $3, $4, false)",
