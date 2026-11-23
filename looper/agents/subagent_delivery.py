@@ -104,6 +104,12 @@ async def planner_turn_note(task_id: str, *, on: bool = True, pool: Any = None) 
     return text[:TURN_NOTE_MAX_CHARS], shown
 
 
+def prompt_reached(turn: Any, *, reports: bool) -> bool:
+    """Whether a turn's message reached the runtime, so results attached to it may be claimed. Runners report it
+    (``prompt_sent``); other runtimes do not always, and a session that started and answered did get it."""
+    return bool(turn.prompt_sent if reports else (turn.prompt_sent or turn.session_started))
+
+
 async def mark_turn_delivered(ids: Sequence[int], *, pool: Any = None) -> None:
     """Record first delivery of results sent in a Planner turn. It takes the row lock tool receipts take and only
     claims rows no one delivered yet; a failure is logged and the results simply ride the next turn too."""

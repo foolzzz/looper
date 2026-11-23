@@ -371,3 +371,4 @@ def test_task_end_and_restart_cancel_explorers_without_the_sweep(end, tmp_path, 
         row = await agent_spawns.get(spawn_id, pool=pool)
         assert row["state"] == "cancelled" and row["cancel_reason"] == "task_ended"
     run_db(check, monkeypatch)
+

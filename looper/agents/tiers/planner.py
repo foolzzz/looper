@@ -4993,7 +4993,6 @@ class PlannerAgent:
                     launch = process.launch
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=limits)
-                await subagent_delivery.mark_turn_delivered(delivered)  # handed to the runtime: claimed
                 turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
                                               limit if limit > 0 else None)
             except TurnBlocked as exc:
@@ -5031,6 +5030,8 @@ class PlannerAgent:
                     error += f": {ttadk_error}"
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise _SessionNotResumed(error)
+            if subagent_delivery.prompt_reached(turn, reports=isinstance(self._claude, RunnerSession)):
+                await subagent_delivery.mark_turn_delivered(delivered)  # only a sent prompt claims the results
 
             if resuming and resuming == self._schedule_session_id:
                 self._schedule_session_id = None
