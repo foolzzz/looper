@@ -219,7 +219,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - Manager 聊天顶部的「Agent:」控件显示这个会话现在用的 Agent Profile 和来源（「this session」或「Settings」），下拉框切换它（`GET /api/manager/session`、`PUT /api/manager/session/profile`，与对话里的 `/profile` 同一条路径，「Follow Settings」即 `/profile 0`）。运行时或 provider 变了、切换之后要开新会话（先让当前会话写交接）时，先用 `confirm()` 说明；同一运行时和 provider 的切换直接续接，不确认。生效的 Profile 不能启动时，控件下面显示原因（`problem`）；列表里不能服务 Manager 的 Profile 置灰并带原因
 - 花费与上下文的展示：
   - 任务列表的每一行都显示任务目前的花费。
-  - 任务详情的 Overview 有一张「Cost」卡片，显示总额和运行次数。下面的「Cost by agent and model」列出 Planner、Workers、Reviewers 各自的运行次数、花费和占比，并注明还在跑的运行和没有报出花费的运行；下面（很宽的屏幕上在旁边）的「By model」表按模型列出运行次数、输入、输出、缓存读写 token（简写，如 1.23M）、cache hit 和花费。cache hit = cache_read / (input + cache_read + cache_write)，只对输入、缓存读写计数均完整的运行求和计算；没有运行上报完整计数时显示「–」，提示「this runtime does not report cache usage」，仅部分运行上报时提示「partial」及覆盖的运行数。没有花费的模型显示「–」，各行加起来就是任务的花费。Manager 记录时带这个任务 id（消息关于这个任务）、或工具调用只指向这一个任务的 turn 单独成行（「Manager · 模型」），注明不算进任务的花费和任务的花费上限；涉及多个任务或没有任务的 turn 不归任何任务。
+  - 任务详情的 Overview 有一张「Cost」卡片，显示总额和运行次数。下面的「Cost by agent and model」列出 Planner、Workers、Reviewers 各自的运行次数、花费和占比，有房间 consult 时再加上 Consults，并注明还在跑的运行和没有报出花费的运行；下面（很宽的屏幕上在旁边）的「By model」表按模型列出运行次数、输入、输出、缓存读写 token（简写，如 1.23M）、cache hit 和花费。cache hit = cache_read / (input + cache_read + cache_write)，只对输入、缓存读写计数均完整的运行求和计算；没有运行上报完整计数时显示「–」，提示「this runtime does not report cache usage」，仅部分运行上报时提示「partial」及覆盖的运行数。没有花费的模型显示「–」，各行加起来就是任务的花费。Manager 记录时带这个任务 id（消息关于这个任务）、或工具调用只指向这一个任务的 turn 单独成行（「Manager · 模型」），注明不算进任务的花费和任务的花费上限；涉及多个任务或没有任务的 turn 不归任何任务。
   - Manager 和 Planner 的历史页开头是「Context & cost」：
     - 最新的上下文规模、压缩次数、总花费和 turn 数；
     - 最近 100 个 turn 结束时上下文的折线，按最小值和最大值缩放，发生过压缩的 turn 画一条虚线；

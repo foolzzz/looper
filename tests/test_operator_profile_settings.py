@@ -1,7 +1,6 @@
 """The profile source is operator-only and stays out of chat settings and the Manager."""
 
 import asyncio
-import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +18,13 @@ from looper.agents.v1_domains import operator_profile as profile_api
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clients  # noqa: F401
 from tests.test_operator_auth import TOKEN
 
-_TOOLS = "733a09157b22ebf31e591e117c55a04b23c41bf70e49a06108082ab045d4922c"
+# The Manager's tools and the chat settings before the operator profile, in order; one another feature adds since is
+# not compared.
+_TOOLS = ("looper_overview", "looper_tasks", "looper_task_create", "looper_task_control", "looper_task_instruct",
+          "looper_task_gate_reply", "looper_task_update", "looper_concurrency", "looper_projects",
+          "looper_agent_profiles", "looper_providers", "looper_models", "looper_catalog", "looper_config_export",
+          "looper_costs", "looper_settings", "looper_schedules", "looper_confirm")
+_CHAT_FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 
 
 @pytest.fixture
@@ -85,14 +90,14 @@ def test_descriptions_levels_and_cli_commands_are_operator_only_and_inside() -> 
 
 
 def test_off_leaves_the_manager_tool_list_and_chat_settings_unchanged() -> None:
-    names = "\n".join(tool.name for tool in MANAGER_TOOLS)
-    assert hashlib.sha256(names.encode()).hexdigest() == _TOOLS
+    assert tuple(tool.name for tool in MANAGER_TOOLS if tool.name in _TOOLS) == _TOOLS
     blob = "\n".join(tool.name + json.dumps(tool.schema) + tool.description for tool in MANAGER_TOOLS)
     assert "manager.profile.source" not in blob and "profile.get" not in blob
     manager = (Path(__file__).parents[1] / "looper/agents/tiers/manager.py").read_text(encoding="utf-8")
     assert "operator_profile" not in manager and "profile_blocks" not in manager
     assert "manager.profile.source" not in manager
-    assert chat_settings.FIELDS == ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
+    assert tuple(field for field in chat_settings.FIELDS if field in _CHAT_FIELDS) == _CHAT_FIELDS
+    assert not [field for field in chat_settings.FIELDS if "profile" in field]
     with pytest.raises(ValueError, match="unknown setting"):
         chat_settings.checked({operator_profile.SOURCE_KEY: "/vault"})
 

@@ -43,6 +43,7 @@ const ALERTS: Record<string, string> = {
 const LEDGER_KINDS: Record<string, string> = { pending: "to-do", decision: "decision to confirm", work_item: "work item" };
 const DELIVERY_SOURCES: Record<string, string> = {
   subscription: "Subscription push", intent: "Intent message", task_end: "Task end notice",
+  catchup: "Lark catch-up dropped",
 };
 
 const text = (value: unknown) => (typeof value === "string" ? value : "");
@@ -76,7 +77,8 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
         badges: facts.overdue === true ? ["overdue"] : [] };
     case "deliveries":
       return { line: parts(DELIVERY_SOURCES[text(facts.source)] ?? text(facts.source), ref,
-        text(facts.channel) && `to ${channelLabel(text(facts.channel))}`), badges: [] };
+        text(facts.channel) && `${facts.source === "catchup" ? "from" : "to"} ${channelLabel(text(facts.channel))}`,
+        text(facts.fix)), badges: [] };
   }
 }
 
