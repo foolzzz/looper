@@ -14,9 +14,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
 
 if TYPE_CHECKING:
+    from ..turn_metrics import TurnTimes, TurnDelivery
     from ..message import MessageEnvelope
     from ..ops import Turn
-    from .manager import Ask
+    from .manager import Ask, Prepared
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -85,6 +86,9 @@ class TurnToken:
     envelope: MessageEnvelope | None = field(default=None, repr=False)  # what the stop's status is published for
     # The Manager let go of the turn (a completion turn past its deadline that did not end): whenever it ends, it
     # writes only its own record, never the Manager's session, runtime, binding or another turn's token.
+    times: TurnTimes | None = field(default=None, repr=False)
+    metrics_prepared: Prepared | None = field(default=None, repr=False)
+    metrics_delivery: TurnDelivery | None = None
     abandoned: bool = False
     on_settle: Callable[[TurnToken], None] | None = field(default=None, repr=False)
 

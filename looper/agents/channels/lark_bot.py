@@ -17,8 +17,13 @@ from .lark_cli import LarkCliError
 from .lark_content import ResourceRef
 
 
+from .lark_transport import LarkTransportKind
+
+
 class BotTransport:
     """Use the open platform for messages and one deduplication set across connections."""
+
+    kind = LarkTransportKind.BOT
 
     def __init__(self, app_id: str, app_secret: str, *, base_url: str | None = None,
                  admit: Callable[[dict[str, Any]], bool] | None = None) -> None:
@@ -29,6 +34,8 @@ class BotTransport:
         self._seen = SeenEvents()
         self._admit = admit
         self._stats = StreamStats()
+        # Answers a press of a card's button on the long connection (``LarkChannelAdapter._card_action``).
+        self.on_card: Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]] | None = None
 
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
@@ -47,6 +54,21 @@ class BotTransport:
 
     async def react(self, message_id: str) -> None:
         await self._api.react(message_id)
+
+    async def send_card(self, card: dict[str, Any], *, chat_id: str | None = None, user_id: str | None = None,
+                        idempotency_key: str | None = None) -> tuple[str | None, str | None]:
+        return await self._api.send_card(card, chat_id=chat_id, user_id=user_id, idempotency_key=idempotency_key)
+
+    async def reply_card(self, message_id: str, card: dict[str, Any], *, idempotency_key: str | None = None,
+                         reply_in_thread: bool = False) -> tuple[str | None, str | None]:
+        return await self._api.reply_card(message_id, card, idempotency_key=idempotency_key,
+                                          reply_in_thread=reply_in_thread)
+
+    async def chat_mode(self, chat_id: str) -> str | None:
+        return await self._api.chat_mode(chat_id)
+
+    async def update_card(self, message_id: str, card: dict[str, Any]) -> None:
+        await self._api.update_card(message_id, card)
 
     async def download(self, message_id: str, ref: ResourceRef, part: Path, *, max_bytes: int) -> None:
         await self._api.download(message_id, ref.key, ref.kind.value, part, max_bytes=max_bytes)
@@ -84,7 +106,8 @@ class BotTransport:
     def events(self) -> AsyncIterator[dict[str, Any]]:
         from .lark_stream import stream_events
 
-        return stream_events(self._api, seen=self._seen, admit=self._admit, stats=self._stats)
+        return stream_events(self._api, seen=self._seen, admit=self._admit, stats=self._stats,
+                             **({"on_card": self.on_card} if self.on_card is not None else {}))
 
     async def names(self, open_ids: Iterable[str]) -> dict[str, str]:
         return await self._api.names(open_ids)
@@ -121,4 +144,5 @@ def make_adapter(config: Mapping[str, Any], app_secret: str, *, runtime_root: Pa
                               allowlist=allowlist, on_rejected=on_rejected, bot_open_id=bot_open_id, bot_app_id=config["app_id"], backoff=True,
                               channel_id=channel_id, manager_id=manager_id, manager_running=manager_running,
                               resolve_chat=resolve_chat, stop_chat=stop_chat)
+    transport.on_card = adapter._card_action
     return adapter

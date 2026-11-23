@@ -12,9 +12,11 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
 from ..run_usage import Usage
+from ..session_routing import MAIN_KEY, SessionKey
 
 if TYPE_CHECKING:
-    from ..agent_settings import Launch
+    from ..agent_settings import AgentSettings, Launch
+    from ..research_order import ResearchSources
     from ..runtimes import ResidentSession, RuntimeAdapter
     from ..session_switch import SessionSwitch
     from ..system_prompt import SystemPrompt
@@ -40,6 +42,7 @@ class ManagerSession:
     and the turn holding it, and what the next turn is told."""
 
     key: str
+    route: SessionKey = MAIN_KEY  # the conversation it holds (``session_routing.session_key_for``); key is its text
     # The resident Claude: started on the first chat message, then fed one
     # user turn per message; restarted when its system prompt changes.
     claude: ResidentSession
@@ -54,6 +57,8 @@ class ManagerSession:
     session_profile: str | None = None
     session_provider: str | None = None
     turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Serializes the resident's admission, reset and idle close. An idle check never waits for a busy turn.
+    lifecycle_gate: asyncio.Lock = field(default_factory=asyncio.Lock)
     process: _Process | None = None  # what the running Claude was started with
     # Why the session was last dropped and the handoff its old session wrote, until the new session's first
     # turn has its resume brief.
@@ -75,6 +80,9 @@ class ManagerSession:
     stopped_notes: list[str] = field(default_factory=list)
     lock_owner: TurnToken | None = None  # the turn that holds ``turn_lock`` from its preparation
     running_token: TurnToken | None = None  # the token of the user turn being answered
+    research: ResearchSources | None = None  # where the turn being prepared may look things up, when on
+    # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
+    agent_settings: AgentSettings | None = None
     last_activity: float
 
 

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
 import math
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -23,6 +24,10 @@ from .lark_cli import RECEIVE_EVENT
 logger = logging.getLogger(__name__)
 _wire_logger = logging.Logger(__name__ + ".wire", level=logging.CRITICAL + 1)
 _MAX_BYTES = 16 * 1024 * 1024
+# A press of a card's button (the platform's new card callback), on the same connection as the messages; its answer
+# (a toast, the card as it is now) goes in the frame's acknowledgement, which the platform waits 3 s for.
+CARD_EVENT = "card.action.trigger"
+CARD_ANSWER_SECONDS = 2.8
 
 
 def _varint(value: int) -> bytes:
@@ -375,6 +380,40 @@ def _flat_event(payload: bytes) -> dict[str, Any] | None:
     return flat
 
 
+def _card_event(payload: bytes) -> dict[str, Any] | None:
+    """A press of a button of Looper's card (schema 2.0 ``card.action.trigger``): who pressed, in which chat and
+    card, and the button's ``looper`` value; None for any other event, a card another sender of the app made
+    included (it is acknowledged and ignored as before)."""
+    try:
+        data = _object(json.loads(payload))
+    except (ValueError, TypeError):
+        return None
+    header = _object(data.get("header"))
+    if header.get("event_type") != CARD_EVENT:
+        return None
+    event = _object(data.get("event"))
+    context, action = _object(event.get("context")), _object(event.get("action"))
+    found = _object(action.get("value")).get("looper")
+    if not isinstance(found, str) or not found:
+        return None
+    return {"type": CARD_EVENT, "event_id": header.get("event_id") or "",
+            "operator_id": _object(event.get("operator")).get("open_id") or "",
+            "chat_id": context.get("open_chat_id") or "", "message_id": context.get("open_message_id") or "",
+            "value": found}
+
+
+def _card_ack(frame: Frame, start: float, response: dict[str, Any] | None) -> bytes:
+    """The acknowledgement of a card press's frame, carrying the answer as the official SDKs do (``data``: the
+    answer's JSON, base64)."""
+    body: dict[str, Any] = {"code": 200}
+    if response is not None:
+        body = {"code": 200, "headers": None,
+                "data": base64.b64encode(json.dumps(response, ensure_ascii=False).encode()).decode()}
+    return replace(frame, headers=[(key, value) for key, value in frame.headers if key != "biz_rt"]
+                   + [("biz_rt", str(int((time.monotonic() - start) * 1000)))],
+                   payload=json.dumps(body, separators=(",", ":")).encode()).encode()
+
+
 def _interval(value: Any, default: float = 120) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
         return float(value)
@@ -389,8 +428,12 @@ class StreamStats:
 async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
                         ping_interval: float | None = None,
                         admit: Callable[[dict], bool] | None = None,
-                        stats: StreamStats | None = None) -> AsyncIterator[dict[str, Any]]:
-    """Yield messages from one connection, acknowledging frames before delivery."""
+                        stats: StreamStats | None = None,
+                        on_card: Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]] | None = None,
+                        ) -> AsyncIterator[dict[str, Any]]:
+    """Yield messages from one connection, acknowledging frames before delivery. With ``on_card``, a press of a
+    card's button is not yielded: its frame is acknowledged with what ``on_card`` answers, within
+    ``CARD_ANSWER_SECONDS`` (a plain acknowledgement past it)."""
     url, config = await api.stream_endpoint()
     service = int(parse_qs(urlsplit(url).query)["service_id"][0])
     interval = _interval(ping_interval if ping_interval is not None else config.get("PingInterval"))
@@ -398,6 +441,20 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
     stats = stats if stats is not None else StreamStats()
     events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=100)
     changed = asyncio.Event()
+    answering: set[asyncio.Task[None]] = set()
+    told_legacy = False
+
+    async def answer_card(socket: ClientConnection, frame: Frame, start: float, card: dict[str, Any]) -> None:
+        response = None
+        if on_card is not None and seen.first(card["event_id"]):
+            try:
+                response = await asyncio.wait_for(on_card(card), CARD_ANSWER_SECONDS)
+            except Exception as exc:
+                logger.warning("Lark stream: a card press was not answered: %s", type(exc).__name__)
+        try:
+            await socket.send(_card_ack(frame, start, response))
+        except (OSError, WebSocketException):
+            logger.debug("Lark stream could not answer a card press")
 
     async def ping(socket: ClientConnection) -> None:
         while True:
@@ -408,7 +465,7 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
                 await socket.send(Frame(service=service, headers=[("type", "ping")]).encode())
 
     async def receive(socket: ClientConnection) -> None:
-        nonlocal interval
+        nonlocal interval, told_legacy
         fragments = _Fragments()
         while True:
             try:
@@ -432,13 +489,34 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
                 if frame.method != 1:
                     logger.debug("Lark stream ignored an unknown frame method")
                     continue
+                assembled, invalid, payload = False, False, None
+                if kind == "event" and on_card is not None:
+                    # A card press is answered in its acknowledgement, so it is read before acknowledging.
+                    assembled = True
+                    try:
+                        payload = fragments.add(frame)
+                    except ValueError:
+                        invalid = True
+                    card = _card_event(payload) if payload is not None else None
+                    if card is not None:
+                        task = asyncio.create_task(answer_card(socket, frame, start, card))
+                        answering.add(task)
+                        task.add_done_callback(answering.discard)
+                        continue
                 ack = replace(frame, headers=[(key, value) for key, value in frame.headers if key != "biz_rt"]
                               + [("biz_rt", str(int((time.monotonic() - start) * 1000)))], payload=b'{"code":200}')
                 await socket.send(ack.encode())
                 if kind != "event":
+                    if kind == "card" and not told_legacy:
+                        told_legacy = True
+                        logger.info("Lark stream ignored a frame of the old card callback; card buttons are "
+                                    "answered as %s events", CARD_EVENT)
                     logger.debug("Lark stream ignored a non-event data frame")
                     continue
-                payload = fragments.add(frame)
+                if invalid:
+                    raise ValueError("invalid frame fragment")
+                if not assembled:
+                    payload = fragments.add(frame)
                 if payload is None:
                     continue
                 event = _flat_event(payload)
@@ -476,9 +554,9 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
         except (OSError, WebSocketException, TimeoutError) as exc:
             raise ConnectionError(f"the Lark stream connection failed: {type(exc).__name__}") from None
         finally:
-            for task in tasks:
+            for task in (*tasks, *answering):
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*tasks, *answering, return_exceptions=True)
             logger.info("Lark stream disconnected")
             if not asyncio.current_task().cancelling():
                 await events.put(None)

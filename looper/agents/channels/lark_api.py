@@ -25,6 +25,7 @@ LARK_BASE_URL = "https://open.larksuite.com"
 BASE_URLS = {"feishu": FEISHU_BASE_URL, "lark": LARK_BASE_URL}
 TOKEN_INVALID_CODES = frozenset({99991661, 99991663})
 SCAN_CALLS_MAX = 40
+MAX_RETRY_HINT = 86400  # Reject implausible seconds/epoch/millisecond values.
 
 
 class LarkApiError(LarkCliError):
@@ -33,6 +34,7 @@ class LarkApiError(LarkCliError):
     def __init__(self, message: str, *, code: int | None = None, http_status: int | None = None) -> None:
         super().__init__(f"{message} (code {code})" if code is not None else message, code=code)
         self.http_status = http_status
+        self.retry_after: float | None = None
 
 
 class BotInfo(NamedTuple):
@@ -121,6 +123,16 @@ class LarkApi:
             token = await self.tenant_token()
             response = await self._request(method, path, params=params, body=body,
                                            headers={"Authorization": f"Bearer {token}"})
+            if response.status_code == 429:
+                try:
+                    answer = self._json(response)
+                except LarkApiError as exc:
+                    error = exc
+                    answer = {}
+                else:
+                    error = self._error(answer, response.status_code, token=token)
+                self._retry_delay(error, response, answer)
+                raise error
             if response.status_code == 401:
                 if self._token == token:
                     self._token = None
@@ -136,9 +148,29 @@ class LarkApi:
                     continue
                 raise error
             if answer.get("code") != 0 or response.is_error:
-                raise self._error(answer, response.status_code, token=token)
+                error = self._error(answer, response.status_code, token=token)
+                self._retry_delay(error, response, answer)
+                raise error
             return answer
         raise AssertionError("unreachable token retry")
+
+    @staticmethod
+    def _retry_delay(error: LarkApiError, response: httpx.Response, answer: dict[str, Any]) -> None:
+        # The gateway may return application throttling (99991400) with HTTP 200. Keep its reset delay
+        # independently of HTTP status; malformed headers must not hide a usable Retry-After.
+        delays = []
+        for raw in (response.headers.get("x-ogw-ratelimit-reset"), response.headers.get("Retry-After"),
+                    answer.get("retry_after")):
+            if isinstance(raw, bool):
+                continue
+            try:
+                delay = float(raw)
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if math.isfinite(delay) and 0 <= delay <= MAX_RETRY_HINT:
+                delays.append(delay)
+        if delays:
+            error.retry_after = max(delays)
 
     @staticmethod
     def _message(text: str | None, markdown: str | None, key: str | None = None) -> dict[str, Any]:
@@ -172,6 +204,51 @@ class LarkApi:
 
     async def edit(self, message_id: str, *, text: str | None = None, markdown: str | None = None) -> None:
         await self.call("PUT", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}", body=self._message(text, markdown))
+
+    @staticmethod
+    def _card(card: dict[str, Any], key: str | None) -> dict[str, Any]:
+        if key is not None and not 0 < len(key) <= 50:
+            raise ValueError("an idempotency key has 1 to 50 characters")
+        body = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
+        if key is not None:
+            body["uuid"] = key
+        return body
+
+    @staticmethod
+    def _sent(answer: dict[str, Any]) -> tuple[str | None, str | None]:
+        """The message a send made and the chat it is in (a user's open_id is sent to in their direct chat)."""
+        data = answer.get("data") if isinstance(answer.get("data"), dict) else {}
+        chat = data.get("chat_id")
+        return sent_message_id(answer), str(chat) if chat else None
+
+    async def send_card(self, card: dict[str, Any], *, chat_id: str | None = None, user_id: str | None = None,
+                        idempotency_key: str | None = None) -> tuple[str | None, str | None]:
+        """Send an interactive card (card JSON) to a chat or a user: the message it became and its chat."""
+        if (chat_id is None) == (user_id is None):
+            raise ValueError("send to exactly one of a chat and a user")
+        body = self._card(card, idempotency_key)
+        body["receive_id"] = chat_id if chat_id is not None else user_id
+        return self._sent(await self.call("POST", "/open-apis/im/v1/messages",
+                                          params={"receive_id_type": "chat_id" if chat_id is not None else "open_id"},
+                                          body=body))
+
+    async def reply_card(self, message_id: str, card: dict[str, Any], *, idempotency_key: str | None = None,
+                         reply_in_thread: bool = False) -> tuple[str | None, str | None]:
+        body = self._card(card, idempotency_key)
+        if reply_in_thread:
+            body["reply_in_thread"] = True
+        return self._sent(await self.call("POST", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
+                                          body=body))
+
+    async def chat_mode(self, chat_id: str) -> str | None:
+        """A chat's mode as the platform says it (``p2p``, ``group``, ``topic``)."""
+        data = (await self.call("GET", f"/open-apis/im/v1/chats/{quote(chat_id, safe='')}")).get("data") or {}
+        return data.get("chat_mode") if isinstance(data, dict) else None
+
+    async def update_card(self, message_id: str, card: dict[str, Any]) -> None:
+        """Replace a card the bot sent (a shared card: everyone in the chat sees the new one)."""
+        await self.call("PATCH", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}",
+                        body={"content": json.dumps(card, ensure_ascii=False)})
 
     async def react(self, message_id: str, emoji: str = "Get") -> None:
         await self.call("POST", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reactions",

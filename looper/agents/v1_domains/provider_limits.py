@@ -1,5 +1,6 @@
 """Operator-only quota observations and their opt-in collection switch."""
 from .. import limit_signals
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _BOOL, _STR, _INT, _NULL_STR
 from ..ops import ErrorCode, PublicOpError
 
@@ -21,16 +22,19 @@ OPERATIONS = (
     Operation("providers.limits", "POST", "/api/v1/providers/limits",
         "Read provider limit windows and seven days of usage; operator only.",
         "Read provider limit windows and seven days of usage; operator only.",
-        _object({"provider_id": _STR}, [], closed=True), LIMITS, risk="read", operator_only=True),
+        _object({"provider_id": _STR}, [], closed=True), LIMITS, risk="read", operator_only=True,
+        level=ActionLevel.INSIDE),  # reads stored observations and usage; no outside effect
     Operation("limit_signals_settings.get", "POST", "/api/v1/limit_signals_settings/get",
         "Read whether provider limit signal collection is enabled.",
         "Read whether provider limit signal collection is enabled.", _object({}, closed=True), SETTINGS,
-        risk="read", operator_only=True),
+        risk="read", operator_only=True,
+        level=ActionLevel.INSIDE),  # reads only Looper's collection setting
     Operation("limit_signals_settings.update", "POST", "/api/v1/limit_signals_settings/update",
         "Enable or disable provider limit observations; null restores the default (off).",
         "Enable or disable provider limit observations; null restores the default (off).",
         _object({"enabled": {"type": ["boolean", "null"]}}, closed=True), SETTINGS,
-        risk="high", confirms=True, operator_only=True),
+        risk="high", confirms=True, operator_only=True,
+        level=ActionLevel.INSIDE),  # stores only Looper's collection switch
 )
 
 
