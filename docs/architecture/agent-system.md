@@ -8750,7 +8750,7 @@ implementation supplies it and is retested.
   stopping at the first reply older than the recovery window; replies are
   admitted oldest first within that thread. A failed thread listing logs its
   thread id and increments `thread_failures`; its already-read pages are still
-  admitted and it does not leave the chat's main window unfinished.
+  admitted and the chat's window remains owed for retry.
   Recovered messages use the live admission, group bot-mention, routing,
   attachment and disabled-chat
   checks. Known p2p chats participate only when bot identity can resolve their
@@ -8769,18 +8769,32 @@ implementation supplies it and is retested.
   consumer retains the earlier live boundary. Each chat's unfinished recovery
   window is stored separately before scanning, retained on errors or cancellation,
   and merged with that chat's next startup window. Discovery work is also durable
-  until its windows have been assigned to chats. Debt older than 15 minutes is
-  dropped (partially expired windows keep their recent portion), with skipped-window
-  and duration counts in the log. Thread containers use the same raw history API;
+  until its windows have been assigned to chats. While the service runs, unfinished
+  windows retry after 30 seconds, 1 minute, 2 minutes, 5 minutes, then 10 minutes
+  between attempts. Retries use the original owed window and the same chat, page,
+  thread and transport limits; completed windows cause no retry work. Ten failed
+  attempts, counted durably across restarts, move a window to `dropped` with
+  `reason: retry_exhausted`. Shutdown cancels and joins retries without consuming
+  an attempt for an interrupted request. Both pending and dropped windows survive
+  restarts; owed windows are never trimmed by the startup freshness policy.
+  `system.status.channels.<channel-id>.catchup` reports `pending`, `dropped` and
+  `windows` (chat id, start/end epoch seconds, state, attempts and reason); an empty
+  chat id denotes discovery work. Channel health reports the same fields, and
+  system checks show pending windows as warnings and dropped windows as failures.
+  With Needs you enabled, its existing messages section and the operator's `/todo`
+  also list dropped windows so missed messages can be checked and forwarded.
+  Dropped records remain available; this repair adds no acknowledgement control.
+  Thread containers use the same raw history API;
   no message search or search scopes are required. Raw parent/root ids take the
   same gate routing path as live replies.
   After a crash, that last heartbeat is the recovery boundary. A missing
   boundary initializes the state without replaying history; one older than
-  15 minutes skips the whole window. Individual recovered messages older than
-  15 minutes at handling time are also skipped. Each startup logs one INFO
+  15 minutes skips new discovery, while previously owed work still runs. Recovered
+  messages are checked against their owed window, even after 15 minutes. Each
+  startup or retry pass logs one INFO
   `lark_catchup` summary: boundary, expired-window flag, chats scanned, messages
   found, handled, duplicate and too-old skips, failures, `threads_scanned`,
-  `thread_failures` and `thread_roots_capped`. The too-old count covers messages
+  `thread_failures`, `thread_roots_capped`, `pending` and `dropped`. The too-old count covers messages
   older than the recovery start in listed containers, including the first old
   reply that stops a thread listing; root discovery does not count messages.
   Message counts cover
