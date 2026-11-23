@@ -84,15 +84,19 @@ def test_planner_guide_is_byte_identical_unless_subagents_are_on_and_wired() -> 
     assert ops.guide_for(roles=False, vault="V", subagents=True).endswith(f"{PLANNER_SUBAGENTS_GUIDE}\nV")
 
 
-def test_project_execution_reads_the_switch_without_changing_its_view() -> None:
+def test_project_execution_keeps_the_derived_switch_out_of_its_view() -> None:
     from looper.agents.project_execution import ProjectExecution
 
     assert ProjectExecution.from_row(None) == ProjectExecution()
+    baseline = ProjectExecution().view()
     for value in (None, "off", ""):
-        assert not ProjectExecution.from_row({"subagents": value}).subagents_on
+        execution = ProjectExecution.from_row({"subagents": value})
+        assert not execution.subagents_on
+        assert execution.view() == baseline | ({"subagents": "off"} if value == "off" else {})
     on = ProjectExecution.from_row({"subagents": "on"})
-    assert on.subagents_on and on.view() == ProjectExecution().view()
-    assert "subagents_on" not in on.view() and "subagents" not in on.view()
+    # Project settings expose an explicit switch; the derived Planner flag stays private.
+    assert on.subagents_on and on.view() == baseline | {"subagents": "on"}
+    assert "subagents_on" not in on.view()
 
 
 def test_planner_turn_text_is_untouched_when_off_or_nothing_finished() -> None:
