@@ -102,6 +102,7 @@ def test_build_requirement_origin_start_and_repeat(monkeypatch, tmp_path):
         task = await pool.fetchrow("SELECT * FROM tasks WHERE id=$1", result["task_id"])
         assert task["chat_id"] == "ou_syntheticoperator" and task["chat_kind"] == "user" and not task["chat_group"]
         assert task["origin_channel_id"] == "channel-lark" and task["manager_id"] == "manager"
+        assert task["untrusted_inputs"] == ["intent"]  # its background came from messages (outbound review)
         assert task["status"] == "init" and bus.publish.await_count == 1
         assert bus.publish.await_args.args[0].payload["task_id"] == task["id"]
         assert task["requirement"].startswith(
