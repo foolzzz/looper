@@ -254,6 +254,7 @@
  "runs.for_task": "inside",
  "runs.get": "inside",
  "runs.list": "inside",
+ "runs.tree": "inside",
  "runs.usage": "inside",
  "runtimes.probe": "inside",
  "schedule_admin.confirm_target": "args",
