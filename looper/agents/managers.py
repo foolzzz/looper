@@ -236,7 +236,21 @@ class ManagerFleet:
 
     def drain_waiting(self) -> dict[str, Any]:
         return {"manager_turns": [agent.agent_id for agent in self.agents()
-                                  if agent.busy or agent._handling is not None or agent._stop_tasks]}
+                                  if agent.busy or agent._handling is not None or agent._stop_tasks
+                                  or agent._router.pending()]}
+
+    async def require_tool_hooks(self) -> None:
+        """The outbound review was turned on: every Manager's process started without its hook stops."""
+        failures: list[Exception] = []
+        for agent in self.agents():
+            try:
+                await agent.require_tool_hook()
+            except Exception as exc:
+                logger.warning("cannot stop %s's process without the outbound review hook", agent.agent_id,
+                               exc_info=True)
+                failures.append(exc)
+        if failures:
+            raise ExceptionGroup("Manager process cleanup failed while enabling outbound review", failures)
 
     def agents(self) -> list[ManagerAgent]:
         return [self._agents[i] for i in sorted(self._agents, key=lambda i: (i != DEFAULT_MANAGER_ID, i))]

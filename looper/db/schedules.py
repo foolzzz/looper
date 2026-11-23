@@ -803,6 +803,26 @@ async def list_notifications(schedule_id: str, *, limit: int, pool: Db | None = 
     return [dict(row) for row in rows]
 
 
+async def channel_delivery_streak(channel_id: str, *, success_after: datetime | None = None,
+                                  outcomes: Sequence[tuple[datetime, bool]] = ()) -> dict[str, Any]:
+    """The latest success and first failure after it, across schedules (dashboard-only rows are not sends)."""
+    from ..agents.message import builtin_channel_id
+
+    # Older schedules store a built-in's type; numbered bots already use their channel id.
+    aliases = [channel_id, *(kind for kind in ('telegram', 'lark', 'lark_bot') if builtin_channel_id(kind) == channel_id)]
+    row = await get_pool().fetchrow(
+        "WITH outcomes AS (SELECT status, created_at FROM schedule_notifications WHERE channel = ANY($1::text[]) "
+        "AND status IN ('sent', 'failed') UNION ALL SELECT status, created_at "
+        "FROM unnest($3::timestamptz[], $4::text[]) AS receipts(created_at, status)), "
+        "latest AS (SELECT greatest(max(created_at) FILTER (WHERE status = 'sent'), "
+        "$2::timestamptz) AS success_at FROM outcomes) SELECT success_at, "
+        "(SELECT max(created_at) FROM outcomes WHERE status = 'failed') AS last_failed_at, "
+        "(SELECT min(created_at) FROM outcomes WHERE status = 'failed' "
+        "AND (success_at IS NULL OR created_at > success_at)) AS failed_since FROM latest", aliases, success_after,
+        [at for at, _ in outcomes], ['sent' if success else 'failed' for _, success in outcomes])
+    return dict(row)
+
+
 async def prune_runs(conn: Db, before: datetime) -> int:
     """Delete one batch of expired terminal runs, keeping each schedule's newest runs."""
     from ..agents.housekeeping import KEEP_LATEST_RUNS, PRUNE_BATCH

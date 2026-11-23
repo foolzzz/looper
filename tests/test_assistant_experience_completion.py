@@ -103,7 +103,8 @@ def test_proactivity_checks_repetition_database_receipts_and_quiet():
     assert e.nothing_to_push(w)
 
 
-def test_scripted_reminder_receipt_uses_the_inserted_id(tmp_path, monkeypatch):
+@pytest.mark.parametrize('session_routing', [False, True])
+def test_scripted_reminder_receipt_uses_the_inserted_id(tmp_path, monkeypatch, session_routing):
     import asyncpg
 
     reminders = [{'id': 1, 'text': 'pre-existing reminder'}]
@@ -130,7 +131,8 @@ def test_scripted_reminder_receipt_uses_the_inserted_id(tmp_path, monkeypatch):
     monkeypatch.setattr(e.runner, 'select_agent', Mock())
     # No dialogue is needed to exercise source seeding and receipt creation.
     case = replace(next(c for c in e.CASES if c.id == 'proactive_reminder'), says=(), checks=())
-    args = SimpleNamespace(fake=True, model='sonnet', manager_model=None, timeout=1)
+    args = SimpleNamespace(fake=True, model='sonnet', manager_model=None, timeout=1,
+                           session_routing=session_routing)
     session = e.Session(args, case, SimpleNamespace(OPEN_ID='ou_eval_operator'), False, None)
     api = Mock()
     api.post.return_value = {'result': {'enabled': False}}
@@ -138,6 +140,14 @@ def test_scripted_reminder_receipt_uses_the_inserted_id(tmp_path, monkeypatch):
 
     assert reminders == [{'id': 1, 'text': 'pre-existing reminder'}, {'id': 2, 'text': session.secret}]
     assert result['proactive_rows'] == [{'source_ref': '2'}]
+    routing_calls = [call for call in api.post.call_args_list
+                     if 'session_routing_enabled' in call.args[1]]
+    if session_routing:
+        assert len(routing_calls) == 1
+        assert routing_calls[0].args == (
+            '/api/v1/session_routing/update', {'session_routing_enabled': True})
+    else:
+        assert routing_calls == []
 
 
 def test_needs_you_must_have_a_failing_source_and_not_repeat_in_another_post():
@@ -195,7 +205,8 @@ def test_new_conversation_positive_and_negative_on_disposable_server(tmp_path, m
     spec.loader.exec_module(stand_in)
     args = SimpleNamespace(fake=True, model='sonnet', manager_model=None, manager_effort=None,
                            claude=None, timeout=60, pg_url=DSN, port=0,
-                           ack_max_ms=2000, first_reply_max_ms=15000)
+                           ack_max_ms=2000, first_reply_max_ms=15000,
+                           session_routing=case_id == 'memory_vault')
     case = next(c for c in e.CASES if c.id == case_id)
     for failing in (False, True):
         result = e.lark.run_once(args, stand_in, tmp_path / str(failing), 'direct',
