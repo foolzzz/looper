@@ -22,12 +22,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+import uuid
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from .. import session_routing
 from ..message import MessageEnvelope, MessageType
 from ..runtimes import CLAUDE_CODE
-from ..session_routing import MAIN_KEY, SessionKey, SessionKind
+from ..session_routing import SessionKey, SessionKind
 from .manager_session import MAIN_SESSION, ManagerSession
 
 if TYPE_CHECKING:
@@ -39,16 +41,29 @@ OPERATOR_ID_SECONDS = 30.0  # how long a bot's operator id is reused before it i
 WAITING_STATUS = "排队中：其他会话正忙"
 
 
+class IdentityUnavailable(Exception):
+    """The identity store failed: retain the message instead of choosing main."""
+
+
+@dataclass(frozen=True)
+class _Completion:
+    envelope: MessageEnvelope
+    rows: list[dict[str, Any]]
+    batch: uuid.UUID
+
+
 class SessionRouter:
     """The workers of a Manager's sessions, and its resident processes' cap."""
 
     def __init__(self, agent: ManagerAgent) -> None:
         self._agent = agent
-        self._queues: dict[str, asyncio.Queue[MessageEnvelope]] = {}
+        self._queues: dict[str, asyncio.Queue[MessageEnvelope | _Completion]] = {}
         self._workers: dict[str, asyncio.Task[None]] = {}
         self._handling: dict[str, MessageEnvelope] = {}
         self._operator_ids: dict[str, tuple[float, str | None]] = {}
         self._resident = asyncio.Condition()
+        self._reservations: set[str] = set()
+        self._completion_ids: set[str] = set()
 
     # --- Where a message goes ---
 
@@ -61,13 +76,24 @@ class SessionRouter:
         main = self._agent._sessions[MAIN_SESSION]
         if not session_routing.routes(self._agent.agent_id):
             return main if self.holds(main) else None  # switched off: what main's worker holds keeps its order
-        key = await (self._user_key(envelope) if kind is MessageType.USER_MESSAGE else self._completion_key(envelope))
-        return self.session(key)
+        if kind is MessageType.COMPLETION_DUE:
+            return None  # claim first in the handler; only that event can name the session
+        from .. import completion_events
+
+        while True:
+            try:
+                return self.session(await self._user_key(envelope))
+            except IdentityUnavailable:
+                # Not settled on the bus: shutdown/restart also retries this message.
+                await asyncio.sleep(completion_events.RETRY_SECONDS)
 
     def dispatch(self, session: ManagerSession, envelope: MessageEnvelope) -> None:
         """Queue ``envelope`` for ``session``'s worker, started on first use."""
+        self._enqueue(session, envelope)
+
+    def _enqueue(self, session: ManagerSession, item: MessageEnvelope | _Completion) -> None:
         queue = self._queues.setdefault(session.key, asyncio.Queue())
-        queue.put_nowait(envelope)
+        queue.put_nowait(item)
         worker = self._workers.get(session.key)
         if worker is None or worker.done():
             self._workers[session.key] = asyncio.create_task(self._work(session), name=f"manager-session:{session.key}")
@@ -90,37 +116,33 @@ class SessionRouter:
         operator = await self._operator_id(origin["channel_id"]) if not origin["group"] else None
         return session_routing.session_key_for(origin, client_id=client_id, operator_id=operator)
 
-    async def _completion_key(self, envelope: MessageEnvelope) -> SessionKey:
-        """A completion wake-up's session: that of the chat its oldest pending event tells (the turn's own envelope,
-        ``_completion_context``). Main when it names none or none is pending (the handler then has nothing to do)."""
-        from ...db import manager_events as db_manager_events
-        from .. import completion_events
+    async def completion_operator(self, channel_id: str) -> str | None:
+        """Resolve identity before claiming: a failed read leaves the events pending for retry."""
+        return await self._operator_id(channel_id)
+
+    def dispatch_completion(self, envelope: MessageEnvelope, rows: list[dict[str, Any]], batch: uuid.UUID,
+                            operator: str | None) -> None:
+        """Queue a claimed batch on the session of the event actually taken, never an earlier peek."""
         from .manager import _completion_context, _message_origin
 
-        target = completion_events.Target.from_payload(envelope.payload)
-        if target is None:
-            return MAIN_KEY
-        try:
-            row = await db_manager_events.pending_one(*target.key)
-        except Exception:
-            logger.warning("%s: cannot read the completion events of %s; telling them in main", self._agent._log,
-                           target.key, exc_info=True)
-            return MAIN_KEY
-        if row is None:
-            return MAIN_KEY
-        origin = _message_origin(_completion_context(row, self._agent.agent_address, envelope.message_id))
+        origin = _message_origin(_completion_context(rows[0], self._agent.agent_address, batch))
         if origin["sender"] is None and origin["channel"] == "telegram" and not origin["group"]:
-            origin["sender"] = origin["chat"]  # a Telegram direct chat's id is its person's id
-        if origin["sender"] is None and not origin["group"] and origin["channel"] != "web":
-            # A direct chat whose person the event does not name: kept apart from main, never let into it.
-            if origin["channel_id"] and origin["chat"]:
-                return SessionKey(SessionKind.DM, origin["channel_id"], origin["chat"])
-        operator = await self._operator_id(origin["channel_id"]) if origin["channel_id"] else None
-        return session_routing.session_key_for(origin, client_id=None, operator_id=operator)
+            origin["sender"] = origin["chat"]
+        if origin["sender"] is None and not origin["group"] and origin["channel"] != "web" \
+                and origin["channel_id"] and origin["chat"]:
+            key = SessionKey(SessionKind.DM, origin["channel_id"], origin["chat"])
+        else:
+            key = session_routing.session_key_for(origin, client_id=None, operator_id=operator)
+        self._completion_ids.add(envelope.message_id)
+        self._enqueue(self.session(key), _Completion(envelope, rows, batch))
+
+    def holds_completion(self, envelope: MessageEnvelope) -> bool:
+        """A claimed wake-up is settled by its session worker when its turn ends."""
+        return envelope.message_id in self._completion_ids
 
     async def _operator_id(self, channel_id: str | None) -> str | None:
-        """The bot's operator id, read once per ``OPERATOR_ID_SECONDS``; None for the dashboard chat, an unknown bot
-        or one whose id cannot be read (its direct chats then stay in main, as without an id: RFC 5.3.1)."""
+        """The bot's identity, cached for ``OPERATOR_ID_SECONDS``. None means successfully read and unconfigured;
+        a failed refresh retains a known identity, or pauses routing when none is known."""
         from ..operator_identity import operator_sender_id
 
         if not channel_id:
@@ -133,7 +155,9 @@ class SessionRouter:
             value = await operator_sender_id(channel_id)
         except Exception:
             logger.warning("%s: cannot read the operator id of %s", self._agent._log, channel_id, exc_info=True)
-            value = None
+            if cached is not None and cached[1] is not None:
+                return cached[1]
+            raise IdentityUnavailable(channel_id) from None
         self._operator_ids[channel_id] = (now, value)
         return value
 
@@ -147,10 +171,14 @@ class SessionRouter:
             while agent._running:
                 if queue.empty() and not session_routing.routes(agent.agent_id):
                     break  # switched off: nothing left to keep in order here
-                envelope = await queue.get()
+                item = await queue.get()
+                envelope = item.envelope if isinstance(item, _Completion) else item
                 self._handling[session.key] = envelope
                 try:
-                    await agent._handle(envelope)
+                    if isinstance(item, _Completion):
+                        await agent._tell_completion(item.rows, item.batch)
+                    else:
+                        await agent._handle(envelope)
                 except Exception:
                     logger.exception("error handling message %s in session %s", envelope.message_id, session.key)
                 finally:
@@ -158,8 +186,10 @@ class SessionRouter:
                     session.last_activity = agent._clock()
                 if not agent._running:
                     break  # left unsettled: a restart replays it
-                if agent._bus is not None:
-                    agent._bus.settle_handled(envelope)
+                if isinstance(item, _Completion) or not self.holds_completion(envelope):
+                    if agent._bus is not None:
+                        agent._bus.settle_handled(envelope)
+                    self._completion_ids.discard(envelope.message_id)
                 await self._turn_ended(session)
         finally:
             if self._workers.get(session.key) is asyncio.current_task():
@@ -182,7 +212,8 @@ class SessionRouter:
 
     def idle(self, session: ManagerSession) -> bool:
         """Whether ``session`` runs nothing and holds nothing: its process may be stopped."""
-        return not (self.holds(session) or session.turn_lock.locked() or session.running_token is not None
+        return not (session.key in self._reservations or self.holds(session)
+                    or session.turn_lock.locked() or session.running_token is not None
                     or session.lifecycle_gate.locked())
 
     async def stop(self) -> None:
@@ -192,6 +223,8 @@ class SessionRouter:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
         self._workers.clear()
+        self._reservations.clear()
+        self._completion_ids.clear()
 
     # --- Resident processes ---
 
@@ -203,8 +236,10 @@ class SessionRouter:
         told = False
         async with self._resident:
             while True:
-                others = [s for s in agent._sessions.values() if s is not session and s.claude.started]
+                others = [s for s in agent._sessions.values() if s is not session
+                          and (s.claude.started or s.key in self._reservations)]
                 if len(others) < session_routing.max_resident():
+                    self._reservations.add(session.key)
                     return
                 idle = sorted((s for s in others if s.key != MAIN_SESSION and self.idle(s)),
                               key=lambda s: s.last_activity)
@@ -212,11 +247,18 @@ class SessionRouter:
                     logger.info("%s: stopped the idle session %s for %s", agent._log, idle[0].key, session.key)
                     continue
                 if session.key == MAIN_SESSION or not any(s.key != MAIN_SESSION for s in others):
+                    self._reservations.add(session.key)
                     return  # main never waits; nor does a session when only main holds a process
                 if not told and envelope is not None:
                     told = True
                     await agent._send_status(envelope, WAITING_STATUS, phase=True)
                 await self._resident.wait()
+
+    async def release(self, session: ManagerSession) -> None:
+        """A start succeeded, failed or was cancelled: release its reservation and wake waiting starts."""
+        async with self._resident:
+            self._reservations.discard(session.key)
+            self._resident.notify_all()
 
     async def _turn_ended(self, session: ManagerSession) -> None:
         """A message of ``session`` was handled: over the cap (a cap of 1), its own process stops; waiting starts

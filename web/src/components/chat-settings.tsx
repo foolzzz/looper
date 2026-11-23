@@ -3,9 +3,13 @@ import { useEffect, useId, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
-  type CompletionTurns, type MissingOperatorBot,
+  fetchOutboundGateway, updateOutboundGateway, type OutboundGatewaySettings,
+  type CompletionTurns, type ChatSettingsUpdate, type MissingOperatorBot,
+  fetchTurnContextSettings, updateTurnContextSettings, type TurnContextSettings, type TurnContextSettingsUpdate,
+  fetchManagerMetricsSettings, updateManagerMetricsSettings, type ManagerMetricsSettings,
 } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
 
@@ -15,11 +19,6 @@ const SELECT = "mt-1 w-full max-w-sm rounded-md border border-input bg-transpare
 const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转述，直到你在 Settings → Channels 填上『我的 ID』";
 const ROUTING_NOTICE = "这些机器人的私聊暂时留在主会话里，直到你在 Settings → Channels 填上『我的 ID』";
 const MAX_RESIDENT_ERROR = "常驻会话数要是 1 到 16 的整数";
-
-type ChatSettingsUpdate = {
-  stop_enabled?: boolean; completion_turns?: CompletionTurns; ledger_enabled?: boolean;
-  session_routing_enabled?: boolean; max_resident?: number | null;
-};
 
 /** Why a completion turn's events got the code notice instead, in words (``manager_events.reason``). */
 const FALLBACK_REASONS: Record<string, string> = {
@@ -41,11 +40,21 @@ const FALLBACK_REASONS: Record<string, string> = {
 export function ChatSettingsSection() {
   const id = useId();
   const [settings, setSettings] = useState<ChatSettings | null>(null);
+  const [outbound, setOutbound] = useState<OutboundGatewaySettings | null>(null);
+  const [outboundError, setOutboundError] = useState("");
+  const [outboundAttempt, setOutboundAttempt] = useState(0);
+  const [outboundSaving, setOutboundSaving] = useState(false);
   const [summary, setSummary] = useState<CompletionSummary | null>(null);
   const [summaryError, setSummaryError] = useState("");
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [context, setContext] = useState<TurnContextSettings | null>(null);
+  const [contextError, setContextError] = useState("");
+  const [timezone, setTimezone] = useState("");
+  const [metrics, setMetrics] = useState<ManagerMetricsSettings | null>(null);
+  const [metricsError, setMetricsError] = useState("");
+  const [metricsSaving, setMetricsSaving] = useState(false);
   const [missingBots, setMissingBots] = useState<MissingOperatorBot[]>([]);
   const [routingBots, setRoutingBots] = useState<MissingOperatorBot[]>([]);
   const [residentDraft, setResidentDraft] = useState<string | null>(null);
@@ -54,9 +63,25 @@ export function ChatSettingsSection() {
   useEffect(() => {
     let alive = true;
     fetchChatSettings().then((value) => {
-      if (alive) setSettings(value);
+      if (alive) {
+        setSettings(value);
+      }
     }).catch((err: unknown) => {
       if (alive) setError(errorText(err));
+    });
+    fetchTurnContextSettings().then((value) => {
+      if (alive) {
+        setContext(value);
+        setTimezone(value.timezone ?? "");
+        setContextError("");
+      }
+    }).catch((err: unknown) => {
+      if (alive) setContextError(errorText(err));
+    });
+    fetchManagerMetricsSettings().then((value) => {
+      if (alive) setMetrics(value);
+    }).catch((err: unknown) => {
+      if (alive) setMetricsError(errorText(err));
     });
     fetchCompletionSummary().then((value) => {
       if (alive) setSummary(value);
@@ -65,6 +90,16 @@ export function ChatSettingsSection() {
     });
     return () => { alive = false; };
   }, [attempt]);
+
+  useEffect(() => {
+    let alive = true;
+    fetchOutboundGateway().then((value) => {
+      if (alive) { setOutbound(value); setOutboundError(""); }
+    }).catch((err: unknown) => {
+      if (alive) setOutboundError(errorText(err));
+    });
+    return () => { alive = false; };
+  }, [outboundAttempt]);
 
   const save = async (body: ChatSettingsUpdate) => {
     setSaving(true);
@@ -95,6 +130,45 @@ export function ChatSettingsSection() {
     }
     setResidentError("");
     void save({ max_resident: value });
+  };
+
+  const saveOutbound = async (enabled: boolean) => {
+    setOutboundSaving(true);
+    setOutboundError("");
+    try {
+      setOutbound(await updateOutboundGateway({ outbound_enabled: enabled }));
+    } catch (err) {
+      setOutboundError(errorText(err));
+    } finally {
+      setOutboundSaving(false);
+    }
+  };
+
+  const saveContext = async (body: TurnContextSettingsUpdate) => {
+    setSaving(true);
+    setContextError("");
+    try {
+      const next = await updateTurnContextSettings(body);
+      setContext((previous) => ({ ...next, missing_operator_ids:
+        "turn_context_enabled" in body ? next.missing_operator_ids : previous?.missing_operator_ids }));
+    } catch (err) {
+      setContextError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveMetrics = async (enabled: boolean) => {
+    if (!confirm(enabled ? "开启管家度量？这会记录回合延迟和主动消息的送达与回复。" : "关闭管家度量？这会停止采集，已有记录保留。")) return;
+    setMetricsSaving(true);
+    setMetricsError("");
+    try {
+      setMetrics(await updateManagerMetricsSettings({ enabled }));
+    } catch (err) {
+      setMetricsError(errorText(err));
+    } finally {
+      setMetricsSaving(false);
+    }
   };
 
   return (
@@ -185,6 +259,87 @@ export function ChatSettingsSection() {
               </div>
             )}
           </div>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-metrics`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-metrics`} type="checkbox" checked={metrics?.enabled ?? false}
+                     disabled={!metrics || metricsSaving} aria-describedby={`${id}-metrics-help`}
+                     onChange={(event) => void saveMetrics(event.target.checked)} />
+              记录管家体验指标
+            </label>
+            <p id={`${id}-metrics-help`} className="text-xs text-muted-foreground">
+              每轮记下回执、首条回复、工具调用次数和是否交付；主动消息记一行。只记录，不改变管家的行为。
+            </p>
+            {metricsError && <p role="alert" className="break-words text-sm text-destructive">{metricsError}</p>}
+          </div>
+          {context && <>
+            <div className="space-y-1.5">
+              <label htmlFor={`${id}-context`} className="flex items-center gap-2 text-sm font-medium">
+                <input id={`${id}-context`} type="checkbox" aria-label="每轮上下文"
+                       checked={context.turn_context_enabled} disabled={saving}
+                       aria-describedby={`${id}-context-help`}
+                       onChange={(event) => void saveContext({ turn_context_enabled: event.target.checked })} />
+                每轮上下文
+              </label>
+              <p id={`${id}-context-help`} className="text-xs text-muted-foreground">
+                默认关闭。设置会保存；每轮上下文功能接入后，管家才会获得本地时间、说话人、聊天来源和回复语言，并检查授权。
+              </p>
+              {context.turn_context_enabled && (context.missing_operator_ids?.length ?? 0) > 0 && (
+                <div role="alert" className="space-y-1 text-sm text-muted-foreground">
+                  <p>以下机器人没有设置「我的 ID」，无法识别操作者；需要操作者授权的动作会被拒绝：</p>
+                  <ul className="list-disc space-y-1 pl-5">
+                    {context.missing_operator_ids!.map((bot) => (
+                      <li key={bot.channel_id} className="break-words">{bot.name} ({bot.channel_type})</li>
+                    ))}
+                  </ul>
+                  <a href="#settings/channels" className="text-primary hover:underline">前往渠道设置</a>
+                </div>
+              )}
+            </div>
+            <form className="space-y-1.5" onSubmit={(event) => {
+              event.preventDefault();
+              void saveContext({ timezone: timezone.trim() || null });
+            }}>
+              <label htmlFor={`${id}-timezone`} className="block text-sm font-medium">时区</label>
+              <div className="flex max-w-sm items-center gap-2">
+                <Input id={`${id}-timezone`} aria-label="时区" value={timezone} disabled={saving}
+                       placeholder={context.server_timezone} aria-describedby={`${id}-timezone-help`}
+                       onChange={(event) => setTimezone(event.target.value)} />
+                <Button type="submit" variant="outline" disabled={saving}>保存</Button>
+              </div>
+              <p id={`${id}-timezone-help`} className="text-xs text-muted-foreground">
+                填写 IANA 时区名（如 Asia/Shanghai）；留空恢复服务器时区。现有定时任务的时区不变。
+              </p>
+            </form>
+            <div className="space-y-1.5">
+              <label htmlFor={`${id}-language`} className="block text-sm font-medium">回复语言</label>
+              <select id={`${id}-language`} aria-label="回复语言" value={context.reply_language} disabled={saving}
+                      className={SELECT} onChange={(event) => void saveContext({
+                        reply_language: event.target.value as "zh-CN" | "en",
+                      })}>
+                <option value="zh-CN">中文</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+          </>}
+          {contextError && <div className="space-y-2">
+            <p role="alert" className="break-words text-sm text-destructive">每轮上下文设置不可用：{contextError}</p>
+            {!context && <Button variant="outline" onClick={() => setAttempt((n) => n + 1)}>重试</Button>}
+          </div>}
+          {outbound && <div className="space-y-1.5">
+            <label htmlFor={`${id}-outbound`} className="flex items-center gap-2 text-sm font-medium">
+              <input id={`${id}-outbound`} type="checkbox" checked={outbound.outbound_enabled} disabled={outboundSaving}
+                     aria-describedby={`${id}-outbound-help`}
+                     onChange={(event) => void saveOutbound(event.target.checked)} />
+              出站统一限流和重试（飞书、Telegram）
+            </label>
+            <p id={`${id}-outbound-help`} className="text-xs text-muted-foreground">
+              默认关闭。当前接入飞书，发送前保存，遇到超时会按幂等键重试；Telegram 将在后续接入。
+            </p>
+          </div>}
+          {outboundError && <div className="space-y-3">
+            <p role="alert" className="break-words text-sm text-destructive">出站设置不可用：{outboundError}</p>
+            <Button variant="outline" disabled={outboundSaving} onClick={() => setOutboundAttempt((n) => n + 1)}>重试出站设置</Button>
+          </div>}
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>
       )}

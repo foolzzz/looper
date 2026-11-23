@@ -571,7 +571,9 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             else:
                 adapter._bus = bus
                 adapter._running = True
-                adapter._transport = transport
+                # Retain the outbound scope hook while replacing the platform boundary.
+                adapter._transport.inner = transport
+                adapter._channel_outbox.transport = transport
             adapters.append(adapter)
             await receive(adapter)
 

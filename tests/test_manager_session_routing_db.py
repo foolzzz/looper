@@ -323,3 +323,38 @@ def test_a_message_cut_off_in_its_session_is_replayed_at_restart(routed: Any, tm
         await restarted.shutdown()
 
     run_db(body, routed, timeout=90)
+
+
+@pytest.mark.parametrize("end", ("started", "failed", "stopped"))
+def test_a_start_reserves_capacity_until_it_starts_fails_or_is_stopped(routed: Any, tmp_path: Path,
+                                                                     end: str) -> None:
+    class StartingResident(_Resident):
+        def __init__(self) -> None:
+            super().__init__("sess-a")
+            self.starting, self.allow_start = asyncio.Event(), asyncio.Event()
+
+        async def start(self, command: list[str], **kwargs: Any) -> None:
+            self.starting.set()
+            await self.allow_start.wait()
+            if end == "failed":
+                raise OSError("synthetic start failure")
+            await super().start(command, **kwargs)
+
+    async def test(rig: _Rig, pool: Any) -> None:
+        await rig.reply(await _published(rig, _web("hello")))
+        starting = rig.group(GROUP_A, StartingResident())
+        other = rig.group(GROUP_B, _Resident("sess-b"))
+        first = await _published(rig, _lark("first", GROUP_A, OTHER, group=True))
+        await asyncio.wait_for(starting.starting.wait(), 20)
+        second = await _published(rig, _lark("second", GROUP_B, OTHER, group=True))
+        await asyncio.sleep(0.2)
+        assert not other.starts, "the resident cap includes the first group's start in progress"
+        if end == "stopped":
+            await rig.manager.stop_turn(first.message_id, via="synthetic-test")
+        starting.allow_start.set()
+        await rig.reply(first)
+        assert await rig.reply(second) == "sess-b 回复 1"
+        assert not rig.manager._router._reservations
+        assert rig.manager._router.resident_count() <= 2
+
+    _run(test, routed, tmp_path)

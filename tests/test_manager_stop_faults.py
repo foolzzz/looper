@@ -75,7 +75,7 @@ def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any,
             from looper.agents import session_routing
 
             monkeypatch.setattr(session_routing, "_routing_enabled", True)
-        case "tool_listing":
+        case "tool_listing" | "outbound_review":  # a Manager without ops reads neither
             _with_ops(manager)
         case "switch_session":
             manager._session_loaded = True

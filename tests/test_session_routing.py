@@ -46,11 +46,12 @@ def test_only_the_default_managers_group_turns_are_isolated_while_routing_is_on(
 
 
 def test_a_completion_turn_runs_in_the_session_of_the_chat_it_tells(monkeypatch, tmp_path) -> None:
-    """Its oldest pending event's chat decides (``_completion_context``): another sender's direct chat is that
-    chat's ``dm:`` session; the operator's is ``main``."""
+    """The actually claimed event's chat decides: another sender's DM stays apart from the operator's main."""
     import asyncio
 
-    from looper.agents import completion_events, operator_identity
+    from types import SimpleNamespace
+
+    from looper.agents import chat_settings, completion_events, operator_identity
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
     from looper.db import manager_events
 
@@ -58,22 +59,38 @@ def test_a_completion_turn_runs_in_the_session_of_the_chat_it_tells(monkeypatch,
                      "fallback": [{"notice": {"kind": "user", "chat": person}}]}
             for person, chat in ((OTHER, "oc_dm_other"), (OPERATOR, "oc_dm_mine"))}
 
-    async def pending_one(manager_id: str, channel_id: str, chat: str) -> dict | None:
-        return rows.get(chat)
+    async def claim(manager_id: str, channel_id: str, chat: str, batch: object) -> list[dict]:
+        return [rows[chat]]
 
     async def operator(channel_id: str) -> str:
         return OPERATOR
 
-    monkeypatch.setattr(manager_events, "pending_one", pending_one)
+    monkeypatch.setattr(manager_events, "claim", claim)
+    monkeypatch.setattr(chat_settings, "completion_turns", lambda: chat_settings.CompletionTurns.DM_ONLY)
     monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
     monkeypatch.setattr(session_routing, "_routing_enabled", True)
     manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
 
     async def keys() -> list[str]:
-        found = []
-        for person in (OTHER, OPERATOR):
-            wake = completion_events.wake(manager.agent_address, completion_events.Target("manager", LARK, person))
-            found.append((await manager._router.target(wake)).key)
-        return found
+        manager._running = True
+        manager._bus = SimpleNamespace(settle_handled=lambda envelope: None)
+        found: list[str] = []
+        told = asyncio.Event()
+
+        async def tell(claimed: list[dict], batch: object) -> None:
+            found.append(manager._session_now().key)
+            told.set()
+
+        monkeypatch.setattr(manager, "_tell_completion", tell)
+        try:
+            for person in (OTHER, OPERATOR):
+                told.clear()
+                wake = completion_events.wake(manager.agent_address, completion_events.Target("manager", LARK, person))
+                assert await manager._router.target(wake) is None  # no route is chosen before the claim
+                await manager._handle_completion_due(wake)
+                await asyncio.wait_for(told.wait(), 1)
+            return found
+        finally:
+            await manager._router.stop()
 
     assert asyncio.run(keys()) == [f"dm:{LARK}:oc_dm_other", "main"]

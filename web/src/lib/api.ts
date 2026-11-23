@@ -573,6 +573,41 @@ export interface ChatSettings {
   missing_operator_ids?: MissingOperatorBot[];
 }
 
+export interface ChatSettingsUpdate {
+  stop_enabled?: boolean | null;
+  completion_turns?: CompletionTurns | null;
+  ledger_enabled?: boolean | null;
+  session_routing_enabled?: boolean | null;
+  max_resident?: number | null;
+}
+
+/** Operator-only turn-context settings; independent of client chat controls. */
+export interface TurnContextSettings {
+  turn_context_enabled: boolean;
+  timezone: string | null;
+  server_timezone: string;
+  reply_language: "zh-CN" | "en";
+  missing_operator_ids?: MissingOperatorBot[];
+}
+
+export interface TurnContextSettingsUpdate {
+  turn_context_enabled?: boolean | null;
+  timezone?: string | null;
+  reply_language?: "zh-CN" | "en" | null;
+}
+
+export async function fetchTurnContextSettings(): Promise<TurnContextSettings> {
+  const result = await callV1<TurnContextSettings>("/api/v1/turn_context_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateTurnContextSettings(body: TurnContextSettingsUpdate): Promise<TurnContextSettings> {
+  const result = await callV1<TurnContextSettings>("/api/v1/turn_context_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 /** The task ends of the last 24 hours, by how they were told (``manager_events.summary``). */
 export interface CompletionSummary {
   window_hours: number;
@@ -599,12 +634,47 @@ export async function fetchChatSettings(): Promise<ChatSettings> {
 }
 
 export async function updateChatSettings(
-  body: {
-    stop_enabled?: boolean | null; completion_turns?: CompletionTurns | null; ledger_enabled?: boolean | null;
-    session_routing_enabled?: boolean | null; max_resident?: number | null;
-  },
+  body: ChatSettingsUpdate,
 ): Promise<ChatSettings> {
   const result = await callV1<ChatSettings>("/api/v1/chat_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Operator-only Manager observations, separate from client-visible chat settings. */
+export interface ManagerMetricsSettings { enabled: boolean }
+
+export async function fetchManagerMetricsSettings(): Promise<ManagerMetricsSettings> {
+  const result = await callV1<ManagerMetricsSettings>("/api/v1/manager_metrics_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateManagerMetricsSettings(body: { enabled: boolean | null }): Promise<ManagerMetricsSettings> {
+  const result = await callV1<ManagerMetricsSettings>("/api/v1/manager_metrics_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Operator-only shared outbound gateway controls; separate from chat settings. */
+export interface OutboundGatewaySettings {
+  outbound_enabled: boolean;
+  send_qps: number;
+  write_qps: number;
+  edit_interval_seconds: number;
+  max_in_flight: number;
+}
+
+export async function fetchOutboundGateway(): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateOutboundGateway(
+  body: { [K in keyof OutboundGatewaySettings]?: OutboundGatewaySettings[K] | null },
+): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
@@ -2957,6 +3027,9 @@ export interface ProjectInstructionFile {
   error?: string;
 }
 
+/** quota: wait for the reset; transient: try again later; environment: someone must fix it; judgment: the rest. */
+export type FailureClass = "quota" | "transient" | "environment" | "judgment";
+
 export interface LlmRecord {
   id: number;
   agent_id: string;
@@ -2986,7 +3059,13 @@ export interface LlmRecord {
   duration_ms: number | null;
   model: string | null;
   error: string | null;
+  /** Why a failed run failed, recorded while failure typing (`engine.failure_typing`) is on; null otherwise. */
+  failure_class?: FailureClass | null;
+  failure_cause?: string | null;
   metadata: {
+    /** Beside the failure class: whether a typed field or the runtime's error text told it, and when a used-up
+     * window resets. */
+    failure?: { signal: "typed" | "text"; resets_at?: string };
     llmrec?: { state: string; reason?: string; detail?: string; route_id?: string };
     ttadk_check?: string;
     command?: string[];
