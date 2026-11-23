@@ -45,6 +45,8 @@ from .task_notice import NotifyTarget, TargetKind
 
 logger = logging.getLogger(__name__)
 
+_GROUP_READ_LOCK = 0x475250  # independent of the message-stream writer and schedule locks
+
 RETRY_DELAY_SECONDS = 2.0  # between the attempts to send a message the channel refused
 
 
@@ -209,13 +211,30 @@ class SubscriptionRuns:
             pool = db_connection.get_pool()
             snapshot = run.get("execution_snapshot") or {}
             planned = extraction.pinned(schedule, snapshot) if snapshot.get("subscription") else schedule
-            picked = await db_subs.extraction_window(
-                pool, planned["subscription"], output_kind=subscriptions.output_kind(planned["subscription"]),
-                from_seq=stream["from_seq"], to_seq=stream["to_seq"], now=run["fired_at"],
-                own_apps=await self._own_apps(),
-                group_read=await extraction.group_read(pool, planned, day=self.day_start(run["fired_at"]).date()))
-            snapshot = {**snapshot, "config_epoch": stream["config_epoch"]} if snapshot else None
-            return await extraction.execute(self, run_id, planned, stream, {**picked, "snapshot": snapshot})
+            async def extract() -> bool:
+                picked = await db_subs.extraction_window(
+                    pool, planned["subscription"], output_kind=subscriptions.output_kind(planned["subscription"]),
+                    from_seq=stream["from_seq"], to_seq=stream["to_seq"], now=run["fired_at"],
+                    own_apps=await self._own_apps(),
+                    group_read=await extraction.group_read(pool, planned, day=self.day_start(run["fired_at"]).date()))
+                held = {**snapshot, "config_epoch": stream["config_epoch"]} if snapshot else None
+                return await extraction.execute(self, run_id, planned, stream, {**picked, "snapshot": held})
+
+            if await extraction.group_read(pool, planned, day=self.day_start(run["fired_at"]).date()) is not None:
+                # Quotas belong to the source, not the schedule. Hold a session lock across the model call so
+                # another intents subscription rereads the remaining allowance only after this run commits it.
+                while True:
+                    async with pool.acquire() as conn:
+                        if await conn.fetchval("SELECT pg_try_advisory_lock($1::int, hashtext($2))", _GROUP_READ_LOCK,
+                                               planned["subscription"]["source_id"]):
+                            try:
+                                return await extract()
+                            finally:
+                                await conn.execute("SELECT pg_advisory_unlock($1::int, hashtext($2))", _GROUP_READ_LOCK,
+                                                   planned["subscription"]["source_id"])
+                    # Waiters release their connections so they cannot exhaust the pool the owner needs to finish.
+                    await asyncio.sleep(0.1)
+            return await extract()
         await self._push_run(run_id, run, schedule, stream)
         return False
 

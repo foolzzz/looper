@@ -6165,6 +6165,8 @@ here pushes: the intent push service polls `intents`.
   sent and ingest time at or after each group's `read_from`; at most 200 such
   messages per run and 500 per group per server-local day. The run cap waits
   for catch-up; the day cap skips and counts messages as the cursor passes.
+  Group-reading executions serialize per source so concurrent subscriptions
+  share the remaining daily allowance without blocking message ingestion.
   Turning the switch on requires the delivery layer and resets every group's
   start time; revoking a group also drops its uncommitted intents, preserving
   existing intents. Group-derived intents carry `via = followed_group`, only

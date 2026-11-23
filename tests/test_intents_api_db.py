@@ -326,3 +326,53 @@ def test_enabling_group_reads_never_moves_a_group_before_its_added_at(monkeypatc
         assert result["enabled"]
         assert result["groups"][0]["read_from"] == added.isoformat()
     run_db(check, monkeypatch, timeout=30)
+
+
+
+def test_turning_group_reads_off_waits_for_the_current_store_to_commit(monkeypatch):
+    import asyncio
+    import json
+    from datetime import timedelta
+    from looper.agents import extraction, intents, leads_model
+
+    async def check(pool):
+        now = datetime.now(timezone.utc)
+        await stream.source(pool)
+        seq = await stream.add(pool, "Synthetic requirement", chat_id="oc_writing", sent_at=now)
+        await pool.execute("INSERT INTO intent_group_reads(source_id,chat_id,added_at,read_from) "
+                           "VALUES($1,'oc_writing',$2,$2)", stream.SOURCE, now - timedelta(minutes=1))
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES('intents.group_read.enabled','true')")
+        parsed = extraction.parse("intents", json.dumps({"intents": [{"type": "dev_task", "title": "Synthetic task",
+                                  "summary": "Synthetic", "confidence": "high", "sources": ["m1"]}]}),
+                                  {"m1": seq}, now=now, valid_days=90, enabled_types={"dev_task"}, app_seqs=(),
+                                  group_seqs={seq})
+        group = extraction.GroupStore(frozenset({seq}), {"oc_writing": 1}, {}, now.date(),
+                                      {"group_read": 1, "group_over_cap": 0})
+        closing = None
+        try:
+            async with pool.acquire() as conn, conn.transaction():
+                counts = await extraction.store_intents(conn, parsed, source_id=stream.SOURCE, schedule_id=None,
+                    run_id=None, record_id=None, now=now, more=False, group=group)
+                assert counts["new"] == 1
+                writer_pid = await conn.fetchval("SELECT pg_backend_pid()")
+                closing = asyncio.create_task(intents.group_read_settings_put(False, db=pool))
+
+                async def wait_for_blocked_close():
+                    while not await pool.fetchval("SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
+                                                  "WHERE $1=ANY(pg_blocking_pids(pid)))", writer_pid):
+                        if closing.done():
+                            await closing
+                            pytest.fail("closing returned before the current store committed")
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(wait_for_blocked_close(), timeout=5)
+                assert not closing.done()
+                assert await leads_model.group_read_enabled(pool)
+            answer = await asyncio.wait_for(closing, timeout=5)
+            assert not answer["enabled"]
+            assert await pool.fetchval("SELECT count(*) FROM intents WHERE via='followed_group'") == 1
+        finally:
+            if closing is not None and not closing.done():
+                closing.cancel()
+                await asyncio.gather(closing, return_exceptions=True)
+    run_db(check, monkeypatch, timeout=20)

@@ -1,6 +1,7 @@
 """Followed-group reads on disposable PostgreSQL, with synthetic messages and a scripted processor."""
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -324,3 +325,51 @@ def test_an_empty_execution_window_commits_only_its_quota_skips(monkeypatch, tmp
         assert await pool.fetchval("SELECT skipped FROM intent_group_read_days") == 1
         assert await pool.fetchval("SELECT cursor_seq FROM subscriptions WHERE schedule_id='s'") == tail
     run_db(check, monkeypatch, setup=seed_role_configs)
+
+
+def test_concurrent_intents_subscriptions_share_the_sources_daily_quota(monkeypatch, tmp_path):
+    fake = processor_says(monkeypatch, "NONE")
+    async def check(pool):
+        await source(pool)
+        first = await schedule(pool)
+        await pool.execute("INSERT INTO schedules(id,project_id,name,cron,timezone,requirement,kind,run_budget_usd,"
+                           "run_timeout_mode,run_timeout_seconds) VALUES('s2','p','Other intents','*/10 * * * *','UTC',"
+                           "$1,'subscription',0.3,'seconds',20)", extraction.INTENTS_INSTRUCTIONS)
+        await db_subs.create(pool, "s2", subscriptions.preset("intents", source_id=SOURCE, zone_name="UTC")["subscription"])
+        second = await db_schedules.get_schedule("s2")
+        await db_subs.update(pool, "s2", {"target_confirmed_at": NOW,
+                                       "target_confirmed_version": await subscriptions.config_version(second)})
+        second = await db_schedules.get_schedule("s2")
+        await followed(pool)
+        for _ in range(2):
+            await add(pool, "group request", chat_id="g", sent_at=NOW, ingested_at=NOW)
+        await pool.execute("INSERT INTO intent_group_read_days(source_id,chat_id,day,read) VALUES($1,'g',$2,499)",
+                           SOURCE, NOW.date())
+        async def own_apps():
+            return ()
+        runner = subscription_runs.SubscriptionRuns(poster=None, own_apps=own_apps, runtime_root=tmp_path,
+            clock=lambda: NOW, day_start=lambda _: NOW.replace(hour=0))
+        for schedule_row, rid in ((first, "r1"), (second, "r2")):
+            async with pool.acquire() as conn, conn.transaction():
+                picked = await runner.plan(conn, schedule_row, now=NOW, scheduled_for=NOW)
+                await conn.execute("INSERT INTO schedule_runs(id,schedule_id,scheduled_for,fired_at,trigger,status) "
+                                   "VALUES($1,$2,$3,$3,'manual','running')", rid, schedule_row["id"], NOW)
+                await runner.record(conn, rid, picked)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def during():
+            entered.set()
+            await release.wait()
+        fake.during = during
+        a = asyncio.create_task(runner.execute("r1"))
+        await asyncio.wait_for(entered.wait(), 5)
+        b = asyncio.create_task(runner.execute("r2"))
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(b), 0.2)
+        assert len(fake.calls) == 1
+        assert await pool.fetchval("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' "
+                                   "AND classid=$1::oid AND granted)", subscription_runs._GROUP_READ_LOCK)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(a, b), 10)
+        assert len(fake.calls) == 1
+        assert await pool.fetchval("SELECT read FROM intent_group_read_days") == 500
+    run_db(check, monkeypatch, setup=seed_role_configs, max_size=3, timeout=30)

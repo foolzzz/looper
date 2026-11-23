@@ -607,6 +607,8 @@ async def group_read_settings_put(enabled: bool, *, source_id: str | None = None
         await conn.execute("INSERT INTO system_settings(key,value) VALUES($1,$2) "
                            "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()", key,
                            str(enabled).lower())
+        # Match storage's chat order: closing waits for existing group writes to commit first.
+        await conn.fetch("SELECT source_id,chat_id FROM intent_group_reads ORDER BY source_id,chat_id FOR UPDATE")
         if enabled and old != "true":
             # A concurrent addition may be newer than this transaction's now().
             await conn.execute("UPDATE intent_group_reads SET read_from=GREATEST(added_at,now())")
