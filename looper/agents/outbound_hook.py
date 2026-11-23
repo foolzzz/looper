@@ -24,6 +24,7 @@ turn; off, nothing here runs and the command is what it was before.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -134,6 +135,17 @@ async def resolve_level(tool_name: str, trusted: Trusted) -> ActionLevel:
 # overwrite it.
 _known = False
 _version = 0
+# Rebuilt for a new running loop, as settings tests and repeated starts use fresh loops.
+_update_lock: asyncio.Lock | None = None
+_update_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _settings_lock() -> asyncio.Lock:
+    global _update_lock, _update_lock_loop
+    loop = asyncio.get_running_loop()
+    if _update_lock is None or _update_lock_loop is not loop:
+        _update_lock, _update_lock_loop = asyncio.Lock(), loop
+    return _update_lock
 
 
 async def enabled(db: Any = None) -> bool:
@@ -184,18 +196,20 @@ async def set_enabled(value: bool) -> dict[str, Any]:
 
     if not isinstance(value, bool):
         raise ValueError("enabled must be true or false")
-    if value and (missing := await managers_without_hook()):
-        names = "; ".join(f"{m['name']} ({m['runtime']})" for m in missing)
-        raise HookUnavailable(f"the outbound review needs every enabled Manager on a runtime with a tool hook "
-                              f"(Claude Code); these have none: {names}. Change their Agent Profile first.")
     global _known, _version
-    await get_pool().execute(
-        "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
-        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
-        ENABLED_KEY, "true" if value else "false")
-    # Right after the write, with nothing awaited between: a read that began before it no longer overwrites it.
-    _known, _version = value, _version + 1
-    return await settings()
+    async with _settings_lock():
+        if value and (missing := await managers_without_hook()):
+            names = "; ".join(f"{m['name']} ({m['runtime']})" for m in missing)
+            raise HookUnavailable(f"the outbound review needs every enabled Manager on a runtime with a tool hook "
+                                  f"(Claude Code); these have none: {names}. Change their Agent Profile first.")
+        await get_pool().execute(
+            "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+            ENABLED_KEY, "true" if value else "false")
+        # Hold the lock through the response and readback: commit order and cache order must agree even when an
+        # older write's response is delayed. A read begun before this change cannot overwrite it either.
+        _known, _version = value, _version + 1
+        return await settings()
 
 
 # --- The hook in the Manager's command ---
@@ -207,6 +221,7 @@ class ToolHook:
 
     command: str
     timeout: int = HOOK_TIMEOUT_SEC
+    trusted: Trusted | None = None  # the MCP names of the process launched with this hook
 
     def settings(self) -> dict[str, Any]:
         return {"PreToolUse": [{"matcher": "*",

@@ -3,6 +3,7 @@ checked before it runs, and which enabled Managers run on a runtime the review c
 declarations of the MCP tools that act only inside (``mcp_tool_levels``), which run without a review."""
 
 from .. import outbound_hook
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _summary, _BOOL, _STR
 from ..ops import ErrorCode, OpError
 
@@ -15,7 +16,8 @@ RESULTS = {}
 
 def _op(name, description, request, result, risk="read"):
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), _summary(description), description,
-                     request, result, risk=risk, confirms=risk == "high", operator_only=True)
+                     request, result, risk=risk, confirms=risk == "high", operator_only=True,
+                     level=ActionLevel.INSIDE)  # reads or changes only Looper's review settings and MCP trust declarations
 
 
 OPERATIONS = (
