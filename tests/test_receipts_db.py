@@ -533,12 +533,7 @@ def test_every_client_error_exit_has_the_failed_receipt_notes_and_both_columns(
     run_db(test, monkeypatch, timeout=30)
 
 
-# The Manager swaps these in or out of its scope by their own switches, so a stand-in would not stay.
-_SWITCHED = {"looper_ledger_add", "looper_ledger_update", "looper_reminder_create", "looper_reminder_cancel",
-             "looper_skill_propose"}
-
-
-def _fake_tools(client: bool = True) -> list[tuple[Any, Any]]:
+def _fake_tools() -> list[tuple[Any, Any]]:
     """One stand-in tool per registered tool, whose run succeeds or fails as its arguments say."""
     from looper.agents.ops import OpError, Risk, Tool
     from looper.agents.ops.categories import TOOL_ACTIONS, ActionKind
@@ -550,8 +545,6 @@ def _fake_tools(client: bool = True) -> list[tuple[Any, Any]]:
 
     found = []
     for name, entry in TOOL_ACTIONS.items():
-        if not client and name in _SWITCHED:
-            continue
         kinds = {None: entry} if isinstance(entry, ActionKind) else dict(entry)
         subjects = {kind.subject for kind in kinds.values() if kind.subject}
         schema = {"type": "object", "properties": {"action": {"type": "string"}, "fail": {"type": "boolean"},
@@ -561,10 +554,19 @@ def _fake_tools(client: bool = True) -> list[tuple[Any, Any]]:
 
 
 def _matrix_ops(tmp_path: Path, client: bool) -> Any:
-    tools = [tool for tool, _ in _fake_tools(client)]
+    tools = [tool for tool, _ in _fake_tools()]
     if client:
         return _client_ops(tmp_path, tools=tools)
-    return ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="t", tools=tools)
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="t", tools=tools)
+
+    # The Manager swaps a tool in or out of its scope by that tool's own switch (the ledger, reminders, any added
+    # later), which would put the real tool back in place of its stand-in. The matrix is about receipts, not about
+    # switches (the real-tool test below runs the switched tools), so its scope stays the stand-ins.
+    async def stand_ins() -> Any:
+        return ops._scope
+
+    ops.current_scope = stand_ins
+    return ops
 
 
 @pytest.mark.parametrize("client", [False, True])
@@ -577,7 +579,7 @@ def test_off_every_write_tool_success_and_failure_are_as_before(monkeypatch: pyt
         if not client:
             ops.begin_turn(turn)
         count = 0
-        for tool, kinds in _fake_tools(client):
+        for tool, kinds in _fake_tools():
             for action, kind in kinds.items():
                 for fail in (False, True):
                     arguments = {**({"action": action} if action else {}), **({kind.subject: "demo"} if kind.subject else {}),
@@ -602,7 +604,7 @@ def test_on_every_write_tool_gets_its_receipt_and_category(monkeypatch: pytest.M
         receipts_settings.set_enabled(True)
         ops = _matrix_ops(tmp_path, client)
         principal = await _client(pool) if client else None
-        for tool, kinds in _fake_tools(client):
+        for tool, kinds in _fake_tools():
             for action, kind in kinds.items():
                 for fail in (False, True):
                     turn = _web("m")

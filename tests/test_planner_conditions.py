@@ -381,18 +381,11 @@ def test_a_blocked_condition_replan_can_stop_an_unneeded_running_branch(planner_
 
 
 def test_default_planner_system_prompt_matches_the_released_bytes() -> None:
-    from pathlib import Path
+    from tests.prompt_sections import assert_frozen, planner_prompt
 
-    from looper.agents.agent_settings import Harness, Layer
-    from looper.agents.knowledge import EMPTY_KNOWLEDGE
-    from looper.agents.tiers.planner import PlannerAgent, PlannerSettings
-
-    agent = PlannerAgent(task_id="task-baseline", runtime_root=Path("."))
-    prompt = agent._system_prompt(
-        TaskPlan("p", "g", "Build the project", ""), PlannerSettings("Plan carefully.", 60, 0, 0),
-        EMPTY_KNOWLEDGE, Harness("Work carefully.", Layer.BUILTIN),
-    )
-    assert prompt.sha256 == "9bda3e3a4ac7dd6455a3c527df7be9e10c8c0e8e71a5a40ff34000806c73e858"
+    text = planner_prompt().text
+    assert_frozen("planner_prompt", text)
+    assert "any_of" not in text
 
 
 def test_replan_preserves_a_started_condition_and_replaces_a_pending_condition(planner_claude: Any, agent_db: Any) -> None:

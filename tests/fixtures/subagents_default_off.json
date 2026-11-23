@@ -1,12 +1,84 @@
 {
   "baseline": "6e091050f3de461023900dc151e551f57681c0cf",
+  "baseline_overrides": {
+    "prompts:tiers.manager": "b3ee3b601ba6f4b76c5ce9eaba63aa9b30976330"
+  },
   "merged_main": "0cd9a801ed0c0ce6e632415c667c72545cb3d3db",
+  "per_item_from": "2934e38f5",
   "surfaces": {
-    "prompts:system_prompt": "c4b30c0ef66483ce734831973e41f364d056012a0ddcbf3acf49e5c2eb16a1fc",
-    "prompts:tiers.manager": "ca257c7c175f92386939ef491ea2210005dd4c8d11b266774c3bc99837c84c5c",
-    "prompts:tiers.planner": "87afaf5610fdab9741964da25c4627c7bc7c198fcff2ef5a8be38efec607aa36",
-    "prompts:tiers.planner_protocol": "c76b9ee373e111c3be2d0c6dd07ea085e6a02a9a04f270f3d08d0c4afcc8da4a",
-    "prompts:tiers.worker": "ad716ab04df8729f435f910f38b6b97cca65e8951d13184a8b4e723ad3594655",
+    "prompts": {
+      "system_prompt": {
+        "BOUNDARIES_LEAD": "7407234775f01d546d80a4e420b502bd998fb571940236f4104fb850edaeda64",
+        "ISOLATION_ID": "392a9834a47f0941ca277ecb6c52b12becc00aa205569a3d21d11518e785c7e0",
+        "REVIEW_CONTRACT": "d29f6db51b8b38be0b0bcb7de00e9a31440b4ec28f224895603a069670dbf189",
+        "WAITING_CONTRACT": "83fa7aa055509c604545145a394355de60f4a1799952c3c1feb8e90803669496",
+        "WORKING_STYLE": "9990a45619adb0251f72a2adf9faf1256194b2672654211060f1544458517a08",
+        "WORK_CONTRACT": "cb4a9d299514045399238d706f79d315884bb3d2dec02369f9d8fd41d7f41165"
+      },
+      "tiers.manager": {
+        "AUTONOMOUS_INPUT": "fd8f793865e929001e2c8e68a47a77ba70b100aac760662543d1548d8d1ec343",
+        "CHAT_RECORD": "c761ea2110c814cfed7acbfb88f13f54bcba7fb9f52baefff87eaa793e1622d9",
+        "DEFAULT_MANAGER_ID": "ae4e94930bf9413d3ba9146faac20b2fd7d7ff84ce33ef29a4684397f862885f",
+        "DEFAULT_SYSTEM_PROMPT": "8d0f60d1925e8bb5f9963c8b8b105490f783ba53edf94114ab8f934233f0e3f4",
+        "MAIN_SESSION": "e4a9e4d8baa71a9d8ebf56ec8ae3ea1e82be9f96ae6fe89e36d701d4a5337f30",
+        "NEW_SESSION_COMMAND": "cd838a991881a8ac6fc9bda0275056f0e2f0318c4e9a56f48ce849101d10265c",
+        "NEW_SESSION_REPLY": "75555c7a5a97165b52ebbab7db03bcd3cdc629e161e84d1ceb944ab92b0b324b",
+        "OUTBOUND_UNHOOKED_REPLY": "0043892f2a3bbc6a8d432b4a20dd0d9960cd533d64fde4fd5e19762305691d3c",
+        "PROFILE_CURRENT_REPLY": "039d0740c4ef66b40360eacbc3c89b38dce73084d4b8a6f970e204b318b2995a",
+        "PROFILE_NOT_HERE_REPLY": "68fb7a2f0e90aacbc18e38ed898dc320a49755c645f2e606d56322be65b6394a",
+        "SCOPE_HEADING": "cd08bcb0bbea92adb1af0e9c4aedf2673527add72884c0a9338763962305a1ca",
+        "STOP_COMMAND": "3506e5fdc134f3ed1179148f3c8ef8fa77193a90c97922711cd18d89150630e9",
+        "STOP_DONE_REPLY": "3250f637275449d3d167c2e84eb35082a5f84d2d5b922088055eecfdabb77a4a",
+        "STOP_IDLE_REPLY": "34599f0f2225f001c8505e44632031bbd11b5f75d697d777d69380afe2c588a0",
+        "STOP_UNSUPPORTED_REPLY": "5280a8ee31cd26e7e25da6828e71b16d31173e5a5989a168fe2d1c5f2600e968",
+        "TEMPLATES_CONTRACT": "ef718f6aad74c247ab271078a3bd8205733f4f96853c5c5aa7769fa2d5f2e7c3",
+        "TEMPLATES_ONLY_SENTENCE": "d33207de80557c248f5779f029d636f7cb0a6a8d96487be1b71ce05cec88c311",
+        "TOOLS_CONTRACT": "1e090fdc5192bb832cae52a6bf4f74033ad21c8d22bd3ab1cd533c6705090609",
+        "TURNED_OFF_REPLY": "902ff75b78d3e0c689cf46156cfaa282739077599512f0cb19ff59ab2732e071",
+        "TURN_CONTEXT_CONTRACT": "556d15e683c0ef3f3208978ebc6e5a40b3fa823eab4ccf3e4c9f91cbb1a4f086",
+        "USER_STOP": "58c05887b7f21aab9839603fd470a5683061d3356ba1d6f6c8d38b404054f7fd",
+        "_PROFILE_SHARED": "3bd6f97d3a712047471589527f7a466e9a5ed2f66136594caf05c2634f337420",
+        "_USE_TOOL": "da33f17cc734196e200d8f091338c908fb0b3e1f1f2556d4a823ac95f1877ae0"
+      },
+      "tiers.planner": {
+        "AUTONOMOUS_INPUT": "fd8f793865e929001e2c8e68a47a77ba70b100aac760662543d1548d8d1ec343",
+        "DEFAULT_SYSTEM_PROMPT": "9a996f897bef16a6b02030604d0917f39282df4661f496275e6fa05cd42b9c50",
+        "PLAN_VIEW": "f7dbb620da1be293916e723b3e4852a8ab3c4ff1099c60b35e7d06f4cc7ef376",
+        "PLAN_VIEW_CLIPPED": "029f981c6d33821855856a7facba52a1a94055279286e46aec141fc7315b6ded",
+        "PLAN_VIEW_STEPS": "53e368b4111478d3f826af192406b5f4a08e7cbd1abc434558cefdbeed685e6b",
+        "SCHEDULE_RUN_REQUIREMENT_HEADING": "9a480a483df9ace177a939fb09550835df99809d5b1f18c699ff90224c217c08",
+        "WAITING_USER": "f38a1e63d87d96f83825f7539df5271817333c47835e3e54e4edc546e831f35c"
+      },
+      "tiers.planner_protocol": {
+        "ADJUDICATED_ACCEPT": "c46b3d0fa663fe6cfcfda01ef6e82d27668ae3a2f9a66ce1716f82bf05ff2702",
+        "ADJUDICATION_RULES": "445fbfd695d92b5823ee5bb49ea98fdec837ff48cf62e2faac7bf62cb12c75ae",
+        "GATE_KIND": "4f83d3c80ad2f21ad63b667d20cd8aa7465eaa6cd9ee8314fe632504d6083582",
+        "PROTOCOL_SECTION": "6b0bdc3089ade97a15ae06c2dc98db0ed02c633a1b139b5b6f67ea904ccc69ee",
+        "REPLY_CONTRACT": "4c2a6d52d9f3f4669e805e40508afc1890248279926132b22d2e1c8ab29b5a2a",
+        "WAIT_KIND": "f3010736707aae1a39dfde0a213d373f3b4342ab9e48d52dd049725e4bfa5fe2",
+        "WORK_KIND": "dd3e8955d3a5ffeb7a7d3db22f06e294f71f57f1b717e9ae0ac76566e1a317da",
+        "_ADVISOR_DECISIONS": "5ab498eea356f114b49edc938c5e423be3f4cf03ad2d9e92c384a58050386652",
+        "_ADVISOR_DIFFICULTY": "434ef9e114fd6792f099eb8d54b25a1b00416fc0fbebf95d073a174821c4b40e",
+        "_ADVISOR_SECTION": "526cf8ab612b02e39d2ee16d5015471dc9f51fea6a8b51dabc8652896776f40c",
+        "_CHAT_GATES": "74461f5eed352e7c3472a57a20781288aa8b70d9c72f6e27fb7d7de87224e46e",
+        "_CONDITION_RULES": "1ef8354dff51772eca59ecf7360a15a7367477b8ac4b7d0fa219cb77c4f6200c",
+        "_GATE_CHANGES": "5ecaa49bc2e469bd02f6bc563b538f23198d4fc39c0beb54a4788c7826f596c0",
+        "_GATE_RULES": "8453e75e4569b7a9a76e26fe2779fc99363995642d964d7407a9a6e9344c3e41",
+        "_GATE_SECTION": "489f4989ba57c7794606a0030636cd4cb20134d4c2ff82c8cccfadb2a2b0d6f6",
+        "_REPLY_CONTRACT": "077e372a591dc42558f6685a23b96478f0c1dcc61d00b45b87542e4c39804d31",
+        "_ROLE_RULES": "e81b0571a94138b455cbdc5483c9347b063f4c548cce683e7c8e87bb373eb82b",
+        "_ROOM_SECTION": "573fa213f8ff1c386054d1f6430be58b47ec2d9719015a82d6bee2e6cf96708e",
+        "_WAIT_RULES": "c202ebd5adf8ea68715d74788453cb45adfcae9261f6859173e20a67b855436c",
+        "_WORKFLOW_ROLE_RULES": "a79b5102f5fc1aaa3c9e98efb7cea9a952cd4914cc9fb0e0b8c5daa1f50e9f9f"
+      },
+      "tiers.worker": {
+        "CONTINUATION_PROMPT": "d39766235d0fffc9356e5f0bcd572f2b2cc10156ff29a4270cc6cd14dac4ada9",
+        "DEFAULT_SYSTEM_PROMPT": "d0772181a19b80e4e93f5a406ea9841b4761da7207cd8b66b681d3feb5e181e5",
+        "REMINDER_PREFIX": "ad0872a8d849012f3179fcd19db1909912355ab8fb88d4e49438d1c4fd563d25",
+        "REVIEWER_SYSTEM_PROMPT": "30a7714aad7854d4f2bb8c49ebfb777d7d95f68dc3d376737d4fe9951aad14b6",
+        "REVIEW_UNSUPPORTED_RUNTIME": "78da14a6a080f45ab15d8f52788e8691708f3e4eb9c48033910d1a8abae650ab"
+      }
+    },
     "tools:each": {
       "looper_agent_profiles": "d3e8cddece7334d58f47e3d25669370a25ff9ac92a51f6796f487be6d32a62d5",
       "looper_catalog": "704b1fc786cde3732cd68a2d699ba0dfe1f53a334f7d7b1fba3e9ec5194a643d",
@@ -48,12 +120,45 @@
       "looper_vault_search": "81cd4eb2e179ac61d05f26515dc49dd6c4dc0d6b4cc376d7fe906440b0144e12",
       "looper_vault_write": "6d43393eb986fc847d536c54322576391a3912d3639dabc13c116fdee5c71dcb"
     },
-    "tools:manager": "ef59c300712b485e48f7a3944ee85b3fdd6ed87233db35636713c7f0726c574d",
-    "tools:planner": "51a5b1b26f2a8b8cae7ef31508855c9798d1f47e3bcdc3e5be5f49cd18189fd4",
-    "tools:worker": "426e7f8bc0c780e49dec5d4612b15cbeac413f2a23accc4a771c4ca6416190a1"
-  },
-  "baseline_overrides": {
-    "prompts:tiers.manager": "b3ee3b601ba6f4b76c5ce9eaba63aa9b30976330"
+    "tools:order": {
+      "manager": [
+        "looper_overview",
+        "looper_tasks",
+        "looper_task_create",
+        "looper_task_control",
+        "looper_task_instruct",
+        "looper_task_gate_reply",
+        "looper_task_update",
+        "looper_concurrency",
+        "looper_projects",
+        "looper_agent_profiles",
+        "looper_providers",
+        "looper_models",
+        "looper_catalog",
+        "looper_config_export",
+        "looper_costs",
+        "looper_settings",
+        "looper_schedules",
+        "looper_confirm"
+      ],
+      "planner": [
+        "looper_task_profiles",
+        "looper_task_profile_set",
+        "looper_task_concurrency",
+        "looper_task_roles",
+        "looper_task_role_set"
+      ],
+      "worker": [
+        "looper_room_roster",
+        "looper_room_post",
+        "looper_room_inbox",
+        "looper_room_read",
+        "looper_room_watch",
+        "looper_vault_search",
+        "looper_vault_read",
+        "looper_vault_write"
+      ]
+    }
   },
   "tools_each_baseline": "53077fbd62c4712c404bd483b32a69b5c0b8c248"
 }

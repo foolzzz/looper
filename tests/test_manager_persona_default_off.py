@@ -12,31 +12,27 @@ from types import SimpleNamespace
 import pytest
 
 from looper.agents import claude_cli, persona, profile_registry
-from looper.agents.agent_settings import Harness, Layer
 from looper.agents.bus import MessageBus
-from looper.agents.knowledge import EMPTY_KNOWLEDGE
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
-from looper.agents.tiers.planner import PlannerAgent, PlannerSettings, TaskPlan
 from tests.db_support import DSN, run_db
+from tests.manager_surface_support import assert_main_surfaces
+from tests.prompt_sections import assert_frozen, planner_prompt
 from tests.test_manager_session_routing_db import _Resident
 
 
 # Captured from origin/main (51a8d2f7c) with the same synthetic database and inputs.
-# Normalize temporary paths and check content-addressed hashes against their sources first.
+# Normalize temporary paths and check content-addressed hashes against their sources first. The system prompt and
+# the tools are checked per section and per tool against tests/fixtures/manager_surfaces_off.json.
 BASELINE = {False: {'sections': '1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c15e852ad21ba7d948d',
          'turn': '92d3f8208e8edc7e68edfd6aae514b9aab2c0d575d36a1fc00e047f329336211',
-         'system': '7d14661d728105ddd57740dc865754ac93a3a509613d185b65ec5a9adea55ebf',
-         'tools': 'de8b33d0d94ea993f875cf3c2e54c07afe471aece5825a4e845610404da22ddc',
          'command': 'e8f4c7aa9c0df509ed6ec960fcb698d7e476c3edbb278821e7601c2034a08740',
-         'signature': '1396add8832134a87b315c2398875f8dc5d02d687dc2f31a80af00eb92d7cdd4'},
+         'signature': '5f76b151eb503d212e137ffa5c78c04cb6b5a885a78a5b415327f184c943ff13'},
  True: {'sections': '1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c15e852ad21ba7d948d',
         'turn': '45d307a205c1b2e5f448e6147f0db2bc033ac11c9bf1ade140bb7cbdb2e64462',
-        'system': '9be99c242f3fa3240f1222686b1001a889941b8123f61cd6684a7559feec6c05',
-        'tools': 'de8b33d0d94ea993f875cf3c2e54c07afe471aece5825a4e845610404da22ddc',
         'command': 'e8f4c7aa9c0df509ed6ec960fcb698d7e476c3edbb278821e7601c2034a08740',
-        'signature': '4c884da72244a15b83eef844f6055b5671c038893347e7ffbd291d953923b522'}}
+        'signature': '5f76b151eb503d212e137ffa5c78c04cb6b5a885a78a5b415327f184c943ff13'}}
 
 
 async def observe(root, monkeypatch):
@@ -84,7 +80,7 @@ async def observe(root, monkeypatch):
         assert signature[3] == item.launch.library.sha256
         assert library_item.sha256 == hashlib.sha256(
             json.dumps(config["mcpServers"]["looper"], sort_keys=True).encode()).hexdigest()
-        signature[1], signature[3] = item.system_prompt.text, config
+        signature[1], signature[3] = "<system prompt, checked per section>", config
 
         def digest(value):
             blob = json.dumps(value, sort_keys=True, ensure_ascii=False)
@@ -93,9 +89,9 @@ async def observe(root, monkeypatch):
             return hashlib.sha256(blob.encode()).hexdigest()
 
         return {key: digest(value) for key, value in {
-            "sections": await manager._sections(None), "turn": item.turn_text,
-            "system": item.system_prompt.text, "tools": tools, "command": command, "signature": signature,
-        }.items()}
+            "sections": await manager._sections(None), "turn": item.turn_text, "command": command,
+            "signature": signature,
+        }.items()}, tools, item.system_prompt.text
     finally:
         await manager.stop()
         await bus.shutdown()
@@ -111,7 +107,9 @@ def test_disabled_or_unset_persona_matches_main(monkeypatch, tmp_path, stored, s
         await persona.load()
         if stable:
             await pool.execute("INSERT INTO system_settings (key,value) VALUES ('manager.stable_context','true')")
-        assert await observe(tmp_path, monkeypatch) == BASELINE[stable]
+        digests, tools, system = await observe(tmp_path, monkeypatch)
+        assert digests == BASELINE[stable]
+        assert_main_surfaces(tools, system, tmp_path, variant="stable_context" if stable else "default")
 
     run_db(check, monkeypatch, timeout=40)
 
@@ -121,10 +119,9 @@ def test_the_planner_prompt_keeps_its_main_hash_with_or_without_persona(value):
     previous = persona.current()
     try:
         persona.set_current(value)
-        planner = PlannerAgent(task_id="task-baseline", runtime_root=Path("."))
-        prompt = planner._system_prompt(
-            TaskPlan("p", "g", "Build the project", ""), PlannerSettings("Plan carefully.", 60, 0, 0),
-            EMPTY_KNOWLEDGE, Harness("Work carefully.", Layer.BUILTIN))
-        assert prompt.sha256 == "9bda3e3a4ac7dd6455a3c527df7be9e10c8c0e8e71a5a40ff34000806c73e858"
+        text = planner_prompt().text
+        assert_frozen("planner_prompt", text)
+        # Sections may be added by other features; the persona's own words never reach the Planner.
+        assert not any(word and word in text for word in (value.name, value.tone, value.notes))
     finally:
         persona.set_current(previous)
