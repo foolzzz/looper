@@ -253,6 +253,7 @@ class SpawnService:
         directory = Path(row["inputs"]["work_dir"])
         checkout = None
         child_task = None
+        record_id = None
         admission_stack = None
         grant = None
         try:
@@ -303,7 +304,6 @@ class SpawnService:
                     admission_stack = AsyncExitStack()
                     grant = await admission_stack.enter_async_context(admission.slot(
                         launch.profile.provider.id, lane, owner=child.agent_id, on_wait=on_wait))
-            record_id = None
             claimed = asyncio.Event()
             launch_ready = asyncio.Event()
             async with agent_spawns.task_lock(row["task_id"], pool=self.pool) as conn:
@@ -391,6 +391,9 @@ class SpawnService:
             raise
         finally:
             if admission_stack is not None:
+                if grant is not None and record_id is None:
+                    # An unstarted run cannot prove that the account's quota recovered.
+                    grant.reported = True
                 await admission_stack.aclose()
             self._homes.pop(spawn_id, None)
             self._children.pop(spawn_id, None)

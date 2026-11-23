@@ -348,11 +348,16 @@ def test_class_precheck_error_fails_open_with_error_log(tmp_path,monkeypatch,cap
     run_db(check,monkeypatch,timeout=10)
 
 
-def test_task_class_recheck_releases_slot_after_account_queue(tmp_path,monkeypatch):
+@pytest.mark.parametrize("probing", [False, True])
+def test_task_class_recheck_releases_slot_after_account_queue(tmp_path,monkeypatch,probing):
     async def check(pool):
         case=await _setup(pool,tmp_path,monkeypatch)
         await pool.execute("INSERT INTO task_concurrency_limits(task_id,role,max_concurrency) VALUES('task','subagent',1)")
-        await case.controller.register(case.provider,Lane.USER_TASK,case.owner)
+        if probing:
+            case.controller.states[case.provider] = admission.Account(state=admission.AdmissionState.PROBING)
+            await case.controller.acquire(case.provider,Lane.USER_TASK,case.owner)
+        else:
+            await case.controller.register(case.provider,Lane.USER_TASK,case.owner)
         active=await case.service.admit(case.parent.caller(),BRIEF,key="other")
         row=await case.service.admit(case.parent.caller(),BRIEF,key="race")
         running=asyncio.create_task(case.service.run(row["id"]))
@@ -368,6 +373,12 @@ def test_task_class_recheck_releases_slot_after_account_queue(tmp_path,monkeypat
             await case.controller.release(case.owner)
             assert (await asyncio.wait_for(running,5))["state"]=="queued"
             assert not case.controller.running and not case.controller.waiters
+            if probing:
+                assert case.controller.states[case.provider].state is admission.AdmissionState.PROBING
+                assert case.controller.states[case.provider].probe_owner is None
+                probe = await case.controller.acquire(case.provider,Lane.USER_TASK,"next-probe")
+                assert probe.probe
+                await case.controller.release("next-probe")
         finally:
             await _close(case,running)
     run_db(check,monkeypatch,timeout=10)
@@ -386,6 +397,21 @@ def test_drain_does_not_admit_explorers(tmp_path,monkeypatch):
         finally:
             await _close(case,running)
     run_db(check,monkeypatch,timeout=10)
+
+
+def test_explorer_refused_before_record_creation_does_not_complete_probe(tmp_path, monkeypatch):
+    async def check(pool):
+        case = await _setup(pool, tmp_path, monkeypatch)
+        case.controller.states[case.provider] = admission.Account(state=admission.AdmissionState.PROBING)
+        row = await case.service.admit(case.parent.caller(), BRIEF, key="budget-before-record")
+        monkeypatch.setattr(spawn, "run_child", AsyncMock(return_value=spawn.ChildResult(
+            None, failure=spawn.ChildFailure.BUDGET, detail="budget reduced before launch")))
+        assert (await case.service.run(row["id"]))["state"] == "over_budget"
+        assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE run_kind='explorer'") == 0
+        assert case.controller.states[case.provider].state is admission.AdmissionState.PROBING
+        assert case.controller.states[case.provider].probe_owner is None
+        assert not case.controller.running and not case.controller.waiters
+    run_db(check, monkeypatch, timeout=10)
 
 
 def test_wait_defers_lending_until_delayed_explorer_identity_is_ready(tmp_path,monkeypatch):
