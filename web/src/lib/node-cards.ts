@@ -20,6 +20,7 @@ import {
   type UserGate,
   type TaskWait,
 } from "@/lib/api";
+import { buildEvidenceView, type EvidenceLoad, type EvidenceView } from "@/lib/evidence";
 
 /** The task's runs by role, as `runs.list` answers for each (the Planner's without its consults' runs), and its
  * consults' runs (the advisor's and its judge's), each with the Planner run that started it. */
@@ -62,7 +63,8 @@ export type CardSection =
   | { kind: "text"; title: string; text: string; preview?: string; markdown?: boolean; tone?: "destructive" }
   | { kind: "list"; title: string; items: string[]; mono?: boolean }
   | { kind: "steps"; title: string; steps: { name: string; look: CardLook }[] }
-  | { kind: "facts"; title: string; facts: CardFact[] };
+  | { kind: "facts"; title: string; facts: CardFact[] }
+  | { kind: "evidence"; title: string; view: EvidenceView };
 
 /** What a Pipeline node's card shows: its name and status, the roles it runs as, then its sections in order. */
 export interface NodeCard {
@@ -218,6 +220,8 @@ export interface StepCardContext {
   workspaces?: StepWorkspace[];
   /** The task's runs, for the runtime and model each role ran on. */
   runs?: TaskRuns;
+  /** The task's evidence read. A step with no checks draws nothing from it. */
+  evidence?: EvidenceLoad;
 }
 
 function dependencySections(step: TaskStep, stepsById: Map<string, TaskStep>, lookOf: StepCardContext["lookOf"]): CardSection[] {
@@ -237,9 +241,14 @@ function dependencySections(step: TaskStep, stepsById: Map<string, TaskStep>, lo
     : [];
 }
 
+function evidenceSection(step: TaskStep, taskId: string, load: EvidenceLoad | undefined): CardSection[] {
+  const view = buildEvidenceView(step, load ?? { status: "loading" }, taskId);
+  return view ? [{ kind: "evidence", title: "Evidence", view }] : [];
+}
+
 /** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
 export function stepCard(
-  step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces, room, runs }: StepCardContext,
+  step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces, room, runs, evidence }: StepCardContext,
 ): NodeCard {
   const span = stepSpan(step, active);
   // completed_at is the last time the step went to review or ended; a step running again still has it.
@@ -252,6 +261,7 @@ export function stepCard(
     sections: [
       ...text("Instruction", step.instruction),
       ...list("Acceptance criteria", step.acceptance_criteria),
+      ...evidenceSection(step, taskId, evidence),
       ...list("Files", step.target_files, true),
       ...dependencySections(step, stepsById, lookOf),
       ...facts("Runs", [
