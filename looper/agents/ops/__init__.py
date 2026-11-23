@@ -157,7 +157,7 @@ class Turn:
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
     # Why the turn runs; by default a user's when it answers a message, else Claude's own.
     origin: TurnOrigin | None = None
-    # Unset until per-turn context is wired; None preserves the existing authorization behavior.
+    # Set only with per-turn context enabled; None preserves the existing authorization behavior.
     speaker: SpeakerKind | None = None
     operator_id_missing: bool = False
     # Initialized explicitly by delivery-guard wiring; absent when disabled.

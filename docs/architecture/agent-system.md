@@ -162,6 +162,21 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   with `looper_task_gate_reply`, which sends the user's own message (asking
   first which gate when it could be more than one), and nothing else does; refer to what Looper writes itself instead
   of repeating it; and never say an operation ran unless its answer was `ok`
+- With `manager.turn_context.enabled` on (default off), each user turn replaces
+  its `Channel:` line with the existing `[Turn context]` renderer's local clock,
+  zone, speaker, chat and reply language, after state and pending-confirmation
+  notes. The system contract adds `TURN_CONTEXT_CONTRACT`; the time stays out of
+  the stable state and process signature. `manager_turn_context` reads the bot's
+  configured operator and allowlist and sets `Turn.speaker`, enabling the existing
+  ops checks: other allowlisted senders and group members cannot request an
+  escalation or confirm one, and a refused confirmation is discarded. A bot
+  identity lookup failure grants no operator authority. Operator messages in
+  groups and API clients can authorize, while private tools keep their separate
+  operator-turn audience checks. Completion and autonomous turns keep their
+  existing messages and no speaker. Off, prompts, tools and launches are unchanged.
+  Dashboard and generated CLI configuration use the existing operator-only
+  `turn_context_settings.get/update`, separate from `chat_settings`; Lark and
+  Telegram need no new command. See [the assistant RFC](rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文).
 - With the system setting `manager.stable_context` `true` (default off), those
   sections and the active goals are one block, `Looper state (rev R)`, R a
   hash of its lines (`tiers/state_view.py`), so the resident session's growing
@@ -204,19 +219,48 @@ control because configuration is operator-only. Dashboard metric widgets are sep
 
   A scenario Manager never gets the section. Off, the prompt, the tool list and the process signature are what they
   were before. The section is composed per turn, so the prompt preview only notes it
-- **Delivery guard policy** (`delivery_guard.py`, `manager.delivery_guard.enabled`, default off):
+- **Mid-turn operator input** (`mid_turn_input.py`, `manager.mid_turn_input.enabled`, default off):
+  operator-only `mid_turn_input.get/update` operations control the switch (`enabled`; null restores off),
+  independently of delivery guard and `chat_settings`. The generated CLI exposes these operations; no chat
+  command or Manager tool changes the switch. On, the default Manager dispatches user messages even without
+  session routing. At most three plain-text operator messages join an operator's running user turn, only on a
+  runtime declaring `MID_TURN_INPUT` and a resident implementing the native input interface (currently the
+  non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
+  commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
+  path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
+  Admission lets OS read callbacks and the output reader run, then rechecks before and after writing,
+  even when a short line's drain returns immediately. A failed or late write queues the message.
+  If a result arrives after the write, the resident process is retired before queue
+  fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
+  merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
+  path. The original tool binding stays in place. The final reply goes to
+  the original chat and each addition from another chat; same-chat web additions get a terminal acknowledgement,
+  while same-chat Lark/Telegram additions need no duplicate reply. Any participating chat can stop the turn.
+  Additions settle only after reply handoff; shutdown before handoff leaves them replayable. Explicit stop
+  follows the existing withdrawal rule and settles all associated messages immediately, preventing replay of
+  stopped work. Typed additions record `metadata.merged` (kind, message id, chat, receipt time), plus each
+  addition's ack and first-reply metrics when metrics are on. A failed resume carries accepted additions into
+  its retry even if the switch has since been turned off. Off, prompt/system text, tools, command and process
+  signature retain their main-baseline bytes, and later messages remain separate turns. Dashboard controls and
+  config-transfer support are not part of this change; operator API/CLI configuration is available now.
+- **Delivery guard** (`delivery_guard.py`, `delivery_guard_manager.py`, `manager.delivery_guard.enabled`, default off):
   the pure policy defines a user's delivery debt (`owed`, then `paid` on non-empty top-level text),
   exempts completion and autonomous turns, and permits at most two hidden follow-ups after a successful
   empty reply. A failed follow-up selects the fixed failure notice; a stop retains normal stop behavior.
   Initial errors, process exits, spend caps, unavailable tools and refused tokens never start follow-ups.
   Six consecutive top-level tool calls select a same-turn reminder, at most twice per turn, only when
-  the runtime declares `MID_TURN_INPUT`. Only Claude Code declares this verified capability. Reminders
-  are model input, with no separate interim channel message.
+  the configured runtime declares `MID_TURN_INPUT` and the active session is a direct resident stream-json
+  process. Keeper and runner-hosted sessions are excluded. Only Claude Code declares this verified
+  capability. Reminders are model input, with no separate interim channel message.
   The operator-only v1 operations `delivery_guard.get` and `delivery_guard.update` read or store the
   switch (`enabled`, null restores off); existing chat settings responses and Manager tools stay unchanged.
-  **Manager wiring is pending:** storing the switch currently changes no replies, prompts, records or
-  channel calls. The policy, turn debt field and capability declaration are groundwork for that wiring;
-  dashboard controls, follow-up records/metrics and runtime reminder injection come with it.
+  Hidden turns send only the fixed follow-up message in the same session, without user-turn context,
+  sections or a channel line. Each has its own run record (`metadata.delivery_guard.followup` and `for`),
+  but adds no user message to chat history; reminders record their count in `metadata.delivery_guard.reminders`.
+  The original user's status and stop token stay active through recovery. Two empty follow-ups, or a failed
+  follow-up, produce the fixed failure notice with the turn's existing blocks. Off, replies, prompts,
+  command lines, record writes and channel calls retain their existing behavior. Dashboard controls and
+  turn metrics await their respective UI and metrics work.
 - **Session budget rules** (`session_budget.py`, `manager.turn_budget_usd`, default off; assistant-layer RFC
   section 5.4): `decide` takes a turn's context and cost and keeps the session, compacts it (a runtime with
   `HEADLESS_COMPACTION`) or rotates it. It uses #1473's `schedule_session.session_bound` and the threshold
@@ -5851,6 +5895,20 @@ subscription's current configuration is confirmed. Quiet types stay on the
 operator's intents list. New evidence replies to the original push, extending
 a pending suggestion's expiry to 24 hours after that delivery.
 
+With `delivery.enabled` on (off by default), the initial push and new-evidence
+reply ask `proactive_delivery.decide` before claiming a send. Both are `intent`
+with `normal` urgency, including a type whose display priority is `urgent`:
+neither is a blocking gate or a reminder the user set. The target chat's most
+recent user message supplies the five-minute grace. A `send` keeps the exact
+text, target, reply and idempotency key; its channel receipt records `outcome`,
+`external_id` and `sent_at`. Retries reuse `intent-<intent id>-<post id>` and
+its first decision, refreshing the receipt on the same row. A digest or drop
+keeps the original `intent_posts` text without spending a send attempt; a
+decision failure logs and waits for the next poll. Final edits and their
+fallback replies keep their existing path. With the switch off there are no
+additional decision reads or writes. Keep delivery off until the briefing can
+surface deferred intents, as required by the [delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md#3-发送点的接入顺序).
+
 `建 I-0042` (or `建` quoting a push) creates and starts one task;
 `驳回 I-0042` rejects the suggestion. Code handles these before the Manager's
 model and checks the operator's typed identity, including dashboard turns.
@@ -6000,15 +6058,15 @@ message's `digest_date` is the local date the next quiet hours end on. The
 decision goes into the message's row of `proactive_deliveries`, the table the
 proactive-message metrics keep (`decision`, `reason`, `counted`, `local_date`,
 `digest_date`, `decided_at`), under the send point's key for the message (a
-gate's `gate-<message id>`, its posts' idempotency key), so a message tried
+gate's `gate-<message id>` or an intent's `intent-<intent id>-<post id>`,
+its posts' idempotency key), so a message tried
 again keeps its first decision and the channel's receipt lands on the same
 row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
-`sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
-did. Off, the layer writes nothing. Wired so far: gate
-reminders, task notices to Lark and Telegram, and subscription digest pushes.
-A completed or failed task's
-code notice is `normal`; an opened, updated or resumed gate that needs the
+`sent`, `rejected` or `unknown`, `sent_at`, `external_id`) on the same row as
+the metrics. Off, the layer writes nothing. Wired so far: gate
+reminders, task notices to Lark and Telegram, subscription digest pushes, and
+initial and new-evidence intent pushes. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
 user is `blocking`, like its reminders. The channel checks a task-end notice
 immediately before sending it, retaining its text and target; a completion
 fallback keeps the original notice's decision key. Recent user messages are
@@ -6020,10 +6078,13 @@ the notice posted as with the switch off. Subscription digest pushes use
 use `subscription_run:<run id>` across retries and restarts, with the receipt
 on the first accepted segment; an uncertain channel outcome is never marked
 sent. A failed digest decision prevents the channel call; a failed receipt
-write is logged without changing an accepted send. Subscription alerts and
-failure notices, task progress, intents, completion turns, the dashboard chat
-and other senders retain their existing paths. Keep the
-switch off until the briefing can read deferred messages; digest consumption
+write is logged without changing an accepted send. Intent pushes use `normal`
+urgency even when their display urgency is high; a decision failure waits for
+the next poll. Deferred or dropped intents retain their post without claiming
+it or consuming a send attempt, and uncertain sends are never retried. Final
+intent edits and fallback replies, subscription alerts and failure notices,
+task progress, completion turns, the dashboard chat and other senders retain
+their existing paths. Keep the switch off until the briefing can read deferred messages; digest consumption
 and the delivery settings UI are not delivered here.
 Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
 
@@ -8184,11 +8245,11 @@ implementation supplies it and is retested.
   attachment paths, including filenames with spaces and Unicode. Dashboard
   turns with attachments show the final answer without streaming text deltas,
   so a path split across chunks cannot escape redaction. With `channels.outbound.enabled` off (the default),
-  both Lark transports retain their original calls and write no outbox rows. Settings → Chat reads and updates
+  Lark and Telegram retain their original calls and write no new outbox rows. Settings → Chat reads and updates
   `outbound_enabled` through the separate operator-only `outbound_gateway.get/update` operations; the existing
   `chat_settings` response fields, accepted writes and Manager tools remain unchanged. Gateway updates are
   high-risk operations with confirmation for callers that require it; null restores each field's default.
-  On, `GatedLarkTransport` routes every write through
+  On, `GatedLarkTransport` routes every Lark write through
   one gateway per channel, sharing its in-flight cap and both send/reply and total-write token buckets
   by the verified app id across CLI/Bot channels (defaults 5/s and 15/s),
   at most four platform calls in flight, classified errors, up to five retries with jitter and
@@ -8202,7 +8263,7 @@ implementation supplies it and is retested.
   the gateway. Answers, progress, notices, notifications and posts first enter
   `channel_outbox`, ordered per chat and concurrent across chats. Caller keys win; otherwise envelope ids
   and part numbers derive stable keys. The first possibly delivered attempt is saved before platform I/O.
-  Every retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
+  Every Lark retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
   persistence; expired possibly delivered rows become `uncertain` and are never resent. Older rows without
   an attempt timestamp conservatively use their creation time on upgrade. A delivery past its total deadline
   becomes `uncertain` if attempted, otherwise `failed`, releasing the chat head even if a saved retry is far
@@ -8216,9 +8277,23 @@ implementation supplies it and is retested.
   and cannot block legacy startup, receiving or catch-up. An empty disabled outbox performs no recovery writes. Waiters share in-process
   completion futures; the scanner sleeps until the earliest unblocked retry or new work. Notifications can
   carry a caller-supplied event key to deduplicate retries. An insert failure logs a warning and falls back to the gateway. Status
-  lines and reactions use the gateway alone. Housekeeping retains sent rows for seven days and other rows
-  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Telegram wiring
-  and dashboard metrics follow separately; the standalone probe remains independent.
+  edits and reactions use the gateway alone; Telegram's first status message uses the outbox.
+  Housekeeping retains sent rows for seven days and other rows
+  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Dashboard metrics
+  follow separately; the standalone probe remains independent.
+
+  | Telegram path | With `channels.outbound.enabled` on |
+  | --- | --- |
+  | Non-polling `GatedRequest(HTTPXRequest)` | `sendMessage`, `editMessageText`, `setMessageReaction`, `sendDocument`, `sendPhoto`, `sendChatAction`, `setMyCommands` and `answerCallbackQuery` use the gateway, with limits shared by bot identity. Edits use `chat_id:message_id`. Reads and durable `PollingRequest` bypass it. |
+  | Answers, notices, progress, command replies, posts, cards and notifications | Each chunk enters the outbox. Envelope ids derive stable per-chunk keys; caller keys win for posts and notifications. A rejected formatted chunk or card can replace only its own row's body with plain text. Earlier chunks are retained. The existing MarkdownV2 format stays in use; the same outbox rule covers HTML bodies. |
+  | Lost responses and restart | Telegram has no platform idempotency key: unknown attempts become `uncertain`, and every row left `sending` after a crash becomes `uncertain`, without resending. Its platform dedupe window is zero. Explicit 429s (including JSON `parameters.retry_after`) and pre-send connection failures can retry; other 4xx responses are rejected. |
+
+  Telegram uses the same configurable per-bot limits; there are no hardcoded per-chat caps.
+  The [official FAQ](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this)
+  advises roughly 30 bulk messages per second per bot, one per second per chat and 20 per minute per group
+  (paid broadcasts can differ). These are guidance, not guaranteed capacity; tune the operator controls
+  and honor runtime 429 responses. Telegram has no stand-in serve: validation uses real PTB adapters
+  with fake HTTP responses, and never calls the real Bot API.
   The CLI transport sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a

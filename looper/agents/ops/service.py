@@ -530,7 +530,7 @@ class ManagerOps:
                 _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
                 if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
-                    self._pending.pop(turn.chat_key, None)
+                    self._lapse(self._pending.pop(turn.chat_key, None))
                     raise _OperatorOnly(turn)
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
@@ -1012,6 +1012,10 @@ class ManagerOps:
         if pending is not None and not turn.autonomous and pending.answer_turn == turn.message_id:
             del self._pending[turn.chat_key]
             self._lapse(pending)
+
+    def has_confirmation(self, chat_key: tuple[str | None, str | None, str | None]) -> bool:
+        """A chat with pending confirmation needs its own user turn, including while it answers one."""
+        return chat_key in self._pending
 
     def asks_in(self, message_id: str) -> bool:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
