@@ -41,7 +41,7 @@ def _ops(tmp_path: Path, library: Any = None) -> ManagerOps:
     router = SimpleNamespace(has_planner=lambda task_id: False, forget_task=lambda task_id: None)
     ops = ManagerOps(Platform(bus=MessageBus(runtime_root=tmp_path), task_router=router, runtime_root=tmp_path),
                      url="http://127.0.0.1:9", token="tok")
-    ops.tool_hook(tmp_path / "rt", fake_claude(tmp_path / "claude", _STAND_IN), library)
+    ops.activate_tool_hook(ops.tool_hook(tmp_path / "rt", fake_claude(tmp_path / "claude", _STAND_IN), library))
     return ops
 
 

@@ -290,6 +290,7 @@ class ClientOps:
         never the operator, so code blocks every ``external`` call it makes (RFC D17); None while the review is off or
         for any other call. The operator's own calls are not reviewed (RFC section 6.1)."""
         from .. import outbound, outbound_hook
+        from ...db import outbound_reviews
         from . import levels, review as layer_one
 
         if not outbound_hook.known_enabled():  # read at startup, set by its switch
@@ -297,7 +298,7 @@ class ClientOps:
         level = await level_of(arguments) if level_of is not None else await levels.level_of(tool, arguments, turn)
         if level not in outbound.REVIEWED:
             return None
-        action = layer_one.action_of(tool.name, arguments, level)
+        action = await layer_one.action_of(tool.name, arguments, level)
         checked = await outbound.review(
             action, outbound.Asker(outbound.Who.ALLOWLISTED_PERSON, API_CHANNEL),
             outbound.Origin(f"client:{principal.client_id}", outbound.Source.TOOL, channel=API_CHANNEL,
@@ -305,8 +306,13 @@ class ClientOps:
         if checked.allowed:
             return None
         message = outbound_hook.BLOCKED_MESSAGE.format(reason=checked.reason.rstrip("."))
-        await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.BLOCKED.value,
-                           result={"message": message})
+        action_id = await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.BLOCKED.value,
+                                       result={"message": message})
+        if action_id is not None and checked.review_id is not None:
+            try:
+                await outbound_reviews.link_action(checked.review_id, action_id)
+            except Exception:
+                logger.warning("cannot link outbound review %s to its call", checked.review_id, exc_info=True)
         await outbound_hook.notify_blocked(f"client {principal.client_name or principal.client_id}", tool.name,
                                            action.target, checked.reason, checked.review_id)
         return _error(ErrorCode.BLOCKED, message)
@@ -331,11 +337,12 @@ class ClientOps:
         return pending
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
-                      error_code: str | None = None, result: Any = None, confirmation_id: str | None = None) -> None:
+                      error_code: str | None = None, result: Any = None,
+                      confirmation_id: str | None = None) -> int | None:
         if risk is Risk.READ:  # a read is not in the trail
             return
         try:
-            await db_actions.record(
+            return await db_actions.record(
                 channel=API_CHANNEL, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
                 confirmation_id=confirmation_id, task_id=tool.task_id(arguments) or _created_task(result),

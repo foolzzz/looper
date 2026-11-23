@@ -10,15 +10,29 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from ..action_levels import ActionLevel
+from ..action_levels import ActionLevel, schedule_reach
 from ..outbound import Action
 
 BLOCKED_ERROR = "blocked"
 
 
-def action_of(tool_name: str, arguments: Mapping[str, Any], level: ActionLevel) -> Action:
-    """A tool call as the review reads it: what it acts on, by its typed arguments, and its arguments whole."""
+async def action_of(tool_name: str, arguments: Mapping[str, Any], level: ActionLevel) -> Action:
+    """A tool call as the review reads it, including the stored reach its level was computed from."""
     fields = arguments.get("fields") if isinstance(arguments.get("fields"), Mapping) else {}
+    row = None
+    if tool_name == "looper_schedules" and arguments.get("action") in ("update", "enable", "run"):
+        from .schedules import _schedule
+
+        row = await _schedule(arguments)
+        fields = fields if arguments["action"] == "update" else {}
+    elif tool_name in ("schedule_admin.update", "schedule_admin.run", "schedule_admin.confirm_target") \
+            and "schedule_id" in arguments:
+        from ...db import schedules
+
+        row = await schedules.get_schedule(arguments["schedule_id"])
+    if row is not None:
+        fields = {**schedule_reach(row), **fields}
+        arguments = {**arguments, "fields": fields}
     target = fields.get("notify_target") if "notify_target" in fields else None
     if isinstance(target, Mapping):
         kind, label = "notify_target", f"{target.get('channel')}:{target.get('chat')}"

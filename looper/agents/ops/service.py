@@ -16,7 +16,11 @@ to ``call``.
   with a note naming it; only in the turn answering that message may
   ``looper_confirm`` run it, with the arguments it was asked with, within
   ``CONFIRMATION_SECONDS``. After that turn it lapses. Confirmations live in
-  memory: a restart drops them, and the user is asked again.
+  memory: a restart drops them, and the user is asked again; with card buttons
+  on (``card_actions``) each is also a ``card_actions`` row, which a restart
+  brings back (``restore_confirmations``), the reply carries it as a card with
+  确认 / 取消 where the channel has buttons (``press``), and the typed
+  confirmation and the button claim the same row, so it runs once.
 - **A stopped turn.** When the user stops a turn (``stop_turn``) or it ends,
   its calls still under way run no further: one waiting in ``escalate``
   registers nothing, and a call that comes later, ``looper_confirm`` too, is
@@ -48,21 +52,25 @@ from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
 from ... import child_env
-from .. import chat_settings
+from .. import card_actions, chat_settings
+from ...db import card_actions as db_cards
 from ...db import ledger as db_ledger, manager_actions as db_actions, managers as db_managers, tasks as db_tasks, workflows as db_workflows
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
-from ..message import BOT_CHANNEL_TYPES, builtin_channel_id
+from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
+from ..reminders import reminders_on
 from ..tiers.manager_session import MAIN_SESSION
+from ..turn_context import SpeakerKind
 from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
+from . import reminders as reminder_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
@@ -135,6 +143,8 @@ class _Pending:
     at: float
     confirmation: dict[str, Any]
     answer_turn: str | None = None  # the message of the turn that may confirm it, once it started
+    card: str | None = None  # its ``card_actions`` token, while card buttons are on
+    asker: Turn | None = None  # the turn that asked: a button runs the call as in it
     impact: str = ""  # what it does, as the block says it
 
 
@@ -149,10 +159,12 @@ TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if
                                     *SCHEDULE_TOOLS, CONFIRM)
 READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Every tool a Manager may have had: a call of one it no longer has is told so. The leads search is the default
-# Manager's while leads are on, the vault's reads while it lets the Manager read it (``ManagerOps._with_operator_tools``).
-_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS)}
+# Manager's while leads are on, the vault's reads while it lets the Manager read it, the reminder tools while
+# reminders are on (``ManagerOps._with_operator_tools``).
+_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS,
+                                                    *reminder_tools.TOOLS)}
 # The default Manager's tools that only the user's own turns run, each behind its own switch.
-_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS)}
+_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, *reminder_tools.TOOLS)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
 
 
@@ -239,13 +251,16 @@ class ManagerOps:
         self._matches: Counter[tuple[str, str]] = Counter()
         self._observing: set[asyncio.Task[None]] = set()
         self._executing = 0
+        self._lapsing: set[asyncio.Task[None]] = set()
+        # The confirmations a card's button answered (id -> what it did), so a typed confirmation of one is told so.
+        self._pressed: OrderedDict[str, str] = OrderedDict()
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
         # later shell command may run one), and the turns already told the operator of a block.
         from ..outbound_hook import CONTENT_TOOLS_KEPT, Trusted
 
         self._review_root: Path | None = None
         self._review_bin = "claude"
-        self._trusted = Trusted.of(None, ())  # until a hook is written: only Looper's own server, none of its tools
+        self._trusted = Trusted.of(None, ())  # until a process's hook is activated: none of Looper's tools
         self._writes: deque[Any] = deque(maxlen=CONTENT_TOOLS_KEPT)
         self._notified: OrderedDict[tuple[str | None, str | None, str | None], None] = OrderedDict()
         # Each tool_use a turn's stream showed, by its id: the binding of the turn it belongs to (a subagent's call,
@@ -356,11 +371,13 @@ class ManagerOps:
     async def _with_operator_tools(self, scope: OpsScope) -> OpsScope:
         """``scope`` with the default Manager's operator-only tools exactly while their switches are on:
         ``looper_leads_search`` while ``leads.enabled`` is, the vault's reads while the vault setting holds and says
-        ``manager_read``. Any other Manager's as it is; off, the default Manager's is what it was before them."""
+        ``manager_read``, the reminder tools while ``reminders.enabled`` is. Any other Manager's as it is; off, the
+        default Manager's is what it was before them."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
             return scope
         wanted = [*((LEADS_SEARCH,) if await leads_on() else ()),
-                  *(VAULT_READ_TOOLS if await manager_vault() is not None else ())]
+                  *(VAULT_READ_TOOLS if await manager_vault() is not None else ()),
+                  *(reminder_tools.TOOLS if await reminders_on() else ())]
         if [tool.name for tool in wanted] == [name for name in scope.tools if name in _OPERATOR_TOOLS]:
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name not in _OPERATOR_TOOLS]
@@ -497,6 +514,9 @@ class ManagerOps:
                     raise OpError(ErrorCode.NOT_THIS_TURN, "this call was not made in the running turn; it did not run")
                 _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
+                if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+                    self._pending.pop(turn.chat_key, None)
+                    raise _OperatorOnly(turn)
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
                 raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn that answers a user's "
@@ -508,7 +528,10 @@ class ManagerOps:
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
                 risk = Risk.HIGH
+                if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+                    raise _OperatorOnly(turn)
                 pending = self._ask(tool, arguments, impact, turn, confirmation=call.confirmation)
+                await self._card(pending, turn)
                 action_id = await self._record(turn, tool, arguments, risk, "needs_confirmation",
                                                confirmation_id=pending.id)
                 await db_ledger.register_confirmation(action_id)
@@ -531,7 +554,8 @@ class ManagerOps:
             return _error(exc.code, str(exc))
         except OpError as exc:
             await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
-                               result={"message": str(exc)})
+                               result={"reason": "operator_only"} if isinstance(exc, _OperatorOnly)
+                               else {"message": str(exc)})
             return _error(exc.code, str(exc))
         except Exception as exc:
             logger.exception("the Manager's call of %s failed", name)
@@ -548,14 +572,39 @@ class ManagerOps:
             raise OpError(ErrorCode.NEEDS_USER_TURN, "only the user's own message confirms an operation")
         pending = self._pending.get(turn.chat_key)
         if pending is None or pending.id != confirmation_id:
+            if confirmation_id in self._pressed:
+                raise OpError(ErrorCode.CONFLICT, f"the user already answered confirmation {confirmation_id} with "
+                                                  "its card's buttons; it does not run again")
             raise OpError(ErrorCode.NOT_FOUND, f"no operation waits for confirmation {confirmation_id} in this chat; "
                                                "run the tool again to ask the user")
         if pending.answer_turn != turn.message_id or self._clock() - pending.at > CONFIRMATION_SECONDS:
             del self._pending[turn.chat_key]
+            self._lapse(pending)
             raise OpError(ErrorCode.EXPIRED, f"confirmation {confirmation_id} lapsed: it counts only in the turn "
                                              "answering the user's very next message, within "
                                              f"{CONFIRMATION_SECONDS // 60} minutes; run the tool again to ask again")
-        del self._pending[turn.chat_key]
+        if pending.card is None:
+            del self._pending[turn.chat_key]
+        else:
+            # Claim its card before it leaves memory: a press meanwhile still finds it waiting, so it loses the claim
+            # instead of taking the confirmation for lapsed (then neither would run it).
+            claimed = await db_cards.claim(pending.card, by=turn.sender, via="typed", choice="confirm",
+                                           outcome="running")
+            if self._pending.get(turn.chat_key) is pending:
+                del self._pending[turn.chat_key]
+            if not claimed:
+                raise OpError(ErrorCode.CONFLICT, f"the user already answered confirmation {confirmation_id} with "
+                                                  "its card's buttons; it does not run again")
+        try:
+            result = await self._run_confirmed(pending, turn)
+        except _Recorded:
+            await self._finish_card(pending, "error")
+            raise
+        await self._finish_card(pending, "ok")
+        return {"status": "ok", "result": result}
+
+    async def _run_confirmed(self, pending: _Pending, turn: Turn) -> Any:
+        """Run the confirmed call in ``turn`` and record it; its result, or ``_Recorded``."""
         tool = pending.tool
         try:
             scope = await self.current_scope()
@@ -579,21 +628,146 @@ class ManagerOps:
         if tool.name in TAINTING_TOOLS and (tool.name != "looper_task_update" or "requirement" in pending.arguments):
             await self._mark_task(tool.task_id(pending.arguments) or _created_task(result))
         await self._record(turn, tool, pending.arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
-        return {"status": "ok", "result": result}
+        return result
+
+    # --- Confirmation cards (``card_actions``) ---
+
+    async def _card(self, pending: _Pending, turn: Turn) -> None:
+        """With card buttons on: keep the confirmation ``card_actions`` row, and add its card, with 确认 and 取消,
+        to the reply when the chat's channel has buttons. A call with a secret-looking argument keeps no arguments
+        there (``manager_actions.masked``), so a restart does not bring it back. A failure only logs: the user
+        confirms by typing as before."""
+        try:
+            if not await card_actions.enabled():
+                return
+            token = card_actions.new_token()
+            buttons = bool(turn.sender) and card_actions.has_buttons(turn.channel_id)
+            card = card_actions.Card(pending.block, (
+                card_actions.Button("确认", card_actions.value(token, "confirm"), "primary"),
+                card_actions.Button("取消", card_actions.value(token, "cancel"))) if buttons else ())
+            payload: dict[str, Any] = {"chat_key": list(turn.chat_key), "tool": pending.tool.name,
+                                       "block": pending.block, "impact": pending.impact, "asked_in": pending.asked_in,
+                                       "turn": _turn_record(turn), "card": card.to_dict()}
+            if (db_actions.masked(pending.arguments) == pending.arguments
+                    and db_actions.masked(pending.confirmation) == pending.confirmation):
+                payload.update(arguments=pending.arguments, confirmation=pending.confirmation)
+            await db_cards.create(token=token, kind="confirmation", subject=pending.id, digest=_digest(pending),
+                                  payload=payload, manager_id=self._scope.manager_id, channel_id=turn.channel_id,
+                                  chat=turn.chat, allowed=[turn.sender] if turn.sender else [],
+                                  ttl=timedelta(seconds=CONFIRMATION_SECONDS))
+        except Exception:
+            logger.warning("could not keep the card of confirmation %s; it is confirmed by typing", pending.id,
+                           exc_info=True)
+            return
+        pending.card = token
+        if self._pending.get(turn.chat_key) is not pending:  # the turn was stopped meanwhile
+            self._lapse(pending)
+        elif buttons:
+            turn.cards.append(card.to_dict())
+
+    def _lapse(self, pending: _Pending | None) -> None:
+        """``pending`` no longer waits: its card says so to a later press, and a restart does not bring it back."""
+        if pending is None or pending.card is None:
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(self._write_lapse(pending.card))
+        except RuntimeError:
+            return
+        self._lapsing.add(task)
+        task.add_done_callback(self._lapsing.discard)
+
+    @staticmethod
+    async def _write_lapse(token: str) -> None:
+        try:
+            await db_cards.lapse([token])
+        except Exception:
+            logger.warning("could not mark a confirmation's card as lapsed", exc_info=True)
+
+    @staticmethod
+    async def _finish_card(pending: _Pending, outcome: str) -> None:
+        if pending.card is None:
+            return
+        try:
+            await db_cards.finish(pending.card, outcome)
+        except Exception:
+            logger.warning("could not record what a confirmation's card came to", exc_info=True)
+
+    async def press(self, row: dict[str, Any], event: card_actions.Press, choice: str) -> card_actions.Answer:
+        """A press of a confirmation card's button, its presser and time already checked (``card_actions.press``):
+        ``confirm`` runs the waiting call as the typed confirmation would, in a turn like the one that asked;
+        ``cancel`` drops it. Either holds only while that confirmation still waits, with the same arguments."""
+        payload = row["payload"]
+        card = card_actions.Card.from_dict(payload["card"])
+        key = tuple(payload["chat_key"])
+        pending = self._pending.get(key)  # type: ignore[arg-type]
+        if pending is None or pending.card != row["token"] or _digest(pending) != row["digest"]:
+            await db_cards.lapse([row["token"]])
+            return card_actions.Answer(card_actions.HANDLED, card=card.settled(card_actions.HANDLED))
+        confirm = choice == "confirm"
+        if not await db_cards.claim(row["token"], by=event.presser, via="button", choice=choice,
+                                    outcome="running" if confirm else "cancelled"):
+            return card_actions.Answer(card_actions.HANDLED, card=card.settled(card_actions.HANDLED))
+        if self._pending.get(key) is pending:  # type: ignore[arg-type]
+            del self._pending[key]  # type: ignore[arg-type]
+        self._pressed[pending.id] = choice
+        while len(self._pressed) > CONFIRMATION_CHATS:
+            self._pressed.popitem(last=False)
+        if not confirm:
+            return card_actions.Answer("已取消", card=card.settled("已取消，没有执行。"))
+        asker = pending.asker or Turn(channel=key[0], chat=key[2], channel_id=key[1])
+        turn = Turn(channel=asker.channel, chat=asker.chat, message_id=pending.asked_in or f"card:{row['token']}",
+                    sender=event.presser, group=asker.group, envelope=asker.envelope, channel_id=asker.channel_id,
+                    client_id=asker.client_id, client_name=asker.client_name)
+        return card_actions.Answer("已确认，正在执行", "success", card=card.settled("⏳ 已确认，正在执行…"),
+                                   later=self._run_pressed(pending, turn, card))
+
+    async def _run_pressed(self, pending: _Pending, turn: Turn, card: card_actions.Card) -> card_actions.Card:
+        try:
+            await self._run_confirmed(pending, turn)
+        except _Recorded as exc:
+            await self._finish_card(pending, "error")
+            return card.settled(f"❌ 没有执行：{exc}")
+        await self._finish_card(pending, "ok")
+        return card.settled("\n\n".join(("✅ 已执行。", *turn.blocks)))
+
+    async def restore_confirmations(self) -> int:
+        """With card buttons on, bring back the confirmations a restart dropped: each card of this Manager that
+        still waits and kept its call's arguments (one that did not lapses). How many came back."""
+        if not await card_actions.enabled():
+            return 0
+        restored = 0
+        for row in await db_cards.open_confirmations(self._scope.manager_id):
+            payload = row["payload"]
+            key = tuple(payload.get("chat_key") or ())
+            name = payload.get("tool")
+            tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
+            if tool is None or "arguments" not in payload or len(key) != 3:
+                await db_cards.lapse([row["token"]])
+                continue
+            self._lapse(self._pending.get(key))  # type: ignore[arg-type]
+            self._pending[key] = _Pending(  # type: ignore[index]
+                id=row["subject"], tool=tool, arguments=dict(payload["arguments"]), block=str(payload["block"]),
+                asked_in=payload.get("asked_in"), at=self._clock() - float(row["age"]),
+                confirmation=dict(payload.get("confirmation") or {}), card=row["token"],
+                asker=_turn_from(payload.get("turn") or {}), impact=str(payload.get("impact") or payload["block"]))
+            restored += 1
+        return restored
 
     def _ask(self, tool: Tool, arguments: dict[str, Any], impact: str, turn: Turn, *,
              confirmation: dict[str, Any]) -> _Pending:
         """Register ``tool``'s call for the user to confirm, replacing the chat's earlier one, and show it."""
         earlier = self._pending.pop(turn.chat_key, None)
+        self._lapse(earlier)
         if earlier is not None and earlier.asked_in == turn.message_id and earlier.block in turn.blocks:
             turn.blocks.remove(earlier.block)  # asked in this turn too: only the newest stands
+            turn.cards[:] = [card for card in turn.cards if card.get("text") != earlier.block]
         block = f"需要你确认：\n{impact}\n回复「确认」就执行；回复别的就不执行。"
         pending = _Pending(id=f"c-{uuid.uuid4().hex[:12]}", tool=tool, arguments=arguments, block=block,
                            asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation),
-                           impact=impact)
+                           asker=turn, impact=impact)
         self._pending[turn.chat_key] = pending
         while len(self._pending) > CONFIRMATION_CHATS:
-            self._pending.pop(next(iter(self._pending)))
+            self._lapse(self._pending.pop(next(iter(self._pending))))
         turn.blocks.append(block)
         return pending
 
@@ -783,6 +957,7 @@ class ManagerOps:
             return ""
         if pending.answer_turn is not None or self._clock() - pending.at > CONFIRMATION_SECONDS:
             del self._pending[turn.chat_key]
+            self._lapse(pending)
             return ""
         pending.answer_turn = turn.message_id
         return (f"[Looper] Your last reply in this chat asked the user to confirm an operation ({pending.tool.name}, "
@@ -798,6 +973,7 @@ class ManagerOps:
             if (pending.asked_in == turn.message_id or pending.answer_turn == turn.message_id) \
                     and not turn.autonomous:
                 del self._pending[key]
+                self._lapse(pending)
                 if pending.block in turn.blocks:
                     turn.blocks.remove(pending.block)
 
@@ -810,6 +986,7 @@ class ManagerOps:
         pending = self._pending.get(turn.chat_key)
         if pending is not None and not turn.autonomous and pending.answer_turn == turn.message_id:
             del self._pending[turn.chat_key]
+            self._lapse(pending)
 
     def asks_in(self, message_id: str) -> bool:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
@@ -829,6 +1006,8 @@ class ManagerOps:
 
     def forget_confirmations(self) -> None:
         """Drop every waiting confirmation (the Manager's session was reset)."""
+        for pending in self._pending.values():
+            self._lapse(pending)
         self._pending.clear()
 
     # --- Tasks a session that found leads wrote (the outbound-review RFC, section 6.3) ---
@@ -867,13 +1046,19 @@ class ManagerOps:
 
     def tool_hook(self, runtime_root: Path, claude_bin: str, library: Any = None) -> Any:
         """The PreToolUse hook (``outbound_hook.ToolHook``) for this Manager's Claude Code, its config written; the
-        reviews it asks for run under ``runtime_root`` with ``claude_bin``, and its MCP tool names stand for the
-        servers ``library`` loads (``outbound_hook.Trusted``)."""
+        reviews it asks for run under ``runtime_root`` with ``claude_bin``. Its MCP trust set takes effect only
+        when the Manager activates this hook for the process it actually starts."""
         from .. import outbound_hook
 
         self._review_root, self._review_bin = runtime_root, claude_bin
-        self._trusted = outbound_hook.Trusted.of(library, (*self._scope.tools, CONFIRM_TOOL))
-        return outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token)
+        return replace(outbound_hook.write_hook(runtime_root, self._scope.manager_id, url=self._url, token=self._token),
+                       trusted=outbound_hook.Trusted.of(library, (*self._scope.tools, CONFIRM_TOOL)))
+
+    def activate_tool_hook(self, hook: Any) -> None:
+        """Use the immutable trust set of the actual process's hook, never a prepared capability refresh."""
+        from ..outbound_hook import Trusted
+
+        self._trusted = hook.trusted if hook is not None and hook.trusted is not None else Trusted.of(None, ())
 
     async def check_outbound(self, payload: Any) -> dict[str, Any]:
         """The hook's answer for one tool call of this Manager (``outbound_hook.answer``), in the turn it belongs to:
@@ -935,7 +1120,7 @@ class ManagerOps:
         level = await levels.level_of(tool, arguments, turn)
         if level not in outbound.REVIEWED:
             return None
-        action = layer_one.action_of(tool.name, arguments, level)
+        action = await layer_one.action_of(tool.name, arguments, level)
         checked = await outbound.review(
             action, outbound.Asker(await _who(turn), turn.channel or "", _message(turn)),
             outbound.Origin(self._scope.manager_id, outbound.Source.TOOL, channel=turn.channel, chat=turn.chat),
@@ -1011,6 +1196,17 @@ class _Recorded(OpError):
         super().__init__(error.code, str(error))
 
 
+class _OperatorOnly(OpError):
+    """A speaker refusal with a typed audit reason, without changing other forbidden errors."""
+
+    def __init__(self, turn: Turn) -> None:
+        message = ("only the operator can authorize this: it was not run and nothing waits for confirmation; "
+                   "tell the speaker that the operator has to ask for it themselves")
+        if turn.operator_id_missing:
+            message += " (this bot has no operator id set)"
+        super().__init__(ErrorCode.FORBIDDEN, message)
+
+
 def _audience(tool: Tool) -> Audience:
     return tool.audience if isinstance(tool, RestrictedTool) else Audience.ANY
 
@@ -1055,6 +1251,26 @@ def _check_answering(turn: Turn) -> None:
 def tools_down_reply(problem: str) -> str:
     """What the user gets when the Manager's tools do not work: nothing was done, whatever Claude says."""
     return f"平台工具不可用，没有执行任何操作：{problem}。请检查 looper serve 的日志，或先在控制台里操作。"
+
+
+def _digest(pending: _Pending) -> str:
+    """What a confirmation card is bound to: the call and its arguments, as they were asked."""
+    return card_actions.digest([pending.tool.name, pending.arguments, pending.confirmation])
+
+
+def _turn_record(turn: Turn) -> dict[str, Any]:
+    """What a confirmation's row keeps of the turn that asked, so a button runs the call as in it after a restart."""
+    return {"channel": turn.channel, "chat": turn.chat, "channel_id": turn.channel_id, "sender": turn.sender,
+            "group": turn.group, "client_id": turn.client_id, "client_name": turn.client_name,
+            "envelope": turn.envelope.to_dict() if turn.envelope is not None else None}
+
+
+def _turn_from(record: Mapping[str, Any]) -> Turn:
+    envelope = record.get("envelope")
+    return Turn(channel=record.get("channel"), chat=record.get("chat"), channel_id=record.get("channel_id"),
+                sender=record.get("sender"), group=bool(record.get("group")), client_id=record.get("client_id"),
+                client_name=record.get("client_name"),
+                envelope=MessageEnvelope.from_dict(envelope) if isinstance(envelope, dict) else None)
 
 
 def _canonical(arguments: Mapping[str, Any]) -> str:
