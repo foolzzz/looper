@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.db_support import DSN, run_db, v1_api
+from tests.db_support import DSN, dropped_tables, run_db, v1_api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -403,8 +403,9 @@ def test_gateway_alias_additive_upgrade_and_model_deletion(monkeypatch):
     from looper.db.connection import ensure_schema
 
     async def check(pool):
-        await pool.execute("DROP TABLE gateway_aliases; DELETE FROM schema_migrations WHERE name='gateway_aliases'")
-        await ensure_schema(pool)
+        async with dropped_tables(pool, "gateway_aliases"):
+            await pool.execute("DELETE FROM schema_migrations WHERE name='gateway_aliases'")
+            await ensure_schema(pool)
         assert await pool.fetchval("SELECT name FROM llm_models WHERE id='model-gw-chat'") == "chat-model"
         await gateway.set_alias("chat", "model-gw-chat", pool=pool)
         await pool.execute("DELETE FROM llm_models WHERE id='model-gw-chat'")

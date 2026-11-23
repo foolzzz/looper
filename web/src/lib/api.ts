@@ -272,6 +272,8 @@ export interface Project extends ProjectExecution {
   active_count: number;
   /** Its schedules; a project with any cannot be deleted. */
   schedule_count: number;
+  /** Present only while agents may propose skills for the operator to confirm; absent means off. */
+  skill_proposals?: "on";
 }
 
 export interface ChatSendResponse {
@@ -1446,6 +1448,16 @@ export interface SubscriptionRunInfo {
   skip_reason?: "blocked_by_hook" | "invalid_reply" | null;
   /** Each message of its push: pending, sending, sent, failed or uncertain. */
   deliveries?: { segment: number; state: string; attempts: number; error: string | null }[];
+  /** Present on a triage run: category counts for that window. Absent on push, leads and intents runs. */
+  extract_counts?: {
+    important: number;
+    digest: number;
+    ignore: number;
+    uncited: number;
+    raised: number;
+    none?: boolean;
+    dropped?: Record<string, number>;
+  } | null;
 }
 
 /** One firing of a schedule (or a "Run now"), and the task it started. */
@@ -1551,6 +1563,8 @@ export interface ScheduleInfo {
   enabled: boolean;
   /** Null while disabled. */
   next_fire_at: string | null;
+  /** Set while a firing waits for a usage window. The instant is the stored reset or cooldown, not a locale clock. */
+  usage_hold?: { until: string; reason: string; reset_known: boolean; window: string | null };
   last_fired_at: string | null;
   last_success_at: string | null;
   consecutive_failures: number;
@@ -2057,6 +2071,8 @@ export interface ProjectSkill {
   size_bytes: number;
   created_at: string;
   updated_at: string;
+  /** active: new runs load it. deprecated: new runs skip it. The install switch is separate. */
+  lifecycle: "active" | "deprecated";
 }
 
 export interface SkillCaps {
@@ -2188,6 +2204,125 @@ export async function rollbackProjectSkill(
     "/api/v1/project_skills/rollback", { project_id: projectId, skill_id: skillId, version });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
+}
+
+export interface SkillLifecycleChange extends ProjectInstalls {
+  skill: ProjectSkill;
+  affected_projects: SkillVersions["affected_projects"];
+}
+
+/** Mark a project skill deprecated. New runs skip it; installs, versions and files stay. The reason is not stored on the skill; it is kept only in the operator action record. */
+export async function deprecateProjectSkill(
+  projectId: string,
+  skillId: string,
+  reason?: string,
+): Promise<SkillLifecycleChange> {
+  const result = await callV1<SkillLifecycleChange>("/api/v1/project_skills/deprecate", {
+    project_id: projectId, skill_id: skillId, ...(reason ? { reason } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Mark a deprecated project skill active so new runs load it again. */
+export async function restoreProjectSkill(projectId: string, skillId: string): Promise<SkillLifecycleChange> {
+  const result = await callV1<SkillLifecycleChange>("/api/v1/project_skills/restore", {
+    project_id: projectId, skill_id: skillId,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Characters of skill name plus description a new run of each role would list. A display threshold, not a cap. */
+export interface ContextBudget {
+  limit: number;
+  roles: Record<"planner" | "worker" | "reviewer", { chars: number; skills: number; over: boolean }>;
+  /** Plugin-bundled skills are left out of v0. */
+  counts_plugin_skills: false;
+}
+
+export async function fetchContextBudget(projectId: string): Promise<ContextBudget> {
+  const result = await callV1<ContextBudget>("/api/v1/project_skills/context_budget", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export type SkillProposalStatus = "pending" | "confirmed" | "confirmed_edited" | "rejected" | "expired" | "superseded";
+
+/** A drafted skill that changes nothing until the operator confirms it. `diff` is the server's comparison with
+ * the skill's current version (an update only). */
+export interface SkillProposal {
+  proposal_id: number;
+  project_id: string;
+  action: "create" | "update";
+  skill_id: string | null;
+  name: string;
+  description: string;
+  why: string;
+  evidence: { task: string; step?: string }[];
+  proposer: string;
+  status: SkillProposalStatus;
+  /** The hash of what is shown; Confirm names it, and the server refuses another. */
+  content_sha256: string;
+  base_sha256: string | null;
+  content: string;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  decision_note: string | null;
+  current: { name: string; description: string; sha256: string } | null;
+  diff: { name: { from: string; to: string }; description: { from: string; to: string }; content: string } | null;
+  /** An update whose skill changed since it was drafted: confirming supersedes it and writes nothing. */
+  stale: boolean;
+  affected_projects: { project_id: string; project_name: string }[];
+}
+
+export interface SkillProposalList {
+  mode: "off" | "on";
+  proposals: SkillProposal[];
+}
+
+export async function fetchSkillProposals(projectId: string): Promise<SkillProposalList> {
+  const result = await callV1<SkillProposalList>("/api/v1/project_skills/proposals/list", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Confirm the proposal whose content hash the operator saw. With `fields`, the operator's edit is what is written. */
+export async function confirmSkillProposal(
+  projectId: string,
+  proposalId: number,
+  contentSha256: string,
+  fields?: { name?: string; description?: string; content?: string },
+): Promise<{ proposal: SkillProposal; version: number | null }> {
+  const result = await callV1<{ proposal: SkillProposal; version: number | null }>(
+    "/api/v1/project_skills/proposals/confirm",
+    { project_id: projectId, proposal_id: proposalId, content_sha256: contentSha256, ...(fields ? { fields } : {}) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function rejectSkillProposal(projectId: string, proposalId: number, reason?: string): Promise<SkillProposal> {
+  const result = await callV1<{ proposal: SkillProposal }>("/api/v1/project_skills/proposals/reject", {
+    project_id: projectId, proposal_id: proposalId, ...(reason ? { reason } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.proposal;
+}
+
+export async function restoreSkillProposal(projectId: string, proposalId: number): Promise<SkillProposal> {
+  const result = await callV1<{ proposal: SkillProposal }>("/api/v1/project_skills/proposals/restore", {
+    project_id: projectId, proposal_id: proposalId,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.proposal;
+}
+
+export async function setSkillProposalMode(projectId: string, mode: "off" | "on"): Promise<"off" | "on"> {
+  const result = await callV1<{ project_id: string; mode: "off" | "on" }>(
+    "/api/v1/project_skills/proposals/set_mode", { project_id: projectId, mode });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.mode;
 }
 
 export async function updateTaskConfig(
@@ -3620,6 +3755,28 @@ export const previewMessageStreamDeletion = async (fields: MessageStreamDeletion
 export const deleteMessageStream = (fields: MessageStreamDeletion & { confirmation_token: string }, session: string) =>
   messageStreamOperation<{ source_id: string; deleted: number; deletion_id: number }>("delete", fields, undefined, session);
 
+export interface TriageWhy {
+  case: "triage_off" | "out_of_scope" | "not_yet" | "skipped" | "event" | "uncited" | "unknown";
+  cause?: "disabled" | "no_subscription";
+  rule?: "chat_excluded" | "imported_history" | "own_app" | "sender_kind";
+  next_run_at?: string | null;
+  cursor_seq?: number;
+  skip_reason?: string;
+  run_id?: string;
+  event_id?: string;
+  category?: "important" | "digest" | "ignore";
+  reason?: string;
+  reason_kind?: "model" | "uncited" | "raised";
+  handling?: string;
+  checked?: string[];
+}
+
+export async function triageWhy(message: string): Promise<TriageWhy> {
+  const result = await callV1<TriageWhy>("/api/v1/triage/why", { message });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 export interface LlmrecSettingsUpdate {
   enabled?: boolean;
   include_oauth?: boolean;
@@ -4552,6 +4709,8 @@ export interface CatalogItem {
   modified: boolean;
   imported_at: string;
   updated_at: string;
+  /** Missing means active. deprecated: a new run skips the skill. Not the install's enabled switch. */
+  lifecycle?: "active" | "deprecated";
   /** An MCP server's configuration, its env and header values masked; null for a plugin or a skill. */
   mcp: McpConfig | null;
   /** Global and project installs. */

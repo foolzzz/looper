@@ -51,6 +51,23 @@ rows without that timestamp fall back to `created_at`. Queue counts include pend
 rows of any age. Gateway events retain at most 10,000 entries for 24 hours in
 memory, with a since-start label until the service has been up for a day.
 
+Task quality is read from the typed `step_attempts` and `task_outcomes` records by the operator-only
+operations `metrics.task_outcomes` (`days`, `project`, `profile`, `difficulty`) and `metrics.step_attempts`
+(`task_id`). A ratio shows from 20 cases with its Wilson 95% interval, else `{"insufficient": true, "n": n}`;
+each figure carries the same figure of the comparison window (the `4 * days` before the window), and a figure
+that cannot be computed returns `{"error": ...}` while the others answer. `coverage_since` is when the records
+begin (nothing is backfilled) and `missing_attempts` counts Worker runs since then with no attempt. A profile
+filter keeps a run that has an attempt of that profile, and a step that has any attempt of that profile, so a
+step that used more than one profile is counted under each of them. The first-pass rate is original-plan steps
+whose first attempt was decided in the window and that were accepted on their only attempt; a step still open,
+skipped, or cut off when the task ended is left out, and one that was reopened and is still pending stays in
+the denominator. Contract rates count the runs whose outcome ended in the window (each run's records from its
+start until the next run starts), not earlier runs of the same task. Costs split
+per billing basis; an unknown cost is null, never 0. The home page's cost comparison states the equivalent
+spend beside the supplier price. `task_feedback.get` and `task_feedback.set` hold the
+operator's delivery verdict on a completed task; neither the verdict nor its note reaches an agent, and the
+Manager has no tool for it. The dashboard shows the task page's 指标 card and the home page's 任务质量 group.
+
 - Entry point for all user messages. There is a default Manager (`manager`)
   and the operator's scenario Managers (`manager-<key>`, table `managers`,
   [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
@@ -3136,6 +3153,41 @@ A run's library record, launch arguments and prompts gain no field from a
 version. A skill uploaded, taken from git, imported from this machine or
 written in Settings has no versions.
 
+**Proposals.** A project can allow agents to draft skills for the operator to
+confirm (`projects.skill_proposals`, NULL or `off` by default, set with
+`project_skills.proposals.set_mode`; the key appears in a project's view and
+export only while it is `on`). A proposal (`skill_proposals`,
+`looper/agents/skill_proposals.py`) is a `create` or an `update` with its full
+text, its reason and the tasks and steps it comes from. It changes no catalog
+item and reaches no run. With the switch on, a task's Planner may store at most two full skill proposals across
+its closing replies, including replays and restarts. Planner-originated validation refusals and later confirmation
+or rejection results reach the next Planner of that project once; a failed PLAN turn releases its feedback claim.
+Validation refusals carry only a typed reason and its fixed explanation, without quoted draft fields. A malformed
+proposal becomes a shape refusal and preserves the final summary. Evidence task and step identifiers are capped
+at 64 characters.
+The Manager's operator-only `looper_skill_propose` tool also creates proposals and is listed only while a project
+opts in; its validation refusals return to the Manager and are not sent to a Planner. Workers and Reviewers supply
+evidence through their learnings and cannot propose or confirm.
+The checks reuse the skill field rules, refuse a secret-shaped string in the
+description, the content or the reason (`skill_secrets`, a fixed table of
+named rules), allow only an `update` once the project has 20 skills, and keep
+the newest pending proposal per name (an older one becomes `superseded`). A
+pending proposal expires after seven days; the operator can restore it, and it
+is checked again.
+
+Only the operator's dashboard session confirms
+(`project_skills.proposals.confirm`; an API client may read proposals but not
+confirm, reject, restore or switch them, and the operation has no `loopercli`
+command). Confirming names the content hash the operator saw: another hash is a
+409, and an `update` whose skill changed after the draft becomes `superseded`
+and writes nothing. A confirmation writes a skill version with author kind
+`proposal` (the proposal's id as the reference), or `operator` after the
+operator edited the text first (`confirmed_edited`). The database ties a
+confirmed status to a `confirm` event of the dashboard, by the user, with that
+hash (`skill_proposal_events`). While proposals are pending, the operator
+gets at most one direct message a day with names, reasons and the page link,
+never skill text; a reply confirms nothing.
+
 **Caps.** Each is refused with a 400 that states it:
 
 - a name: at most 64 characters, Claude Code's limit for a skill name;
@@ -5909,6 +5961,25 @@ triage preset, renderer, parser, writer, why API/CLI, UI, Manager hand-off or
 briefing reader yet. The dashboard, Lark and Telegram therefore gain no new
 message behavior; CLI configuration can call the operator-only operations.
 
+### Event triage Manager handoff
+
+An important triage event that owns at least one message of its run is handed to the Manager:
+`agents.triage_run.store` calls `agents.triage_handoff` in the same transaction, which writes one
+`manager_events` row of kind `triage` (no task) per owning event and sets `triage_events.manager_event_id`.
+Ownership is the highest category that cites a window message, then the earliest event id
+(`db.triage_events.owned_counts`, which the brief reads too); an event fully covered by another has no row.
+The row targets the default Manager's operator direct chat (`operator_dm_target`), else the operator's newest
+dashboard chat, else it falls back at once (`no_chat`). It never targets a group, and holds ids only.
+`manager_events.claim` takes a `kind` (default `task_end`), so a triage event never joins a task-end batch.
+`agents.triage_turn` is what a turn runs on: the `[TRIAGE]` message with every event fenced as outside content,
+the reply contract (a message, or exactly `NO_REPLY`), the daily cap (`subscriptions.triage.max_turns_per_day`,
+default 12, in `triage_settings.get/update`; past it the batch falls back as `daily_cap`) and `finish`, which
+settles the batch: `NO_REPLY` is `skipped`/`manager_silent`, a message goes through the delivery layer
+(`ProactiveSource.TRIAGE`) to `delivered`, `delivery_deferred` or `send_failed`, and a failed, timed-out or
+preempted turn falls back (`turn_failed`, `turn_timeout`, `turn_stopped`). A triage fallback sends nothing:
+it has no code notice and the processor's text is never sent; the event waits for the brief. The Manager does
+not run these turns yet (`manager.py` is untouched); an unclaimed triage row falls back as `queue_deadline`.
+
 ### Message leads
 
 Message leads are sourced, unconfirmed notes, stored in PostgreSQL rather than
@@ -6533,14 +6604,55 @@ list or command line changes either way.
 - **API:** `POST /api/v1/attention/summary`, read-only and operator-only:
   `{read_at, total, sections: [{kind, state, count, items, error}]}`, each
   item `{key, title, context, since, href, ref, facts}`.
+  `POST /api/v1/attention/settings_get` returns `{enabled}` to the operator,
+  including while off, without reading summary sources.
 - **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
-  only while the summary answers. Failing logins that were read are left to
-  the startup-check banner every page shows; a confirmation asked in the
+  only while the setting is on. The sidebar reads the setting rather than
+  requesting the summary on every page load. Failing logins that were read
+  are left to the startup-check banner every page shows; a confirmation asked in the
   dashboard chat links to that conversation.
 - **Chat:** `/todo` (and Telegram's `/todo@bot`) is answered by code next to
   `/new` and `/gates`, only in the operator's own turns
   (`operator_identity.is_operator`); a group, another sender and an API
   client get a refusal.
+
+### Idle checks
+
+([RFC](rfcs/assistant-phase3-v0.zh-CN.md) section 4.)
+
+When the default Manager has been idle for 30 minutes, code reads the needs-you
+summary, picks what is new since it last looked, and only then asks the Manager
+(a read-only turn in `main`) whether to say something; the Manager may answer
+`NO_REPLY`, and what it writes goes to the operator's direct chat through the
+delivery layer. The switch is `manager.idle_checks.enabled` (default off, no
+row is off), set only through the operator-only `idle_check_settings.get` and
+`update`; `update(true)` answers `conflict` unless `delivery.enabled`,
+`attention.enabled` and `manager.lanes.enabled` are on. Not in `chat_settings`.
+
+- `agents/idle_checks.py`: `plan(state)` is a pure function of typed inputs
+  (the rules of RFC 4.3, cheap ones first, each skip typed); `select` takes the
+  summary's sections by a typed table (`gates` and `confirmations` never; the
+  rest by their own rule) and drops what a check of the last 7 days that ended
+  `silent`, `sent` or `uncertain` already named, by a per-section fingerprint
+  (a schedule's includes `last_ok_at`, so "fail, skipped gate, fail" is new);
+  `render_message` writes the English `[IDLE CHECK]` text with every title
+  fenced (`untrusted.Source.NEEDS_YOU`); `parse_reply` accepts `NO_REPLY`
+  exactly; `deliver_result` settles the check (`silent`, `sent`, `uncertain`,
+  `deferred`, `failed`) after `proactive_delivery.decide`.
+- `IdleCheckService` ticks every 5 minutes. With the switch off a tick reads the
+  setting and stops. A tick that decides not to check writes nothing (it counts
+  the reason and logs it at DEBUG). The advisory lock covers only "decide,
+  insert, publish". Checks left `running` by an earlier server fail as `restart`.
+- Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
+  `idle_check_source` adds `idle_check` to the source check of
+  `proactive_deliveries`, built from the check's current values, so it composes
+  with the morning brief's and triage's widenings.
+- `attention.summary`'s `schedules` items gain the fact `last_ok_at`; `/todo`
+  and the Needs you page are unchanged.
+- The Manager side (its `idle_for()`, the shared background-turn entry, the lane
+  a check runs in, `IDLE_CHECK_DUE` routing, and what a user message does to a
+  queued or running check) and the service's start in `serve` come after the
+  lanes change; until then nothing starts a service and the switch has no effect.
 
 ### User gates
 

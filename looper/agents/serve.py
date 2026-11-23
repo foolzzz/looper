@@ -64,6 +64,7 @@ from .memory_write import MemoryWriteService
 from .memory_push import MemoryPushService
 from .reminders import ReminderService
 from .morning_brief import MorningBriefService
+from .metrics_alerts import MetricsAlertService
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
@@ -952,8 +953,12 @@ async def _run_agent_system_watched(
             await cost_guard.initialize(day_start=scheduler.day_start, pool=pool)
             bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
-            from . import advisor_alerts, outbound_hook
+            from . import advisor_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
+            # So does the daily note that skill proposals wait for the operator (names and reasons, never content).
+            from . import skill_proposal_notice
+            skill_proposal_notice.configure(registry.notify, dashboard_url=dashboard_url)
+            usage_windows.configure(registry.notify)
             # So do the outbound review's block notices; its switch is read once here, and kept by its operations.
             outbound_hook.configure(registry.notify)
             await outbound_hook.enabled()
@@ -1006,6 +1011,7 @@ async def _run_agent_system_watched(
                                                              and agent.busy)
             await fleet.load()
             morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
+            metrics_alert_service = MetricsAlertService(registry)
             from .completion_service import CompletionService
             completion_service = CompletionService(
                 bus=bus, manager_running=fleet.is_running, drain=drain,
@@ -1134,6 +1140,7 @@ async def _run_agent_system_watched(
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
         await morning_brief_service.start()  # idle while the morning brief is off
+        await metrics_alert_service.start()
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
@@ -1207,6 +1214,7 @@ async def _run_agent_system_watched(
             await memory_push_service.stop()
             await memory_writer.stop()
             await reminder_service.stop()
+            await metrics_alert_service.stop()
             await morning_brief_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()

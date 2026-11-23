@@ -150,6 +150,8 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "task_count": row.get("task_count", 0),
         "active_count": row.get("active_count", 0),
         "schedule_count": row.get("schedule_count", 0),
+        # Only a project that switched skill proposals on shows the key; every other view is as before.
+        **({"skill_proposals": row["skill_proposals"]} if row.get("skill_proposals") else {}),
     }
 
 
@@ -1367,6 +1369,7 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
     profile id (None: drop the task's choice, only when ``clearing``); each one registered and able to run its role.
     400 otherwise."""
     from ..db import profile_registry as db_profiles
+    from .acp_guards import refuse_profile
     from .profile_registry import RegistryError, check_selection
 
     if not raw:
@@ -1395,6 +1398,7 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
             names = ", ".join(str(p["name"]) for p in registered[:20])
             raise RequestError(HTTP_400, f"{field}.{role}: no Agent Profile {wanted!r}; registered: {names}")
         try:
+            await refuse_profile(match["id"], "task profile choices", pool=pool)
             await check_selection(match["id"], [role], pool=pool)
         except RegistryError as exc:
             raise RequestError(HTTP_400, f"{field}.{role}: {exc}") from None
@@ -1417,9 +1421,9 @@ async def choosable_profiles(project_id: str | None, *,
 
     listed = await db_projects.allowed_profiles(project_id, pool=pool) if project_id else []
     if listed:
-        return listed, True
+        return [row for row in listed if row["runtime_type"] != "acp"], True
     return [row for row in await db_profiles.list_profiles(pool=pool)
-            if set(servable_roles((profile := AgentProfile.from_row(row)).runtime.capabilities,
+            if row["runtime_type"] != "acp" and set(servable_roles((profile := AgentProfile.from_row(row)).runtime.capabilities,
                                   profile.runtime.type)) & set(_CHOOSABLE)], False
 
 

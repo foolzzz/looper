@@ -87,6 +87,11 @@ SUBSCRIPTION_RUN = _object({
     **dict.fromkeys(("output_text", "notification_id", "skip_reason"), _NULL_STR)})
 SUBSCRIPTION_RUN["properties"]["deliveries"] = _array(_object({"segment": _INT, "state": _STR, "attempts": _INT,
                                                                "error": _NULL_STR}))
+# Optional, and only present on a triage run: adding it after construction keeps it out of ``required``.
+SUBSCRIPTION_RUN["properties"]["extract_counts"] = {"anyOf": [
+    _object({"important": _INT, "digest": _INT, "ignore": _INT, "uncited": _INT, "raised": _INT, "none": _BOOL,
+             "dropped": {"type": "object", "additionalProperties": _INT}}, [], closed=True),
+    {"type": "null"}]}
 RUN["properties"]["subscription"] = SUBSCRIPTION_RUN  # a subscription's runs only
 RUN["required"] = [name for name in RUN["required"] if name != "subscription"]
 _SCHEDULE_FIELDS["subscription"] = SUBSCRIPTION  # a subscription's only
@@ -94,9 +99,12 @@ SCHEDULE_WITHOUT_LAST_RUN = _object({key: value for key, value in _SCHEDULE_FIEL
                                     if key not in {"manager_id", "manager_name"}})
 SCHEDULE = _object({**_SCHEDULE_FIELDS, "last_run": _nullable(RUN)})
 # Full schedule projections include availability; compact tool results may omit it.
+_USAGE_HOLD = _object({"until": _STR, "reason": _STR, "reset_known": _BOOL, "window": _NULL_STR},
+                      ["until", "reason", "reset_known"], closed=True)
 for _schema in (SCHEDULE_WITHOUT_LAST_RUN, SCHEDULE):
     _schema["properties"]["notify_target_available"] = _BOOL
-    _schema["required"] = [name for name in _schema["required"] if name != "subscription"]
+    _schema["properties"]["usage_hold"] = _USAGE_HOLD
+    _schema["required"] = [name for name in _schema["required"] if name not in ("subscription", "usage_hold")]
 SCHEDULE_LIMITS = _object({
     **dict.fromkeys(("name_max_chars", "requirement_max_chars", "min_interval_seconds",
                      "min_interval_gated_seconds", "run_timeout_max_seconds", "gate_command_max_chars",

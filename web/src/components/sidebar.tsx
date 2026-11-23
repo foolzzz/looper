@@ -10,6 +10,7 @@ import {
   Radio,
   ListChecks,
   BellRing,
+  BrainCircuit,
   ChevronDown,
   Sliders,
   Folder,
@@ -22,7 +23,7 @@ import { SignOut } from "@/components/sign-out";
 import { ProjectDialog } from "@/components/project-dialog";
 import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { fetchOverview } from "@/lib/api";
-import { fetchAttention } from "@/lib/api-attention";
+import { attentionSettingsGet } from "@/lib/api-attention";
 import { intentsSettingsGet } from "@/lib/api-leads";
 import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
@@ -30,7 +31,7 @@ import { cn } from "@/lib/utils";
 
 /** "history" is one agent's session, or every run of one role; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page = "dashboard" | "todo" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "intents" | "settings" | "history";
+export type Page = "dashboard" | "todo" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "intents" | "memory" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -39,6 +40,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "gates", label: "User Gates", icon: MessageCircleQuestion },
   { page: "schedules", label: "Schedules", icon: CalendarClock },
   { page: "messages", label: "Message stream", icon: Radio },
+  { page: "memory", label: "Memory 记忆", icon: BrainCircuit },
 ];
 
 interface SidebarProps {
@@ -78,11 +80,14 @@ export function Sidebar({
     );
     return () => { live = false; };
   }, []);
-  // The "needs you" summary answers only while it is on (409 otherwise): its page is listed only then.
+  // Read the switch without collecting a summary (which correctly returns 409 while off).
   const [todoOn, setTodoOn] = useState(false);
   useEffect(() => {
     let live = true;
-    fetchAttention().then(() => { if (live) setTodoOn(true); }, () => { if (live) setTodoOn(false); });
+    attentionSettingsGet().then(
+      (settings) => { if (live) setTodoOn(settings.enabled === true); },
+      () => { if (live) setTodoOn(false); },
+    );
     return () => { live = false; };
   }, []);
   const navItems = [

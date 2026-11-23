@@ -9,6 +9,8 @@ from looper.agents import profile_registry as service
 from looper.agents.runtimes import AuthKind, VendorType
 from looper.db import agent_setting_layers as layers, connection, profile_registry as db
 from tests.db_support import DSN, run_db
+from tests.role_support import EVERY_ROLE
+from tests.builtin_support import BUILTIN_PROFILES, builtin_providers
 
 SECRET = "sk-synthetic-registry-read-test-only"
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -69,9 +71,7 @@ def test_normalized_nested_reads_counts_order_and_missing(monkeypatch):
     async def test(pool):
         await _seed(pool)
         providers = await db.list_providers()
-        assert [p['id'] for p in providers] == [
-            'prov-claude-subscription', 'prov-coco-login', 'prov-codex-login', 'prov-cursor-login', 'prov-grok-login',
-            'prov-test', 'prov-empty']
+        assert [p['id'] for p in providers] == [*(i for i, _ in await builtin_providers(pool)), 'prov-test', 'prov-empty']
         provider = await db.get_provider('prov-test')
         assert provider == next(p for p in providers if p['id'] == 'prov-test')
         assert (provider['model_count'], provider['profile_count'], provider['api_key_set']) == (3, 2, True)
@@ -97,8 +97,9 @@ def test_normalized_nested_reads_counts_order_and_missing(monkeypatch):
         assert await db.get_provider('missing') is None
         assert await db.get_profile('missing') is None
         assert await db.get_model('missing') is None
-        # The built-in profile and the advisor's, its judge's and the leads check's.
-        assert await db.login_profile_count('claude-code') == 4
+        # The built-in profiles on the Claude subscription.
+        assert await db.login_profile_count('claude-code') == sum(
+            p.provider.oauth_runtime_type == 'claude-code' for p in BUILTIN_PROFILES.values())
         assert await db.login_profile_count('codex') == 0
         assert SECRET not in repr((providers, models, profiles))
         assert await db.get_api_key('prov-test') == SECRET  # positive control for the isolated secret path
@@ -123,8 +124,7 @@ def test_every_layer_and_usage_reads_the_same_model_reference(monkeypatch):
         assert usage['allowed_in'] == ['Test project']
         view = service.profile_view(profile, usage)
         assert view['profile_id'] == 'agent-test' and view['used_by'] == usage
-        assert view['roles'] == ['manager', 'planner', 'worker', 'explorer', 'reviewer', 'processor', 'advisor', 'advice_check',
-                                 'leads_check', 'outbound_check']
+        assert view['roles'] == EVERY_ROLE
         assert view['cost']['source'] == 'provider_price'
         assert view['cost']['unpriced'] == ['unknown-model'] and view['warnings']
         assert SECRET not in repr((rows, view))
@@ -147,7 +147,8 @@ def test_registry_service_lists_models_vendor_types_login_and_masks_keys(monkeyp
         from types import SimpleNamespace
         monkeypatch.setattr(service, '_login_modules', lambda: {'codex': SimpleNamespace(login_view=login_view)})
         view = await service.registry_view()
-        assert {v['vendor_type'] for v in view['vendor_types']} == {v.value for v in VendorType}
+        assert {v['vendor_type'] for v in view['vendor_types']} == {
+            v.value for v in VendorType if v is not VendorType.ACP_COMMAND}
         assert 'provider_presets' not in view
         account = next(p for p in view['providers'] if p['provider_id'] == 'prov-test')
         assert account['api_key'] == service.SECRET_MASK
@@ -214,8 +215,7 @@ def test_profile_view_preserves_usage_cost_and_warnings_from_normalized_settings
     assert view['profile_id'] == 'agent-test' and view['model_id'] == 'model-test'
     assert view['model']['name'] == 'unknown-model[1m]'
     assert view['provider']['provider_id'] == 'prov-test' and view['provider_name'] == 'Saved account'
-    assert view['roles'] == ['manager', 'planner', 'worker', 'explorer', 'reviewer', 'processor', 'advisor', 'advice_check',
-                             'leads_check', 'outbound_check'] and view['used_by'] == used
+    assert view['roles'] == EVERY_ROLE and view['used_by'] == used
     assert view['cost'] == {'source': 'provider_price', 'equivalent': False, 'unpriced': ['unknown-model[1m]']}
     assert view['warnings'] and view['custom_prompt'] == 'Saved prompt'
     assert 'wrong-model' not in repr(view)
@@ -234,7 +234,7 @@ def test_profile_view_prices_in_launch_catalog_order_not_selected_model_first():
 def test_vendor_suggestions_are_stable_and_do_not_allocate_public_ids():
     first = service.vendor_types_view()
     assert first == service.vendor_types_view()
-    assert [v['vendor_type'] for v in first] == [v.value for v in VendorType]
+    assert [v['vendor_type'] for v in first] == [v.value for v in VendorType if v is not VendorType.ACP_COMMAND]
     login = next(v for v in first if v['vendor_type'] == 'codex-login')
     assert login['auth'] == 'oauth' and login['oauth_runtime_type'] == 'codex'
     assert login['endpoints'] == [{'protocol': 'openai-responses', 'base_url': '', 'use_runtime_default': False}]

@@ -1822,7 +1822,7 @@ class ManagerAgent:
         has_sessions = any(t["name"] == ops_sessions.TOOL_NAME for t in tools)
         has_reminders = any(t["name"] in REMINDER_TOOLS for t in tools)
         if (self._has_templates or has_workflows or has_leads or has_ledger or has_sessions or has_reminders
-                or self.agent_id != DEFAULT_MANAGER_ID):
+                or any(t["name"] == "looper_skill_propose" for t in tools) or self.agent_id != DEFAULT_MANAGER_ID):
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
