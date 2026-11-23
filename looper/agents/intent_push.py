@@ -24,8 +24,13 @@ TICK_SECONDS = 10.0
 EXPIRY_SECONDS = 300.0
 FINAL_RETRY_SECONDS = 30
 FINAL_RETRY_MAX_SECONDS = 300
+PASS_LIMIT = 50
 _LOCK_NAMESPACE = 741923
 _active: IntentPushService | None = None
+
+
+def _final_retry_delay(attempts: int) -> timedelta:
+    return timedelta(seconds=min(FINAL_RETRY_SECONDS * 2**max(attempts-1, 0), FINAL_RETRY_MAX_SECONDS))
 
 
 def _source_line(view: Mapping[str, Any], timezone: str) -> str:
@@ -124,6 +129,7 @@ class IntentPushService:
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._last_expiry: datetime | None = None
+        self._last_intent_id = 0
 
     async def start(self) -> None:
         global _active
@@ -155,7 +161,7 @@ class IntentPushService:
         if (self._drain is not None and self._drain.draining) or not await leads_model.intents_enabled():
             return
         rows = await connection.get_pool().fetch(
-            "SELECT id FROM intents WHERE (state IN ('pending','merged') AND created_at >= $1) "
+            "SELECT id FROM intents WHERE id > $3 AND ((state IN ('pending','merged') AND created_at >= $1) "
             "OR (state IN ('tasked','rejected','expired') AND EXISTS "
             "(SELECT 1 FROM intent_posts p LEFT JOIN intent_final_notices n ON n.push_id=p.id "
             "WHERE p.intent_id=intents.id AND p.kind='push' AND p.state='sent' AND "
@@ -163,9 +169,11 @@ class IntentPushService:
             "(SELECT 1 FROM intent_posts f WHERE f.intent_id=intents.id AND f.kind='final' "
             "AND f.updated_at >= intents.handled_at AND f.state IN ('pending','failed','uncertain')))) "
             "OR n.handled_at <> intents.handled_at OR (n.state='pending' AND n.next_attempt_at <= $2)))) "
-            "ORDER BY id", self._clock()-timedelta(hours=24), self._clock())
+            ") ORDER BY id LIMIT $4", self._clock()-timedelta(hours=24), self._clock(), self._last_intent_id, PASS_LIMIT)
         for row in rows:
             await self._locked(row["id"])
+        # Pending intents stay selectable after a send; continue past them before scanning from the oldest again.
+        self._last_intent_id = rows[-1]["id"] if len(rows) == PASS_LIMIT else 0
 
     async def final_edit(self, intent_id: int) -> None:
         if await leads_model.intents_enabled():
@@ -191,6 +199,7 @@ class IntentPushService:
         schedule = await db_schedules.get_schedule(row["schedule_id"], pool=conn) if row["schedule_id"] else None
         target = await target_for(schedule)
         if target is None:
+            await self._defer_final_notice(conn, intent_id)
             return
         channel, chat = target
         now = self._clock()
@@ -237,6 +246,16 @@ class IntentPushService:
                                    "VALUES($1,$2,$3,$4,$5,$6) RETURNING id",
                                    intent_id, kind, channel, chat, text, candidates or [])
 
+    async def _defer_final_notice(self, conn: Any, intent_id: int) -> None:
+        now = self._clock()
+        notice = await conn.fetchrow("SELECT n.* FROM intent_final_notices n JOIN intent_posts p ON p.id=n.push_id "
+                                     "JOIN intents i ON i.id=p.intent_id WHERE i.id=$1 AND n.handled_at=i.handled_at "
+                                     "AND n.state='pending' AND n.next_attempt_at <= $2", intent_id, now)
+        if notice is not None:
+            # An invalid target spends no delivery attempt, but must not stay due on every tick.
+            await conn.execute("UPDATE intent_final_notices SET next_attempt_at=$2,updated_at=$3 WHERE push_id=$1",
+                               notice["push_id"], now+_final_retry_delay(notice["attempts"]), now)
+
     async def _finalize(self, conn: Any, intent: Mapping[str, Any], push: Mapping[str, Any],
                         posts: list[Any], schedule: Any, text: str) -> None:
         now = self._clock()
@@ -260,6 +279,7 @@ class IntentPushService:
         channel, chat = push["channel_id"], push["chat"]
         schedule = await db_schedules.get_schedule(schedule["id"], pool=conn)
         if await target_for(schedule) != (channel, chat):
+            await self._defer_final_notice(conn, intent["id"])
             return
         final = await conn.fetchrow("SELECT * FROM intent_posts WHERE id=$1", notice["final_post_id"]) \
             if notice["final_post_id"] else None
@@ -267,10 +287,9 @@ class IntentPushService:
         attempts = notice["attempts"]
         if not success and attempts < db_subs.DELIVERY_ATTEMPTS:
             attempts += 1
-            delay = min(FINAL_RETRY_SECONDS * 2**(attempts-1), FINAL_RETRY_MAX_SECONDS)
             # Persist the attempt and its backoff before I/O; the session lock excludes other senders.
             await conn.execute("UPDATE intent_final_notices SET attempts=$2,next_attempt_at=$3,updated_at=$4 "
-                               "WHERE push_id=$1", push["id"], attempts, now+timedelta(seconds=delay), now)
+                               "WHERE push_id=$1", push["id"], attempts, now+_final_retry_delay(attempts), now)
             try:
                 success = (await self._registry.edit(channel, push_target(channel, chat), push["external_id"], text)).success
             except Exception:
@@ -382,7 +401,8 @@ class IntentPushService:
             return
         now = self._clock()
         rows = await connection.get_pool().fetch("SELECT id FROM intents WHERE state='pending' "
-                                                 "AND COALESCE(expires_at,created_at+interval '24 hours') <= $1", now)
+                                                 "AND COALESCE(expires_at,created_at+interval '24 hours') <= $1 "
+                                                 "ORDER BY id LIMIT $2", now, PASS_LIMIT)
         for row in rows:
             try:
                 async with connection.transaction() as conn:

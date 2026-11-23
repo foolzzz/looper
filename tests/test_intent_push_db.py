@@ -774,3 +774,73 @@ def test_successful_legacy_transition_does_not_revive_an_older_failed_reply(monk
         assert len(env.channels.posts) == 1 and env.channels.edits == []
         assert await pool.fetchval("SELECT count(*) FROM intent_final_notices") == 0
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("guard", ["before_processing", "before_edit"])
+@pytest.mark.parametrize("attempts,delay", [(0, 30), (2, 60), (6, 300)])
+def test_invalid_final_notice_target_defers_without_spending_attempts(monkeypatch, guard, attempts, delay):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        iid = await env.create(created_at=NOW)
+        await env.service.run_once()
+        async with pool.acquire() as conn, conn.transaction():
+            await store.transition(conn, iid, "rejected", via="dashboard", now=NOW)
+        await pool.execute("INSERT INTO intent_final_notices(push_id,handled_at,attempts,next_attempt_at,updated_at) "
+                           "SELECT id,$1,$2,$1,$1 FROM intent_posts WHERE intent_id=$3", NOW, attempts, iid)
+        original = intent_push.target_for
+        calls = 0
+        async def invalid(schedule):
+            nonlocal calls
+            calls += 1
+            return await original(schedule) if guard == "before_edit" and calls == 1 else None
+        monkeypatch.setattr(intent_push, "target_for", invalid)
+        await env.service.run_once()
+        notice = await pool.fetchrow("SELECT * FROM intent_final_notices")
+        assert notice["next_attempt_at"] == NOW+timedelta(seconds=delay)
+        assert notice["state"] == "pending" and notice["attempts"] == attempts
+        assert len(env.channels.posts) == 1 and env.channels.edits == []
+        # A restarted poller must not select the blocked notice on every ten-second tick.
+        service = intent_push.IntentPushService(env.channels, clock=lambda: NOW+timedelta(seconds=10))
+        calls = 0
+        await service.run_once()
+        assert calls == 0
+        service._clock = lambda: notice["next_attempt_at"]
+        monkeypatch.setattr(intent_push, "target_for", original)
+        await service.run_once()
+        assert await pool.fetchval("SELECT state FROM intent_final_notices") == ("sent" if attempts < 3 else "failed")
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("phase", ["push", "final"])
+def test_push_backlog_drains_oldest_first_over_passes(monkeypatch, phase):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        ids = [await env.create(created_at=NOW) for _ in range(51)]
+        if phase == "final":
+            await env.service.run_once()
+            await env.service.run_once()
+            await pool.execute("UPDATE intents SET state='rejected',handled_at=$1,handled_via='dashboard'", NOW)
+        for count in (50, 51):
+            await env.service.run_once()
+            if phase == "push":
+                done = await pool.fetch("SELECT intent_id FROM intent_posts WHERE kind='push' ORDER BY intent_id")
+                assert len(env.channels.posts) == count
+            else:
+                done = await pool.fetch("SELECT intent_id FROM intent_posts WHERE edited_at IS NOT NULL ORDER BY intent_id")
+                assert len(env.channels.edits) == count
+            assert [row["intent_id"] for row in done] == ids[:count]
+        await env.service.run_once()
+        assert len(env.channels.posts if phase == "push" else env.channels.edits) == 51
+    run_db(check, monkeypatch)
+
+
+def test_expiry_backlog_drains_oldest_first_over_passes(monkeypatch):
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        ids = [await env.create(created_at=NOW-timedelta(days=2)) for _ in range(51)]
+        for count in (50, 51, 51):
+            await env.service.expire()
+            done = await pool.fetch("SELECT id FROM intents WHERE state='expired' ORDER BY id")
+            assert [row["id"] for row in done] == ids[:count]
+        assert env.channels.posts == [] and env.channels.edits == []
+    run_db(check, monkeypatch)
