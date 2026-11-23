@@ -4,9 +4,11 @@ Digests were captured from origin/main before the explorer implementation. They
 cover argv, generated configuration, reported catalog tools and prompt blocks.
 """
 from dataclasses import replace
+import ast
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -74,3 +76,19 @@ BASELINE = {
 @pytest.mark.parametrize('role', ['manager', 'planner', 'worker'])
 def test_existing_role_runtime_inputs_byte_identical(kind, role):
     assert hashlib.sha256(surfaces(kind, role)).hexdigest() == BASELINE[f'{kind}/{role}']
+
+
+@pytest.mark.parametrize('role', ['manager', 'planner'])
+def test_resident_process_signature_inputs_match_main(role):
+    """Together with argv/prompt snapshots, pin the resident restart boundary to main."""
+    path = f'looper/agents/tiers/{role}.py'
+    baseline = subprocess.run(['git', 'show', f'origin/main:{path}'],
+                              capture_output=True, check=True, text=True).stdout
+    current = (Path(__file__).resolve().parents[1] / path).read_text()
+
+    def signatures(source):
+        return [ast.dump(node.value) for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == 'signature' for target in node.targets)]
+
+    expected = signatures(baseline)
+    assert expected and signatures(current) == expected

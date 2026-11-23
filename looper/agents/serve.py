@@ -1018,6 +1018,12 @@ async def _run_agent_system_watched(
             room.consults = consults
             planner_ops.room = room
             room_ops = RoomOps(room, url=_local_url(host, port))
+            from .subagents import SpawnService
+            from .ops.subagents import WorkerSubagents
+            explorers = WorkerSubagents(SpawnService(runtime_root, claude_bin=claude_bin,
+                keeper=KeeperSettings(epoch) if lease is not None else None,
+                on_stale=lease.lose if lease is not None else None), room, worker_pool=worker_pool)
+            room_ops.subagents = explorers
             worker_pool.room_ops = room_ops
             for candidate in scan.candidates:
                 if candidate.grant:
@@ -1064,6 +1070,7 @@ async def _run_agent_system_watched(
         # Replayed messages and resumed runs can probe or call platform tools immediately.
         # Listen before starting any of their consumers.
         try:
+            await explorers.start()
             await consults.resume_all()
             # Before any Planner resumes: a consult of the advisor a stopped server left running cannot finish.
             from .advisor import fail_interrupted
@@ -1145,9 +1152,12 @@ async def _run_agent_system_watched(
                 await advisory_checks
             if mode is ShutdownMode.DETACH_KEPT:
                 await worker_pool.detach_kept(epoch=lease.epoch)
+                await explorers.stop(epoch=lease.epoch)
                 if control is not None:
                     await control.close(handover=True)
             logger.info("shutting down agent system...")
+            if mode is not ShutdownMode.DETACH_KEPT:
+                await explorers.stop()
             await consults.stop()
             await gate_reminders.stop()
             # Cancel and reap in-flight wait checks before stopping agents and their bus.
