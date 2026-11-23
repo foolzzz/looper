@@ -11,20 +11,30 @@
       "record_id": null
     },
     "row": {
+      "attempt": 1,
       "brief": {
         "why": "Choose an execution strategy."
       },
       "budget_usd": 0.2,
+      "cancel_reason": null,
+      "child_process": null,
       "child_record_id": null,
       "created_at": "<timestamp>",
+      "delivered_at": null,
+      "delivery": null,
       "detail": "settings unavailable",
+      "failure_cause": null,
+      "failure_class": null,
       "finished_at": "<timestamp>",
       "id": 1,
+      "idempotency_key": null,
       "inputs": {
         "language": "Python"
       },
       "kind": "advisor",
       "parent_record_id": 1,
+      "parent_spend_known": null,
+      "profile_id": null,
       "result": {
         "failure": "unavailable",
         "rounds": [
@@ -38,6 +48,7 @@
       },
       "returns": 0,
       "rounds": 1,
+      "spawner": null,
       "spent_usd": 0.0,
       "state": "failed",
       "step_id": "step-golden",
@@ -48,20 +59,30 @@
   "tables": {
     "agent_spawns": [
       {
+        "attempt": 1,
         "brief": {
           "why": "Choose an execution strategy."
         },
         "budget_usd": 0.2,
+        "cancel_reason": null,
+        "child_process": null,
         "child_record_id": null,
         "created_at": "<timestamp>",
+        "delivered_at": null,
+        "delivery": null,
         "detail": "settings unavailable",
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": "<timestamp>",
         "id": 1,
+        "idempotency_key": null,
         "inputs": {
           "language": "Python"
         },
         "kind": "advisor",
         "parent_record_id": 1,
+        "parent_spend_known": null,
+        "profile_id": null,
         "result": {
           "failure": "unavailable",
           "rounds": [
@@ -75,6 +96,7 @@
         },
         "returns": 0,
         "rounds": 1,
+        "spawner": null,
         "spent_usd": 0.0,
         "state": "failed",
         "step_id": "step-golden",
