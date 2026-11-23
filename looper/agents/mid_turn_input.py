@@ -64,6 +64,8 @@ class MergedInput:
                 times.ack_at = turn_metrics.ack_board.take(*key)
                 times.ack = (turn_metrics.AckKind.REACTION if times.ack_at else
                              turn_metrics.AckKind.NONE if known else turn_metrics.AckKind.PENDING)
+            # Its first reply waits for the user turn it was merged into.
+            times.queued_behind = turn_metrics.QueuedBehind.USER
             result["turn_metrics"] = times.to_metadata(delivery, TurnOrigin.USER, times.received_at < started_at)
         return result
 

@@ -8,6 +8,7 @@ sets (``ManagerAgent._current``), else main.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
@@ -15,7 +16,10 @@ from ..run_usage import Usage
 from ..session_routing import MAIN_KEY, SessionKey
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from ..agent_settings import AgentSettings, Launch
+    from ..ops import TurnOrigin
     from ..research_order import ResearchSources
     from ..runtimes import ResidentSession, RuntimeAdapter
     from ..session_switch import SessionSwitch
@@ -80,6 +84,8 @@ class ManagerSession:
     # Told to the next user turn: the user stopped or withdrew the ones before.
     stopped_notes: list[str] = field(default_factory=list)
     lock_owner: TurnToken | None = None  # the turn that holds ``turn_lock`` from its preparation
+    # turns that held this session's turn lock, newest last, while metrics are on; read by queued_behind
+    turns_ended: deque[tuple[TurnOrigin, datetime]] = field(default_factory=lambda: deque(maxlen=16))
     running_token: TurnToken | None = None  # the token of the user turn being answered
     research: ResearchSources | None = None  # where the turn being prepared may look things up, when on
     # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).

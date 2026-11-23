@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -39,6 +39,14 @@ class ChatKind(str, Enum):
     GROUP = 'group'
 
 
+class QueuedBehind(str, Enum):
+    """What a user message waited behind in its own session, between arrival and its turn."""
+
+    NONE = 'none'
+    USER = 'user'
+    BACKGROUND = 'background'
+
+
 @dataclass
 class TurnTimes:
     received_at: datetime
@@ -47,17 +55,52 @@ class TurnTimes:
     first_reply_at: datetime | None = None
     tool_calls: int = 0
     chat: ChatKind = ChatKind.DASHBOARD
+    queued_behind: QueuedBehind | None = None
 
     def to_metadata(self, delivery: TurnDelivery, origin: TurnOrigin, replayed: bool) -> dict[str, Any]:
         if origin is TurnOrigin.COMPLETION:
             return {'origin': origin.value, 'tool_calls': self.tool_calls, 'delivery': delivery.value}
         def elapsed(at: datetime | None) -> int | None:
             return None if at is None else round((at - self.received_at).total_seconds() * 1000)
-        return {'v': 1, 'origin': origin.value, 'chat': self.chat.value,
-                'received_at': self.received_at.isoformat().replace('+00:00', 'Z'),
-                'ack': self.ack.value, 'ack_ms': elapsed(self.ack_at),
-                'first_reply_ms': elapsed(self.first_reply_at), 'tool_calls': self.tool_calls,
-                'delivery': delivery.value, 'replayed': replayed}
+        record = {'v': 1, 'origin': origin.value, 'chat': self.chat.value,
+                  'received_at': self.received_at.isoformat().replace('+00:00', 'Z'),
+                  'ack': self.ack.value, 'ack_ms': elapsed(self.ack_at),
+                  'first_reply_ms': elapsed(self.first_reply_at), 'tool_calls': self.tool_calls,
+                  'delivery': delivery.value, 'replayed': replayed}
+        if self.queued_behind is not None:
+            record['queued_behind'] = self.queued_behind.value
+        return record
+
+
+def queued_behind(ended: Iterable[tuple[TurnOrigin, datetime]], received_at: datetime) -> QueuedBehind:
+    """What this message waited behind in its own session between arrival and its turn.
+
+    Turns that ended at or after ``received_at`` count. A completion turn, or any
+    other non-user origin, is ``background`` and wins over a user turn. A user
+    turn alone is ``user``. An empty window is ``none``. Own turns are not recorded.
+    """
+    relevant = [origin for origin, ended_at in ended if ended_at >= received_at]
+    if any(origin != TurnOrigin.USER for origin in relevant):
+        return QueuedBehind.BACKGROUND
+    if any(origin == TurnOrigin.USER for origin in relevant):
+        return QueuedBehind.USER
+    return QueuedBehind.NONE
+
+
+def note_lock_end(session: Any, token: Any, origin: TurnOrigin) -> None:
+    """Remember that ``token`` held this session's turn lock, once, while metrics are on.
+
+    A turn that never owned the lock blocked nobody. The turn is recorded even when
+    post-reply maintenance keeps the lock afterwards; that hold is not another turn,
+    so callers do not record it again when the lock is released. The completion
+    deadline path and the turn's ``finally`` share one record.
+    """
+    if token is None or not chat_settings.metrics_enabled() or session.lock_owner is not token:
+        return
+    if getattr(token, '_queued_end_noted', False):
+        return
+    token._queued_end_noted = True
+    session.turns_ended.append((origin, datetime.now(timezone.utc)))
 
 
 class AckBoard:
