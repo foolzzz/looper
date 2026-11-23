@@ -825,15 +825,18 @@ async def _run_agent_system_watched(
         with startup.measure("kept_scan"):
             left_running = await tasks_left_running(pool)
             from . import kept_dirs
+            from .ops.subagents import kept_explorer_records
+            explorer_records = await kept_explorer_records(runtime_root, pool) if lease is not None else {}
             try:
                 scan = await kept_dirs.scan_at_start(runtime_root, epoch=epoch if lease is not None else None,
-                                                     resumable=left_running.resumable, pool=pool)
+                    resumable=left_running.resumable, pool=pool,
+                    **({"reserved_runs": set(explorer_records)} if explorer_records else {}))
             except OSError as exc:
                 raise StartupCheckFailed(f"cannot tell whether kept runs are still running: {exc}") from exc
         # The runs the previous server did not see end: nothing runs yet, so every record still running is one.
         with startup.measure("end_unfinished_records"):
             from ..db.llm_records import end_unfinished_records
-            if unfinished := await end_unfinished_records(pool=pool, keep=scan.record_ids):
+            if unfinished := await end_unfinished_records(pool=pool, keep=[*scan.record_ids, *explorer_records.values()]):
                 logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
 
         with startup.measure("llmrec"):

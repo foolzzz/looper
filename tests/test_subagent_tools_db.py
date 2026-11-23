@@ -131,6 +131,16 @@ def test_grant_recovery_keeps_tools_but_requires_parent_binding(tmp_path, monkey
     run_db(check, monkeypatch)
 
 
+def test_binding_uses_the_recorded_runtime_directory(tmp_path):
+    facade = WorkerSubagents(SimpleNamespace(), RoomService())
+    seat = Seat("worker@s1", "worker", MemberKind.WORK, run="worker-parent", work_dir=str(tmp_path))
+    recorder = SimpleNamespace(record_id=1, _cwd=str(tmp_path / "verification"),
+                               _usage_so_far=SimpleNamespace(cost_usd=None))
+    launch = SimpleNamespace(max_budget_usd=None)
+    facade.bind("task", seat, recorder, launch)
+    assert facade._parents[seat.run].caller().work_dir == tmp_path / "verification"
+
+
 def test_tools_launch_real_standin_wait_push_and_reap_child_on_parent_end(tmp_path, monkeypatch):
     from tests.fake_claude import fake_claude
     from looper.agents import proc_tree

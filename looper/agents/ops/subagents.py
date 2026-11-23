@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,27 @@ explorers are cancelled. These tools share your run's budget and task limits.
 
 def worker_enabled(project: Mapping[str, Any] | None, *, is_verify: bool = False) -> bool:
     return not is_verify and (project or {}).get("subagents") == "on"
+
+
+async def kept_explorer_records(runtime_root: Path, pool: Any) -> dict[str, int]:
+    """Delegate persisted explorer keepers to SpawnService before the Worker startup sweep."""
+    from ..keeper import RUNS_DIR
+    rows = await pool.fetch("SELECT s.child_record_id,s.child_process,r.agent_id FROM agent_spawns s "
+        "JOIN llm_records r ON r.id=s.child_record_id WHERE s.kind='explorer' AND s.state='asking' "
+        "AND s.child_process->>'kept'='true' AND r.run_kind='explorer' AND r.status='running'")
+    owned = {}
+    root = (runtime_root / RUNS_DIR).resolve()
+    for row in rows:
+        identity = row["child_process"]
+        if isinstance(identity, str):
+            identity = json.loads(identity)
+        location = identity.get("run_dir")
+        if not isinstance(location, str) or not location:
+            continue
+        directory = Path(location).resolve()
+        if directory.parent == root and directory.name == row["agent_id"]:
+            owned[directory.name] = row["child_record_id"]
+    return owned
 
 
 async def _never(call):
@@ -121,9 +143,12 @@ class WorkerSubagents:
         self._scanner: asyncio.Task | None = None
 
     def bind(self, task_id: str, seat: Any, recorder: Any, launch: Any) -> None:
-        if recorder.record_id is None or not seat.work_dir:
+        directory = getattr(recorder, "_cwd", None) or seat.work_dir
+        if recorder.record_id is None or not directory:
             raise ValueError("explorer tools require a recorded parent and working directory")
-        self._parents[seat.run] = _Parent(task_id, seat, recorder, launch)
+        # Verification Workers may run in a private checkout rather than the
+        # dispatch's directory. Explore the actual recorded runtime directory.
+        self._parents[seat.run] = _Parent(task_id, replace(seat, work_dir=str(directory)), recorder, launch)
 
     async def end(self, run: str) -> None:
         if run not in self._parents:
@@ -273,17 +298,22 @@ class WorkerSubagents:
                                                                  caller.spent_usd)
                 rows = await self.service.pool.fetch("SELECT s.id,s.state,r.status FROM agent_spawns s "
                     "JOIN llm_records r ON r.id=s.parent_record_id WHERE s.kind='explorer' "
-                    "AND (s.finished_at IS NULL OR s.delivered_at IS NULL)")
+                    "AND (s.finished_at IS NULL OR (s.delivered_at IS NULL AND EXISTS "
+                    "(SELECT 1 FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=s.task_id "
+                    "AND p.subagents='on' AND COALESCE(p.agent_room,'on')='on')))")
                 for row in rows:
-                    if row["status"] != "running":
-                        await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
-                    elif row["state"] == "queued":
-                        self.schedule(row["id"])
-                    elif row["state"] == "finishing":
-                        await self.service.finish(row["id"])
-                    elif row["state"] == "cancelling":
-                        await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
-                    await self._fallback([row["id"]])
+                    try:
+                        if row["status"] != "running":
+                            await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
+                        elif row["state"] == "queued":
+                            self.schedule(row["id"])
+                        elif row["state"] == "finishing":
+                            await self.service.finish(row["id"])
+                        elif row["state"] == "cancelling":
+                            await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
+                        await self._fallback([row["id"]])
+                    except Exception:
+                        logger.exception("explorer %s recovery deferred", row["id"])
             except Exception:
                 logger.exception("explorer recovery scan failed")
             await asyncio.sleep(1)
@@ -302,5 +332,8 @@ class WorkerSubagents:
         else:
             rows = await self.service.pool.fetch("SELECT id FROM agent_spawns WHERE kind='explorer' AND finished_at IS NULL")
             for row in rows:
-                await self.service.cancel(row["id"], reason=CancelReason.SERVER)
+                try:
+                    await self.service.cancel(row["id"], reason=CancelReason.SERVER)
+                except Exception:
+                    logger.exception("explorer %s shutdown deferred to recovery", row["id"])
         await asyncio.gather(*list(self._jobs.values()), return_exceptions=True)

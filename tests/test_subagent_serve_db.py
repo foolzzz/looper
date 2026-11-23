@@ -1,11 +1,12 @@
 """The disposable serve lifecycle starts queued explorers and delivers only once across restart."""
 import asyncio
-import json
-import os
 import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+from urllib.parse import unquote, urlsplit
 
 import asyncpg
 import pytest
@@ -13,13 +14,18 @@ import pytest
 from evals.prompt_regression import runner
 from looper.db import agent_spawns, llm_records, projects
 from tests.db_support import DSN, fresh_database_without_recording
-from tests.runner_support import require_disposable_database
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
 
 def test_serve_resumes_queued_explorer_and_restart_does_not_redeliver(monkeypatch):
-    require_disposable_database(str(DSN), served=False)
+    # This task's disposable server and CI; the older runner helper names a
+    # different local server and assumes a fixed password.
+    target = urlsplit(str(DSN))
+    if (target.scheme != "postgresql" or target.hostname not in ("127.0.0.1", "localhost")
+            or target.port not in (54331, 5432) or target.username != "postgres"
+            or unquote(target.path.lstrip("/")) in ("looper", "loopx") or target.query or target.fragment):
+        raise ValueError("requires the dedicated disposable PostgreSQL server")
     monkeypatch.setattr(runner, "_SERVE", "import sys\nfrom looper.cli import main\n"
         'sys.exit(main(["serve","--host","127.0.0.1","--port",sys.argv[1],"--runtime-root",sys.argv[2]]))\n')
     with tempfile.TemporaryDirectory(prefix="explorer.", dir="/tmp") as directory:
@@ -101,3 +107,33 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,
                         time.sleep(.05)
                     assert spawn["state"] == "answered" and spawn["result"]["verified"] is True
                     assert len(records) == len(messages) == 1
+
+
+def test_worker_startup_scan_leaves_delegated_explorer_keepers_for_the_spawn_service(tmp_path, monkeypatch):
+    from looper.agents import keeper, kept_dirs
+    from looper.db import plans
+
+    directory = tmp_path / keeper.RUNS_DIR / "explorer-owned"
+    directory.mkdir(parents=True)
+    (directory / keeper.STATE).write_text("{}")
+    no_worker_scan = Mock(side_effect=AssertionError("explorer has its own recovery owner"))
+    monkeypatch.setattr(kept_dirs.KeeperRecord, "read", no_worker_scan)
+    monkeypatch.setattr(kept_dirs, "live", lambda records: {})
+    monkeypatch.setattr(plans, "run_holds", AsyncMock(return_value={}))
+    scan = asyncio.run(kept_dirs.scan_at_start(tmp_path, epoch=2, reserved_runs={directory.name}))
+    assert not scan.candidates and not scan.record_ids
+    assert directory.exists()
+    no_worker_scan.assert_not_called()
+
+
+def test_kept_explorer_startup_ownership_comes_from_durable_records(tmp_path):
+    from looper.agents import keeper
+    from looper.agents.ops.subagents import kept_explorer_records
+
+    pool = SimpleNamespace(fetch=AsyncMock(return_value=[
+        {"child_record_id": 3, "agent_id": "explorer-owned",
+         "child_process": {"run_dir": str(tmp_path / keeper.RUNS_DIR / "explorer-owned")}},
+        {"child_record_id": 4, "agent_id": "explorer-wrong",
+         "child_process": {"run_dir": str(tmp_path / "outside" / "explorer-wrong")}},
+    ]))
+    assert asyncio.run(kept_explorer_records(tmp_path, pool)) == {"explorer-owned": 3}
