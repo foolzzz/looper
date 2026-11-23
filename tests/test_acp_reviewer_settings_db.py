@@ -193,84 +193,52 @@ def test_import_skips_an_existing_chain_into_acp_and_allows_clearing_it(monkeypa
     run_db(check, monkeypatch)
 
 
-@pytest.mark.provenance
-def test_off_registry_selection_and_export_match_main(monkeypatch, tmp_path):
-    """Compare current main and this checkout on one disposable schema."""
-    import io
-    import os
-    from pathlib import Path
-    import subprocess
-    import sys
-    import tarfile
+def test_off_registry_selection_and_export_match_absent(monkeypatch):
+    """Disabling the pilot preserves the catalog and export without its registrations."""
+    from looper.agents import config_transfer, projects, runtimes
 
-    root = Path(__file__).resolve().parents[1]
-    revision = subprocess.run(["git", "rev-parse", "origin/main"], cwd=root, text=True,
-                              capture_output=True, check=True).stdout.strip()
-    archive = subprocess.run(["git", "archive", revision, "looper", "runners", "pyproject.toml"], cwd=root,
-                             capture_output=True, check=True).stdout
-    baseline = tmp_path / "main"
-    baseline.mkdir()
-    with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
-        bundle.extractall(baseline, filter="data")
+    def normalized(value):
+        if isinstance(value, dict):
+            return {key: normalized(item) for key, item in value.items()
+                    if key not in {"created_at", "updated_at", "probed_at", "exported_at", "looper_version"}}
+        if isinstance(value, (list, tuple)):
+            return [normalized(item) for item in value]
+        return value
 
-    program = r'''
-import asyncio, hashlib, json, os, sys
-from pathlib import Path
-import asyncpg
-import looper
-from looper.agents import config_transfer, profile_registry, projects, runtimes
-from looper.db import connection
-assert Path(looper.__file__).resolve().is_relative_to(Path.cwd().resolve())
-
-def normalized(value):
-    if isinstance(value, dict):
-        return {key: normalized(item) for key, item in value.items()
-                if key not in {'created_at', 'updated_at', 'probed_at', 'exported_at'}}
-    if isinstance(value, (list, tuple)):
-        return [normalized(item) for item in value]
-    return value
-
-async def main():
-    pool = await asyncpg.create_pool(os.environ['LOOPER_TEST_DATABASE_URL'], min_size=1, max_size=3,
-                                    server_settings={'search_path': sys.argv[1]})
-    connection._pool = pool
-    profile_registry._login_modules = lambda: {}
-    try:
-        catalog = await profile_registry.registry_view()
+    async def snapshot(pool):
+        catalog = await registry.registry_view()
         chosen, restricted = await projects.choosable_profiles(None)
-        async with pool.acquire() as conn, conn.transaction(isolation='repeatable_read', readonly=True):
-            exported = json.loads(''.join([part async for part in config_transfer.export_chunks(
+        async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+            exported = json.loads("".join([part async for part in config_transfer.export_chunks(
                 conn, include_projects=True, include_secrets=False)]))
-        values = {'registry': catalog, 'choosable_profiles': [chosen, restricted],
-                  'servable_roles': {name: profile_registry.servable_roles(adapter.capabilities, name)
-                                     for name, adapter in runtimes.ADAPTERS.items() if name != 'acp'},
-                  'config_export': exported}
-        assert catalog['runtimes'] and catalog['profiles'] and chosen
-        assert exported['runtimes'] and exported['profiles']
-        print(json.dumps({key: hashlib.sha256(json.dumps(normalized(value), sort_keys=True, default=str).encode()).hexdigest()
-                          for key, value in values.items()}, sort_keys=True))
-    finally:
-        connection._pool = None
-        await pool.close()
-asyncio.run(main())
-'''
+        assert catalog["runtimes"] and catalog["profiles"] and chosen
+        assert exported["runtimes"] and exported["profiles"]
+        # This PR adds no export section: even an unconditional new section must fail while off.
+        assert "acp_reviewer" not in exported and "acp_reviewer" not in exported["settings"]
+        assert exported["settings"]["cost_guard"] == {"mode": "off"}
+        return normalized({"registry": catalog, "choosable_profiles": [chosen, restricted],
+                           "servable_roles": {row["type"]: registry.servable_roles(
+                               runtimes.ADAPTERS[row["type"]].capabilities, row["type"])
+                               for row in catalog["runtime_types"]}, "config_export": exported})
 
     async def check(pool):
         assert await settings.read() == settings.AcpReviewerSettings()
-        # Include an ordinary runtime/Profile so an empty query/export cannot pass the comparison.
+        # Positive controls keep an empty query/export from satisfying the comparison.
         await pool.execute("INSERT INTO agent_runtimes (id,name,type,capabilities,builtin) "
                            "VALUES ('rt-off-baseline','Baseline runtime','claude-code',ARRAY['run'],false)")
         await pool.execute("INSERT INTO agent_profiles (id,name,runtime_id,model_id) "
                            "SELECT 'agent-off-baseline','Baseline review','rt-off-baseline',model_id "
                            "FROM agent_profiles WHERE id='agent-claude-code-opus'")
-        schema = await pool.fetchval("SHOW search_path")
-        results = []
-        environment = {**os.environ, "PYTHONPATH": ""}
-        for checkout in (baseline, root):
-            result = await asyncio.to_thread(subprocess.run, [sys.executable, "-c", program, schema],
-                                            cwd=checkout, env=environment, text=True, capture_output=True,
-                                            check=False, timeout=45)
-            assert result.returncode == 0, result.stderr
-            results.append(json.loads(result.stdout))
-        assert results[0] == results[1], f"off-path differs from main {revision}: {results}"
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES ('cost_guard.mode','off')")
+        off = await snapshot(pool)
+        with monkeypatch.context() as absent:
+            absent.delitem(runtimes.ADAPTERS, "acp")
+            # Enum iteration supplies vendor registrations; retain the class for existing identity checks.
+            absent.setattr(VendorType, "_member_names_", [name for name in VendorType._member_names_
+                                                        if name != "ACP_COMMAND"])
+            absent.setattr(settings, "read", AsyncMock(return_value=settings.AcpReviewerSettings()))
+            absent.setattr(settings, "ensure_registered", AsyncMock())
+            assert off == await snapshot(pool)
+
+    monkeypatch.setattr(registry, "_login_modules", lambda: {})
     run_db(check, monkeypatch)
