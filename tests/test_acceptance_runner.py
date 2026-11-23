@@ -119,12 +119,13 @@ def test_timeout_ends_background_descendants(tmp_path, monkeypatch):
 def test_private_checkout_detects_even_restored_writes(tmp_path, monkeypatch, command):
     work = tmp_path / "repo"
     head = repository(work)
-    check = CommandCheck("c1", 1, command, network=True)
+    check = CommandCheck("c1", 1, command, protect=("code.txt",), network=True)
     async def run(pool):
         await seed(pool, work, [check])
         row = (await invoke(tmp_path, [check], work=work, base_commit=head))[-1]
         assert row["guarded"] and row["head_sha"] == head and row["content_sha"]
         assert (row["state"], row["error_kind"]) == ("error", "changed_code")
+        assert row["protected_changed"] == ["code.txt"]
         assert (work / "code.txt").read_text() == "original\n"
         assert git(work, "status", "--porcelain") == ""
         assert not list((tmp_path / "runtime" / ".local" / "acceptance").glob("*"))
@@ -276,6 +277,124 @@ def test_process_fence_records_error_without_launching(tmp_path, monkeypatch):
         row = (await invoke(tmp_path, [check]))[-1]
         assert row["error_kind"] == "evidence_unavailable" and not (tmp_path / "forbidden").exists()
     run_db(run, monkeypatch)
+
+
+@pytest.mark.parametrize("stage", ["preflight", "monitor", "artifact"])
+def test_unexpected_failure_settles_evidence_before_propagating(tmp_path, monkeypatch, stage):
+    work = tmp_path / "repo"
+    head = repository(work)
+    check = ArtifactCheck("c1", 1, "printf measured > result.txt", artifact=("result.txt",), network=stage != "preflight")
+    if stage == "preflight":
+        from looper.agents import proc_tree
+        monkeypatch.setattr(proc_tree, "spawn", AsyncMock(side_effect=RuntimeError("control plane fenced")))
+    elif stage == "monitor":
+        monkeypatch.setattr(runner.VerificationWrites, "finish", lambda _: (_ for _ in ()).throw(RuntimeError("watch lost")))
+    else:
+        monkeypatch.setattr(runner.artifacts, "collect", lambda *a: (_ for _ in ()).throw(RuntimeError("storage lost")))
+
+    async def run(pool):
+        await seed(pool, work, [check])
+        with pytest.raises(RuntimeError):
+            await invoke(tmp_path, [check], work=work, base_commit=head)
+        row, = await runs.list_runs("task-check")
+        assert (row["state"], row["error_kind"]) == ("error", "evidence_unavailable")
+        assert row["finished_at"] is not None and row["duration_ms"] is not None
+        assert await runs.recover_interrupted() == []  # a completed failure is not a restart interruption
+        assert not (work / "result.txt").exists()
+    run_db(run, monkeypatch)
+
+
+@pytest.mark.parametrize("stage", ["result", "preflight"])
+def test_failed_evidence_write_remains_unfinished_and_cannot_be_skipped(tmp_path, monkeypatch, stage):
+    check = CommandCheck("c1", 1, "echo measured >> count", network=stage == "result")
+    if stage == "preflight":
+        from looper.agents import proc_tree
+        monkeypatch.setattr(proc_tree, "spawn", AsyncMock(side_effect=RuntimeError("control plane fenced")))
+    finish = AsyncMock(side_effect=OSError("evidence database unavailable"))
+    monkeypatch.setattr(runs, "finish_run", finish)
+    async def run(pool):
+        await seed(pool, tmp_path, [check])
+        with pytest.raises(runner.EvidenceUnavailable):
+            await invoke(tmp_path, [check])
+        row, = await runs.list_runs("task-check")
+        assert row["state"] == "running" and row["finished_at"] is None
+        with pytest.raises(runner.EvidenceUnavailable, match="running"):
+            await invoke(tmp_path, [check])
+        if stage == "result":
+            assert (tmp_path / "count").read_text() == "measured\n"
+        else:
+            assert not (tmp_path / "count").exists()
+        assert finish.await_count == 1  # do not retry an uncertain terminal write
+    run_db(run, monkeypatch)
+
+
+@pytest.mark.parametrize("network,error", [(True, "could_not_start"), (False, "sandbox_unavailable")])
+def test_launch_failure_distinguishes_network_and_sandbox(tmp_path, monkeypatch, network, error):
+    from looper.agents import proc_tree
+    monkeypatch.setattr(proc_tree, "spawn", AsyncMock(side_effect=FileNotFoundError("launcher missing")))
+    check = CommandCheck("c1", 1, "touch must-not-run", network=network)
+    async def run(pool):
+        await seed(pool, tmp_path, [check])
+        row = (await invoke(tmp_path, [check]))[-1]
+        assert (row["state"], row["error_kind"]) == ("error", error)
+        assert not (tmp_path / "must-not-run").exists()
+    run_db(run, monkeypatch)
+
+
+def test_permission_downgrade_refuses_network_check_without_claiming_sandbox_failure(tmp_path, monkeypatch):
+    check = CommandCheck("c1", 1, "touch must-not-run", network=True)
+    async def run(pool):
+        owner = await seed(pool, tmp_path, [check])
+        await projects.set_acceptance_checks(owner["id"], "local", pool=pool)
+        row = (await invoke(tmp_path, [check]))[-1]
+        assert (row["state"], row["error_kind"]) == ("error", "could_not_start")
+        assert not (tmp_path / "must-not-run").exists()
+    run_db(run, monkeypatch)
+
+
+def test_remaining_budget_expires_before_command_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "STEP_BUDGET_SECONDS", 0.25)
+    check = CommandCheck("c1", 1, "sleep 10", timeout_seconds=10, network=True)
+    async def run(pool):
+        await seed(pool, tmp_path, [check])
+        row = (await invoke(tmp_path, [check]))[-1]
+        assert (row["state"], row["error_kind"]) == ("error", "budget")
+    run_db(run, monkeypatch)
+
+
+def test_task_artifact_removal_waits_for_an_active_collection(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from looper.agents import acceptance_artifacts as artifacts
+
+    source, runtime = tmp_path / "source", tmp_path / "runtime"
+    source.mkdir()
+    runtime.mkdir()
+    (source / "report.txt").write_text("measured")
+    collecting, release, deleting = threading.Event(), threading.Event(), threading.Event()
+    original = artifacts._mkdir
+    def pause(directory, boundary):
+        original(directory, boundary)
+        collecting.set()
+        assert release.wait(5)
+    monkeypatch.setattr(artifacts, "_mkdir", pause)
+    def remove():
+        deleting.set()
+        artifacts.remove_task(runtime, "task-check")
+    with ThreadPoolExecutor(max_workers=2) as threads:
+        collected = threads.submit(artifacts.collect, source, ("report.txt",), runtime,
+            {"task_id": "task-check", "step_id": "step-1", "attempt": 1, "check_id": "c1", "run": 1})
+        try:
+            assert collecting.wait(5)
+            removed = threads.submit(remove)
+            assert deleting.wait(5)
+            with pytest.raises(TimeoutError):
+                removed.result(timeout=0.1)
+        finally:
+            release.set()
+        assert collected.result(timeout=5)[0]["bytes"] == 8
+        removed.result(timeout=5)
+    assert not artifacts.task_directory(runtime, "task-check").exists()
 
 
 def test_service_concurrency_is_two_across_steps(tmp_path, monkeypatch):

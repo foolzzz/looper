@@ -66,6 +66,8 @@ def test_definitions_survive_planner_restart_and_replan_without_execution(tmp_pa
         restored = PlannerAgent(task_id="task-checks", runtime_root=tmp_path)
         await restored._load_plan()
         assert restored._plan.steps[0].checks == specs[0].checks
+        enabled_view = "\n".join(restored._plan_lines(restored._plan))
+        assert '"command": "touch should-not-exist"' in enabled_view
         detail = await tasks.get_task_with_steps("task-checks", pool=pool)
         assert detail["steps"][0]["checks"][0]["command"] == "touch should-not-exist"
         assert not (tmp_path / "should-not-exist").exists()
@@ -78,8 +80,14 @@ def test_definitions_survive_planner_restart_and_replan_without_execution(tmp_pa
         saved = (await plans.load("task-checks", pool=pool))["steps"][0]
         assert saved["instruction"] == raw["instruction"]
         assert saved["checks"] == [check.row() for check in specs[0].checks]
-        view = "\n".join(restored._plan_lines(restored._plan))
-        assert json.loads(view.split("  checks: ", 1)[1]) == saved["checks"]
+        # Disabling hides stored commands both in the live plan and after restart.
+        for restarted in (False, True):
+            if restarted:
+                restored = PlannerAgent(task_id="task-checks", runtime_root=tmp_path)
+                await restored._load_plan()
+            view = "\n".join(restored._plan_lines(restored._plan))
+            assert "  checks: " not in view and "touch should-not-exist" not in view
+            assert restored._plan.steps[0].checks == specs[0].checks
         assert not (tmp_path / "should-not-exist").exists()
         # While enabled, omitting checks replaces the definitions with an empty set.
         await projects.set_acceptance_checks(project["id"], "local", pool=pool)

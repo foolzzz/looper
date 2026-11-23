@@ -136,10 +136,28 @@ def test_saved_network_checks_can_be_loaded_after_permission_changes(tmp_path, m
         monkeypatch.setattr(planner.db_projects, "get_task_project", AsyncMock(return_value={
             "acceptance_checks": current_mode}))
         monkeypatch.setattr(planner.db_step_workspaces, "list_for_task", AsyncMock(return_value=[]))
-        monkeypatch.setattr(agent, "_refresh_project", AsyncMock())
         await agent._load_plan()
         assert agent._plan is not None
-        assert agent._plan.steps[0].checks[0].network is True
+        saved = agent._plan.steps[0]
+        assert saved.checks[0].network is True
+        baseline = _main_modules("origin/main")
+        old = baseline.planner.PlannerAgent(task_id="task-saved", runtime_root=tmp_path)
+        context = planner_protocol.DecisionContext("s1", planner_protocol.ResultKind.WORK, True, False, 0)
+        messages = [agent._decision_message(agent._plan, saved, context, ["Worker finished."]),
+                    agent._supervise_message(agent._plan, [saved], [["Worker running."]]),
+                    "[CHAT] Continue.\n" + planner.PLAN_VIEW]
+        for mode in (current_mode, "off"):
+            monkeypatch.setattr(planner.db_projects, "get_task_project", AsyncMock(return_value={
+                "acceptance_checks": mode}))
+            await agent._refresh_project(agent._plan)
+            for message in messages:
+                rendered, _ = agent._render_plan_message(agent._plan, message, full_reason="new process")
+                if mode == "off":
+                    original, _ = old._render_plan_message(agent._plan, message, full_reason="new process")
+                    assert rendered.encode() == original.encode()
+                else:
+                    assert '"command": "exit 0"' in rendered  # positive control for enabled rendering
+            assert saved.checks[0].network is True  # disabling changes visibility, not stored definitions
 
     asyncio.run(run())
 

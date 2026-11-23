@@ -124,7 +124,8 @@ def collect(work_dir: Path, paths: tuple[str, ...], runtime_root: Path, row: dic
 
 def remove_task(runtime_root: Path, task_id: str) -> None:
     directory = task_directory(runtime_root, task_id)
-    if directory.is_symlink():
-        directory.unlink()
-    elif directory.exists():
-        shutil.rmtree(directory)
+    with _storage_lock:
+        if directory.is_symlink():
+            directory.unlink()
+        elif directory.exists():
+            shutil.rmtree(directory)

@@ -41,6 +41,7 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
         {"id": "report", "criterion": 2, "type": "artifact",
          "command": "printf 'acceptance artifact\\n' > acceptance-report.txt", "artifact": ["acceptance-report.txt"],
          "timeout_seconds": 10, "network": True},
+        {"id": "fenced", "criterion": 1, "type": "command", "command": "touch must-not-run"},
     ]
     script = {str(work.resolve()): {
         "plan": [{"id": "s1", "instruction": "Create the fixture deliverable.",
@@ -71,6 +72,13 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
         "LOOPER_EVAL_REAL_CLAUDE": "",  # even an inherited real-mode setting cannot escape the fixture
     }
     monkeypatch.setattr(runner, "_SERVE", "import sys\nfrom looper.cli import main\n"
+        "from looper.agents import proc_tree\n"
+        "spawn = proc_tree.spawn\n"
+        "async def fenced_spawn(*args, **kwargs):\n"
+        "    if args[0].endswith(('sandbox-exec', 'unshare')):\n"
+        "        raise RuntimeError('fixture control plane fenced')\n"
+        "    return await spawn(*args, **kwargs)\n"
+        "proc_tree.spawn = fenced_spawn\n"
         "sys.exit(main(['serve', '--host', '127.0.0.1', '--port', sys.argv[1], '--runtime-root', sys.argv[2]]))\n")
     with fresh_database_without_recording(str(DSN)) as (url, _):
         server = dict(database_url=url, runtime_root=runtime, bin_dir=bin_dir, home=home,
@@ -115,10 +123,13 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
             evidence = api.post("/api/v1/task_evidence/get", {"task": task_id, "step": "s1"})["result"]
             saved_step, = evidence["steps"]
             measured = {row["check_id"]: row for row in saved_step["runs"]}
-            assert set(measured) == {"command", "report"}
+            assert set(measured) == {"command", "report", "fenced"}
             assert measured["command"]["state"] == "failed" and measured["command"]["exit_code"] == 1
             assert measured["command"]["output_tail"] == "measured failure\n"
             assert measured["report"]["state"] == "passed"
+            assert (measured["fenced"]["state"], measured["fenced"]["error_kind"]) == ("error", "evidence_unavailable")
+            assert measured["fenced"]["finished_at"] is not None
+            assert not (work / "must-not-run").exists()
             assert all(row["guarded"] and row["head_sha"] and row["content_sha"] for row in measured.values())
             artifact, = measured["report"]["artifacts"]
             assert artifact == {"name": "1.txt", "mime": "text/plain", "bytes": 20,
@@ -128,6 +139,9 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
             assert len(files) == 1 and files[0].read_bytes() == b"acceptance artifact\n"
             assert not (work / "acceptance-report.txt").exists()  # generated in the private checkout
             before = saved_step["runs"]
+            api.post("/api/v1/acceptance_checks/update", {"project_id": owner, "acceptance_checks": "off"})
+            disabled = api.post("/api/v1/task_evidence/get", {"task": task_id, "step": "s1"})["result"]["steps"][0]
+            assert disabled == saved_step  # permission changes retain definitions and completed evidence
 
         # A prior stopped process's running row must settle at startup, without rewriting terminal history.
         async def unfinished():
@@ -140,7 +154,7 @@ def test_serve_collects_and_retains_evidence_without_gating_the_worker_result(tm
         pending = asyncio.run(unfinished())
         with runner.running_server(**server, log_path=tmp_path / "after.log") as api:
             after = api.post("/api/v1/task_evidence/get", {"task": task_id, "step": "s1"})["result"]["steps"][0]["runs"]
-            assert after[:2] == before  # completed attempts retain the same ids, timestamps and bytes
-            assert len(after) == 3 and after[2]["id"] == pending["id"]
-            assert after[2]["state"] == "error" and after[2]["error_kind"] == "interrupted"
+            assert after[:3] == before  # completed attempts retain the same ids, timestamps and bytes
+            assert len(after) == 4 and after[3]["id"] == pending["id"]
+            assert after[3]["state"] == "error" and after[3]["error_kind"] == "interrupted"
             assert files[0].read_bytes() == b"acceptance artifact\n"

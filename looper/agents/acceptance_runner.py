@@ -180,6 +180,7 @@ async def _one(*, task_id: str, step_id: str, check: Check, attempt: int, work_d
     directory = work_dir
     outcome = _error(runs.ErrorKind.BUDGET)
     row = None
+    finishing = False
     try:
         if remaining > 0:
             try:
@@ -197,15 +198,19 @@ async def _one(*, task_id: str, step_id: str, check: Check, attempt: int, work_d
             env = _environment()
             prefix: tuple[str, ...] | None = ()
             if check.network and mode is not AcceptanceChecksMode.NETWORK:
-                prefix = None
+                outcome = _error(runs.ErrorKind.COULD_NOT_START)
             elif not check.network:
                 prefix = await local_prefix(directory, env)
             if prefix is None:
                 outcome = _error(runs.ErrorKind.SANDBOX_UNAVAILABLE)
-            else:
+            elif not outcome:
                 left = remaining - (time.monotonic() - started)
                 outcome = (_error(runs.ErrorKind.BUDGET) if left <= 0 else
                            await _execute(check, directory, env, prefix, min(check.timeout_seconds, left)))
+                if left < check.timeout_seconds and outcome.get("error_kind") is runs.ErrorKind.TIMEOUT:
+                    outcome["error_kind"] = runs.ErrorKind.BUDGET
+            written = []
+            changed = False
             if monitor is not None:
                 try:
                     written = monitor.finish()
@@ -217,16 +222,20 @@ async def _one(*, task_id: str, step_id: str, check: Check, attempt: int, work_d
                     outcome = {**outcome, **_error(runs.ErrorKind.EVIDENCE_UNAVAILABLE)}
                 else:
                     if changed:
-                        from .tiers.worker import _restore_verification
-                        await _thread(_restore_verification, str(directory), backup / "baseline")
                         outcome = {**outcome, **_error(runs.ErrorKind.CHANGED_CODE)}
-            if outcome["state"] is not runs.CheckState.ERROR:
+            if outcome["state"] is not runs.CheckState.ERROR or changed:
                 try:
-                    protected = await _thread(_protected, directory, check.protect, base_commit)
-                    if protected:
-                        outcome.update(state=runs.CheckState.FAILED, protected_changed=protected)
+                    protected = set(await _thread(_protected, directory, check.protect, base_commit))
+                    protected.update(name for name in written
+                                     if any(Path(name).is_relative_to(path) for path in check.protect))
+                    outcome["protected_changed"] = sorted(protected)
+                    if protected and outcome["state"] is not runs.CheckState.ERROR:
+                        outcome["state"] = runs.CheckState.FAILED
                 except (OSError, subprocess.SubprocessError, EvidenceUnavailable):
                     outcome = {**outcome, **_error(runs.ErrorKind.EVIDENCE_UNAVAILABLE)}
+            if changed:
+                from .tiers.worker import _restore_verification
+                await _thread(_restore_verification, str(directory), backup / "baseline")
             if outcome["state"] is runs.CheckState.PASSED and isinstance(check, ArtifactCheck):
                 try:
                     outcome["artifacts"] = await _thread(artifacts.collect, directory, check.artifact, runtime_root, row)
@@ -237,6 +246,7 @@ async def _one(*, task_id: str, step_id: str, check: Check, attempt: int, work_d
                 except OSError:
                     outcome = {**outcome, **_error(runs.ErrorKind.EVIDENCE_UNAVAILABLE)}
         outcome["duration_ms"] = int((time.monotonic() - started) * 1000)
+        finishing = True  # An uncertain terminal write must not be retried or reported as complete.
         try:
             finished = await runs.finish_run(row["id"], **outcome)
         except Exception as exc:
@@ -252,6 +262,17 @@ async def _one(*, task_id: str, step_id: str, check: Check, attempt: int, work_d
         if row is not None:
             await runs.finish_run(row["id"], runs.CheckState.ERROR, error_kind=runs.ErrorKind.INTERRUPTED,
                                   duration_ms=int((time.monotonic() - started) * 1000))
+        raise
+    except Exception:
+        if row is not None and not finishing:
+            try:
+                finished = await runs.finish_run(row["id"], runs.CheckState.ERROR,
+                    error_kind=runs.ErrorKind.EVIDENCE_UNAVAILABLE,
+                    duration_ms=int((time.monotonic() - started) * 1000))
+            except Exception as exc:
+                raise EvidenceUnavailable("cannot finish evidence record") from exc
+            if finished is None:
+                raise EvidenceUnavailable("evidence record no longer running")
         raise
     finally:
         if monitor is not None:
@@ -278,6 +299,8 @@ async def run_step_checks(*, task_id: str, step_id: str, checks: Sequence[Check]
         latest = {r["check_id"]: r for r in history}
         for check in checks:
             previous = latest.get(check.id)
+            if previous is not None and previous["state"] == runs.CheckState.RUNNING.value:
+                raise EvidenceUnavailable("previous evidence record is still running")
             if previous is not None and previous["error_kind"] != runs.ErrorKind.INTERRUPTED.value:
                 continue
             async with semaphore:

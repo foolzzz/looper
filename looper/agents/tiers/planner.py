@@ -5304,7 +5304,7 @@ class PlannerAgent:
                 f"- {step.label} [{step.status}] {_clip(step.instruction, 200)} "
                 f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries}{roles})"
             ]
-            if step.checks:
+            if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
                 lines.append("  checks: " + json.dumps([check.row() for check in step.checks], ensure_ascii=False))
             summary = _clip((step.result or {}).get("summary"), 200) if step.status == "verified" else ""
             if summary:
