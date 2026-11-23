@@ -92,8 +92,9 @@ def migrate(url, source, real=None):
             assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
             after = await witness(conn)
             for table in ("task_plans", "system_settings", "library_items", "library_files", "library_installs"):
-                # The bridge's machine-imported skill gains only the nullable version pointer.
-                expected = [{**r, "skill_version": None} for r in before[table]] \
+                # Machine imports have no project-skill version. The lifecycle
+                # column arrives as active on every existing row.
+                expected = [{**r, "skill_version": None, "lifecycle": "active"} for r in before[table]] \
                     if table == "library_items" else before[table]
                 assert after[table] == expected, table
             return {"profiles_after": await conn.fetchval("SELECT count(*) FROM agent_profiles"),

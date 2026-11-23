@@ -66,6 +66,7 @@ from .memory_push import MemoryPushService
 from .reminders import ReminderService
 from .idle_checks import IdleCheckService, PostFn
 from .morning_brief import MorningBriefService
+from .metrics_alerts import MetricsAlertService
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
@@ -969,6 +970,9 @@ async def _run_agent_system_watched(
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
+            # So does the daily note that skill proposals wait for the operator (names and reasons, never content).
+            from . import skill_proposal_notice
+            skill_proposal_notice.configure(registry.notify, dashboard_url=dashboard_url)
             usage_windows.configure(registry.notify)
             # So do the outbound review's block notices; its switch is read once here, and kept by its operations.
             outbound_hook.configure(registry.notify)
@@ -1022,6 +1026,7 @@ async def _run_agent_system_watched(
                                                              and agent.busy)
             await fleet.load()
             morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
+            metrics_alert_service = MetricsAlertService(registry)
             from .completion_service import CompletionService
             completion_service = CompletionService(
                 bus=bus, manager_running=fleet.is_running, drain=drain,
@@ -1059,11 +1064,20 @@ async def _run_agent_system_watched(
             planner_ops.room = room
             room_ops = RoomOps(room, url=_local_url(host, port))
             from .subagents import SpawnService
-            from .ops.subagents import WorkerSubagents
+            from .ops.subagents import PlannerSubagents, WorkerSubagents
             explorers = WorkerSubagents(SpawnService(runtime_root, claude_bin=claude_bin,
                 keeper=KeeperSettings(epoch) if lease is not None else None,
                 on_stale=lease.lose if lease is not None else None), room, worker_pool=worker_pool)
             room_ops.subagents = explorers
+            planner_ops.subagents = PlannerSubagents(explorers)
+            from ..db import tasks as task_rows
+            from ..db.agent_spawns import CancelReason
+
+            async def end_explorers(task_id: str) -> None:
+                # A stopped, cancelled, finished, failed or restarted task ends all its explorers at once.
+                await explorers.service.cascade(task_id=task_id, reason=CancelReason.TASK_ENDED)
+
+            task_rows.task_ended_listeners.append(end_explorers)
             worker_pool.room_ops = room_ops
             for candidate in scan.candidates:
                 if candidate.grant:
@@ -1143,6 +1157,7 @@ async def _run_agent_system_watched(
         await reminder_service.start()  # idle while reminders are off
         await idle_check_service.start()
         await morning_brief_service.start()  # idle while the morning brief is off
+        await metrics_alert_service.start()
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
@@ -1201,6 +1216,8 @@ async def _run_agent_system_watched(
                 await explorers.stop(epoch=lease.epoch)
                 if control is not None:
                     await control.close(handover=True)
+            if end_explorers in task_rows.task_ended_listeners:
+                task_rows.task_ended_listeners.remove(end_explorers)
             logger.info("shutting down agent system...")
             if mode is not ShutdownMode.DETACH_KEPT:
                 await explorers.stop()
@@ -1215,6 +1232,7 @@ async def _run_agent_system_watched(
             await memory_writer.stop()
             await reminder_service.stop()
             await idle_check_service.stop()
+            await metrics_alert_service.stop()
             await morning_brief_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()

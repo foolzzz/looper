@@ -91,6 +91,59 @@ async def finish_run(run_id: int, state: CheckState, *, error_kind: ErrorKind | 
     return _row(row)
 
 
+async def get_run(run_id: int, task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """One evidence row, only when it belongs to `task_id`."""
+    pool = pool or get_pool()
+    return _row(await pool.fetchrow(
+        "SELECT * FROM step_check_runs WHERE id=$1 AND task_id=$2", run_id, task_id))
+
+
+async def failed_required_current(task_ids: Sequence[str], *, pool: asyncpg.Pool | None = None
+                                  ) -> dict[str, list[dict[str, str]]]:
+    """Required checks whose current evidence failed, per task.
+
+    Current evidence is the greatest `run` of the latest `attempt` for each step and check.
+    A later run that passed is the current one, so the earlier failure is not listed. An advisory
+    failure (`required` false), an error and a stale row are not listed. A skipped step is not
+    listed, and neither is a check id the step's current `checks` no longer defines. The same
+    name is listed once, on its earliest step. Tasks with none are absent. Each task's items
+    are ordered by step index, then check id.
+    """
+    if not task_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """
+        WITH current AS (
+            SELECT DISTINCT ON (r.step_id, r.check_id)
+                   r.task_id, r.step_id, r.check_id, r.required, r.state, s.step_index,
+                   s.status AS step_status, s.checks
+            FROM step_check_runs r
+            JOIN task_steps s ON s.id = r.step_id
+            WHERE r.task_id = ANY($1::text[])
+            ORDER BY r.step_id, r.check_id, r.attempt DESC, r.run DESC
+        )
+        SELECT task_id, step_id, check_id
+        FROM current
+        WHERE required AND state = 'failed' AND step_status <> 'skipped'
+          AND jsonb_typeof(checks) = 'array'
+          AND EXISTS (
+              SELECT 1 FROM jsonb_array_elements(checks) AS definition
+              WHERE definition->>'id' = check_id)
+        ORDER BY task_id, step_index, check_id
+        """, list(task_ids))
+    found: dict[str, list[dict[str, str]]] = {}
+    seen: dict[str, set[str]] = {}
+    for row in rows:
+        task_id, check_id = row["task_id"], row["check_id"]
+        names = seen.setdefault(task_id, set())
+        if check_id in names:
+            continue
+        names.add(check_id)
+        found.setdefault(task_id, []).append({"step_id": row["step_id"], "check_id": check_id})
+    return found
+
+
 async def list_runs(task_id: str, step_id: str | None = None, *, pool: asyncpg.Pool | None = None
                     ) -> list[dict[str, Any]]:
     """All evidence, oldest first, optionally narrowed to a step's database id."""

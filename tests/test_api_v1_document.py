@@ -55,6 +55,16 @@ def test_an_operation_does_not_share_its_schema_with_the_tool() -> None:
     assert "action" in gates.schema["properties"] and "action" in gates.schema["required"]
 
 
+def test_lifecycle_schema_values_come_from_the_enum() -> None:
+    from looper.agents.skill_lifecycle import Lifecycle
+    from looper.agents.v1_domains.catalog import CATALOG_ITEM
+    from looper.agents.v1_domains.project_skills import PROJECT_SKILL
+
+    values = [member.value for member in Lifecycle]
+    assert CATALOG_ITEM["properties"]["lifecycle"]["enum"] == values
+    assert PROJECT_SKILL["properties"]["lifecycle"]["enum"] == values
+
+
 def test_summary_and_escalation_note() -> None:
     for op in api_v1.operations():
         assert 0 < len(op.summary) <= 120 and op.description.startswith(op.summary.rstrip("…")), op.operation_id
