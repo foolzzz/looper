@@ -167,8 +167,9 @@ def test_saved_network_checks_can_be_loaded_after_permission_changes(tmp_path, m
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("status", ["pending", "dispatched", "deciding", "completed", "verified"])
 def test_switch_off_stored_rows_and_prompts_match_pinned_main_bytes(tmp_path, monkeypatch, status):
-    # Reuse the fixture's recorded main source as the independent default-off baseline.
-    baseline = _main_modules(BASELINE["main_revision"])
+    # The network mode compares with the pinned source that already has the checks contract,
+    # independent of subsequent merges.
+    baseline = _main_modules("ecc2eedbf2ac4a1b44ff9078e634002c228458c1")
     current = SimpleNamespace(planner=planner, protocol=planner_protocol, prompt=system_prompt,
                               tasks=tasks, worker=worker)
     for mode in ("off", "network"):

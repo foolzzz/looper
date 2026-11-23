@@ -28,6 +28,7 @@ class Gate:
     stale: tuple[str, ...] = ()
     rechecks_used: int = 0
     stale_reruns_used: int = 0
+    budget_spent: bool = False  # an errored required check ran out of the step's checking budget
     current: tuple[Mapping[str, Any], ...] = ()
     head: Version = (None, None)
 
@@ -68,5 +69,6 @@ def gate(checks: Sequence[Check], current: Iterable[Mapping[str, Any]], head: Ve
             stale.append(check.id)
         elif state != CheckState.PASSED or row.get("protected_changed"):
             failed.append(check.id)
+    spent = any(row.get("error_kind") == "budget" for row in rows if row["check_id"] in errored)
     return Gate(not (failed or errored or stale), tuple(failed), tuple(errored), tuple(stale),
-                current=rows, head=head)
+                budget_spent=spent, current=rows, head=head)

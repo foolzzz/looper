@@ -454,9 +454,7 @@ class DecisionContext:
         if self.evidence is not None and not self.evidence.passed:
             allowed = [Decision.RETRY] if self.retries < self.max_retries else []
             # A budget error means the step's whole checking budget is spent: another run would only repeat it.
-            budget_spent = any(row.get("error_kind") == "budget" for row in self.evidence.current
-                               if row["check_id"] in self.evidence.errored)
-            if self.evidence.errored and self.evidence.rechecks_used < 2 and not budget_spent:
+            if self.evidence.errored and self.evidence.rechecks_used < 2 and not self.evidence.budget_spent:
                 allowed.append(Decision.RECHECK)
             return (*allowed, Decision.REPLAN, Decision.FAIL)
         if self.checkpoint:

@@ -3263,7 +3263,8 @@ set it; omission preserves the target permission. With it enabled, Planner work 
 `task_steps.checks` through plan edits and restarts. After a successful Worker,
 the Planner runs checks before asking for its decision and stores append-only
 `step_check_runs` evidence. A pure evidence gate removes `accept` (including adjudicated acceptance)
-and `review` until every required check passes on the current HEAD and content hash.
+and `review` until every required check passes on the current content hash (a commit that leaves the content unchanged,
+such as a review freeze, keeps the measured version; HEAD decides only for a directory without one).
 Missing, failed, errored and stale evidence cannot be accepted, even after a passing Reviewer verdict
 or a failed Planner turn. Advisory checks do not block. Steps without required review can be accepted
 by the gate without starting a Reviewer.

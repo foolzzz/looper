@@ -185,7 +185,7 @@ def _context(context: DecisionContext) -> dict[str, Any]:
         if isinstance(value, Gate):
             value = {"passed": value.passed, "failed": list(value.failed), "errored": list(value.errored),
                      "stale": list(value.stale), "rechecks_used": value.rechecks_used,
-                     "stale_reruns_used": value.stale_reruns_used}
+                     "stale_reruns_used": value.stale_reruns_used, "budget_spent": value.budget_spent}
         elif isinstance(value, Enum):
             value = value.value
         elif isinstance(value, frozenset):

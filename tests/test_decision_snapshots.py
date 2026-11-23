@@ -176,7 +176,8 @@ def test_evidence_snapshot_keeps_only_gate_state_and_replays_after_json(passed, 
     assert secret not in serialized and "measured-head" not in serialized
     compact = json.loads(serialized)
     assert compact["evidence"] == {"passed": passed, "failed": list(failed), "errored": list(errored), "stale": list(stale),
-                                    "rechecks_used": 1, "stale_reruns_used": 2}
+                                    "rechecks_used": 1, "stale_reruns_used": 2,
+                                    "budget_spent": False}
     restored = _context_of(compact)
     assert isinstance(restored.evidence, EvidenceGate)
     assert restored.evidence.failed == failed and restored.evidence.errored == errored
@@ -190,6 +191,25 @@ def test_evidence_snapshot_keeps_only_gate_state_and_replays_after_json(passed, 
     if not passed:
         row["decision"]["decision"] = "accept"
         assert not replay(row).same
+
+
+def test_a_spent_check_budget_withholds_recheck_and_replays_after_json():
+    from looper.agents.acceptance_gate import Gate as EvidenceGate
+
+    rows = ({"check_id": "c1", "error_kind": "budget", "output_tail": "secret", "opaque": object()},)
+    evidence = EvidenceGate(False, errored=("c1",), budget_spent=True, current=rows, head=("h", "c"))
+    context = DecisionContext("s1", ResultKind.WORK, True, False, 0, 3, evidence=evidence)
+    assert Decision.RECHECK not in context.allowed()
+    compact = json.loads(json.dumps(_context(context)))
+    assert compact["evidence"]["budget_spent"] is True and "secret" not in json.dumps(compact)
+    restored = _context_of(compact)
+    assert restored.allowed() == context.allowed()  # replays from the snapshot alone, without the rows
+    allowed = [item.value for item in context.offered(True)]
+    row = _decision_row(context, allowed, "retry")
+    row["inputs"]["adjudicated_accept"] = True
+    assert replay(row).same
+    row["decision"]["decision"] = "recheck"
+    assert not replay(row).same
 
 
 def test_a_turn_digest_keeps_hashes_flags_and_sizes_but_no_text():

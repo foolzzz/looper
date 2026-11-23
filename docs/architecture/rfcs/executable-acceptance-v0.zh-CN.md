@@ -10,7 +10,7 @@
   - **标准（criterion）：** 步骤的 `acceptance_criteria` 里的一条文字，按 1 起的序号引用。
   - **检查（check）：** 绑定到一条标准、由 Looper 的代码执行、能给出通过或失败的东西。
   - **证据（evidence）：** 一次检查运行留下的一行记录：状态、退出码、耗时、输出尾部、产物、所测的代码版本。证据只由代码写，模型不能写也不能改。
-  - **所测版本：** 检查运行时那棵代码的 HEAD 和内容哈希。证据只对它有效，代码变了就过期（`stale`）。
+  - **所测版本：** 检查运行时那棵代码的内容哈希（覆盖全部受跟踪和未跟踪文件）；只提交、不改内容（如评审冻结）不换版本，没有内容哈希的目录才比较 HEAD。证据只对它有效，代码变了就过期（`stale`）。
 
 ## 1. 背景与目标
 
@@ -151,7 +151,7 @@ Worker 成功 ──→ 有检查？─ 否 ─→ （今天的流程）
           └─ 否 ─→ [DECISION]：accept 可用
 ```
 
-- 检出的 HEAD 与内容哈希是所测版本；Reviewer 开始前和 `accept` 前按 D9 核对，不同就重跑。
+- 所测版本按内容哈希比较（提交而内容不变不算变，没有内容哈希时才比较 HEAD）；Reviewer 开始前和 `accept` 前按 D9 核对，不同就重跑。
 - 检查按在计划里的顺序运行，不因前一个失败而跳过后一个（Worker 需要一次看到全部失败）。
 - `error` 的原因有固定枚举：`could_not_start`、`timeout`、`changed_code`、`output_limit`、`artifact_invalid`、`evidence_unavailable`、`interrupted`、`budget`、`sandbox_unavailable`，任务页用文字显示，不显示原始异常。
 
