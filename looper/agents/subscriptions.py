@@ -27,7 +27,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..db import subscriptions as db_subs
-from . import cron, extraction, subscription_rules
+from . import cron, extraction, subscription_rules, triage_run, triage_settings
 
 # Where lines_v1 writes its time: the same as lark-chat (``zh-CN``, 24-hour, numbers not padded but the clock's).
 RENDER = "lines_v1"
@@ -113,7 +113,7 @@ def _rules(raw: Any) -> list[dict[str, Any]]:
         raise ValueError(f"subscription.{exc}") from None
 
 
-OUTPUT_KINDS = ("push", "leads", "intents")
+OUTPUT_KINDS = ("push", "leads", "intents", "triage")
 
 
 def output_kind(sub: Mapping[str, Any] | None) -> str:
@@ -133,9 +133,19 @@ def check_extraction(sub: Mapping[str, Any]) -> None:
                                or sub.get("delivery_policy", "per_run") != "per_run"):
         raise ValueError("subscription.rules, window lookback and delivery_policy daily apply to push subscriptions "
                          "only: a leads or intents subscription reads its kind's scope after its cursor")
+    if output_kind(sub) == "triage":
+        if sub.get("include_chats"):
+            raise ValueError("triage has the fixed intents scope; include_chats is not supported")
+        if sub.get("check_items"):
+            raise ValueError("triage does not use a second model check")
     if not is_extraction(sub) and sub.get("check_items"):
         raise ValueError("subscription.check_items applies to leads and intents subscriptions only: it checks what "
                          "they find before it is stored")
+
+
+async def check_triage_enabled(sub: Mapping[str, Any], db: Any = None) -> None:
+    if output_kind(sub) == "triage" and not await triage_settings.enabled(db):
+        raise ValueError(f"cannot create a triage subscription: {triage_settings.TURNED_OFF}")
 
 
 _PARSERS = {
@@ -490,6 +500,7 @@ async def confirmation_text(schedule: Mapping[str, Any], *, now: datetime, actio
 # What the confirmation says an extraction reads (message-leads-intents RFC, decision 5 and R-1).
 SCOPE_ZH = {
     "leads": "群和话题群里人发的消息、别人发给你的单聊和你自己发的消息；不读机器人和 Looper 自己的推送",
+    "triage": "单聊、@ 你的消息和你自己发的消息，以及勾选的告警机器人；不读导入历史、其他机器人和 Looper 自己的推送",
     "intents": "单聊、@ 你的消息和你自己发的消息，以及勾选的告警机器人（只用于「监控异常排查」）；不读其他机器人和 "
                "Looper 自己的推送",
 }
@@ -529,7 +540,7 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
         chats.append(f"另排除 {len(sub['exclude_chats'])} 个会话")
     verb = action.replace("推送目标：", "")  # "确认推送目标：" is a push's word; an extraction confirms itself
     lines = [f"{verb}订阅「{schedule['name']}」：它会用不带工具的处理器整理你的消息"
-             f"（{'消息线索' if kind == 'leads' else '意图识别'}）。",
+             f"（{'消息线索' if kind == 'leads' else '事件分流' if kind == 'triage' else '意图识别'}）。",
              f"- 读取范围：{SCOPE_ZH[kind]}{'；' + '，'.join(chats) if chats else ''}；最长回看 "
              f"{sub.get('max_age_minutes', '-')} 分钟，每次最多 {sub.get('max_events', '-')} 条（读不完的下一次接着读）",
              f"- 不整理的会话：{excluded} 个（消息流页设置）",
@@ -561,6 +572,10 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
     lines.append(f"- 预计花费：约 ${_usd(low)}–{_usd(high)} 每天（按最近 24 小时 {day:,} 条、最多 {runs} 次运行估算；"
                  f"单价 {extraction.COST_MEASURED_ON} 实测：每次约 ${extraction.COST_PER_RUN_USD[0]:g}–"
                  f"{extraction.COST_PER_RUN_USD[1]:g}，每条约 ${extraction.COST_PER_EVENT_USD:g}）")
+    if kind == "triage":
+        lines.append(f"- 分流估算：每次约 ${extraction.COST_PER_RUN_USD[0]:g}–${extraction.COST_PER_RUN_USD[1]:g}，"
+                     "另加每条消息费用；沿用抽取实测单价，分流预计高 10%–30%，尚待首次实测")
+        lines.append("- 结果去向：仅存储事件和理由，暂不发送；重要事件等待管家交接，摘要事件等待晨报接入")
     if kind == "intents":
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
         label = next((t["label"] for t in await notify_targets()
@@ -599,6 +614,11 @@ async def bot_identity(channel: str | None) -> str:
 _PRESET_STREAM = {"chat_kinds": ["p2p", "group", "topic"], "include_history": True, "max_age_minutes": 10080,
                   "max_events": 500, "text_max_chars": 500, "quiet_word": "NONE", "output_header": ""}
 PRESETS: dict[str, dict[str, Any]] = {
+    "triage": {"kind": "subscription", "name": "事件分流", "cron": "*/10 * * * *",
+               "requirement": triage_run.DEFAULT_REQUIREMENT, "run_budget_usd": 0.3, "daily_budget_usd": 3,
+               "notify": "failures",
+               "subscription": {**_PRESET_STREAM, "sender_kinds": ["user", "app"], "output_kind": "triage",
+                                "window": "cursor", "delivery_policy": "per_run"}},
     "leads": {"kind": "subscription", "name": "消息线索", "cron": "7 * * * *",
               "requirement": extraction.LEADS_INSTRUCTIONS, "run_budget_usd": 0.6, "daily_budget_usd": 10,
               "notify": "failures",
@@ -615,7 +635,7 @@ def preset(kind: str, *, source_id: str, zone_name: str) -> dict[str, Any]:
     intents, ``notify_target``: ``PRESETS`` with the source and the server's zone. Its chat kinds, sender kinds and
     the rest of the stream filter only satisfy validation: an extraction's scope is fixed by its kind."""
     if kind not in PRESETS:
-        raise ValueError(f"output_kind must be leads or intents, not {kind!r}")
+        raise ValueError(f"output_kind must be leads, intents or triage, not {kind!r}")
     found = json.loads(json.dumps(PRESETS[kind]))
     found["timezone"] = zone_name
     found["subscription"]["source_id"] = source_id

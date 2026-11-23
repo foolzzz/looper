@@ -68,7 +68,7 @@ async def earliest_ledger_item(*, db: Db | None = None) -> dict[str, Any] | None
 _UNCERTAIN_DELIVERIES = """
             SELECT 'subscription' AS source, d.run_id AS key, s.id AS ref, s.name AS title,
                    r.target_channel AS channel, max(d.updated_at) AS at, NULL::text AS goal_id,
-                   NULL::text AS requirement
+                   NULL::text AS requirement, NULL::text AS reason
             FROM subscription_deliveries d
             JOIN subscription_runs r ON r.run_id = d.run_id
             JOIN schedule_runs sr ON sr.id = d.run_id
@@ -76,14 +76,20 @@ _UNCERTAIN_DELIVERIES = """
             WHERE d.state = 'uncertain' AND d.updated_at >= $1
             GROUP BY d.run_id, s.id, s.name, r.target_channel
             UNION ALL
-            SELECT 'intent', p.id::text, p.intent_id::text, i.title, p.channel_id, p.updated_at, NULL, NULL
+            SELECT 'intent', p.id::text, p.intent_id::text, i.title, p.channel_id, p.updated_at, NULL, NULL, NULL
             FROM intent_posts p JOIN intents i ON i.id = p.intent_id
             WHERE p.state = 'uncertain' AND p.updated_at >= $1
             UNION ALL
             SELECT 'task_end', e.id::text, e.task_id, t.title, e.channel_id, e.created_at, t.goal_id,
-                   left(t.requirement, 200)
+                   left(t.requirement, 200), NULL
             FROM manager_events e JOIN tasks t ON t.id = e.task_id
             WHERE e.delivery = 'uncertain' AND e.created_at >= $1
+            UNION ALL
+            SELECT 'intent', 'final:' || n.push_id, p.intent_id::text, i.title, p.channel_id,
+                   n.updated_at, NULL, NULL, n.failure_reason
+            FROM intent_final_notices n JOIN intent_posts p ON p.id=n.push_id
+            JOIN intents i ON i.id=p.intent_id
+            WHERE n.state='failed' AND n.handled_at=i.handled_at AND n.updated_at >= $1
         """
 
 
@@ -91,8 +97,8 @@ async def uncertain_deliveries(since: datetime, limit: int, *,
                                db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
     """Messages Looper may or may not have sent since ``since`` (``uncertain``: the send was under way when the
     process died, or the channel's answer was lost; never sent again): a subscription's push (one row per run), a
-    message about an intent, and the message telling a task's end. Newest first. Each table's partial index of its
-    uncertain rows (schema.sql) keeps this off its history."""
+    message about an intent, an exhausted intent final notice, and the message telling a task's end. Newest first.
+    Partial indexes on uncertain deliveries and failed final notices keep this off their history."""
     return await _limited(db, _UNCERTAIN_DELIVERIES, "at DESC, source, key", limit, since)
 
 

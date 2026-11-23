@@ -36,8 +36,9 @@ import asyncpg
 
 from ..db import (connection as db_connection, proactive_deliveries as db_deliveries,
                   schedules as db_schedules, subscriptions as db_subs)
-from . import turn_metrics
-from . import chat_settings, cron, extraction, proactive_delivery as delivery, processor, subscription_rules, subscriptions
+from . import (chat_settings, cron, extraction, model_call, proactive_delivery as delivery, processor,
+               subscription_rules, subscriptions, turn_metrics)
+from .agent_settings import AgentType
 from .channels.base import PostOutcome
 from .message import MessageEnvelope, builtin_channel_id, channel_thread_id, is_lark, parse_channel_id
 from .task_notice import NotifyTarget, TargetKind
@@ -127,8 +128,8 @@ class SubscriptionRuns:
         if subscriptions.output_kind(sub) == "triage":
             from . import triage_settings
 
-            return {"skip_reason": (triage_settings.NOT_IMPLEMENTED if await triage_settings.enabled(conn)
-                                    else triage_settings.TURNED_OFF)}
+            if not await triage_settings.enabled(conn):
+                return {"skip_reason": triage_settings.TURNED_OFF}
         if subscriptions.is_extraction(sub):
             return await extraction.plan(conn, schedule, now=now, own_apps=await self._own_apps())
         to_seq = await db_subs.committed_seq(conn, sub["source_id"])
@@ -198,11 +199,10 @@ class SubscriptionRuns:
         stream = await db_subs.get_run(run_id)
         if run is None or schedule is None or stream is None or run["status"] != db_schedules.RUNNING:
             return False
-        if subscriptions.output_kind(schedule["subscription"]) == "triage":
-            # A recovered run cannot fall through to the intents processor before triage execution exists.
-            from . import triage_settings
-
-            await self._end(run_id, status="cancelled", outcome="failed", error=triage_settings.NOT_IMPLEMENTED)
+        if run["fired_at"] is None:
+            # Without the original age cutoff, a recovered attempt cannot reproduce its planned window.
+            await self._end(run_id, status="cancelled", outcome="failed",
+                            error="the run has no firing time; the next run reads its window again")
             return False
         if subscriptions.is_extraction(schedule["subscription"]):
             pool = db_connection.get_pool()
@@ -239,12 +239,13 @@ class SubscriptionRuns:
                    else processor.PROCESSOR_TIMEOUT_SEC)
         reference = {"kind": "subscription_window", "schedule_id": schedule["id"], "run_id": run_id,
                      "from_seq": stream["from_seq"], "to_seq": stream["to_seq"], "events": len(picked["rows"])}
-        result = await processor.run(
+        result = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
             owner=schedule["id"], instructions=schedule["requirement"], input_text=text, input_ref=reference,
             quiet_word=sub["quiet_word"], budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout),
             runtime_root=self._runtime_root, claude_bin=self._claude_bin, project_id=schedule["project_id"],
             schedule_id=schedule["id"],
-            metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(text)}})
+            metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(text)}},
+            role=AgentType.PROCESSOR), parse=str))
         await db_subs.update_run(pool, run_id, record_id=result.record_id, events_selected=len(picked["rows"]))
         if result.failure is processor.ProcessorFailure.BLOCKED:
             # Blocked every time it is sent: kept, the window would be sent again, and blocked, with every run after.
