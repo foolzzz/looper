@@ -65,6 +65,7 @@ from ..keeper.protocol import ErrorCode, KeeperError
 from ..kept_run import (AdoptFailure, AdoptOutcome, AdoptResult, AttachError, DetachKind, DetachOutcome,
                         KeptRun, KeptRunState, KeeperLost, KeeperSettings, RunHold)
 from ..ops.vault import run_section
+from ..ops import subagents as subagent_ops
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..operator_notes import notes_note
@@ -1481,6 +1482,8 @@ class WorkerPool:
                            fallbacks: list[dict[str, str]]) -> None:
         async def run() -> dict:
             async with self._record_run(wp.worker_id, recorder):
+                if self.room_ops is not None:
+                    self.room_ops.bind_subagents(wp.worker_id, recorder, ctx.launch)
                 return await self._consume(ctx, handle, recorder, start=ConsumeStart.ADOPTED)
 
         await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks, severity=ctx.severity)
@@ -1968,6 +1971,7 @@ class WorkerPool:
             data = grant["seat"]
             seat = Seat(**{**data, "kind": MemberKind(data["kind"])})
         # Revoke before awaiting presence, which also closes this run's watches.
+        await self.room_ops.end_subagents(worker_id)
         self.room_ops.revoke_run(worker_id)
         if seat is not None:
             try:
@@ -2203,13 +2207,15 @@ class WorkerPool:
         # The task's room and knowledge vault share the run's token and MCP entry.
         execution = ProjectExecution.from_row(project)
         room_on = execution.room_on
+        subagents_on = subagent_ops.worker_enabled(project, is_verify=is_verify)
         vault_config = await vault.for_project(project) if parent_task_id else None
         seat, room_text, vault_text = None, "", ""
-        if runtime.type != "acp" and self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
+        if runtime.type != "acp" and self.room_ops is not None and parent_task_id and (room_on or vault_config is not None or subagents_on):
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
                 mode = room_input(launch, is_verify=is_verify)
-                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept, mode=mode)
+                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept, mode=mode,
+                                            **({"subagents": True} if subagents_on else {}))
                 if not hosted:
                     library = await self.room_ops.library_with_server(
                         library, self._runtime_root, token, worker_id, reconnect_seconds=120 if kept else None)
@@ -2218,8 +2224,10 @@ class WorkerPool:
                     room_text = room_section(seat, mode)
                 if vault_config is not None:
                     vault_text = run_section(vault_config)
+                if subagents_on:
+                    room_text = "\n\n".join(part for part in (room_text, subagent_ops.WORKER_INSTRUCTIONS) if part)
             except Exception as exc:
-                unavailable = "the task's room" if room_on else "the knowledge vault"
+                unavailable = "the task's room" if room_on else "the knowledge vault" if vault_config else "subagents"
                 logger.warning("worker %s: %s is unavailable", worker_id, unavailable, exc_info=True)
                 self.room_ops.revoke_run(worker_id)
                 seat, token = None, None
@@ -2512,6 +2520,8 @@ class WorkerPool:
             pid_of=lambda: handle.pid,
         )
         async with self._record_run(worker_id, recorder):
+            if self.room_ops is not None:
+                self.room_ops.bind_subagents(worker_id, recorder, launch)
             if ctx.advisor_consult is not None:
                 await recorder.annotate({"advisor_consult": ctx.advisor_consult})
             if fallbacks:

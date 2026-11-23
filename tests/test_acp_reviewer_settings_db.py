@@ -194,8 +194,8 @@ def test_import_skips_an_existing_chain_into_acp_and_allows_clearing_it(monkeypa
 
 
 @pytest.mark.provenance
-def test_off_registry_selection_and_export_match_merge_base(monkeypatch, tmp_path):
-    """Compare the shared base and this checkout on one disposable schema."""
+def test_off_registry_selection_and_export_match_main(monkeypatch, tmp_path):
+    """Compare current main and this checkout on one disposable schema."""
     import io
     import os
     from pathlib import Path
@@ -204,7 +204,7 @@ def test_off_registry_selection_and_export_match_merge_base(monkeypatch, tmp_pat
     import tarfile
 
     root = Path(__file__).resolve().parents[1]
-    revision = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=root, text=True,
+    revision = subprocess.run(["git", "rev-parse", "origin/main"], cwd=root, text=True,
                               capture_output=True, check=True).stdout.strip()
     archive = subprocess.run(["git", "archive", revision, "looper", "runners", "pyproject.toml"], cwd=root,
                              capture_output=True, check=True).stdout
@@ -272,5 +272,5 @@ asyncio.run(main())
                                             check=False, timeout=45)
             assert result.returncode == 0, result.stderr
             results.append(json.loads(result.stdout))
-        assert results[0] == results[1], f"off-path differs from merge-base {revision}: {results}"
+        assert results[0] == results[1], f"off-path differs from main {revision}: {results}"
     run_db(check, monkeypatch)

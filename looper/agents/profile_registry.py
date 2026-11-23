@@ -205,6 +205,8 @@ BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
     # than the extraction's, the cheapest that met the targets on the checker eval.
     "leads_check": LegacyAgentProfile("agent-claude-code-haiku-5-5", "claude-code/haiku-5-5", BUILTIN_RUNTIME,
                                       BUILTIN_PROVIDER, "claude-haiku-5-5"),
+    "explorer": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
+                                   BUILTIN_PROVIDER, "claude-sonnet-5-5"),
     "outbound_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
                                          BUILTIN_PROVIDER, "claude-sonnet-5-5"),
 })
@@ -841,6 +843,10 @@ def check_roles(profile: AgentProfile | LegacyAgentProfile, roles: Iterable[str]
             raise RegistryError(
                 f"Agent Profile {profile.name!r} cannot run the {role}: its runtime {profile.runtime.name!r} "
                 f"({label}) lacks {_listed(missing)}, which a {role} needs ({_listed(needs)})")
+        if role == "explorer" and (adapter is None or
+                adapter.read_only_for(profile.runtime.capabilities) is runtimes.ReadOnly.CHECK):
+            raise RegistryError(f"Agent Profile {profile.name!r} cannot run the explorer: "
+                                "its runtime cannot enforce read-only exploration")
 
 
 # The roles a layer of each scope, or a task's choice, selects a profile for.

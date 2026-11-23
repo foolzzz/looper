@@ -153,6 +153,7 @@ class AgentType(str, Enum):
     ADVICE_CHECK = "advice_check"
     LEADS_CHECK = "leads_check"
     OUTBOUND_CHECK = "outbound_check"
+    EXPLORER = "explorer"
 
 
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
@@ -187,6 +188,7 @@ BUILTIN_SYSTEM_PROMPT_MODE = {
     AgentType.ADVISOR: SystemPromptMode.REPLACE, AgentType.ADVICE_CHECK: SystemPromptMode.REPLACE,
     AgentType.LEADS_CHECK: SystemPromptMode.REPLACE,
     AgentType.OUTBOUND_CHECK: SystemPromptMode.REPLACE,
+    AgentType.EXPLORER: SystemPromptMode.REPLACE,
 }
 
 
@@ -657,7 +659,7 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
     agent = AgentType(role) if role is not None else None
     harness = BUILTIN_SETTINGS.harness
     chosen, chosen_source = builtin_profile(agent.value if agent else None), Layer.BUILTIN
-    budget, budget_source = None, Layer.BUILTIN
+    budget, budget_source = (.50 if agent is AgentType.EXPLORER else None), Layer.BUILTIN
     env: dict[str, tuple[str, Layer]] = {}
     boundaries = layers.get((Layer.SYSTEM, None), EMPTY_LAYER).boundaries
     mode = role_system_prompt_mode(agent, layers)
@@ -671,9 +673,12 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
         if text is not None and not (layer is Layer.SYSTEM and _is_builtin_harness(text)):
             in_project = project_id if layer in (Layer.PROJECT, Layer.ROLE_PROJECT) else None
             harness = Harness(text, layer, in_project, from_role)
-        if values.profile is not None:
+        # Explorers have their own profile and cap; shared task defaults must
+        # not silently replace the deliberately cheaper built-in model.
+        own_explorer_layer = agent is not AgentType.EXPLORER or layer_role is AgentType.EXPLORER
+        if values.profile is not None and own_explorer_layer:
             chosen, chosen_source = values.profile, layer
-        if values.run_budget_usd is not None:
+        if values.run_budget_usd is not None and own_explorer_layer:
             budget, budget_source = values.run_budget_usd, layer
         for key, value in values.env:
             if value is None:
@@ -804,7 +809,7 @@ async def load_agent_settings(
         if row is None:
             raise SettingsError(f"the run's Agent Profile {profile_id!r} no longer exists")
         settings = replace(settings, profile=_stored_profile(row), profile_error=None, pricing_catalog=())
-    elif settings.profile_source is Layer.BUILTIN and AgentType(role) in SPAWN_ROLES:
+    elif settings.profile_source is Layer.BUILTIN and AgentType(role) in (*SPAWN_ROLES, AgentType.EXPLORER):
         # A spawned role's own built-in profile, seeded with the schema; without it the role does not run (another
         # model in its place would not be the one chosen for it).
         builtin = builtin_profile(AgentType(role).value)
@@ -959,12 +964,14 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
 class Access(str, Enum):
     """What a run may do (the advisor RFC, section 6). ``full``: every tool; ``read_only``: no change to files (a
     Planner's); ``consult``: only the reading tools, in a resumed fork of a seat's session (an agent room consult);
+    ``explore``: fresh local reading tools without MCP, web or child agents;
     ``advisor``: no tool at all, its system prompt replaced (an advisor's, a judge's or an outbound review's run);
     ``platform_tools``: only session-bound server tools, with no local tools or installed capabilities."""
 
     FULL = "full"
     READ_ONLY = "read_only"
     CONSULT = "consult"
+    EXPLORE = "explore"
     ADVISOR = "advisor"
     PLATFORM_TOOLS = "platform_tools"  # routed Manager: only the session-bound server tools, no local tools
 
@@ -991,12 +998,30 @@ class Launch:
     # Frozen only for ACP; existing launch signatures and records do not include it.
     acp_reviewer: AcpReviewerSettings | None = None
 
+    def __post_init__(self) -> None:
+        if self.explore:
+            from .runtimes import RuntimeUnsupported
+
+            if self.read_only_mode is ReadOnly.CHECK:
+                raise RuntimeUnsupported(f"{self.runtime.label} cannot launch a read-only explorer")
+            # Explorer authority is independent of the parent's catalog and mounts.
+            object.__setattr__(self, "library", EMPTY_LIBRARY)
+            object.__setattr__(self, "knowledge", replace(self.knowledge, add_dirs=()))
+            object.__setattr__(self, "read_dirs", ())
+
+    @property
+    def explore(self) -> bool:
+        """A fresh local-reading run, without MCP, web tools or native children."""
+        return self.access_level is Access.EXPLORE
+
     @property
     def access_level(self) -> Access:
         """The run's access level: the launch's, else its role's (a Planner's is read-only, every other role's
         full)."""
         if self.access is not None:
             return self.access
+        if self.role is AgentType.EXPLORER:
+            return Access.EXPLORE
         return Access.READ_ONLY if self.role is AgentType.PLANNER else Access.FULL
 
     @property
@@ -1056,7 +1081,7 @@ class Launch:
     def steers(self) -> bool:
         """Whether the run is driven through its runtime's steering protocol (the probed capability of the
         registered runtime), so the Planner's messages reach it while it works."""
-        return Capability.STEER in self.profile.runtime.capabilities
+        return not self.explore and Capability.STEER in self.profile.runtime.capabilities
 
     @property
     def model(self) -> str:
@@ -1225,6 +1250,8 @@ class Launch:
         }
         if self.read_only:
             record["read_only"] = self.read_only_mode.value  # how it is kept from changing files
+        if self.explore:
+            record["access"] = self.access_level.value
         if self.env:
             record["env"] = {
                 "sha256": self.env_sha256,

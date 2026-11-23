@@ -504,7 +504,9 @@ async def delete_task(task_id: str, runtime_root: Path | None, *,
         await task_workspaces.finish(task_id, deleted=True, pool=conn)
         await db_tasks.delete_task(task_id, pool=conn)
     if runtime_root is not None:
+        from .acceptance_artifacts import remove_task as remove_evidence
         from .room import remove_run_sessions
+        await asyncio.to_thread(remove_evidence, runtime_root, task_id)
         await asyncio.to_thread(remove_run_sessions, runtime_root, task_id)
     if task_router is not None:
         task_router.forget_task(task_id)
