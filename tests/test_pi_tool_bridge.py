@@ -817,6 +817,8 @@ def test_post_bypasses_environment_proxies(
     ("looper_probe", 300, 120_000),
     ("looper_room_inbox", 300, 320_000),
     ("looper_room_inbox", 100.5, 120_500),
+    ("looper_agent_spawn", 120, 140_000),
+    ("looper_agent_wait", 120, 140_000),
     ("looper_room_inbox", 10, 120_000),
     ("looper_room_inbox", 0, 120_000),
     ("looper_room_inbox", -1, 120_000),
@@ -824,7 +826,7 @@ def test_post_bypasses_environment_proxies(
     ("looper_room_inbox", True, 120_000),
     ("looper_room_inbox", None, 120_000),
 ])
-def test_request_deadline_uses_only_positive_numeric_room_waits(
+def test_request_deadline_uses_only_positive_numeric_platform_waits(
     agent_api: _AgentAPIServer, tmp_path: Path, name: str, wait: Any, timeout: int,
 ) -> None:
     _catalog(agent_api, name)
