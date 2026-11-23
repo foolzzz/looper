@@ -60,6 +60,7 @@ from .wait_service import WaitService
 from .ledger_reconciler import LedgerReconciler
 from .source_service import SourceService, own_bot_app_ids
 from .intent_push import IntentPushService
+from .memory_write import MemoryWriteService
 from .reminders import ReminderService
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
@@ -755,6 +756,7 @@ async def _run_agent_system_watched(
     advisory_checks: asyncio.Task[None] | None = None
     http_server: AgentHTTPServer | None = None
     control = None
+    memory_writer: MemoryWriteService | None = None
     mode = ShutdownMode.END_RUNS
     if ops.keeper_mode is KeeperMode.ON:
         with startup.measure("lease"):
@@ -963,6 +965,8 @@ async def _run_agent_system_watched(
             completion_events.set_scheduler(scheduler)
             source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
             intent_push_service = IntentPushService(registry, drain=drain)
+            memory_writer = MemoryWriteService(runtime_root=runtime_root, drain=drain)
+            drain.add_source(lambda: {"starting": memory_writer.drain_waiting()})
             reminder_service = ReminderService(registry, drain=drain)
             ledger_reconciler = LedgerReconciler()
             supervisor.register(task_router)
@@ -1072,6 +1076,7 @@ async def _run_agent_system_watched(
                 startup_steps=startup.steps,
                 loop_watch=loop_watch,
             )
+            http_server._memory_writer = memory_writer
         fence.http_server = http_server
         with startup.measure("http"):
             await http_server.start()
@@ -1111,6 +1116,7 @@ async def _run_agent_system_watched(
         # Sources that are off (the default) cost one query per tick.
         await source_service.start()
         await intent_push_service.start()
+        await memory_writer.start()
         await reminder_service.start()  # idle while reminders are off
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
@@ -1180,6 +1186,7 @@ async def _run_agent_system_watched(
             await completion_service.stop()
             await source_service.stop()
             await intent_push_service.stop()
+            await memory_writer.stop()
             await reminder_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()
@@ -1216,6 +1223,8 @@ async def _run_agent_system_watched(
             with contextlib.suppress(asyncio.CancelledError):
                 await advisory_checks
         try:
+            if memory_writer is not None:
+                await memory_writer.stop()
             if http_server is not None:
                 await http_server.stop()
         finally:

@@ -2995,8 +2995,9 @@ only the operator's confirmation of its exact content lets Looper write it
 into the vault's memory folder
 ([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
 PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
-part is the foundation: the tables, the vocabulary, the setting and the
-reads. Nothing proposes, drafts, confirms or writes a candidate yet.
+part includes the foundation and the confirmed write path. Sources, drafting,
+pushes, private-chat replies and the dashboard memory page follow separately.
+The write path adds no model-visible prompt, contract or tool.
 
 - **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
   `M-0042`; its kind, state and reason, the least trusted class of its
@@ -3041,6 +3042,49 @@ reads. Nothing proposes, drafts, confirms or writes a candidate yet.
   the database directly, refused inside an agent run (exit codes: 0, 1 none
   found or a check failed, 2 usage, 3 not configured, 4 refused, 5 no such
   candidate, 6 database unusable).
+- **Operator actions:** `/api/v1/memory/confirm`, `confirm_many`, `reject`,
+  `edit`, `retry`, `revive` and `delete` are operator-only. Confirmation
+  names the current content hash; a stale hash is a conflict. Batch
+  confirmation returns a result for each selected item. Editing stores a
+  new revision and clears confirmation; saving and confirming it is one
+  transaction. Only the dashboard and the operator's direct-chat handler may
+  confirm. OpenAPI marks confirmation and editing `x-looper-cli: false`, so
+  the official `loopercli` generates no confirmation or save-and-confirm command.
+  The CLI adds `looper memory reject | retry | delete`, never
+  `confirm`; exit code 7 means the state does not allow the action. Deleting
+  a candidate leaves its fingerprint as a tombstone and leaves vault notes
+  alone.
+- **Writing** (`looper/agents/memory_write.py`): `looper serve` polls and
+  wakes after confirmation or retry. With `memory_write` absent or disabled
+  it writes nothing. A PostgreSQL session advisory lock per git repository
+  serializes writers across processes; the vault's existing thread lock
+  also prevents interleaving with direct vault writes. After claiming one
+  candidate it checks the settings, branch, absence of an ongoing git
+  operation and cleanliness of the target paths; unrelated dirty files
+  stay as they are. A new `looper/memory/M-0042-a<n>` branch and worktree
+  under the configured `worktree_root` hold the changes, with descriptors
+  that refuse links and atomic file replacements. Only explicit paths are
+  staged and committed, using the vault's author and hooks. The subject
+  starts with the configured prefix and identifies the candidate; the body
+  records its source and confirmation, followed by exact candidate,
+  revision, attempt and content-hash trailers. Before fast-forwarding, and
+  again afterwards, the writer checks the committed paths and bytes against
+  the confirmed operations. A branch advance outside those paths can be
+  rebased; touching a target requires new drafting and confirmation.
+- **Failure and recovery:** a blocked write keeps its confirmation and waits
+  for the operator's retry; a content conflict clears confirmation and
+  requests redrafting once. No write stashes, resets or commits somebody
+  else's changes. Startup checks interrupted writes against typed trailers
+  in the latest 500 branch commits and verifies their content before marking
+  them written. Unmerged attempts retry at most three times; cleanup removes
+  only owned memory worktrees and branches under the configured root.
+  Cleanup failure after a successful merge is a warning, and later
+  housekeeping retries it. Git failures use fixed reasons, with no git
+  output in logs. Existing git timeouts and index-lock retries apply.
+- **Known limits:** unsaved editor buffers do not block a write and a later
+  editor save can overwrite it; the content hash and commit trailers allow
+  checking what was written. An agent with a shell has the same system-user
+  access to the vault; this supported write path does not isolate that user.
 
 ### Project skills: skills a project writes
 
