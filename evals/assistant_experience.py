@@ -122,11 +122,16 @@ def times_in(text: str) -> set[int]:
             continue
         # These checks compare minutes of day, without tracking a reply's date.
         # 晚上12点 means next-day midnight, which cannot be scored here.
-        if (period in ('上午', '早上', '凌晨') and h > 12) or (period == '晚上' and h == 12):
+        if ((period in ('上午', '早上', '凌晨') and h > 12) or
+                (period == '下午' and h >= 18) or (period == '晚上' and 12 <= h < 18)):
             continue
-        if period in ('上午', '早上', '凌晨') and h == 12:
+        if period == '中午':
+            h = 13 if h == 1 else h
+            if not 11 <= h <= 13:
+                continue
+        elif period in ('上午', '早上', '凌晨') and h == 12:
             h = 0
-        elif (period in ('下午', '晚上') and h < 12) or (period == '中午' and h < 11):
+        elif period in ('下午', '晚上') and h < 12:
             h += 12
         result.add(h * 60 + (numbers[quarter] * 15 if quarter else 30 if half else m))
     return result
@@ -135,15 +140,12 @@ def times_in(text: str) -> set[int]:
 def dates_in(text: str, today: date) -> set[date]:
     result = set()
     pattern = (r'(?:(\d{4})\s*[-年]\s*(\d{1,2})\s*[-月]\s*(\d{1,2})\s*日?|'
-               r'(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*[日号])')
+               r'(\d{1,2})\s*月\s*(\d{1,2})\s*[日号])')
     for match in re.finditer(pattern, text):
         year, month, day, short_month, short_day = match.groups()
-        y, m, d = int(year or today.year), int(month or short_month or today.month), int(day or short_day)
-        if not year:
-            if short_month and (m, d) < (today.month, today.day):
-                y += 1
-            elif not short_month and d < today.day:
-                y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        y, m, d = int(year or today.year), int(month or short_month), int(day or short_day)
+        if not year and (m, d) < (today.month, today.day):
+            y += 1
         try:
             result.add(date(y, m, d))
         except ValueError:
