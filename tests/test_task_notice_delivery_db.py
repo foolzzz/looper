@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import chat_settings, completion_events, proactive_delivery as delivery
+from looper.agents import chat_settings, completion_events, proactive_delivery as delivery, turn_metrics
 from looper.agents.bus import MessageBus
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.base import DeliveryReceipt
@@ -94,6 +95,38 @@ def test_on_sends_same_notice_and_records_normal_urgency(tmp_path, monkeypatch, 
                 row["task_id"], row["decision"], row["counted"], row["outcome"], row["sent_at"] is not None) == (
             "task_notice", "normal", "group" if group else "direct", notice.channel_id, notice.target.id,
             "task-notice", "send", not group, "sent", True)
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("channel", ["lark", "lark_bot", "telegram"])
+@pytest.mark.parametrize("metrics_enabled,delivery_enabled", [(True, True), (True, False),
+                                                             (False, True), (False, False)])
+def test_outbound_metrics_share_the_notice_decision(tmp_path, monkeypatch, channel, metrics_enabled, delivery_enabled):
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, "_metrics_enabled", metrics_enabled)
+        chat_settings.set_delivery_enabled(delivery_enabled)
+        adapter, sender, notice, queued, status = await prepare(pool, tmp_path, monkeypatch, channel=channel)
+        sender.return_value = DeliveryReceipt(channel, True, external_id="synthetic-receipt")
+
+        async def subscribe(channel_id):
+            yield queued
+
+        adapter._bus = SimpleNamespace(subscribe=subscribe, runtime_root=tmp_path)
+        adapter._running = True
+        await adapter._outbound_loop()
+        await asyncio.gather(*turn_metrics._pending)
+        sender.assert_awaited_once()
+        assert sender.await_args.args == (int(notice.target.id) if channel == "telegram" else notice.target, notice.text)
+        rows = await pool.fetch("SELECT * FROM proactive_deliveries")
+        assert len(rows) == int(metrics_enabled or delivery_enabled)
+        if rows:
+            [row] = rows
+            assert row["dedupe_key"] == (f"task_notice:{status.message_id}" if delivery_enabled else queued.message_id)
+            assert row["outcome"] == "sent" and row["external_id"] == "synthetic-receipt"
+            assert row["sent_at"] is not None
+            assert row["decision"] == ("send" if delivery_enabled else None)
+            assert row["counted"] == (True if delivery_enabled else None)
+            assert row["task_id"] == ("task-notice" if delivery_enabled else None)
     run_db(check, monkeypatch)
 
 
