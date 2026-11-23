@@ -2328,7 +2328,7 @@ _FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_
          "roles_template_unfit": (1, 0, 0, 0),
          "schedule_template_report": (1, 0, 1, 0),
          # A gate is a step; the steps its closing turn added follow it.
-         "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
+         "gate_ambiguous": (2, 0, 0, 0), "gate_outside_answer": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
          "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
          "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0),
          "vault_closeout_keeps": (1, 0, 0, 0), "vault_closeout_nothing": (1, 0, 0, 0),
@@ -2358,7 +2358,7 @@ _SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step"
           "schedule_template_report": (0, 0, 1),
           # Its four platform steps run side by side between the interface step and the check.
           "roles_multi_platform": (6, 6, 4),
-          "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
+          "gate_ambiguous": (0, 0, 1), "gate_outside_answer": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
           # The clear part runs beside the gate and then beside the step the gate's answer planned.
           "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
           "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
@@ -2403,7 +2403,7 @@ _COUNTS = {
 # that waits on it before it opens, so no gate asked.
 _GATE_KEYS = ("gates_opened", "gate_turns", "gates_passed", "gates_ended_by_user", "gates_cancelled",
               "assumptions_stated", "gate_parallel_runs", "conclusion_reads")
-_GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
+_GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_outside_answer": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
           "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
 # Only the room tasks' agents use the room: room_interface's store posts its interface, its client asks the Planner,
 # which answers in a [ROOM] turn; room_consult's second step asks the first, whose run has ended, and a consult of

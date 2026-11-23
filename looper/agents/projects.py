@@ -1210,6 +1210,7 @@ AGENTS_EDITABLE_STATUSES = (*EDITABLE_STATUSES, *db_tasks.RESTARTABLE_STATUSES)
 
 async def add_task_supplement(
     task_id: str, text: str, *, via: str, wake: Callable[[int | None], Awaitable[Any]], best_effort: bool = False,
+    from_operator: bool | None = None,
 ) -> Any:
     """Store a supplement before waking its Planner through the entry's existing delivery protocol.
 
@@ -1221,7 +1222,8 @@ async def add_task_supplement(
 
     supplement_id = None
     try:
-        supplement_id = await task_changes.add_supplement(task_id, kept_text(text, SUPPLEMENTS_MAX_CHARS), via=via)
+        supplement_id = await task_changes.add_supplement(task_id, kept_text(text, SUPPLEMENTS_MAX_CHARS), via=via,
+                                                          from_operator=from_operator)
     except Exception:
         if not best_effort:
             raise
