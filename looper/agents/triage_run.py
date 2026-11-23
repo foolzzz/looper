@@ -194,7 +194,8 @@ async def raise_floor(conn: Any, parsed: TriageParsed, rows: Sequence[Mapping[st
 
 async def store(conn: Any, parsed: TriageParsed, *, source_id: str, schedule_id: str, run_id: str,
                 record_id: int | None, window_rows: Sequence[Mapping[str, Any]]) -> ExtractCounts:
-    """Store events and exact window atomically with the caller's run end and cursor; never enqueue delivery.
+    """Store events and exact window atomically with the caller's run end and cursor; an important event that owns a
+    window message also gets its Manager handoff row, never a message.
 
     Category counts are window-message counts. Uncited messages have no event row: window_seqs answers their why.
     NONE is an explicit whole-window ignore and likewise needs no individual rows.
@@ -236,6 +237,11 @@ async def store(conn: Any, parsed: TriageParsed, *, source_id: str, schedule_id:
                            raised=raised, dropped=dict(dropped))
     await conn.execute("UPDATE subscription_runs SET window_seqs = $2::bigint[], extract_counts = $3::jsonb "
                        "WHERE run_id = $1", run_id, seqs, json.dumps(counts.as_dict(), sort_keys=True))
+    if counts.important:
+        from . import triage_handoff
+
+        # Only an important event that owns a window message is handed to the Manager, in this same transaction.
+        await triage_handoff.hand_off(conn, run_id)
     return counts
 
 

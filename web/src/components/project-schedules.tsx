@@ -133,6 +133,26 @@ function formatInZone(iso: string | null, timeZone?: string): string {
   return format.format(date);
 }
 
+/** A usage-window wait in the schedule's own zone. */
+export function usageWindowWait(until: string, timeZone?: string): string {
+  return `Waiting for a usage window until ${formatInZone(until, timeZone)}`;
+}
+
+/** The schedules list's next-run line. Null when the caller shows "Next" plus the schedule's own time.
+ * A disabled schedule stays labeled Disabled when it is also waiting. */
+export function listNextRun(schedule: {
+  enabled: boolean;
+  timezone?: string;
+  next_fire_at?: string | null;
+  usage_hold?: { until: string } | null;
+}): string | null {
+  const hold = schedule.usage_hold ? usageWindowWait(schedule.usage_hold.until, schedule.timezone) : null;
+  if (!schedule.enabled) return hold ? `Disabled · ${hold}` : "Disabled";
+  if (hold) return hold;
+  if (!schedule.next_fire_at) return "No next run";
+  return null;
+}
+
 /** A `<time>` in a schedule's zone (see `formatInZone`). */
 export function ScheduleTime({ iso, timeZone, className }: { iso: string; timeZone?: string; className?: string }) {
   return (
@@ -1920,11 +1940,18 @@ const SKIP_LABELS: Record<NonNullable<SubscriptionRunInfo["skip_reason"]>, strin
   blocked_by_hook: "a prompt hook blocked it", invalid_reply: "its reply could not be read, twice",
 };
 
+function triageCountLine(counts: NonNullable<SubscriptionRunInfo["extract_counts"]>): string | null {
+  if (typeof counts.important !== "number") return null;
+  const dropped = counts.dropped ? Object.values(counts.dropped).reduce((sum, value) => sum + value, 0) : 0;
+  return `important ${counts.important} · digest ${counts.digest ?? 0} · ignore ${counts.ignore ?? 0} · uncited ${counts.uncited ?? 0} · raised ${counts.raised ?? 0} · dropped ${dropped}`;
+}
+
 /** What a subscription run read and made, under its line of the history. */
 function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
   const sub = run.subscription;
   if (!sub) return null;
   const dropped = [sub.events_too_old && `${sub.events_too_old} too old`, sub.events_over_cap && `${sub.events_over_cap} over the cap`].filter(Boolean);
+  const counts = sub.extract_counts ? triageCountLine(sub.extract_counts) : null;
   return (
     <div className="min-w-0 text-xs sm:basis-full">
       <p className="text-muted-foreground">
@@ -1933,6 +1960,7 @@ function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
         {" · "}events {sub.from_seq + 1}–{sub.to_seq}
         {sub.deliveries && sub.deliveries.length > 0 && ` · messages: ${sub.deliveries.map((d) => `${d.segment} ${d.state}`).join(", ")}`}
       </p>
+      {counts && <p className="text-muted-foreground">{counts}</p>}
       {sub.output_text && (
         <details className="mt-1">
           <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">Output</summary>
@@ -2621,11 +2649,16 @@ export function ProjectSchedulesSection({
             const sid = schedule.schedule_id;
             const state = row(sid);
             const enabled = switching[sid] ?? schedule.enabled;
-            const next = schedule.enabled
-              ? schedule.next_fire_at
+            const hold = schedule.usage_hold
+              ? usageWindowWait(schedule.usage_hold.until, schedule.timezone)
+              : null;
+            const next = !schedule.enabled
+              ? hold ? `Disabled · ${hold}` : "Disabled"
+              : hold
+              ? hold
+              : schedule.next_fire_at
                 ? `next ${formatInZone(schedule.next_fire_at, schedule.timezone)}`
-                : "no next run"
-              : "Disabled";
+                : "no next run";
             return (
               <CollapsibleRow
                 key={sid}
