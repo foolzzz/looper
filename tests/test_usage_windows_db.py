@@ -1,0 +1,612 @@
+"""Usage-window holds on a disposable database: schedule deferral, background callers, and one notice per signal.
+
+Synthetic providers and windows only. No model is started: a held outbound review never reaches the stand-in,
+and a held leads check stores every item unchecked.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import asyncpg
+import pytest
+
+from tests.db_support import DSN, run_db
+from tests.fake_claude import fake_claude
+from tests.schedule_support import NOON, ScheduleEnv, run_scheduled
+from tests.subscription_support import cursor, lark_targets, started
+
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+BUILTIN = "prov-claude-subscription"
+UTC = timezone.utc
+
+
+async def _quiet() -> None:
+    from looper.agents import cost_guard, cost_guard_settings as settings, usage_windows
+
+    try:
+        await settings.update({"mode": "off"})
+        await cost_guard.refresh()
+    except Exception:
+        pass
+    usage_windows.clear_cache()
+    usage_windows.configure(None)
+
+
+async def _enforce(pool, *, signals: bool = True, clock=None, day_start=None) -> None:
+    from looper.agents import cost_guard, cost_guard_settings as settings
+    from looper.db import system_settings
+
+    await system_settings.put_settings(
+        {"engine.limit_signals.enabled": "true" if signals else None}, pool=pool)
+    await cost_guard.initialize(day_start=day_start or (lambda now: now), pool=pool)
+    guard = cost_guard.current()
+    if clock is not None:
+        guard.clock = clock
+    await settings.update({"mode": "enforce"}, pool=pool)
+    await cost_guard.refresh()
+    guard = cost_guard.current()
+    if clock is not None:
+        guard.clock = clock
+        guard.day = (day_start or (lambda now: now))(clock())
+
+
+async def _window(pool, *, status="warning", utilization=0.95, resets_at, observed_at, name="five_hour",
+                  provider=BUILTIN) -> None:
+    from looper.agents import usage_windows
+    from looper.db import provider_limits
+
+    fields = {"status": status, "utilization": utilization, "source": "claude_stream", "observed_at": observed_at,
+              "resets_at": resets_at}
+    await provider_limits.upsert(provider, name, fields, pool=pool)
+    usage_windows.clear_cache()
+
+
+async def _failure(pool, *, at: datetime, resets_at: datetime | None = None, cause: str = "rate_limit",
+                   error: str = "retry at 2099-01-01T00:00:00Z", provider=BUILTIN) -> None:
+    from looper.agents import usage_windows
+
+    metadata: dict[str, Any] = {"profile": {"provider": {"id": provider}}, "failure": {}}
+    if resets_at is not None:
+        metadata["failure"]["resets_at"] = resets_at.isoformat()
+    await pool.execute(
+        "INSERT INTO llm_records (agent_id, status, metadata, failure_class, failure_cause, created_at, "
+        "finished_at, error) VALUES ('worker-synthetic', 'failed', $1::jsonb, 'quota', $2, $3, $3, $4)",
+        json.dumps(metadata), cause, at, error)
+    usage_windows.clear_cache()
+
+
+def test_high_utilization_defers_a_firing_until_its_reset_then_admits_it_again(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import usage_windows
+
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            sid = (await env.enabled())["schedule_id"]
+            await env.due(sid)
+            resets = env.clock.now + timedelta(seconds=30)
+            await _failure(env.pool, at=env.clock.now - timedelta(hours=1), cause="usage_limit",
+                           error="already failed; do not replay this step")
+            before = await env.pool.fetchval("SELECT count(*) FROM llm_records WHERE failure_class = 'quota'")
+            await _window(env.pool, utilization=0.95, resets_at=resets, observed_at=env.clock.now)
+            next_at = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid)
+            await env.scheduler.tick()
+            assert await env.runs(sid) == [] and env.bus.of("task_start") == []
+            row = await env.pool.fetchrow("SELECT last_fired_at, next_fire_at FROM schedules WHERE id = $1", sid)
+            assert row["last_fired_at"] is None and row["next_fire_at"] == next_at
+            view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+            assert view["usage_hold"]["reason"] == "high_utilization"
+            assert datetime.fromisoformat(view["usage_hold"]["until"]) == resets
+            assert await env.pool.fetchval("SELECT count(*) FROM llm_records WHERE failure_class = 'quota'") == before
+
+            env.clock.now = resets + timedelta(seconds=1)
+            usage_windows.clear_cache()
+            await env.scheduler.tick()
+            assert env.bus.of("task_start") and len(await env.runs(sid)) == 1
+            resumed = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+            assert "usage_hold" not in resumed
+            assert await env.pool.fetchval("SELECT count(*) FROM llm_records WHERE failure_class = 'quota'") == before
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_after_the_hold_the_firing_is_checked_against_the_daily_budget(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import usage_windows
+
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            sid = (await env.enabled(daily_budget_usd=0.01))["schedule_id"]
+            await env.due(sid)
+            await env.pool.execute(
+                "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status, cost_usd, "
+                "finished_at) VALUES ('run-spent', $1, $2, $2, 'manual', 'completed', 1, $2)",
+                sid, env.clock.now)
+            resets = env.clock.now + timedelta(seconds=30)
+            await _window(env.pool, utilization=0.95, resets_at=resets, observed_at=env.clock.now)
+            await env.scheduler.tick()
+            assert env.bus.of("task_start") == []
+            assert [run["status"] for run in await env.runs(sid)] == ["completed"]
+            env.clock.now = resets + timedelta(seconds=1)
+            usage_windows.clear_cache()
+            await env.scheduler.tick()
+            assert env.bus.of("task_start") == []
+            assert {run["status"] for run in await env.runs(sid)} == {"completed", "skipped_budget"}
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_094_and_a_past_reset_do_not_defer_a_firing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            low = (await env.enabled())["schedule_id"]
+            past = (await env.enabled())["schedule_id"]
+            await env.due(low)
+            await env.pool.execute(
+                "UPDATE schedules SET next_fire_at = (SELECT next_fire_at FROM schedules WHERE id = $1) WHERE id = $2",
+                low, past)
+            await _window(env.pool, utilization=0.94, resets_at=env.clock.now + timedelta(hours=1),
+                          observed_at=env.clock.now, name="five_hour")
+            await _window(env.pool, status="rejected", utilization=1, resets_at=env.clock.now - timedelta(minutes=1),
+                          observed_at=env.clock.now - timedelta(hours=1), name="seven_day")
+            await env.scheduler.tick()
+            started = env.bus.of("task_start")
+            assert len(started) == 2 and len(set(started)) == 2
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_rejected_holds_until_the_reset_and_notifies_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import gate_service, usage_windows
+
+        sent: list[tuple[str, str, str]] = []
+        locked: list[str] = []
+
+        async def sender(channel, chat, text, **_kwargs):
+            try:
+                async with env.pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '500ms'")
+                        await conn.fetchrow("SELECT id FROM schedules WHERE id = $1 FOR UPDATE", sid)
+                locked.append("ok")
+            except asyncpg.exceptions.LockNotAvailableError:
+                locked.append("locked")
+            sent.append((channel, chat, text))
+            return True, None
+
+        async def target():
+            return SimpleNamespace(channel_id="channel-lark", target=SimpleNamespace(id="ou_synthetic"))
+
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            usage_windows.configure(sender)
+            monkeypatch.setattr(gate_service, "dashboard_target", target)
+            sid = (await env.enabled())["schedule_id"]
+            await env.due(sid)
+            resets = env.clock.now + timedelta(seconds=30)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=resets, observed_at=env.clock.now)
+            await env.scheduler.tick()
+            await env.scheduler.tick()
+            assert await env.runs(sid) == []
+            assert len(sent) == 1 and sent[0][0] == "channel-lark" and "后台工作会等待" in sent[0][2]
+            assert BUILTIN in sent[0][2] and "重置时间未知" not in sent[0][2]
+            assert locked == ["ok"]
+            started = await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid})
+            assert started["run"]["trigger"] == "manual"
+            waiting = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+            assert waiting["usage_hold"]["reason"] == "rejected"
+            assert datetime.fromisoformat(waiting["usage_hold"]["until"]) == resets
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_known_high_utilization_reset_sends_no_notice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import gate_service, usage_windows
+
+        sent: list[str] = []
+
+        async def sender(_channel, _chat, text, **_kwargs):
+            sent.append(text)
+            return True, None
+
+        async def target():
+            return SimpleNamespace(channel_id="channel-lark", target=SimpleNamespace(id="ou_synthetic"))
+
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            usage_windows.configure(sender)
+            monkeypatch.setattr(gate_service, "dashboard_target", target)
+            sid = (await env.enabled())["schedule_id"]
+            await env.due(sid)
+            await _window(env.pool, utilization=0.95, resets_at=env.clock.now + timedelta(seconds=30),
+                          observed_at=env.clock.now)
+            await env.scheduler.tick()
+            assert await env.runs(sid) == [] and sent == []
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_observe_does_not_defer_or_notify(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import cost_guard, cost_guard_settings as settings, gate_service, usage_windows
+
+        sent: list[str] = []
+
+        async def sender(*_args, **_kwargs):
+            sent.append("sent")
+            return True, None
+
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            await settings.update({"mode": "observe"}, pool=env.pool)
+            await cost_guard.refresh()
+            cost_guard.current().clock = env.clock
+            usage_windows.configure(sender)
+            monkeypatch.setattr(gate_service, "dashboard_target", AsyncMockTarget())
+            sid = (await env.enabled())["schedule_id"]
+            await env.due(sid)
+            await _window(env.pool, utilization=0.95, resets_at=env.clock.now + timedelta(hours=1),
+                          observed_at=env.clock.now)
+            await env.scheduler.tick()
+            assert env.bus.of("task_start") and sent == []
+            view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+            assert "usage_hold" not in view
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+class AsyncMockTarget:
+    async def __call__(self):
+        return SimpleNamespace(channel_id="channel-lark", target=SimpleNamespace(id="ou_synthetic"))
+
+
+def test_off_does_not_read_windows_and_a_firing_still_starts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.db import provider_limits
+
+        calls: list[Any] = []
+        real = provider_limits.windows
+
+        async def wrapped(*args, **kwargs):
+            calls.append(args)
+            return await real(*args, **kwargs)
+
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            from looper.agents import cost_guard, cost_guard_settings as settings
+
+            await settings.update({"mode": "off"}, pool=env.pool)
+            await cost_guard.refresh()
+            monkeypatch.setattr(provider_limits, "windows", wrapped)
+            sid = (await env.enabled())["schedule_id"]
+            await env.due(sid)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=env.clock.now + timedelta(hours=1),
+                          observed_at=env.clock.now)
+            calls.clear()
+            await env.scheduler.tick()
+            assert env.bus.of("task_start") and calls == []
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_signals_off_ignores_windows_and_a_quota_failure_still_holds(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.db import provider_limits
+
+        calls: list[Any] = []
+        real = provider_limits.windows
+
+        async def wrapped(*args, **kwargs):
+            calls.append(args)
+            return await real(*args, **kwargs)
+
+        try:
+            await _enforce(env.pool, signals=False, clock=env.clock, day_start=env.scheduler.day_start)
+            monkeypatch.setattr(provider_limits, "windows", wrapped)
+            ignored = (await env.enabled())["schedule_id"]
+            await env.due(ignored)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=env.clock.now + timedelta(hours=1),
+                          observed_at=env.clock.now)
+            calls.clear()
+            await env.scheduler.tick()
+            assert env.bus.of("task_start") and calls == []
+
+            held = (await env.enabled())["schedule_id"]
+            await env.due(held)
+            reset = env.clock.now + timedelta(minutes=20)
+            await _failure(env.pool, at=env.clock.now, resets_at=reset, cause="usage_limit",
+                           error="the text says 2099-01-01, which is not the reset")
+            await env.scheduler.tick()
+            view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": held}))["schedule"]
+            assert view["usage_hold"]["reason"] == "quota_failure"
+            assert datetime.fromisoformat(view["usage_hold"]["until"]) == reset
+            assert "2099" not in view["usage_hold"]["until"]
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_cooldown_is_five_minutes_from_the_stored_time_and_a_restart_does_not_extend_it(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool) -> None:
+        from looper.agents import usage_windows
+
+        try:
+            await _enforce(pool, signals=True)
+            observed = datetime.now(UTC) - timedelta(minutes=1)
+            await _window(pool, status="rejected", utilization=0.2, resets_at=None, observed_at=observed,
+                          name="session")
+            now = observed + timedelta(minutes=2)
+            first = await usage_windows.hold_for(BUILTIN, background=False, now=now, pool=pool)
+            assert first is not None and first.until == observed + timedelta(minutes=5)
+            assert first.reset_known is False and first.reason is usage_windows.HoldReason.REJECTED
+            for _ in range(10):
+                again = await usage_windows.hold_for(BUILTIN, background=False, now=now + timedelta(seconds=20),
+                                                     pool=pool)
+                assert again.until == first.until
+            usage_windows.clear_cache()
+            restarted = await usage_windows.hold_for(BUILTIN, background=False, now=now, pool=pool)
+            assert restarted.until == first.until
+            assert await usage_windows.hold_for(BUILTIN, background=False, now=first.until, pool=pool) is None
+
+            ended = datetime.now(UTC) - timedelta(minutes=1)
+            other = "prov-cooldown-only"
+            await pool.execute(
+                "INSERT INTO llm_providers (id, name, vendor_type, auth) VALUES ($1, 'Cooldown', 'custom', 'api_key')",
+                other)
+            await _failure(pool, at=ended, cause="rate_limit", provider=other)
+            cooled = await usage_windows.hold_for(other, background=True, now=ended + timedelta(minutes=1), pool=pool)
+            assert cooled.reason is usage_windows.HoldReason.QUOTA_COOLDOWN
+            assert cooled.until == ended + timedelta(minutes=5) and cooled.reset_known is False
+            usage_windows.clear_cache()
+            assert (await usage_windows.hold_for(other, background=True, now=ended + timedelta(minutes=4),
+                                                pool=pool)).until == cooled.until
+        finally:
+            await _quiet()
+
+    run_db(test, monkeypatch)
+
+
+def test_subscription_cursor_stays_and_outbound_blocks_while_leads_pass_through(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import extraction, leads_check, outbound
+        from looper.agents.outbound import Action, ActionLevel, Asker, Origin, Who
+        from looper.agents.serve import seed_role_configs
+
+        try:
+            await seed_role_configs(env.pool)
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            await lark_targets(env.pool)
+            sid = await started(env)
+            before = await cursor(env, sid)
+            await env.due(sid)
+            resets = env.clock.now + timedelta(seconds=30)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=resets, observed_at=env.clock.now)
+            await env.scheduler.tick()
+            assert await cursor(env, sid) == before
+            assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs WHERE schedule_id = $1", sid) == 0
+
+            # The outbound and leads paths use the wall clock, so the same account stays rejected past it.
+            wall = datetime.now(UTC) + timedelta(minutes=30)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=wall, observed_at=datetime.now(UTC),
+                          name="seven_day")
+            from looper.agents import cost_guard
+            cost_guard.current().clock = lambda: datetime.now(UTC)
+            seen = tmp_path / "outbound-seen.jsonl"
+            monkeypatch.setenv("OUTBOUND_SEEN", str(seen))
+            monkeypatch.setenv("OUTBOUND_REPLY", "{}")
+            action = Action(tool="looper_lark", action="send", level=ActionLevel.EXTERNAL, target_kind="chat",
+                            target="Build status", summary="Send a message", content="The nightly build is green.")
+            review = await outbound.review(
+                action, Asker(Who.OPERATOR, "lark", "Post the build status."),
+                Origin("planner-task", outbound.Source.TOOL, task_id=None, channel="lark", chat="oc_build"),
+                runtime_root=tmp_path / "rt", claude_bin=fake_claude(tmp_path / "claude", _STAND_IN))
+            assert review.allowed is False and review.failure is outbound.Failure.UNAVAILABLE
+            assert str(review.reason).startswith("usage window on hold until ")
+            assert not seen.exists()
+
+            items = [{"kind": "commitment", "summary": "李四今天下班前修好登录页", "detail": "", "confidence": "high",
+                      "sources": [1], "window_sources": [1], "about": []}]
+            untouched = json.loads(json.dumps(items))
+            people = extraction.Participants({"ou_zhang": "张三"}, "ou_user")
+            messages = {1: {"seq": 1, "external_id": "om_1", "chat_id": "oc_team", "chat_kind": "group",
+                            "chat_name": "研发群", "parent_id": None, "sender_id": "ou_zhang", "sender_kind": "user",
+                            "sender_name": "张三", "sent_at": NOON, "text": "登录页的报错谁能看一下？"}}
+            outcome = await leads_check.check(
+                "leads", items, messages=messages, participants=people, zone_name="Asia/Shanghai", text_max_chars=500,
+                types={}, owner="sub-synthetic", reference={"window": "w"}, budget_usd=0.5, timeout_s=30,
+                runtime_root=tmp_path / "leads", claude_bin=str(tmp_path / "claude"))
+            assert outcome.checked is None and items == untouched
+            assert outcome.detail.startswith("failed: usage window on hold until ")
+            assert outcome.counts["check_failed"] is True
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("catch_up", ["skip", "once"])
+def test_a_hold_longer_than_grace_stays_due_and_then_fires_on_time(
+        catch_up: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import cost_guard
+
+        def held_rows() -> list[dict[str, Any]]:
+            return [row for row in cost_guard.current().snapshot()["recent"]
+                    if row.get("decision") == "hold" or row.get("would_hold_until")]
+
+        def waits() -> list[logging.LogRecord]:
+            return [record for record in caplog.records if "waits for a usage window" in record.getMessage()]
+
+        try:
+            caplog.set_level(logging.INFO)
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            sid = (await env.enabled(cron="0 12 * * *", timezone="America/Los_Angeles", catch_up=catch_up))["schedule_id"]
+            await env.pool.execute(
+                "UPDATE schedules SET next_fire_at = $2, last_fired_at = NULL WHERE id = $1", sid, NOON)
+            resets = NOON + timedelta(minutes=10)
+            env.clock.now = NOON + timedelta(minutes=3)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=resets, observed_at=NOON)
+            next_at = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid)
+            await env.scheduler.tick()
+            row = await env.pool.fetchrow("SELECT last_fired_at, next_fire_at FROM schedules WHERE id = $1", sid)
+            assert await env.runs(sid) == []
+            assert row["last_fired_at"] is None and row["next_fire_at"] == next_at
+            assert len(held_rows()) == 1 and len(waits()) == 1
+
+            env.clock.now += timedelta(seconds=20)
+            await env.scheduler.tick()
+            assert await env.runs(sid) == []
+            assert len(held_rows()) == 1 and len(waits()) == 1
+            still = await env.pool.fetchrow("SELECT last_fired_at, next_fire_at FROM schedules WHERE id = $1", sid)
+            assert still["last_fired_at"] is None and still["next_fire_at"] == next_at
+
+            extended = resets + timedelta(minutes=5)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=extended, observed_at=env.clock.now)
+            env.clock.now += timedelta(seconds=20)
+            await env.scheduler.tick()
+            assert len(held_rows()) == 2 and len(waits()) == 2
+            assert await env.runs(sid) == []
+
+            # The cached window already ends at ``extended``. Clearing it would also drop the deferral note.
+            env.clock.now = extended + timedelta(seconds=1)
+            await env.scheduler.tick()
+            runs = await env.runs(sid)
+            started = [run for run in runs if run["trigger"] == "scheduled"]
+            assert len(started) == 1 and started[0]["missed"] == 0
+            assert all(run["trigger"] != "catch_up" and run["status"] != "skipped_missed" for run in runs)
+            fired = await env.pool.fetchrow("SELECT last_fired_at, next_fire_at FROM schedules WHERE id = $1", sid)
+            assert fired["last_fired_at"] == NOON and fired["next_fire_at"] != next_at
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_an_operator_run_now_starts_during_a_high_utilization_hold(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            fresh = (await env.enabled())["schedule_id"]
+            resets = env.clock.now + timedelta(minutes=10)
+            await _window(env.pool, utilization=0.95, resets_at=resets, observed_at=env.clock.now)
+            started = await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": fresh})
+            assert started["run"]["trigger"] == "manual"
+            alone = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": fresh}))["schedule"]
+            assert "usage_hold" not in alone
+
+            sid = (await env.enabled())["schedule_id"]
+            await env.due(sid)
+            await _window(env.pool, utilization=0.95, resets_at=resets, observed_at=env.clock.now)
+            await env.scheduler.tick()
+            assert await env.runs(sid) == []
+            next_at = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid)
+            manual = await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid})
+            assert manual["run"]["trigger"] == "manual"
+            waiting = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+            assert waiting["usage_hold"]["reason"] == "high_utilization"
+            assert await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid) == next_at
+            assert not any(run["status"] == "skipped_missed" for run in await env.runs(sid))
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_hold_notice_keeps_one_settings_row_per_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool) -> None:
+        from looper.agents import gate_service, usage_windows
+
+        sent: list[str] = []
+
+        async def sender(_channel, _chat, text, **_kwargs):
+            sent.append(text)
+            return True, None
+
+        async def target():
+            return SimpleNamespace(channel_id="channel-lark", target=SimpleNamespace(id="ou_synthetic"))
+
+        try:
+            usage_windows.configure(sender)
+            monkeypatch.setattr(gate_service, "dashboard_target", target)
+            day = datetime(2026, 1, 15, 20, tzinfo=UTC)
+            provider = "prov-synthetic"
+            await usage_windows.notify_hold(provider, usage_windows.Hold(
+                day + timedelta(minutes=5), usage_windows.HoldReason.QUOTA_COOLDOWN, False, None))
+            await usage_windows.notify_hold(provider, usage_windows.Hold(
+                day + timedelta(minutes=6), usage_windows.HoldReason.QUOTA_COOLDOWN, False, None))
+            await usage_windows.notify_hold(provider, usage_windows.Hold(
+                day + timedelta(hours=1), usage_windows.HoldReason.REJECTED, True, "five_hour"))
+            await usage_windows.notify_hold(provider, usage_windows.Hold(
+                day + timedelta(hours=2), usage_windows.HoldReason.REJECTED, True, "five_hour"))
+            assert len(sent) == 3
+            rows = await pool.fetch(
+                "SELECT key FROM system_settings WHERE key LIKE $1 ORDER BY key",
+                "cost_guard_hold:prov-synthetic:%")
+            assert [row["key"] for row in rows] == [
+                "cost_guard_hold:prov-synthetic:failure",
+                "cost_guard_hold:prov-synthetic:five_hour",
+            ]
+        finally:
+            usage_windows.configure(None)
+
+    run_db(test, monkeypatch)
+
+
+def test_settings_get_lists_a_current_hold_and_omits_it_while_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool) -> None:
+        from looper.agents import cost_guard, cost_guard_settings as settings
+        from looper.agents.v1_domains import cost_guard as domain
+
+        try:
+            await _enforce(pool)
+            await _window(pool, status="rejected", utilization=1, resets_at=datetime.now(UTC) + timedelta(minutes=20),
+                          observed_at=datetime.now(UTC))
+            view = await domain.run(None, domain.OPERATIONS[0], {}, None, None)
+            assert view["mode"] == "enforce"
+            assert view["holds"][0]["provider"] == BUILTIN and view["holds"][0]["reason"] == "rejected"
+            await settings.update({"mode": "off"}, pool=pool)
+            await cost_guard.refresh()
+            off = await domain.run(None, domain.OPERATIONS[0], {}, None, None)
+            assert "holds" not in off
+        finally:
+            await _quiet()
+
+    run_db(test, monkeypatch)
+
+
+_STAND_IN = r'''
+import json, os, sys
+turn = json.loads(sys.stdin.readline())["message"]["content"]
+with open(os.environ["OUTBOUND_SEEN"], "a") as seen:
+    seen.write(turn + "\n")
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "{}", "session_id": "s"}))
+'''
