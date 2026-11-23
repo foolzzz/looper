@@ -3128,10 +3128,15 @@ confirm (`projects.skill_proposals`, NULL or `off` by default, set with
 export only while it is `on`). A proposal (`skill_proposals`,
 `looper/agents/skill_proposals.py`) is a `create` or an `update` with its full
 text, its reason and the tasks and steps it comes from. It changes no catalog
-item and reaches no run. With the switch on, a task's Planner may include at most two full skill proposals in its
-closing reply; validation refusals and later confirmation or rejection results reach the next Planner of that project once.
+item and reaches no run. With the switch on, a task's Planner may store at most two full skill proposals across
+its closing replies, including replays and restarts. Planner-originated validation refusals and later confirmation
+or rejection results reach the next Planner of that project once; a failed PLAN turn releases its feedback claim.
+Validation refusals carry only a typed reason and its fixed explanation, without quoted draft fields. A malformed
+proposal becomes a shape refusal and preserves the final summary. Evidence task and step identifiers are capped
+at 64 characters.
 The Manager's operator-only `looper_skill_propose` tool also creates proposals and is listed only while a project
-opts in; Workers and Reviewers supply evidence through their learnings and cannot propose or confirm.
+opts in; its validation refusals return to the Manager and are not sent to a Planner. Workers and Reviewers supply
+evidence through their learnings and cannot propose or confirm.
 The checks reuse the skill field rules, refuse a secret-shaped string in the
 description, the content or the reason (`skill_secrets`, a fixed table of
 named rules), allow only an `update` once the project has 20 skills, and keep
