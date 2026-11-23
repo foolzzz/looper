@@ -85,6 +85,8 @@ TOOL_LEVELS: Mapping[str, ActionLevel | LevelOf] = {
     # A step's run's room, inside its task
     "looper_room_roster": INSIDE, "looper_room_post": INSIDE, "looper_room_inbox": INSIDE,
     "looper_room_read": INSIDE, "looper_room_watch": INSIDE,
+    # Bounded read-only children and their results stay within this task.
+    "looper_agent_spawn": INSIDE, "looper_agent_wait": INSIDE, "looper_agent_cancel": INSIDE,
     # The knowledge vault: reading, or writing and committing the operator's notes (never pushed)
     "looper_vault_search": INSIDE, "looper_vault_read": INSIDE, "looper_vault_write": MACHINE,
 }

@@ -97,6 +97,7 @@ class MessageKind(str, Enum):
     ANNOUNCE = "announce"
     NOTICE = "notice"  # Looper's, to a seat: a watch fired, a question went to the Planner
     ESCALATION = "escalation"  # Looper's, to the Planner
+    SPAWN_RESULT = "spawn_result"  # Looper's, to the Worker that spawned an explorer
 
 
 # What members post; Looper writes the rest.
@@ -120,6 +121,7 @@ class Reason(str, Enum):
     INTERFACE_CHANGED = "interface_changed"
     ROOM_FULL = "room_full"
     WATCH = "watch"  # a notice: what a run watched for happened
+    SPAWN_RESULT = "spawn_result"
 
 
 class FallbackReason(str, Enum):
@@ -432,6 +434,9 @@ def message_view(message: Mapping[str, Any], seat: Seat | None = None) -> dict[s
         view["files"] = files
     if commits := [ref["commit"] for ref in refs if ref.get("commit")]:
         view["commits"] = commits
+    if message["kind"] == MessageKind.SPAWN_RESULT.value:
+        if spawn_ids := [ref["spawn_id"] for ref in refs if ref.get("spawn_id")]:
+            view["spawn_id"] = spawn_ids[0]
     if message.get("reason"):
         view["reason"] = message["reason"]
     if message.get("via") and message["via"] != "agent":
@@ -1125,6 +1130,14 @@ class RoomService:
         if member.run is None or member.presence is not Presence.ONLINE or pool is None or not hasattr(pool, "remind"):
             return
         await pool.remind(member.run)
+
+    async def notify_spawn_result(self, task_id: str, seat: str) -> None:
+        """Wake inbox waits and use the room's normal delivery path for a stored explorer result."""
+        self._wake_inboxes(task_id)
+        context = await self._context(task_id, live=False)
+        member = context.member(seat)
+        if member is not None:
+            await self._remind(task_id, member)
 
     # --- The Planner ---
 

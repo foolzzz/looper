@@ -83,4 +83,6 @@ class RoomTurnTools:
         arguments = object_arguments(call.arguments)
         if arguments is None:
             return invalid_arguments()
-        return tool_outcome(await self._ops.call("Bearer " + self._token, call.name, arguments))
+        from ...ops.subagents import TOOL_NAMES
+        identity = {"call_id": call.call_id} if call.name in TOOL_NAMES else {}
+        return tool_outcome(await self._ops.call("Bearer " + self._token, call.name, arguments, **identity))
