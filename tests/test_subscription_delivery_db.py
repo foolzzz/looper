@@ -1,11 +1,14 @@
 """Digest pushes use the shared delivery policy on real PostgreSQL, with synthetic channels and processor."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
-from looper.agents import chat_settings, proactive_delivery as delivery
+from looper.agents import chat_settings, proactive_delivery as delivery, turn_metrics
+from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.schedule_notify import Kind
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, channel_address, manager_address
@@ -34,6 +37,41 @@ async def configured(env, *, channel="lark", chat=DM):
     await confirm(env, sid)
     top = await add(env.pool, "synthetic event", sent_at=minutes_ago(env, 1))
     return sid, top
+
+
+@pytest.mark.parametrize("metrics_enabled,delivery_enabled", [(True, True), (True, False),
+                                                             (False, True), (False, False)])
+def test_registry_metrics_share_the_digest_decision(monkeypatch, tmp_path, metrics_enabled, delivery_enabled):
+    async def check(env, poster, fake):
+        env.clock.now = DAY
+        sid, top = await configured(env)
+        monkeypatch.setattr(chat_settings, "_metrics_enabled", metrics_enabled)
+        chat_settings.set_delivery_enabled(delivery_enabled)
+        registry = ChannelRegistry(SimpleNamespace())
+
+        async def post(target, text, **kwargs):
+            return await poster("channel-lark", target, text, **kwargs)
+
+        registry._channels["channel-lark"] = SimpleNamespace(post=post)
+        scheduler_with(env, poster=registry.post)
+        run = await fire(env, sid)
+        await asyncio.gather(*turn_metrics._pending)
+        [sent] = poster.sent
+        assert (sent["text"], sent["target"].id, sent["key"]) == (TEXT, DM, run["id"])
+        assert run["stream"]["outcome"] == "delivered" and await cursor(env, sid) == top
+        rows = await env.pool.fetch("SELECT * FROM proactive_deliveries")
+        assert len(rows) == int(metrics_enabled or delivery_enabled)
+        if rows:
+            [row] = rows
+            assert row["dedupe_key"] == (f"subscription_run:{run['id']}" if delivery_enabled else run["id"])
+            assert row["source"] == "subscription" and row["outcome"] == "sent"
+            assert row["external_id"] == "om_1" and row["sent_at"] is not None
+            assert row["decision"] == ("send" if delivery_enabled else None)
+            assert row["urgency"] == ("digest" if delivery_enabled else None)
+            assert row["counted"] == (True if delivery_enabled else None)
+            assert row["schedule_id"] == (sid if delivery_enabled else None)
+
+    scenario(check, monkeypatch, tmp_path, reply=TEXT)
 
 
 @pytest.mark.parametrize("explicit_off,channel,chat", [(False, "lark", DM), (True, "lark", DM),

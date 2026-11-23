@@ -375,7 +375,8 @@ class SubscriptionRuns:
                                                  idempotency_key=subscriptions.idempotency_keys(
                                                      run_id, segment)[segment - 1],
                                                  **turn_metrics.proactive_kwargs(
-                                                     turn_metrics.ProactiveSource.SUBSCRIPTION, run_id))
+                                                     turn_metrics.ProactiveSource.SUBSCRIPTION, run_id,
+                                                     dedupe_key=f"subscription_run:{run_id}" if decided is not None else None))
                 except _NoPoster:
                     await db_subs.mark_segment(run_id, segment, "failed", error="this server cannot send messages")
                 except Exception as exc:  # whether the channel sent it is not known: it is not sent again
