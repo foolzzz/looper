@@ -66,7 +66,7 @@ from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
 from .. import session_routing
 from ..reminders import reminders_on
-from ..tiers.manager_session import MAIN_SESSION
+from ..tiers.manager_session import MAIN_SESSION, on_session_replaced
 from ..turn_context import SpeakerKind
 from . import API_CHANNEL, Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
@@ -263,6 +263,7 @@ class ManagerOps:
         # Per chat: (who pressed, session, that session's generation, the switch's generation, the note).
         self._button_notes: OrderedDict[tuple[str | None, str | None, str | None],
                                         list[tuple[str | None, str, int, int, str]]] = OrderedDict()
+        on_session_replaced(self.forget_session)  # every reset path clears a session's id (``ManagerSession``)
         self._session_gen: dict[str, int] = {}  # bumped when a session is reset: its older notes are never told
         self._chat_sessions: dict[tuple[str | None, str | None, str | None], str] = {}  # the session a chat runs in
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
