@@ -1,17 +1,19 @@
 """Acceptance collection precedes and constrains Planner decisions."""
 from __future__ import annotations
 
+import ast
 import asyncio
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import system_prompt
+from looper.agents import acceptance_checks, system_prompt
 from looper.agents.project_execution import AcceptanceChecksMode, ProjectExecution
 from looper.agents.tiers import planner, planner_protocol, worker
 from looper.db import plans, projects, tasks
-from test_acceptance_checks_off import BASELINE, _main_modules, _outputs, _step
+from test_acceptance_checks_off import _PLANNER_TEXT, BASELINE, _assert_planner_text, _main_modules, _outputs, _step
 from test_planner_agent import WORK_FAILED, WORK_OK, decide, drive, plan, step
 from test_planner_workspaces import git, init_repo, project
 from tests.db_support import DSN, run_db
@@ -167,14 +169,26 @@ def test_saved_network_checks_can_be_loaded_after_permission_changes(tmp_path, m
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("status", ["pending", "dispatched", "deciding", "completed", "verified"])
 def test_switch_off_stored_rows_and_prompts_match_pinned_main_bytes(tmp_path, monkeypatch, status):
-    # The network mode compares with the pinned source that already has the checks contract,
-    # independent of subsequent merges.
-    baseline = _main_modules("ecc2eedbf2ac4a1b44ff9078e634002c228458c1")
     current = SimpleNamespace(planner=planner, protocol=planner_protocol, prompt=system_prompt,
                               tasks=tasks, worker=worker)
-    for mode in ("off", "network"):
-        execution = ProjectExecution.from_row({"acceptance_checks": mode})
-        assert _outputs(current, tmp_path, execution) == _outputs(baseline, tmp_path, execution)
+    # Off: the recorded main source, with the Planner's text frozen per section like its other renderings.
+    baseline = _main_modules(BASELINE["main_revision"])
+    outputs = _outputs(current, tmp_path, ProjectExecution.from_row({"acceptance_checks": "off"}))
+    pinned = _outputs(baseline, tmp_path)
+    assert {name: text for name, text in outputs.items() if name not in _PLANNER_TEXT} == (
+        {name: text for name, text in pinned.items() if name not in _PLANNER_TEXT})
+    _assert_planner_text(outputs)
+    # Network: the pinned source that already has the checks contract; its Planner text legitimately differs
+    # from the off text, so the whole outputs are compared byte for byte.
+    execution = ProjectExecution.from_row({"acceptance_checks": "network"})
+    pin = "ecc2eedbf2ac4a1b44ff9078e634002c228458c1"
+    checked = _main_modules(pin)
+    # The baseline modules import the current acceptance_checks, so its protocol text is pinned directly.
+    tree = ast.parse(subprocess.check_output(["git", "show", f"{pin}:looper/agents/acceptance_checks.py"], text=True))
+    pinned_section, = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                       and any(getattr(target, "id", "") == "PROTOCOL_SECTION" for target in node.targets)]
+    assert acceptance_checks.PROTOCOL_SECTION == pinned_section
+    assert _outputs(current, tmp_path, execution) == _outputs(checked, tmp_path, execution)
 
     async def check(pool):
         owner = await projects.create_project(name="Default-off compatibility", pool=pool)

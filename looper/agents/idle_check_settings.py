@@ -45,6 +45,7 @@ async def update(value: bool | None) -> dict[str, bool]:
         current = await settings()
         missing = [key for key in PREREQUISITES if not current[key]]
         if missing:
-            raise OpError(ErrorCode.CONFLICT, "idle checks need these settings on first: " + ", ".join(missing))
+            raise OpError(ErrorCode.CONFLICT, "Cannot enable idle checks. Enable these prerequisites first: "
+                          + ", ".join(missing))
     await system_settings.put_settings({KEY: None if value is None else str(value).lower()})
     return await view()

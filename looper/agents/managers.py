@@ -264,14 +264,15 @@ class ManagerFleet:
                 return agent, token
         return None
 
-    async def stop_chat(self, channel_id: str, chat_id: str, *, via: str) -> ChatStopSummary:
+    async def stop_chat(self, channel_id: str, chat_id: str, *, via: str,
+                        sender_id: str | None = None) -> ChatStopSummary:
         """Stop this bot/chat's live turns, including queued turns, in every owning Manager."""
         if not chat_settings.stop_enabled():
             boundary_log(logger, "chat_stop", channel_id=channel_id, chat_id=chat_id, owners=[],
                          stopped=0, cannot_interrupt=0, failed=0, action="stop", outcome="disabled")
             return ChatStopSummary(state="disabled")
         # Snapshot every owner and its tokens before the first await: a turn may settle or the fleet change.
-        snapshot = [(agent, agent.live_for_chat(channel_id, chat_id)) for agent in self.agents()]
+        snapshot = [(agent, agent.live_for_chat(channel_id, chat_id, sender_id=sender_id)) for agent in self.agents()]
         summary = ChatStopSummary(matched=sum(len(tokens) for _, tokens in snapshot),
                                   managers=sum(bool(tokens) for _, tokens in snapshot))
         for agent, tokens in snapshot:
