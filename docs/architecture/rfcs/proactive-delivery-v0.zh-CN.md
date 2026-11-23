@@ -42,7 +42,7 @@
 
 | 规则 | 默认 |
 |---|---|
-| 免打扰时段 | 22:00–08:00，按 `user.timezone`；没有设置时取服务器时区（`cron.local_zone_name()`） |
+| 免打扰时段 | 22:00–08:00，按 `user.timezone`；没有设置时取服务器时区（`turn_context.zone()`） |
 | 每日上限 | 私聊每天 5 条，超出的进摘要 |
 | 刚说过话 | 5 分钟内放行，不计数 |
 | 紧急类 | 卡住任务的关卡、用户自己设的提醒，永远照发 |
@@ -54,7 +54,7 @@
 ## 2. 开关；关闭时什么不变
 
 - 系统设置 `delivery.enabled`（默认 `false`）：只有操作者能读写，经 `proactive_delivery.get` 和 `proactive_delivery.update`（`loopercli proactive-delivery update --enabled true`，高风险，要确认），和投递守卫（`delivery_guard`）一样不放进客户端看得到的 `chat_settings`。关闭时没有任何发送点调用 `deliver`，发出的每条消息和现在一样，也不写 `proactive_deliveries`（测试比对）。
-- 时区读系统设置 `user.timezone`（IANA 名称）；没有或不认识时用服务器时区。v0 只读，编辑入口随每轮上下文那一项加入。
+- 时区是用户的 `user.timezone`，由每轮上下文的设置保管和编辑（`turn_context.zone()`：存的时区，没有或不认识时用服务器时区）；送达层只读它。
 - 免打扰时段、上限和时区在 v0 不开放修改：第一个发送点（关卡提醒）都是紧急类，不受它们影响；接入第一个会产生「进摘要」的发送点时，再加它们的设置。
 
 ## 3. 发送点的接入顺序
