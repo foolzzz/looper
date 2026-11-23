@@ -475,17 +475,19 @@ class Session:
             (vault_path / 'operator.md').write_text(vault_text)
             api.post('/api/v1/knowledge_vault/update', {'path': str(vault_path), 'writable': [],
                                                       'rules_file': None, 'manager_read': True})
+        reminder_id = None
         if self.case.category == Category.PROACTIVITY:
             # The reminder tool is opt-in. Fake fixtures below settle before enabling so the
             # live timer cannot race the scripted Manager and produce a second observation.
             async def seed_sources() -> None:
+                nonlocal reminder_id
                 conn = await asyncpg.connect(database_url)
                 try:
                     if self.case.id == 'proactive_reminder':
-                        await conn.execute("INSERT INTO reminders (text, due_at, timezone, channel_id, chat, "
+                        reminder_id = await conn.fetchval("INSERT INTO reminders (text, due_at, timezone, channel_id, chat, "
                                            "created_channel, status, attempts, settled_at) "
                                            "VALUES ($1, now()-interval '1 minute', 'UTC', 'channel-lark', $2, "
-                                           "'lark', $3, $4, $5)", self.secret, self.stand_in.OPEN_ID,
+                                           "'lark', $3, $4, $5) RETURNING id", self.secret, self.stand_in.OPEN_ID,
                                            'delivered' if self.args.fake else 'pending', int(self.args.fake),
                                            datetime.now().astimezone() if self.args.fake else None)
                     if self.case.id == 'proactive_needs_you':
@@ -613,11 +615,12 @@ class Session:
                         await conn.execute("UPDATE llm_records SET metadata = jsonb_set(metadata, '{turn_metrics}', "
                                            "(metadata->'turn_metrics') || $1::jsonb) WHERE agent_id='manager' "
                                            "AND created_at >= $2 AND metadata ? 'turn_metrics'", json.dumps({
+                                               'ack': 'reaction',
                                                'ack_ms': ack_max + int(self.failing),
                                                'first_reply_ms': reply_max + int(self.failing)}), since)
                     elif self.case.id != 'proactive_quiet' or self.failing:
                         source = 'user_reminder' if self.case.id == 'proactive_reminder' else 'autonomous'
-                        source_ref = 'asst-needs-you' if self.case.id == 'proactive_needs_you' else '1'
+                        source_ref = str(reminder_id) if self.case.id == 'proactive_reminder' else 'asst-needs-you'
                         target_chat = self.stand_in.OPEN_ID if self.case.id == 'proactive_reminder' else str(Chat.DM)
                         for n in range(2 if self.failing else 1):
                             await conn.execute("INSERT INTO proactive_deliveries (source, source_ref, channel_id, "

@@ -1,9 +1,11 @@
 """Assistant eval contracts and their disposable-server positive/negative scripts."""
 from datetime import datetime, timezone
+from dataclasses import replace
 import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -101,6 +103,43 @@ def test_proactivity_checks_repetition_database_receipts_and_quiet():
     assert e.nothing_to_push(w)
 
 
+def test_scripted_reminder_receipt_uses_the_inserted_id(tmp_path, monkeypatch):
+    import asyncpg
+
+    reminders = [{'id': 1, 'text': 'pre-existing reminder'}]
+    deliveries = []
+
+    async def insert(sql, *args):
+        if sql.startswith('INSERT INTO reminders'):
+            reminders.append({'id': reminders[-1]['id'] + 1, 'text': args[0]})
+            return reminders[-1]['id']
+        if sql.startswith('INSERT INTO proactive_deliveries'):
+            deliveries.append({'source_ref': args[1]})
+        return 0
+
+    async def fetch(sql, *args):
+        if 'FROM reminders' in sql:
+            return reminders
+        if 'FROM proactive_deliveries' in sql:
+            return deliveries
+        return []
+
+    conn = SimpleNamespace(execute=AsyncMock(side_effect=insert), fetchval=AsyncMock(side_effect=insert),
+                           fetch=AsyncMock(side_effect=fetch), close=AsyncMock())
+    monkeypatch.setattr(asyncpg, 'connect', AsyncMock(return_value=conn))
+    monkeypatch.setattr(e.runner, 'select_agent', Mock())
+    # No dialogue is needed to exercise source seeding and receipt creation.
+    case = replace(next(c for c in e.CASES if c.id == 'proactive_reminder'), says=(), checks=())
+    args = SimpleNamespace(fake=True, model='sonnet', manager_model=None, timeout=1)
+    session = e.Session(args, case, SimpleNamespace(OPEN_ID='ou_eval_operator'), False, None)
+    api = Mock()
+    api.post.return_value = {'result': {'enabled': False}}
+    result = session.run(api, 'unused', tmp_path / 'world.json', tmp_path / 'calls.jsonl', {}, tmp_path)
+
+    assert reminders == [{'id': 1, 'text': 'pre-existing reminder'}, {'id': 2, 'text': session.secret}]
+    assert result['proactive_rows'] == [{'source_ref': '2'}]
+
+
 def test_needs_you_must_have_a_failing_source_and_not_repeat_in_another_post():
     w = window(replies_by_turn=['需要你处理：abcdefgh', '明白。'])
     w.actions = [{'tool': 'looper_schedules', 'risk': 'read', 'status': 'ok'}]
@@ -172,6 +211,7 @@ def test_new_conversation_positive_and_negative_on_disposable_server(tmp_path, m
         assert values['proactivity']['reply_rate']['all'] is None
         assert sum(sum(day['by_source'].values()) for day in values['proactivity']['per_day']) == len(result['proactive_rows'])
         if case.category == e.Category.LATENCY:
+            assert all(metric['ack'] == 'reaction' for metric in result['turn_metrics'])
             assert values['receipt_latency']['p50_ms'] == 2000 + int(failing)
             assert values['first_reply_latency']['p95_ms'] == 15000 + int(failing)
         assert result['fake_observations'] == (case.category in (e.Category.PROACTIVITY, e.Category.LATENCY))
