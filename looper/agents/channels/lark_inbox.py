@@ -143,6 +143,17 @@ class LarkInbox(SQLiteInbox):
 
     def _drop(self, chat_id: str, start: float, end: float, attempts: int, reason: CatchupDropReason,
               thread_id: str = "") -> None:
+        # Keep one continuous loss per scope, including prefixes cut off by later retries.
+        while True:
+            rows = self._db.execute(
+                "SELECT rowid, start, end, attempts FROM catchup_dropped WHERE chat_id = ? AND thread_id = ? "
+                "AND reason = ? AND start <= ? AND end >= ?", (chat_id, thread_id, reason.value, end, start)).fetchall()
+            if not rows:
+                break
+            for _, previous_start, previous_end, previous_attempts in rows:
+                start, end = min(start, previous_start), max(end, previous_end)
+                attempts = max(attempts, previous_attempts)
+            self._db.executemany("DELETE FROM catchup_dropped WHERE rowid = ?", [(row[0],) for row in rows])
         self._db.execute("INSERT OR REPLACE INTO catchup_dropped VALUES (?, ?, ?, ?, ?, ?, ?)",
                          (chat_id, start, end, attempts, reason.value, time(), thread_id))
 

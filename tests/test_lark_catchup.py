@@ -1914,7 +1914,7 @@ def test_catchup_admission_guard_enforces_age_at_handling_time(tmp_path, monkeyp
                 assert datetime.fromisoformat(turn.timestamp).timestamp() == now - age
             else:
                 assert bus.journal.undelivered() == []
-                assert (await instance._inbox.catchup_status())["dropped"] == 0
+                assert (await instance._inbox.catchup_status())["dropped"] == 1
             assert await instance._handle_lark_event(event) == "duplicate"
         finally:
             await instance._inbox.close()
@@ -2033,11 +2033,121 @@ def test_stale_message_guard_ignores_unaddressed_messages_without_drops(tmp_path
         try:
             assert await instance._handle_lark_event(event) == ("too_old" if kind == "mentioned" else "ignored")
             assert bus.journal.undelivered() == []
-            assert (await instance._inbox.catchup_status())["dropped"] == 0
+            assert (await instance._inbox.catchup_status())["dropped"] == (1 if kind == "mentioned" else 0)
             assert await instance._handle_lark_event(event) == "duplicate"
         finally:
             await instance._inbox.close()
             await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_cutoff_mention_expiring_while_consumer_starts_is_visible(tmp_path, monkeypatch):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        now = int(time.time())
+        clock = [now]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        transport = HistoryTransport()
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        instance._bus = bus
+        instance._inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        await instance._inbox.defer_discovery(now - 900, now)
+
+        async def ready():
+            clock[0] += 30
+            transport.consumer_started.set()
+
+        monkeypatch.setattr(transport.consumer_started, "wait", ready)
+        transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "has_more": False,
+            "messages": [history_message("om_cutoff_late_consumer", at=now - 895)]}]
+        try:
+            await instance._catch_up(None)
+            assert transport.list_calls[0]["start"] == now - 900
+            assert transport.list_calls[0]["end"] == now + 30
+            assert bus.journal.undelivered() == []
+            health = instance.healthcheck()["catchup"]
+            assert health["pending"] == 0 and health["dropped"] == 1
+            (drop,) = health["windows"]
+            assert (drop["chat_id"], drop["reason"], drop["start"], drop["end"]) == (
+                "oc_synthetic_group", "stale", now - 895, now - 895)
+            assert await instance._inbox.processed("om_cutoff_late_consumer")
+            await instance._catch_up(None)
+            assert instance.healthcheck()["catchup"]["dropped"] == 1
+        finally:
+            await instance._inbox.close()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("chat,reason,intervals,expected", [
+    ("oc_drop", "stale", [(20, 30)], [(10, 30)]),
+    ("oc_drop", "stale", [(0, 10)], [(0, 20)]),
+    ("oc_drop", "stale", [(15, 25)], [(10, 25)]),
+    ("oc_drop", "stale", [(30, 40), (20, 30)], [(10, 40)]),
+    ("oc_drop", "stale", [(21, 30)], [(10, 20), (21, 30)]),
+    ("oc_other", "stale", [(20, 30)], [(10, 20), (20, 30)]),
+    ("oc_drop", "permission", [(20, 30)], [(10, 20), (20, 30)]),
+])
+def test_drop_windows_merge_only_contiguous_ranges_for_same_scope(tmp_path, chat, reason, intervals, expected):
+    from looper.agents.channels.lark_inbox import CatchupDropReason, LarkInbox
+
+    async def run():
+        inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        try:
+            await inbox.defer("oc_drop", 10, 20)
+            await inbox.fail_catchup("oc_drop", 1, CatchupDropReason.STALE)
+            for start, end in intervals:
+                await inbox.drop_window(chat, start, end, CatchupDropReason(reason))
+            health = await inbox.catchup_status()
+            assert health["pending"] == 0 and health["dropped"] == len(expected)
+            assert [(w["start"], w["end"]) for w in health["windows"]] == expected
+            assert health["windows"][0]["attempts"] == 1
+            assert health["windows"][0]["chat_id"] == "oc_drop"
+            assert health["windows"][0]["reason"] == "stale"
+        finally:
+            await inbox.close()
+
+    asyncio.run(run())
+
+
+def test_long_outage_with_failing_discovery_coalesces_expired_prefixes(tmp_path, monkeypatch):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    async def run():
+        now = int(time.time())
+        clock = [now]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        transport = HistoryTransport()
+        instance = adapter(tmp_path, transport)
+        path = tmp_path / "inbox.sqlite3"
+        instance._inbox = await LarkInbox.open(path)
+        await instance._inbox.defer_discovery(now - 1200, now)
+        calls = 0
+
+        async def fail():
+            nonlocal calls
+            calls += 1
+            raise TimeoutError("synthetic discovery timeout")
+
+        monkeypatch.setattr(instance, "_catchup_chats", fail)
+        try:
+            for elapsed in (0, 30, 90, 210, 510, 1110):
+                clock[0] = now + elapsed
+                await instance._catch_up(None)
+                await instance._inbox.close()
+                instance._inbox = await LarkInbox.open(path)
+            health = await instance._inbox.catchup_status()
+            assert calls == 5
+            assert health["pending"] == 0 and health["dropped"] == 1
+            (drop,) = health["windows"]
+            assert (drop["chat_id"], drop["reason"], drop["start"], drop["end"]) == (
+                "", "stale", now - 1200, now)
+        finally:
+            await instance._inbox.close()
 
     asyncio.run(run())
 

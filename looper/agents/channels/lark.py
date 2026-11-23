@@ -1151,8 +1151,11 @@ class LarkChannelAdapter(ChannelAdapter):
             elif event.get("chat_type") == "group" and not self._bot_mentions(event):
                 handled = False
             elif created is not None and created.before(time() - _CATCHUP_MAX_AGE):
-                if self._inbox is not None and message_id:
-                    await self._inbox.finish(message_id)
+                if self._inbox is not None:
+                    await self._inbox.drop_window(event.get("chat_id") or "", created.at, created.at,
+                                                  CatchupDropReason.STALE)
+                    if message_id:
+                        await self._inbox.finish(message_id)
                 return "too_old"
             else:
                 handled = await self._process_lark_event(event)
