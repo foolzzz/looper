@@ -73,7 +73,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, turn_metrics
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, outbound_hook, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
@@ -84,7 +84,7 @@ from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import leads_model, research_order, session_switch
 from ..research_order import ResearchSources
-from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext
+from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
 from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
@@ -393,7 +393,8 @@ QUOTE_READ_SEC = 80.0
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "attention_enabled", "route_to_gate", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
-    "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
+    "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
+    "build_user_message",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
@@ -741,6 +742,9 @@ class _CompletionNotTaken(Exception):
     """The Manager was turned off before its completion turn ran."""
 
 
+OUTBOUND_UNHOOKED_REPLY = "对外动作审查刚刚打开，这次没有执行。请再发一次，管家会带着审查重新开始。"
+
+
 class TurnFailed(RuntimeError):
     """The turn failed with what the user is told, as written (the runtime cannot start); ``error`` is why, for the
     chat's status line. Raised, not returned: the turn is answered as failed, so a queue staged behind it is not
@@ -878,6 +882,8 @@ class ManagerAgent:
         self._stop_tasks: set[asyncio.Task[Any]] = set()
         # Completion turns past their deadline that did not end, and the stops of their runtimes (``_tell_completion``).
         self._late_turns: set[asyncio.Task[Any]] = set()
+        # Retired runtimes' tree cleanup, separate from turns that can ignore cancellation indefinitely.
+        self._runtime_cleanups: set[asyncio.Task[None]] = set()
         # Looper's platform tools (set by ``serve``): what Claude's calls in a turn act through.
         self.ops: ManagerOps | None = None
         # The envelope the message loop is handling, and the ones a stop found unfinished (the fleet settles or
@@ -1596,6 +1602,15 @@ class ManagerAgent:
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        if self.ops is not None and await token.step("outbound_review", outbound_hook.enabled()):
+            # The review hooks every tool call of the Manager; a runtime it cannot hook does not run while it is on.
+            if not launch.runtime.tool_hook:
+                raise ProfileUnavailable(
+                    f"the outbound review is on, and this Manager's Agent Profile runs on {launch.runtime.label}, "
+                    "which has no tool hook: choose a Claude Code profile, or turn the review off",
+                    agent_settings.profile_source)
+            launch = replace(launch, tool_hook=self.ops.tool_hook(self._runtime_root, self._config.claude_bin,
+                                                                   launch.library))
         launch = await token.step("llmrec_attach", llmrec.attach(
             launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
         if ask.turn is not None:
@@ -1642,6 +1657,8 @@ class ManagerAgent:
                 command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
                 totals=self._session_totals, price=launch.price), 10, undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
+            if self.ops is not None:
+                self.ops.activate_tool_hook(launch.tool_hook)
         if switch is None and session.session_id and session.session_runtime == "api" \
                 and (self._claude_runtime is not launch.runtime or not self._claude.started):
             # Restore the API session's saved context before deciding whether it needs a handoff.
@@ -1654,6 +1671,8 @@ class ManagerAgent:
                     totals=self._session_totals, price=launch.price), seconds,
                     undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
+            if self.ops is not None:
+                self.ops.activate_tool_hook(launch.tool_hook)
         if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
             switch = session_switch.context_full(
@@ -1694,9 +1713,41 @@ class ManagerAgent:
                 cause = (pi_runner if kind == "pi" else dsh_runner)._opt_out(cause)
             raise OSError(cause) from None
 
-    async def _stop_replaced_session(self) -> None:
-        if isinstance(self._claude, ResidentClaude):
+    async def require_tool_hook(self) -> None:
+        """The outbound review was turned on: a process of this Manager started without its hook stops now, whatever
+        holds its lifecycle (a turn or a handoff it runs ends failed), with its whole tree and the cleanup of the
+        processes it replaced before; the next turn starts one with the hook."""
+        for session in self._sessions.values():
+            if session.claude.started and session.process is not None and session.process.launch.tool_hook is not None:
+                continue
+            if session.claude.started:
+                logger.warning("%s: stopping its process, which has no outbound review hook", self._log)
+            await session.claude.stop(kill=True)
+        while self._runtime_cleanups:
+            # A cancelled request must not cancel a retired runtime's cleanup. New retirements made while this
+            # waits also belong to activation; a failed cleanup prevents activation from reporting success.
+            await asyncio.gather(*(asyncio.shield(task) for task in self._runtime_cleanups))
+
+    def _track_runtime_cleanup(self, runtime: ResidentSession) -> None:
+        stopping = asyncio.create_task(runtime.stop(kill=True))
+        self._runtime_cleanups.add(stopping)
+        self._late_turns.add(stopping)
+        stopping.add_done_callback(self._late_turns.discard)
+
+        def ended(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is None:
+                self._runtime_cleanups.discard(task)
+            else:
+                logger.error("%s: retired runtime cleanup did not finish successfully", self._log)
+
+        stopping.add_done_callback(ended)
+
+    async def _stop_replaced_session(self, *, whole_tree: bool = False) -> None:
+        if isinstance(self._claude, ResidentClaude) and not whole_tree:
             await self._claude.stop(kill=True, wait_tree=False)
+            self._track_runtime_cleanup(self._claude)
+            # Let stop capture the retired process before this resident object may start a new one.
+            await asyncio.sleep(0)
         else:
             await self._claude.stop(kill=True)
 
@@ -1718,12 +1769,14 @@ class ManagerAgent:
             # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
             await token.keep("switch_session", self._switch_session(prepared.switch, token.cancel),
                              HANDOFF_TIMEOUT_SEC + 30)
+        # A process without the outbound review's hook, replaced by one with it, ends with its whole tree.
+        unhooked = launch.tool_hook is not None and (self._process is None or self._process.launch.tool_hook is None)
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
-            await token.keep("claude_stop", self._stop_replaced_session(), 30)
+            await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
         if self._claude.stale(signature):
-            await token.keep("claude_stop", self._stop_replaced_session(), 30)
+            await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
         command = self._claude.command if self._claude.started else await token.step("claude_command", asyncio.to_thread(
             self._claude_command, prepared.prompt_file, launch))
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
@@ -1767,6 +1820,8 @@ class ManagerAgent:
                             price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
                     self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
+                    if self.ops is not None:
+                        self.ops.activate_tool_hook(launch.tool_hook)
                     raise
                 except OSError as exc:
                     cause = str(exc) or type(exc).__name__
@@ -1785,6 +1840,8 @@ class ManagerAgent:
                     command = self._claude.command
                     await token.step("recorder_annotate", recorder.annotate({"command": command}))
                 self._process = _Process(command, signature, prepared.system_prompt, launch)
+                if self.ops is not None:
+                    self.ops.activate_tool_hook(launch.tool_hook)
         except TurnStopped:
             # Stopped while the record was open: it ends as stopped, with no spend.
             await token.keep("recorder_finish", self._finish_stopped_early(token, recorder, prepared.turn), 10)
@@ -1812,10 +1869,13 @@ class ManagerAgent:
         try:
             async with self._lifecycle_gate:
                 previous = self._process
+                # A process without the outbound review's hook is never kept for a launch with it: the stale
+                # process stops below.
                 if previous is not None and prepared.switch is None and self._claude.started \
                         and self._claude.pid is not None \
                         and prepared.launch.runtime is self._claude_runtime \
-                        and previous.launch.library.sha256 != prepared.launch.library.sha256:
+                        and previous.launch.library.sha256 != prepared.launch.library.sha256 \
+                        and (previous.launch.tool_hook is None) == (prepared.launch.tool_hook is None):
                     close = getattr(self._claude, "try_stop_if_idle", None)
                     if close is None or not await token.keep("library_idle_close", close(), 10):
                         # A user result may leave background/autonomous work running. Keep the actual
@@ -2209,9 +2269,7 @@ class ManagerAgent:
         self._publish_binding(None)
         late, self._claude = self._claude, self._claude_runtime.resident_session(self.agent_id)
         self._process = None
-        stopping = asyncio.create_task(late.stop(kill=True))
-        self._late_turns.add(stopping)
-        stopping.add_done_callback(self._late_turns.discard)
+        self._track_runtime_cleanup(late)
 
     async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any], *,
                                     rejected: bool = False) -> None:
@@ -2432,7 +2490,8 @@ class ManagerAgent:
                     # Every tool call of the turn may come to the bridge, a subagent's too: each is expected,
                     # though only the Manager's own blocks are shown.
                     bare, arguments = _looper_call(block.get("name"), block.get("input"))
-                    self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
+                    self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"),
+                                    parent_call_id=payload.get("parent_tool_use_id"))
 
         async def on_event(payload: dict[str, Any]) -> None:
             if payload.get("type") == "system" and payload.get("subtype") == "transport" and not token.abandoned:
@@ -2545,6 +2604,10 @@ class ManagerAgent:
             if token.cancel.requested:
                 await self._finish_stopped_early(token, recorder, ops_turn)
                 raise TurnStopped()
+            if outbound_hook.known_enabled() and (self._process is None or self._process.launch.tool_hook is None):
+                # Turned on after this turn was prepared: its process has no hook, and the next turn starts one that has.
+                raise TurnFailed(OUTBOUND_UNHOOKED_REPLY, "the outbound review is on and the Manager's process has no "
+                                 "tool hook")
             if self._claude.shares_bridge:
                 self._publish_binding(token)  # on disk before the runtime gets the prompt
             token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
@@ -2934,7 +2997,9 @@ class ManagerAgent:
         api_history = (session.session_runtime == "api" and session.session_id is not None
                        and await db_api_sessions.last_turn(session.session_id) is not None)
         # A failed first API request has no committed conversation to summarize.
+        # A process without the outbound review's hook writes no handoff while the review is on.
         if self._claude.started and process is not None and not self._claude.stale(process.signature) \
+                and not (outbound_hook.known_enabled() and process.launch.tool_hook is None) \
                 and (session.session_runtime != "api" or api_history):
             # The handoff's prompt is not the user's message: it gets a cancel of its own, requested with the turn's, so
             # that writing it does not make the turn "running" or its message "seen".
@@ -3000,8 +3065,11 @@ class ManagerAgent:
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=self._runner_limits)
                 options = {"stop": lambda: recorder.cap_stop} if isinstance(self._claude, RunnerSession) else {}
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, cancel=cancel, **options),
-                                              HANDOFF_TIMEOUT_SEC)
+                async with asyncio.timeout(HANDOFF_TIMEOUT_SEC):
+                    if outbound_hook.known_enabled() and process.launch.tool_hook is None:
+                        # The timeout context keeps the check and send in this task, including on Python 3.11.
+                        raise RuntimeError("the outbound review is on, and this process has no tool hook")
+                    turn = await self._claude.run_turn(text, on_event, cancel=cancel, **options)
             except TurnCancelled as exc:
                 await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
                                       status=RecordStatus.INTERRUPTED, usage=Usage())

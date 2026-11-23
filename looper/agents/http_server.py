@@ -1068,6 +1068,13 @@ class AgentHTTPServer:
                 writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing()}))
             except OpError as exc:
                 writer.write(_json_response(HTTP_503, {"error": str(exc)}))
+        elif path == f"{AGENT_API}outbound/check" and method == "POST":
+            # The outbound review's hook in the Manager's Claude Code (outbound_hook): its answer for one tool call.
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            writer.write(_json_response(HTTP_200, await ops.check_outbound(payload)))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
@@ -1239,6 +1246,8 @@ class AgentHTTPServer:
         checks = [now.get(check.get("id"), check) if check.get("id") in now else
                   self._check_results.get(check.get("id"), check) if check.get("id") in self_check.CLAUDE_CHECK_IDS
                   else check for check in self._self_checks]
+        if (registry := getattr(self, "_channels", None)) is not None:
+            checks.extend(registry.start_checks())
         pool = self._worker_pool
         if pool is None or not (status := pool.keeper_status()):
             return checks

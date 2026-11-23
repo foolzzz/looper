@@ -84,6 +84,7 @@ from .instructions import InstructionFile
 if TYPE_CHECKING:
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
+    from ..failures import Evidence, Failure
     from ..run_usage import Usage
 
 _PROBE_TIMEOUT_SEC = 10.0
@@ -147,6 +148,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     reports_request_context = True
     default_executable = "claude"
     image_input = ImageInput.READ_TOOL
+    # A PreToolUse hook in --settings, verified against 2.1.329 (the outbound-review RFC, section 17.1): it runs for
+    # the built-in tools, MCP tools and subagents' calls, and a JSON deny stops the call, its reason shown to the model.
+    tool_hook = True
     # Verified against Claude Code 2.1.285 (claude_cli), no_tools against 2.1.328 (claude_cli.NO_TOOLS_ARGS); its
     # replies follow Looper's contracts by prompt, so no structured_output. Headless /compact on resume
     # was verified with 2.1.329: a manual compact_boundary and a later turn recalling the summary.
@@ -233,7 +237,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             if isinstance(launch.llmrec, LlmrecRoute) and launch.llmrec.kind is RouteKind.TRANSLATE:
                 env[BASE_URL] = launch.llmrec.url
                 env[AUTH_TOKEN] = launch.llmrec.local_token
-        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir, sealed=sealed)
+        hook = launch.tool_hook if launch is not None else None
+        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir, sealed=sealed,
+                                         hooks=hook.settings() if hook is not None else None)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
                       executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:
@@ -509,6 +515,11 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         # Redact the complete diagnostic before whitespace normalization and clipping.
         detail = safe_error(detail, secrets=(launch.profile.provider.api_key or "",), limit=None)
         return " ".join(detail.split())[:300] or None
+
+    def failure_signal(self, result_event: dict[str, Any] | None, evidence: Evidence) -> Failure | None:
+        from .. import failures
+
+        return failures.claude_code(result_event, evidence)
 
     def managed_hooks(self) -> ManagedHooks | None:
         """The hook events of the first managed settings file that sets any (``MANAGED_SETTINGS``); one that cannot

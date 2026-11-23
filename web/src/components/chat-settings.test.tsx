@@ -22,6 +22,8 @@ describe("Chat settings", () => {
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
+  let outbound: boolean;
+  let outboundError: boolean;
   let metrics = false;
   let metricsError = false;
   let metricsPuts: unknown[];
@@ -33,12 +35,23 @@ describe("Chat settings", () => {
     missing = [];
     summary = SUMMARY;
     puts = [];
+    outbound = false;
+    outboundError = false;
     metrics = false;
     metricsError = false;
     metricsPuts = [];
     vi.stubGlobal("confirm", vi.fn(() => true));
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path.startsWith("/api/v1/outbound_gateway/")) {
+        if (outboundError) return Response.json({ status: "error", error: { code: "unavailable", message: "gateway unavailable" } }, { status: 503 });
+        if (path.endsWith("/update")) {
+          const body = JSON.parse(String(init?.body));
+          puts.push({ operation: "outbound_gateway.update", ...body });
+          outbound = body.outbound_enabled;
+        }
+        return Response.json({ status: "ok", result: { outbound_enabled: outbound, send_qps: 5, write_qps: 15, edit_interval_seconds: 1, max_in_flight: 4 } });
+      }
       if (path.startsWith("/api/v1/manager_metrics_settings/")) {
         if (path.endsWith("/update")) {
           metricsPuts.push(JSON.parse(String(init?.body)));
@@ -133,6 +146,89 @@ describe("Chat settings", () => {
     await act(async () => box.click());
     expect(puts).toEqual([{ stop_enabled: true }]);
     expect((container.querySelector("input[type=checkbox]") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("enables outbound retries without changing the other chat settings", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const box = container.querySelector("input[id$=-outbound]") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(container.textContent).toContain("出站统一限流和重试（飞书、Telegram）");
+    await act(async () => box.click());
+    expect(puts).toEqual([{ operation: "outbound_gateway.update", outbound_enabled: true }]);
+    expect(stored).not.toHaveProperty("outbound_enabled");
+    expect(box.checked).toBe(true);
+  });
+
+  it("keeps chat settings usable when the outbound gateway is unavailable", async () => {
+    outboundError = true;
+    await act(async () => root.render(<ChatSettingsSection />));
+    expect(container.textContent).toContain("gateway unavailable");
+    expect(container.querySelector("input[id$=-outbound]")).toBeNull();
+    const box = container.querySelector("input[id$=-stop]") as HTMLInputElement;
+    await act(async () => box.click());
+    expect(puts).toEqual([{ stop_enabled: true }]);
+  });
+
+  it("retains the outbound value after an update fails", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    outboundError = true;
+    const box = container.querySelector("input[id$=-outbound]") as HTMLInputElement;
+    await act(async () => box.click());
+    expect(box.checked).toBe(false);
+    expect(container.textContent).toContain("gateway unavailable");
+    expect(puts).toEqual([]);
+  });
+
+  it("keeps gateway, metrics and turn-context settings independent across writes", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const gateway = container.querySelector("input[id$=-outbound]") as HTMLInputElement;
+    const metricsBox = container.querySelector("input[id$=-metrics]") as HTMLInputElement;
+    const contextBox = container.querySelector("input[aria-label='每轮上下文']") as HTMLInputElement;
+    await act(async () => metricsBox.click());
+    await act(async () => contextBox.click());
+    await act(async () => gateway.click());
+    const language = container.querySelector("select[aria-label='回复语言']") as HTMLSelectElement;
+    await act(async () => {
+      language.value = "en";
+      language.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => (container.querySelector("input[id$=-stop]") as HTMLInputElement).click());
+    expect(gateway.checked).toBe(true);
+    expect(metricsBox.checked).toBe(true);
+    expect(contextBox.checked).toBe(true);
+    expect(language.value).toBe("en");
+    expect(metricsPuts).toEqual([{ enabled: true }]);
+    expect(puts).toEqual([{ turn_context_enabled: true },
+      { operation: "outbound_gateway.update", outbound_enabled: true },
+      { reply_language: "en" }, { stop_enabled: true }]);
+    expect(stored).toEqual({ stop_enabled: true, completion_turns: "off", ledger_enabled: false });
+    expect(context).not.toHaveProperty("outbound_enabled");
+    expect(context).not.toHaveProperty("enabled");
+  });
+
+  it("retries gateway reads alone and preserves the other settings and an unsaved time zone", async () => {
+    outboundError = true;
+    await act(async () => root.render(<ChatSettingsSection />));
+    const metricsBox = container.querySelector("input[id$=-metrics]") as HTMLInputElement;
+    const contextBox = container.querySelector("input[aria-label='每轮上下文']") as HTMLInputElement;
+    await act(async () => metricsBox.click());
+    await act(async () => contextBox.click());
+    const zone = container.querySelector("input[aria-label='时区']") as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(zone, "Asia/Shanghai");
+      zone.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const before = vi.mocked(fetch).mock.calls.length;
+    outboundError = false;
+    const retry = [...container.querySelectorAll("button")].find((button) => button.textContent === "重试出站设置")!;
+    await act(async () => retry.click());
+    expect(vi.mocked(fetch).mock.calls.slice(before).map(([url]) => String(url)))
+      .toEqual(["/api/v1/outbound_gateway/get"]);
+    expect(metricsBox.checked).toBe(true);
+    expect(contextBox.checked).toBe(true);
+    expect(zone.value).toBe("Asia/Shanghai");
+    expect(container.textContent).not.toContain("gateway unavailable");
+    expect((container.querySelector("input[id$=-outbound]") as HTMLInputElement).checked).toBe(false);
   });
 
   it("switches the Manager's completion turns on alone, and shows the day's counts", async () => {

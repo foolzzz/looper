@@ -655,6 +655,29 @@ export async function updateManagerMetricsSettings(body: { enabled: boolean | nu
   return result;
 }
 
+/** Operator-only shared outbound gateway controls; separate from chat settings. */
+export interface OutboundGatewaySettings {
+  outbound_enabled: boolean;
+  send_qps: number;
+  write_qps: number;
+  edit_interval_seconds: number;
+  max_in_flight: number;
+}
+
+export async function fetchOutboundGateway(): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateOutboundGateway(
+  body: { [K in keyof OutboundGatewaySettings]?: OutboundGatewaySettings[K] | null },
+): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 /** The processor's system setting, and the hooks the machine's administrator set for its runtime (they run in every
  * processor run and see the messages it processes; null for none). */
 export interface ProcessorSettings {
@@ -3017,6 +3040,9 @@ export interface ProjectInstructionFile {
   error?: string;
 }
 
+/** quota: wait for the reset; transient: try again later; environment: someone must fix it; judgment: the rest. */
+export type FailureClass = "quota" | "transient" | "environment" | "judgment";
+
 export interface LlmRecord {
   id: number;
   agent_id: string;
@@ -3046,7 +3072,13 @@ export interface LlmRecord {
   duration_ms: number | null;
   model: string | null;
   error: string | null;
+  /** Why a failed run failed, recorded while failure typing (`engine.failure_typing`) is on; null otherwise. */
+  failure_class?: FailureClass | null;
+  failure_cause?: string | null;
   metadata: {
+    /** Beside the failure class: whether a typed field or the runtime's error text told it, and when a used-up
+     * window resets. */
+    failure?: { signal: "typed" | "text"; resets_at?: string };
     llmrec?: { state: string; reason?: string; detail?: string; route_id?: string };
     ttadk_check?: string;
     command?: string[];
