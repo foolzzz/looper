@@ -13,7 +13,7 @@ import pytest
 
 from fake_claude import fake_claude
 from looper import db, ops_config
-from looper.agents import idle_checks, operator_notes, proactive_delivery, profile_registry, serve
+from looper.agents import idle_checks, operator_notes, proactive_delivery, profile_registry, serve, session_routing
 from looper.agents.channels.base import ChannelAdapter, DeliveryReceipt, PostReceipt
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.db import idle_checks as store
@@ -54,11 +54,15 @@ class _Lark(ChannelAdapter):
 
 @pytest.mark.parametrize("returned", [False, True], ids=["restart-during-post", "returned-during-turn"])
 def test_serve_never_resends_an_interrupted_post_or_delivers_after_the_user_returns(monkeypatch, tmp_path, returned):
+    # Cover restoring both an enabled and a disabled caller, including a non-default resident limit.
+    monkeypatch.setattr(session_routing, "_routing_enabled", returned)
+    monkeypatch.setattr(session_routing, "_max_resident", 7)
+
     async def run(pool):
         await pool.execute("INSERT INTO system_settings (key,value) VALUES "
             "('llmrec.enabled','false'), ('delivery.enabled','true'), ('attention.enabled','true'), "
             "('manager.lanes.enabled','true'), ('manager.idle_checks.enabled','true'), "
-            "('manager.session_routing.enabled','true')")
+            "('manager.session_routing.enabled','true'), ('manager.sessions.max_resident','3')")
         requests = tmp_path / "synthetic-turns.jsonl"
         reached, release = tmp_path / "idle-reached", tmp_path / "idle-release"
         executable = fake_claude(tmp_path / "synthetic-claude", f'''
@@ -121,6 +125,8 @@ for line in sys.stdin:
             await until(lambda: signal.SIGTERM in stops or task.done(), "serve ready", timeout=30)
             if task.done():
                 task.result()
+            assert session_routing.routing_enabled() is True
+            assert session_routing.max_resident() == 3
             async with httpx.AsyncClient(trust_env=False) as client:
                 response = await client.post(f"http://127.0.0.1:{port}/api/v1/system/status", json={},
                     headers={"Authorization": f"Bearer {servers[-1]._operator_token}"})
@@ -159,6 +165,8 @@ for line in sys.stdin:
                 assert (await store.get(check_id))["state"] == "sending"
             stops[signal.SIGTERM]()
             await asyncio.wait_for(task, 20)
+            assert session_routing.routing_enabled() is returned
+            assert session_routing.max_resident() == 7
             if not returned:
                 assert (await store.get(check_id))["state"] == "sending"
                 task = await start()
@@ -172,6 +180,8 @@ for line in sys.stdin:
                 assert len(requests.read_text().splitlines()) == 1
                 stops[signal.SIGTERM]()
                 await asyncio.wait_for(task, 20)
+                assert session_routing.routing_enabled() is returned
+                assert session_routing.max_resident() == 7
         finally:
             release.touch()
             if not task.done():
