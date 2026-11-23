@@ -23,7 +23,7 @@ BOT_OPEN_ID = "ou_bot0000001"  # every profile's bot, as its info says
 BOT_MENTION = {"id": BOT_OPEN_ID, "key": "@_user_1", "name": "HelperBot"}
 
 _STAND_IN = """\
-import base64, json, os, sys, time
+import base64, fcntl, json, os, re, sys, time
 world = json.load(open({world!r}))
 args = sys.argv[1:]
 with open({log!r}, "a") as log:
@@ -40,11 +40,15 @@ def answer(value):
 name = ""
 if args[:1] == ["--profile"]:
     name, args = args[1], args[2:]
+key = None
 if "--idempotency-key" in args:
     at = args.index("--idempotency-key")
     if len(args) <= at + 1 or not 0 < len(args[at + 1]) <= 50:
         refuse("--idempotency-key: at most 50 characters")
+    key = args[at + 1]
     args = args[:at] + args[at + 2:]
+if "--reply-in-thread" in args:
+    args.remove("--reply-in-thread")
 for flag in ("--text", "--markdown"):
     # lark-cli 1.0.100 reads "@path" from a file and takes "@@" for a literal "@".
     if flag in args and args[args.index(flag) + 1][:1] == "@" and args[args.index(flag) + 1][:2] != "@@":
@@ -71,6 +75,37 @@ if args[:4] == ["contact", "+search-user", "--as", "user"]:
     if "--query" in rest:
         users = [u for u in users if rest["--query"].lower() in (u["localized_name"] + u["email"]).lower()]
     answer({{"ok": True, "identity": "user", "data": {{"has_more": False, "users": users}}}})
+def deliver(target, message_id, chat):
+    # A separate journal records deliveries; the original argv log still records every attempt.
+    with open({log!r} + ".delivered.jsonl", "a+") as journal:
+        fcntl.flock(journal, fcntl.LOCK_EX)
+        journal.seek(0)
+        previous = [json.loads(line) for line in journal]
+        found = next((item for item in previous if key and item["key"] == key and item["profile"] == name), None)
+        if found:
+            message_id = found["message_id"]
+        match = re.search(r"(rl230020|rl99991400|to|hang)x([0-9]+)$", target)
+        fail = False
+        if match:
+            with open({log!r}) as attempts:
+                calls = [json.loads(line) for line in attempts]
+                target_attempts = sum(target in call and any(method in call for method in
+                    ("+messages-send", "+messages-reply")) for call in calls)
+            fail = target_attempts <= int(match[2])
+            if fail and match[1] in ("rl230020", "rl99991400"):
+                refuse("rate limited", 1, 230020 if match[1] == "rl230020" else 99991400)
+        if not found:
+            journal.write(json.dumps({{"key": key, "profile": name, "target": target,
+                                      "message_id": message_id, "chat_id": chat}}) + "\\n")
+            journal.flush()
+        if fail:
+            if match[1] == "hang":
+                # Delivery happened, but no response reaches the caller before its 20 s deadline.
+                time.sleep(60)
+            print(json.dumps({{"ok": False, "identity": "bot", "error": {{"type": "network", "subtype": "timeout",
+                "message": "API call failed: server time out error"}}}}), file=sys.stderr)
+            sys.exit(4)
+        answer({{"ok": True, "identity": "bot", "data": {{"message_id": message_id, "chat_id": chat}}}})
 if args[:4] == ["im", "+messages-send", "--as", "bot"]:
     rest = args[4:]
     if len(rest) != 4 or rest[0] not in ("--chat-id", "--user-id") or rest[2] not in ("--text", "--markdown"):
@@ -83,7 +118,7 @@ if args[:4] == ["im", "+messages-send", "--as", "bot"]:
         sys.exit(4)
     with open({log!r}) as sent:
         count = sum(1 for line in sent if "+messages-send" in line)
-    answer({{"ok": True, "identity": "bot", "data": {{"message_id": "om_%04d" % count, "chat_id": rest[1]}}}})
+    deliver(rest[1], "om_%04d" % count, rest[1])
 if args[:5] == ["im", "+messages-reply", "--as", "bot", "--message-id"] and len(args) == 8:
     if args[6] not in ("--text", "--markdown"):
         refuse("specify one of --text, --markdown or --content")
@@ -91,7 +126,7 @@ if args[:5] == ["im", "+messages-reply", "--as", "bot", "--message-id"] and len(
         refuse("the message was recalled", api_code=230011)
     with open({log!r}) as sent:
         count = sum(1 for line in sent if "+messages-reply" in line)
-    answer({{"ok": True, "identity": "bot", "data": {{"message_id": "om_r%04d" % count, "chat_id": "oc_group"}}}})
+    deliver(args[5], "om_r%04d" % count, "oc_group")
 if args[:5] == ["im", "+messages-edit", "--as", "bot", "--message-id"] and len(args) == 8:
     if args[6] not in ("--text", "--markdown"):
         refuse("specify one of --text, --markdown or --content")

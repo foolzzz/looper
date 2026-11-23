@@ -24,6 +24,7 @@ def test_doctor_waits_for_cold_ttadk_sign_in_and_fails_when_signed_out(tmp_path,
     runtimes = [{"type": "codex", "executable": executable}]
     ok = self_check.Check("unrelated", "Unrelated", self_check.OK, "ready")
     monkeypatch.setattr(self_check, "check_database", AsyncMock(return_value=ok))
+    monkeypatch.setattr(self_check, "provider_limit_checks_for_database", AsyncMock(return_value=[]))
     monkeypatch.setattr(self_check, "_database_facts", AsyncMock(
         return_value=self_check._DatabaseFacts(ttadk_runtimes=runtimes)))
     monkeypatch.setattr(self_check, "check_claude", lambda *args: [])

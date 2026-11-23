@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
 from ..run_usage import Usage
+from ..session_routing import MAIN_KEY, SessionKey
 
 if TYPE_CHECKING:
     from ..agent_settings import AgentSettings, Launch
@@ -42,6 +43,7 @@ class ManagerSession:
     and the turn holding it, and what the next turn is told."""
 
     key: str
+    route: SessionKey = MAIN_KEY  # the conversation it holds (``session_routing.session_key_for``); key is its text
     # The resident Claude: started on the first chat message, then fed one
     # user turn per message; restarted when its system prompt changes.
     claude: ResidentSession
