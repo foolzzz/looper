@@ -29,6 +29,7 @@ BACKGROUND_PAUSE_UTILIZATION = 0.95
 AGING_SECONDS = 300
 INTERACTIVE_SECONDS = 120
 RECHECK_SECONDS = 30
+PROBE_SECONDS = 5
 BACKOFF_MINUTES = (5, 10, 20, 40, 60)
 _current_owner: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "admission_owner", default=None
@@ -188,6 +189,8 @@ class Controller:
         self.warning_day: date | None = None
         self.overadmissions = 0
         self.notices: list[tuple[str, int, dict]] = []
+        self.background_tasks: set[asyncio.Task] = set()
+        self.probes: dict[str, asyncio.Task] = {}
 
     def _state(self, provider_id: str) -> Account:
         return self.states.setdefault(provider_id, Account(since=self.now()))
@@ -199,13 +202,54 @@ class Controller:
         await self._send_notices()
         return state
 
+    def _background(self, coroutine) -> asyncio.Task:
+        task = asyncio.create_task(coroutine)
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+        return task
+
+    async def stop(self) -> None:
+        """Finish cancellation cleanup before channels and storage are closed."""
+        async with self.lock:
+            self.probes.clear()
+            pending = tuple(self.background_tasks)
+            for task in pending:
+                task.cancel()
+        # Notification cancellation can release a database claim; never await
+        # its cleanup while holding the account lock or after closing storage.
+        await asyncio.gather(*pending, return_exceptions=True)
+        self.background_tasks.difference_update(pending)
+
     async def _send_notices(self) -> None:
         pending, self.notices = self.notices, []
         for provider_id, event_id, fields in pending:
-            try:
-                await _freeze_alert(provider_id, event_id, **fields)
-            except Exception:
-                logger.exception("Could not send account freeze alert")
+            self._background(self._send_notice(provider_id, event_id, fields))
+
+    async def _send_notice(self, provider_id: str, event_id: int, fields: dict) -> None:
+        try:
+            await asyncio.wait_for(_freeze_alert(provider_id, event_id, **fields), 30)
+        except Exception:
+            logger.exception("Could not send account freeze alert")
+
+    async def _probe_account(self, provider_id: str) -> None:
+        try:
+            result = await asyncio.wait_for(self.probe(provider_id), PROBE_SECONDS)
+        except Exception:
+            logger.warning(
+                "Account quota probe unavailable; using a waiting run", exc_info=True
+            )
+            result = Unavailable()
+        async with self.lock:
+            # A new freeze or operator action invalidates this probe's result.
+            if self.probes.get(provider_id) is not asyncio.current_task():
+                return
+            del self.probes[provider_id]
+            if isinstance(result, Allowed):
+                await self._transition(provider_id, ProbeEnded(False, False))
+            elif isinstance(result, StillLimited):
+                await self._transition(provider_id, QuotaFailure(result.resets_at, None))
+            self.lock.notify_all()
+        await self._send_notices()
 
     async def _transition(self, provider_id: str, event: Event) -> AdmissionState:
         account = self._state(provider_id)
@@ -254,8 +298,7 @@ class Controller:
             or (
                 isinstance(event, AllowedSignal)
                 and (
-                    previous is AdmissionState.PROBING
-                    or previous is AdmissionState.FROZEN
+                    previous in (AdmissionState.PROBING, AdmissionState.FROZEN)
                     and event.observed_at > account.since
                 )
             )
@@ -272,6 +315,9 @@ class Controller:
             if isinstance(event, ProbeEnded) and previous is AdmissionState.PROBING:
                 account.probe_owner = None
             return account.state
+        pending_probe = self.probes.pop(provider_id, None)
+        if pending_probe is not None and pending_probe is not asyncio.current_task():
+            pending_probe.cancel()
         account.since = now
         if account.state is AdmissionState.OPEN:
             account.resumed_at = now
@@ -416,20 +462,21 @@ class Controller:
             if not self.draining() and (not w.draining or not w.draining())
         ]
         if account.state is AdmissionState.PROBING:
-            if account.probe_owner is not None or not eligible:
+            if (
+                account.probe_owner is not None
+                or provider_id in self.probes
+                or not eligible
+            ):
                 await self._notify_waiters(provider_id, provider)
                 return
             if not account.probe_checked:
                 account.probe_checked = True
                 if provider.get("oauth_runtime_type") == "codex":
-                    result = await self.probe(provider_id)
-                    if isinstance(result, Allowed):
-                        await self._transition(provider_id, AllowedSignal(now))
-                    elif isinstance(result, StillLimited):
-                        await self._transition(
-                            provider_id, QuotaFailure(result.resets_at, None)
-                        )
-                        return
+                    self.probes[provider_id] = self._background(
+                        self._probe_account(provider_id)
+                    )
+                    await self._notify_waiters(provider_id, provider)
+                    return
             if account.state is AdmissionState.PROBING:
                 self._grant(min(eligible, key=lambda w: w.sequence), probe=True)
                 await self._notify_waiters(provider_id, provider)
@@ -522,13 +569,8 @@ class Controller:
                 self.waiters.append(waiter)
                 while not waiter.ready.done():
                     await self._pump(provider_id)
-                    # A channel notification must never hold the all-account lock.
-                    if self.notices:
-                        self.lock.release()
-                        try:
-                            await self._send_notices()
-                        finally:
-                            await self.lock.acquire()
+                    # Dispatch only: channel I/O runs outside the record-ending budget.
+                    await self._send_notices()
                     if waiter.ready.done():
                         break
                     try:
@@ -591,7 +633,11 @@ class Controller:
             self.running.pop(owner, None)
             return
         async with self.lock:
-            self.running.pop(owner, None)
+            grant = self.running.pop(owner, None)
+            if grant is not None and grant.probe:
+                account = self._state(grant.provider_id)
+                if account.probe_owner == owner:
+                    account.probe_owner = None
             self.lock.notify_all()
 
     async def wake(self) -> None:
@@ -664,6 +710,7 @@ transition = _controller.transition
 register = _controller.register
 release = _controller.release
 wake = _controller.wake
+stop = _controller.stop
 snapshot = _controller.snapshot
 daily_overadmissions = _controller.daily_overadmissions
 
@@ -703,7 +750,10 @@ async def signal(
     if not enabled():
         return
     try:
-        if any(w["status"] == "allowed" for _, w in windows):
+        if (
+            any(w["status"] == "allowed" for _, w in windows)
+            and not any(w["status"] == "rejected" for _, w in windows)
+        ):
             record = (
                 await llm_records.get_record(record_id)
                 if record_id is not None

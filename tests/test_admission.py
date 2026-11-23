@@ -616,3 +616,294 @@ def test_disabled_run_metadata_has_no_admission_fields(monkeypatch, controller):
     monkeypatch.setattr(admission, "_controller", controller)
     controller.active = False
     assert admission.record_metadata() == {}
+
+
+@pytest.mark.parametrize("probing", [False, True])
+def test_codex_mixed_windows_never_unfreeze_account(controller, monkeypatch, probing):
+    async def scenario():
+        from looper.agents import limit_signals
+        from looper.db import llm_records
+
+        c = controller
+        monkeypatch.setattr(admission, "_controller", c)
+        monkeypatch.setattr(admission, "transition", c.transition)
+        monkeypatch.setattr(admission, "wake", c.wake)
+        await c.transition("account", admission.QuotaFailure(None, None))
+        if probing:
+            c.now = lambda: NOW + timedelta(minutes=5)
+            await c.transition("account", admission.UntilReached())
+        monkeypatch.setattr(
+            llm_records, "get_record",
+            AsyncMock(return_value={"created_at": c.now() + timedelta(seconds=1)}),
+        )
+        windows = limit_signals.parse({
+            "type": limit_signals.CODEX_EVENT,
+            "rateLimits": {
+                "primary": {"usedPercent": 50},
+                "secondary": {"usedPercent": 100},
+            },
+        }, now=c.now())
+        assert [w["status"] for _, w in windows] == ["allowed", "rejected"]
+        before = c.states["account"].state
+        await admission.observed("account", windows, 1)
+        assert c.states["account"].state is before
+
+    asyncio.run(scenario())
+
+
+def test_probing_rejects_allowed_signal_from_older_run(controller):
+    async def scenario():
+        c = controller
+        await c.transition("account", admission.QuotaFailure(None, None))
+        c.now = lambda: NOW + timedelta(minutes=5)
+        await c.transition("account", admission.UntilReached())
+        assert await c.transition(
+            "account", admission.AllowedSignal(NOW - timedelta(seconds=1))
+        ) is admission.AdmissionState.PROBING
+        assert await c.transition(
+            "account", admission.AllowedSignal(c.now() + timedelta(seconds=1))
+        ) is admission.AdmissionState.OPEN
+
+    asyncio.run(scenario())
+
+
+def test_cancel_after_probe_grant_releases_probe_owner(controller, monkeypatch):
+    async def scenario():
+        c = controller
+        await c.transition("account", admission.QuotaFailure(None, None))
+        c.now = lambda: NOW + timedelta(minutes=5)
+        await c.transition("account", admission.UntilReached())
+        granted = asyncio.Event()
+
+        async def notify(provider_id, provider):
+            if c.states[provider_id].probe_owner is not None:
+                granted.set()
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(c, "_notify_waiters", notify)
+        task = asyncio.create_task(c.acquire("account", Lane.USER_TASK, "cancelled"))
+        await asyncio.wait_for(granted.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert "cancelled" not in c.running
+        assert c.states["account"].probe_owner is None
+        monkeypatch.setattr(c, "_notify_waiters", AsyncMock())
+        grant = await asyncio.wait_for(c.acquire("account", Lane.USER_TASK, "next"), 1)
+        assert grant.probe
+        await c.release("next")
+
+    asyncio.run(scenario())
+
+
+def test_slow_freeze_notice_does_not_block_transition(controller, monkeypatch):
+    async def scenario():
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def send(provider_id, event_id, **fields):
+            started.set()
+            await finish.wait()
+
+        monkeypatch.setattr(admission, "_freeze_alert", send)
+        task = asyncio.create_task(
+            controller.transition("account", admission.QuotaFailure(None, 1))
+        )
+        await asyncio.wait_for(started.wait(), 1)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), 0.1)
+            assert controller.states["account"].state is admission.AdmissionState.FROZEN
+        finally:
+            finish.set()
+            await task
+            await tick()
+
+    asyncio.run(scenario())
+
+
+def test_codex_probe_does_not_hold_global_lock(controller, monkeypatch):
+    async def scenario():
+        from looper.db import profile_registry
+
+        c = controller
+        profile_registry.get_provider.return_value["oauth_runtime_type"] = "codex"
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def probe(provider_id):
+            started.set()
+            await finish.wait()
+            return admission.Unavailable()
+
+        c.probe = probe
+        await c.transition("account", admission.QuotaFailure(None, None))
+        c.now = lambda: NOW + timedelta(minutes=5)
+        await c.transition("account", admission.UntilReached())
+        task = asyncio.create_task(c.acquire("account", Lane.USER_TASK, "probe"))
+        await asyncio.wait_for(started.wait(), 1)
+        independent = asyncio.create_task(c.acquire("other", Lane.USER_TASK, "independent"))
+        try:
+            other = await asyncio.wait_for(asyncio.shield(independent), 0.1)
+            assert other.provider_id == "other"
+        finally:
+            finish.set()
+            await asyncio.gather(task, independent)
+            await c.release("probe")
+            await c.release("independent")
+
+    asyncio.run(scenario())
+
+
+def test_codex_probe_timeout_falls_back_to_one_waiter(controller, monkeypatch):
+    async def scenario():
+        from looper.db import profile_registry
+
+        c = controller
+        profile_registry.get_provider.return_value["oauth_runtime_type"] = "codex"
+        monkeypatch.setattr(admission, "PROBE_SECONDS", 0.01, raising=False)
+        cancelled = asyncio.Event()
+
+        async def probe(provider_id):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        c.probe = probe
+        await c.transition("account", admission.QuotaFailure(None, None))
+        c.now = lambda: NOW + timedelta(minutes=5)
+        await c.transition("account", admission.UntilReached())
+        task = asyncio.create_task(c.acquire("account", Lane.USER_TASK, "probe"))
+        try:
+            grant = await asyncio.wait_for(task, 0.2)
+            assert grant.probe and cancelled.is_set()
+            await c.release("probe")
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_pending_codex_probe_keeps_same_account_waiters_queued(controller):
+    async def scenario():
+        from looper.db import profile_registry
+
+        c = controller
+        profile_registry.get_provider.return_value["oauth_runtime_type"] = "codex"
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def probe(provider_id):
+            started.set()
+            await finish.wait()
+            return admission.Unavailable()
+
+        c.probe = AsyncMock(side_effect=probe)
+        await c.transition("account", admission.QuotaFailure(None, None))
+        c.now = lambda: NOW + timedelta(minutes=5)
+        await c.transition("account", admission.UntilReached())
+        first = asyncio.create_task(c.acquire("account", Lane.USER_TASK, "first"))
+        await asyncio.wait_for(started.wait(), 1)
+        second = asyncio.create_task(c.acquire("account", Lane.USER_TASK, "second"))
+        await tick()
+        assert not first.done() and not second.done()
+        c.probe.assert_awaited_once()
+        finish.set()
+        grant = await asyncio.wait_for(first, 1)
+        assert grant.probe and not second.done()
+        await c.release("first")
+        next_grant = await asyncio.wait_for(second, 1)
+        assert next_grant.probe
+        await c.release("second")
+
+    asyncio.run(scenario())
+
+
+def test_stop_awaits_probe_and_notice_cleanup_without_global_lock(controller, monkeypatch):
+    async def scenario():
+        from looper.db import profile_registry
+
+        c = controller
+        profile_registry.get_provider.return_value["oauth_runtime_type"] = "codex"
+        notice_started, probe_started = asyncio.Event(), asyncio.Event()
+        cleaned = set()
+
+        async def notice(provider_id, event_id, **fields):
+            notice_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                async with c.lock:
+                    cleaned.add("notice")
+
+        async def probe(provider_id):
+            probe_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                async with c.lock:
+                    cleaned.add("probe")
+
+        monkeypatch.setattr(admission, "_freeze_alert", notice)
+        c.probe = probe
+        await c.transition("account", admission.QuotaFailure(None, None))
+        await asyncio.wait_for(notice_started.wait(), 1)
+        c.now = lambda: NOW + timedelta(minutes=5)
+        await c.transition("account", admission.UntilReached())
+        waiter = asyncio.create_task(c.acquire("account", Lane.USER_TASK, "waiting"))
+        await asyncio.wait_for(probe_started.wait(), 1)
+        try:
+            await asyncio.wait_for(c.stop(), 1)
+            assert cleaned == {"notice", "probe"}
+            assert not c.background_tasks and not c.probes
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "event,answer,expected",
+    [
+        (admission.OperatorClear(), admission.StillLimited(), admission.AdmissionState.OPEN),
+        (admission.QuotaFailure(None, 2), admission.Allowed(), admission.AdmissionState.FROZEN),
+    ],
+)
+def test_state_change_discards_late_codex_probe_result(controller, event, answer, expected):
+    async def scenario():
+        from looper.db import profile_registry
+
+        c = controller
+        profile_registry.get_provider.return_value["oauth_runtime_type"] = "codex"
+        started, cancelled, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def probe(provider_id):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # A remote call may complete after its caller was cancelled.
+                cancelled.set()
+                await finish.wait()
+                return answer
+
+        c.probe = probe
+        await c.transition("account", admission.QuotaFailure(None, 1))
+        c.now = lambda: NOW + timedelta(minutes=5)
+        await c.transition("account", admission.UntilReached())
+        waiter = asyncio.create_task(c.acquire("account", Lane.USER_TASK, "waiting"))
+        await asyncio.wait_for(started.wait(), 1)
+        old_probe = c.probes["account"]
+        try:
+            await c.transition("account", event)
+            await asyncio.wait_for(cancelled.wait(), 1)
+            finish.set()
+            await asyncio.gather(old_probe, return_exceptions=True)
+            assert c.states["account"].state is expected
+            assert "account" not in c.probes
+        finally:
+            finish.set()
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+            await c.release("waiting")
+
+    asyncio.run(scenario())

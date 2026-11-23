@@ -1034,6 +1034,8 @@ class WorkerPool:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         # The runs counted against their task's limit: worker id -> (role, task id).
         self._slots: dict[str, tuple[AgentType, str]] = {}
+        # A task slot can precede account admission; no runtime needs draining yet.
+        self._admission_waiting: set[str] = set()
         # Held to check a limit and take a place, so two runs cannot both take a task's last one.
         self._slot_lock = asyncio.Lock()
         # The runs waiting for a place, by (role, task id): woken to check again when a run of theirs ends, and all of
@@ -1809,6 +1811,7 @@ class WorkerPool:
             ready.set()  # startup failed or was cancelled: waiting input returns undelivered
         self._tasks.pop(worker_id, None)
         self._active.pop(worker_id, None)
+        self._admission_waiting.discard(worker_id)
         held = self._slots.pop(worker_id, None)
         if held is not None:
             self._wake_slot_waiters(held)
@@ -1825,7 +1828,8 @@ class WorkerPool:
         return {"runs": [{"worker_id": wp.worker_id, "task_id": wp.parent_task_id or wp.task_id,
                           "role": wp.role.value, "since": wp.since.isoformat(), "keepable": wp.keepable,
                           "runtime_id": wp.runtime_id, "runtime_type": wp.runtime_type}
-                         for wid, wp in self._active.items() if wid in self._slots]}
+                         for wid, wp in self._active.items()
+                         if wid in self._slots and wid not in self._admission_waiting]}
 
     async def recheck(self) -> None:
         """Let every run waiting for room in its task check its task's limit again (a limit changed)."""
@@ -2381,9 +2385,12 @@ class WorkerPool:
             try:
                 if lane is None:
                     lane = await admission.worker_lane(ctx.parent_task_id, envelope.payload, role=ctx.launch.role)
+                if admission.enabled():
+                    self._admission_waiting.add(ctx.worker_id)
                 async with admission.slot(ctx.launch.profile.provider.id, lane, owner=ctx.worker_id,
                         on_wait=lambda text: self._activity(ctx.parent_task_id, ctx.worker_id, "phase", text),
                         draining=lambda: self._drain is not None and self._drain.draining):
+                    self._admission_waiting.discard(ctx.worker_id)
                     if admission.enabled():
                         ctx.started_at = datetime.now(timezone.utc)
                         if isinstance(ctx.handle, KeptRun):
@@ -2398,6 +2405,7 @@ class WorkerPool:
                 result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
                 break
             finally:
+                self._admission_waiting.discard(ctx.worker_id)
                 if not is_verify and not (isinstance(ctx.handle, KeptRun)
                                           and ctx.handle.state is KeptRunState.DETACHED):
                     await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)

@@ -24,11 +24,18 @@ async def freeze_alert(
     until_known: bool,
     waiting: int,
 ) -> None:
-    """Claim before sending, like advisor alerts, so a restart cannot resend."""
+    """Deduplicate successful sends; release unsuccessful claims for retry."""
     from .gate_service import dashboard_target
 
+    key = f"admission_alert_sent:{event_id}"
+    claimed = sent = False
     try:
-        if not await system_settings.claim(f"admission_alert_sent:{event_id}", "sent"):
+        sender = _sender
+        chat = await dashboard_target()
+        if sender is None or chat is None:
+            return
+        claimed = await system_settings.claim(key, "sent")
+        if not claimed:
             return
         account = await profile_registry.get_provider(provider_id)
         windows = await provider_limits.windows(provider_id)
@@ -43,16 +50,20 @@ async def freeze_alert(
         )
         text = f"账号 {account['name'] if account else provider_id} 的额度已用完（{names}），{reset}；{waiting} 个运行等待继续。"
         logger.warning("admission freeze: %s", text)
-        chat = await dashboard_target()
-        if chat is not None and _sender is not None:
-            sent, error = await _sender(
-                chat.channel_id,
-                chat.target.id,
-                text,
-                group=chat.target.group,
-                event_key=f"admission-freeze:{event_id}",
-            )
-            if not sent:
-                logger.error("cannot send admission freeze alert: %s", error)
+        sent, error = await sender(
+            chat.channel_id,
+            chat.target.id,
+            text,
+            group=chat.target.group,
+            idempotency_key=f"admission-freeze:{event_id}",
+        )
+        if not sent:
+            logger.error("cannot send admission freeze alert: %s", error)
     except Exception:
         logger.error("cannot deliver admission freeze alert", exc_info=True)
+    finally:
+        if claimed and not sent:
+            try:
+                await system_settings.put_settings({key: None})
+            except Exception:
+                logger.error("cannot release admission freeze alert claim", exc_info=True)

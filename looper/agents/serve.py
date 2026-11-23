@@ -1213,6 +1213,7 @@ async def _run_agent_system_watched(
             await supervisor.stop_all()
             for runner_supervisor in runner_supervisors:
                 await runner_supervisor.stop()
+            await admission.stop()
             await registry.stop_all()
             await bus.shutdown()
             if control is not None:

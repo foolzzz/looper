@@ -82,6 +82,7 @@ from datetime import datetime,timedelta,timezone
 from pathlib import Path
 from looper.agents import admission,gate_service
 from looper.agents.channels.registry import ChannelRegistry
+from looper.agents.channels.base import PostReceipt
 from looper.agents.gate_service import GateChat
 from looper.agents.task_notice import NotifyChannel,NotifyTarget,TargetKind
 state=Path(os.environ["ADMISSION_FIXTURE_STATE"])
@@ -91,13 +92,24 @@ admission._controller.now=clock
 admission.RECHECK_SECONDS=.05
 async def target():
     return GateChat(NotifyChannel.TELEGRAM,NotifyTarget(TargetKind.CHAT,"synthetic-alert-chat"),"channel-telegram")
-async def notify(self,channel_id,chat,text,**kwargs):
-    assert channel_id=="channel-telegram" and chat=="synthetic-alert-chat"
-    with (state/"alerts.jsonl").open("a") as output:
-        output.write(json.dumps({"text":text})+"\\n")
-    return True,None
+class Adapter:
+    channel_id="channel-telegram"
+    channel_type="telegram"
+    async def notify(self,chat,text,*,idempotency_key=None):
+        assert chat=="synthetic-alert-chat"
+        assert idempotency_key.startswith("admission-freeze:")
+        with (state/"alerts.jsonl").open("a") as output:
+            output.write(json.dumps({"text":text})+"\\n")
+        return PostReceipt(True)
+    def healthcheck(self): return {"healthy":True}
+    def prepare_stop(self): pass
+    async def stop(self): pass
+original_init=ChannelRegistry.__init__
+def initialize(self,bus):
+    original_init(self,bus)
+    self._channels["channel-telegram"]=Adapter()
 gate_service.dashboard_target=target
-ChannelRegistry.notify=notify
+ChannelRegistry.__init__=initialize
 """
 
 
@@ -261,4 +273,7 @@ def test_serve_serializes_freezes_probes_then_operator_clear(tmp_path, monkeypat
                 ("probing", "open"),
             ]
             assert events[-1]["actor"] == "operator"
-            assert len((state / "alerts.jsonl").read_text().splitlines()) == 2
+            _until(
+                lambda: len((state / "alerts.jsonl").read_text().splitlines()) == 2,
+                "both background freeze alerts",
+            )
