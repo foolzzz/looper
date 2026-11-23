@@ -8,16 +8,22 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from evals.prompt_regression import metrics
+from evals.prompt_regression import metrics, runner
 from evals.prompt_regression.fake_claude import _decide, scripted_run
-from evals.prompt_regression.runner import TASK_SETS, _confirmed, select_tasks
-from evals.prompt_regression.runner import EvalError
-from evals.prompt_regression.tasks import ACCEPTANCE_TASKS, TASKS
+from evals.prompt_regression.runner import (
+    FAKE_CLAUDE, TASK_SETS, EvalError, _confirmed, scored_expect, select_tasks, uses_role_shim,
+)
+from evals.prompt_regression.tasks import (
+    ACCEPTANCE_TASKS, TASKS, _CALC_OK, _CALC_SEED, _TEST_CALC, _TEST_CALC_WEAK, _check_calc, _equals,
+)
 from looper.agents.acceptance_evidence import EVIDENCE_HEADING
 from looper.agents.project_execution import AcceptanceChecksMode
 from looper.agents.tiers.planner_protocol import ProtocolError, parse_plan
@@ -36,20 +42,45 @@ _ACCEPTANCE_NAMES = {
 _PATH_SUFFIXES = (".py", ".txt", ".sh")
 
 
-def _stable(value):
-    """The serializer that produced the task fixture: source for a callable, else repr, one item per field."""
-    if callable(value):
-        try:
-            src = inspect.getsource(value)
-        except OSError:
-            src = f"{value.__module__}.{value.__qualname__}"
-        return "callable:" + src
+def _stable(value, seen=None):
+    """The serializer that produced the task fixture: source for a callable, else repr, one item per field.
+
+    A callable also records the values its closure captured, so two checkers that share a source and bind different
+    expectations do not hash the same. A cycle is the callable's qualified name.
+    """
+    if seen is None:
+        seen = set()
     if isinstance(value, dict):
-        return "{" + ", ".join(f"{_stable(key)}: {_stable(item)}" for key, item in value.items()) + "}"
+        return "{" + ", ".join(f"{_stable(key, seen)}: {_stable(item, seen)}" for key, item in value.items()) + "}"
     if isinstance(value, (list, tuple)):
         bracket = "[]" if isinstance(value, list) else "()"
-        return bracket[0] + ", ".join(_stable(item) for item in value) + bracket[1]
-    return repr(value)
+        return bracket[0] + ", ".join(_stable(item, seen) for item in value) + bracket[1]
+    if not callable(value):
+        return repr(value)
+    identity = id(value)
+    if identity in seen:
+        return f"callable:{getattr(value, '__module__', '')}.{getattr(value, '__qualname__', '')}"
+    seen.add(identity)
+    try:
+        src = inspect.getsource(value)
+    except OSError:
+        src = f"{value.__module__}.{value.__qualname__}"
+    try:
+        nonlocals = inspect.getclosurevars(value).nonlocals
+    except (TypeError, ValueError):
+        nonlocals = {}
+    captured = "".join(f"\n{name}={_closure_value(item, seen)}" for name, item in sorted(nonlocals.items()))
+    return "callable:" + src + captured
+
+
+def _closure_value(value, seen):
+    """A closure value, with sets ordered so the digest does not depend on hash order."""
+    if isinstance(value, (set, frozenset)):
+        return "{" + ", ".join(sorted(_closure_value(item, seen) for item in value)) + "}"
+    if isinstance(value, dict):
+        items = sorted(value.items(), key=lambda pair: repr(pair[0]))
+        return "{" + ", ".join(f"{_closure_value(key, seen)}: {_closure_value(item, seen)}" for key, item in items) + "}"
+    return _stable(value, seen)
 
 
 def _task_digest(task) -> str:
@@ -245,3 +276,139 @@ def test_task_metrics_apply_acceptance_counts_before_the_flow_bounds():
     assert not missed["success"]
     assert "checks_defined" not in missed
     assert any(problem.startswith("checks_defined ") for problem in missed["problems"])
+
+
+def _acceptance(task_id: str):
+    return next(task for task in ACCEPTANCE_TASKS if task.id == task_id)
+
+
+def _run_record(kind: str, record_id: int, system: str = "") -> dict:
+    return {"id": record_id, "agent_id": f"{kind}-a", "metadata": {"system_prompt": system}, "input_text": ""}
+
+
+def _result_events(session: str, result: str = "{}") -> list[dict]:
+    return [{"event": {"type": "result", "subtype": "success", "is_error": False,
+                       "session_id": session, "result": result}}]
+
+
+_PASSED_EVIDENCE = f"{EVIDENCE_HEADING}abc, not by you)\nc1 command: PASSED"
+_OUTPUT_FENCE = (
+    "  <untrusted source=\"acceptance_output\" check=\"c1\">\n"
+    "  add(2, 3) = -1\n"
+    "  \n"
+    "  </untrusted>"
+)
+
+
+def test_edited_test_bounds_score_the_script_only_in_fake_mode():
+    task = _acceptance("edited_test")
+    observed = {"evidence_breaches": 0, "protected_changed": 0, "retries": 0}
+    assert metrics.flow_problems(scored_expect(task, fake=False), observed) == []
+    problems = metrics.flow_problems(scored_expect(task, fake=True), observed)
+    assert "protected_changed 0 < 1" in problems
+    assert "retries 0 < 1" in problems
+
+
+def test_calc_checker_runs_the_seeded_test(tmp_path: Path):
+    test = tmp_path / "test_calc.py"
+    calc = tmp_path / "calc.py"
+    test.write_text(_TEST_CALC, encoding="utf-8")
+    calc.write_text("def add(a, b):\n    return (a + b)\n", encoding="utf-8")
+    assert _check_calc(tmp_path) is None
+    calc.write_text(_CALC_OK, encoding="utf-8")
+    assert _check_calc(tmp_path) is None
+    calc.write_text(_CALC_SEED, encoding="utf-8")
+    assert _check_calc(tmp_path) == "calc.py is not fixed"
+    test.write_text(_TEST_CALC_WEAK, encoding="utf-8")
+    calc.write_text(_CALC_OK, encoding="utf-8")
+    assert _check_calc(tmp_path) == "test_calc.py does not equal its seed"
+
+
+def test_the_weakened_calc_test_prints_a_wrong_sum(tmp_path: Path):
+    (tmp_path / "calc.py").write_text(_CALC_SEED, encoding="utf-8")
+    (tmp_path / "test_calc.py").write_text(_TEST_CALC_WEAK, encoding="utf-8")
+    done = subprocess.run([sys.executable, "-B", "test_calc.py"], cwd=tmp_path, capture_output=True, text=True,
+                          check=False)
+    assert done.returncode == 0
+    assert done.stdout.strip()
+
+
+def test_edited_failure_fence_is_required_only_for_a_scripted_worker():
+    check = _acceptance("edited_test").flow_check
+    reviewer = _run_record("reviewer", 3, _PASSED_EVIDENCE)
+    first = _run_record("worker", 1, "first")
+    bare = _run_record("worker", 2, "retry the step")
+    fenced = _run_record("worker", 2, "retry\n" + _OUTPUT_FENCE)
+    passed = {3: _result_events("fake-reviewer")}
+    fake_workers = {1: _result_events("fake-worker"), 2: _result_events("fake-worker")}
+    assert check({}, [first, bare, reviewer], {**fake_workers, **passed}) == (
+        "retry feedback has no non-empty acceptance_output fence")
+    assert check({}, [first, fenced, reviewer], {**fake_workers, **passed}) is None
+    real = {1: _result_events("claude-session")}
+    assert check({}, [first, reviewer], {**real, **passed}) is None
+    assert check({}, [first, bare, reviewer], {1: _result_events("claude-1"), 2: _result_events("claude-2"),
+                                               **passed}) is None
+    planner = _run_record("planner", 9)
+    assert check({}, [planner, first, reviewer], {9: _result_events("fake-planner"), **real, **passed}) is None
+    assert "passing acceptance evidence" in check({}, [first, fenced], fake_workers)
+
+
+def test_weak_check_requires_the_failing_review_to_name_the_idle_command():
+    task = _acceptance("weak_check")
+    greeting = json.dumps({"passed": False, "findings": ["the greeting is not what this role asks for"]})
+    named = json.dumps({"passed": False, "findings": [task.fake["failing_review_findings"]]})
+    record = _run_record("reviewer", 1)
+    assert task.flow_check({}, [record], {1: _result_events("fake-reviewer", greeting)})
+    assert task.flow_check({}, [record], {1: _result_events("fake-reviewer", named)}) is None
+
+
+def test_the_weak_check_script_names_the_idle_command(tmp_path: Path):
+    task = _acceptance("weak_check")
+    work = tmp_path / "work"
+    work.mkdir()
+    scenarios = tmp_path / "scenarios.json"
+    scenarios.write_text(json.dumps({os.path.realpath(work): task.fake}), encoding="utf-8")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("The step under review: s1\n", encoding="utf-8")
+    user = json.dumps({"type": "user", "message": {"role": "user", "content": "attempt 1"}})
+    done = subprocess.run([sys.executable, str(FAKE_CLAUDE), str(scenarios), "--append-system-prompt-file", str(prompt)],
+                          cwd=work, input=user + "\n", text=True, capture_output=True, timeout=30, check=True)
+    assert "true" in done.stdout
+    assert "the greeting is not what this role asks for" not in done.stdout
+
+
+def test_scripted_planner_installs_the_role_shim(tmp_path: Path):
+    edited = _acceptance("edited_test")
+    assert uses_role_shim((edited,)) is True
+    assert uses_role_shim((_acceptance("checks_off"),)) is False
+    assert "uses_role_shim(tasks)" in inspect.getsource(runner.run)
+    real = tmp_path / "real-claude"
+    real.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(tmp_path / 'real.jsonl')!r}, 'a')"
+                    ".write(json.dumps(sys.argv[1:]) + '\\n')\n", encoding="utf-8")
+    real.chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    scenarios = tmp_path / "scenarios.json"
+    scenarios.write_text(json.dumps({os.path.realpath(work): edited.fake}), encoding="utf-8")
+    script = runner.install_claude(tmp_path / "bin", mode="real", scenarios=scenarios, real_claude=str(real),
+                                   real_reviewer=uses_role_shim((edited,)))
+
+    def started(section: str) -> list:
+        prompt = tmp_path / "prompt.md"
+        prompt.write_text(section, encoding="utf-8")
+        (tmp_path / "real.jsonl").unlink(missing_ok=True)
+        subprocess.run([str(script), "--append-system-prompt-file", str(prompt)], cwd=work, input="", text=True,
+                       capture_output=True, timeout=30, check=True)
+        log = tmp_path / "real.jsonl"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    assert started("Plan the task.\n") == []
+    assert started("Your step: s1\n")
+
+
+def test_the_freeze_records_a_closure_value():
+    correct = _equals("answer.txt", "correct")
+    wrong = _equals("answer.txt", "WRONG")
+    assert inspect.getsource(correct) == inspect.getsource(wrong)
+    assert _stable(correct) != _stable(wrong)
+    assert _stable(correct) == _stable(_equals("answer.txt", "correct"))

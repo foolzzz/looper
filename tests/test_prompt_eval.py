@@ -2382,10 +2382,10 @@ _FLOW = {"skill_proposal_useful": (2, 0, 0, 0), "skill_proposal_not_needed": (1,
          "reviewer_elsewhere_wrong": (1, 1, 2, 0), "advisor_checkpoint": (1, 0, 0, 0),
          "advisor_optional_flaky": (1, 1, 0, 0),
          "hidden_precondition": (1, 0, 0, 0), "rethink_bug": (1, 0, 0, 0), "misleading_error": (1, 0, 0, 0),
-         # One reviewed step; checks left off; a failed review then a retry; a rewritten test then a retry;
-         # one recheck of a timed-out check, then a retry.
+         # One reviewed step; checks left off; a failed review then a retry; a protected edit, a fenced retry,
+         # then one passing review; one recheck of a timed-out check, then a retry.
          "checks_per_criterion": (1, 0, 1, 0), "checks_off": (1, 0, 0, 0), "weak_check": (1, 1, 2, 0),
-         "edited_test": (1, 1, 0, 0), "check_error_recheck": (1, 1, 0, 0)}
+         "edited_test": (1, 1, 1, 0), "check_error_recheck": (1, 1, 0, 0)}
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
 _SHAPE = {"skill_proposal_useful": (0, 0, 1), "skill_proposal_not_needed": (0, 0, 1),

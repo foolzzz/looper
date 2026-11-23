@@ -62,8 +62,8 @@ directories), one at a time over the HTTP API:
 | `misleading_error` | `test_app.py` fails saying `app.py` expected `ready`. The value comes from `config.py`. The check rejects an `app.py` that contains that literal |
 | `checks_per_criterion` | `acceptance_checks` `local`: three required checks of `slugify` (`python3 test_slug.py lower`, `spaces`, `strip`), each bound to one criterion and protecting `test_slug.py`, plus one advisory artifact check. The delivered `slug.py` is correct and `test_slug.py` is the seed |
 | `checks_off` | the same `slugify` requirement with acceptance checks left off: the plan has no `checks`, and it breaks no contract |
-| `weak_check` | `local`, and the script plays the Planner and Workers in real mode too: criterion 1 is bound to the required command `true`. The first attempt is wrong and the Reviewer fails it; the second is correct |
-| `edited_test` | `local`, and the script plays the Planner in real mode too: `python3 test_calc.py` protects `test_calc.py`. The first attempt rewrites the test; the second restores it and fixes `calc.py` |
+| `weak_check` | `local`, and the script plays the Planner and Workers in real mode too: criterion 1 is bound to the required command `true`. The first attempt is wrong and the Reviewer's failing finding names that idle check; the second is correct |
+| `edited_test` | `local`, and the script plays the Planner in real mode too: `python3 -B test_calc.py` protects `test_calc.py`. The first attempt rewrites the test so it prints the wrong sum and still exits 0; the retry feedback fences that output; the second attempt restores the test, fixes `calc.py`, and a Reviewer sees the passing evidence |
 | `check_error_recheck` | `local`, fully scripted in real mode (`real_reviewer`, and the step has no review): `grep -qx yes ready.txt \|\| sleep 5` times out, the Planner rechecks once, then retries, and the second attempt writes `yes` |
 
 `hidden_precondition`, `rethink_bug` and `misleading_error` are the hard set

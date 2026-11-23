@@ -288,13 +288,34 @@ def require_claude(mode: str, claude: str | None, runtime_types: Iterable[str]) 
                         "runtime with --agent or --register-agent)")
 
 
+def scored_expect(task: EvalTask, *, fake: bool) -> dict[str, int]:
+    """Bounds that score every mode, plus the script's own bounds in fake mode.
+
+    A scripted misbehavior is not a pass condition for a real model that is right on the first try.
+    """
+    expect = dict(task.expect)
+    if fake:
+        expect.update(task.fake.get("expect") or {})
+    return expect
+
+
+def uses_role_shim(tasks: Iterable[EvalTask]) -> bool:
+    """Whether real mode must install the stand-in so a scripted role stays on the script.
+
+    ``real_reviewer`` and ``real_planner`` already did. ``scripted_planner`` scripts only the Planner; without the
+    shim a real-mode run of that task alone sends the Planner to Claude Code.
+    """
+    return any(task.real_reviewer or task.fake.get("real_planner") or task.fake.get("scripted_planner")
+               for task in tasks)
+
+
 def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
                    max_budget_usd: float | None = None, real_claude: str | None = None,
                    real_reviewer: bool = False) -> Path | None:
     """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget (none when
     no agent runs it: ``real_claude`` None). With ``real_reviewer`` installs the role-selective stand-in in real
-    mode. Each task script chooses real Reviewers or a real Planner (``fake_claude.REAL_CLAUDE_ENV``); other tasks
-    remain fully real."""
+    mode. Each task script chooses real Reviewers, a real Planner, or a scripted Planner
+    (``fake_claude.REAL_CLAUDE_ENV``); other tasks remain fully real."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     prefix = ""
     if mode == "fake":
@@ -788,7 +809,7 @@ def run_task(
                              merged_by_looper(work_dir, task_id) if step_workspaces else set()),
             work_dir=work_dir,
             check_problem=task.check(work_dir) or (task.flow_check(detail, records, events) if task.flow_check else None),
-            expect=task.expect,
+            expect=scored_expect(task, fake=fake),
             disciplines=task.disciplines,
             # The gates the runner ended because the Planner asked again after the script ran out.
             gate_asks_beyond_script=sum(1 for done in answered.values() if done > len(_script(task))),
@@ -1187,8 +1208,7 @@ def run(
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
-                       real_claude=real_claude, real_reviewer=any(task.real_reviewer or task.fake.get("real_planner")
-                                                                 for task in tasks))
+                       real_claude=real_claude, real_reviewer=uses_role_shim(tasks))
         (root / "runtime").mkdir(mode=0o700)
         home = root / "home" if mode == "fake" else None
         if home is not None:

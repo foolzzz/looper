@@ -76,7 +76,9 @@ Code, except where the task's script says otherwise. ``real_reviewer`` plays
 the Planner and Workers from the script and sends only Reviewers to Claude
 Code. ``real_planner`` sends only the Planner to Claude Code.
 ``scripted_planner`` plays the Planner from the script and sends Workers and
-Reviewers to Claude Code. ``decision_rechecks`` (a step id to a count) answers
+Reviewers to Claude Code. ``failing_review_findings`` (a string or a list)
+replaces the finding text when that review fails. ``decision_rechecks`` (a
+step id to a count) answers
 ``recheck`` while that decision is offered and the step has used fewer
 rechecks than the count, then falls through to retry.
 """
@@ -490,8 +492,13 @@ def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None
         findings = panel[min(int(attempt.group(1)) if attempt else 1, len(panel)) - 1]
         verdict = {"passed": not findings, "findings": findings, "summary": "Checked the requested file."}
     elif failed:
-        verdict = {"passed": False, "findings": ["the reported file does not meet the criteria" if read else
-                                               "the greeting is not what this role asks for"],
+        named = script.get("failing_review_findings")
+        if named is None:
+            findings = ["the reported file does not meet the criteria" if read else
+                        "the greeting is not what this role asks for"]
+        else:
+            findings = [named] if isinstance(named, str) else list(named)
+        verdict = {"passed": False, "findings": findings,
                    "summary": "The file is missing or incomplete." if read else "Not to this role's liking."}
     else:
         verdict = {"passed": True, "findings": [], "summary": "Meets the criteria."}
