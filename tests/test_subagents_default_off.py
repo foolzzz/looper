@@ -98,3 +98,44 @@ def test_planner_turn_text_is_untouched_when_off_or_nothing_finished() -> None:
     # ``on=False`` never reads the database, so a turn of a project with the switch off adds nothing.
     assert asyncio.run(planner_turn_note("task", on=False)) == ("", [])
     assert asyncio.run(mark_turn_delivered([])) is None
+
+
+def _base_planner_source() -> str:
+    import subprocess
+
+    for ref in ("origin/codex/subagents-pr2-worker-tools", "origin/main"):
+        shown = subprocess.run(["git", "show", f"{ref}:looper/agents/tiers/planner.py"], capture_output=True, text=True)
+        if shown.returncode == 0:
+            return shown.stdout
+    raise AssertionError("no base ref to compare the Planner's prompt with")
+
+
+def test_planner_system_prompt_with_the_switch_off_matches_the_base_bytes() -> None:
+    import ast
+    from dataclasses import replace
+
+    from looper.agents.agent_settings import Harness, Layer
+    from looper.agents.knowledge import EMPTY_KNOWLEDGE
+    from looper.agents.ops.planner import PlannerOps
+    from looper.agents.tiers import planner as planner_module
+    from looper.agents.tiers.planner import PlannerAgent, PlannerSettings, TaskPlan
+
+    definition = next(n for n in ast.parse(_base_planner_source()).body
+                      if isinstance(n, ast.ClassDef) and n.name == "PlannerAgent")
+    method = next(n for n in definition.body if isinstance(n, ast.FunctionDef) and n.name == "_system_prompt")
+    namespace = dict(vars(planner_module))
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "base-planner-prompt", "exec"), namespace)
+    agent = PlannerAgent(task_id="task-baseline", runtime_root=Path("."))
+    agent._ops = PlannerOps(object(), url="http://localhost:1")
+    agent._ops.subagents = object()  # wired, as in `looper serve`
+
+    def prompts():
+        args = (TaskPlan("p", "g", "Build the project", ""), PlannerSettings("Plan carefully.", 60, 0, 0),
+                EMPTY_KNOWLEDGE, Harness("Work carefully.", Layer.BUILTIN))
+        return agent._system_prompt(*args).text, namespace["_system_prompt"](agent, *args).text
+
+    current, base = prompts()
+    assert current.encode() == base.encode()
+    agent._execution = replace(agent._execution, subagents_on=True)
+    on, base = prompts()
+    assert on != base and on.startswith(base[:100])

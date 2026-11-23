@@ -4993,9 +4993,9 @@ class PlannerAgent:
                     launch = process.launch
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=limits)
+                await subagent_delivery.mark_turn_delivered(delivered)  # handed to the runtime: claimed
                 turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
                                               limit if limit > 0 else None)
-                await subagent_delivery.mark_turn_delivered(delivered)
             except TurnBlocked as exc:
                 await recorder.finish(output_text=None, result_event=None, error=str(exc))
                 raise

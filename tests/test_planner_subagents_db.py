@@ -327,3 +327,47 @@ def test_planner_api_passes_the_bridge_call_id():
         SimpleNamespace(_planner_ops=Ops()), "POST", "/api/agent/v1/ops/looper_agent_spawn",
         {"authorization": "Bearer planner.x", "x-looper-call": "call-9"}, json.dumps({"kind": "explorer"}).encode(), writer))
     assert calls == [("looper_agent_spawn", {"kind": "explorer"}, "call-9")] and b'"status": "ok"' in writer.data
+
+
+def test_task_cap_holds_when_the_planner_turn_spend_is_unknown(tmp_path, monkeypatch):
+    from looper.agents import agent_settings
+
+    async def check(pool):
+        ops, workers, project, header, _, _ = await _setup(pool, tmp_path, monkeypatch, task_budget_usd=1,
+                                                           subagent_budget_usd=.5)
+        _only_plan(workers)
+        turn = AgentSettings(profile=builtin_resolved_profile(), max_budget_usd=.8)
+        monkeypatch.setattr(agent_settings, "load_agent_settings", AsyncMock(return_value=turn))
+        # Nothing is recorded yet, but the turn may still spend 0.80 of the task's 1.00.
+        clipped = await ops.call(header, SPAWN, {"kind": "explorer", "brief": BRIEF}, call_id="a")
+        row = await agent_spawns.get(clipped["result"]["spawn"]["id"], pool=pool)
+        assert row["parent_spend_known"] is False and row["budget_usd"] == pytest.approx(.2)
+        monkeypatch.setattr(agent_settings, "load_agent_settings", AsyncMock(
+            return_value=AgentSettings(profile=builtin_resolved_profile(), max_budget_usd=.95)))
+        refused = await ops.call(header, SPAWN, {"kind": "explorer", "brief": BRIEF}, call_id="b")
+        assert refused["status"] == "refused" and refused["reason"] == "budget"
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("end", ["stopped", "failed", "cancelled", "completed", "restart"])
+def test_task_end_and_restart_cancel_explorers_without_the_sweep(end, tmp_path, monkeypatch):
+    from looper.db import tasks as task_rows
+
+    async def check(pool):
+        ops, workers, _, header, _, _ = await _setup(pool, tmp_path, monkeypatch)
+        _only_plan(workers)
+        out = await ops.call(header, SPAWN, {"kind": "explorer", "brief": BRIEF}, call_id="e")
+        spawn_id = out["result"]["spawn"]["id"]
+
+        async def cascade(task_id):
+            await workers.service.cascade(task_id=task_id, reason=agent_spawns.CancelReason.TASK_ENDED)
+        monkeypatch.setattr(task_rows, "task_ended_listeners", [cascade])
+        if end == "restart":
+            # The status is only briefly not running: no sweep gets a look at it.
+            await task_rows.reset_task_for_restart("task", keep_steps=True)
+            await pool.execute("UPDATE tasks SET status='running' WHERE id='task'")
+        else:
+            await task_rows.update_task_status("task", end)
+        row = await agent_spawns.get(spawn_id, pool=pool)
+        assert row["state"] == "cancelled" and row["cancel_reason"] == "task_ended"
+    run_db(check, monkeypatch)

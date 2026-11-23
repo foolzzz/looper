@@ -145,13 +145,15 @@ class _PlannerParent:
     record_id: int
     work_dir: Path
     writable_turn: bool
+    turn_cap_usd: float = 0.0
 
     def owns(self, row: Mapping[str, Any]) -> bool:
         return row.get("spawner") == "planner"
 
     def caller(self) -> Spawner:
         return Spawner(SpawnParent(self.task_id, None, self.record_id), "planner", self.work_dir, seat="planner",
-                       writable_turn=self.writable_turn, budget_usd=None, spent_usd=None)
+                       writable_turn=self.writable_turn, budget_usd=None, spent_usd=None,
+                       unrecorded_usd=self.turn_cap_usd)
 
 
 def _view(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -416,6 +418,18 @@ class PlannerSubagents:
     def __init__(self, workers: WorkerSubagents):
         self.workers = workers
 
+    async def _turn_cap(self, task_id: str) -> float:
+        """What the running turn may still add to the task's spend: its per-run cap, since its own spend is not
+        known here (the task cap must hold either way). 0 when no cap is set or it cannot be read."""
+        from ..agent_settings import AgentType, load_agent_settings
+        try:
+            project_id = await self.workers.service.pool.fetchval("SELECT project_id FROM tasks WHERE id=$1", task_id)
+            cap = (await load_agent_settings(AgentType.PLANNER, project_id, task_id)).max_budget_usd
+        except Exception:
+            logger.warning("task %s: could not read the Planner's per-run cap", task_id, exc_info=True)
+            return 0.0
+        return float(cap) if cap else 0.0
+
     async def call(self, task_id: str, name: str, raw: Any, *, call_id: str | None = None,
                    in_turn: bool = False) -> dict:
         pool = self.workers.service.pool
@@ -429,5 +443,5 @@ class PlannerSubagents:
             work_dir = await pool.fetchval("SELECT work_dir FROM tasks WHERE id=$1", task_id)
             if not work_dir:
                 raise Refused(RefusalReason.SCOPE, "the task has no working directory to explore")
-            return _PlannerParent(task_id, record_id, Path(work_dir), in_turn)
+            return _PlannerParent(task_id, record_id, Path(work_dir), in_turn, await self._turn_cap(task_id))
         return await self.workers.serve(task_id, f"planner-{task_id}", f"planner-{task_id}", resolve, name, raw, call_id)
