@@ -429,11 +429,14 @@ def _failed_run(states: Sequence[str]) -> bool:
     return len(states) >= FAILING_RUN and all(state == "failed" for state in states[:FAILING_RUN])
 
 
-async def _last_user_message_at(channel_id: str, chat: str) -> datetime | None:
-    thread = channel_thread_id(channel_id, chat, "manager", "manager")
+async def _last_user_message_at(channel_id: str, sender_id: str) -> datetime | None:
+    # The delivery target is a sender id; Lark stores its DM under a different chat id.
     try:
         return await connection.get_pool().fetchval(
-            "SELECT max(created_at) FROM chat_messages WHERE session_id = $1 AND role = 'user'", thread)
+            "SELECT max(m.created_at) FROM chat_messages m "
+            "JOIN chat_direct_threads d USING (session_id) JOIN chat_threads t USING (session_id) "
+            "WHERE d.channel_id = $1 AND d.sender_id = $2 AND m.role = 'user' AND t.manager_id = $3",
+            channel_id, sender_id, MANAGER_ID)
     except Exception:
         logger.warning("idle checks: could not read the last user message", exc_info=True)
         return None

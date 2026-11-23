@@ -49,7 +49,7 @@ class _Lark(ChannelAdapter):
     async def receive(self):
         await self.bus.publish(MessageEnvelope.create(source=channel_address("lark"), target=MANAGER_ADDRESS,
             message_type=MessageType.USER_MESSAGE, payload={"text": "I am back", "channel_context": {
-                "chat_id": "ou_synthetic_serve", "sender_id": "ou_synthetic_serve", "chat_type": "p2p"}}))
+                "chat_id": "oc_synthetic_serve_dm", "sender_id": "ou_synthetic_serve", "chat_type": "p2p"}}))
 
 
 @pytest.mark.parametrize("returned", [False, True], ids=["restart-during-post", "returned-during-turn"])
@@ -139,7 +139,10 @@ for line in sys.stdin:
                 await until(reached.exists, "fake idle turn reached", timeout=20)
                 await adapters[-1].receive()
                 async def user_stored():
-                    return await pool.fetchval("SELECT count(*) FROM chat_messages WHERE role='user'")
+                    return await pool.fetchval("SELECT count(*) FROM chat_messages m "
+                        "JOIN chat_direct_threads d USING (session_id) WHERE m.role='user' "
+                        "AND d.channel_id='channel-lark' AND d.sender_id='ou_synthetic_serve' "
+                        "AND m.session_id='lark:oc_synthetic_serve_dm'")
                 deadline = loop.time() + 15
                 while not await user_stored():
                     assert loop.time() < deadline, "stand-in DM must reach persisted user history"

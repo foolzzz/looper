@@ -103,15 +103,16 @@ async def update(value: bool | None) -> dict[str, Any]:
 
 
 async def note_direct_thread(session_id: str | None, origin: Mapping[str, Any]) -> None:
-    """Record who a Lark or Telegram direct chat ``session_id`` is with, while the switch is on. A group, the web
-    chat and a message without a sender record nothing; a failure is logged, never raised."""
+    """Record a direct chat's sender while session search or idle checks need it. A group, the web chat and a
+    message without a sender record nothing; a failure is logged, never raised."""
     from ...db import chat_search
+    from .. import idle_check_settings
 
     channel, channel_id, sender = origin.get("channel"), origin.get("channel_id"), origin.get("sender")
     if not session_id or origin.get("group") or channel == "web" or not channel_id or not sender:
         return
     try:
-        if await enabled():
+        if await enabled() or await idle_check_settings.enabled():
             await chat_search.note_direct_thread(session_id, str(channel_id), str(sender))
     except Exception:
         logger.warning("could not record who direct chat %s is with", session_id, exc_info=True)
