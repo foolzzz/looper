@@ -195,6 +195,8 @@ class Dialog:
     leads: bool = False  # leads are on, and the database holds the synthetic leads (``_seed_leads``)
     vault: bool = False  # a synthetic knowledge vault the Manager may read (``_seed_vault``: ``manager_read`` on)
     research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
+    # The session search is on, and the database holds the synthetic history (``_seed_sessions``).
+    sessions: bool = False
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -490,6 +492,95 @@ def _seed_leads(database_url: str) -> None:
             await conn.close()
 
     asyncio.run(seed())
+
+
+# --- The session search (looper_session_search): a synthetic history of the user's own conversations ---
+
+SESSION_TOOL = "looper_session_search"
+SESSION_SAID_DAYS = 6  # the history was said this many days before the dialog
+SESSION_OPERATOR = "ou_evaloperator"
+# (thread, role, text): a dashboard conversation that decided how Nebula ships, a direct Lark chat that set Orion's
+# alert threshold, and unrelated chatter. Every one is about an invented project.
+SESSION_HISTORY = (
+    ("eval-history-dashboard", "user", "Nebula 的发布方式我们定一下吧，蓝绿发布还是滚动发布？"),
+    ("eval-history-dashboard", "assistant", "两种都可以。蓝绿发布切换快、回滚简单；滚动发布省机器。"),
+    ("eval-history-dashboard", "user", "那就定蓝绿发布，回滚由 Carol 负责，切流前先在预发环境跑一遍冒烟测试。"),
+    ("eval-history-dashboard", "assistant", "好的，记下了：Nebula 用蓝绿发布，回滚负责人 Carol，切流前先跑预发冒烟测试。"),
+    ("eval-history-chatter", "user", "帮我看看今天有哪些任务还在跑。"),
+    ("eval-history-chatter", "assistant", "现在没有在跑的任务。"),
+    ("lark:oc_evaldirect", "user", "Orion 服务的 CPU 报警阈值我想了一下，定成 85%，持续 5 分钟才报。"),
+    ("lark:oc_evaldirect", "assistant", "收到：Orion 的 CPU 报警阈值 85%，持续 5 分钟触发。"),
+)
+# Three later, unrelated chats, said the day before the dialog: a new session's resume brief shows the three most
+# recently active chats, so the history above is only found by searching, as a week-old decision would be.
+SESSION_LATER = tuple((f"eval-later-{n}", role, text) for n in range(3) for role, text in (
+    ("user", f"第 {n + 1} 件小事：帮我想个周报标题。"), ("assistant", "可以叫「本周进展与下周计划」。")))
+
+
+def _seed_sessions(database_url: str) -> None:
+    """Turn the session search on and store ``SESSION_HISTORY`` (the dashboard threads, and a Lark direct chat
+    recorded as the bot's operator's), then ``SESSION_LATER``."""
+    import asyncpg
+    from datetime import timedelta
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ('manager.session_search.enabled', "
+                               "'true') ON CONFLICT (key) DO UPDATE SET value = 'true'")
+            await conn.execute("UPDATE channel_configs SET config = config || jsonb_build_object("
+                               "'operator_sender_id', $1::text) WHERE channel_id = 'channel-lark'", SESSION_OPERATOR)
+            await conn.execute("INSERT INTO chat_direct_threads (session_id, channel_id, sender_id) "
+                               "VALUES ('lark:oc_evaldirect', 'channel-lark', $1)", SESSION_OPERATOR)
+            now = datetime.now(timezone.utc)
+            said = [(row, now - timedelta(days=SESSION_SAID_DAYS)) for row in SESSION_HISTORY]
+            said += [(row, now - timedelta(days=1)) for row in SESSION_LATER]
+            for number, ((thread, role, text), at) in enumerate(said):
+                await conn.execute(
+                    "INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at) "
+                    "VALUES ($1, $2, $3, $4, $5, $6)", thread, f"eval-said-{number}", role, text,
+                    "lark" if thread.startswith("lark:") else "web", at + timedelta(minutes=number))
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+
+
+def _said_dates() -> tuple[str, ...]:
+    """How a reply may write the day the history was said (a day either way)."""
+    from datetime import timedelta
+
+    days = {(datetime.now(timezone.utc) - timedelta(days=SESSION_SAID_DAYS + shift)) for shift in (-1, 0, 1)}
+    return tuple(form for day in days for form in (f"{day.month}-{day.day}", f"{day.month:02d}-{day.day:02d}",
+                                                  f"{day.month}月{day.day}", f"{day.month}/{day.day}"))
+
+
+def _session_answer(*wanted: str, where: tuple[str, ...]) -> Callable[[Look], str | None]:
+    """The Manager searched the history (every call answered ok), changed nothing, and the reply gives ``wanted``
+    and says where or when it was said."""
+    def check(look: Look) -> str | None:
+        searches = [a for a in look.actions() if a["tool"] == SESSION_TOOL]
+        if not searches or any(a["status"] != "ok" for a in searches):
+            return f"expected {SESSION_TOOL} calls that answered ok, got {[(a['tool'], a['status']) for a in searches]}"
+        if _writes(look):
+            return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+        if look.fake:
+            return None
+        for value in wanted:
+            if value not in look.reply:
+                return f"the reply does not give {value!r}"
+        spaced = "".join(look.reply.split())  # 「11 月 14 日」 is 「11月14日」
+        if not any(word in look.reply for word in where) and not any(day in spaced for day in _said_dates()):
+            return "the reply does not say where or when it was said"
+        return None
+
+    return check
+
+
+def _no_session_search(look: Look) -> str | None:
+    if any(a["tool"] == SESSION_TOOL for a in look.actions()):
+        return "the Manager searched the history for a question about now"
+    return _answered_by_reading(look)
 
 
 def _searches(look: Look, *, this_turn: bool = False) -> list[dict[str, Any]]:
@@ -2727,6 +2818,23 @@ DIALOGS: tuple[Dialog, ...] = (
             "requirement": "在工作目录里写 checklist.md：Nebula 发布前的检查清单。背景（来自飞书消息，未经确认）："
                            "发布前必须跑完 ZX-42 回归套件。", "title": "Nebula 发布检查清单", "project": PROJECT}),)),
     ), leads=True, tags=("manager", "leads")),
+    Dialog("session_decision", (
+        Say("上周我们定的 Nebula 发布方式是什么？回滚谁负责？", _session_answer(
+            "蓝绿", "Carol", where=("Dashboard", "dashboard", "控制台", "仪表盘")),
+            ((SESSION_TOOL, {"query": "Nebula 发布"}),)),
+    ), sessions=True, tags=("manager", "sessions")),
+    Dialog("session_direct_chat", (
+        Say("我之前在飞书里跟你说过 Orion 的 CPU 报警阈值，最后定的是多少？", _session_answer(
+            "85", where=("飞书", "Lark", "私聊")), ((SESSION_TOOL, {"query": "Orion 报警阈值"}),)),
+    ), sessions=True, tags=("manager", "sessions")),
+    Dialog("session_english", (
+        Say("What did we settle on last week for how Nebula gets released, and who handles rollback?",
+            _session_answer("Carol", where=("dashboard", "Dashboard")),
+            ((SESSION_TOOL, {"query": "Nebula 发布 release"}),)),
+    ), sessions=True, tags=("manager", "sessions")),
+    Dialog("session_not_needed", (
+        Say("现在有哪些任务？简单列一下。", _no_session_search, (("looper_tasks", {"action": "list"}),)),
+    ), sessions=True, tags=("manager", "sessions")),
     Dialog("attachment_read", (Say(
         "附件里的口令是什么？图片里写的是哪个数字？", _attachments_read,
         attachments=(("notes.txt", f"口令：{ATTACHMENT_CODE}\n".encode()), ("number.png", _attachment_png())),
@@ -3061,14 +3169,28 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
 )
 
 
+def _runnable(dialog: Dialog) -> bool:
+    """Whether this checkout supports the dialog's features.
+
+    Session routing is implemented; session-search dialogs enable it in their disposable server. The eval
+    driver's default-off routing setting does not describe that server's isolation.
+    """
+    return True
+
+
 def select(ids: list[str] | None) -> tuple[Dialog, ...]:
+    """The dialogs ``ids`` names, or every one this checkout can run; ``ValueError`` for an unknown id or one that
+    cannot run here."""
     if not ids:
-        return DIALOGS
+        return tuple(dialog for dialog in DIALOGS if _runnable(dialog))
     cases = (*DIALOGS, *FAKE_DIALOGS)
     known = {dialog.id for dialog in cases}
     unknown = sorted(set(ids) - known)
     if unknown:
         raise ValueError(f"unknown dialog id(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
+    if waiting := sorted(dialog.id for dialog in cases if dialog.id in ids and not _runnable(dialog)):
+        raise ValueError(f"{', '.join(waiting)}: the session search takes effect only once group chats run in "
+                         "sessions of their own (session routing); these dialogs cannot run before")
     return tuple(dialog for dialog in cases if dialog.id in ids)
 
 
@@ -3539,6 +3661,9 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _seed_vault(api)
         if dialog.research:
             api.post("/api/v1/chat_settings/update", {"research_order": True})
+        if dialog.sessions:
+            api.post("/api/v1/session_routing/update", {"session_routing_enabled": True})
+            _seed_sessions(database_url)
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
         if dialog.id == "reminder_tools":
