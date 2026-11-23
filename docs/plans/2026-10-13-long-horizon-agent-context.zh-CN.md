@@ -962,6 +962,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，项目开关仍默认关且没有启用入口；验证见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。下一步按 RFC PR2 接 Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消；规划者入口、运行树界面和账号准入分别留给后续 PR。
+
 - **助理每轮上下文接线**：类型化分类、渲染、操作者设置入口和 ops 说话人授权检查已实现；Manager 接线尚未完成，开关默认关，暂不注入上下文或契约。接线后补回合 prompt 关闭基准、渠道真实链路与时间/身份评测（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
 
 - **流程预设的后续入口**：任务模板引用流程、定时任务选择流程；当前模板和定时任务仍不采用项目默认流程。
