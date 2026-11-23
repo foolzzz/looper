@@ -359,6 +359,7 @@ async def seed_role_configs(pool: Any = None) -> None:
     from .advice import ADVISOR_ROLE_PROMPT, JUDGE_ROLE_PROMPT
     from .advisor import ADVISOR_TIMEOUT_SEC, JUDGE_TIMEOUT_SEC
     from .leads_check import CHECK_TIMEOUT_SEC, LEADS_CHECK_ROLE_PROMPT
+    from .explorer import EXPLORER_MAX_TURNS, EXPLORER_ROLE_PROMPT, EXPLORER_TIMEOUT_SEC
     from .outbound import OUTBOUND_ROLE_PROMPT, REVIEW_TIMEOUT_SEC as OUTBOUND_TIMEOUT_SEC
     from .processor import PROCESSOR_ROLE_PROMPT, PROCESSOR_TIMEOUT_SEC
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
@@ -419,6 +420,13 @@ async def seed_role_configs(pool: Any = None) -> None:
             "timeout_seconds": CHECK_TIMEOUT_SEC,  # at most, per check
             # Its instructions and reply contract follow it.
             "system_prompt": LEADS_CHECK_ROLE_PROMPT,
+        },
+        {
+            "role": "explorer",
+            "display_name": "Explorer",
+            "timeout_seconds": EXPLORER_TIMEOUT_SEC,
+            "max_turns": EXPLORER_MAX_TURNS,
+            "system_prompt": EXPLORER_ROLE_PROMPT,
         },
         {
             "role": "outbound_check",
@@ -809,6 +817,11 @@ async def _run_agent_system_watched(
             except Exception:
                 logger.exception("could not sweep the agents a previous server left running")
 
+        with startup.measure("acceptance_recovery"):
+            from .acceptance_runner import recover
+
+            await recover(runtime_root)
+
         # Warm the interpreter's snapshot before kept adoption or HTTP startup can need it.
         with startup.measure("code_manifest"):
             from .. import components
@@ -818,15 +831,18 @@ async def _run_agent_system_watched(
         with startup.measure("kept_scan"):
             left_running = await tasks_left_running(pool)
             from . import kept_dirs
+            from .ops.subagents import kept_explorer_records
+            explorer_records = await kept_explorer_records(runtime_root, pool) if lease is not None else {}
             try:
                 scan = await kept_dirs.scan_at_start(runtime_root, epoch=epoch if lease is not None else None,
-                                                     resumable=left_running.resumable, pool=pool)
+                    resumable=left_running.resumable, pool=pool,
+                    **({"reserved_runs": set(explorer_records)} if explorer_records else {}))
             except OSError as exc:
                 raise StartupCheckFailed(f"cannot tell whether kept runs are still running: {exc}") from exc
         # The runs the previous server did not see end: nothing runs yet, so every record still running is one.
         with startup.measure("end_unfinished_records"):
             from ..db.llm_records import end_unfinished_records
-            if unfinished := await end_unfinished_records(pool=pool, keep=scan.record_ids):
+            if unfinished := await end_unfinished_records(pool=pool, keep=[*scan.record_ids, *explorer_records.values()]):
                 logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
 
         with startup.measure("llmrec"):
@@ -926,6 +942,9 @@ async def _run_agent_system_watched(
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
                                   message_backup=db_backup.message_backup_for(ops, runtime_root))
+            from . import cost_guard
+
+            await cost_guard.initialize(day_start=scheduler.day_start, pool=pool)
             bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook
@@ -1014,6 +1033,12 @@ async def _run_agent_system_watched(
             room.consults = consults
             planner_ops.room = room
             room_ops = RoomOps(room, url=_local_url(host, port))
+            from .subagents import SpawnService
+            from .ops.subagents import WorkerSubagents
+            explorers = WorkerSubagents(SpawnService(runtime_root, claude_bin=claude_bin,
+                keeper=KeeperSettings(epoch) if lease is not None else None,
+                on_stale=lease.lose if lease is not None else None), room, worker_pool=worker_pool)
+            room_ops.subagents = explorers
             worker_pool.room_ops = room_ops
             for candidate in scan.candidates:
                 if candidate.grant:
@@ -1060,6 +1085,7 @@ async def _run_agent_system_watched(
         # Replayed messages and resumed runs can probe or call platform tools immediately.
         # Listen before starting any of their consumers.
         try:
+            await explorers.start()
             await consults.resume_all()
             # Before any Planner resumes: a consult of the advisor a stopped server left running cannot finish.
             from .advisor import fail_interrupted
@@ -1141,9 +1167,12 @@ async def _run_agent_system_watched(
                 await advisory_checks
             if mode is ShutdownMode.DETACH_KEPT:
                 await worker_pool.detach_kept(epoch=lease.epoch)
+                await explorers.stop(epoch=lease.epoch)
                 if control is not None:
                     await control.close(handover=True)
             logger.info("shutting down agent system...")
+            if mode is not ShutdownMode.DETACH_KEPT:
+                await explorers.stop()
             await consults.stop()
             await gate_reminders.stop()
             # Cancel and reap in-flight wait checks before stopping agents and their bus.

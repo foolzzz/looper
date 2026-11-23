@@ -1034,12 +1034,13 @@ class ManagerOps:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())
 
-    def waiting_confirmations(self) -> list[dict[str, Any]]:
+    def waiting_confirmations(self, *, unpersisted_only: bool = False) -> list[dict[str, Any]]:
         """The operations that wait for the user's word now, oldest first: asked, no turn answering them yet, and
         within ``CONFIRMATION_SECONDS``. Read only (the "needs you" summary, ``agents.attention``)."""
         now = self._clock()
         waiting = sorted(((key, pending) for key, pending in self._pending.items()
-                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS),
+                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS
+                          and (not unpersisted_only or pending.card is None)),
                          key=lambda item: item[1].at)
         return [{"confirmation_id": pending.id, "tool": pending.tool.name, "impact": pending.impact,
                  "channel": channel, "channel_id": channel_id, "chat": chat, "waited_seconds": int(now - pending.at),

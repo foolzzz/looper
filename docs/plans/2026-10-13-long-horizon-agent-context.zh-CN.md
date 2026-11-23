@@ -47,6 +47,7 @@
 | M5 | 项目执行配置 | ✅ 已交付（looper #37） | M2 |
 | M6 | prompt 回归评测 | ✅ 已交付（looper #36） | M1 |
 | M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #45） | M2、M5 |
+| 事件分流 v0 | [RFC](../architecture/rfcs/event-triage-v0.zh-CN.md) 的表、类型、只读访问器与独立操作者开关 | 基础层已实现，默认关闭；分流运行、why 入口、管家交接与晨报仍待后续 PR | M7a，#1482 |
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ✅ 已交付（looper #46） | M7a |
 | M7c | 及时沉淀：日志记失败与重试、决策理由、用户指令、会话切换；换 agent 前的交接摘要和新会话的续接简报；Manager 续接；项目经验随时进草稿 | ✅ 已交付（looper #66） | M7b、M9a |
 | M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付（looper #48） | M1.6、M4 |
@@ -62,6 +63,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
+| P4.7 花费守卫 | PR 1：运行前预留、历史 P95 与每日计数重算、全部模型回合及调度触发的观察接线、操作者只读展示已实现；默认关闭，仅支持 `off/observe`；定向测试 433 通过，隔离服务及替身 Manager 回合已验证，真实模型验证待批准；执行拦截、等待、通知、暂停与用量窗口按 RFC 后续 PR 交付 | [RFC](../architecture/rfcs/cost-guard-v0.zh-CN.md) |
 | 热升级 v0 | 组件规划、排空、Claude Code 看护与跨重启接管 | 默认关闭；macOS launchd 替身链路已验证，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍有缺口（[证据](../validation/kept-runs/README.md)） | M9a、M9c |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发和控制台命令型表单 | 现有定时任务；热升级排空功能 |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发，以及管家创建、配置展示与确认命令型定时任务 | 现有定时任务；热升级排空功能 |
@@ -1016,13 +1018,15 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消已实现，项目开关仍默认关，见[Worker 工具验收](../validation/platform-subagents-worker-tools.zh-CN.md)；真实模型运行与评测待授权执行。规划者入口、运行树界面、项目设置入口和账号准入分别留给后续 PR。
+- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审。执行器、`step_check_runs` 与 operator-only `task_evidence.get` 已在本分支实现，复用私有检出及写通知，带资源限制、产物保留和重启恢复；Worker 成功后写证据，仍不影响决策。异常证据收尾及保存检查后再关闭的计划文本已补回归；关闭状态按 `main` 对照 prompt 和步骤行，定义仍供操作者读回。macOS local 使用网络与 job-creation 双重禁止并预检，Linux `unshare -rn` 尚未实测。证据门、Reviewer 证据、任务页展示与结果/渠道输出待后续阶段，真实模型评测未运行。
 - **助理人格接线**（本分支已实现，未设置即关闭，依赖 #1533）：默认 Manager 把名字、语气和补充说明放在 `_sections()` 第一段，沿用稳定块更新规则；不注入称呼、不增加工作时间，群和他人私聊共用 main 时不注入人格，独立会话只给名字；受限回合发去人格的完整稳定块且不覆盖 main 的已展示状态，场景管家和其他角色不继承。固定 main 哈希、下一轮更新/清空、稳定块及隔离服务重启由定向测试覆盖；真实模型语气和改名评测待批准，尚未执行（[RFC §5.2](../architecture/rfcs/assistant-layer-v0.zh-CN.md#52-12-人格与称呼)）。
 
 - **助理每轮上下文接线**（本分支已实现，默认关）：Manager 用户回合用现有渲染器替换 `Channel:` 行，并按渠道发送者设置 `Turn.speaker`，接通现有升级和确认的授权检查；收尾、自主回合不注入。新增 main 的关闭路径固定基准及渠道身份、确认劫持、稳定块、隔离 serve 测试；真实模型的时间/身份评测未执行，待维护者批准后用 `evals.assistant_experience --turn-context --categories time,identity` 对比基线（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
 
 - **引擎可靠性：用量和限流信号**（[RFC](../architecture/rfcs/engine-reliability-v0.zh-CN.md)）：本分支实现默认关闭的 Claude Code / Codex app-server 窗口采集、账号七天用量、只读 `providers.limits`、额度块和自检；独立服务用替身事件验证，真实额度耗尽与重置未测。准入、冻结、失败处理和降级仍待后续实现。
 
-- **助理层第 3 期：空闲检查、车道与插话、动作类别与回执、状态卡**（[RFC](../architecture/rfcs/assistant-phase3-v0.zh-CN.md)，决定已定，只有文档；维护者 2026-11-22 的答复是 D24–D35）：四项各一个默认关闭的开关；PR 顺序和依赖见 RFC 第 12 节，3.6a、3.7a、3.5a、3.5b 可以先做（会话路由 #1518 已合入），空闲检查要在车道之后才能打开。
+- **助理层第 3 期：空闲检查、车道与插话、动作类别与回执、状态卡**（[RFC](../architecture/rfcs/assistant-phase3-v0.zh-CN.md)，决定已定；维护者 2026-11-22 的答复是 D24–D35）：本分支已实现 3.6a 的 `ActionCategory`、`ActionKind`、`TOOL_ACTIONS` 和写动作完整性测试，只有声明，不改变运行行为；运行时回执、开关和存储仍归 3.6b。其余按 RFC 第 12 节推进：3.7a、3.5a、3.5b 可以先做（会话路由 #1518 已合入），空闲检查要在车道之后才能打开。
 
 - **流程预设的后续入口**：任务模板引用流程、定时任务选择流程；当前模板和定时任务仍不采用项目默认流程。
 
@@ -1098,6 +1102,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 触屏上翻看消息历史（现在只有键盘的 ↑、↓）。
 
 ### 5.4 验证缺口
+
+- **卡片按钮的意图 / 账本接入**（默认关）：复用 `card_actions` 的记录、会话 / 消息绑定和 1.5 秒授权期限；Needs-you 的操作确认也从共享入口读取。真实飞书 / Telegram 回调尚未验证；真实模型评测尚未获批，只跑 fake-mode。获批后在开关打开时跑 assistant experience 的 identity，以及 Manager 的 `ledger_tools`、`confirm_create_start`、`cancel_confirmation` 对话：Sonnet 两次，Opus xhigh Manager 一次；预计合计 $1–3，属估算，不是实测费用或执行授权。
 
 - **管家中途输入**（本分支实现，默认关闭）：按助理层 RFC §5.3.6 接入 `manager.mid_turn_input.enabled`，只有操作者可用独立的 `mid_turn_input.get/update`。脚本 CLI 与隔离 PostgreSQL 覆盖同聊天/跨聊天并入、队列回退、停止、重启重放和关闭时的主干哈希对照；没有调用真实模型。同聊天、控制台到私聊、等待中停止，以及结果已在内核 stdout 缓冲、读回调尚未执行、短行 drain 不让出时不并入、不提前结算且只排队一次的真实 Claude Code 对照仍待维护者单独批准，不能将替身通过算作模型行为验证；拟验证 4 个场景，sonnet 各 2 次（每进程 $0.25、最多 16 个进程、共 $4），opus xhigh 各 1 次（每进程 $0.50、最多 8 个进程、共 $4），另加 sonnet 身份/隔离回归 $4，整批上限 $12；每场景最多 2 个进程，停止、队列回退及替换均计入，单场景最多 60 秒。Settings 页面开关与配置导入导出尚未接入。
 

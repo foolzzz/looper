@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from ..db import connection, intents as db_intents, proactive_deliveries as db_deliveries, schedules as db_schedules
 from ..db import subscriptions as db_subs
-from . import chat_settings, leads_model, proactive_delivery as delivery, subscriptions, turn_metrics
+from . import chat_settings, intent_cards, leads_model, proactive_delivery as delivery, subscriptions, turn_metrics
 from .channels.base import PostOutcome
 from .message import builtin_channel_id, channel_thread_id, parse_channel_id
 from .operator_identity import operator_sender_id
@@ -291,7 +291,11 @@ class IntentPushService:
             await conn.execute("UPDATE intent_final_notices SET attempts=$2,next_attempt_at=$3,updated_at=$4 "
                                "WHERE push_id=$1", push["id"], attempts, now+_final_retry_delay(attempts), now)
             try:
-                success = (await self._registry.edit(channel, push_target(channel, chat), push["external_id"], text)).success
+                card = await intent_cards.final_card(intent["id"], channel, chat, push["external_id"], text, conn=conn)
+                receipt = (await self._registry.edit_card(channel, push_target(channel, chat), push["external_id"], card)
+                           if card is not None else
+                           await self._registry.edit(channel, push_target(channel, chat), push["external_id"], text))
+                success = receipt.success
             except Exception:
                 success = False
             if not success:
@@ -364,12 +368,15 @@ class IntentPushService:
         if claimed is None:
             return
         external = error = None
+        card = None
         try:
-            receipt = await self._registry.post(post["channel_id"], push_target(post["channel_id"], post["chat"]),
-                                                post["text"], reply_to=reply,
-                                                idempotency_key=delivery_key,
-                                                **turn_metrics.proactive_kwargs(
-                                                    turn_metrics.ProactiveSource.INTENT, str(intent["id"])))
+            card = (await intent_cards.make(intent, post["channel_id"], post["chat"], post["text"], conn=conn)
+                    if post["kind"] == "push" else None)
+            target = push_target(post["channel_id"], post["chat"])
+            kwargs = {"reply_to": reply, "idempotency_key": delivery_key,
+                      **turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.INTENT, str(intent["id"]))}
+            receipt = (await self._registry.post_card(post["channel_id"], target, card, **kwargs) if card is not None
+                       else await self._registry.post(post["channel_id"], target, post["text"], **kwargs))
             state = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "failed", PostOutcome.UNKNOWN: "uncertain"}[receipt.result]
             external = receipt.external_ids[0] if receipt.external_ids else None
             error = receipt.error
@@ -377,6 +384,9 @@ class IntentPushService:
             state, error = "uncertain", type(exc).__name__
         await conn.execute("UPDATE intent_posts SET state=$2, external_id=$3, error=$4, updated_at=$5 WHERE id=$1",
                            post["id"], state, external, error, now)
+        if state == "failed" and card is not None:
+            from ..db import card_actions as db_cards
+            await db_cards.lapse([card.token], pool=conn)
         if decided is not None:
             try:
                 # Retries refresh the receipt on the decided row, as the channel metrics do.
