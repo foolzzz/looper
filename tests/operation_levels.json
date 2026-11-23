@@ -136,6 +136,8 @@
  "manager_installs.delete": "inside",
  "manager_installs.list": "inside",
  "manager_installs.put": "inside",
+ "manager_lanes.get": "inside",
+ "manager_lanes.update": "inside",
  "manager_metrics.get": "inside",
  "manager_metrics_settings.get": "inside",
  "manager_metrics_settings.update": "inside",

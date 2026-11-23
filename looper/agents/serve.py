@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .llmrec.control import ProxyControl
+    from .managers import ManagerFleet
 
 from .. import ops_config
 from ..ops_config import KeeperMode, OpsConfig
@@ -63,6 +64,7 @@ from .intent_push import IntentPushService
 from .memory_write import MemoryWriteService
 from .memory_push import MemoryPushService
 from .reminders import ReminderService
+from .idle_checks import IdleCheckService, PostFn
 from .morning_brief import MorningBriefService
 from .metrics_alerts import MetricsAlertService
 from .http_server import AgentHTTPServer
@@ -77,6 +79,17 @@ from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
 
 logger = logging.getLogger(__name__)
+
+
+async def _prepare_idle_checks(bus: MessageBus, fleet: ManagerFleet, drain: DrainState, *, post: PostFn) -> IdleCheckService:
+    """Recover before bus replay; callbacks also follow a settings-driven Manager replacement."""
+    from .tiers import idle_check_turn
+
+    idle_check_turn.configure(post)
+    service = IdleCheckService(bus, idle_for=lambda: fleet.default.idle_for(),
+                               manager_running=lambda: fleet.is_running("manager"), drain=drain)
+    await service.recover()
+    return service
 
 
 class _SuspendDetector:
@@ -795,6 +808,8 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
+                from . import lanes_settings
+                await lanes_settings.load()
                 await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
@@ -1119,6 +1134,7 @@ async def _run_agent_system_watched(
 
             if interrupted := await fail_interrupted():
                 logger.warning("%d consult(s) of the advisor were interrupted by the restart and failed", interrupted)
+            idle_check_service = await _prepare_idle_checks(bus, fleet, drain, post=registry.post)
             await supervisor.start_all()
             await fleet.sweep()
             await carry_on_tasks(task_router, left_running)
@@ -1141,6 +1157,7 @@ async def _run_agent_system_watched(
         await memory_writer.start()
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
+        await idle_check_service.start()
         await morning_brief_service.start()  # idle while the morning brief is off
         await metrics_alert_service.start()
         await ledger_reconciler.start()  # idle while the ledger is off
@@ -1216,6 +1233,7 @@ async def _run_agent_system_watched(
             await memory_push_service.stop()
             await memory_writer.stop()
             await reminder_service.stop()
+            await idle_check_service.stop()
             await metrics_alert_service.stop()
             await morning_brief_service.stop()
             await ledger_reconciler.stop()
