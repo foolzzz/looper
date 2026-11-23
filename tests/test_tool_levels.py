@@ -173,6 +173,9 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "memory.check": INSIDE,  # checks prerequisites without changing files or sending messages
     "outbound_review.get": INSIDE,  # reads Looper's own review setting
     "outbound_review.update": INSIDE,  # changes Looper's own review setting
+    "project_skills.context_budget": INSIDE,  # reads the displayed skill-description budget; sends nothing
+    "project_skills.deprecate": INSIDE,  # marks a catalog skill deprecated inside Looper; sends nothing and does not touch installs or files
+    "project_skills.restore": INSIDE,  # marks a catalog skill active inside Looper; sends nothing and does not touch installs or files
     "project_skills.rollback": INSIDE,  # writes a new stored skill version inside Looper; sends nothing and does not touch the machine outside the catalog
     "project_skills.versions": INSIDE,  # reads stored skill versions; sends nothing
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
