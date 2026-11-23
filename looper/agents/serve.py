@@ -64,6 +64,7 @@ from .memory_write import MemoryWriteService
 from .memory_push import MemoryPushService
 from .reminders import ReminderService
 from .morning_brief import MorningBriefService
+from .metrics_alerts import MetricsAlertService
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
@@ -1010,6 +1011,7 @@ async def _run_agent_system_watched(
                                                              and agent.busy)
             await fleet.load()
             morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
+            metrics_alert_service = MetricsAlertService(registry)
             from .completion_service import CompletionService
             completion_service = CompletionService(
                 bus=bus, manager_running=fleet.is_running, drain=drain,
@@ -1138,6 +1140,7 @@ async def _run_agent_system_watched(
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
         await morning_brief_service.start()  # idle while the morning brief is off
+        await metrics_alert_service.start()
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
@@ -1211,6 +1214,7 @@ async def _run_agent_system_watched(
             await memory_push_service.stop()
             await memory_writer.stop()
             await reminder_service.stop()
+            await metrics_alert_service.stop()
             await morning_brief_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()

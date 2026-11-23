@@ -61,6 +61,7 @@ describe("the dashboard's 任务质量 group", () => {
   let root: Root;
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: { enabled: false, last_checked: null, rules: [] } })));
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     vi.mocked(fetchTaskMetrics).mockResolvedValue(metrics());
     vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [{ project_id: "p1", name: "Alpha" }], projects_root: "" } as never);
@@ -72,9 +73,18 @@ describe("the dashboard's 任务质量 group", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
   });
   const show = async () => { await act(async () => root.render(<TaskQualitySection />)); };
   const text = () => container.textContent ?? "";
+
+  it("preserves the recorded c53b056de1999ef41d3f8fdac0f1c3c01975e2fb markup apart from the alert switch", async () => {
+    vi.mocked(fetchTaskMetrics).mockResolvedValue(metrics({ coverage_since: null }));
+    await show();
+    const section = container.querySelector('section[aria-label="任务质量"]')!.cloneNode(true) as HTMLElement;
+    section.querySelector('[aria-label="质量告警设置"]')?.remove();
+    expect(section.outerHTML).toMatchSnapshot();
+  });
 
   it("shows the figures against the 28 days before, and 样本不足 under 20 cases instead of a percentage", async () => {
     await show();

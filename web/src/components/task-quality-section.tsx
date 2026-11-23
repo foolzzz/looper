@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { MetricsAlertsControl } from "@/components/metrics-alerts-control";
 import { fetchProjectsList, fetchRegistry } from "@/lib/api";
 import { startPolling } from "@/lib/polling";
 import {
@@ -227,6 +228,7 @@ export function TaskQualitySection() {
           </>
         )}
       </div>
+      <MetricsAlertsControl />
     </section>
   );
 }

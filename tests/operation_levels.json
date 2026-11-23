@@ -172,6 +172,8 @@
  "message_stream.status": "inside",
  "metrics.step_attempts": "inside",
  "metrics.task_outcomes": "inside",
+ "metrics_alerts.get": "inside",
+ "metrics_alerts.update": "inside",
  "mid_turn_input.get": "inside",
  "mid_turn_input.update": "inside",
  "models.add_many": "inside",

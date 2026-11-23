@@ -124,7 +124,7 @@ def test_no_agent_facing_module_reads_task_feedback_or_the_metrics():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1] / "looper"
     readers = {"db/task_feedback.py", "db/metrics.py", "agents/metrics.py", "agents/v1_domains/metrics.py",
-               "agents/v1_domains/task_feedback.py", "db/migrations/task_feedback.py"}
+               "agents/v1_domains/task_feedback.py", "db/migrations/task_feedback.py", "agents/metrics_alerts.py"}
     found = {str(path.relative_to(root)) for path in root.rglob("*.py")
              if any(word in path.read_text() for word in ("task_feedback", "db_metrics", "db import metrics"))}
     assert found <= readers, found - readers
