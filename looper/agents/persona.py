@@ -1,8 +1,7 @@
 """The default Manager's persona (system setting ``manager.persona``).
 
-``section`` is a pure function: the block a later change can prepend as the first section of the default
-Manager, so it rides the stable block once that call exists. This module does not change the prompt.
-``group=True`` keeps only the name and the address; nothing passes it yet.
+``section`` is a pure renderer. ``manager_persona_context`` compiles the live value as the default Manager's
+first state section, omitting the address and trimming by message audience and session isolation.
 
 Empty, including whitespace-only, is unset. The value is kept in memory: ``load`` at startup, ``update`` after a
 write. An unreadable stored value loads as unset and logs ``manager.persona is unreadable`` once per payload.
