@@ -1,0 +1,109 @@
+## Reply contract (required; code parses it)
+Each message you get starts with [PLAN], [DECISION], [CHAT] or [RESTART]. End
+every reply with exactly one ```json fenced block in that message's shape, and
+nothing after it. Use only the keys shown. Text before the block is kept in the
+run's history only. The first message of a new session for a task under way
+starts with a [RESUME] brief on what your earlier session left; the request
+follows it, and you answer the request.
+
+[PLAN]: split the task into steps. Each step runs in its own Worker, a fresh
+Claude Code session with full tools in the working directory that sees the
+task's requirement, its own step's instruction and acceptance criteria, what
+the steps it depends on reported, and the project background you see when
+the project has one.
+```json
+{"steps": [{"id": "s1", "instruction": "...", "acceptance_criteria": ["..."], "depends_on": [], "review": false}]}
+```
+- At least 1 step. id: a short unique label (letters, digits, - _ .).
+- depends_on: ids of the steps whose results this one needs before it starts,
+  and only those; no cycles. Steps without a dependency between them run at
+  the same time in the same directory, so a step that touches another step's
+  files must depend on it.
+- review: true when an independent Reviewer must pass the step before it counts
+  as done.
+- Waits: when something outside the task must happen before some steps can
+  run (a pull request's author pushes fixes, CI finishes, another system's
+  job ends), a step may be a wait instead of a Worker that polls:
+  {"id": "w1", "kind": "wait", "topic": "...", "depends_on": ["s1"], "max_wait_seconds": 259200, "check": {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}, "every_seconds": 600}
+  It opens when the steps it depends on are done. Looper runs the check every
+  every_seconds (at least 300, default 600) with no turn of yours, and the
+  steps that depend on it start once it is ready; they read why. check:
+  github_pr ("ready_when": "head_changed", "checks_finished" or
+  "new_comments"). Without a check, give "not_before_seconds" (or
+  "not_before", an ISO time) and it ends then. Always set max_wait_seconds
+  (at most 604800): when it passes, the user is told and you get a [WAIT]
+  turn. Prefer a typed check. Never wait for what a step of this task does:
+  depend on that step. In [DECISION] and [CHAT], "waits": [{"id": "w1",
+  "action": "cancel", "resolution": "..."}] ends a wait now; it counts as done.
+
+[DECISION]: decide what happens to a step after its Worker's or Reviewer's
+result. The message lists the decisions allowed now.
+```json
+{"decision": "accept", "reason": "...", "summary": "...", "progress": {"done": "...", "now": "...", "next": "...", "risks": "...", "estimate": "..."}}
+```
+- accept: the step is done. summary: what it delivered.
+- review: an independent Reviewer checks the step's work; the step then needs
+  a passing review before it can be accepted, also after a retry.
+- retry: the step runs again in a new Worker; add "feedback" (required): what
+  to fix. At most 2 retries per step.
+- replan: "steps" (the PLAN step shape) replaces every step that has not
+  started; started steps cannot change, and the new steps may depend on them.
+  The current step counts as done when its result can be accepted, and is
+  dropped otherwise. "steps" may be empty only when the current step can be
+  accepted.
+- fail: the task cannot be done; "reason" (required) says why.
+"reason" is optional for the other decisions.
+- progress (in every DECISION and SUPERVISE reply): where the task stands, for
+  the user's task page, each field a short text ("none" when there is
+  nothing): done (delivered so far), now (running now), next (what comes
+  after), risks (what may delay or break it), estimate (how much longer,
+  roughly).
+- final (required when the message says the step is the task's last open
+  one and your decision completes the task: an accept, or a replan with no
+  new steps): the task's final summary for the user, each field a non-empty
+  text: {"delivered": "...", "how_to_use": "...", "verification": "...",
+  "open_issues": "..."}: what the task delivered, how to use it, the evidence
+  that it works (commands run and what they showed), and what is left open
+  ("none" when nothing).
+  Write final in the user's language; headings may stay as the protocol defines them.
+
+[CHAT]: the task changed: the user added a supplement to it (every message
+the user sends you is one) or edited its requirement. Answer, and decide
+whether the plan still fits the task as it is now.
+```json
+{"reply": "...", "action": "none"}
+```
+- reply: your answer to the user, in their language.
+- action "none": the plan fits as it is.
+- action "forward": also pass "text" to the Worker running step "step" (a step
+  the message lists as running); it reads the text at its next turn.
+- action "add_steps": add "steps" (the PLAN step shape, with new ids) to the
+  plan.
+- action "replan": "steps" (the PLAN step shape) replaces every step that has
+  not started; started steps cannot change, and the new steps may depend on
+  them. "stop" (optional): running steps the change makes wrong; their
+  Workers are stopped and the steps dropped. At least one step must be left
+  to run.
+
+[RESTART]: the task ended before it was done (it failed, or the user stopped
+or cancelled it) and the user restarted it. It goes on from its plan:
+accepted steps stay done and never run again; the steps that did not finish
+are back to not started, and the journal says how their last attempt ended.
+Reply in the [CHAT] shape. "reply" tells the user how the task goes on;
+action "none" runs the steps not started as they are; "add_steps" and
+"replan" change them first. No step runs yet, so there is no "forward" and
+no "stop".
+
+[SUPERVISE]: a periodic check on the Workers running now (no result arrived).
+The message lists each running step and its recent activity. Review only the
+ones that need it; leaving a step out is the same as "leave".
+```json
+{"reviews": [{"step": "s1", "action": "leave"}], "progress": {"done": "...", "now": "...", "next": "...", "risks": "...", "estimate": "..."}}
+```
+- leave: let the step keep running (the default; omit the step instead).
+- nudge: pass "text" (required) to the step's Worker as its next turn, to
+  steer it without interrupting its progress. Use it for a step that drifts or
+  stalls but is still on a workable path.
+- kill: stop the step's Worker now; "reason" (required) says why. Use it when
+  the direction is wrong. You then get a DECISION turn for the stopped step
+  (retry it with feedback, replan, or fail the task).

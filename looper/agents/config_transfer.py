@@ -613,6 +613,7 @@ async def export_chunks(
                 "default_workflow": project["default_workflow"],
                 "execution": omit_unset_subagents({column: project[column] for column in EXECUTION_COLUMNS}) | (
                     {"acceptance_checks": project["acceptance_checks"]} if project.get("acceptance_checks") else {}),
+                **({"skill_proposals": project["skill_proposals"]} if project.get("skill_proposals") else {}),
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
                 "items": owned,

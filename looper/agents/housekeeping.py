@@ -51,6 +51,7 @@ class Report:
     llm_route_files: int = 0
     chat_attachments: int = 0
     skill_tombstones: int = 0
+    skill_proposals_expired: int = 0
     rotated: list[str] = field(default_factory=list)
     failed_steps: dict[str, str] = field(default_factory=dict)
 
@@ -278,6 +279,13 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             from .skill_versions import purge_tombstones
 
             report.skill_tombstones = await purge_tombstones(conn, now=now)
+    with _step(report, "skill proposals"):
+        from .skill_proposal_notice import notify_pending
+        from .skill_proposals import expire_due
+
+        async with db_connection.transaction() as conn:
+            report.skill_proposals_expired = await expire_due(conn, now)
+        await notify_pending(now=now)
     with _step(report, "decision snapshots"):
         # Off, nothing writes the table, this cleanup included: rows of an earlier window stay with their task.
         async with db_connection.transaction() as conn:

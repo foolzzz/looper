@@ -20,6 +20,19 @@ class ArtifactInvalid(Exception):
     pass
 
 
+class ArtifactMissing(Exception):
+    """The stored artifact's file is not on disk."""
+
+
+class ArtifactRefused(Exception):
+    """The name or the file is not a code-generated artifact (a path, a symlink, a device)."""
+
+
+# Names `collect` writes: 1.png, 2.txt, … gif is served when a row names one; nothing here emits it.
+_STORED_NAME = re.compile(r"^[1-9][0-9]{0,8}\.(png|jpg|webp|gif|txt|json)$")
+INLINE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
 def _component(value: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
         return value
@@ -120,6 +133,47 @@ def collect(work_dir: Path, paths: tuple[str, ...], runtime_root: Path, row: dic
             shutil.rmtree(directory, ignore_errors=True)
             raise
     return metadata
+
+
+# The extension `collect` writes is the only type the bytes route serves. A mime stored on the row is not.
+_MIME_BY_EXTENSION = {
+    "png": "image/png", "jpg": "image/jpeg", "webp": "image/webp", "gif": "image/gif",
+    "txt": "text/plain", "json": "application/json",
+}
+
+
+def mime_for_name(name: str) -> str | None:
+    """The type of a name `collect` writes, or None when the name is not one of those."""
+    match = _STORED_NAME.fullmatch(name)
+    return None if match is None else _MIME_BY_EXTENSION[match.group(1)]
+
+
+def content_disposition(mime: str, name: str) -> str:
+    """Images the dashboard can draw are inline; every other type downloads under the stored name."""
+    if mime in INLINE_TYPES:
+        return "inline"
+    return f'attachment; filename="{name}"'
+
+
+def read_artifact(runtime_root: Path, *, task_id: str, step_id: str, attempt: int, check_id: str,
+                  run: int, name: str) -> bytes:
+    """The bytes `collect` stored for this run. The name is the row's, never a request path.
+
+    A missing file raises `ArtifactMissing`. A name that is not one `collect` writes, a symlink,
+    or anything that is not a regular file under the evidence directory raises `ArtifactRefused`.
+    """
+    if type(attempt) is not int or attempt < 0 or type(run) is not int or run < 1 or not _STORED_NAME.fullmatch(name):
+        raise ArtifactRefused("not a stored artifact")
+    try:
+        relative = Path("evidence") / _component(task_id) / _component(step_id) / str(attempt) / _component(check_id) / str(run) / name
+    except ArtifactInvalid as exc:
+        raise ArtifactRefused("not a stored artifact") from exc
+    try:
+        return _read(runtime_root, relative.as_posix())
+    except FileNotFoundError as exc:
+        raise ArtifactMissing("file missing") from exc
+    except (ArtifactInvalid, OSError) as exc:
+        raise ArtifactRefused("not a stored artifact") from exc
 
 
 def remove_task(runtime_root: Path, task_id: str) -> None:
