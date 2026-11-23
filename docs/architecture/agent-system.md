@@ -6324,8 +6324,9 @@ marked as background rather than instructions. Tasks created from the dashboard
 leave `origin_channel_id` empty, as other dashboard-created tasks do.
 
 The one state writer permits `pending → tasked | rejected | expired` and
-`expired → tasked`. Each transition gets one final notice: an edit of the original
-push, falling back to one quoted reply. Either succeeding completes it; type,
+`expired → tasked`. A transition of an intent whose push was delivered (sent, with a
+message id, to the current target chat) gets one final notice: an edit of that push,
+falling back to one quoted reply. An intent whose push never went out gets none. Either succeeding completes it; type,
 sender or chat renames, added evidence and timezone changes do not repeat it.
 The additive `intent_final_notices` migration stores the transition's `handled_at`,
 attempts, fallback post and next attempt, without rewriting old rows. The periodic
@@ -6335,8 +6336,12 @@ never resent; its idempotent edit can still be retried. Exhaustion stops retries
 with `final_notice_retry_exhausted`, visible in the existing attention delivery
 section. `expired → tasked` starts a fresh notice for the new state. The next pass
 also adopts legacy failed final replies, even when their old reply attempts are
-exhausted, into one bounded notice budget. Previously stuck intents expire on
-upgrade, so the operator may receive one delayed expiry reply.
+exhausted, into one bounded notice budget. After the upgrade, pending intents with a
+null `expires_at` that are over 24 hours old expire on the first expiry pass at
+startup or a later one (at most 50 per pass, oldest first); they never had a
+delivered push, so their expiry sends nothing. An intent handled before the upgrade
+whose final edit and fallback reply had failed gets one more bounded notice, so the
+operator may receive one delayed final-state edit or reply.
 Lark post edits use Markdown rich-text posts, matching the original message;
 status-message edits keep their original plain-text format. Delivery claims
 commit before sending; an uncertain result is never resent, while an explicit failure has a bounded
