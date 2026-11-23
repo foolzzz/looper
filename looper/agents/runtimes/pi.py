@@ -226,8 +226,10 @@ class PiRuntime(RuntimeAdapter):
 
     def launch_args(self, launch: Launch) -> list[str]:
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        return ["-p", "--mode", "json", *_ISOLATION_FLAGS, "-e", str(bridge_extension()),
-                *(["--tools", "read,grep,find,ls,mcp__looper__*"] if launch.read_only else []), *binding.args]
+        return ["-p", "--mode", "json", *_ISOLATION_FLAGS,
+                *([] if launch.explore else ["-e", str(bridge_extension())]),
+                *(["--tools", "read,grep,find,ls"] if launch.explore else
+                  ["--tools", "read,grep,find,ls,mcp__looper__*"] if launch.read_only else []), *binding.args]
 
     def environment(self, launch: Launch) -> dict[str, str]:
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
@@ -235,7 +237,7 @@ class PiRuntime(RuntimeAdapter):
         visible = {**child_env.inherited(), **dict(launch.env), **dict(binding.env)}
         # HOME and the two directory bindings need the prompt/session paths; run_command sets them via env.
         return {**_isolated_env(visible), KEY_ENV: dict(binding.env)[KEY_ENV], **_PI_ENV,
-                **bridge_env(launch.library)}
+                **({} if launch.explore else bridge_env(launch.library))}
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:

@@ -1,0 +1,14 @@
+{
+  "baseline": "bf447cff97e76990be2e920342d5fdb4a2a55d28",
+  "surfaces": {
+    "prompts:system_prompt": "c4b30c0ef66483ce734831973e41f364d056012a0ddcbf3acf49e5c2eb16a1fc",
+    "prompts:tiers.manager": "64225889b0851324666745967497f548b8035f445d1794bf5f2af4d144144437",
+    "prompts:tiers.planner": "87afaf5610fdab9741964da25c4627c7bc7c198fcff2ef5a8be38efec607aa36",
+    "prompts:tiers.planner_protocol": "3f7b1bba80096fe6961103536e6da55e4202444e2412818758defea69b8c9bc7",
+    "prompts:tiers.worker": "95f4802b9e6c5b8db1f8e219b3dc16c940f1964771437bf3e4151e97f78140be",
+    "tools:all": "7682e7f2067abbff20f3fcdba490effd964dc7e5acadee480b9f9bcbb28adc00",
+    "tools:manager": "ef59c300712b485e48f7a3944ee85b3fdd6ed87233db35636713c7f0726c574d",
+    "tools:planner": "51a5b1b26f2a8b8cae7ef31508855c9798d1f47e3bcdc3e5be5f49cd18189fd4",
+    "tools:worker": "426e7f8bc0c780e49dec5d4612b15cbeac413f2a23accc4a771c4ca6416190a1"
+  }
+}

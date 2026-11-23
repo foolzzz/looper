@@ -95,6 +95,13 @@ async def _shape(conn: Any) -> dict[str, Any]:
 
 async def _before_the_run_tree(conn: Any) -> None:
     """The database as it was before: no run tree, no spawn tables, no step difficulty, no markers for them."""
+    # Roll back the dependent explorer migration too, so recreating this older
+    # table exercises the complete forward migration path.
+    await conn.execute("DELETE FROM schema_migrations WHERE name IN "
+                       "('platform_subagents', 'platform_subagents_online')")
+    await conn.execute("ALTER TABLE projects DROP COLUMN subagents, DROP COLUMN subagent_budget_usd, "
+                       "DROP COLUMN subagent_task_budget_usd, DROP COLUMN subagents_per_run, "
+                       "DROP COLUMN subagents_per_task")
     await conn.execute("DROP TABLE advisor_advice, agent_spawns")
     await conn.execute("ALTER TABLE llm_records DROP COLUMN parent_record_id, DROP COLUMN run_kind")
     await conn.execute("ALTER TABLE task_steps DROP COLUMN difficulty")
@@ -216,7 +223,7 @@ def test_a_record_takes_its_kind_from_its_agent_id_unless_given_and_names_its_pa
         assert (rows[child]["run_kind"], rows[child]["parent_record_id"]) == ("advisor", planner)
         assert rows[other]["run_kind"] is None
         with pytest.raises(ValueError, match="unknown run kind"):
-            await llm_records.start_record(agent_id="x-1", run_kind="explorer")
+            await llm_records.start_record(agent_id="x-1", run_kind="unknown")
         # A parent's record going away keeps its children, without the link.
         await pool.execute("DELETE FROM llm_records WHERE id = $1", planner)
         assert await pool.fetchval("SELECT parent_record_id FROM llm_records WHERE id = $1", child) is None
@@ -272,7 +279,7 @@ def test_a_spawn_moves_only_along_its_transitions_and_from_the_state_its_caller_
             await agent_spawns.create(kind="advisor", task_id=task, step_id=None, parent_record_id=None, brief={},
                                       inputs={}, budget_usd=1.0, state=SpawnState.ANSWERED)
         with pytest.raises(ValueError, match="unknown spawn kind"):
-            await agent_spawns.create(kind="explorer", task_id=task, step_id=None, parent_record_id=None, brief={},
+            await agent_spawns.create(kind="unknown", task_id=task, step_id=None, parent_record_id=None, brief={},
                                       inputs={}, budget_usd=1.0)
 
     run_db(test, monkeypatch)

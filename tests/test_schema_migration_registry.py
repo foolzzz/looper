@@ -25,6 +25,10 @@ def test_discovered_migrations_preserve_the_original_execution_and_probe_order()
 
 def test_discovered_online_steps_preserve_every_original_byte_and_order():
     steps = [asdict(step) for step in migrations.online_steps(migrations.discover())]
+    # Optional unique indexes do not change the released non-unique steps.
+    for step in steps:
+        if not step["unique_indexes"]:
+            step.pop("unique_indexes")
     existing = {step["marker"] for step in _BASELINE["online"]}
     # JSON normalizes tuples to lists while retaining the SQL strings exactly.
     assert json.loads(json.dumps([step for step in steps if step["marker"] in existing])) == _BASELINE["online"]

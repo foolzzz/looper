@@ -221,7 +221,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         from ..llmrec.gateway import translated
 
         # Project settings load after process env; pin the attached route and all translation safeguards here too.
-        sealed = launch is not None and launch.no_tools
+        sealed = launch is not None and (launch.no_tools or launch.explore)
         env = None
         if launch is not None and translated(launch):
             env = {**dict(TRANSLATED_ENV), AUTH_TOKEN: "", API_KEY: ""}
@@ -311,7 +311,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             return [*NO_TOOLS_ARGS, "--model", launch.model, *(["--effort", launch.effort] if launch.effort else []),
                     *budget, *self.bind_provider(provider, launch.model, launch.effort).args]
         return [
-            *(consult_args() if launch.consult else
+            *([*consult_args(), "--disable-slash-commands"] if launch.explore else
+              consult_args() if launch.consult else
               read_only_args(launch.library, cwd=cwd if cwd is not None else Path.cwd(),
                              add_dirs=(*launch.knowledge.add_dirs, *launch.read_dirs))
               if launch.read_only else permission_args()),
@@ -366,6 +367,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         from the final launch environment: a backend switch it keeps on (Bedrock, Vertex, Foundry and the others of
         ``TRANSLATED_BACKEND_ENV``, from the settings or inherited) takes it away, and so does a compatible or
         translated endpoint."""
+        if launch.explore:
+            return False
         try:
             environment = self.environment(launch)
         except RuntimeUnsupported:  # a launch that cannot run says so where it starts; it has no web here
