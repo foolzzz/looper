@@ -64,6 +64,40 @@ describe("花费观察", () => {
     expect(container.textContent).toContain("$3.00");
   });
 
+  it("执行中列出当前暂缓，并且仍然没有编辑控件", async () => {
+    result = { ...result, mode: "enforce", holds: [
+      { provider: "prov-synthetic", reason: "rejected", until: "2026-01-15T21:00:00+00:00", window: "five_hour",
+        reset_known: true },
+      { provider: "prov-cooldown", reason: "quota_cooldown", until: "2026-01-15T20:10:00+00:00", window: null,
+        reset_known: false }] };
+    await render();
+    expect(container.textContent).toContain("执行中");
+    expect(container.textContent).toContain("用量窗口暂缓");
+    expect(container.textContent).toContain("账号被拒");
+    expect(container.textContent).toContain("配额冷却");
+    expect(container.textContent).toContain("prov-synthetic");
+    expect(container.textContent).toContain("2026-01-15T21:00:00+00:00");
+    expect(container.textContent).toContain("2026-01-15T20:10:00+00:00");
+    expect(container.textContent).toContain("重置时间未知");
+    expect(container.querySelectorAll("input,select,button,textarea")).toHaveLength(0);
+  });
+
+  it("暂缓显示到重置时刻，观察记录带上本来会暂缓到的时间和说明", async () => {
+    const until = "2026-01-15T21:00:00+00:00";
+    result = { ...result, mode: "enforce", recent: [
+      { run_kind: "schedule", currency: "equivalent_usd", estimate_usd: 0.1, estimate_source: "floor",
+        decision: "hold", scope: "schedule_day", scope_ref: "sched", action: null, would_hold_until: until,
+        note: `hold until ${until}` },
+      { run_kind: "schedule", currency: "equivalent_usd", estimate_usd: 0.1, estimate_source: "floor",
+        decision: "admit", scope: "schedule_day", scope_ref: "sched", action: null, would_hold_until: until,
+        note: `would hold until ${until}` },
+    ] };
+    await render();
+    expect(container.textContent).toContain(`暂缓到 ${until}`);
+    expect(container.textContent).toContain(`本来会放行 · ${until} · would hold until ${until}`);
+    expect(container.textContent).not.toContain("超出上限");
+  });
+
   it("读取失败展示错误而不是成功或空数据", async () => {
     unavailable = true;
     await render();
