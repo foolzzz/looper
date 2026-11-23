@@ -105,8 +105,11 @@ async def insert_decision(conn: asyncpg.Connection, row: Mapping[str, Any]) -> d
 
 
 async def record_receipt(dedupe_key: str, outcome: str, external_id: str | None = None) -> None:
-    """Note what the channel did with a decided message (``sent`` or ``rejected``), the first time only: a receipt
-    the metrics wrote already stands."""
+    """Note what the channel did with a decided message. A receipt already recorded stands, except a ``rejected``
+    one: a later try of the same message replaces its outcome, sent time and external id. One the metrics wrote as
+    sent or unknown stands."""
     await get_pool().execute(
-        "UPDATE proactive_deliveries SET outcome = $2, external_id = COALESCE(external_id, $3), sent_at = now() "
-        "WHERE dedupe_key = $1 AND decision = 'send' AND outcome IS NULL", dedupe_key, outcome, external_id)
+        "UPDATE proactive_deliveries SET outcome = $2, sent_at = now(), "
+        "external_id = CASE WHEN outcome IS NULL THEN COALESCE(external_id, $3) ELSE $3 END "
+        "WHERE dedupe_key = $1 AND decision = 'send' AND (outcome IS NULL OR outcome = 'rejected')",
+        dedupe_key, outcome, external_id)

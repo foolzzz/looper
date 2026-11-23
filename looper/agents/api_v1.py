@@ -110,6 +110,7 @@ class Operation:
     stream_description: str | None = None
     stream_events: Mapping[str, Any] | None = None
     audit_operator: bool = True  # dashboard operations may opt out of the Manager/client action trail
+    cli: bool = True  # False: dashboard/DM only; never generate a loopercli command
     # Where a call reaches (the outbound-review RFC, section 4): ``level``, or ``level_of`` its arguments when they
     # decide it. Not in the OpenAPI document.
     level: ActionLevel = ActionLevel.INSIDE
@@ -245,6 +246,8 @@ RESULTS: dict[str, dict[str, Any]] = {
         "workflow": {"type": ["object", "null"]},
         "waits": _array(), "roles": _array(), "supplements": _array(), "latest_progress": _NULL_STR,
         "result": _NULL_STR, "cost_usd": {"type": ["number", "null"]}, "concurrency": _OBJ, "gates": _array(),
+        "cost_by_role": _object({role: _object({"cost_usd": {"type": "number"}, "runs": _INT})
+                                 for role in ("planner", "worker", "reviewer", "explorer")}),
     }, [*_LISTED, "phase", "work_dir", "requirement", "steps", "waits", "supplements", "latest_progress", "result",
         "cost_usd", "concurrency"]),
     "task_pipeline": _object({
@@ -511,6 +514,8 @@ def _path_item(operation: Operation) -> dict[str, Any]:
             item[key] = value
     if operation.hand:
         item["x-looper-cli-hand"] = True
+    if not operation.cli:
+        item["x-looper-cli"] = False
     if operation.operator_only:
         item["x-looper-operator-only"] = True
     if operation.method == "POST":

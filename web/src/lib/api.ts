@@ -161,7 +161,7 @@ export interface TaskCost {
   equivalent_runs?: number;
   /** Runs Looper priced at their provider's prices. */
   provider_price_runs?: number;
-  by_role: Record<TaskRole, { cost_usd: number; runs: number }>;
+  by_role: Record<TaskRole, { cost_usd: number; runs: number }> & { explorer?: { cost_usd: number; runs: number } };
   by_model: TaskModelCost[];
   /** The Manager's turns about the task, by model; not in cost_usd or the spend cap. */
   manager_by_model: TaskModelCost[];
@@ -231,6 +231,11 @@ export interface ProjectExecution {
   room_consult_budget_usd: number | null;
   room_consult_timeout_seconds: number | null;
   room_consults_per_task: number | null;
+  subagents?: "off" | "on" | null;
+  subagent_budget_usd?: number | null;
+  subagent_task_budget_usd?: number | null;
+  subagents_per_run?: number | null;
+  subagents_per_task?: number | null;
   advisor: "off" | "on" | null;
   advisor_consult_budget_usd: number | null;
   advisor_budget_usd: number | null;
@@ -3075,7 +3080,7 @@ export async function fetchTaskConversation(
 /** One run of a task as `runs.for_task` answers: no prompts, metadata body or events. */
 export interface TaskRunRow {
   id: number;
-  role: TaskRole;
+  role: TaskRole | "explorer";
   agent_id: string;
   step_id: string | null;
   status: LlmRecord["status"];
@@ -3096,6 +3101,38 @@ export async function fetchTaskRuns(taskId: string, signal?: AbortSignal): Promi
   const result = await callV1<{ runs: TaskRunRow[] }>("/api/v1/runs/for_task", { task_id: taskId }, { signal });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.runs;
+}
+
+export interface RunTreeCost {
+  subscription_usd: number | null;
+  api_usd: number | null;
+}
+export interface RunTreeNode {
+  id: number;
+  kind: string;
+  parent_record_id: number | null;
+  spawner: { role: string | null; seat: string | null };
+  reason: string;
+  model: string | null;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  own_cost: RunTreeCost;
+  subtree_cost: RunTreeCost;
+  result_summary: string | null;
+  result_verified: boolean | null;
+  failure_class: string | null;
+  failure_cause: string | null;
+  state: string | null;
+  delivery: string | null;
+  cancel_reason: string | null;
+  parent_spend_known: boolean | null;
+  wait_intervals: { started_at: string; ended_at: string | null }[];
+}
+export async function fetchRunTree(taskId: string, signal?: AbortSignal): Promise<{ task_id: string; nodes: RunTreeNode[] }> {
+  const result = await callV1<{ task_id: string; nodes: RunTreeNode[] }>("/api/v1/runs/tree", { task_id: taskId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export function streamTaskActivity(
