@@ -57,23 +57,26 @@ async def run(agent: ManagerAgent, *, origin: TurnOrigin, deadline_seconds: floa
         register(agent, origin, target, state)
     task = asyncio.create_task(work)
     try:
-        done, _ = await asyncio.wait({task}, timeout=deadline_seconds)
-    except asyncio.CancelledError:
-        await cancel_and_wait(task)
-        token = state.get("token")
-        if token is not None and token.live:  # the child may not have taken its first step
-            if agent._running_token is token:
-                agent._running_token = None
-            token.settle(token.outcome)
-        raise
-    if not done:
-        await fallback("turn_timeout")
-        if late is not None:
-            await late(task)
-        else:
-            await end_late(agent, task, target.correlation_id, state, origin=origin,
-                           stop_reason=f"{origin.value}_timeout")
-    return Result(not done, task)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=deadline_seconds)
+        except asyncio.CancelledError:
+            await cancel_and_wait(task)
+            token = state.get("token")
+            if token is not None and token.live:  # the child may not have taken its first step
+                if agent._running_token is token:
+                    agent._running_token = None
+                token.settle(token.outcome)
+            raise
+        if not done:
+            await fallback("turn_timeout")
+            if late is not None:
+                await late(task)
+            else:
+                await end_late(agent, task, target.correlation_id, state, origin=origin,
+                               stop_reason=f"{origin.value}_timeout")
+        return Result(not done, task)
+    finally:
+        agent._session_now().turn_ended_at = agent._clock()
 
 
 def live_tokens(agent: ManagerAgent, channel_id: str, sender_id: str | None,
