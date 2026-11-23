@@ -119,10 +119,14 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   yet.
 - **Operator profile** (`operator_profile.py`, `manager.profile.source`, default unset): a deterministic compiler
   reads `关于我.md` (or `记忆/关于我.md`, but not both) and `偏好/**/*.md` from the folder the operator names.
+  That folder must resolve, symlinks included, inside the configured knowledge vault; save and read both check.
   Notes whose path has a part starting with `.` or `_` are skipped. It produces a typed profile — name, address,
-  reply language, time zone, working hours, communication preferences and standing rules — and each value cites
-  the note path and heading. The rendered text is at most 1500 characters; lower-priority fields are dropped
-  first, and the last remaining field is truncated with `…` when it alone is still over the cap. `profile.get`
+  reply language, time zone, working hours, communication preferences and standing rules. Heading fields cite the
+  note path, heading and line. A markdown bullet with inline `[kind:: …]` fields is one entry: `kind` chooses
+  the field, and the entry cites the note path and that line. A `summary` is not required for those notes.
+  Content inside a code fence is ignored, and backticks in the output are normalized. A single-value field with
+  a second value fails the compile. The rendered text is at most 1500 characters; lower-priority fields are
+  dropped first, and the last remaining field is truncated with `…` when it alone is still over the cap. `profile.get`
   stores the result in `profile_blocks` and keeps the version when the compiled body is unchanged. The
   operator-only v1 operations are `profile.get`, `profile_source.get` and `profile_source.update` (null clears
   the folder and the cached block). They are not chat settings and not Manager tools. **Manager wiring is

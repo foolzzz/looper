@@ -35,6 +35,8 @@
 
 已经存进去的值如果不是绝对目录、目录不存在或不是目录，`profile.get` 直接失败，不会把它当成关闭。`profile_source.get` 仍返回存着的原文，方便清掉。
 
+源目录还要落在已配置的知识库里面。`profile_source.update` 在写设置之前（确认文案也用这一次检查），以及 `profile.get` 在编译之前，都会把目录 `resolve`（跟随符号链接）然后要求结果位于 `knowledge_vault` 的解析路径之内。知识库没配置或不成立时原因是 `vault_unconfigured`；解析后跑到知识库外面时原因是 `outside_vault`。两种都失败，不会当成关闭。词法上在知识库外、解析后在里面的符号链接可以保存，存下来的是解析后的路径。
+
 ## 3. 编译
 
 只读两类笔记：
@@ -55,11 +57,32 @@
 
 同一个字段有两个标题就失败。不认识的二级标题忽略。三级标题留在二级标题的正文里。空白节不产生字段。
 
-偏好笔记：有非空的二级标题时，每一节是一条长期规则，不用 frontmatter 的 `summary`。否则，`summary` 非空并且正文里有一个 ATX 标题时，`summary` 是一条规则，出处标题用第一个 ATX 标题。对不上的记入 `skipped`（`no heading to cite` 或 `no summary`），空笔记不记。`summary` 只能是单行；重复、未闭合的 frontmatter、`|` / `>` 块标量都失败。
+名字、称呼、回复语言、时区、工作时间各只有一个值。同一个字段出现第二个值（例如二级标题下有两条 bullet）时整份档案编译失败，原因是 `multiple_values`。文本和结构化字段都不会只留最后一条。沟通偏好和长期规则保留每一条。
+
+笔记里的条目是一行一个 markdown bullet，行内用 Dataview 字段。关于我和 `偏好/` 下的笔记都认这一种，例如：
+
+```text
+- 回复用中文 [kind:: preference] [source:: 对话 2026-11-20] [confidence:: high]
+```
+
+`kind` 决定字段，区分大小写：
+
+| kind | 字段 |
+|---|---|
+| preference、habit | `communication_preferences` |
+| fact、decision、commitment、request、deadline、person | `standing_rules` |
+
+每条的出处是笔记相对路径、行号，以及它前面最近的标题；没有标题时标题用 `kind`。`source`、`confidence`、`until` 留在笔记里，不复制进档案。没写 `status` 视为 `active`；`superseded` 和 `deleted` 不进入档案，也不记入 `skipped`。不认识的 `kind` 记入 `skipped`，原因是 `unknown kind`。编译器不读时钟，所以 `until` 不参与取舍。
+
+一篇笔记只要有这样的条目，就用这些条目：不要求 frontmatter 的 `summary`，`summary` 也不再另算一条规则。没有条目时才用下面的旧写法。
+
+偏好笔记的旧写法：有非空的二级标题时，每一节是一条长期规则，不用 frontmatter 的 `summary`。否则，`summary` 非空并且正文里有一个 ATX 标题时，`summary` 是一条规则，出处标题用第一个 ATX 标题。对不上的记入 `skipped`（`no heading to cite` 或 `no summary`），空笔记不记。`summary` 只能是单行；重复、未闭合的 frontmatter、`|` / `>` 块标量都失败。
+
+代码围栏不参与编译。行首最多三个空格、接着至少三个反引号或波浪号，算开围栏；同样字符、至少一样长、后面没有信息字符串的一行算关围栏。围栏里面的标题和示例条目都忽略。没闭合的围栏一直忽略到笔记末尾。写进档案的文字把反引号换成撇号，把连续三个及以上的波浪号换成 `---`，输出里因此没有围栏边界。
 
 渲染按固定优先级（名字、称呼、回复语言、时区、工作时间、沟通偏好、长期规则）。同一字段里保持笔记里的顺序；偏好笔记先按相对路径排序。超过 1500 个字符（Unicode 码位，和 PostgreSQL 的 `char_length` 一致）时从优先级最低的字段往前丢，丢到只剩一条仍超长就截断那一条并加上 `…`，该字段标 `truncated`。上限比一条字段标签还短时失败。
 
-每个值的出处是相对路径加标题，不是绝对路径。单篇笔记超过 256 KiB、不是 UTF-8、范围内笔记超过 200 篇，都失败。
+每个值的出处是相对路径、标题和行号，不是绝对路径。单篇笔记超过 256 KiB、不是 UTF-8、范围内笔记超过 200 篇，都失败。
 
 ## 4. 表
 
@@ -85,13 +108,13 @@ CREATE TABLE IF NOT EXISTS profile_blocks (
 |---|---|---|
 | `profile.get` | read | 未设置时返回空档案，不读盘、不写表。已设置时编译并按上一节决定是否换版本 |
 | `profile_source.get` | read | 返回 `{source}`，未设置是 null |
-| `profile_source.update` | high，需确认 | `{source}` 为绝对目录或 null。确认文案说明只保存目录，不注入 Manager |
+| `profile_source.update` | high，需确认 | `{source}` 为知识库内的绝对目录或 null。确认文案说明只保存目录，不注入 Manager |
 
 Agent 的 token 调用这三个操作得到 403。它们不出现在 `chat_settings` 的视图里，也不出现在 Manager 的 `looper_settings` 工具里。
 
 ## 6. 和设计稿的出入
 
-- 设计稿把笔记的 `summary` 拼成一段最多 1500 字的文本。这一版改成有类型的字段，每条带来源（路径 + 标题）。超长时按字段优先级丢弃，而不是按 summary 的拼接顺序截。
+- 设计稿把笔记的 `summary` 拼成一段最多 1500 字的文本。这一版改成有类型的字段，每条带来源（路径、标题和行号）。超长时按字段优先级丢弃，而不是按 summary 的拼接顺序截。
 - 设计稿的开关是 `manager.profile_block.enabled`。这一版不另加布尔值：源目录未设置就是关闭。注入档案的 PR 如果需要独立开关，再加。
 - 设计稿在输入变化时重编译。这一版没有笔记索引，`profile.get` 时重编译；内容没变就不换版本。这次写入是刷新缓存，不是注入 Manager。
 - 设计稿里群会话只拿名字和称呼。那是注入时的过滤，不属于这一版。
