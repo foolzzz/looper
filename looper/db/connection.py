@@ -1159,16 +1159,19 @@ async def _reminders_pending(conn: asyncpg.Connection) -> bool:
 
 
 async def _morning_briefs_pending(conn: asyncpg.Connection) -> bool:
-    """The table, ``consumed_until`` on a table created before that column, or the consumed-id table. A marker
-    without the morning briefs table is left alone."""
+    """The table, ``consumed_until`` or ``read_ids`` on a table created before that column, or the consumed-id
+    table. A marker without the morning briefs table is left alone."""
     if not await conn.fetchval("SELECT to_regclass('morning_briefs') IS NOT NULL"):
         return not await conn.fetchval(
             "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MORNING_BRIEFS)
     missing_column = not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'morning_briefs'::regclass "
         "AND attname = 'consumed_until' AND attnum > 0 AND NOT attisdropped)")
+    missing_reads = not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'morning_briefs'::regclass "
+        "AND attname = 'read_ids' AND attnum > 0 AND NOT attisdropped)")
     missing_ids = not await conn.fetchval("SELECT to_regclass('morning_brief_consumed') IS NOT NULL")
-    return missing_column or missing_ids
+    return missing_column or missing_reads or missing_ids
 
 
 async def _morning_brief_source_row(conn: asyncpg.Connection):

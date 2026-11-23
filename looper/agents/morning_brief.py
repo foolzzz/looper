@@ -4,9 +4,11 @@ On a workday, at ``morning_brief.time`` (09:15 by default) in ``user.timezone`` 
 service sends one brief through ``deliver``: what waits for the operator (the needs-you summary), reminders due
 that local day, and proactive messages held for the digest. Every brief reads from the first attempt's digest
 dates (Monday also Saturday and Sunday) through the day being sent, except digest rows already recorded by id.
-A sent or uncertain brief records, in the same transaction as its row, only the rows that read returned. A
-refusal records none, so a Tuesday brief that was rejected is still in Wednesday's. A row whose insert had not
-committed is not recorded, and the next brief reads it once. Nothing in any section means
+The claim stores the ids that read returned, in that same write. A sent or uncertain brief records those ids,
+in the same transaction as its row. A refusal records none and clears the stored ids, so a Tuesday brief that
+was rejected is still in Wednesday's. If the sender stops before that record, recovery consumes exactly the
+stored ids and does not scan by time: a row whose insert had not committed is still read once, on the next
+brief. Nothing in any section means
 nothing is sent. The switch, the channel and the operator are read again after the summary and again
 immediately before the post. The switch is read once more after the operator query returns: it can be turned
 off while that query runs. A fresh claim that then fails the check is deleted. A claim that continued a refusal
@@ -262,8 +264,9 @@ class MorningBriefService:
         reminders = await store.reminders_today(conn, channel_id=channel_id, chat=chat, start=start,
                                                 end=start + timedelta(days=1))
         # The window stays the first attempt's dates through today. Rows already read are excluded by id, so a
-        # custom time does not drop a message held later that morning and does not repeat one. A refusal records
-        # no ids. An insert that has not committed is not among them, so the next brief still reads it.
+        # custom time does not drop a message held later that morning and does not repeat one. The claim stores
+        # this read's ids; a refusal records none. An insert that has not committed is not among them, so the
+        # next brief still reads it, including when recovery runs after the sender stops before settle.
         origin = await store.first_attempt_date(conn, channel_id, chat) or day
         dates = list(digest_dates_through(origin, day))
         deferred = await store.digests(
@@ -276,7 +279,8 @@ class MorningBriefService:
         if text is None or decision.outcome is not Outcome.SEND:
             await store.skip(conn, day, channel_id, chat, now, "nothing to say")
             return
-        if not await store.claim(conn, day, channel_id, chat, now, attempts_limit=ATTEMPTS):
+        read_ids = [row["id"] for row in deferred]
+        if not await store.claim(conn, day, channel_id, chat, now, attempts_limit=ATTEMPTS, read_ids=read_ids):
             return
         key = _key(day, channel_id, chat)
         decided = False
@@ -307,7 +311,7 @@ class MorningBriefService:
             status = "uncertain"
         await store.settle(conn, day, channel_id, chat, status, now=self._clock(), detail=_detail(error),
                            consumed_until=None if status == "failed" else now,
-                           read_ids=None if status == "failed" else [row["id"] for row in deferred])
+                           read_ids=None if status == "failed" else read_ids)
         if decided:
             try:
                 await deliveries.record_receipt(key, outcome.value, external)

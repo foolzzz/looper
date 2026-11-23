@@ -2523,11 +2523,13 @@ CREATE TABLE IF NOT EXISTS morning_briefs (
     attempts    INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     detail      TEXT CHECK (detail IS NULL OR char_length(detail) <= 500),
     consumed_until TIMESTAMPTZ,       -- check time when this brief recorded the rows it read; not a watermark
+    read_ids    BIGINT[] NOT NULL DEFAULT '{}',  -- digest ids this claim's read returned; recovery consumes these
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (local_date, channel_id, chat)
 );
 ALTER TABLE morning_briefs ADD COLUMN IF NOT EXISTS consumed_until TIMESTAMPTZ;
+ALTER TABLE morning_briefs ADD COLUMN IF NOT EXISTS read_ids BIGINT[] NOT NULL DEFAULT '{}';
 -- Digest rows a brief actually read. The next brief skips these ids. An uncommitted insert is not here.
 CREATE TABLE IF NOT EXISTS morning_brief_consumed (
     delivery_id BIGINT PRIMARY KEY REFERENCES proactive_deliveries(id) ON DELETE CASCADE

@@ -3,12 +3,15 @@
 ``sending`` is claimed and committed before the channel is asked. ``sent`` went out. ``skipped`` had nothing to
 say, or there was no operator chat. ``uncertain`` may have gone out (the sender stopped, or the channel's answer
 was lost) and is never sent again. ``failed`` is a refusal, tried again while ``attempts`` is under the limit.
-The delivery (``agents.morning_brief``) is the only writer. Weekends write nothing. A sent or uncertain brief
-records the digest rows that read returned, by id, in ``morning_brief_consumed``, in the same transaction as that
-row. The next brief reads the first attempt's dates through its own day, except those ids. A refusal records
-none, so the retry reads the same digests. ``consumed_until`` is that brief's check time, not a watermark: a row
-whose insert had not committed is absent from the ids, and a later brief still reads it. Releasing a retry puts
-that refusal back, attempt count included; only a fresh claim is deleted.
+The delivery (``agents.morning_brief``) is the only writer. Weekends write nothing. A claim stores the digest
+ids that read returned, on the row, in that same write. A sent or uncertain brief copies those ids into
+``morning_brief_consumed``, in the same transaction as its status. A sender that stops before then is
+``uncertain`` and consumes exactly the stored ids; it does not scan ``proactive_deliveries`` by time. The next
+brief reads the first attempt's dates through its own day, except those ids. A refusal records none and clears
+the stored ids, so the retry reads the same digests. ``consumed_until`` is that brief's check time, not a
+watermark: a row whose insert had not committed is absent from the ids, and a later brief still reads it.
+Releasing a retry puts that refusal back, attempt count included, and clears the ids this claim stored; only a
+fresh claim is deleted.
 """
 
 from __future__ import annotations
@@ -29,16 +32,13 @@ async def orphans_uncertain(conn: Any, now: datetime) -> int:
     """Settle as ``uncertain`` what a sender claimed and never settled. Under the delivery lock no claim is live,
     so a ``sending`` row is one whose sender stopped: it may have been sent, and is never sent again.
 
-    Digest rows visible at that moment and decided at or before the claim are recorded by id with the row. An
-    insert that has not committed is not visible, so it is not recorded and a later brief still reads it."""
+    Consume exactly the digest ids stored with that claim. Do not scan by ``decided_at``: a row that commits
+    after the read is not in the set, and a later brief still reads it."""
     async with conn.transaction():
-        await conn.execute(
-            "INSERT INTO morning_brief_consumed (delivery_id) "
-            "SELECT p.id FROM proactive_deliveries p "
-            "JOIN morning_briefs b ON b.channel_id = p.channel_id AND b.chat = p.chat "
-            "WHERE b.status = 'sending' AND p.decision = 'digest' AND p.source <> 'morning_brief' "
-            "AND p.decided_at <= b.updated_at "
-            "ON CONFLICT DO NOTHING")
+        claimed = await conn.fetch(
+            "SELECT channel_id, chat, read_ids FROM morning_briefs WHERE status = 'sending'")
+        for row in claimed:
+            await _record_read(conn, row["channel_id"], row["chat"], list(row["read_ids"] or []))
         done = await conn.execute(
             "UPDATE morning_briefs SET status = 'uncertain', "
             "detail = 'the sender stopped before recording the answer', "
@@ -60,23 +60,28 @@ async def skip(conn: Any, local_date: date, channel_id: str, chat: str, now: dat
 
 
 async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
-                attempts_limit: int) -> bool:
-    """Take this date's brief for one send (committed before the channel is asked). A refusal under
-    ``attempts_limit`` is taken again and keeps its detail, so releasing the claim can put that refusal back;
-    anything else is left as it is."""
+                attempts_limit: int, read_ids: list[int] | None = None) -> bool:
+    """Take this date's brief for one send (committed before the channel is asked).
+
+    ``read_ids`` are the digest rows this attempt's read returned. They are written by the same statement as
+    the claim. Recovery consumes that set and does not read the table again. A refusal under ``attempts_limit``
+    is taken again and keeps its detail, so releasing the claim can put that refusal back; anything else is
+    left as it is."""
+    ids = read_ids or []
     row = await get(conn, local_date, channel_id, chat)
     if row is None:
         return await conn.fetchval(
-            "INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, updated_at) "
-            "VALUES ($1, $2, $3, 'sending', 1, $4) "
+            "INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, updated_at, read_ids) "
+            "VALUES ($1, $2, $3, 'sending', 1, $4, $5::bigint[]) "
             "ON CONFLICT (local_date, channel_id, chat) DO NOTHING RETURNING true",
-            local_date, channel_id, chat, now) is True
+            local_date, channel_id, chat, now, ids) is True
     if row["status"] == "failed" and row["attempts"] < attempts_limit:
         return await conn.fetchval(
-            "UPDATE morning_briefs SET status = 'sending', attempts = attempts + 1, updated_at = $4 "
+            "UPDATE morning_briefs SET status = 'sending', attempts = attempts + 1, updated_at = $4, "
+            "read_ids = $6::bigint[] "
             "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'failed' AND attempts < $5 "
             "RETURNING true",
-            local_date, channel_id, chat, now, attempts_limit) is True
+            local_date, channel_id, chat, now, attempts_limit, ids) is True
     return False
 
 
@@ -87,7 +92,7 @@ async def release(conn: Any, local_date: date, channel_id: str, chat: str) -> No
     is put back as that refusal, with the attempt count it had before this claim. Deleting it would hide the
     first attempt, and the next day would no longer read that attempt's digests."""
     restored = await conn.fetchval(
-        "UPDATE morning_briefs SET status = 'failed', attempts = attempts - 1 "
+        "UPDATE morning_briefs SET status = 'failed', attempts = attempts - 1, read_ids = '{}' "
         "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' AND attempts > 1 "
         "RETURNING true",
         local_date, channel_id, chat)
@@ -115,14 +120,15 @@ async def settle(conn: Any, local_date: date, channel_id: str, chat: str, status
                  detail: str | None = None, consumed_until: datetime | None = None,
                  read_ids: list[int] | None = None) -> bool:
     """Move a claimed brief to ``status``. ``consumed_until`` is the check's time when ``read_ids`` were taken
-    (unset on a refusal, so the retry reads them again). Those ids are written in this same transaction. False
-    when it was no longer ``sending``."""
+    (unset on a refusal, so the retry reads them again). Those ids are written in this same transaction. A
+    refusal clears the ids the claim stored and records none. False when it was no longer ``sending``."""
     async with conn.transaction():
         applied = await conn.fetchval(
             "UPDATE morning_briefs SET status = $4, detail = $5, updated_at = $6, "
-            "consumed_until = COALESCE($7, consumed_until) "
+            "consumed_until = COALESCE($7, consumed_until), "
+            "read_ids = COALESCE($8::bigint[], '{}'::bigint[]) "
             "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' RETURNING true",
-            local_date, channel_id, chat, status, detail, now, consumed_until)
+            local_date, channel_id, chat, status, detail, now, consumed_until, read_ids)
         if applied and read_ids is not None:
             await _record_read(conn, channel_id, chat, read_ids)
     return applied is True

@@ -392,9 +392,10 @@ def test_turning_the_brief_off_during_the_last_operator_check_drops_the_claim(
         real_targets = morning_brief.operator_targets
 
         async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
-                        attempts_limit: int) -> bool:
+                        attempts_limit: int, read_ids: list[int] | None = None) -> bool:
             nonlocal claimed
-            ok = await real_claim(conn, local_date, channel_id, chat, now, attempts_limit=attempts_limit)
+            ok = await real_claim(conn, local_date, channel_id, chat, now, attempts_limit=attempts_limit,
+                                  read_ids=read_ids)
             claimed = claimed or bool(ok)
             return ok
 
@@ -450,9 +451,10 @@ def test_a_refused_retry_switched_off_keeps_that_days_digest_for_the_next(
         real_targets = morning_brief.operator_targets
 
         async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
-                        attempts_limit: int) -> bool:
+                        attempts_limit: int, read_ids: list[int] | None = None) -> bool:
             nonlocal taken
-            ok = await real_claim(conn, local_date, channel_id, chat, now, attempts_limit=attempts_limit)
+            ok = await real_claim(conn, local_date, channel_id, chat, now, attempts_limit=attempts_limit,
+                                  read_ids=read_ids)
             taken = taken or bool(ok)
             return ok
 
@@ -524,6 +526,8 @@ def test_a_rejected_first_brief_keeps_that_days_digest_on_the_next(
         await _service(channel, tuesday).run_once()
         assert "11-24 06:30" in channel.posts[0]["text"]
         assert await pool.fetchval("SELECT consumed_until FROM morning_briefs") is None
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+        assert list(await pool.fetchval("SELECT read_ids FROM morning_briefs")) == []
         await _digest(pool, "held", tuesday.date(), hour=7, minute=30)
         wednesday = datetime(2026, 11, 25, 7, 0, tzinfo=ZONE)
         await _service(channel, wednesday).run_once()
@@ -570,6 +574,86 @@ def test_a_digest_committed_after_the_brief_read_it_is_in_the_next_brief_once(
         thursday = datetime(2026, 11, 26, 9, 15, tzinfo=ZONE)
         await _service(channel, thursday).run_once()
         assert len(channel.posts) == 3
+        assert "09:14" not in channel.posts[2]["text"] and "09:00" not in channel.posts[2]["text"]
+        assert sum("11-24 09:14" in post["text"] for post in channel.posts) == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_digest_committed_after_the_send_is_not_consumed_when_the_sender_stops(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The producer has not committed when the brief reads, claims and sends. The producer then commits and the
+    process exits before settle. Restart recovery consumes only the ids stored with the claim, so the next brief
+    includes the producer's row once and the brief after that does not repeat it. The row's ``decided_at`` is at
+    or before the claim, which is the scan recovery must not do."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        tuesday = datetime(2026, 11, 24, 9, 15, tzinfo=ZONE)
+        await _digest(pool, "seen", tuesday.date(), hour=9, minute=0)
+        late_at = tuesday.replace(minute=14, second=59)
+        channel = _Channel()
+        service = _service(channel, tuesday)
+        reached = asyncio.Event()
+        committed = asyncio.Event()
+        real_settle = morning_brief.store.settle
+
+        async def stop_before_settle(*args: Any, **kwargs: Any) -> bool:
+            reached.set()
+            await committed.wait()
+            raise RuntimeError("sender stopped before settle")
+
+        monkeypatch.setattr(morning_brief.store, "settle", stop_before_settle)
+        task: asyncio.Task[None] | None = None
+        try:
+            async with pool.acquire() as producer:
+                async with producer.transaction():
+                    await producer.execute(
+                        "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, "
+                        "chat_kind, decision, reason, counted, local_date, digest_date, decided_at) "
+                        "VALUES ('late', 'task_notice', 'normal', 'channel-lark', $1, 'direct', 'digest', "
+                        "'quiet_hours', false, $2, $2, $3)",
+                        OP, tuesday.date(), late_at)
+                    task = asyncio.create_task(service.run_once())
+                    await asyncio.wait_for(reached.wait(), 10)
+            committed.set()
+            with pytest.raises(RuntimeError, match="sender stopped"):
+                await task
+        finally:
+            committed.set()
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, RuntimeError):
+                    pass
+        monkeypatch.setattr(morning_brief.store, "settle", real_settle)
+
+        assert "11-24 09:00" in channel.posts[0]["text"]
+        assert "09:14" not in channel.posts[0]["text"]
+        claim = await pool.fetchrow("SELECT status, updated_at, read_ids FROM morning_briefs")
+        assert claim["status"] == "sending"
+        assert late_at <= claim["updated_at"]
+        seen_id = await pool.fetchval("SELECT id FROM proactive_deliveries WHERE dedupe_key = 'seen'")
+        late_id = await pool.fetchval("SELECT id FROM proactive_deliveries WHERE dedupe_key = 'late'")
+        assert list(claim["read_ids"]) == [seen_id]
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+
+        await _service(channel, tuesday).run_once()
+        assert len(channel.posts) == 1
+        assert await pool.fetchval("SELECT status FROM morning_briefs") == "uncertain"
+        consumed = await pool.fetch("SELECT delivery_id FROM morning_brief_consumed ORDER BY delivery_id")
+        assert [row["delivery_id"] for row in consumed] == [seen_id]
+        assert late_id not in {row["delivery_id"] for row in consumed}
+
+        wednesday = datetime(2026, 11, 25, 9, 15, tzinfo=ZONE)
+        await _service(channel, wednesday).run_once()
+        assert "11-24 09:14" in channel.posts[1]["text"]
+        assert "11-24 09:00" not in channel.posts[1]["text"]
+        thursday = datetime(2026, 11, 26, 9, 15, tzinfo=ZONE)
+        await _service(channel, thursday).run_once()
         assert "09:14" not in channel.posts[2]["text"] and "09:00" not in channel.posts[2]["text"]
         assert sum("11-24 09:14" in post["text"] for post in channel.posts) == 1
 
@@ -774,6 +858,13 @@ def test_an_old_database_gains_the_table_and_the_kind(monkeypatch: pytest.Monkey
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT to_regclass('morning_brief_consumed') IS NOT NULL")
+        await pool.execute("ALTER TABLE morning_briefs DROP COLUMN read_ids")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'morning_briefs'::regclass "
+            "AND attname = 'read_ids' AND attnum > 0 AND NOT attisdropped)")
 
     run_db(test, monkeypatch)
 
