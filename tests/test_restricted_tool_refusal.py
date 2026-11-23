@@ -20,6 +20,8 @@ def test_each_operator_only_tool_says_what_it_is_refused_for_in_its_own_words():
                                "the dashboard",
         "looper_vault_read": "the user's knowledge vault is searched and read only in their own direct chat or on "
                              "the dashboard",
+        "looper_session_search": "the user's earlier conversations are searched only in their own direct chat or on "
+                                 "the dashboard",
         "looper_reminder_create": "looper_reminder_create runs only in the user's own direct chat or on "
                                   "the dashboard",
         "looper_reminder_list": "looper_reminder_list runs only in the user's own direct chat or on "
