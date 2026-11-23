@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from ... import env
 from ..bus import MessageBus
@@ -41,6 +42,7 @@ from ..message import (
     parse_channel_id,
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
+from .. import task_notice_delivery
 from ..ops.leads import for_group
 from .allowlist import SenderAllowlist
 from .. import card_actions, chat_attachments, chat_commands, chat_settings
@@ -50,6 +52,8 @@ from .proactive import record_delivery
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 from .telegram_inbox import TelegramInbox
+from .outbound import Gateway, Outbox, OutboundProtocol, OutboxSource, derived_key
+from .. import chat_settings
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +82,11 @@ def _post_outcome(exc: Exception) -> PostOutcome:
     """Whether Telegram refused a send (its answer said no: nothing was sent) or the answer was lost (a time-out or a
     broken connection after the request went out: the message may be there)."""
     from telegram.error import BadRequest, ChatMigrated, Forbidden, InvalidToken, RetryAfter, TimedOut
+    from .telegram_request import TelegramWriteError
+    from .outbound import ErrorClass
 
+    if isinstance(exc, TelegramWriteError):
+        return PostOutcome.REJECTED if exc.error_class == ErrorClass.REJECTED else PostOutcome.UNKNOWN
     if isinstance(exc, TimedOut):
         return PostOutcome.UNKNOWN
     if isinstance(exc, (BadRequest, Forbidden, ChatMigrated, InvalidToken, RetryAfter)):
@@ -123,6 +131,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._address = channel_address("telegram", self._channel_id)
         self._app: Any = None
         self._requests: tuple[Any, ...] = ()
+        self._gateway: Gateway | None = None
+        self._channel_outbox: Outbox | None = None
         self._outbound_task: asyncio.Task[Any] | None = None
         self._running = False
         # correlation_id → telegram chat_id for reply routing (bounded, oldest evicted first)
@@ -166,6 +176,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         )
         from telegram import Update
         from telegram.request import HTTPXRequest
+        from .telegram_request import GatedRequest, TelegramOutboxTransport
 
         self._bus = bus
         self._running = True
@@ -191,7 +202,12 @@ class TelegramChannelAdapter(ChannelAdapter):
 
             # Own both transports even if Application.initialize fails. Save polling
             # responses before PTB acknowledges them, retaining its network retry loop.
-            self._requests = (PollingRequest(connection_pool_size=1), HTTPXRequest(connection_pool_size=256))
+            self._gateway = Gateway(self.channel_id, app_id=f'telegram:{identity}')
+            self._channel_outbox = Outbox(
+                self.channel_id, TelegramOutboxTransport(lambda: self._app.bot), self._gateway,
+                protocol=OutboundProtocol.TELEGRAM, enabled=chat_settings.outbound_enabled)
+            self._requests = (PollingRequest(connection_pool_size=1), GatedRequest(
+                self._gateway, enabled=chat_settings.outbound_enabled, connection_pool_size=256))
             builder.get_updates_request(self._requests[0])
             builder.request(self._requests[1])
             builder.update_queue(self._inbox)
@@ -219,6 +235,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             self._outbound_task = asyncio.create_task(self._outbound_loop())
 
             await self._app.initialize()
+            await self._channel_outbox.start_if_needed()
             await self._inbox.polling_started(int(datetime.now(timezone.utc).timestamp()))
             await self._inbox.replay(self._app.bot)
             try:
@@ -281,6 +298,12 @@ class TelegramChannelAdapter(ChannelAdapter):
                 await cleanup("stop", self._app.stop)
         # Application.stop drains received updates, whose handlers can still add reactions.
         await cleanup("reactions", self._reactions.stop)
+        if self._channel_outbox is not None:
+            await cleanup("outbox", self._channel_outbox.stop)
+        if self._gateway is not None:
+            await cleanup("gateway", self._gateway.stop)
+        self._channel_outbox = None
+        self._gateway = None
         if self._app:
             await cleanup("shutdown", self._app.shutdown)
         for request in self._requests:
@@ -300,6 +323,9 @@ class TelegramChannelAdapter(ChannelAdapter):
         if self._app is None:
             return DeliveryReceipt(channel="telegram", success=False, error="the Telegram bot is not started")
         text = self._redact(text)
+        if chat_settings.outbound_enabled():
+            receipt = await self._outbox_messages(chat, text, key=idempotency_key, source=OutboxSource.NOTIFY)
+            return self._delivery_receipt(receipt)
         try:
             for chunk in self._split_message(text, max_len=4000):
                 msg = await self._app.bot.send_message(chat_id=int(chat), text=chunk)
@@ -326,6 +352,9 @@ class TelegramChannelAdapter(ChannelAdapter):
             return PostReceipt(False, error=f"not a Telegram message id: {reply_to!r}", outcome=PostOutcome.REJECTED)
         sent: list[str] = []
         text = self._redact(text)
+        if chat_settings.outbound_enabled():
+            return await self._outbox_messages(str(chat), text, key=idempotency_key,
+                                               reply_to=reply, source=OutboxSource.POST)
         try:
             for chunk in self._split_message(text, max_len=4000):
                 extra = ({"reply_to_message_id": reply, "allow_sending_without_reply": True}
@@ -349,6 +378,21 @@ class TelegramChannelAdapter(ChannelAdapter):
         except ValueError:
             return PostReceipt(False, error="invalid Telegram chat or message id", outcome=PostOutcome.REJECTED)
         extra = {"reply_to_message_id": reply, "allow_sending_without_reply": True} if reply is not None else {}
+        if chat_settings.outbound_enabled():
+            assert self._channel_outbox is not None
+            key = idempotency_key or str(uuid4())
+            body = dict(chat_id=chat, text=self._redact(card.text)[:4000], **extra)
+            markup = card_actions.telegram_markup(card)
+            if markup is not None:
+                body['reply_markup'] = markup.to_dict()
+            receipt = await self._channel_outbox.send('send', str(chat), body, None, key, OutboxSource.POST)
+            if receipt.result == PostOutcome.REJECTED and markup is not None:
+                body.pop('reply_markup')
+                receipt = await self._channel_outbox.send('send', str(chat), body, None, key, OutboxSource.POST,
+                                                         replace_rejected=True)
+            if receipt.success and receipt.external_ids:
+                await card_actions.bind(card, receipt.external_ids[0], str(chat))
+            return receipt
         try:
             message = await self._app.bot.send_message(chat_id=chat, text=self._redact(card.text)[:4000],
                                                        reply_markup=card_actions.telegram_markup(card), **extra)
@@ -373,6 +417,9 @@ class TelegramChannelAdapter(ChannelAdapter):
         return PostReceipt(True, external_ids=(external_id,))
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
+        return await task_notice_delivery.send(envelope, self._deliver)
+
+    async def _deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
         its own, or send the answer to the Telegram user who wrote and close its status line."""
         paths = envelope.metadata.get("attachment_paths", [])
@@ -387,12 +434,14 @@ class TelegramChannelAdapter(ChannelAdapter):
                 return DeliveryReceipt(channel="telegram", success=False, error="a notice without a Telegram chat id")
             notice = Notice.from_payload(envelope.payload)
             if notice is None or not notice.target.group:
-                return await self._send_answer(chat, str(envelope.payload.get("text") or ""))
+                return await self._send_answer(chat, str(envelope.payload.get("text") or ""),
+                                               message_id=envelope.message_id, source=OutboxSource.NOTICE)
             # A group's notice carries the whole summary: several messages in order. A part that fails ends the
             # notice; the parts before it are not sent again.
             parts = split_message(for_group(notice.text))
             for number, part in enumerate(parts):
-                receipt = await self._send_answer(chat, part)
+                receipt = await self._send_answer(chat, part, message_id=f'{envelope.message_id}:{number}',
+                                                  source=OutboxSource.NOTICE)
                 if not receipt.success:
                     logger.warning("%s: part %d of %d of a task's end notice to %s failed: %s", self._channel_id,
                                    number + 1, len(parts), chat, receipt.error)
@@ -411,7 +460,8 @@ class TelegramChannelAdapter(ChannelAdapter):
                 else:
                     if (envelope.message_type is MessageType.STATUS_UPDATE
                             and status_kind(envelope.payload) is StatusKind.PROGRESS):
-                        return await self._send_answer(chat_id, str(envelope.payload["text"]))
+                        return await self._send_answer(chat_id, str(envelope.payload["text"]),
+                                                       message_id=envelope.message_id, source=OutboxSource.PROGRESS)
                     self._remember(corr_id, chat_id)
         if chat_id is None:
             return DeliveryReceipt(
@@ -427,7 +477,8 @@ class TelegramChannelAdapter(ChannelAdapter):
                     await self._status.update(corr_id, str(chat_id), envelope.payload)
                 case StatusKind.PROGRESS:
                     # Task progress leaves the status line alone.
-                    return await self._send_answer(chat_id, str(envelope.payload["text"]))
+                    return await self._send_answer(chat_id, str(envelope.payload["text"]),
+                                                   message_id=envelope.message_id, source=OutboxSource.PROGRESS)
             return DeliveryReceipt(channel="telegram", success=True)
 
         text = self._format_reply(envelope)
@@ -435,14 +486,19 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=True)
 
         text, cards = card_actions.shown(text, envelope.metadata.get("cards"))
-        receipt = await self._send_answer(chat_id, text) if text else DeliveryReceipt(channel="telegram", success=True)
-        for card in cards:
-            sent = await self.post_card(NotifyTarget(TargetKind.CHAT, str(chat_id)), card)
-            if not sent.success:
+        receipt = (await self._send_answer(chat_id, text, message_id=envelope.message_id) if text
+                   else DeliveryReceipt(channel="telegram", success=True))
+        for i, card in enumerate(cards):
+            gated = chat_settings.outbound_enabled()
+            key = derived_key(self.channel_id, f"card:{envelope.message_id}", i) if gated else None
+            sent = await self.post_card(NotifyTarget(TargetKind.CHAT, str(chat_id)), card, idempotency_key=key)
+            if gated and not sent.success:
+                receipt = self._delivery_receipt(sent)
+                break
+            if not sent.success and not gated:
                 await self._send_answer(chat_id, card.text)  # the user can still answer it by typing
             if not text:
-                receipt = DeliveryReceipt(channel="telegram", success=sent.success, error=sent.error,
-                                          external_id=sent.external_ids[0] if sent.external_ids else None)
+                receipt = self._delivery_receipt(sent)
         if not envelope.payload.get("autonomous"):
             await self._status.finish(corr_id, error=envelope.payload.get("error"))
         return receipt
@@ -450,6 +506,11 @@ class TelegramChannelAdapter(ChannelAdapter):
     async def _send_status(self, chat_id: str, text: str) -> str | None:
         if self._app is None:
             return None
+        if chat_settings.outbound_enabled():
+            receipt = await self._outbox_messages(chat_id, self._redact(text), source=OutboxSource.PROGRESS)
+            if not receipt.success:
+                raise RuntimeError(receipt.error or 'Telegram status delivery failed')
+            return receipt.external_ids[-1] if receipt.external_ids else None
         message = await self._app.bot.send_message(chat_id=int(chat_id), text=self._redact(text))
         return str(message.message_id)
 
@@ -486,11 +547,50 @@ class TelegramChannelAdapter(ChannelAdapter):
                   outcome="answered" if receipt.success else "answer_failed")
         return True
 
-    async def _send_answer(self, chat_id: int, text: str) -> DeliveryReceipt:
+    @staticmethod
+    def _delivery_receipt(receipt: PostReceipt) -> DeliveryReceipt:
+        return DeliveryReceipt(channel='telegram', success=receipt.success,
+                               external_id=receipt.external_ids[-1] if receipt.external_ids else None,
+                               error=redact(receipt.error) if receipt.error else None)
+
+    async def _outbox_messages(self, chat: str, text: str, *, key: str | None = None,
+                               message_id: str | None = None, reply_to: int | None = None,
+                               source: OutboxSource, formatted: bool = False) -> PostReceipt:
+        from telegram.constants import ParseMode
+
+        assert self._channel_outbox is not None
+        try:
+            chat_id = int(chat)
+        except ValueError:
+            return PostReceipt(False, error=f'not a Telegram chat id: {chat!r}', outcome=PostOutcome.REJECTED)
+        seed = message_id or key or str(uuid4())
+        sent: list[str] = []
+        for i, chunk in enumerate(self._split_message(text, max_len=4000)):
+            part_key = key if key is not None and i == 0 else derived_key(self.channel_id, seed, i)
+            body: dict[str, Any] = {'chat_id': chat_id, 'text': chunk}
+            if formatted:
+                body['parse_mode'] = ParseMode.MARKDOWN_V2
+            if reply_to is not None and i == 0:
+                body.update(reply_to_message_id=reply_to, allow_sending_without_reply=True)
+            receipt = await self._channel_outbox.send('send', chat, body, None, part_key, source)
+            if formatted and receipt.result == PostOutcome.REJECTED:
+                body.pop('parse_mode')
+                receipt = await self._channel_outbox.send('send', chat, body, None, part_key, source,
+                                                         replace_rejected=True)
+            sent.extend(receipt.external_ids)
+            if not receipt.success:
+                return replace(receipt, external_ids=tuple(sent), error=redact(receipt.error or 'delivery failed'))
+        return PostReceipt(True, external_ids=tuple(sent))
+
+    async def _send_answer(self, chat_id: int, text: str, *, message_id: str | None = None,
+                           source: OutboxSource = OutboxSource.ANSWER) -> DeliveryReceipt:
         """Send ``text`` as Markdown, or as plain text when Telegram cannot parse it."""
         import telegram
 
         text = self._redact(text)
+        if chat_settings.outbound_enabled():
+            return self._delivery_receipt(await self._outbox_messages(
+                str(chat_id), text, message_id=message_id, source=source, formatted=True))
         try:
             bot = self._app.bot
             # Split long messages (Telegram limit: 4096 chars)
@@ -606,16 +706,28 @@ class TelegramChannelAdapter(ChannelAdapter):
         if route is None or (route.explicit and await self._turned_off(update.effective_chat.id, route, "/start")):
             return
         log_route(logger, self.channel_id, str(update.effective_chat.id), route)
-        await update.message.reply_text(
-            "Looper Agent 已就绪。直接发消息给我，或使用:\n"
+        text = ("Looper Agent 已就绪。直接发消息给我，或使用:\n"
             "/status — 查看当前任务进度\n"
             "/new — 开始新的 Manager 会话\n"
             "/stop — 停止管家当前的回复\n"
             "/profile — 查看或切换本会话的 Agent Profile\n"
             "/help — 帮助信息"
         )
+        await self._command_reply(update, text)
 
     async def _cmd_status(self, update: Any, context: Any) -> None:
+        """``/status`` is the typed command while the status card is on; off, it is still the progress question."""
+        from .. import status_card
+
+        try:
+            on = status_card.enabled()
+        except Exception:
+            logger.warning("%s: cannot read whether /status is on; forwarded as before", self._channel_id,
+                           exc_info=True)
+            on = False
+        if on:
+            await self._forward_command(update)
+            return
         await self._forward(update, "当前任务进度怎么样？", status=True)
 
     async def _cmd_help(self, update: Any, context: Any) -> None:
@@ -623,7 +735,17 @@ class TelegramChannelAdapter(ChannelAdapter):
         if route is None or (route.explicit and await self._turned_off(update.effective_chat.id, route, "/help")):
             return
         log_route(logger, self.channel_id, str(update.effective_chat.id), route)
-        await update.message.reply_text(chat_commands.help_text())
+        await self._command_reply(update, chat_commands.help_text())
+
+    async def _command_reply(self, update: Any, text: str) -> None:
+        if chat_settings.outbound_enabled():
+            receipt = await self._outbox_messages(
+                str(update.effective_chat.id), text, reply_to=update.message.message_id,
+                message_id=f'command:{update.update_id}', source=OutboxSource.ANSWER)
+            if not receipt.success:
+                raise RuntimeError(receipt.error or 'Telegram command reply failed')
+            return
+        await update.message.reply_text(text)
 
     async def _cmd_new(self, update: Any, context: Any) -> None:
         """/new goes to the Manager as the text ``/new``, which it answers itself by starting a new session."""

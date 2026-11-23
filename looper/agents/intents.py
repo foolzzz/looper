@@ -9,8 +9,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..db import connection, intents as store
-from . import leads_model, projects
+from ..db import connection, intents as store, tasks as db_tasks
+from . import leads_model, projects, untrusted
 from .leads import source_view
 from .subscriptions import strip_mentions
 
@@ -193,6 +193,7 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
     if platform is None:
         raise IntentRefused("task service is unavailable")
     now = now or _now()
+    fence = await untrusted.enabled(_db(db))  # before the connection below: a build holds no second one
     async with _db(db).acquire() as conn, conn.transaction():
         await _enabled(conn)
         row = await store.locked(conn, intent_id)
@@ -230,6 +231,10 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
             label = "私聊" if item["chat_kind"] == "p2p" else f"《{item['chat']}》"
             clock = raw["sent_at"].astimezone(ZoneInfo(zone_name)).strftime("%Y-%m-%d %H:%M")
             lines.append(f"- {label} · {item['sender']} · {clock} · {item['link'] or item['message_id']}")
+        if fence:
+            # The background and its sources (other people's words, chat and sender names) go in one block.
+            lines[2:] = ["", untrusted.LEAD_LINE, untrusted.fence("\n".join(lines[3:]), source=untrusted.Source.INTENT,
+                                                                  provenance={"ref": view["id"]})]
         fields: dict[str, Any] = {"manager_id": "manager"}
         if origin:
             channel = origin.get("channel") or via
@@ -246,6 +251,8 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
             data["workflow"] = workflow["key"]
         created = await projects.create_task_core(data, task_fields=fields, conn=conn)
         task_id = created["task_id"]
+        # The task's background came from messages: marked, for the outbound review (RFC section 6.3).
+        await db_tasks.mark_untrusted(task_id, "intent", pool=conn)
         await store.transition(conn, intent_id, "tasked", via=via, now=now, task_id=task_id)
     try:
         await projects.start_ready_task(task_id, platform.bus, AgentAddress("manager", fields["manager_id"]))

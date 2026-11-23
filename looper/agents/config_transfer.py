@@ -11,7 +11,8 @@
 - ``settings``: the system and role layers of the agent settings (a layer
   names its Agent Profile, ``profile``), and each role's prompt (``null`` while
   it follows the recommended one), timeout and enabled flag. Effort belongs to
-  the Agent Profile; concurrency limits belong to current role layers;
+  the Agent Profile; concurrency limits belong to current role layers.
+  ``settings.system`` carries ``manager.persona`` when that persona is set;
 - ``channels``: each chat channel's configuration;
 - ``managers`` (v4 only): live scenario definitions and task templates, with
   immutable Manager ids, natural profile/project references and no machine paths;
@@ -126,7 +127,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "channels",
+SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "settings.system", "channels",
             "catalog", "installs", "workflows",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
@@ -137,6 +138,8 @@ _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_p
                     "notify", "notify_format", "user_gates")
 _COMMAND_FIELDS = ("command", "env", "env_file")
 _ALERT_FIELDS = ("success_deadline", "alert_failures_after", "alert_stale_after_seconds", "alert_overlap_after")
+# The throttle fields: in the file only when set (a schedule without them exports as before).
+_THROTTLE_FIELDS = ("active_hours", "idle_only")
 _AGENT_SCHEDULE_FIELDS = ("requirement", "gate_command", "gate_timeout_seconds", "run_budget_usd",
                           "daily_budget_usd", "user_gates")
 
@@ -456,6 +459,7 @@ def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> 
         for name in (*_AGENT_SCHEDULE_FIELDS, "profiles", "task_limits"):
             entry.pop(name)
     entry.update({name: row[name] for name in _ALERT_FIELDS if row.get(name) is not None})
+    entry.update({name: row[name] for name in _THROTTLE_FIELDS if row.get(name)})
     if row.get("template_key"):
         entry["template_key"] = row["template_key"]
         entry["template_inputs"] = dict(row.get("template_inputs") or {})
@@ -556,6 +560,11 @@ async def export_chunks(
         summary.counts["manager.installs"] = len(manager_installs)
     if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
         head["settings"]["scheduler"] = scheduler
+    from . import persona
+
+    if system := await persona.export_value(conn):  # unset or unreadable: the key stays absent
+        head["settings"]["system"] = {persona.PERSONA_KEY: system}
+        summary.counts["settings.system"] = 1
     if chat := await stored_chat_settings(conn):
         head["settings"]["chat"] = chat
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
@@ -706,6 +715,8 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
             raise ConfigFileError(f"settings.{section} must be a JSON list")
     if not isinstance(data.get("settings", {}).get("scheduler", {}), dict):
         raise ConfigFileError("settings.scheduler must be a JSON object")
+    if not isinstance(data.get("settings", {}).get("system", {}), dict):
+        raise ConfigFileError("settings.system must be a JSON object")
     if not isinstance(data.get("settings", {}).get("chat", {}), dict):
         raise ConfigFileError("settings.chat must be a JSON object")
     _check_retired_fields(data.get("settings", {}).get("layers", []), "settings.layers", ("model", "effort"))
@@ -1626,6 +1637,34 @@ class _Importer:
         for name in sorted(set(entry) - set(scheduler_settings.FIELDS)):
             self.record("settings.scheduler", name, Action.SKIPPED, reason="unknown scheduler setting")
 
+    async def system(self, entry: Any) -> None:
+        """``manager.persona`` from the file. An empty value clears it; a refused value or unknown key is skipped."""
+        from . import persona
+
+        try:
+            entry = _mapping(entry, "system settings")
+        except _Skip as exc:
+            self.record("settings.system", "system", Action.SKIPPED, reason=str(exc))
+            return
+        if "manager.persona" in entry:
+            current = await persona.export_value(self.conn)
+            try:
+                raw = entry["manager.persona"]
+                if not isinstance(raw, Mapping):
+                    raise ValueError("manager.persona must be a JSON object")
+                parsed = persona.checked(raw)
+            except ValueError as exc:
+                self.record("settings.system", persona.PERSONA_KEY, Action.SKIPPED, reason=str(exc))
+            else:
+                new = persona.payload(parsed) or None
+                if not (current is None and new is None):
+                    action = self.outcome("settings.system", persona.PERSONA_KEY, current,
+                                          () if current == new else ("manager.persona",))
+                    if self.apply and action in (Action.ADDED, Action.CHANGED):
+                        await persona.write(parsed, conn=self.conn)
+        for name in sorted(set(entry) - {"manager.persona"}):
+            self.record("settings.system", name, Action.SKIPPED, reason="unknown system setting")
+
     async def chat(self, entry: Any) -> None:
         from . import chat_settings
 
@@ -2402,7 +2441,7 @@ class _Importer:
         from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 
         entry = _mapping(entry, "a schedule")
-        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS,
+        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS, *_THROTTLE_FIELDS,
                                       "notify_target", "profiles", "task_limits", "repoint", "manager",
                                       "template_key", "template_inputs"})
         if unknown:
@@ -2433,7 +2472,7 @@ class _Importer:
                         continue
                 if name not in ("cron", "timezone", "run_timeout_seconds"):
                     values[name] = schedules._PARSERS[name](entry.get(name, defaults.get(name)))
-            for name in (*_COMMAND_FIELDS, *_ALERT_FIELDS):
+            for name in (*_COMMAND_FIELDS, *_ALERT_FIELDS, *_THROTTLE_FIELDS):
                 if name in _COMMAND_FIELDS and kind == "agent" and name not in entry:
                     continue
                 raw = entry.get(name)
@@ -2549,7 +2588,7 @@ class _Importer:
             current = None
             if row is not None:
                 current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS,
-                                                        "run_timeout_mode", "notify_channel",
+                                                        *_THROTTLE_FIELDS, "run_timeout_mode", "notify_channel",
                                                         "notify_chat", "manager_id", "template_key", "template_inputs")}
                 current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
                 current["task_limits"] = dict(row["task_limits"])
@@ -2684,6 +2723,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         await importer.role(entry)
     if "scheduler" in settings:
         await importer.scheduler(settings["scheduler"])
+    if "system" in settings:
+        await importer.system(settings["system"])
     if "chat" in settings:
         await importer.chat(settings["chat"])
     for entry in data.get("catalog", []):

@@ -5,7 +5,7 @@ import asyncio
 import asyncpg
 import pytest
 
-from looper.db import connection
+from looper.db import connection, migrations
 from tests.bridge_schema_support import structure
 from tests.db_support import DSN, fresh_connection
 
@@ -17,7 +17,7 @@ def test_existing_final_baseline_upgrades_once_and_preserves_schedule_choices():
         async with fresh_connection() as old, fresh_connection() as fresh:
             # Reproduce the released final baseline, before the additive column.
             column = "    user_gates TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on')),\n"
-            sql = connection.SCHEMA_PATH.read_text()
+            sql = migrations.schema_sql(connection.SCHEMA_PATH.read_text(), connection._MIGRATIONS)
             assert sql.count(column) == 1
             await old.execute(sql.replace(column, ""))
             await old.execute("INSERT INTO schema_migrations (name) VALUES ('post_bridge_baseline')")

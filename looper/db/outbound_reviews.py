@@ -27,3 +27,10 @@ async def insert(*, agent_id: str, source: str, tool: str, level: str, target_ki
         agent_id, parent_record_id, record_id, task_id, manager_action_id, channel, chat, source, tool, action, level,
         target_kind, target, summary, verdict, failure, reason, list(signals), profile_id, model, cost_usd,
         latency_ms)
+
+
+async def link_action(review_id: int, manager_action_id: int, *, pool: asyncpg.Pool | None = None) -> None:
+    """Name the ``manager_actions`` row of the call ``review_id`` reviewed (written after the review)."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE outbound_reviews SET manager_action_id = $2 WHERE id = $1", review_id,
+                       manager_action_id)
