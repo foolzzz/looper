@@ -211,11 +211,15 @@ _DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "tas
 
 
 def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    title = _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"]
+    if row.get("reason") == "final_notice_retry_exhausted":
+        title += "（最终状态通知重试已耗尽）"
     return _item(f"delivery:{row['source']}:{row['key']}",
-                 _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"], since=row["at"],
+                 title, since=row["at"],
                  href=_DELIVERY_HREF[row["source"]].format(ref=row["ref"]),
                  ref=leads_model.format_intent_id(int(row["ref"])) if row["source"] == "intent" else None,
-                 source=row["source"], channel=_channel_type(row["channel"]))
+                 source=row["source"], channel=_channel_type(row["channel"]),
+                 **({"reason": row["reason"]} if row.get("reason") else {}))
 
 
 async def _deliveries(_: Any) -> Read:
