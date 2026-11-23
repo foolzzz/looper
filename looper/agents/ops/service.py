@@ -73,7 +73,7 @@ from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from . import reminders as reminder_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
-from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
+from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_tool
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .session_search import TOOL as SESSION_SEARCH, enabled as session_search_on
@@ -393,17 +393,20 @@ class ManagerOps:
 
     async def _with_operator_tools(self, scope: OpsScope) -> OpsScope:
         """``scope`` with the default Manager's operator-only tools exactly while their switches are on:
-        ``looper_leads_search`` while ``leads.enabled`` is, the vault's reads while the vault setting holds and says
-        ``manager_read``, ``looper_session_search`` while ``manager.session_search.enabled`` is, and the reminder
-        tools while ``reminders.enabled`` is. Any other Manager's as it is; off, the default Manager's is what it
-        was before them."""
+        ``looper_leads_search`` while ``leads.enabled`` is, as ``leads.search_mode`` describes it
+        (``ops.leads.leads_tool``), the vault's reads while the vault setting holds and says ``manager_read``,
+        ``looper_session_search`` while ``manager.session_search.enabled`` is; the reminder tools while ``reminders.enabled`` is.
+        Any other Manager's as it is; off, the
+        default Manager's is what it was before them."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
             return scope
-        wanted = [*((LEADS_SEARCH,) if await leads_on() else ()),
+        leads = await leads_tool()
+        wanted = [*((leads,) if leads is not None else ()),
                   *(VAULT_READ_TOOLS if await manager_vault() is not None else ()),
                   *((SESSION_SEARCH,) if await session_search_on() else ()),
                   *(reminder_tools.TOOLS if await reminders_on() else ())]
-        if [tool.name for tool in wanted] == [name for name in scope.tools if name in _OPERATOR_TOOLS]:
+        current = [tool for tool in scope.tools.values() if tool.name in _OPERATOR_TOOLS]
+        if len(wanted) == len(current) and all(new is old for new, old in zip(wanted, current)):
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name not in _OPERATOR_TOOLS]
         adjusted = replace(scope, tools=_tool_map([*kept, *wanted]))

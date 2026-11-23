@@ -31,6 +31,9 @@ second copy. Turning it on names the enabled bots that have no operator id.
 out; off by default (proactive delivery RFC section 2). Operator-only, through ``proactive_delivery.get`` and
 ``proactive_delivery.update``, like the delivery guard.
 
+``morning_brief.enabled`` and ``morning_brief.time``: the weekday morning brief (off by default, 09:15).
+Operator-only, through ``morning_brief.get`` and ``morning_brief.update``. Not part of the chat settings clients see.
+
 ``manager.session_routing.enabled`` and ``manager.sessions.max_resident``: whether the default Manager gives each
 group and each other sender's direct chat a session of its own, and how many sessions keep a process resident
 (``session_routing``; off, and 2). Operator-only. Turning routing on names the enabled bots that have no operator
@@ -40,12 +43,13 @@ Turn context, timezone and reply language have separate operator-only
 ``turn_context_settings.get/update`` operations; they are not client chat settings.
 
 Stop, completion turns, research order, metrics, delivery guard, outbound writes, turn context, the delivery
-layer and session routing are kept in memory: ``load`` reads them at startup and updates refresh them. Until
-loaded, all are off.
+layer, session routing and the morning brief are kept in memory: ``load`` reads them at startup and updates
+refresh them. Until loaded, the switches are off and the brief's time is 09:15.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import asdict
 from enum import Enum
@@ -75,6 +79,11 @@ OUTBOUND_DEFAULTS = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_
 OUTBOUND_FIELDS = ("outbound_enabled", *OUTBOUND_DEFAULTS)
 DELIVERY_ENABLED_KEY = "delivery.enabled"
 DEFAULT_DELIVERY_ENABLED = False
+MORNING_BRIEF_ENABLED_KEY = "morning_brief.enabled"
+MORNING_BRIEF_TIME_KEY = "morning_brief.time"
+DEFAULT_MORNING_BRIEF_ENABLED = False
+DEFAULT_MORNING_BRIEF_TIME = "09:15"
+_MORNING_BRIEF_TIME = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 OPERATOR_FIELDS = ("ledger_enabled",)  # only the operator sets the ledger
 SESSION_ROUTING_FIELDS = ("session_routing_enabled", "max_resident")
@@ -120,6 +129,8 @@ _outbound_limits = dict(OUTBOUND_DEFAULTS)
 _delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
 _mid_turn_input_enabled = DEFAULT_MID_TURN_INPUT_ENABLED
 _delivery_enabled = DEFAULT_DELIVERY_ENABLED
+_morning_brief_enabled = DEFAULT_MORNING_BRIEF_ENABLED
+_morning_brief_time = DEFAULT_MORNING_BRIEF_TIME
 
 
 def stop_enabled() -> bool:
@@ -263,6 +274,57 @@ async def update_delivery(value: bool | None) -> dict[str, bool]:
     return delivery_view()
 
 
+def morning_brief_enabled() -> bool:
+    return _morning_brief_enabled
+
+
+def set_morning_brief_enabled(value: bool) -> None:
+    """Apply a value in memory only (``load`` and ``update_morning_brief`` store it; tests use this directly)."""
+    global _morning_brief_enabled
+    _morning_brief_enabled = value
+
+
+def morning_brief_time() -> str:
+    return _morning_brief_time
+
+
+def set_morning_brief_time(value: str) -> None:
+    """Apply a value in memory only (``load`` and ``update_morning_brief`` store it; tests use this directly)."""
+    global _morning_brief_time
+    _morning_brief_time = value
+
+
+def morning_brief_view() -> dict[str, Any]:
+    return {"enabled": _morning_brief_enabled, "time": _morning_brief_time}
+
+
+async def update_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist the operator's choice. A field left out keeps its value; null restores that field's default.
+    A refused body changes nothing."""
+    unknown = [key for key in body if key not in ("enabled", "time")]
+    if unknown:
+        raise ValueError(f"unknown setting {unknown[0]!r}; the morning brief has enabled, time")
+    if not body:
+        raise ValueError("give at least one of enabled, time (null: the default)")
+    enabled = body["enabled"] if "enabled" in body else None
+    when = body["time"] if "time" in body else None
+    if "enabled" in body and enabled is not None and not isinstance(enabled, bool):
+        raise ValueError("enabled must be true, false or null")
+    if "time" in body and when is not None and (not isinstance(when, str) or _MORNING_BRIEF_TIME.fullmatch(when) is None):
+        raise ValueError("time must be HH:MM or null")
+    stored: dict[str, str | None] = {}
+    if "enabled" in body:
+        stored[MORNING_BRIEF_ENABLED_KEY] = None if enabled is None else ("true" if enabled else "false")
+    if "time" in body:
+        stored[MORNING_BRIEF_TIME_KEY] = when
+    await db_settings.put_settings(stored)
+    if "enabled" in body:
+        set_morning_brief_enabled(DEFAULT_MORNING_BRIEF_ENABLED if enabled is None else enabled)
+    if "time" in body:
+        set_morning_brief_time(DEFAULT_MORNING_BRIEF_TIME if when is None else when)
+    return morning_brief_view()
+
+
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
@@ -276,6 +338,7 @@ async def load() -> bool:
         session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY, status_card.ENABLED_KEY,
         receipts_settings.ENABLED_KEY,
         *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
+        MORNING_BRIEF_ENABLED_KEY, MORNING_BRIEF_TIME_KEY,
     ])
     session_routing.apply_stored(stored)
     _turn_context_enabled = stored.get(TURN_CONTEXT_KEY) == "true"
@@ -289,6 +352,10 @@ async def load() -> bool:
     set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
     set_mid_turn_input_enabled(stored.get(MID_TURN_INPUT_KEY) == "true")
     set_delivery_enabled(stored.get(DELIVERY_ENABLED_KEY) == "true")
+    set_morning_brief_enabled(stored.get(MORNING_BRIEF_ENABLED_KEY) == "true")
+    raw_time = stored.get(MORNING_BRIEF_TIME_KEY)
+    set_morning_brief_time(raw_time if isinstance(raw_time, str) and _MORNING_BRIEF_TIME.fullmatch(raw_time)
+                           else DEFAULT_MORNING_BRIEF_TIME)
     set_outbound_enabled(stored.get(OUTBOUND_ENABLED_KEY) == "true")
     limits = {}
     for key, default in OUTBOUND_DEFAULTS.items():

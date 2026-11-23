@@ -11,7 +11,8 @@ from tests import memory_support as sup
 from tests.db_support import DSN, run_db, v1_api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-_OPERATIONS = ("list", "get", "settings_get", "settings_put", "check")
+_WRITES = ("confirm", "confirm_many", "reject", "edit", "retry", "revive", "delete")
+_OPERATIONS = ("list", "get", "settings_get", "settings_put", "check", *_WRITES)
 
 
 def test_the_operations_are_the_operators_and_add_no_tool():
@@ -19,7 +20,10 @@ def test_the_operations_are_the_operators_and_add_no_tool():
     assert set(found) == {f"memory.{name}" for name in _OPERATIONS}
     for op in found.values():
         assert op.operator_only and op.tool is None and not op.hand and len(op.summary) <= 120
-        assert op.risk == ("write" if op.operation_id == "memory.settings_put" else "read")
+        assert op.description.startswith(op.summary)
+        assert op.risk == ("write" if op.operation_id.rsplit(".", 1)[1] in (*_WRITES, "settings_put") else "read")
+        if op.operation_id.rsplit(".", 1)[1] in _WRITES:
+            assert not op.audit_operator  # the candidate's erasable events own this trail
 
 
 def test_the_operator_lists_and_reads_candidates(monkeypatch, tmp_path):
@@ -90,3 +94,64 @@ def test_an_api_client_can_use_no_memory_operation(monkeypatch, tmp_path, action
             assert status == 403 and answer["error"]["code"] == "forbidden", answer
 
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_confirm_batch_has_independent_results_and_cannot_accept_cli_identity(monkeypatch, tmp_path):
+    repo = sup.synthetic_vault(tmp_path)
+
+    async def check(pool):
+        settings = await sup.configure_write(repo, pool)
+        numbers = [await sup.candidate(pool, statement=f"Preference {number}") for number in range(2)]
+        revisions = [await sup.revise_current(pool, number, settings) for number in numbers]
+        items = [{"candidate": f"M-{number}", "content_hash": revision["content_hash"]}
+                 for number, revision in zip(numbers, revisions)]
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("memory.confirm", {**items[0], "via": "cli"})
+            assert status == 400, answer
+            status, answer = await call("memory.confirm", {**items[0], "content_hash": "0" * 64})
+            assert status == 409 and answer["error"]["code"] == "conflict", answer
+            status, answer = await call("memory.confirm_many", {"items": [
+                items[0], {**items[1], "content_hash": "0" * 64}]})
+            assert status == 200, answer
+            results = answer["result"]["items"]
+            assert [item["ok"] for item in results] == [True, False]
+            assert results[0]["result"]["candidate"]["state"] == "confirmed"
+            assert results[1]["error"]["code"] == "conflict"
+            status, answer = await call("memory.confirm_many", {"items": []})
+            assert status == 400, answer
+            status, answer = await call("memory.reject", {"candidate": items[1]["candidate"], "reason": "not useful"})
+            assert status == 200 and answer["result"]["candidate"]["state"] == "rejected", answer
+            status, answer = await call("memory.delete", {"candidate": items[1]["candidate"]})
+            assert status == 200 and answer["result"]["deleted"], answer
+
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_candidate_edits_use_only_their_erasable_event_trail(monkeypatch, tmp_path):
+    from looper.db import memory as db_memory
+
+    repo = sup.synthetic_vault(tmp_path)
+
+    async def check(pool):
+        settings = await sup.configure_write(repo, pool)
+        number = await sup.candidate(pool)
+        revision = await sup.revise_current(pool, number, settings)
+        candidate = f"M-{number}"
+        async with v1_api(tmp_path, pool) as call:
+            changes = [{**sup.NOTE, "content": sup.NOTE["content"] + "Private synthetic correction.\n"}, sup.INDEX]
+            status, answer = await call("memory.edit", {"candidate": candidate,
+                                                        "content_hash": revision["content_hash"],
+                                                        "changes": changes})
+            assert status == 200 and answer["result"]["candidate"]["revision"] == 2, answer
+            assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE tool='memory.edit'") == 0
+            status, answer = await call("memory.delete", {"candidate": candidate})
+            assert status == 200 and answer["result"]["deleted"], answer
+            assert await db_memory.get(number, db=pool) is None
+            assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE tool='memory.delete'") == 0
+            await pool.execute("DELETE FROM system_settings WHERE key='memory_write'")
+            before = await pool.fetchval("SELECT count(*) FROM manager_actions")
+            status, answer = await call("memory.confirm", {"candidate": "M-9999", "content_hash": "0" * 64})
+            assert status == 403, answer
+            assert await pool.fetchval("SELECT count(*) FROM manager_actions") == before
+
+    run_db(check, monkeypatch, timeout=60)
