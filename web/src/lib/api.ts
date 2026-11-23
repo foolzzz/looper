@@ -45,6 +45,51 @@ export interface SelfCheck {
   fix: string;
 }
 
+export interface ProviderLimitWindow {
+  window_name: string;
+  status: "allowed" | "warning" | "rejected";
+  utilization: number | null;
+  resets_at: string | null;
+  window_minutes: number | null;
+  source: string;
+  record_id: number | null;
+  observed_at: string;
+}
+
+export interface ProviderDailyUsage {
+  day: string;
+  runs: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  cache_creation_input_tokens: number | null;
+  cost_usd: number | null;
+  quota_failures: number | null;
+}
+
+export interface ProviderLimits {
+  enabled: boolean;
+  providers: {
+    provider_id: string;
+    name: string;
+    cost_basis: "api_equivalent" | "reported";
+    windows: ProviderLimitWindow[];
+    usage: ProviderDailyUsage[];
+    admission: null;
+  }[];
+}
+
+export async function fetchProviderLimits(providerId: string, signal?: AbortSignal): Promise<ProviderLimits> {
+  const result = await callV1<ProviderLimits>("/api/v1/providers/limits", { provider_id: providerId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export function updateLimitSignalsSettings(enabled: boolean, confirmation?: V1PendingConfirmation) {
+  return confirmation ? confirmV1<{ enabled: boolean }>(confirmation.confirmation_id, confirmation.session)
+    : callV1<{ enabled: boolean }>("/api/v1/limit_signals_settings/update", { enabled });
+}
+
 /** A ready task's status: created (from the dashboard or by the Manager) and never started. */
 export const READY_STATUS = "init";
 export const READY_LABEL = "Ready — not started";
@@ -570,7 +615,7 @@ export interface ChatSettings {
   completion_turns: CompletionTurns;
   /** Whether the ledger records what waits, what was decided and who does what. Off by default. */
   ledger_enabled: boolean;
-  /** Bots with no operator id, returned when enabling the ledger. */
+  /** Present when an update turns the ledger on: bots with no operator id. */
   missing_operator_ids?: MissingOperatorBot[];
 }
 
@@ -578,6 +623,33 @@ export interface ChatSettingsUpdate {
   stop_enabled?: boolean | null;
   completion_turns?: CompletionTurns | null;
   ledger_enabled?: boolean | null;
+}
+
+/** Operator-only session routing controls, independent of client chat settings. */
+export interface SessionRoutingSettings {
+  /** Whether the default Manager gives each group and each other sender's direct chat a session of its own. Off by default. */
+  session_routing_enabled: boolean;
+  /** How many sessions keep a process running (1..16, default 2). */
+  max_resident: number;
+  /** Present when an update turns session routing on: bots with no operator id. Empty when every bot has one. */
+  missing_operator_ids?: MissingOperatorBot[];
+}
+
+export interface SessionRoutingSettingsUpdate {
+  session_routing_enabled?: boolean | null;
+  max_resident?: number | null;
+}
+
+export async function fetchSessionRoutingSettings(): Promise<SessionRoutingSettings> {
+  const result = await callV1<SessionRoutingSettings>("/api/v1/session_routing/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateSessionRoutingSettings(body: SessionRoutingSettingsUpdate): Promise<SessionRoutingSettings> {
+  const result = await callV1<SessionRoutingSettings>("/api/v1/session_routing/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Operator-only turn-context settings; independent of client chat controls. */

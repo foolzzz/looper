@@ -236,7 +236,8 @@ class ManagerFleet:
 
     def drain_waiting(self) -> dict[str, Any]:
         return {"manager_turns": [agent.agent_id for agent in self.agents()
-                                  if agent.busy or agent._handling is not None or agent._stop_tasks]}
+                                  if agent.busy or agent._handling is not None or agent._stop_tasks
+                                  or agent._router.pending()]}
 
     async def require_tool_hooks(self) -> None:
         """The outbound review was turned on: every Manager's process started without its hook stops."""

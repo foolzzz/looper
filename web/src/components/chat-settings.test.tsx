@@ -12,12 +12,15 @@ const SUMMARY = {
   oldest_pending_seconds: null, failing: false,
 };
 
+const ROUTING_NOTICE = "这些机器人的私聊暂时留在主会话里，直到你在 Settings → Channels 填上『我的 ID』";
 const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转述，直到你在 Settings → Channels 填上『我的 ID』";
 
 describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
   let stored: Record<string, unknown>;
+  let routing: Record<string, unknown>;
+  let routingPuts: unknown[];
   let context: Record<string, unknown>;
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
@@ -29,7 +32,11 @@ describe("Chat settings", () => {
   let metricsPuts: unknown[];
 
   beforeEach(() => {
-    stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false };
+    stored = {
+      stop_enabled: false, completion_turns: "off", ledger_enabled: false,
+    };
+    routing = { session_routing_enabled: false, max_resident: 2 };
+    routingPuts = [];
     context = { turn_context_enabled: false, timezone: null, server_timezone: "America/Los_Angeles",
       reply_language: "zh-CN", missing_operator_ids: [] };
     missing = [];
@@ -76,17 +83,31 @@ describe("Chat settings", () => {
         }
         return Response.json({ status: "ok", result: context });
       }
+      if (path.startsWith("/api/v1/session_routing/")) {
+        let body: { session_routing_enabled?: boolean; max_resident?: number | null } = {};
+        if (path.endsWith("/update")) {
+          body = JSON.parse(String(init?.body));
+          expect(Object.keys(body).every((key) => ["session_routing_enabled", "max_resident"].includes(key))).toBe(true);
+          routingPuts.push(body);
+          routing = { ...routing, ...body,
+            max_resident: body.max_resident === undefined ? routing.max_resident : body.max_resident ?? 2 };
+        }
+        return Response.json({ status: "ok", result: { ...routing,
+          ...(body.session_routing_enabled === true ? { missing_operator_ids: missing } : {}) } });
+      }
       if (!["/api/v1/chat_settings/get", "/api/v1/chat_settings/update"].includes(path)) {
         throw new Error(`Unexpected request: ${input}`);
       }
-      let body: { ledger_enabled?: boolean } | null = null;
+      type Body = { ledger_enabled?: boolean };
+      let body: Body = {};
       if (path === "/api/v1/chat_settings/update") {
         body = JSON.parse(String(init?.body));
-        expect(Object.keys(body!).every((key) => ["stop_enabled", "completion_turns", "ledger_enabled"].includes(key))).toBe(true);
+        expect(Object.keys(body!).every((key) => ["stop_enabled", "completion_turns", "research_order", "ledger_enabled"].includes(key))).toBe(true);
         puts.push(body);
         stored = { ...stored, ...body };
       }
-      const result = { ...stored, ...(body?.ledger_enabled === true ? { missing_operator_ids: missing } : {}) };
+      const lists = body.ledger_enabled === true;
+      const result = { ...stored, ...(lists ? { missing_operator_ids: missing } : {}) };
       return Response.json({ status: "ok", result });
     }));
     container = document.createElement("div");
@@ -345,5 +366,52 @@ describe("Chat settings", () => {
     expect(puts).toEqual([{ ledger_enabled: true }]);
     expect(container.querySelector("[role=status]")).toBeNull();
     expect(container.textContent).not.toContain(LEDGER_NOTICE);
+  });
+
+  it("turns session routing on, names the bots whose direct chats stay in the main session", async () => {
+    missing = [{ channel_id: "channel-lark", channel_type: "lark", name: "Example Lark" }];
+    await act(async () => root.render(<ChatSettingsSection />));
+    expect(container.querySelector("input[type=number]")).toBeNull();
+    const routing = container.querySelectorAll("input[type=checkbox]")[2] as HTMLInputElement;
+    expect(routing.checked).toBe(false);
+    await act(async () => routing.click());
+    expect(routingPuts).toEqual([{ session_routing_enabled: true }]);
+    expect(puts).toEqual([]);
+    await act(async () => (container.querySelector("input[id$='-stop']") as HTMLInputElement).click());
+    expect(routing.checked).toBe(true);
+    const notice = container.querySelector("[role=status]") as HTMLElement;
+    expect(notice.textContent).toContain(ROUTING_NOTICE);
+    expect(notice.querySelector("a")?.getAttribute("href")).toBe("#settings/channels");
+    expect(notice.querySelector("li")?.textContent).toBe("Example Lark");
+    expect(container.querySelector("input[type=number]")).not.toBeNull();
+  });
+
+  it("sends max_resident as an integer, rejects out-of-range values and restores the default with null", async () => {
+    routing.session_routing_enabled = true;
+    await act(async () => root.render(<ChatSettingsSection />));
+    const input = container.querySelector("input[type=number]") as HTMLInputElement;
+    expect(input.value).toBe("2");
+    const type = async (value: string) => {
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+        setter.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    const button = (label: string) =>
+      [...container.querySelectorAll("button")].find((b) => b.textContent === label) as HTMLButtonElement;
+    for (const bad of ["0", "17", "1.5", ""]) {
+      await type(bad);
+      await act(async () => button("Save").click());
+      expect(container.querySelector("[role=alert]")?.textContent).toContain("1 到 16");
+    }
+    expect(puts).toEqual([]);
+    await type("5");
+    await act(async () => button("Save").click());
+    expect(routingPuts).toEqual([{ max_resident: 5 }]);
+    expect(input.value).toBe("5");
+    await act(async () => button("Restore default").click());
+    expect(routingPuts).toEqual([{ max_resident: 5 }, { max_resident: null }]);
+    expect(input.value).toBe("2");
   });
 });

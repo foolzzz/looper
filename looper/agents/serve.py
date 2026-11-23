@@ -1198,6 +1198,7 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("cursor_login", "Cursor login"),), (("ttadk", "TTADK"),),
         (("llmrec", "Model request recording"),), (("gateway", "Local gateway"),),
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
+        (("provider_limits", "Provider quotas"),),
     )
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
@@ -1231,6 +1232,7 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_lark_cli, lark_enabled),
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),
+            self_check.provider_limit_checks(),
         )
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])
