@@ -1077,11 +1077,19 @@ class ResidentClaude:
         cancel = cancel or TurnCancel.never()
         if cancel.requested:  # stopped before anything was written: the process is untouched
             return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
-        checkpoint = (await self._tree.checkpoint() if self._tree is not None
-                      and cancel.cleanup is not StopCleanup.NONE else None)
-        if cancel.requested:  # the stop arrived while the before-prompt snapshot was read
-            return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
-        turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag, on_event=on_event,
+        checkpoint: frozenset[int] | None = None
+        checkpoint_taken = False
+
+        async def tracked_event(event: dict[str, Any]) -> None:
+            nonlocal checkpoint, checkpoint_taken
+            if _is_init(event) and not checkpoint_taken:
+                checkpoint_taken = True
+                # Cold-start stdio tools belong to the resident, before this turn's work.
+                checkpoint = await self._tree.checkpoint() if self._tree is not None else None
+            await on_event(event)
+
+        turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag,
+                         on_event=on_event if cancel.cleanup is StopCleanup.NONE else tracked_event,
                          done=asyncio.get_running_loop().create_future(), stop=stop)
         input_lost = False
         self._user_turn, self._cancel, self._interrupting = turn, cancel, None

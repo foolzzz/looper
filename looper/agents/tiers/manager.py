@@ -2533,6 +2533,8 @@ class ManagerAgent:
         state["token"], state["turn"] = token, turn
         prepared: Prepared | None = None
         try:
+            if lanes_settings.enabled():
+                self._running_token = token  # arrivals can preempt even while task facts are loading
             token.advance(TurnPhase.PREPARING)
             more = await token.step("task_facts", completion_events.task_facts([row["task_id"] for row in rows]))
             message = completion_events.completion_message(rows, channel_line=channel_line(context), more=more)

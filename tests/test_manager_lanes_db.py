@@ -121,6 +121,49 @@ def test_user_arrival_preempts_or_waits_for_the_completion_runtime(monkeypatch, 
 
 
 @pytest.mark.parametrize("routing", [False, True])
+def test_user_arrival_preempts_while_completion_task_facts_are_loading(monkeypatch, tmp_path, routing):
+    monkeypatch.setattr(ApiSession, "can_interrupt", True)
+    monkeypatch.setattr(session_routing, "routes", lambda _: routing)
+
+    async def run(pool):
+        loading, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def slow_facts(task_ids):
+            loading.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(completion_events, "task_facts", slow_facts)
+        async with _manager(pool, tmp_path, monkeypatch, [_script("user answer")]) as chat:
+            due = await _record_end(chat, pool, tmp_path)
+            settled = _observe_settles(chat.bus, monkeypatch)
+            await chat.bus.start()
+            await chat.manager.start(chat.bus)
+            await chat.bus.publish(due)
+            await asyncio.wait_for(loading.wait(), 15)
+            session = chat.manager._sessions["main"]
+            token = session.running_token
+            user = _user()
+            await chat.bus.publish(user)
+            await until(lambda: chat.manager._router.queued_count(session) == 1
+                        or due.message_id in settled, "arrival dispatched during task facts")
+            assert token is not None and token.cancel.requested
+            assert token.stop.via == "preempt" and token.preempted_by == user.message_id
+            await until(lambda: user.message_id in settled, "fallback and user reply without task facts")
+            assert cancelled.is_set()
+            assert settled == [due.message_id, user.message_id]
+            row = await pool.fetchrow("SELECT state, reason, delivery FROM manager_events")
+            assert tuple(row) == ("fallback", "turn_stopped", "sent")
+            assert [reply.payload["text"] for reply in _replies(chat.bus)] == [NOTICE, "user answer"]
+            assert len(chat.model.requests) == 1
+            assert "was interrupted so you could answer" in json.dumps(chat.model.requests[0].body["input"])
+
+    run_db(run, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize("routing", [False, True])
 def test_lanes_off_keeps_completion_input_records_and_settle_order(monkeypatch, tmp_path, routing):
     # Fixed behavior baseline: ecc2eedbf2ac4a1b44ff9078e634002c228458c1.
     monkeypatch.setattr(lanes_settings, "enabled", lambda: False)

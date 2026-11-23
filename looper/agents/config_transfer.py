@@ -579,12 +579,14 @@ async def export_chunks(
 
     if manager_lanes := await lanes_settings.portable(conn):
         head["settings"]["manager_lanes"] = manager_lanes
+        if manager_lanes["enabled"]:
+            summary.counts["settings.manager_lanes"] = len(manager_lanes)
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
                            "models": len(head["models"]), "profiles": len(head["profiles"]),
                            "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]),
                            "settings.scheduler": len(scheduler), "settings.chat": len(chat),
-                           "settings.cost_guard": len(cost_guard), "settings.manager_lanes": len(manager_lanes),
+                           "settings.cost_guard": len(cost_guard),
                            "channels": len(channels),
                            "installs": len(head["installs"])})
     summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])

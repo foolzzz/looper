@@ -49,7 +49,7 @@ def classify_arrival(running_origin: TurnOrigin | None, can_interrupt: bool, mid
 
 
 def prepare_background(session: ManagerSession, token: TurnToken) -> None:
-    """Request a before-prompt process checkpoint only for enabled background turns."""
+    """Request an after-init process checkpoint only for enabled background turns."""
     from . import lanes_settings
 
     if lanes_settings.enabled() and token.ops_turn is not None \

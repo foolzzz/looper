@@ -105,7 +105,7 @@ def test_frequent_preemption_warns_once_per_day(monkeypatch, caplog):
 
 
 _CHILDREN = '''\
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 def out(event):
     print(json.dumps(event), flush=True)
 for raw in sys.stdin:
@@ -115,7 +115,16 @@ for raw in sys.stdin:
              'session_id': 'synthetic', 'total_cost_usd': 0, 'num_turns': 1})
         continue
     text = msg['message']['content']
+    if text == 'background':
+        # A cold resident starts persistent stdio tools before announcing init.
+        tool = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                                start_new_session=True)
+        with open('tool.pid', 'w') as stream:
+            stream.write(str(tool.pid))
     out({'type': 'system', 'subtype': 'init', 'session_id': 'synthetic'})
+    if text == 'background':
+        while not os.path.exists('init-observed'):
+            time.sleep(0.01)
     if text in ('old', 'background'):
         child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
                                  start_new_session=True)
@@ -144,8 +153,9 @@ def test_control_preemption_cleans_new_children_or_kills_the_resident(
         resident = ResidentClaude(label="preemption-test")
         await resident.start([executable], cwd=str(tmp_path), signature=None)
         initial_pid = resident.pid
-        async def event(_):
-            pass
+        async def event(value):
+            if value.get('subtype') == 'init' and (tmp_path / 'tool.pid').exists():
+                (tmp_path / 'init-observed').touch()
         old = new = None
         task = None
         try:
@@ -162,6 +172,7 @@ def test_control_preemption_cleans_new_children_or_kills_the_resident(
             else:
                 raise AssertionError("the background turn did not start")
             new = int(pid_file.read_text())
+            tool = int((tmp_path / "tool.pid").read_text())
             cancel.cleanup = StopCleanup.REQUIRED
             cancel.request()
             result = await asyncio.wait_for(task, 8)
@@ -169,12 +180,12 @@ def test_control_preemption_cleans_new_children_or_kills_the_resident(
             assert table is not None and new not in table
             if checkpoint_available:
                 assert result.stopped is StopMethod.CONTROL
-                assert old in table and resident.pid == initial_pid
+                assert old in table and tool in table and resident.pid == initial_pid
                 again = await asyncio.wait_for(resident.run_turn("next", event), 5)
                 assert again.result_event['result'] == str(initial_pid)
             else:
                 assert result.stopped is StopMethod.KILL
-                assert not resident.started and old not in table
+                assert not resident.started and old not in table and tool not in table
         finally:
             if task is not None and not task.done():
                 task.cancel()

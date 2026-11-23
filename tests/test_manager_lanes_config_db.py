@@ -11,9 +11,28 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-async def _export(pool):
+async def _export(pool, summary=None):
     return json.loads("".join([chunk async for chunk in config_transfer.export_chunks(
-        pool, include_projects=False, include_secrets=False)]))
+        pool, include_projects=False, include_secrets=False, summary=summary)]))
+
+
+@pytest.mark.parametrize("enabled", [None, False, True])
+def test_export_summary_only_includes_lanes_when_enabled(enabled):
+    async def check(pool):
+        if enabled is not None:
+            await system_settings.put_settings({lanes_settings.KEY: json.dumps(enabled)}, pool=pool)
+        summary = config_transfer.ExportSummary()
+        document = await _export(pool, summary)
+        if enabled is not None:
+            assert document["settings"]["manager_lanes"] == {"enabled": enabled}
+        else:
+            assert "manager_lanes" not in document["settings"]
+        if enabled:
+            assert summary.counts["settings.manager_lanes"] == 1
+        else:
+            assert "settings.manager_lanes" not in summary.counts
+
+    run_db(check)
 
 
 def test_lanes_config_preview_apply_export_and_reset():
