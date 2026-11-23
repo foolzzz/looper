@@ -431,8 +431,12 @@ def _failed_run(states: Sequence[str]) -> bool:
 
 async def _last_user_message_at(channel_id: str, chat: str) -> datetime | None:
     thread = channel_thread_id(channel_id, chat, "manager", "manager")
-    return await connection.get_pool().fetchval(
-        "SELECT max(created_at) FROM chat_messages WHERE session_id = $1 AND role = 'user'", thread)
+    try:
+        return await connection.get_pool().fetchval(
+            "SELECT max(created_at) FROM chat_messages WHERE session_id = $1 AND role = 'user'", thread)
+    except Exception:
+        logger.warning("idle checks: could not read the last user message", exc_info=True)
+        return None
 
 
 async def _remember(check: Mapping[str, Any], text: str, *, failure: str | None = None) -> None:
@@ -466,11 +470,15 @@ async def deliver_result(check: Mapping[str, Any], reply: str, *, post: PostFn, 
         await settle(check_id, "failed", reason="invalid_reply", reply=reply, record_id=record_id)
         return "failed"
     key = f"idle-{check_id}"
+    spoke = await _last_user_message_at(channel_id, chat)
+    if spoke is not None and spoke > check["created_at"]:
+        await settle(check_id, "preempted", record_id=record_id)
+        return "preempted"
     try:
         decided = await delivery.decide(
             delivery.Delivery(delivery.DeliveryKind.IDLE_CHECK, delivery.Urgency.NORMAL, delivery.ChatKind.DIRECT),
             dedupe_key=key, channel_id=channel_id, chat=chat,
-            last_user_message_at=await _last_user_message_at(channel_id, chat), source_ref=str(check_id),
+            last_user_message_at=spoke, source_ref=str(check_id),
             manager_id=check["manager_id"], now=now)
     except Exception:  # not urgent: unlike a gate's reminder, it is not sent without the layer's say
         logger.warning("idle check %s: the delivery decision failed", check_id, exc_info=True)
@@ -482,6 +490,10 @@ async def deliver_result(check: Mapping[str, Any], reply: str, *, post: PostFn, 
     if decided.outcome is not delivery.Outcome.SEND:
         await settle(check_id, "deferred", reply=reply, record_id=record_id)
         return "deferred"
+    spoke = await _last_user_message_at(channel_id, chat)
+    if spoke is not None and spoke > check["created_at"]:
+        await settle(check_id, "preempted", record_id=record_id)
+        return "preempted"
     text = f"{_clip(reply.strip(), REPLY_MAX - len(DETAILS_LINE) - 2)}\n\n{DETAILS_LINE}"
     external: str | None = None
     if not await store.claim_sending(check_id):
