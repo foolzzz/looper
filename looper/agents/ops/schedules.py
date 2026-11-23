@@ -148,7 +148,8 @@ async def _runs_in_scope(call: Call, runs: list[dict[str, Any]]) -> list[dict[st
 async def _in_scope(call: Call, view: dict[str, Any]) -> dict[str, Any]:
     """A schedule's view as the Manager may see it: its last run as ``_runs_in_scope``, and for a scoped Manager
     none of its tasks' spend, another owner's template selection, nor its Planner session's last task unless
-    that task is its own."""
+    that task is its own. A usage-window deferral is an operator schedule fact, not a tool result."""
+    view.pop("usage_hold", None)
     if not call.scoped:
         return view
     view = {**view, **({"spent_today_usd": None} if "spent_today_usd" in view else {})}

@@ -613,6 +613,7 @@ async def export_chunks(
                 "default_workflow": project["default_workflow"],
                 "execution": omit_unset_subagents({column: project[column] for column in EXECUTION_COLUMNS}) | (
                     {"acceptance_checks": project["acceptance_checks"]} if project.get("acceptance_checks") else {}),
+                **({"skill_proposals": project["skill_proposals"]} if project.get("skill_proposals") else {}),
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
                 "items": owned,
@@ -1186,6 +1187,36 @@ class _Importer:
         self.blocked_models: set[tuple[str, str, str]] = set()
         self.blocked_profiles: set[str] = set()
         self.seen_registry: dict[str, set[Any]] = defaultdict(set)
+        self.acp_profiles = {name for name, (_, spec) in self.profiles.items() if spec.runtime.type == "acp"}
+        self.acp_role_templates: set[tuple[str, str]] = set()
+
+    def block_acp_profiles(self, data: Mapping[str, Any]) -> None:
+        """Identify forward references before any profile or fallback can be written."""
+        runtime_names = {"acp", *(name for name, (_, spec) in self.runtimes.items() if spec.type == "acp")}
+        runtime_names.update(entry["name"].strip() for entry in data.get("runtimes", [])
+                             if isinstance(entry, Mapping) and entry.get("type") == "acp"
+                             and isinstance(entry.get("name"), str))
+        entries = [entry for entry in data.get("profiles", []) if isinstance(entry, Mapping)
+                   and isinstance(entry.get("name"), str)]
+        self.acp_profiles.update(entry["name"].strip() for entry in entries
+                                 if isinstance(entry.get("runtime"), str) and entry["runtime"] in runtime_names)
+        # Overlay the file before checking existing chains too; clearing a regular Profile's invalid fallback
+        # repairs the chain, while a new reference to a stored hop into ACP must still be skipped.
+        fallbacks = {**self.profile_fallbacks,
+                     **{entry["name"].strip(): entry.get("fallback") for entry in entries}}
+        while True:
+            blocked = {name for name, fallback in fallbacks.items()
+                       if isinstance(fallback, str) and fallback in self.acp_profiles}
+            if blocked <= self.acp_profiles:
+                break
+            self.acp_profiles.update(blocked)
+
+    def _refuses_acp(self, name: Any) -> bool:
+        return isinstance(name, str) and name in self.acp_profiles
+
+    def _check_acp_reference(self, name: Any) -> None:
+        if self._refuses_acp(name):
+            raise _Skip(f"ACP Reviewer pilot Profile {name!r} and its fallback selections cannot be imported")
 
     def _profile_spec(self, profile_id: str, name: str, runtime: str, model_key: tuple[str, str, str],
                       effort: str | None, agent_teams: bool, custom_prompt: str = "", *, web_search: bool = True) -> Any:
@@ -1250,6 +1281,8 @@ class _Importer:
             try:
                 name = label = entry_name(entry.get("name"), "runtime")
                 runtime = adapter(entry.get("type") if isinstance(entry.get("type"), str) else "")
+                if runtime.type == "acp":
+                    raise _Skip("ACP Reviewer pilot runtimes are registered only through operator settings")
                 try:
                     launcher = Launcher(entry.get("launcher", "native"))
                 except (TypeError, ValueError):
@@ -1452,6 +1485,7 @@ class _Importer:
                 raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
             name = label = entry_name(entry.get("name"), "Agent Profile")
             self._unique("profiles", name)
+            self._check_acp_reference(name)
             fallback = entry_name(entry["fallback"], "fallback Agent Profile") if entry.get("fallback") is not None else None
             runtime = _string(entry.get("runtime"), "runtime", required=True)
             if runtime in self.blocked_runtimes or runtime not in self.runtimes:
@@ -1493,6 +1527,8 @@ class _Importer:
         from .profile_registry import RegistryError, check_roles, servable_roles
 
         for source in self.profiles:
+            if self._refuses_acp(source):
+                continue
             seen = {source}
             current = source
             hops = 0
@@ -1534,6 +1570,7 @@ class _Importer:
 
         if name is None:
             return None
+        self._check_acp_reference(name)
         if name in self.blocked_profiles or name not in self.profiles:
             raise _Skip(f"no valid Agent Profile {name!r} here or in the file")
         profile_id, spec = self.profiles[name]
@@ -1952,6 +1989,7 @@ class _Importer:
             def profile(name: str | None, role: str) -> str | None:
                 if name is None:
                     return None
+                self._check_acp_reference(name)
                 if name in self.blocked_profiles or name not in self.profiles:
                     self.plan.notes.append(f"workflow {key}: no valid Agent Profile {name!r}; imported without it")
                     return None
@@ -2140,6 +2178,12 @@ class _Importer:
                     items.append(item_id)
             profile_id = None
             if profile is not None:
+                if self._refuses_acp(profile):
+                    self.invalid_role_templates.add((project_id, key))
+                    self.acp_role_templates.add((project_id, key))
+                    self.record(section, f"{label}{key}", Action.SKIPPED,
+                                reason=f"ACP Reviewer pilot Profile {profile!r} cannot be imported into a role template")
+                    continue
                 if profile in self.blocked_profiles:
                     self.invalid_role_templates.add((project_id, key))
                     self.record(section, f"{label}{key}", Action.SKIPPED,
@@ -2174,6 +2218,8 @@ class _Importer:
 
         if name is None:
             return None
+        if self._refuses_acp(name):
+            raise ConfigFileError(f"ACP Reviewer pilot Profile {name!r} cannot be imported into a task template")
         if not isinstance(name, str) or name in self.blocked_profiles or name not in self.profiles:
             raise ConfigFileError(f"{role}: no valid Agent Profile {name!r} here or in the file; import it first")
         identity, spec = self.profiles[name]
@@ -2279,6 +2325,18 @@ class _Importer:
                     raw_profiles = template.get("profiles", {})
                     if not isinstance(raw_profiles, Mapping):
                         raise ConfigFileError(f"{identity}/{key}: profiles must be an object")
+                    role_refs = template.get("role_templates", [])
+                    if not isinstance(role_refs, list):
+                        raise ConfigFileError(f"{identity}/{key}: role_templates must be a list")
+                    acp_role_template = next((role_key for role_key in role_refs if isinstance(role_key, str)
+                                              and ((project_id, role_key) in self.acp_role_templates
+                                              or self._refuses_acp(profile_names.get(
+                                                  self.role_template_values.get(project_id, {}).get(role_key, {}).get("profile_id"))))), None)
+                    acp_profile = next((profile for profile in raw_profiles.values() if self._refuses_acp(profile)), None)
+                    if acp_profile is not None or acp_role_template is not None:
+                        self.record("manager.templates", f"{identity}/{key}", Action.SKIPPED,
+                                    reason="ACP Reviewer pilot Profile selections cannot be imported into a task template")
+                        continue
                     profiles = {}
                     for role, profile in raw_profiles.items():
                         if role not in ("planner", "worker", "reviewer") or not isinstance(profile, str):
@@ -2431,6 +2489,8 @@ class _Importer:
             spec = specs.get(identity)
             if spec is None or spec.runtime.type not in runtimes.ADAPTERS:
                 raise RegistryError(f"no selectable Agent Profile {identity!r} here or in the file")
+            if spec.runtime.type == "acp":
+                raise RegistryError("ACP Reviewer pilot Profile selections cannot be imported into a schedule")
             check_roles(spec, (role,))
 
         for role, identity in fixed_profiles(template, profiles).items():
@@ -2530,6 +2590,7 @@ class _Importer:
             if role not in TASK_PROFILE_ROLES:
                 raise _Skip(f"profiles: a schedule chooses the Agent Profile of its {', '.join(TASK_PROFILE_ROLES)} "
                             f"only, not {role!r}")
+            self._check_acp_reference(name)
             if not isinstance(name, str) or name in self.blocked_profiles or name not in self.profiles:
                 raise _Skip(f"profiles.{role}: no Agent Profile {name!r} here or in the file")
             profile_id, spec = self.profiles[name]
@@ -2723,6 +2784,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
             # Resolve the projected dependencies and reject the complete graph before any import writes.
             await import_config(conn, data, apply=False)
     importer = _Importer(conn, await _Target.read(conn), apply, created_directories)
+    importer.block_acp_profiles(data)
     importer.imported_managers = {entry.get("id") for entry in data.get("managers", [])
                                   if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)}
     for entry in data.get("runtimes", []):

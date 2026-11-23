@@ -1,0 +1,11 @@
+{
+  "base": "53077fbd62c4712c404bd483b32a69b5c0b8c248",
+  "sha256": {
+    "prompts": "185578f54cf824a4b40068100cb3f5f52e90ada8f4d0c175a4b9fbaeabfd0f98",
+    "tools": "76a6006374afaae65cb1525742bf74c3c99dc0a7954e441d51844e7668655346",
+    "commands": "ea5faa57c9cd6a88a9079704a8da42f4931522ed6adb000ed311ffd5ff21a01a",
+    "signatures": "731a6f8314147f2d677d0e09ca287c9d490629795f095dbc6c49de6b594320a7",
+    "bindings": "b1ca5940d384374830d1604c6074e2913cce330cb860fbe3b461ae7eb33b762a",
+    "existing_grok_reviewer": "f85253a66cdfbac51d71ae9c0efc262f20a14b78a1b4a7a7abd12d5c2b9a0274"
+  }
+}

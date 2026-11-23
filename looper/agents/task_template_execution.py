@@ -33,6 +33,9 @@ async def merged_profiles(template: TaskTemplate | None, profiles: Mapping[str, 
         if allowed and profile not in {p["id"] for p in allowed}:
             raise TemplateError(f"{role} Agent Profile {profile!r} is not on the project's list")
         try:
+            from .acp_guards import refuse_profile
+
+            await refuse_profile(profile, "task templates", pool=pool)
             await check_selection(profile, [role], pool=pool)
         except RegistryError as exc:
             raise TemplateConflict(f"the template {template.name if template else 'schedule'}'s {role} Agent Profile can no longer run the {role}: {exc}") from None
@@ -70,7 +73,9 @@ def validate_role_dependencies(template: TaskTemplate, project: Mapping[str, Any
                     raise RegistryError(f"role {key}'s Agent Profile is not on the project's list")
                 profile_check(profile, kind.agent.value)
             except RegistryError as exc:
-                if not interactive:
+                from .acp_guards import AcpSelectionError
+
+                if not interactive or isinstance(exc, AcpSelectionError):
                     raise TemplateError(str(exc)) from None
                 profile = None
                 if fallbacks is not None:
@@ -105,13 +110,16 @@ async def template_roles(template: TaskTemplate, project: Mapping[str, Any], *, 
         if row["profile_id"]:
             role = "worker" if row["kind"] == "work" else "reviewer"
             try:
+                from .acp_guards import refuse_profile
+
+                await refuse_profile(row["profile_id"], "task templates", pool=pool)
                 await check_selection(row["profile_id"], [role], pool=pool)
             except RegistryError as exc:
-                errors[(row["profile_id"], role)] = str(exc)
+                errors[(row["profile_id"], role)] = exc
 
     def check(profile_id: str, role: str) -> None:
         if error := errors.get((profile_id, role)):
-            raise RegistryError(error)
+            raise error
 
     return validate_role_dependencies(template, project, rows, {p["id"] for p in allowed}, items, check,
                                       interactive=interactive, fallbacks=fallbacks)

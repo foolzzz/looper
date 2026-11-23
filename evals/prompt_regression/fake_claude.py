@@ -186,7 +186,9 @@ def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> di
                 "adjudications": script["panel_adjudications"], "final": FINAL}
     if "accept" in allowed:
         return {"decision": "accept", "reason": "meets the acceptance criteria", "summary": "The step is done.",
-                "final": FINAL, **({"gates": gates} if gates else {})}
+                "final": FINAL, **({"gates": gates} if gates else {}),
+                **({"skill_proposals": script["skill_proposals"]}
+                   if step and script.get("skill_proposals_step") == step.group(1) else {})}
     if "review" in allowed and "needs a passing review" in message:
         return {"decision": "review", "reason": "the step asks for an independent review"}
     replacement = (script.get("decision_replans") or {}).get(step.group(1) if step else "")
