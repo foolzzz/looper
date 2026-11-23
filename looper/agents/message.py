@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, TypedDict
 
 
@@ -35,6 +35,9 @@ class MessageType(str, Enum):
     # A Manager → itself: completion events of one chat wait for its completion turn (payload: ``manager_id``,
     # ``channel_id``, ``chat``; ``completion_events``). Only a wake-up: the events are claimed from the table.
     COMPLETION_DUE = "completion_due"
+    # A Manager → itself: an idle check (a row of ``idle_checks``) waits for its turn (payload: ``check_id``).
+    # Only a wake-up: the check is read from its row, and one that is not ``running`` is not handled.
+    IDLE_CHECK_DUE = "idle_check_due"
 
     # Manager ↔ Planner
     TASK_REQUEST = "task_request"
@@ -81,6 +84,13 @@ class MessageType(str, Enum):
     HEARTBEAT = "heartbeat"
     AGENT_LIFECYCLE = "agent_lifecycle"
     SYSTEM_EVENT = "system_event"
+
+
+class CancelBy(StrEnum):
+    """The control caller responsible for a task cancellation, carried in its envelope."""
+
+    USER = "user"
+    MANAGER = "manager"
 
 
 class RestartMode(str, Enum):

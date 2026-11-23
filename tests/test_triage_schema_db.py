@@ -8,7 +8,7 @@ import pytest
 from looper.db import connection, subscriptions
 from looper.db.manager_events import EventKind, Reason
 from tests.bridge_schema_support import structure, witness
-from tests.db_support import DSN, fresh_schema, run_db
+from tests.db_support import DSN, dropped_tables, fresh_schema, run_db
 from tests.subscription_support import SOURCE, source
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
@@ -18,29 +18,29 @@ def test_triage_upgrade_matches_fresh_and_reopen_does_not_replay():
     async def check():
         async with fresh_schema() as pool, fresh_schema() as fresh:
             await connection.ensure_schema(pool)
-            await pool.execute("""
-                DROP TABLE morning_brief_triage, triage_event_sources, triage_events;
-                DROP FUNCTION triage_drop_event();
-                ALTER TABLE subscription_runs DROP COLUMN window_seqs;
-                ALTER TABLE subscriptions DROP CONSTRAINT subscriptions_output_kind_check;
-                ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_output_kind_check
-                    CHECK (output_kind IN ('push', 'leads', 'intents'));
-                ALTER TABLE manager_events DROP CONSTRAINT manager_events_task;
-                ALTER TABLE manager_events ALTER COLUMN task_id SET NOT NULL;
-                ALTER TABLE manager_events DROP CONSTRAINT manager_events_kind_check;
-                ALTER TABLE manager_events ADD CONSTRAINT manager_events_kind_check CHECK (kind IN ('task_end'));
-                ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check;
-                ALTER TABLE manager_events ADD CONSTRAINT manager_events_reason_check
-                    CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', 'turn_timeout', 'turn_stopped',
-                                      'empty_reply', 'send_failed', 'queue_deadline', 'restart', 'no_chat', 'target_changed'));
-            """)
-            await pool.execute("INSERT INTO system_settings (key, value) VALUES ('synthetic-saved-choice', 'keep')")
-            async with pool.acquire() as conn:
-                before = await witness(conn)
-                async with conn.transaction(readonly=True):
-                    assert await connection.schema_change_pending(conn)
-                assert await witness(conn) == before
-            await connection.ensure_schema(pool)
+            async with dropped_tables(pool, "triage_event_sources", "triage_events"):
+                await pool.execute("""
+                    DROP FUNCTION triage_drop_event();
+                    ALTER TABLE subscription_runs DROP COLUMN window_seqs;
+                    ALTER TABLE subscriptions DROP CONSTRAINT subscriptions_output_kind_check;
+                    ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_output_kind_check
+                        CHECK (output_kind IN ('push', 'leads', 'intents'));
+                    ALTER TABLE manager_events DROP CONSTRAINT manager_events_task;
+                    ALTER TABLE manager_events ALTER COLUMN task_id SET NOT NULL;
+                    ALTER TABLE manager_events DROP CONSTRAINT manager_events_kind_check;
+                    ALTER TABLE manager_events ADD CONSTRAINT manager_events_kind_check CHECK (kind IN ('task_end'));
+                    ALTER TABLE manager_events DROP CONSTRAINT manager_events_reason_check;
+                    ALTER TABLE manager_events ADD CONSTRAINT manager_events_reason_check
+                        CHECK (reason IN ('off', 'group_chat', 'manager_off', 'turn_failed', 'turn_timeout', 'turn_stopped',
+                                          'empty_reply', 'send_failed', 'queue_deadline', 'restart', 'no_chat', 'target_changed'));
+                """)
+                await pool.execute("INSERT INTO system_settings (key, value) VALUES ('synthetic-saved-choice', 'keep')")
+                async with pool.acquire() as conn:
+                    before = await witness(conn)
+                    async with conn.transaction(readonly=True):
+                        assert await connection.schema_change_pending(conn)
+                    assert await witness(conn) == before
+                await connection.ensure_schema(pool)
             await connection.ensure_schema(fresh)
             async with pool.acquire() as conn, fresh.acquire() as other:
                 assert await structure(conn) == await structure(other)
