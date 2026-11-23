@@ -13,6 +13,7 @@ import shutil
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -1453,6 +1454,23 @@ def test_every_server_installs_gh_before_starting(tmp_path: Path, monkeypatch: p
         pytest.fail("no server may start")
 
 
+def test_a_server_that_exits_before_answering_shows_its_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            capsys: pytest.CaptureFixture[str]) -> None:
+    def exits(*_: Any, stdout: Any, **__: Any) -> SimpleNamespace:
+        stdout.write("OSError: [Errno 98] address already in use\n")
+        stdout.flush()
+        return SimpleNamespace(poll=lambda: 1, returncode=1)
+
+    monkeypatch.setattr(runner, "free_port", lambda: 49152)
+    monkeypatch.setattr(runner.subprocess, "Popen", exits)
+    with pytest.raises(runner.EvalError, match=r"exited \(1\)"), runner.running_server(
+        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        log_path=tmp_path / "serve.log",
+    ):
+        pytest.fail("no server may start")
+    assert "address already in use" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("rooted", [False, True])
 def test_eval_server_projects_root_preserves_default_ops(tmp_path, monkeypatch, rooted):
     import tomllib
@@ -2159,6 +2177,18 @@ def test_ports_handed_out_in_one_process_are_distinct() -> None:
     with ThreadPoolExecutor(max_workers=8) as pool:
         ports = list(pool.map(lambda _: runner.free_port(), range(64)))
     assert len(set(ports)) == 64
+
+
+def test_a_port_handed_out_is_out_of_reach_of_other_processes() -> None:
+    port = runner.free_port()
+    # Below the dynamic ports Linux and macOS give a port-0 bind or an outgoing connection.
+    assert port < 32768
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", port))  # nothing listens on it: only the lock can keep another process off
+    claimed = subprocess.run(
+        [sys.executable, "-c", f"from evals.prompt_regression import runner; print(runner._claim({port}))"],
+        cwd=runner.REPO_ROOT, capture_output=True, text=True, timeout=60, check=True).stdout
+    assert claimed.strip() == "False"
 
 
 class _CostlyApi:
