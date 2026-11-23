@@ -94,7 +94,7 @@ def test_guard_error_has_one_global_key(monkeypatch):
     item = alerts.Alert(alerts.AlertKind.GUARD_ERROR, cg.Scope(cg.BudgetScope.GLOBAL_DAY, 'global'), None, DAY)
     asyncio.run(alerts.flush((item,)))
     assert claim.await_args.args[0] == 'cost_guard_alert:guard_error:global_day:global:none'
-    assert '花费守卫' in sender.await_args.args[2]
+    assert '定时触发检查失败时跳过本次触发' in sender.await_args.args[2]
 
 
 def test_rollover_sends_one_summary_and_cleans_old_claims(monkeypatch):

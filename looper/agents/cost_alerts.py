@@ -109,7 +109,7 @@ async def _text(item: Alert) -> str:
     from .cost_guard import BACKGROUND, Currency, RunKind
 
     if item.kind is AlertKind.GUARD_ERROR:
-        return '花费守卫：今天的花费计数或准入检查出错，已继续原执行路径；对外动作仍须通过审查。\n' + _link()
+        return '花费守卫：今天的花费计数或准入检查出错；定时触发检查失败时跳过本次触发，对外动作仍须通过审查。\n' + _link()
     scope = await _scope_name(item)
     currency = '等价花费' if item.currency is Currency.EQUIVALENT else '真钱'
     if item.kind is AlertKind.NEAR_LIMIT:

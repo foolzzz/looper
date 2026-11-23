@@ -4,8 +4,8 @@ from __future__ import annotations
 import asyncpg
 
 name = "schedule_equivalent_budget"
-order = 1440
-pending_order = 1440
+order = 1600
+pending_order = 1600
 fresh_ddl = """
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS daily_budget_equivalent_usd DOUBLE PRECISION
   CHECK (daily_budget_equivalent_usd > 0);

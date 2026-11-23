@@ -1002,7 +1002,8 @@ class Scheduler:
                 raise held
             usage_windows.clear_schedule(schedule["id"])
             admission = await observe_schedule(schedule, defer_alerts=True)
-        if admission is not None and admission.decision is Decision.DENY and admission.action is LimitAction.SKIP:
+        if (admission is not None and admission.decision is Decision.DENY
+                and admission.action is LimitAction.SKIP and admission.reason is not cost_guard.DenialReason.GUARD_ERROR):
             scope = admission.scope
             assert scope is not None and scope.limit_usd is not None
             error = (f"{scope.scope.value} {scope.scope_ref}: today's spent and reserved ${admission.spent_usd:.4f}, "
@@ -1020,7 +1021,8 @@ class Scheduler:
             notices.append(admission.alerts)
         budget = schedule["daily_budget_usd"]
         split_enforced = (cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE
-                          and schedule.get("daily_budget_equivalent_usd") is not None)
+                          and schedule.get("daily_budget_equivalent_usd") is not None
+                          and admission is not None and admission.problem is None)
         if budget is not None and not split_enforced:
             spent = await db_schedules.spent_since(conn, schedule["id"], self.day_start(now))
             if spent >= budget:
@@ -1030,6 +1032,15 @@ class Scheduler:
                     return _Launched(await self._skip(conn, "skipped_budget", now, common, fired_at=now, error=error))
                 return _Launched(await self._put(conn, run_id, None, status="skipped_budget", fired_at=now,
                                                  finished_at=now, error=error))
+        if (admission is not None and admission.reason is cost_guard.DenialReason.GUARD_ERROR
+                and admission.decision is Decision.DENY):
+            # Failed split accounting cannot bypass the legacy cap above or launch an unchecked run.
+            error = f"{admission.reason.value}: {admission.problem}"
+            if run_id is None:
+                assert common is not None
+                return _Launched(await self._skip(conn, "skipped_budget", now, common, fired_at=now, error=error))
+            return _Launched(await self._put(conn, run_id, None, status="skipped_budget", fired_at=now,
+                                             finished_at=now, error=error))
         # The run's timeout is fixed as it starts; changing the schedule or the default later leaves it be.
         timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
                                                                       schedule["run_timeout_seconds"], conn)}

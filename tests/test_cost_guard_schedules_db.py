@@ -80,3 +80,32 @@ def test_budget_denial_precedes_rejected_window_even_if_already_noted(monkeypatc
         finally:
             usage_windows.clear_cache()
     run_scheduled(check, monkeypatch, tmp_path)
+
+
+def test_schedule_accounting_exception_commits_skip_without_advancing_cursor(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    from looper.agents import cost_alerts
+
+    async def check(env):
+        sid = await started(env, target=None)
+        before = await cursor(env, sid)
+        await env.pool.execute('UPDATE schedules SET daily_budget_usd=1, daily_budget_equivalent_usd=5 WHERE id=$1', sid)
+        guard = cg.Guard(Config(mode=Mode.ENFORCE), day_start=env.scheduler.day_start,
+                         clock=env.clock, pool=env.pool)
+        monkeypatch.setattr(cg, '_guard', guard)
+        monkeypatch.setattr(cg, '_schedule_launch', AsyncMock(side_effect=OSError('synthetic profile failure')))
+        published = []
+
+        async def flush(alerts):
+            # Publication follows the real scheduler transaction, even when accounting failed.
+            row = await env.pool.fetchrow('SELECT status,error FROM schedule_runs WHERE schedule_id=$1', sid)
+            assert row['status'] == 'skipped_budget' and 'guard_error' in row['error']
+            published.extend(alerts)
+
+        monkeypatch.setattr(cost_alerts, 'flush', flush)
+        await env.due(sid)
+        await env.scheduler._fire_due(env.clock.now)
+        assert await cursor(env, sid) == before
+        assert [a.kind for a in published] == [cost_alerts.AlertKind.GUARD_ERROR]
+        assert await env.pool.fetchval('SELECT count(*) FROM tasks WHERE project_id=$1', env.project_id) == 0
+    run_scheduled(check, monkeypatch, tmp_path)

@@ -24,7 +24,7 @@ def row(kind='agent', equivalent=None):
         gate_command=None, daily_budget_usd=1, kind=kind, daily_budget_equivalent_usd=equivalent)
 
 
-async def launch(schedule, *, spent=0, admission=None, operator=False):
+async def launch(schedule, *, spent=0, admission=None, operator=False, observe=False):
     scheduler = object.__new__(sm.Scheduler)
     scheduler._day_zone = timezone.utc
     scheduler._usage_block = AsyncMock(return_value=None)
@@ -38,7 +38,8 @@ async def launch(schedule, *, spent=0, admission=None, operator=False):
 
     scheduler._skip = skip
     notices = []
-    with patch.object(cg, 'observe_schedule', AsyncMock(return_value=admission)), \
+    observer = AsyncMock(wraps=cg.observe_schedule) if observe else AsyncMock(return_value=admission)
+    with patch.object(cg, 'observe_schedule', observer), \
          patch.object(sm.db_schedules, 'owner_error', AsyncMock(return_value=None)), \
          patch.object(sm.db_schedules, 'spent_since', AsyncMock(return_value=spent)), \
          patch.object(sm, 'effective_run_timeout', AsyncMock(return_value=None)):
@@ -83,3 +84,24 @@ def test_enforce_split_replaces_legacy_mixed_check(monkeypatch, equivalent, expe
     monkeypatch.setattr(cg, '_guard', cg.Guard(Config(mode=Mode.ENFORCE)))
     outcome, _ = asyncio.run(launch(row(equivalent=equivalent), spent=3, admission=cg.Admission()))
     assert outcome['status'] == expected
+
+
+@pytest.mark.parametrize('spent', [0, 3])
+@pytest.mark.parametrize('defer_alerts', [False, True])
+def test_schedule_accounting_exception_denies_and_keeps_legacy_cap(monkeypatch, spent, defer_alerts):
+    g = cg.Guard(Config(mode=Mode.ENFORCE))
+    monkeypatch.setattr(cg, '_guard', g)
+    monkeypatch.setattr(cg, '_schedule_launch', AsyncMock(side_effect=OSError('synthetic launch failure')))
+    monkeypatch.setattr(cg.cost_alerts, 'flush', AsyncMock())
+
+    async def check():
+        schedule = row(equivalent=5)
+        admission = await cg.observe_schedule(schedule, defer_alerts=defer_alerts)
+        assert admission.decision is cg.Decision.DENY
+        assert admission.reason is cg.DenialReason.GUARD_ERROR
+        assert admission.reservation is None and admission.problem
+        outcome, notices = await launch(schedule, spent=spent, observe=True)
+        assert outcome['status'] == 'skipped_budget'
+        assert ('daily budget' if spent else 'guard_error') in outcome['error']
+        assert any(a.kind is cg.cost_alerts.AlertKind.GUARD_ERROR for batch in notices for a in batch)
+    asyncio.run(check())

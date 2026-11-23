@@ -122,21 +122,26 @@ def test_review_accounting_failure_runs_classifier_and_still_requires_audit(monk
     run_db(body, monkeypatch, timeout=30)
 
 
-def test_review_continued_role_hold_allows_a_fresh_review_without_replaying_the_action(monkeypatch, tmp_path):
+@pytest.mark.parametrize('scope', ['role_day', 'global_day'])
+def test_review_continued_hold_allows_a_fresh_review_without_replaying_the_action(monkeypatch, tmp_path, scope):
     async def body(pool):
         from looper.agents import cost_holds
         await _configure(pool, monkeypatch, 'enforce', 'outbound_check')
-        await pool.execute("DELETE FROM system_settings WHERE key IN ('cost_guard.daily_usd', "
-                           "'cost_guard.daily_equivalent_usd')")
+        prefix = 'cost_guard.' if scope == 'role_day' else 'cost_guard.roles.outbound_check.'
+        await pool.execute("DELETE FROM system_settings WHERE key=ANY($1::text[])",
+                           [f'{prefix}daily_usd', f'{prefix}daily_equivalent_usd'])
         await cg.refresh()
         blocked = await _caller('outbound_check', tmp_path)
         assert blocked.failure.value == 'budget'
         hold = await pool.fetchrow("SELECT * FROM cost_holds WHERE reason='review_budget'")
+        assert hold['scope'] == scope
+        assert hold['scope_ref'] == ('outbound_check' if scope == 'role_day' else 'global')
         with pytest.raises(ValueError, match='上限'):
             await cost_holds.decide(hold['id'], 'continue', 0.01, via='dashboard', pool=pool)
         await cost_holds.decide(hold['id'], 'continue', 1, via='dashboard', pool=pool)
-        assert await pool.fetchval("SELECT value FROM system_settings "
-            "WHERE key='cost_guard.roles.outbound_check.daily_equivalent_usd'") == '1.0'
+        cap = ('cost_guard.roles.outbound_check.daily_equivalent_usd' if scope == 'role_day'
+               else 'cost_guard.daily_equivalent_usd')
+        assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", cap) == '1.0'
         assert await pool.fetchval('SELECT count(*) FROM llm_records') == 0
         allowed = await _caller('outbound_check', tmp_path)
         assert allowed.decision.value == 'allow'

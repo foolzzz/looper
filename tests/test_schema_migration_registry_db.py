@@ -134,6 +134,7 @@ def test_room_delivery_resumes_validation_without_replacing_constraint(missing_m
 def test_equivalent_budget_migration_repairs_column_even_with_marker():
     async def test():
         from looper.db.migrations import schedule_equivalent_budget as migration
+        assert migration.order == migration.pending_order == 1600
         async with fresh_connection() as conn:
             await connection.ensure_schema(conn)
             assert not await migration.pending(conn)

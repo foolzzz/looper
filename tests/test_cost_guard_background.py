@@ -19,6 +19,8 @@ def configured(monkeypatch, mode=Mode.ENFORCE):
     g = cg.Guard(Config(mode=mode, daily_usd=0, daily_equivalent_usd=0,
                        roles={kind.value: RoleLimits(0, 0) for kind in cg.BACKGROUND}), clock=lambda: NOW)
     g.day = g.day_start(NOW)
+    # These policy unit tests seed counters directly; DB refresh is covered by the two-Guard tests.
+    monkeypatch.setattr(g, '_rebuild', AsyncMock())
     g._limits = {'schedules': {'schedule-a': {'usd': 0, 'equivalent_usd': None}}}
     monkeypatch.setattr(cg, '_guard', g)
     monkeypatch.setattr(cg.store, 'context', AsyncMock(return_value={'tasks': {}, 'schedules': g._limits['schedules']}))
@@ -123,6 +125,7 @@ def test_accounting_failure_emits_guard_error_after_unlock_and_keeps_classifier_
     async def check():
         g = configured(monkeypatch)
         g.day = None
+        monkeypatch.setattr(g, '_rebuild', cg.Guard._rebuild.__get__(g))
         monkeypatch.setattr(cg.store, 'history', AsyncMock(side_effect=OSError('synthetic read failure')))
         seen = []
         async def flush(alerts):
@@ -142,7 +145,8 @@ def test_deferred_schedule_accounting_error_returns_alert_without_sending(monkey
         flush = AsyncMock()
         monkeypatch.setattr(cg.cost_alerts, 'flush', flush)
         result = await cg.observe_schedule({'id': 'schedule-a', 'kind': 'agent'}, defer_alerts=True)
-        assert result.decision is cg.Decision.ADMIT and result.problem
+        assert result.decision is cg.Decision.DENY and result.problem
+        assert result.reason is cg.DenialReason.GUARD_ERROR
         assert len(result.alerts) == 1 and result.alerts[0].kind is cg.cost_alerts.AlertKind.GUARD_ERROR
         flush.assert_not_awaited()
     asyncio.run(check())
@@ -221,6 +225,7 @@ def test_real_task_dispatch_reservation_counts_toward_its_next_schedule_firing(m
 def test_restart_counts_schedule_reservations_written_before_schedule_enforcement(monkeypatch):
     async def check():
         g = configured(monkeypatch)
+        monkeypatch.setattr(g, '_rebuild', cg.Guard._rebuild.__get__(g))
         g.config = Config(mode=Mode.ENFORCE)
         limits = {'tasks': {'task-a': {'cap': 10, 'schedule_id': 'schedule-a'}},
                   'schedules': {'schedule-a': {'usd': 1, 'equivalent_usd': None}}}

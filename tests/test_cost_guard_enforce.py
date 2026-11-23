@@ -44,13 +44,19 @@ def test_three_queued_workers_reserve_before_record_and_transfer_once(monkeypatc
         hit = admissions[-1]
         assert hit.scope == cg.Scope(cg.BudgetScope.TASK, 'task-a', 2)
         assert hit.spent_usd == 2 and hit.currency is cg.Currency.PROVIDER
+        persisted = []
+        cg.store.history.return_value = persisted
         for record in (1, 2):
             reservation = await cg.before_run(launch=launch(), run_kind='worker', task_id='task-a')
             assert reservation is admissions[record - 1].reservation
             await cg.bind(reservation, record)
+            persisted.append(dict(id=record, run_kind='worker', task_id='task-a', schedule_id=None,
+                created_at=NOW, status='running', cost_usd=None, currency=cg.Currency.PROVIDER.value,
+                metadata=reservation.metadata()))
         assert g._reserved[cg.BudgetScope.TASK, 'task-a', cg.Currency.PROVIDER] == 2
         for record in (1, 2):
             await cg.finish(record, cost_usd=1)
+            persisted[record - 1].update(status='completed', cost_usd=1)
         assert g._reserved[cg.BudgetScope.TASK, 'task-a', cg.Currency.PROVIDER] == 0
         cg.store.context.return_value['tasks']['task-a']['cap'] = 4
         assert (await cg.task_gate('task-a', cg.RunKind.WORKER, launch(), reserve=True)).decision is cg.Decision.ADMIT
@@ -170,7 +176,8 @@ def test_task_cap_refusal_precedes_a_rejected_usage_window(monkeypatch, entry):
     async def check():
         g = setup_guard(monkeypatch, cap=1)
         g.day = g.day_start(NOW)
-        g._spent[cg.BudgetScope.TASK, 'task-a', cg.Currency.PROVIDER] = 1
+        cg.store.history.return_value = [dict(id=1, run_kind='worker', task_id='task-a', schedule_id=None,
+            created_at=NOW, status='completed', cost_usd=1, currency=cg.Currency.PROVIDER.value, metadata={})]
         held = usage_windows.Hold(NOW + timedelta(hours=1), usage_windows.HoldReason.REJECTED, True, 'five_hour')
         monkeypatch.setattr(usage_windows, 'hold_for', AsyncMock(return_value=held))
         notified = AsyncMock()

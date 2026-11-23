@@ -365,7 +365,7 @@ async def review(action: Action, asker: Asker, origin: Origin, *, context: Seque
     ``unknown`` action is reviewed."""
     if action.level not in REVIEWED:
         raise ValueError(f"{action.level.value} actions are not reviewed")
-    from .cost_guard import BudgetScope, Denied, Held
+    from .cost_guard import Denied, Held
 
     run = _Run()
     if asker.who is not Who.OPERATOR:
@@ -382,7 +382,7 @@ async def review(action: Action, asker: Asker, origin: Origin, *, context: Seque
             reason = f"outbound_check reached today's spend cap ({admission.scope.scope.value})"
             outcome = _blocked(Failure.BUDGET, reason)
             try:
-                await cost_holds.create_hold(BudgetScope.ROLE_DAY, "outbound_check", admission.currency,
+                await cost_holds.create_hold(admission.scope.scope, admission.scope.scope_ref, admission.currency,
                     admission.scope.limit_usd, admission.spent_usd, reason="review_budget",
                     estimate_usd=admission.estimate_usd)
             except Exception:

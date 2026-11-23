@@ -62,6 +62,10 @@ class Decision(str, Enum):
     HOLD = 'hold'
 
 
+class DenialReason(str, Enum):
+    GUARD_ERROR = 'guard_error'
+
+
 class Held(Exception):
     """A run waits for a usage window; this is control state, not a runtime failure."""
 
@@ -131,7 +135,7 @@ class Admission:
     estimate_usd: float = 0.
     problem: str | None = None
     until: datetime | None = None
-    reason: str | None = None
+    reason: DenialReason | str | None = None
     provider_id: str | None = None
     reset_known: bool = True
     window: str | None = None
@@ -307,7 +311,8 @@ class Guard:
         if self.config.mode is settings.Mode.OFF:
             return Admission()
         async with self._lock:
-            if self.day != self.day_start(self.clock()):
+            # Enforce reads persisted spend/reservations from other servers before deciding.
+            if self.config.mode is settings.Mode.ENFORCE or self.day != self.day_start(self.clock()):
                 await self._rebuild()
             return self._admit(run_kind, scopes, currency, estimate, estimate_source, reserve, schedule_id)
 
@@ -499,7 +504,7 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
         # Window and failure reads stay outside the admission lock.
         hold, provider_id = await guard._usage_hold(launch, guard.clock(), background=kind in BACKGROUND)
         async with guard._lock:
-            if guard.day != guard.day_start(guard.clock()):
+            if guard.config.mode is settings.Mode.ENFORCE or guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
             if task_id or schedule_id:
                 context = await store.context(task_id, schedule_id, pool=guard.pool)
@@ -626,7 +631,7 @@ async def observe_schedule(schedule, *, operator=False, defer_alerts=False, reco
         # Window and failure reads stay outside the admission lock.
         hold, provider_id = await guard._usage_hold(launch, guard.clock())
         async with guard._lock:
-            if guard.day != guard.day_start(guard.clock()):
+            if guard.config.mode is settings.Mode.ENFORCE or guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
             # This is a trigger observation, not another reservation: the actual model turn reserves once.
             currency = currency_of(launch)
@@ -646,10 +651,14 @@ async def observe_schedule(schedule, *, operator=False, defer_alerts=False, reco
     except Exception:
         guard.problem = 'Schedule accounting failed; inspect the server log.'
         logger.exception('cost guard schedule observation failed')
-        if defer_alerts:
-            return Admission(problem=guard.problem, alerts=_problem_alerts(guard))
-        await _flush_problem(guard)
-    return None
+        enforcing = guard.config.mode is settings.Mode.ENFORCE
+        failure = (Admission(decision=Decision.DENY, would=Decision.DENY, problem=guard.problem,
+                             reason=DenialReason.GUARD_ERROR, action=LimitAction.SKIP,
+                             alerts=_problem_alerts(guard)) if enforcing else
+                   Admission(problem=guard.problem, alerts=_problem_alerts(guard)))
+        if not defer_alerts:
+            await _flush_problem(guard)
+        return failure if enforcing or defer_alerts else None
 
 
 async def refresh_day():
@@ -683,7 +692,7 @@ async def task_gate(task_id, run_kind, launch_estimate, *, reserve=False, step_i
         kind = RunKind(run_kind)
         hold, provider_id = await guard._usage_hold(launch_estimate, guard.clock(), background=kind in BACKGROUND)
         async with guard._lock:
-            if guard.day != guard.day_start(guard.clock()):
+            if guard.config.mode is settings.Mode.ENFORCE or guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
             context = await store.context(task_id, None, pool=guard.pool)
             for group in ('tasks', 'schedules'):

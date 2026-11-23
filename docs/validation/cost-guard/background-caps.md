@@ -68,7 +68,16 @@ runtime were removed after validation.
 Repeated daily alert claims are counted in memory and summarized on the next
 local day. A restart preserves persistent daily deduplication but loses those
 repeat counters. Ordinary alerts use the existing advisor-alert delivery source
-and normal urgency, so quiet hours apply.
+and normal urgency, so quiet hours apply. Daily claims currently precede the
+quiet-hours DIGEST decision, whose morning-brief line omits amounts; preserving
+the alert body and deduplicating next-day summaries across processes remain
+follow-up work.
+
+Every enforced admission now reloads stored reservations and settled spend,
+including those written by another process on the same day. This reads committed
+evidence before deciding; it does not serialize simultaneous admissions whose
+records have not been written yet. Reusing the existing history rebuild adds a
+history/limits read to each enforced check; no load benchmark was run.
 
 `FALLBACK`, unanswered-push handling, the full spend settings editor and moving
 the day boundary to the operator's timezone remain separate work. No real-model
@@ -87,3 +96,12 @@ checks passed. No skipped test is counted as a pass.
 
 The two changed frontend test files passed 75 tests. The production frontend
 build passed with its existing bundle-size warning.
+
+Review corrections passed **640 tests** with Python 3.11, `-n 1` and disposable
+PostgreSQL: only touched test files plus the command-schedule schema, migration
+registry, API document and tool-level checks. Temporarily restoring the pre-fix
+`cost_guard.py` and `scheduler.py` made all **25 new regressions fail**; restoring
+the fixes passed the final run. The scheduler DB regression exercised a real
+firing transaction, cursor preservation and post-commit error publication.
+The standalone service/browser scenario above was not rerun for these review
+corrections; no UI or model-visible content changed.
