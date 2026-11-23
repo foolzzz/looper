@@ -237,7 +237,8 @@ class TestWorkerPool:
                     if offline_fails:
                         raise RuntimeError("room storage unavailable")
 
-            pool.room_ops = SimpleNamespace(revoke_run=revoke, room=SimpleNamespace(presence_changed=presence_changed))
+            pool.room_ops = SimpleNamespace(revoke_run=revoke, end_subagents=AsyncMock(),
+                                            room=SimpleNamespace(presence_changed=presence_changed))
 
             async def execute(*_args: Any, **_kwargs: Any) -> None:
                 started.set()
@@ -1727,6 +1728,10 @@ class TestWorkerConcurrency:
                 for worker_id in ("w1", "w2"):
                     await bus.publish(_run_item(worker_id, "t-a", Path(tmp)))
                 await self._until_running(pool, "w1")
+                # Dispatch is asynchronous: w1 starting does not mean w2 has reached its limit yet.
+                async with asyncio.timeout(10):
+                    while not pool._slot_waiters:
+                        await asyncio.sleep(0.02)
                 seen = [{w: wp.status for w, wp in pool._active.items()}]
 
                 self._limits(agent_db, worker=2)

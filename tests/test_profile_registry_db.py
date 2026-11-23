@@ -395,7 +395,7 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
         builtin = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-claude-code"}, claude=claude))["runtime"]
         assert (builtin["version"], builtin["probe_error"]) == ("2.1.285 (Claude Code)", None)
         assert builtin["probed_at"] and set(builtin["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
-        assert builtin["roles"] == ["manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check",
+        assert builtin["roles"] == ["manager", "planner", "worker", "explorer", "reviewer", "processor", "advisor", "advice_check",
                                     "leads_check", "outbound_check"]
         assert (await _call("POST", "/api/v1/registry/view", {}, claude=claude))[1]["runtimes"][0]["path"] == claude
 
@@ -410,7 +410,7 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
             True, "", "codex-cli 0.162.0", str(bin_dir / "codex"))
         types = {t["type"]: t for t in (await _registry())["runtime_types"]}
         assert (types["codex"]["runtime_id"], types["codex"]["roles"]) == (
-            "rt-codex", ["manager", "planner", "worker", "reviewer"])
+            "rt-codex", ["manager", "planner", "worker", "explorer", "reviewer"])
 
         # One registered by hand before runtimes were built in probes its own executable.
         legacy = await _runtime("claude-code", name="claude-beta", builtin=False,
@@ -699,7 +699,7 @@ def test_coco_on_path_pairs_only_with_its_own_login_and_runs_every_role(
         assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
                 runtime["protocols"], runtime["roles"]) == (
             "rt-coco", True, "traecli 0.214.1", "Coco (TRAE CLI)", ["openai-responses"],
-            ["manager", "planner", "worker", "reviewer"])
+            ["manager", "planner", "worker", "explorer", "reviewer"])
         assert await register_found_runtimes() == []
 
         async def profile(provider_id: str, runtime_id: str = "rt-coco") -> tuple[int, Any]:
@@ -709,7 +709,7 @@ def test_coco_on_path_pairs_only_with_its_own_login_and_runs_every_role(
 
         status, payload = await profile("prov-coco-login")
         assert status == 201, payload
-        assert payload["profile"]["roles"] == ["manager", "planner", "worker", "reviewer"]
+        assert payload["profile"]["roles"] == ["manager", "planner", "worker", "explorer", "reviewer"]
         profile_id = payload["profile"]["profile_id"]
         await _ok("PUT", "/api/agent-settings/roles/manager", {"profile_id": profile_id})
         settings = await _ok("GET", "/api/agent-settings")
@@ -902,7 +902,7 @@ def test_dsh_path_registration_is_once_and_redetect_updates_the_persisted_probe(
         assert (runtime["runtime_id"], runtime["builtin"], runtime["executable"], runtime["version"],
                 runtime["probe_error"], runtime["path"], runtime["roles"]) == (
             "rt-dsh", True, "", SUPPORTED_VERSION, None, str(tmp_path / "dsh"),
-            ["manager", "planner", "worker", "reviewer"])
+            ["manager", "planner", "worker", "explorer", "reviewer"])
         assert set(runtime["capabilities"]) == {c.value for c in DshRuntime.capabilities}
         original = await db.get_runtime("rt-dsh")
         assert await register_found_runtimes() == []
@@ -949,7 +949,7 @@ def test_dsh_profile_and_all_four_role_selections_round_trip_through_api_and_dat
             "model_id": await _model_id(provider_id, "deepseek-flash"), "effort": "high",
         }))["profile"]
         profile_id = profile["profile_id"]
-        assert profile["roles"] == ["manager", "planner", "worker", "reviewer"]
+        assert profile["roles"] == ["manager", "planner", "worker", "explorer", "reviewer"]
         for role in profile["roles"]:
             await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile_id})
         view = await _ok("GET", "/api/agent-settings")
@@ -1036,7 +1036,7 @@ def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_log
         assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
                 runtime["protocols"], runtime["roles"]) == (
             "rt-grok", True, "grok 1.0.62 (1474f9cbdd91) [stable]", "Grok", ["openai-responses"],
-            ["manager", "planner", "worker", "reviewer"])
+            ["manager", "planner", "worker", "explorer", "reviewer"])
 
         async def profile(provider_id: str, runtime_id: str = "rt-grok") -> tuple[int, Any]:
             return await _call("POST", "/api/agent-profiles", {
@@ -1090,11 +1090,11 @@ def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_every_role(
         assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
                 runtime["protocols"], runtime["roles"]) == (
             "rt-cursor-agent", True, "2026.10.22", "Cursor Agent", ["openai-responses"],
-            ["manager", "planner", "worker", "reviewer"])
+            ["manager", "planner", "worker", "explorer", "reviewer"])
         types = {entry["type"]: entry for entry in registry["runtime_types"]}
         assert types["cursor-agent"]["loads_operator_config"] is True
         assert types["claude-code"]["loads_operator_config"] is False
-        assert types["cursor-agent"]["roles"] == ["manager", "planner", "worker", "reviewer"]
+        assert types["cursor-agent"]["roles"] == ["manager", "planner", "worker", "explorer", "reviewer"]
 
         async def profile(provider_id: str, runtime_id: str = "rt-cursor-agent") -> tuple[int, Any]:
             return await _call("POST", "/api/agent-profiles", {
@@ -1104,7 +1104,7 @@ def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_every_role(
 
         status, payload = await profile("prov-cursor-login")
         assert status == 201, payload
-        assert payload["profile"]["roles"] == ["manager", "planner", "worker", "reviewer"]
+        assert payload["profile"]["roles"] == ["manager", "planner", "worker", "explorer", "reviewer"]
         key = await _provider({
             "name": "responses-key", "vendor_type": "custom", "api_key": SECRET,
             "endpoints": [{"protocol": "openai-responses", "base_url": "https://example.invalid/v1"}],
@@ -1130,12 +1130,12 @@ def test_startup_refreshes_existing_cursor_capabilities_without_probing_or_chang
         await pool.execute("UPDATE agent_runtimes SET capabilities = $1, version = 'old' WHERE id = 'rt-cursor-agent'",
                            ["run", "mcp", "add_dirs"])
         before = await db.get_runtime("rt-cursor-agent")
-        assert servable_roles(before["capabilities"], "cursor-agent") == ["worker", "reviewer"]
+        assert servable_roles(before["capabilities"], "cursor-agent") == ["worker", "explorer", "reviewer"]
         monkeypatch.setenv("PATH", str(tmp_path))  # Refresh must work even without a CLI on PATH.
         await register_found_runtimes()
         after = await db.get_runtime("rt-cursor-agent")
         assert set(after["capabilities"]) == {c.value for c in adapter("cursor-agent").capabilities}
-        assert servable_roles(after["capabilities"], "cursor-agent") == ["manager", "planner", "worker", "reviewer"]
+        assert servable_roles(after["capabilities"], "cursor-agent") == ["manager", "planner", "worker", "explorer", "reviewer"]
         assert {k: v for k, v in after.items() if k != "capabilities"} == {
             k: v for k, v in before.items() if k != "capabilities"}
 
@@ -1163,7 +1163,7 @@ def test_pi_on_path_is_discovered_once_offers_every_role_and_refuses_other_auth_
     from looper.agents.runtimes.pi import PiRuntime
 
     capabilities = sorted(capability.value for capability in PiRuntime.capabilities)
-    roles = ["manager", "planner", "worker", "reviewer"]
+    roles = ["manager", "planner", "worker", "explorer", "reviewer"]
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -1337,9 +1337,9 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
                                                             "workflows": []}
         # What its runtime can run: the stand-in keeps no resident session.
         assert (profiles["claude-code/sonnet"]["roles"], profiles["si/sonnet"]["roles"]) == (
-            ["manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check", "leads_check",
+            ["manager", "planner", "worker", "explorer", "reviewer", "processor", "advisor", "advice_check", "leads_check",
              "outbound_check"],
-            ["worker", "reviewer"])
+            ["worker", "explorer", "reviewer"])
         # A profile's own answer has it too.
         changed = (await _ok("PUT", f"/api/agent-profiles/{one_off}", {"effort": "high"}))["profile"]
         assert changed["used_by"] == profiles["si/sonnet"]["used_by"]

@@ -99,7 +99,7 @@ def test_probe_uses_configured_binary_and_persists_capabilities_without_confirma
             assert status == 200 and answer["status"] == "ok", answer
             runtime = answer["result"]["runtime"]
             assert runtime["version"] == "synthetic-1.0" and runtime["capabilities"] == ["run"]
-            assert runtime["roles"] == ["worker", "reviewer"] and runtime["probed_at"]
+            assert runtime["roles"] == ["worker", "explorer", "reviewer"] and runtime["probed_at"]
             assert runtime["probe_error"] == "Synthetic probe diagnostic"
             row = await db.get_runtime("rt-claude-code")
             assert row["version"] == runtime["version"] and row["probe_error"] == runtime["probe_error"]

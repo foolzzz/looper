@@ -75,7 +75,7 @@ def library(tmp_path: Path) -> AgentLibrary:
 
 
 def _launch(runtime: str, library: AgentLibrary, *, web_search: bool = True, env: tuple = ()) -> Any:
-    return SimpleNamespace(runtime=ADAPTERS[runtime], library=library, env=env,
+    return SimpleNamespace(runtime=ADAPTERS[runtime], library=library, env=env, explore=False,
                            profile=SimpleNamespace(web_search=web_search))
 
 

@@ -1123,7 +1123,8 @@ class AgentHTTPServer:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
-            writer.write(_json_response(HTTP_200, await ops.call(header, m.group(1), arguments)))
+            writer.write(_json_response(HTTP_200, await ops.call(
+                header, m.group(1), arguments, call_id=headers.get("x-looper-call"))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()

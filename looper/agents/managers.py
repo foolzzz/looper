@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..db import managers as db_managers
-from . import card_actions, chat_settings, completion_events
+from . import card_actions, chat_settings, completion_events, intent_cards, ledger_cards
 from .channels.chat_routing import boundary_log
 from .channels.lark_quote import ReadQuote
 from .bus import MessageBus
@@ -172,6 +172,8 @@ class ManagerFleet:
         default = ManagerDefinition.from_row(default_row) if default_row else default_definition()
         card_actions.install("confirmation", self._press_confirmation)
         card_actions.install("gate", self._press_gate)
+        intent_cards.install(self._platform)
+        ledger_cards.install()
         self._supervisor.register(self._build(default))
         await self._restore(default.id)
         for row in rows:

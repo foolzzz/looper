@@ -87,6 +87,7 @@
     "failure": "parse",
     "response": null,
     "row": {
+      "attempt": 1,
       "brief": {
         "attempt": 1,
         "source": "optional",
@@ -94,11 +95,18 @@
         "task_id": "task-golden"
       },
       "budget_usd": 1.0,
+      "cancel_reason": null,
+      "child_process": null,
       "child_record_id": 3,
       "created_at": "<timestamp>",
+      "delivered_at": null,
+      "delivery": null,
       "detail": "the advisor's answer does not fit AdviceResponse v1: the reply ends with no JSON object with a status",
+      "failure_cause": null,
+      "failure_class": null,
       "finished_at": "<timestamp>",
       "id": 1,
+      "idempotency_key": null,
       "inputs": {
         "bindings": [],
         "request": {
@@ -134,6 +142,8 @@
       },
       "kind": "advisor",
       "parent_record_id": 1,
+      "parent_spend_known": null,
+      "profile_id": null,
       "result": {
         "booked": [
           2,
@@ -169,6 +179,7 @@
       },
       "returns": 0,
       "rounds": 1,
+      "spawner": null,
       "spent_usd": 0.008,
       "state": "failed",
       "step_id": "step-golden",
@@ -196,6 +207,7 @@
       },
       "operation": "create",
       "result": {
+        "attempt": 1,
         "brief": {
           "attempt": 1,
           "source": "optional",
@@ -203,17 +215,27 @@
           "task_id": "task-golden"
         },
         "budget_usd": 1.0,
+        "cancel_reason": null,
+        "child_process": null,
         "child_record_id": null,
         "created_at": "<timestamp>",
+        "delivered_at": null,
+        "delivery": null,
         "detail": null,
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": null,
         "id": 1,
+        "idempotency_key": null,
         "inputs": {},
         "kind": "advisor",
         "parent_record_id": 1,
+        "parent_spend_known": null,
+        "profile_id": null,
         "result": {},
         "returns": 0,
         "rounds": 0,
+        "spawner": null,
         "spent_usd": 0.0,
         "state": "drafting",
         "step_id": "step-golden",
@@ -231,6 +253,7 @@
       },
       "operation": "move",
       "result": {
+        "attempt": 1,
         "brief": {
           "attempt": 1,
           "source": "optional",
@@ -238,17 +261,27 @@
           "task_id": "task-golden"
         },
         "budget_usd": 1.0,
+        "cancel_reason": null,
+        "child_process": null,
         "child_record_id": null,
         "created_at": "<timestamp>",
+        "delivered_at": null,
+        "delivery": null,
         "detail": null,
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": null,
         "id": 1,
+        "idempotency_key": null,
         "inputs": {},
         "kind": "advisor",
         "parent_record_id": 1,
+        "parent_spend_known": null,
+        "profile_id": null,
         "result": {},
         "returns": 0,
         "rounds": 0,
+        "spawner": null,
         "spent_usd": 0.0,
         "state": "linting",
         "step_id": "step-golden",
@@ -330,6 +363,7 @@
       },
       "operation": "move",
       "result": {
+        "attempt": 1,
         "brief": {
           "attempt": 1,
           "source": "optional",
@@ -337,11 +371,18 @@
           "task_id": "task-golden"
         },
         "budget_usd": 1.0,
+        "cancel_reason": null,
+        "child_process": null,
         "child_record_id": null,
         "created_at": "<timestamp>",
+        "delivered_at": null,
+        "delivery": null,
         "detail": null,
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": null,
         "id": 1,
+        "idempotency_key": null,
         "inputs": {
           "bindings": [],
           "request": {
@@ -377,6 +418,8 @@
         },
         "kind": "advisor",
         "parent_record_id": 1,
+        "parent_spend_known": null,
+        "profile_id": null,
         "result": {
           "booked": [
             2
@@ -399,6 +442,7 @@
         },
         "returns": 0,
         "rounds": 1,
+        "spawner": null,
         "spent_usd": 0.004,
         "state": "asking",
         "step_id": "step-golden",
@@ -451,6 +495,7 @@
       },
       "operation": "move",
       "result": {
+        "attempt": 1,
         "brief": {
           "attempt": 1,
           "source": "optional",
@@ -458,11 +503,18 @@
           "task_id": "task-golden"
         },
         "budget_usd": 1.0,
+        "cancel_reason": null,
+        "child_process": null,
         "child_record_id": 3,
         "created_at": "<timestamp>",
+        "delivered_at": null,
+        "delivery": null,
         "detail": "the advisor's answer does not fit AdviceResponse v1: the reply ends with no JSON object with a status",
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": "<timestamp>",
         "id": 1,
+        "idempotency_key": null,
         "inputs": {
           "bindings": [],
           "request": {
@@ -498,6 +550,8 @@
         },
         "kind": "advisor",
         "parent_record_id": 1,
+        "parent_spend_known": null,
+        "profile_id": null,
         "result": {
           "booked": [
             2,
@@ -533,6 +587,7 @@
         },
         "returns": 0,
         "rounds": 1,
+        "spawner": null,
         "spent_usd": 0.008,
         "state": "failed",
         "step_id": "step-golden",
@@ -592,6 +647,7 @@
     ],
     "agent_spawns": [
       {
+        "attempt": 1,
         "brief": {
           "attempt": 1,
           "source": "optional",
@@ -599,11 +655,18 @@
           "task_id": "task-golden"
         },
         "budget_usd": 1.0,
+        "cancel_reason": null,
+        "child_process": null,
         "child_record_id": 3,
         "created_at": "<timestamp>",
+        "delivered_at": null,
+        "delivery": null,
         "detail": "the advisor's answer does not fit AdviceResponse v1: the reply ends with no JSON object with a status",
+        "failure_cause": null,
+        "failure_class": null,
         "finished_at": "<timestamp>",
         "id": 1,
+        "idempotency_key": null,
         "inputs": {
           "bindings": [],
           "request": {
@@ -639,6 +702,8 @@
         },
         "kind": "advisor",
         "parent_record_id": 1,
+        "parent_spend_known": null,
+        "profile_id": null,
         "result": {
           "booked": [
             2,
@@ -674,6 +739,7 @@
         },
         "returns": 0,
         "rounds": 1,
+        "spawner": null,
         "spent_usd": 0.008,
         "state": "failed",
         "step_id": "step-golden",
