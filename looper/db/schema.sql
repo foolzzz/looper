@@ -2317,7 +2317,7 @@ CREATE TABLE IF NOT EXISTS proactive_deliveries (
     external_id TEXT,                 -- 发送方知道时：平台消息 id
     outcome     TEXT CHECK (outcome IN ('sent', 'rejected', 'unknown')),
     dedupe_key  TEXT,
-    urgency     TEXT CHECK (urgency IN ('normal', 'digest', 'blocking', 'user_set')),
+    urgency     TEXT CHECK (urgency IN ('normal', 'blocking', 'user_set')),
     chat_kind   TEXT NOT NULL CHECK (chat_kind IN ('direct', 'group')),
     task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     step_id     TEXT,
