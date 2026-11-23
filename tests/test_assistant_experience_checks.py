@@ -84,7 +84,7 @@ def test_saved_real_time_replies(case_id, reply):
 
 
 @pytest.mark.parametrize('reply, minutes', [
-    ('下午 1:51', 831), ('上午 1:51', 111), ('晚上 9：05', 1265),
+    ('下午 1:51', 831), ('上午 1:51', 111), ('晚上 9：05', 1265), ('下午 15:00', 900),
     ('上午12:00', 0), ('下午12:00', 720), ('中午12点', 720),
     ('中午一点', 780), ('中午11:30', 690), ('凌晨12点', 0),
     ('凌晨 12:05', 5), ('上午十二点半', 30), ('下午十二点半', 750),
@@ -93,7 +93,7 @@ def test_period_times_have_one_interpretation(reply, minutes):
     assert e.times_in(reply) == {minutes}
 
 
-@pytest.mark.parametrize('reply', ['晚上12点', '晚上12:00', '下午13:51', '下午1:600'])
+@pytest.mark.parametrize('reply', ['晚上12点', '晚上12:00', '上午13:51', '下午1:600'])
 def test_unsupported_or_invalid_period_times(reply):
     assert e.times_in(reply) == set()
 

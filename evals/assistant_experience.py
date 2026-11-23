@@ -122,7 +122,7 @@ def times_in(text: str) -> set[int]:
             continue
         # These checks compare minutes of day, without tracking a reply's date.
         # 晚上12点 means next-day midnight, which cannot be scored here.
-        if period and (h > 12 or (period == '晚上' and h == 12)):
+        if (period in ('上午', '早上', '凌晨') and h > 12) or (period == '晚上' and h == 12):
             continue
         if period in ('上午', '早上', '凌晨') and h == 12:
             h = 0
