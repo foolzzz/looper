@@ -362,6 +362,28 @@ summary: 不要把摘要再算一条
     assert "不要把摘要再算一条" not in compiled.text
 
 
+def test_an_all_superseded_preference_note_does_not_revive_its_summary(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _note(root, "偏好/old.md", """---
+summary: 重新启用失效偏好
+---
+
+# 回复
+
+- 旧称呼 [kind:: preference] [source:: 对话 2026-11-20] [confidence:: high] [status:: superseded]
+- 旧习惯 [kind:: habit] [source:: 对话 2026-11-20] [confidence:: high] [status:: superseded]
+""")
+    compiled = compile_profile(root)
+    assert compiled.fields["communication_preferences"] == []
+    assert compiled.fields["standing_rules"] == []
+    assert compiled.skipped == ()
+    assert compiled.sources == ()
+    assert compiled.text == ""
+    blob = compiled.text + repr(compiled.payload())
+    for hidden in ("重新启用失效偏好", "旧称呼", "旧习惯"):
+        assert hidden not in blob
+
+
 def test_code_fences_are_not_fields_and_backticks_are_normalized(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     _note(root, "关于我.md", """## 名字

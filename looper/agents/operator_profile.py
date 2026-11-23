@@ -414,9 +414,9 @@ def _about_pieces(root: Path, path: Path, skipped: list[dict[str, str]]) -> list
 def _rule_pieces(root: Path, path: Path, skipped: list[dict[str, str]]) -> list[Piece]:
     rel = _rel(root, path)
     summary, lines = _note_lines(_read(root, path), rel)
-    # Inline entries are the note. A summary is not required and is not a second rule.
-    if entries := _kind_pieces(lines, rel, skipped):
-        return entries
+    # Any inline entry selects this format. Filtering may leave nothing; the summary is not a rule then.
+    if any(_inline_entry(line) is not None for _, line in lines):
+        return _kind_pieces(lines, rel, skipped)
     pieces: list[Piece] = []
     for heading, line_no, chunk in _sections(lines, 2):
         for value in _values(chunk):
