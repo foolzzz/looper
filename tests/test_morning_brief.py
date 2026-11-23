@@ -4,10 +4,8 @@ its switch is off, reads that switch and stops."""
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
-
-import pytest
 
 from looper.agents import attention, chat_settings, morning_brief
 from looper.agents.morning_brief import digest_dates, is_due, render
@@ -33,6 +31,27 @@ def test_it_is_due_on_a_workday_at_the_configured_time() -> None:
     assert not is_due(datetime(2026, 11, 21, 9, 15, tzinfo=ZONE), send)  # Saturday
     assert not is_due(datetime(2026, 11, 23, 14, 59, tzinfo=ZONE), time(15, 0))
     assert is_due(datetime(2026, 11, 23, 15, 0, tzinfo=ZONE), time(15, 0))
+
+
+def test_a_skipped_minute_is_due_on_the_first_tick_after_the_gap() -> None:
+    """Asia/Jerusalem, Friday 2026-03-27: 01:59 is followed by 03:00. 02:15 never happens, so 03:00 is due."""
+    zone = ZoneInfo("Asia/Jerusalem")
+    send = time(2, 15)
+    assert not is_due(datetime(2026, 3, 27, 1, 59, tzinfo=zone), send)
+    first = datetime(2026, 3, 27, 0, 0, tzinfo=timezone.utc).astimezone(zone)
+    assert (first.hour, first.minute) == (3, 0)
+    assert is_due(first, send)
+
+
+def test_a_repeated_hour_is_still_due_and_the_same_local_date() -> None:
+    """Africa/Cairo, Thursday 2026-10-29: 23:30 happens twice. Both are due, and both are 2026-10-29."""
+    zone = ZoneInfo("Africa/Cairo")
+    send = time(23, 30)
+    first = datetime(2026, 10, 29, 23, 30, tzinfo=zone, fold=0)
+    second = datetime(2026, 10, 29, 23, 30, tzinfo=zone, fold=1)
+    assert first.utcoffset() != second.utcoffset()
+    assert first.date() == second.date() == date(2026, 10, 29)
+    assert is_due(first, send) and is_due(second, send)
 
 
 def _reminder(hour: int, text: str) -> dict:

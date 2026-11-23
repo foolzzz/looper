@@ -2436,10 +2436,12 @@ CREATE TABLE IF NOT EXISTS morning_briefs (
     status      TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'skipped', 'uncertain', 'failed')),
     attempts    INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     detail      TEXT CHECK (detail IS NULL OR char_length(detail) <= 500),
+    consumed_until TIMESTAMPTZ,       -- digests decided at or before this were taken; null while sending or failed
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (local_date, channel_id, chat)
 );
+ALTER TABLE morning_briefs ADD COLUMN IF NOT EXISTS consumed_until TIMESTAMPTZ;
 -- morning briefs end
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online

@@ -2,9 +2,13 @@
 
 On a workday, at ``morning_brief.time`` (09:15 by default) in ``user.timezone`` (else the server's zone), the
 service sends one brief through ``deliver``: what waits for the operator (the needs-you summary), reminders due
-that local day, and proactive messages the delivery layer deferred into today's digest (Monday also takes
-Saturday's and Sunday's). Nothing in any section means nothing is sent. A brief with something to say is sent
-uncounted and never deferred: it is the digest. ``decide`` records that only while ``delivery.enabled`` is on.
+that local day, and proactive messages held for the digest. A chat's first brief reads that day's digest dates
+(Monday also Saturday and Sunday). One that ran records how far it read; the next reads every digest decided
+after that and no later than this check, so a custom time does not drop a message held later that morning.
+Nothing in any section means nothing is sent. The switch, the channel and the operator are read again after the
+summary and again immediately before the post. A brief with something to say is sent uncounted and never
+deferred: it is the digest. ``decide`` records that only while ``delivery.enabled`` is on, under the same key
+as the post, and the channel receipt is written on that row.
 
 ``morning_brief.enabled`` is off by default. While it is off a tick reads the in-memory switch and stops. One
 row of ``morning_briefs`` per local date and direct chat makes a restart and a second server send it at most
@@ -20,8 +24,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..db import connection, morning_briefs as store
-from . import attention, chat_settings, proactive_delivery
+from ..db import connection, morning_briefs as store, proactive_deliveries as deliveries
+from . import attention, chat_settings, proactive_delivery, turn_metrics
 from .channels.base import PostOutcome
 from .operator_identity import OPERATOR_KEY
 from .proactive_delivery import ChatKind, Delivery, DeliveryKind, DeliveryState, Outcome, Urgency
@@ -43,8 +47,8 @@ _DETAIL_MAX = 500
 
 
 def digest_dates(day: date) -> tuple[date, ...]:
-    """The digest dates this brief covers: Monday also takes Saturday and Sunday, so a Friday night's deferral
-    is not dropped. Any other workday covers that day only."""
+    """The digest dates a chat's first brief covers: Monday also takes Saturday and Sunday, so a Friday night's
+    deferral is not dropped. A later brief reads what that chat has not yet consumed."""
     if day.weekday() == 0:
         return (day - timedelta(days=2), day - timedelta(days=1), day)
     return (day,)
@@ -102,6 +106,11 @@ def _detail(text: str | None) -> str | None:
     return text[:_DETAIL_MAX]
 
 
+def _key(day: date, channel_id: str, chat: str) -> str:
+    """The brief's one key: its delivery row, its post's idempotency key and its receipt."""
+    return f"morning_brief:{day.isoformat()}:{channel_id}:{chat}"
+
+
 def _send_at() -> time:
     raw = chat_settings.morning_brief_time()
     try:
@@ -157,6 +166,16 @@ class MorningBriefService:
         if not done:
             logger.warning("morning brief did not stop within %s s; left to the event loop", STOP_GRACE_SECONDS)
 
+    def _running(self) -> bool:
+        return chat_settings.morning_brief_enabled() and not self._stopping.is_set() and (
+            self._drain is None or not self._drain.draining)
+
+    async def _accepts(self, channel_id: str, chat: str) -> bool:
+        """The switch is still on, and ``chat`` is still this enabled channel's operator."""
+        if not self._running():
+            return False
+        return (channel_id, chat) in await operator_targets()
+
     async def _loop(self) -> None:
         while not self._stopping.is_set():
             try:
@@ -193,56 +212,87 @@ class MorningBriefService:
             await store.skip(conn, day, "", "", now, "no operator direct chat")
             return
         # A date already sent, skipped or left uncertain is not read again. A refusal under the attempt limit is.
-        pending: list[tuple[str, str]] = []
+        # This is read before the summary: a day with nothing left to send does not collect.
+        pending = False
         for channel_id, chat in targets:
-            row = await store.get(conn, day, channel_id, chat)
-            if row is None or (row["status"] == "failed" and row["attempts"] < ATTEMPTS):
-                pending.append((channel_id, chat))
+            if await _pending(conn, day, channel_id, chat):
+                pending = True
+                break
         if not pending:
             return
         summary = await attention.collect(managers=self._managers)
+        # The switch, the channel and the operator can change while the summary is read.
+        if not self._running():
+            return
         needs = attention.summary_text(summary)
         start = datetime.combine(day, time.min, tzinfo=policy.timezone)
-        for channel_id, chat in pending:
-            if self._stopping.is_set() or (self._drain is not None and self._drain.draining):
+        for channel_id, chat in await operator_targets():
+            if not self._running():
                 return
+            if not await _pending(conn, day, channel_id, chat):
+                continue
             await self._one(conn, policy, now, day, start, needs, channel_id, chat)
 
     async def _one(self, conn: Any, policy: Any, now: datetime, day: date, start: datetime, needs: str,
                    channel_id: str, chat: str) -> None:
-        row = await store.get(conn, day, channel_id, chat)
-        if row is not None and not (row["status"] == "failed" and row["attempts"] < ATTEMPTS):
+        if not await self._accepts(channel_id, chat):
             return
+        if not await _pending(conn, day, channel_id, chat):
+            return
+        boundary = await store.consumption_boundary(conn, channel_id, chat)
         reminders = await store.reminders_today(conn, channel_id=channel_id, chat=chat, start=start,
                                                 end=start + timedelta(days=1))
-        deferred = await store.digests(conn, channel_id=channel_id, chat=chat, dates=list(digest_dates(day)))
+        deferred = await store.digests(
+            conn, channel_id=channel_id, chat=chat, until=now, after=boundary,
+            dates=None if boundary is not None else list(digest_dates(day)))
         text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))
+        if not await self._accepts(channel_id, chat):
+            return
         if text is None or decision.outcome is not Outcome.SEND:
             await store.skip(conn, day, channel_id, chat, now, "nothing to say")
             return
         if not await store.claim(conn, day, channel_id, chat, now, attempts_limit=ATTEMPTS):
             return
+        key = _key(day, channel_id, chat)
+        decided = False
         if chat_settings.delivery_enabled():
             try:
                 await proactive_delivery.decide(
-                    delivery, dedupe_key=f"morning_brief:{day.isoformat()}:{channel_id}:{chat}",
-                    channel_id=channel_id, chat=chat, last_user_message_at=None, now=now)
+                    delivery, dedupe_key=key, channel_id=channel_id, chat=chat, last_user_message_at=None, now=now)
+                decided = True
             except Exception:
                 logger.warning("morning brief delivery decision failed; sending anyway", exc_info=True)
+        if not await self._accepts(channel_id, chat):
+            await store.release(conn, day, channel_id, chat)
+            return
+        external: str | None = None
         try:
             receipt = await self._registry.post(
-                channel_id, target(chat), text, idempotency_key=f"looper-morning-brief-{day.isoformat()}-{channel_id}-{chat}")
+                channel_id, target(chat), text, idempotency_key=key, **turn_metrics.proactive_kwargs(
+                    turn_metrics.ProactiveSource.MORNING_BRIEF, dedupe_key=key))
             outcome, error = receipt.result, receipt.error
+            external = receipt.external_ids[0] if receipt.external_ids else None
         except Exception as exc:
             outcome, error = PostOutcome.UNKNOWN, type(exc).__name__
-        settled = self._clock()
         if outcome is PostOutcome.SENT:
             status = "sent"
         elif outcome is PostOutcome.REJECTED:
             status = "failed"
         else:
             status = "uncertain"
-        await store.settle(conn, day, channel_id, chat, status, now=settled, detail=_detail(error))
+        await store.settle(conn, day, channel_id, chat, status, now=self._clock(), detail=_detail(error),
+                           consumed_until=None if status == "failed" else now)
+        if decided:
+            try:
+                await deliveries.record_receipt(key, outcome.value, external)
+            except Exception:
+                logger.warning("morning brief receipt was not recorded", exc_info=True)
         logger.info("morning brief %s %s: %s", day.isoformat(), channel_id, outcome.value)
+
+
+async def _pending(conn: Any, day: date, channel_id: str, chat: str) -> bool:
+    """Whether this date's brief is still to send: no row yet, or a refusal under the attempt limit."""
+    row = await store.get(conn, day, channel_id, chat)
+    return row is None or (row["status"] == "failed" and row["attempts"] < ATTEMPTS)

@@ -1054,19 +1054,27 @@ async def _reminders_pending(conn: asyncpg.Connection) -> bool:
 
 
 async def _morning_briefs_pending(conn: asyncpg.Connection) -> bool:
-    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MORNING_BRIEFS):
-        return False
-    return not await conn.fetchval("SELECT to_regclass('morning_briefs') IS NOT NULL")
+    """The table, or ``consumed_until`` on a table created before that column. A marker without the table is left
+    alone."""
+    if not await conn.fetchval("SELECT to_regclass('morning_briefs') IS NOT NULL"):
+        return not await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MORNING_BRIEFS)
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'morning_briefs'::regclass "
+        "AND attname = 'consumed_until' AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _morning_brief_source_row(conn: asyncpg.Connection):
-    """The ``proactive_deliveries.source`` check, found by the values it lists (its name is PostgreSQL's)."""
+    """The CHECK on ``proactive_deliveries.source`` alone. Its name is PostgreSQL's; a check that only mentions a
+    source value in some other column is not this one."""
     if not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL"):
         return None
     return await conn.fetchrow(
-        "SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint "
-        "WHERE conrelid = 'proactive_deliveries'::regclass AND contype = 'c' "
-        "AND pg_get_constraintdef(oid) LIKE '%gate_reminder%' LIMIT 1")
+        "SELECT c.conname, pg_get_constraintdef(c.oid) AS definition FROM pg_constraint c "
+        "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) "
+        "WHERE c.conrelid = 'proactive_deliveries'::regclass AND c.contype = 'c' "
+        "AND a.attname = 'source' AND a.attnum > 0 AND NOT a.attisdropped "
+        "AND cardinality(c.conkey) = 1 ORDER BY c.conname LIMIT 1")
 
 
 async def _morning_brief_source_pending(conn: asyncpg.Connection) -> bool:
@@ -1813,7 +1821,8 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                                    _MORNING_BRIEF_KIND)
         if await _morning_briefs_pending(conn):
             await conn.execute(_morning_briefs_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MORNING_BRIEFS)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                               _MORNING_BRIEFS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))

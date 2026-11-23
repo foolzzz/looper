@@ -6,14 +6,15 @@ Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from looper.agents import attention, chat_settings, morning_brief, proactive_delivery
+from looper.agents import attention, chat_settings, morning_brief, proactive_delivery, turn_metrics
 from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.db import connection, reminders as reminder_store
 from tests.db_support import DSN, run_db, run_with_channel_configs
@@ -32,9 +33,9 @@ class _Channel:
         self.outcomes, self.posts = list(outcomes), []
 
     async def post(self, channel_id: str, target: Any, text: str, *, reply_to: str | None = None,
-                   idempotency_key: str | None = None) -> PostReceipt:
+                   idempotency_key: str | None = None, proactive: Any = None) -> PostReceipt:
         self.posts.append({"channel_id": channel_id, "kind": target.kind.value, "to": target.id, "text": text,
-                           "key": idempotency_key})
+                           "key": idempotency_key, "proactive": proactive})
         outcome = self.outcomes.pop(0) if self.outcomes else PostOutcome.SENT
         if outcome is PostOutcome.SENT:
             return PostReceipt(True, external_ids=(f"om_{len(self.posts)}",))
@@ -85,8 +86,8 @@ async def _reminder(text: str, due_at: datetime, *, chat: str = OP, channel_id: 
 
 
 async def _digest(pool: Any, key: str, day: date, *, channel: str = "channel-lark", chat: str = OP,
-                  kind: str = "task_notice", reason: str = "quiet_hours", hour: int = 23) -> None:
-    when = datetime(day.year, day.month, day.day, hour, 0, tzinfo=ZONE)
+                  kind: str = "task_notice", reason: str = "quiet_hours", hour: int = 23, minute: int = 0) -> None:
+    when = datetime(day.year, day.month, day.day, hour, minute, tzinfo=ZONE)
     await pool.execute(
         "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, decision, "
         "reason, counted, local_date, digest_date, decided_at) "
@@ -316,6 +317,177 @@ def test_delivery_on_records_an_uncounted_send_and_off_records_nothing(monkeypat
     run_with_channel_configs(test, monkeypatch)
 
 
+def test_a_change_while_collection_is_awaited_is_rechecked_before_sending(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The switch, the channel and the operator are read again after ``attention.collect``. Off, or a disabled
+    channel, sends nothing and does not consume the day. A new operator is who receives it."""
+
+    async def switched_off(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+
+        async def collect(*, managers: Any = None) -> dict[str, Any]:
+            chat_settings.set_morning_brief_enabled(False)
+            return _summary("error", "db down")
+
+        monkeypatch.setattr(attention, "collect", collect)
+        channel = _Channel()
+        await _service(channel, MONDAY).run_once()
+        assert channel.posts == []
+        assert await _rows(pool) == []
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        await _service(channel, MONDAY).run_once()
+        assert len(channel.posts) == 1 and channel.posts[0]["to"] == OP
+
+    async def channel_disabled(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+
+        async def collect(*, managers: Any = None) -> dict[str, Any]:
+            await pool.execute("UPDATE channel_configs SET enabled = false WHERE channel_id = 'channel-lark'")
+            return _summary("error", "db down")
+
+        monkeypatch.setattr(attention, "collect", collect)
+        channel = _Channel()
+        await _service(channel, MONDAY).run_once()
+        assert channel.posts == []
+        assert await _rows(pool) == []
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        await _service(channel, MONDAY).run_once()
+        assert [post["to"] for post in channel.posts] == [OP]
+
+    async def operator_changed(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        replacement = "ou_replacementoperator"
+
+        async def collect(*, managers: Any = None) -> dict[str, Any]:
+            await pool.execute("UPDATE channel_configs SET config = $2 WHERE channel_id = $1", "channel-lark",
+                               json.dumps({"operator_sender_id": replacement}))
+            return _summary("error", "db down")
+
+        monkeypatch.setattr(attention, "collect", collect)
+        channel = _Channel()
+        await _service(channel, MONDAY).run_once()
+        assert [post["to"] for post in channel.posts] == [replacement]
+
+    run_with_channel_configs(switched_off, monkeypatch)
+    run_with_channel_configs(channel_disabled, monkeypatch)
+    run_with_channel_configs(operator_changed, monkeypatch)
+
+
+def test_a_message_held_after_an_early_brief_is_read_by_a_later_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tuesday's brief is 07:00. A 07:30 message quiet hours put in Tuesday's digest is still unread on Thursday
+    when Wednesday did not run, and Friday does not repeat it."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        chat_settings.set_morning_brief_time("07:00")
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        tuesday = datetime(2026, 11, 24, 7, 0, tzinfo=ZONE)
+        await _digest(pool, "before", tuesday.date(), hour=6)
+        channel = _Channel()
+        await _service(channel, tuesday).run_once()
+        assert "11-24 06:00" in channel.posts[0]["text"]
+        await _digest(pool, "after", tuesday.date(), hour=7, minute=30)
+        thursday = datetime(2026, 11, 26, 7, 0, tzinfo=ZONE)
+        await _service(channel, thursday).run_once()
+        assert "11-24 07:30" in channel.posts[1]["text"]
+        assert "11-24 06:00" not in channel.posts[1]["text"]
+        friday = datetime(2026, 11, 27, 7, 0, tzinfo=ZONE)
+        await _service(channel, friday).run_once()
+        assert "07:30" not in channel.posts[2]["text"]
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_delivery_on_records_the_receipt_on_the_decision_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        chat_settings.set_delivery_enabled(True)
+        chat_settings.set_metrics_enabled(True)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        channel = _Channel()
+        await _service(channel, MONDAY).run_once()
+        await asyncio.gather(*turn_metrics._pending)
+        key = f"morning_brief:{MONDAY.date().isoformat()}:channel-lark:{OP}"
+        (post,) = channel.posts
+        assert post["key"] == key
+        assert post["proactive"].source.value == "morning_brief"
+        assert post["proactive"].dedupe_key == key
+        rows = await pool.fetch("SELECT dedupe_key, decision, outcome, external_id, sent_at IS NOT NULL AS sent "
+                                "FROM proactive_deliveries")
+        assert [dict(row) for row in rows] == [
+            {"dedupe_key": key, "decision": "send", "outcome": "sent", "external_id": "om_1", "sent": True}]
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_clock_gap_sends_on_the_next_tick_and_a_repeated_hour_sends_once(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    async def gap(pool: Any) -> None:
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'Asia/Jerusalem') "
+                           "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
+        await chat_settings.load()
+        chat_settings.set_morning_brief_time("02:15")
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        zone = ZoneInfo("Asia/Jerusalem")
+        channel = _Channel()
+        await _service(channel, datetime(2026, 3, 27, 1, 59, tzinfo=zone)).run_once()
+        assert channel.posts == []
+        first = datetime(2026, 3, 27, 0, 0, tzinfo=timezone.utc).astimezone(zone)
+        await _service(channel, first).run_once()
+        assert len(channel.posts) == 1 and "03-27" in channel.posts[0]["text"]
+
+    async def repeated(pool: Any) -> None:
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'Africa/Cairo') "
+                           "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
+        await chat_settings.load()
+        chat_settings.set_morning_brief_time("23:30")
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        zone = ZoneInfo("Africa/Cairo")
+        channel = _Channel()
+        await _service(channel, datetime(2026, 10, 29, 23, 30, tzinfo=zone, fold=0)).run_once()
+        await _service(channel, datetime(2026, 10, 29, 23, 30, tzinfo=zone, fold=1)).run_once()
+        assert len(channel.posts) == 1
+        assert await _rows(pool) == [{"local_date": date(2026, 10, 29), "channel_id": "channel-lark", "chat": OP,
+                                      "status": "sent", "attempts": 1}]
+
+    run_with_channel_configs(gap, monkeypatch)
+    run_with_channel_configs(repeated, monkeypatch)
+
+
+def test_a_missing_or_unknown_zone_uses_the_server_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """00:20 UTC is 09:20 in Tokyo and not yet 09:15 in UTC. Only the server-zone fallback sends."""
+
+    async def missing(pool: Any) -> None:
+        monkeypatch.setattr(chat_settings, "_timezone", None)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        channel = _Channel()
+        await _service(channel, datetime(2026, 11, 23, 0, 20, tzinfo=timezone.utc)).run_once()
+        assert len(channel.posts) == 1 and channel.posts[0]["text"].startswith("晨报 · 11-23（周一）")
+
+    async def unknown(pool: Any) -> None:
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'Not/AZone') "
+                           "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
+        await chat_settings.load()
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        channel = _Channel()
+        await _service(channel, datetime(2026, 11, 23, 0, 20, tzinfo=timezone.utc)).run_once()
+        assert len(channel.posts) == 1 and channel.posts[0]["text"].startswith("晨报 · 11-23（周一）")
+
+    monkeypatch.setattr("looper.agents.turn_context.server_zone", lambda: ZoneInfo("Asia/Tokyo"))
+    run_with_channel_configs(missing, monkeypatch)
+    run_with_channel_configs(unknown, monkeypatch)
+
+
 def test_an_old_database_gains_the_table_and_the_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         import asyncpg
@@ -344,5 +516,44 @@ def test_an_old_database_gains_the_table_and_the_kind(monkeypatch: pytest.Monkey
         await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE source = 'morning_brief'") == 1
         assert await pool.fetchval("SELECT to_regclass('morning_briefs') IS NOT NULL")
+        await pool.execute("ALTER TABLE morning_briefs DROP COLUMN consumed_until")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'morning_briefs'::regclass "
+            "AND attname = 'consumed_until' AND attnum > 0 AND NOT attisdropped)")
+
+    run_db(test, monkeypatch)
+
+
+def test_the_source_check_is_found_by_its_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check whose text mentions ``gate_reminder`` but is not on ``source`` is left alone. The ``source`` check
+    is widened even when its own text does not mention ``gate_reminder``."""
+
+    async def test(pool: Any) -> None:
+        await pool.execute("ALTER TABLE proactive_deliveries DROP CONSTRAINT proactive_deliveries_source_check")
+        await pool.execute(
+            "ALTER TABLE proactive_deliveries ADD CONSTRAINT proactive_deliveries_source_check "
+            "CHECK (source IN ('task_notice'))")
+        await pool.execute(
+            "ALTER TABLE proactive_deliveries ADD CONSTRAINT proactive_deliveries_decoy_check "
+            "CHECK (source_ref IS NULL OR source_ref <> 'gate_reminder')")
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'morning_brief_kind'")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        await pool.execute(
+            "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, "
+            "decision, reason, counted, local_date) VALUES ('brief', 'morning_brief', 'normal', "
+            "'channel-lark', 'ou_1', 'direct', 'send', 'within_limits', false, '2026-11-23')")
+        source = await pool.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'proactive_deliveries'::regclass AND conname = 'proactive_deliveries_source_check'")
+        decoy = await pool.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'proactive_deliveries'::regclass AND conname = 'proactive_deliveries_decoy_check'")
+        assert source is not None and "morning_brief" in source
+        assert decoy is not None and "gate_reminder" in decoy
 
     run_db(test, monkeypatch)
