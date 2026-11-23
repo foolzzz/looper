@@ -156,7 +156,13 @@ class WorkerSubagents:
         async with self._locks.setdefault(run, asyncio.Lock()):
             parent = self._parents.pop(run, None)
             if parent is not None:
-                await self.service.cascade(parent_record_id=parent.recorder.record_id, reason=CancelReason.PARENT_ENDED)
+                try:
+                    for row in await self._owned(parent, None):
+                        if row["state"] == "finishing":
+                            await self.service.finish(row["id"])
+                            await self._fallback([row["id"]])
+                finally:
+                    await self.service.cascade(parent_record_id=parent.recorder.record_id, reason=CancelReason.PARENT_ENDED)
         self._locks.pop(run, None)
 
     async def call(self, task_id: str, seat: Any, name: str, raw: Any, *, call_id: str | None = None) -> dict:
@@ -207,8 +213,7 @@ class WorkerSubagents:
                 rows = await self._wait(parent, ids, seconds)
                 from ..subagent_delivery import mark_tool_delivered
                 # Hold off room delivery until this tool has claimed its completed results.
-                if name == WAIT or seconds > 0:
-                    await mark_tool_delivered(self.service.pool, ids)
+                await mark_tool_delivered(self.service.pool, ids)
             finally:
                 for spawn_id in ids:
                     count = self._waiting[spawn_id] - 1
@@ -303,12 +308,13 @@ class WorkerSubagents:
                     "AND p.subagents='on' AND COALESCE(p.agent_room,'on')='on')))")
                 for row in rows:
                     try:
-                        if row["status"] != "running":
-                            await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
+                        if row["state"] == "finishing":
+                            await self.service.finish(row["id"])
+                        elif row["status"] != "running":
+                            if row["state"] in ("queued", "asking", "cancelling"):
+                                await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
                         elif row["state"] == "queued":
                             self.schedule(row["id"])
-                        elif row["state"] == "finishing":
-                            await self.service.finish(row["id"])
                         elif row["state"] == "cancelling":
                             await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
                         await self._fallback([row["id"]])
@@ -330,10 +336,13 @@ class WorkerSubagents:
         if epoch is not None:
             await self.service.detach(epoch=epoch)
         else:
-            rows = await self.service.pool.fetch("SELECT id FROM agent_spawns WHERE kind='explorer' AND finished_at IS NULL")
+            rows = await self.service.pool.fetch("SELECT id,state FROM agent_spawns WHERE kind='explorer' AND finished_at IS NULL")
             for row in rows:
                 try:
-                    await self.service.cancel(row["id"], reason=CancelReason.SERVER)
+                    if row["state"] == "finishing":
+                        await self.service.finish(row["id"])
+                    else:
+                        await self.service.cancel(row["id"], reason=CancelReason.PARENT_ENDED)
                 except Exception:
                     logger.exception("explorer %s shutdown deferred to recovery", row["id"])
         await asyncio.gather(*list(self._jobs.values()), return_exceptions=True)

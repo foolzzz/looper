@@ -206,3 +206,90 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
         finally:
             await facade.stop()
     run_db(check, monkeypatch, timeout=45)
+
+
+async def _leave_finishing(pool, facade, ops, header):
+    import json
+
+    facade.schedule = lambda spawn_id: None
+    reply = await ops.call(header, SPAWN, {"kind": "explorer", "brief": BRIEF}, call_id="completed-child")
+    spawn_id = reply["result"]["spawn"]["id"]
+    await agent_spawns.move(spawn_id, agent_spawns.SpawnState.ASKING,
+                            expect=agent_spawns.SpawnState.QUEUED, pool=pool)
+    await agent_spawns.move(spawn_id, agent_spawns.SpawnState.FINISHING,
+        expect=agent_spawns.SpawnState.ASKING, result={"child": {"cost_usd": .02,
+        "output": json.dumps({"summary": "Finished evidence", "findings": [],
+                              "open_questions": [], "confidence": "high"})}}, pool=pool)
+    return spawn_id
+
+
+@pytest.mark.parametrize("entry,parent_running", [("end", False), ("scan", False), ("scan", True)])
+def test_finishing_completes_and_releases_budget_after_parent_end(entry, parent_running, tmp_path, monkeypatch):
+    from looper.db import room as db_room
+
+    async def check(pool):
+        ops, facade, _, grant = await _setup(pool, tmp_path, monkeypatch, room_on=True)
+        header, parent = await grant("worker-parent")
+        spawn_id = await _leave_finishing(pool, facade, ops, header)
+        if not parent_running:
+            await pool.execute("UPDATE llm_records SET status='completed',finished_at=now() WHERE id=$1", parent)
+        if entry == "end":
+            await ops.end_subagents("worker-parent")
+        else:
+            # A transient writeback failure must be retried by the live scanner,
+            # without recover() or restarting the service.
+            finish = facade.service.finish
+            attempts = 0
+            async def flaky_finish(child_id):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("synthetic writeback failure")
+                return await finish(child_id)
+            monkeypatch.setattr(facade.service, "finish", flaky_finish)
+            scanner = asyncio.create_task(facade._scan())
+            try:
+                async with asyncio.timeout(3):
+                    while (await agent_spawns.get(spawn_id, pool=pool))["delivered_at"] is None:
+                        await asyncio.sleep(.01)
+            finally:
+                scanner.cancel()
+                await asyncio.gather(scanner, return_exceptions=True)
+            assert attempts == 2
+        row = await agent_spawns.get(spawn_id, pool=pool)
+        assert row["state"] == "answered" and row["cancel_reason"] is None
+        assert row["spent_usd"] == .02 and row["finished_at"] is not None
+        usage = await agent_spawns.commitment("task", parent, pool=pool)
+        assert usage["task_reserved"] == 0 and usage["task_committed"] == .02
+        messages = await db_room.messages("task", pool=pool)
+        assert len(messages) == 1 and messages[0]["refs"] == [{"spawn_id": spawn_id}]
+    run_db(check, monkeypatch)
+
+
+def test_spawn_zero_wait_replay_claims_completed_tool_result(tmp_path, monkeypatch):
+    from looper.db import room as db_room
+
+    async def check(pool):
+        ops, facade, _, grant = await _setup(pool, tmp_path, monkeypatch, room_on=True)
+        header, _ = await grant("worker-parent")
+        spawn_id = await _leave_finishing(pool, facade, ops, header)
+        await facade.service.finish(spawn_id)
+        replay = await ops.call(header, SPAWN,
+            {"kind": "explorer", "brief": BRIEF, "wait_seconds": 0}, call_id="completed-child")
+        assert replay["result"]["spawn"]["result"]["summary"] == "Finished evidence"
+        row = await agent_spawns.get(spawn_id, pool=pool)
+        assert row["delivery"] == "tool" and row["delivered_at"] is not None
+        assert not await db_room.messages("task", pool=pool)
+    run_db(check, monkeypatch)
+
+
+def test_non_keeper_shutdown_uses_parent_ended_reason(tmp_path, monkeypatch):
+    async def check(pool):
+        ops, facade, _, grant = await _setup(pool, tmp_path, monkeypatch)
+        header, _ = await grant("worker-parent")
+        facade.schedule = lambda spawn_id: None
+        reply = await ops.call(header, SPAWN, {"kind": "explorer", "brief": BRIEF}, call_id="shutdown")
+        await facade.stop()
+        row = await agent_spawns.get(reply["result"]["spawn"]["id"], pool=pool)
+        assert row["state"] == "cancelled" and row["cancel_reason"] == "parent_ended"
+    run_db(check, monkeypatch)

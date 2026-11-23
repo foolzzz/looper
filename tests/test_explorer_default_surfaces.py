@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -92,3 +93,24 @@ def test_resident_process_signature_inputs_match_main(role):
 
     expected = signatures(baseline)
     assert expected and signatures(current) == expected
+
+
+@pytest.mark.parametrize("probe", ["looper/_component_probe.py", "tests/fixtures/component_probe_v2_14_69.py"])
+def test_component_probe_reads_the_unchanged_seat_tool_catalog(probe):
+    from looper.agents.ops import room, vault
+    from looper.agents.room import MemberKind
+
+    root = Path(__file__).resolve().parents[1]
+    paths = ('looper/agents/ops/__init__.py', 'looper/agents/room.py',
+             'looper/agents/ops/room.py', 'looper/agents/ops/vault.py')
+    completed = subprocess.run(
+        [sys.executable, '-I', str(root / probe)],
+        input=json.dumps({path: (root / path).read_text() for path in paths}),
+        capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    expected = {role: [tool.listing() for tool in (*room.tools_for(kind), *vault.TOOLS)]
+                for role, kind in (('worker', MemberKind.WORK), ('reviewer', MemberKind.REVIEW))}
+    assert json.loads(completed.stdout) == expected
+    read = next(tool for tool in expected['worker'] if tool['name'] == room.READ)
+    assert read['inputSchema']['properties']['kind']['enum'] == [
+        'info', 'question', 'answer', 'interface', 'announce', 'notice', 'escalation']

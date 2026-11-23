@@ -103,7 +103,9 @@ TOOLS: tuple[Tool, ...] = (
         description="Earlier room messages you can see, newest first, marking nothing read: by kind, from (a seat "
                     "or role), about (a message id: its whole thread), unanswered questions, before (a message id).",
         schema={"type": "object", "additionalProperties": False, "properties": {
-            "kind": {"type": "string", "enum": [k.value for k in MessageKind if k is not MessageKind.SPAWN_RESULT]},
+            "kind": {"type": "string", "enum": [k.value for k in (MessageKind.INFO, MessageKind.QUESTION, MessageKind.ANSWER,
+                                                      MessageKind.INTERFACE, MessageKind.ANNOUNCE, MessageKind.NOTICE,
+                                                      MessageKind.ESCALATION)]},
             "from": {"type": "string"},
             "about": {"type": "integer", "minimum": 1},
             "unanswered": {"type": "boolean"},

@@ -18,7 +18,8 @@ from tests.db_support import DSN, fresh_database_without_recording
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
 
-def test_serve_resumes_queued_explorer_and_restart_does_not_redeliver(monkeypatch):
+@pytest.mark.parametrize("subagents", ["off", "on"])
+def test_serve_resumes_queued_explorer_and_restart_does_not_redeliver(monkeypatch, subagents):
     # This task's disposable server and CI; the older runner helper names a
     # different local server and assumes a fixed password.
     target = urlsplit(str(DSN))
@@ -62,11 +63,20 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,
             "GROK_HOME": str(home / ".grok"), "XDG_CONFIG_HOME": str(home / ".config"),
             "XDG_CACHE_HOME": str(home / ".cache"), "LOOPER_TELEGRAM_BOT_TOKEN": ""}
         with fresh_database_without_recording(str(DSN)) as (url, _):
-            async def seed():
+            async def configure():
                 conn = await asyncpg.connect(url)
                 try:
                     project = await projects.create_project(name="Explorer serve", work_dir=str(source), pool=conn)
-                    await conn.execute("UPDATE projects SET subagents='on' WHERE id=$1", project["id"])
+                    await conn.execute("UPDATE projects SET subagents=$2 WHERE id=$1", project["id"], subagents)
+                    return project
+                finally:
+                    await conn.close()
+
+            project = asyncio.run(configure())
+
+            async def seed():
+                conn = await asyncpg.connect(url)
+                try:
                     await conn.execute("INSERT INTO tasks(id,project_id,requirement,status) "
                         "VALUES('serve-task',$1,'Read source','running')", project["id"])
                     await conn.execute("INSERT INTO task_steps(id,task_id,step_index,step_key,instruction,status,worker_id) "
@@ -84,7 +94,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,
             async def readback():
                 conn = await asyncpg.connect(url)
                 try:
-                    spawn = await agent_spawns.get(row["id"], pool=conn)
+                    spawn = await agent_spawns.get(row["id"], pool=conn) if row is not None else None
                     records = await conn.fetch("SELECT id FROM llm_records WHERE run_kind='explorer'")
                     messages = await conn.fetch("SELECT kind FROM room_messages WHERE kind='spawn_result'")
                     return spawn, records, messages
@@ -96,6 +106,9 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,
                         notes_root=home / "notes", env=environment, startup_timeout=45,
                         log_path=root / f"serve-{iteration}.log") as api:
                     assert api.post("/api/v1/system/status", {})["status"] == "ok"
+                    if subagents == "off":
+                        assert asyncio.run(readback()) == (None, [], [])
+                        continue
                     if row is None:
                         row = asyncio.run(seed())
                     deadline = time.monotonic() + 20
