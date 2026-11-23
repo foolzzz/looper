@@ -617,7 +617,7 @@ def test_the_schedules_section_carries_last_ok_at_and_the_todo_text_does_not_cha
 # --- the migrations --------------------------------------------------------------------------------------------------
 
 _BASE_SOURCES = ("task_notice", "completion", "progress", "gate", "gate_reminder", "subscription", "intent",
-                 "schedule", "advisor_alert", "autonomous", "user_reminder")
+                 "schedule", "advisor_alert", "autonomous", "user_reminder", "morning_brief")
 
 
 async def source_check(conn) -> tuple[str, str, bool]:
@@ -667,9 +667,9 @@ def test_a_new_database_has_the_table_and_the_widened_check_and_records_only_the
     asyncio.run(asyncio.wait_for(check(), 60))
 
 
-@pytest.mark.parametrize("others", [("morning_brief",), ("morning_brief", "triage"), ("triage",), ()])
+@pytest.mark.parametrize("others", [("triage",), ("triage", "other_value"), ()])
 def test_the_source_check_keeps_the_values_other_migrations_added(others):
-    """Applied after a database already has ``morning_brief`` (and any later value), the new check is the current
+    """Applied after a database already has later values, the new check is the current
     one plus ``idle_check``: no list of ours decides what survives."""
     import asyncio
 
