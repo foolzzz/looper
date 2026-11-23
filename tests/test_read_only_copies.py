@@ -103,9 +103,10 @@ class _Content:
             return files(project_id, int(n))
 
         monkeypatch.setattr(db_projects, "list_projects", list_projects)
-        from looper.db import managers, manager_installs
+        from looper.db import managers, manager_installs, manager_sessions
         monkeypatch.setattr(managers, "list_managers", AsyncMock(return_value=[]))
         monkeypatch.setattr(manager_installs, "list_installed", AsyncMock(return_value=[]))
+        monkeypatch.setattr(manager_sessions, "list", AsyncMock(return_value=[]))
         monkeypatch.setattr(db_documents, "list_documents", list_documents)
         monkeypatch.setattr(db_documents, "get_content", get_content)
         monkeypatch.setattr(db_library, "list_installed", list_installed)
@@ -391,6 +392,85 @@ def test_saved_schedule_sessions_keep_their_runtime_directories(tmp_path: Path, 
     removed = asyncio.run(reclaim_unused(tmp_path))
     assert set(removed) == set(directories.values()) - kept
     assert all((directory / "state").read_text() == "saved conversation" for directory in kept)
+
+
+def test_saved_manager_chat_histories_keep_matching_runtime_directories(
+    tmp_path: Path, content: _Content, monkeypatch,
+) -> None:
+    from looper.agents import session_routing
+    from looper.agents.runtimes.per_turn import session_dir_name
+    from looper.agents.session_routing import SessionKey, SessionKind, resident_label
+    from looper.db import manager_sessions
+
+    monkeypatch.setattr(session_routing, "_routing_enabled", True)
+    rows = [{"kind": "group", "channel_id": "bot-test", "chat": "group-test", "runtime_type": "codex",
+             "session_id": "saved-group"},
+            {"kind": "dm", "channel_id": "bot-test", "chat": "person-test", "runtime_type": "pi",
+             "session_id": "saved-dm"},
+            {"kind": "group", "channel_id": "bot-test", "chat": "reset-test", "runtime_type": "codex",
+             "session_id": None}]
+    monkeypatch.setattr(manager_sessions, "list", AsyncMock(return_value=rows))
+    monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
+    kept, retired = set(), set()
+    for row in rows:
+        label = resident_label("manager", SessionKey(SessionKind(row["kind"]), row["channel_id"], row["chat"]))
+        for runtime in ("codex", "pi"):
+            directory = tmp_path / ".local" / runtime / "sessions" / session_dir_name(label)
+            directory.mkdir(parents=True)
+            (directory / "state").write_text("saved conversation")
+            (kept if row["session_id"] and runtime == row["runtime_type"] else retired).add(directory)
+
+    assert set(asyncio.run(reclaim_unused(tmp_path))) == retired
+    assert all((directory / "state").read_text() == "saved conversation" for directory in kept)
+
+
+def test_unreadable_saved_manager_chats_prevent_history_reclamation_with_routing_on(
+    tmp_path: Path, content: _Content, monkeypatch,
+) -> None:
+    from looper.agents import session_routing
+    from looper.db import manager_sessions
+
+    monkeypatch.setattr(session_routing, "_routing_enabled", True)
+    monkeypatch.setattr(manager_sessions, "list", AsyncMock(side_effect=ConnectionError("database is down")))
+    monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
+    history = tmp_path / ".local" / "codex" / "sessions" / "manager.group.saved"
+    history.mkdir(parents=True)
+    (history / "state").write_text("saved conversation")
+
+    assert asyncio.run(reclaim_unused(tmp_path)) == []
+    assert (history / "state").read_text() == "saved conversation"
+
+
+@pytest.mark.parametrize("routing", [False, True])
+def test_isolated_manager_histories_survive_reclamation_without_changing_the_off_path(
+    tmp_path: Path, content: _Content, monkeypatch, routing: bool,
+) -> None:
+    from looper.agents import session_routing
+    from looper.agents.session_routing import SessionKey, SessionKind, key_digest
+    from looper.db import manager_sessions
+
+    monkeypatch.setattr(session_routing, "_routing_enabled", routing)
+    listed = AsyncMock(return_value=[])
+    monkeypatch.setattr(manager_sessions, "list", listed)
+    monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
+    histories = []
+    for kind in (SessionKind.GROUP, SessionKind.DM):
+        key = SessionKey(kind, "bot-test", "chat-test").text
+        history = (tmp_path / ".local" / "manager-sessions" / key_digest(key) /
+                   "claude" / "projects" / "workspace" / "saved.jsonl")
+        history.parent.mkdir(parents=True)
+        history.write_text("saved conversation")
+        histories.append(history)
+    unused = tmp_path / ".local" / "codex" / "sessions" / "planner-gone"
+    unused.mkdir(parents=True)
+    (unused / "state").write_text("retired conversation")
+
+    assert asyncio.run(reclaim_unused(tmp_path)) == [unused]
+    assert all(history.read_text() == "saved conversation" for history in histories)
+    if routing:
+        listed.assert_awaited_once_with("manager")
+    else:
+        listed.assert_not_awaited()
 
 
 def test_removing_a_session_directory_unlinks_its_login_link_and_leaves_the_login_file(
