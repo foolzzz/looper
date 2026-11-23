@@ -39,7 +39,9 @@ async def capture_baseline(work_dir: str, attempt: int, previous: Mapping[str, A
 
 
 def worker_result(result: Mapping[str, Any], previous: Mapping[str, Any] | None, attempt: int) -> dict[str, Any]:
-    report = {key: value for key, value in result.items() if key != "acceptance_baseline"}
+    report = {key: value for key, value in result.items() if key not in {"acceptance_baseline", "acceptance"}}
     if baseline := AcceptanceBaseline.from_result(previous, attempt):
         report["acceptance_baseline"] = baseline.row()
+    if previous and "acceptance" in previous:
+        report["acceptance"] = previous["acceptance"]
     return report

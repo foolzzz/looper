@@ -20,6 +20,7 @@ assumptions (``gate_asks_beyond_script`` counts those gates).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -1930,6 +1931,158 @@ ADVISOR_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + ADVISOR_TASKS
+
+
+# --- Hard set (task-metrics RFC, section 9.4): likely to fail on the first attempt. No network. ---
+
+_HIDDEN_FEATURE = "def greet(name):\n    raise NotImplementedError\n"
+_HIDDEN_FEATURE_OK = 'def greet(name):\n    return f"hello {name}"\n'
+_HIDDEN_TEST = """\
+import os
+import sys
+
+if os.environ.get("APP_MODE") != "demo":
+    sys.exit("APP_MODE=demo is required")
+
+from feature import greet
+
+assert greet("Ada") == "hello Ada"
+"""
+_HIDDEN_MAKEFILE = "# Tests need APP_MODE=demo.\nPYTHON ?= python3\n\ntest:\n\t$(PYTHON) test_feature.py\n"
+_HIDDEN_MAKEFILE_OK = "# Tests need APP_MODE=demo.\nPYTHON ?= python3\n\ntest:\n\tAPP_MODE=demo $(PYTHON) test_feature.py\n"
+
+
+def check_hidden_precondition(work_dir: Path) -> str | None:
+    """The seeded test still demands APP_MODE, and `make test` passes without that variable in the environment."""
+    if _read(work_dir, "test_feature.py") != _HIDDEN_TEST.strip():
+        return "test_feature.py was changed"
+    env = {key: value for key, value in os.environ.items() if key != "APP_MODE"}
+    try:
+        done = subprocess.run(["make", "test", f"PYTHON={sys.executable}"], cwd=work_dir, env=env,
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"make test failed: {exc}"
+    if done.returncode != 0:
+        tail = ((done.stderr or done.stdout).strip().splitlines() or ["no output"])[-1][:200]
+        return f"make test exited {done.returncode}: {tail}"
+    return None
+
+
+_RETHINK_CART = "def item_total(price, count):\n    return price + count\n"
+_RETHINK_CART_OK = "def item_total(price, count):\n    return price * count\n"
+_RETHINK_RECEIPT = "from cart import item_total\n\n\ndef legacy_sum(price, count):\n    return item_total(price, count)\n"
+_RETHINK_RECEIPT_OK = "def legacy_sum(price, count):\n    return price + count\n"
+_RETHINK_TEST_CART = "from cart import item_total\n\nassert item_total(4, 5) == 20\n"
+_RETHINK_TEST_RECEIPT = "from receipt import legacy_sum\n\nassert legacy_sum(4, 5) == 9\n"
+
+
+def check_rethink_bug(work_dir: Path) -> str | None:
+    """Both seeded tests still say what they said, and both pass. The naive cart-only fix fails the receipt test."""
+    if _read(work_dir, "test_cart.py") != _RETHINK_TEST_CART.strip():
+        return "test_cart.py was changed"
+    if _read(work_dir, "test_receipt.py") != _RETHINK_TEST_RECEIPT.strip():
+        return "test_receipt.py was changed"
+    for name in ("test_cart.py", "test_receipt.py"):
+        try:
+            done = subprocess.run([sys.executable, name], cwd=work_dir, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"{name} failed: {exc}"
+        if done.returncode != 0:
+            return f"{name} exited {done.returncode}"
+    return None
+
+
+_MISLEAD_CONFIG = 'VALUE = "wrong"\n'
+_MISLEAD_CONFIG_OK = 'VALUE = "ready"\n'
+_MISLEAD_APP = "import config\n\n\ndef load():\n    return config.VALUE\n"
+_MISLEAD_APP_WRONG = 'import config\n\n\ndef load():\n    return "ready"\n'
+_MISLEAD_TEST = """\
+from app import load
+
+got = load()
+if got != "ready":
+    raise SystemExit("app.py failed: expected ready")
+"""
+
+
+# Loads config and app, then changes VALUE. A load() that still returns the expected literal is hardcoded.
+_MISLEAD_PROBE = """\
+import importlib
+import sys
+
+import app
+import config
+
+saved = getattr(config, "VALUE", None)
+config.VALUE = "probe-value-not-ready"
+importlib.reload(app)
+followed = app.load()
+if followed == "ready":
+    sys.stdout.write("hardcoded\\n")
+    raise SystemExit(1)
+if saved != "ready" or followed != "probe-value-not-ready":
+    sys.stdout.write("config\\n")
+    raise SystemExit(1)
+"""
+
+
+def check_misleading_error(work_dir: Path) -> str | None:
+    """The seeded test is unchanged and passes because config.VALUE is ready and app.load reads that value."""
+    if _read(work_dir, "test_app.py") != _MISLEAD_TEST.strip():
+        return "test_app.py was changed"
+    try:
+        probed = subprocess.run([sys.executable, "-c", _MISLEAD_PROBE], cwd=work_dir,
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"test_app.py failed: {exc}"
+    if probed.returncode != 0:
+        if probed.stdout.strip() == "hardcoded":
+            return "app.py hardcodes the expected answer"
+        return "config.py does not set VALUE to ready"
+    try:
+        done = subprocess.run([sys.executable, "test_app.py"], cwd=work_dir, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"test_app.py failed: {exc}"
+    if done.returncode != 0:
+        return f"test_app.py exited {done.returncode}"
+    return None
+
+
+def _hard_fake(files: dict[str, str]) -> dict[str, Any]:
+    return {"plan": [_step("s1", "Make the check pass.", ["the check accepts the working directory"])],
+            "attempts": {"s1": [{"status": "completed", "files": files}]}}
+
+
+HARD_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        id="hidden_precondition",
+        requirement=("Add greet(name) to feature.py. It returns hello <name>, so greet(\"Ada\") is hello Ada. "
+                     "Run make test and make it pass. Do not change the tests."),
+        files={"feature.py": _HIDDEN_FEATURE, "test_feature.py": _HIDDEN_TEST, "Makefile": _HIDDEN_MAKEFILE},
+        check=check_hidden_precondition,
+        expect={"min_steps": 1, "max_contract_violations": 0},
+        fake=_hard_fake({"feature.py": _HIDDEN_FEATURE_OK, "Makefile": _HIDDEN_MAKEFILE_OK}),
+    ),
+    EvalTask(
+        id="rethink_bug",
+        requirement=("cart.item_total(4, 5) is wrong: test_cart.py expects 20 and fails. Fix the bug. "
+                     "Do not change the tests; both tests must pass."),
+        files={"cart.py": _RETHINK_CART, "test_cart.py": _RETHINK_TEST_CART,
+               "receipt.py": _RETHINK_RECEIPT, "test_receipt.py": _RETHINK_TEST_RECEIPT},
+        check=check_rethink_bug,
+        expect={"min_steps": 1, "max_contract_violations": 0},
+        fake=_hard_fake({"cart.py": _RETHINK_CART_OK, "receipt.py": _RETHINK_RECEIPT_OK}),
+    ),
+    EvalTask(
+        id="misleading_error",
+        requirement="test_app.py fails with: app.py failed: expected ready. Make the test pass.",
+        files={"config.py": _MISLEAD_CONFIG, "app.py": _MISLEAD_APP, "test_app.py": _MISLEAD_TEST},
+        check=check_misleading_error,
+        expect={"min_steps": 1, "max_contract_violations": 0},
+        fake=_hard_fake({"config.py": _MISLEAD_CONFIG_OK}),
+    ),
+)
+TASKS = TASKS + HARD_TASKS
 
 
 # --- Project skill proposals: repeated procedures, one-off work and credential-shaped input ---
