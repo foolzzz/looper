@@ -260,7 +260,9 @@ class ManagerOps:
         # The confirmations a card's button answered (id -> what it did), so a typed confirmation of one is told so.
         self._pressed: OrderedDict[str, str] = OrderedDict()
         # What a card button did, per chat, for the chat's next user turn (``_note_button``).
-        self._button_notes: OrderedDict[tuple[str | None, str | None, str | None], list[str]] = OrderedDict()
+        self._button_notes: OrderedDict[tuple[str | None, str | None, str | None], list[tuple[str | None, int, str]]] \
+            = OrderedDict()
+        self._notes_epoch = 0  # bumped when the session is reset: older notes are never told
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
         # later shell command may run one), and the turns already told the operator of a block.
         from ..outbound_hook import Trusted
@@ -549,7 +551,7 @@ class ManagerOps:
             if risk is not Risk.READ and (blocked := await self._outbound_check(tool, arguments, turn, risk)):
                 return blocked
             call = Call(arguments, turn, self._platform, scope=scope)
-            impact = await self._escalate(tool, call, watch)
+            impact = await receipts.escalate(tool, call, watch)
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
                 risk = Risk.HIGH
@@ -593,19 +595,6 @@ class ManagerOps:
         if watch.shown is not None and isinstance(result, dict):
             result.setdefault("shown_to_user", watch.shown)  # after the record: the trail keeps the tool's own result
         return {"status": "ok", "result": result}
-
-    @staticmethod
-    async def _escalate(tool: Tool, call: Call, watch: receipts.Watch) -> str | None:
-        """``tool.escalate(call)``; with receipts on, a write it refuses (a schedule that does not exist) still gets
-        its "did not run" line, as one that fails while running does."""
-        if tool.escalate is None:
-            return None
-        try:
-            return await tool.escalate(call)
-        except OpError as exc:
-            if receipts_settings.enabled() and not isinstance(exc, _OperatorOnly):
-                receipts.record_refusal(watch, call.turn, tool.name, call.arguments, exc)
-            raise
 
     async def _confirm(self, confirmation_id: str, turn: Turn) -> dict[str, Any]:
         if turn.autonomous:
@@ -666,6 +655,8 @@ class ManagerOps:
                 logger.exception("the Manager's confirmed call of %s failed", tool.name)
                 error = OpError(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); "
                                                        "tell the user, and ask again later")
+            if receipts_settings.enabled() and watch.receipt is None and not isinstance(error, _OperatorOnly):
+                receipts.record_refusal(watch, turn, tool.name, pending.arguments, error)
             await self._record(turn, tool, pending.arguments, Risk.HIGH, "error", error_code=error.code.value,
                                result={"message": str(error)}, confirmation_id=pending.id, watch=watch)
             raise _Recorded(error, watch.shown) from None
@@ -758,7 +749,7 @@ class ManagerOps:
         while len(self._pressed) > CONFIRMATION_CHATS:
             self._pressed.popitem(last=False)
         if not confirm:
-            self._note_button(key, pending.id, "it was cancelled; it did not run")  # type: ignore[arg-type]
+            self._note_button(key, event.presser, pending.id, "it was cancelled; it did not run")  # type: ignore[arg-type]
             return card_actions.Answer("已取消", card=card.settled("已取消，没有执行。"))
         asker = pending.asker or Turn(channel=key[0], chat=key[2], channel_id=key[1])
         turn = Turn(channel=asker.channel, chat=asker.chat, message_id=pending.asked_in or f"card:{row['token']}",
@@ -773,10 +764,12 @@ class ManagerOps:
             await self._run_confirmed(pending, turn, watch)
         except _Recorded as exc:
             await self._finish_card(pending, "error")
-            self._note_button(turn.chat_key, pending.id, f"it failed ({receipts.reason(exc.code)})")
+            self._note_button(turn.chat_key, turn.sender, pending.id, f"it failed ({receipts.reason(exc.code)})")
+            if turn.blocks:  # receipts on: the failed-write line code generated
+                return card.settled("\n\n".join(turn.blocks))
             return card.settled(f"❌ 没有执行：{exc}")
         await self._finish_card(pending, "ok")
-        self._note_button(turn.chat_key, pending.id,
+        self._note_button(turn.chat_key, turn.sender, pending.id,
                           f"it ran ({receipts.render(watch.receipt)})" if watch.receipt is not None else "it ran")
         return card.settled("\n\n".join(("✅ 已执行。", *turn.blocks)))
 
@@ -1010,17 +1003,36 @@ class ManagerOps:
         """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the
         operator's card buttons did in this chat since its last one (``_note_button``)."""
         note = self._begin_turn(turn, binding, session_key=session_key)
-        notes = [] if turn.autonomous else self._button_notes.pop(turn.chat_key, [])
-        return "\n".join(part for part in (note, *notes) if part)
+        return "\n".join(part for part in (note, *self._take_button_notes(turn)) if part)
 
-    def _note_button(self, key: tuple[str | None, str | None, str | None], confirmation_id: str, what: str) -> None:
+    def _take_button_notes(self, turn: Turn) -> list[str]:
+        """The notes this chat's card buttons left, for the user turn of the person who pressed (RFC 6.5), once.
+        Never while receipts are off (stale ones are dropped), in a background turn, for another speaker, or from
+        before the session was reset."""
+        if not receipts_settings.enabled():
+            self._button_notes.clear()
+            return []
+        entries = [entry for entry in self._button_notes.get(turn.chat_key, []) if entry[1] == self._notes_epoch]
+        if turn.autonomous or turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+            return []
+        mine = [entry for entry in entries if entry[0] == turn.sender]
+        rest = [entry for entry in entries if entry[0] != turn.sender]
+        if rest:
+            self._button_notes[turn.chat_key] = rest
+        else:
+            self._button_notes.pop(turn.chat_key, None)
+        return [text for _sender, _epoch, text in mine]
+
+    def _note_button(self, key: tuple[str | None, str | None, str | None], sender: str | None,
+                     confirmation_id: str, what: str) -> None:
         """Tell this chat's next user turn what a card button did to a confirmation (RFC 6.5): at most 3, newest
-        kept. Nothing while receipts are off."""
+        kept, for the person who pressed. Nothing while receipts are off."""
         if not receipts_settings.enabled():
             return
         note = (f"[Looper] After your last reply, the operator answered confirmation {confirmation_id} with its "
                 f"card: {what}.")
-        self._button_notes[key] = [*self._button_notes.pop(key, []), note][-3:]
+        entries = [entry for entry in self._button_notes.pop(key, []) if entry[1] == self._notes_epoch]
+        self._button_notes[key] = [*entries, (sender, self._notes_epoch, note)][-3:]
         while len(self._button_notes) > CONFIRMATION_CHATS:
             del self._button_notes[next(iter(self._button_notes))]
 
@@ -1099,7 +1111,9 @@ class ManagerOps:
                 for (channel, channel_id, chat), pending in waiting]
 
     def forget_confirmations(self) -> None:
-        """Drop every waiting confirmation (the Manager's session was reset)."""
+        """Drop every waiting confirmation (the Manager's session was reset), and the card-button notes with them."""
+        self._notes_epoch += 1
+        self._button_notes.clear()
         for pending in self._pending.values():
             self._lapse(pending)
         self._pending.clear()
@@ -1312,6 +1326,8 @@ class _Recorded(OpError):
 
 class _OperatorOnly(OpError):
     """A speaker refusal with a typed audit reason, without changing other forbidden errors."""
+
+    operator_only = True  # no receipt: the model tells the speaker (``receipts.escalate``)
 
     def __init__(self, turn: Turn) -> None:
         message = ("only the operator can authorize this: it was not run and nothing waits for confirmation; "

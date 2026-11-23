@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from . import receipts_settings
 from .ops import ErrorCode, OpError
 from .ops.categories import TOOL_ACTIONS, ActionCategory, ActionKind
 
@@ -166,6 +167,18 @@ async def run_watched(tool: Any, call: Any, watch: Watch) -> Any:
 def record_refusal(watch: Watch, turn: Any, tool: str, arguments: Mapping[str, Any], error: OpError) -> None:
     """The receipt of a write call refused before it ran (its ``escalate`` raised)."""
     _finish(watch, turn, len(turn.blocks), tool, arguments, error)
+
+
+async def escalate(tool: Any, call: Any, watch: Watch) -> str | None:
+    """``tool.escalate(call)``; with receipts on, a write it refuses still gets its "did not run" line."""
+    if tool.escalate is None:
+        return None
+    try:
+        return await tool.escalate(call)
+    except OpError as exc:
+        if receipts_settings.enabled() and not getattr(exc, "operator_only", False):
+            record_refusal(watch, call.turn, tool.name, call.arguments, exc)
+        raise
 
 
 def row_fields(watch: Watch | None) -> dict[str, str]:
