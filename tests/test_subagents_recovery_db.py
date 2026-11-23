@@ -214,3 +214,134 @@ def test_cancelling_orphan_keeps_reservation_until_restart_termination_succeeds(
                 await proc_tree.end(process, label='explorer cancellation test cleanup')
             await asyncio.wait_for(process.wait(), 10)
     run_db(check, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize('operation', ['recover', 'cascade'])
+def test_bulk_cancellation_continues_after_unavailable_and_reclaims_files(tmp_path, monkeypatch, operation):
+    async def check(pool):
+        service, caller = await setup(pool, tmp_path, monkeypatch)
+        first, stuck, _, first_record = await orphan(pool, service, caller, 'stuck')
+        second, ended, _, second_record = await orphan(pool, service, caller, 'next')
+        abandoned = [service.runtime_root / '.local' / name / str(first['id'])
+                     for name in ('explorers', 'explorer-homes')]
+        for directory in abandoned:
+            directory.mkdir(parents=True)
+            (directory / 'owned').touch()
+        original_end = proc_tree.end_orphan
+
+        async def end_unless_stuck(pid, started, **kwargs):
+            if pid != stuck.pid:
+                await original_end(pid, started, **kwargs)
+
+        monkeypatch.setattr(proc_tree, 'end_orphan', end_unless_stuck)
+        no_spawn = AsyncMock(side_effect=AssertionError('bulk cancellation must not spawn'))
+        monkeypatch.setattr(subagents.spawn, 'run_child', no_spawn)
+        try:
+            if operation == 'recover':
+                await service.recover()
+            else:
+                await service.cascade(task_id='t', reason=agent_spawns.CancelReason.TASK_ENDED)
+            pending = await agent_spawns.get(first['id'], pool=pool)
+            done = await agent_spawns.get(second['id'], pool=pool)
+            assert pending['state'] == 'cancelling' and pending['finished_at'] is None
+            assert pending['child_process']['pid'] == stuck.pid and stuck.returncode is None
+            assert (await llm_records.get_record(first_record, pool=pool))['status'] == 'running'
+            assert done['state'] == 'cancelled' and done['finished_at'] is not None
+            assert (await llm_records.get_record(second_record, pool=pool))['status'] == 'interrupted'
+            await asyncio.wait_for(ended.wait(), 10)
+            assert (await agent_spawns.commitment('t', caller.parent.record_id, pool=pool))['task_reserved'] == .5
+            assert all(not directory.exists() for directory in abandoned)
+            no_spawn.assert_not_awaited()
+            monkeypatch.setattr(proc_tree, 'end_orphan', original_end)
+            await service.recover()
+            await asyncio.wait_for(stuck.wait(), 10)
+            assert (await agent_spawns.commitment('t', caller.parent.record_id, pool=pool))['task_reserved'] == 0
+        finally:
+            for process in (stuck, ended):
+                if process.returncode is None:
+                    await proc_tree.end(process, label='bulk explorer cancellation cleanup')
+                await asyncio.wait_for(process.wait(), 10)
+    run_db(check, monkeypatch, timeout=50)
+
+
+@pytest.mark.parametrize('operation', ['recover', 'cascade'])
+def test_bulk_cleanup_runs_even_on_unexpected_failure(tmp_path, monkeypatch, operation):
+    async def check(pool):
+        service, caller = await setup(pool, tmp_path, monkeypatch)
+        row = await service.admit(caller, brief(), key='cleanup')
+        await agent_spawns.move(row['id'], agent_spawns.SpawnState.ASKING,
+                                expect=agent_spawns.SpawnState.QUEUED, pool=pool)
+        roots = [service.runtime_root / '.local' / name / 'abandoned'
+                 for name in ('explorers', 'explorer-homes')]
+        for root in roots:
+            root.mkdir(parents=True)
+        monkeypatch.setattr(service, 'cancel', AsyncMock(side_effect=RuntimeError('unexpected failure')))
+        with pytest.raises(RuntimeError, match='unexpected failure'):
+            if operation == 'recover':
+                await service.recover()
+            else:
+                await service.cascade(task_id='t', reason=agent_spawns.CancelReason.TASK_ENDED)
+        assert all(not root.exists() for root in roots)
+    run_db(check, monkeypatch)
+
+
+def test_detach_skips_handed_over_id_still_in_running(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    async def check(pool):
+        service, caller = await setup(pool, tmp_path, monkeypatch)
+        row = await service.admit(caller, brief(), key='detach')
+        await agent_spawns.move(row['id'], agent_spawns.SpawnState.ASKING,
+                                expect=agent_spawns.SpawnState.QUEUED, pool=pool)
+        service._handles[row['id']] = SimpleNamespace(detach=AsyncMock(
+            return_value=SimpleNamespace(kind=kept_run.DetachKind.DETACHED)))
+        finished = asyncio.get_running_loop().create_future()
+        finished.set_result(None)
+        service._running[row['id']] = finished
+        end = AsyncMock(side_effect=AssertionError('handed-over process must not be ended'))
+        monkeypatch.setattr(service, '_end_process', end)
+        await service.detach(epoch=1)
+        assert (await agent_spawns.get(row['id'], pool=pool))['state'] == 'asking'
+        end.assert_not_awaited()
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize('changed', ['metadata', 'runtime', 'model', 'read_only', 'access'])
+def test_kept_resume_compares_only_execution_boundary(tmp_path, monkeypatch, changed):
+    from types import SimpleNamespace
+    from looper.agents.agent_settings import Access, AgentType, Launch
+    from looper.agents.claude_cli import ClaudeRunRecorder
+
+    async def check(pool):
+        service, caller = await setup(pool, tmp_path, monkeypatch)
+        service.keeper = KeeperSettings(2)
+        row = await service.admit(caller, brief(), key='resume-boundary')
+        settings = await subagents.load_agent_settings(AgentType.EXPLORER)
+        launch = Launch(settings, role=AgentType.EXPLORER, access=Access.EXPLORE)
+        saved = launch.record()
+        if changed == 'metadata':
+            saved['pricing'] = {'builtin_prices_as_of': 'previous'}
+            saved['settings_sources'] = {'old': 'source'}
+            saved['llmrec'] = {'state': 'recording', 'route': 'old-route'}
+        elif changed == 'runtime':
+            saved['profile']['runtime']['type'] = 'other-runtime'
+        elif changed == 'model':
+            saved['model_choice']['model'] = 'other-model'
+        else:
+            saved[changed] = 'full'
+        directory = service.runtime_root / keeper.RUNS_DIR / 'held'
+        directory.mkdir(parents=True)
+        keeper.write_json(directory / keeper.MANIFEST, {'role': 'explorer', 'task_id': 't',
+            'record_id': 123, 'run_id': 'held', 'runtime_type': launch.runtime.type, 'launch': saved})
+        row.update(child_record_id=123, child_process={'run_dir': str(directory)})
+        attach = AsyncMock(return_value=SimpleNamespace(command=[]))
+        monkeypatch.setattr(kept_run.KeptRun, 'attach', attach)
+        monkeypatch.setattr(ClaudeRunRecorder, 'resume', AsyncMock())
+        monkeypatch.setattr(service, '_collect_kept', AsyncMock())
+        assert await service._resume_kept(row) is (changed == 'metadata')
+        if changed == 'metadata':
+            attach.assert_awaited_once()
+            await asyncio.gather(*service._running.values())
+        else:
+            attach.assert_not_awaited()
+    run_db(check, monkeypatch)

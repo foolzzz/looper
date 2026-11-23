@@ -54,6 +54,36 @@ def test_non_repository_refused_and_failure_leaves_no_checkout(tmp_path):
     assert not target.exists()
 
 
+@pytest.mark.parametrize('tracked,target_kind', [
+    (True, 'file'), (False, 'directory'), (False, 'missing'),
+])
+def test_snapshot_refuses_symlinks_without_changing_source(tmp_path, tracked, target_kind):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    git(repo, 'init')
+    (repo / 'ordinary').write_text('source')
+    git(repo, 'add', 'ordinary')
+    outside = tmp_path / 'outside'
+    if target_kind == 'file':
+        outside.write_text('private')
+    elif target_kind == 'directory':
+        outside.mkdir()
+        (outside / 'private').write_text('private')
+    link = repo / 'link\nwith-newline'
+    link.symlink_to(outside, target_is_directory=target_kind == 'directory')
+    if tracked:
+        git(repo, 'add', '--', link.name)
+    status = git(repo, 'status', '--porcelain=v1')
+    index = (repo / '.git/index').read_bytes()
+    target = tmp_path / 'explorers/spawn'
+    with pytest.raises(CheckoutError, match='symbolic links'):
+        prepare(repo, target)
+    assert not target.exists()
+    assert link.is_symlink() and link.readlink() == outside
+    assert (repo / '.git/index').read_bytes() == index
+    assert git(repo, 'status', '--porcelain=v1') == status
+
+
 def test_snapshot_failure_cleans_partial_target(tmp_path, monkeypatch):
     repo = tmp_path / 'repo'
     repo.mkdir()

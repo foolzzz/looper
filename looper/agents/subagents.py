@@ -109,6 +109,7 @@ class SpawnService:
         self._running: dict[int, asyncio.Task] = {}
         self._handles: dict[int, Any] = {}
         self._children: dict[int, asyncio.Task] = {}
+        self._homes: dict[int, str] = {}
 
     async def admit(self, caller: Spawner, brief: Any, *, key: str, kind: str = "explorer",
                     profile: str | None = None, budget_usd: float | None = None,
@@ -269,6 +270,7 @@ class SpawnService:
                 timeout_s=role.get("timeout_seconds") or EXPLORER_TIMEOUT_SEC,
                 max_turns=role.get("max_turns") or EXPLORER_MAX_TURNS,
                 role=AgentType.EXPLORER)
+            self._homes[spawn_id] = child.agent_id
             record_id = None
             claimed = asyncio.Event()
             launch_ready = asyncio.Event()
@@ -276,13 +278,16 @@ class SpawnService:
                 latest = await agent_spawns.get(spawn_id, pool=conn)
                 if latest["state"] != "queued":
                     return latest
+                task_status = await conn.fetchval("SELECT status FROM tasks WHERE id=$1", row["task_id"])
+                subagents_on = await conn.fetchval("SELECT subagents FROM projects WHERE id=$1 FOR UPDATE", task_row["project_id"])
+                if task_status != "running" or subagents_on != "on":
+                    moved = await agent_spawns.move(spawn_id, SpawnState.CANCELLED, expect=SpawnState.QUEUED,
+                        cancel_reason=CancelReason.TASK_ENDED.value, pool=conn)
+                    return moved or await agent_spawns.get(spawn_id, pool=conn)
                 limit = await conn.fetchval("SELECT max_concurrency FROM task_concurrency_limits WHERE task_id=$1 AND role='subagent'", row["task_id"]) or 4
                 active = await conn.fetchval("SELECT count(*) FROM agent_spawns WHERE task_id=$1 AND kind='explorer' AND state IN ('asking','cancelling')", row["task_id"])
                 if active >= limit:
                     return latest
-                if project.get("subagents") != "on" or task_row["status"] != "running":
-                    return await agent_spawns.move(spawn_id, SpawnState.CANCELLED, expect=SpawnState.QUEUED,
-                                                  cancel_reason=CancelReason.TASK_ENDED.value, pool=conn)
                 async def on_record(value):
                     nonlocal record_id
                     record_id = value
@@ -349,6 +354,7 @@ class SpawnService:
                 return await self.finish(spawn_id)
             raise
         finally:
+            self._homes.pop(spawn_id, None)
             self._children.pop(spawn_id, None)
             handle = self._handles.pop(spawn_id, None)
             from .kept_run import KeptRunState
@@ -372,6 +378,9 @@ class SpawnService:
         detail = child.get("detail", "")
         if failure == ChildFailure.START_FAILURE.value:
             state, failure_class, cause = SpawnState.FAILED, "environment", "start_failure"
+            result = {}
+        elif failure == ChildFailure.TIMEOUT.value:
+            state, failure_class, cause = SpawnState.FAILED, "judgment", "timeout"
             result = {}
         elif cost is None or not _number(cost) or cost > row["budget_usd"] or failure == ChildFailure.BUDGET.value:
             state, failure_class, cause = SpawnState.OVER_BUDGET, "judgment", "budget"
@@ -451,33 +460,47 @@ class SpawnService:
         """Cancel the one-level subtree selected by a task, parent run or dropped step."""
         if task_id is None and parent_record_id is None and step_id is None:
             raise ValueError("cascade requires a task, parent or step")
-        rows = await self.pool.fetch("SELECT id FROM agent_spawns WHERE kind='explorer' "
-            "AND ($1::text IS NULL OR task_id=$1) AND ($2::bigint IS NULL OR parent_record_id=$2) "
-            "AND ($3::text IS NULL OR step_id=$3) AND finished_at IS NULL", task_id, parent_record_id, step_id)
-        for row in rows:
-            await self.cancel(row["id"], reason=reason)
+        try:
+            rows = await self.pool.fetch("SELECT id FROM agent_spawns WHERE kind='explorer' "
+                "AND ($1::text IS NULL OR task_id=$1) AND ($2::bigint IS NULL OR parent_record_id=$2) "
+                "AND ($3::text IS NULL OR step_id=$3) AND finished_at IS NULL ORDER BY id", task_id, parent_record_id, step_id)
+            for row in rows:
+                try:
+                    await self.cancel(row["id"], reason=reason)
+                except Unavailable:
+                    logger.warning("explorer %s still cancelling during cascade", row["id"], exc_info=True)
+        finally:
+            await self._cleanup_abandoned()
 
     async def recover(self) -> None:
         """Recover durable states without invoking the spawn path."""
-        rows = await self.pool.fetch("SELECT id FROM agent_spawns WHERE kind='explorer' AND finished_at IS NULL ORDER BY id")
-        for entry in rows:
-            if entry["id"] in self._running:
-                continue
-            row = await agent_spawns.get(entry["id"], pool=self.pool)
-            if row["state"] == "finishing":
-                await self.finish(row["id"])
-            elif row["state"] in ("asking", "cancelling"):
-                if row["state"] == "asking" and await self._adopt(row):
+        try:
+            rows = await self.pool.fetch("SELECT id FROM agent_spawns WHERE kind='explorer' AND finished_at IS NULL ORDER BY id")
+            for entry in rows:
+                if entry["id"] in self._running:
                     continue
-                await self.cancel(row["id"], reason=CancelReason.SERVER)
-        # Checkout owners never survive a non-kept recovery; queued rows have no checkout yet.
+                try:
+                    row = await agent_spawns.get(entry["id"], pool=self.pool)
+                    if row["state"] == "finishing":
+                        await self.finish(row["id"])
+                    elif row["state"] in ("asking", "cancelling"):
+                        if row["state"] == "asking" and await self._adopt(row):
+                            continue
+                        await self.cancel(row["id"], reason=CancelReason.SERVER)
+                except Unavailable:
+                    logger.warning("explorer %s still cancelling during recovery", entry["id"], exc_info=True)
+        finally:
+            await self._cleanup_abandoned()
+
+    async def _cleanup_abandoned(self) -> None:
+        # Only live or adopted owners retain their checkout and runtime home.
         from .explorer_checkout import remove_abandoned
-        await asyncio.to_thread(remove_abandoned, self.runtime_root / ".local" / "explorers",
-                                keep={str(spawn_id) for spawn_id in self._running})
-        kept_homes = set()
-        for handle in self._handles.values():
-            kept_homes.add(handle.manifest["run_id"])
-        await asyncio.to_thread(remove_abandoned, self.runtime_root / ".local" / "explorer-homes", keep=kept_homes)
+        try:
+            await asyncio.to_thread(remove_abandoned, self.runtime_root / ".local" / "explorers",
+                                    keep={str(spawn_id) for spawn_id in self._running})
+        finally:
+            kept_homes = set(self._homes.values()) | {handle.manifest["run_id"] for handle in self._handles.values()}
+            await asyncio.to_thread(remove_abandoned, self.runtime_root / ".local" / "explorer-homes", keep=kept_homes)
 
     async def _adopt(self, row: Mapping[str, Any]) -> bool:
         if self.keeper is None or not (row.get("child_process") or {}).get("kept"):
@@ -505,7 +528,14 @@ class SpawnService:
                             role=AgentType.EXPLORER, access=Access.EXPLORE)
             if not launch.runtime.keepable or launch.runtime.hosts_runs:
                 return False
-            if manifest.get("runtime_type") != launch.runtime.type or manifest.get("launch") != launch.record():
+            saved = manifest.get("launch") or {}
+            current = launch.record()
+            # Audit metadata (prices, setting sources and recorder routing) may
+            # change without changing the authority of the existing process.
+            if (manifest.get("runtime_type") != launch.runtime.type
+                    or saved.get("profile", {}).get("runtime", {}).get("type") != launch.runtime.type
+                    or saved.get("model_choice", {}).get("model") != launch.model
+                    or any(saved.get(key) != current.get(key) for key in ("read_only", "access"))):
                 return False
             handle = await KeptRun.attach(directory, runtime=launch.runtime, launch=launch,
                 epoch=self.keeper.epoch, on_stale=self.on_stale, label=f"explorer {row['id']}")
@@ -559,9 +589,11 @@ class SpawnService:
     async def detach(self, *, epoch: int, timeout: float = 5) -> None:
         """Hand keepable children to the next controller; cancel the others."""
         from .kept_run import DetachKind
+        detached = set()
         for spawn_id, handle in list(self._handles.items()):
             outcome = await handle.detach(epoch=epoch, timeout=timeout)
             if outcome.kind is DetachKind.DETACHED:
+                detached.add(spawn_id)
                 child = self._children.get(spawn_id)
                 if child is not None:
                     child.cancel()
@@ -570,4 +602,6 @@ class SpawnService:
                 if running is not None:
                     await asyncio.gather(running, return_exceptions=True)
         for spawn_id in list(self._running):
+            if spawn_id in detached:
+                continue
             await self.cancel(spawn_id, reason=CancelReason.SERVER)

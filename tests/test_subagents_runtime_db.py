@@ -270,3 +270,43 @@ def test_missing_child_record_prevents_process_launch(tmp_path, monkeypatch):
         assert result.failure is spawn.ChildFailure.UNAVAILABLE and result.record_id is None
         no_process.assert_not_awaited()
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize('operation', ['recover', 'cascade'])
+def test_bulk_cleanup_preserves_unselected_running_explorer_home(tmp_path, monkeypatch, operation):
+    monkeypatch.setenv('EXPLORER_MODE', 'gate')
+
+    async def check(pool):
+        directory, parent, settings = await _parent(pool, tmp_path)
+        await pool.execute("UPDATE projects SET subagent_task_budget_usd=1")
+        monkeypatch.setattr(subagents, 'load_agent_settings', AsyncMock(return_value=settings))
+        service = subagents.SpawnService(tmp_path / 'runtime', pool=pool,
+            claude_bin=fake_claude(tmp_path / 'claude', _EXPLORER_CLI))
+        caller = subagents.Spawner(parent, 'worker', directory)
+        brief = {'goal': 'Find source', 'deliverable': 'Evidence', 'scope': ['source.py']}
+        active = await service.admit(caller, brief, key='live-home')
+        other_record = await llm_records.start_record(agent_id='worker-other-parent', task_id=parent.task_id, pool=pool)
+        other = subagents.Spawner(spawn.SpawnParent(parent.task_id, parent.step_id, other_record), 'worker', directory)
+        queued = await service.admit(other, brief, key='other-parent')
+        running = asyncio.create_task(service.run(active['id']))
+        try:
+            await _wait_for_file(tmp_path / 'seen.json')
+            homes = list((service.runtime_root / '.local' / 'explorer-homes').iterdir())
+            assert len(homes) == 1 and homes[0].is_dir()
+            assert not service._handles  # the ordinary, non-keeper path owns a home too
+            if operation == 'recover':
+                await service.recover()
+            else:
+                await service.cascade(parent_record_id=other_record, reason=agent_spawns.CancelReason.PARENT_ENDED)
+                assert (await agent_spawns.get(queued['id'], pool=pool))['state'] == 'cancelled'
+            assert (await agent_spawns.get(active['id'], pool=pool))['state'] == 'asking'
+            assert homes[0].is_dir()
+            (tmp_path / 'release').touch()
+            assert (await asyncio.wait_for(running, 15))['state'] == 'answered'
+            assert not homes[0].exists()
+        finally:
+            (tmp_path / 'release').touch()
+            if not running.done():
+                running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+    run_db(check, monkeypatch, timeout=45)

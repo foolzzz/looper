@@ -54,6 +54,11 @@ def prepare(work_dir: Path, target: Path) -> Checkout:
             except CheckoutError:
                 _git(repo, 'read-tree', '--empty', env=env)
             _git(repo, 'add', '-A', '--', '.', env=env)
+            # Inspect the staged snapshot before extraction, including dangling
+            # links and links to directories outside the source repository.
+            entries = _git(repo, 'ls-files', '--stage', '-z', env=env).split('\0')
+            if any(entry.startswith('120000 ') for entry in entries):
+                raise CheckoutError('explorer snapshots cannot contain symbolic links')
             tree = _git(repo, 'write-tree', env=env)
             _git(repo, 'read-tree', tree, env=env)
             _git(repo, 'checkout-index', '--all', f'--prefix={target}{os.sep}', env=env)

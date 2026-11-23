@@ -219,3 +219,92 @@ def test_subtree_spend_soft_stops_parent_and_manager_cost_is_excluded(tmp_path, 
         await service.enforce_parent_budget(parent.parent.record_id, .5, spent_usd=.1)
         service.stop_parent.assert_not_awaited()
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize('change', ['task', 'project'])
+@pytest.mark.parametrize('full', [False, True])
+def test_run_rechecks_task_and_project_after_preparation(tmp_path, monkeypatch, change, full):
+    from looper.agents import knowledge
+
+    async def check(pool):
+        service, parent = await setup(pool, tmp_path, monkeypatch)
+        row = await service.admit(parent, brief(), key='stale-launch')
+        if full:
+            other = await service.admit(parent, brief(), key='occupied')
+            await agent_spawns.move(other['id'], agent_spawns.SpawnState.ASKING,
+                                    expect=agent_spawns.SpawnState.QUEUED, pool=pool)
+            await pool.execute("INSERT INTO task_concurrency_limits(task_id,role,max_concurrency) VALUES('t','subagent',1)")
+        original = knowledge.load_knowledge
+
+        async def change_during_preparation(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            if change == 'task':
+                await pool.execute("UPDATE tasks SET status='cancelled' WHERE id='t'")
+            else:
+                await pool.execute("UPDATE projects SET subagents='off' WHERE id=(SELECT project_id FROM tasks WHERE id='t')")
+            return result
+
+        monkeypatch.setattr(knowledge, 'load_knowledge', change_during_preparation)
+        no_spawn = AsyncMock(side_effect=AssertionError('stale queued explorer must not launch'))
+        monkeypatch.setattr(subagents.spawn, 'run_child', no_spawn)
+        result = await service.run(row['id'])
+        assert result['state'] == 'cancelled' and result['cancel_reason'] == 'task_ended'
+        assert result['child_record_id'] is None and result['finished_at'] is not None
+        assert (await agent_spawns.commitment('t', parent.parent.record_id, pool=pool))['task_reserved'] == (.5 if full else 0)
+        no_spawn.assert_not_awaited()
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize('cost', [.02, None])
+def test_timeout_is_classified_and_unknown_cost_is_charged_conservatively(tmp_path, monkeypatch, cost):
+    async def check(pool):
+        service, parent = await setup(pool, tmp_path, monkeypatch)
+        row = await service.admit(parent, brief(), key='timeout')
+        child = await llm_records.start_record(agent_id='explorer-timeout', task_id='t', run_kind='explorer',
+                                              parent_record_id=parent.parent.record_id, pool=pool)
+        await llm_records.finish_record(child, status='failed', cost_usd=cost, pool=pool)
+        await agent_spawns.move(row['id'], agent_spawns.SpawnState.ASKING,
+                                expect=agent_spawns.SpawnState.QUEUED, child_record_id=child, pool=pool)
+        await agent_spawns.move(row['id'], agent_spawns.SpawnState.FINISHING,
+                                expect=agent_spawns.SpawnState.ASKING,
+                                result={'child': {'failure': 'timeout'}}, pool=pool)
+        result = await service.finish(row['id'])
+        assert result['state'] == 'failed'
+        assert result['failure_class'] == 'judgment' and result['failure_cause'] == 'timeout'
+        assert result['spent_usd'] == (cost if cost is not None else row['budget_usd'])
+        assert (await agent_spawns.commitment('t', parent.parent.record_id, pool=pool))['task_reserved'] == 0
+    run_db(check, monkeypatch)
+
+
+def test_run_waits_for_project_switch_transaction(tmp_path, monkeypatch):
+    from looper.agents import knowledge
+
+    async def check(pool):
+        service, parent = await setup(pool, tmp_path, monkeypatch)
+        row = await service.admit(parent, brief(), key='project-lock')
+        prepared = asyncio.Event()
+        original = knowledge.load_knowledge
+        no_spawn = AsyncMock(side_effect=AssertionError('disabled project must not launch'))
+        monkeypatch.setattr(subagents.spawn, 'run_child', no_spawn)
+        async with pool.acquire() as conn:
+            transaction = conn.transaction()
+            await transaction.start()
+
+            async def prepare_with_pending_switch(*args, **kwargs):
+                result = await original(*args, **kwargs)
+                await conn.execute("UPDATE projects SET subagents='off' WHERE id=(SELECT project_id FROM tasks WHERE id='t')")
+                prepared.set()
+                return result
+
+            monkeypatch.setattr(knowledge, 'load_knowledge', prepare_with_pending_switch)
+            running = asyncio.create_task(service.run(row['id']))
+            try:
+                await asyncio.wait_for(prepared.wait(), 10)
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(running), .1)
+            finally:
+                await transaction.commit()
+                result = await asyncio.wait_for(running, 10)
+        assert result['state'] == 'cancelled' and result['cancel_reason'] == 'task_ended'
+        no_spawn.assert_not_awaited()
+    run_db(check, monkeypatch, timeout=30)
