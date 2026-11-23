@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,19 +33,19 @@ def _switch_forgotten() -> Any:
     outbound_hook._known = False
 
 
-def _ops(tmp_path: Path, session: dict[str, str | None]) -> Any:
+def _ops(tmp_path: Path, session: dict[str, str | None], monkeypatch: pytest.MonkeyPatch) -> Any:
     """A Manager's ops whose session is ``session["id"]``, with a stand-in leads search that finds what
     ``session["leads"]`` holds."""
     from looper.agents.bus import MessageBus
-    from looper.agents.ops import Risk, Tool
+    from looper.agents.ops import leads as ops_leads
     from looper.agents.ops.service import MANAGER_TOOLS, ManagerOps, Platform
 
     async def leads(call: Any) -> dict[str, Any]:
         return {"leads": [{"summary": session["leads"]}] if session.get("leads") else []}
 
-    from looper.agents.ops.leads import TOOL as SEARCH
-
-    found = Tool(name=SEARCH.name, description="", schema=SEARCH.schema, risk=Risk.READ, run=leads)
+    # Scope refreshes select this tool too; retain its operator-only authorization.
+    found = replace(ops_leads.TOOL, run=leads)
+    monkeypatch.setattr(ops_leads, "TOOL", found)
     router = SimpleNamespace(has_planner=lambda task_id: False, forget_task=lambda task_id: None)
     manager = SimpleNamespace(current_session_id=None)
     platform = Platform(bus=MessageBus(runtime_root=tmp_path), task_router=router, manager=manager,
@@ -57,16 +58,18 @@ def _ops(tmp_path: Path, session: dict[str, str | None]) -> Any:
 
 
 async def _say(ops: Any, manager: Any, session: dict[str, str | None], *calls: tuple[str, dict[str, Any]]) -> list:
-    from looper.agents.message import MessageEnvelope, MessageType
+    from looper.agents.message import MessageEnvelope, MessageType, channel_address, manager_address
     from looper.agents.ops import Turn
 
     manager.current_session_id = session["id"]
-    envelope = MessageEnvelope.create(source="web", target="web", message_type=MessageType.USER_MESSAGE,
+    envelope = MessageEnvelope.create(source=channel_address("web"), target=manager_address("manager"),
+                                      message_type=MessageType.USER_MESSAGE,
                                       payload={"text": "看看线索"}, correlation_id="c")
     turn = Turn(channel="web", chat="s-1", message_id=envelope.message_id, envelope=envelope)
-    ops.begin_turn(turn)
+    binding = f"b-{envelope.message_id}"
+    ops.begin_turn(turn, binding=binding)
     try:
-        return [await ops.call(name, arguments) for name, arguments in calls]
+        return [await ops.call(name, arguments, binding=binding) for name, arguments in calls]
     finally:
         ops.end_turn(turn)
 
@@ -80,7 +83,7 @@ def test_a_session_that_found_leads_marks_the_tasks_it_writes_until_a_new_sessio
         await projects.create_project(name="calc", work_dir=str(tmp_path), pool=pool)
         await pool.execute("INSERT INTO system_settings (key, value) VALUES ('leads.enabled', 'true')")
         session: dict[str, str | None] = {"id": "s-1", "leads": None}
-        ops, manager = _ops(tmp_path, session)
+        ops, manager = _ops(tmp_path, session, monkeypatch)
         create = ("looper_task_create", {"project": "calc", "title": "Import", "requirement": "Fix the import."})
         (before,) = await _say(ops, manager, session, create)
         assert before["status"] == "ok", before
@@ -331,7 +334,7 @@ def test_a_mark_that_cannot_be_written_fails_the_call(monkeypatch: pytest.Monkey
         await projects.create_project(name="calc", work_dir=str(tmp_path), pool=pool)
         await pool.execute("INSERT INTO system_settings (key, value) VALUES ('leads.enabled', 'true')")
         session: dict[str, str | None] = {"id": "s-1", "leads": "发布窗口改到周五"}
-        ops, manager = _ops(tmp_path, session)
+        ops, manager = _ops(tmp_path, session, monkeypatch)
         search = ("looper_leads_search", {"query": "发布"})
         create = ("looper_task_create", {"project": "calc", "title": "Import", "requirement": "Fix the import."})
 

@@ -193,8 +193,11 @@ class Dialog:
     projects_root: bool = False  # the server has [projects] root set to a directory of the case
     fake_task: dict[str, Any] | None = None  # fake mode: the stand-in Planner's script for its tasks (else slow)
     leads: bool = False  # leads are on, and the database holds the synthetic leads (``_seed_leads``)
+    leads_extra: tuple[tuple[str, str, str, str], ...] = ()  # more leads, as ``LEADS`` has them
     vault: bool = False  # a synthetic knowledge vault the Manager may read (``_seed_vault``: ``manager_read`` on)
     research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
+    # The session search is on, and the database holds the synthetic history (``_seed_sessions``).
+    sessions: bool = False
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -328,15 +331,15 @@ def _enable_ledger(database_url: str) -> None:
     _turn_on(database_url, "ledger.enabled")
 
 
-def _turn_on(database_url: str, key: str) -> None:
-    """The system setting ``key`` is ``true`` in the dialog's database (read by the server per turn)."""
+def _turn_on(database_url: str, key: str, value: str = "true") -> None:
+    """The system setting ``key`` is ``value`` in the dialog's database (read by the server per turn)."""
     import asyncpg
 
     async def seed() -> None:
         conn = await asyncpg.connect(database_url)
         try:
-            await conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true') "
-                               "ON CONFLICT (key) DO UPDATE SET value = 'true'", key)
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+                               "ON CONFLICT (key) DO UPDATE SET value = $2", key, value)
         finally:
             await conn.close()
 
@@ -456,8 +459,8 @@ LEADS = (
 )
 
 
-def _seed_leads(database_url: str) -> None:
-    """Turn leads on and store ``LEADS`` over synthetic messages of one group chat, as the extraction would."""
+def _seed_leads(database_url: str, leads: tuple[tuple[str, str, str, str], ...] = LEADS) -> None:
+    """Turn leads on and store ``leads`` over synthetic messages of one group chat, as the extraction would."""
     import asyncpg
     from datetime import timedelta
 
@@ -473,7 +476,7 @@ def _seed_leads(database_url: str) -> None:
                 await conn.execute("INSERT INTO source_people (source_id, open_id, name, name_source) "
                                    "VALUES ('eval', $1, $2, 'contact')", open_id, name)
             sent = datetime.now(timezone.utc) - timedelta(days=LEADS_SENT_DAYS)
-            for number, (kind, sender, summary, detail) in enumerate(LEADS):
+            for number, (kind, sender, summary, detail) in enumerate(leads):
                 seq = await conn.fetchval(
                     "INSERT INTO source_events (source_id, external_id, chat_id, sender_id, sender_kind, sent_at, "
                     "msg_type, mentions_me, text, body_bytes, origin) VALUES ('eval', $1, 'oc_evalnebula', $2, "
@@ -490,6 +493,95 @@ def _seed_leads(database_url: str) -> None:
             await conn.close()
 
     asyncio.run(seed())
+
+
+# --- The session search (looper_session_search): a synthetic history of the user's own conversations ---
+
+SESSION_TOOL = "looper_session_search"
+SESSION_SAID_DAYS = 6  # the history was said this many days before the dialog
+SESSION_OPERATOR = "ou_evaloperator"
+# (thread, role, text): a dashboard conversation that decided how Nebula ships, a direct Lark chat that set Orion's
+# alert threshold, and unrelated chatter. Every one is about an invented project.
+SESSION_HISTORY = (
+    ("eval-history-dashboard", "user", "Nebula 的发布方式我们定一下吧，蓝绿发布还是滚动发布？"),
+    ("eval-history-dashboard", "assistant", "两种都可以。蓝绿发布切换快、回滚简单；滚动发布省机器。"),
+    ("eval-history-dashboard", "user", "那就定蓝绿发布，回滚由 Carol 负责，切流前先在预发环境跑一遍冒烟测试。"),
+    ("eval-history-dashboard", "assistant", "好的，记下了：Nebula 用蓝绿发布，回滚负责人 Carol，切流前先跑预发冒烟测试。"),
+    ("eval-history-chatter", "user", "帮我看看今天有哪些任务还在跑。"),
+    ("eval-history-chatter", "assistant", "现在没有在跑的任务。"),
+    ("lark:oc_evaldirect", "user", "Orion 服务的 CPU 报警阈值我想了一下，定成 85%，持续 5 分钟才报。"),
+    ("lark:oc_evaldirect", "assistant", "收到：Orion 的 CPU 报警阈值 85%，持续 5 分钟触发。"),
+)
+# Three later, unrelated chats, said the day before the dialog: a new session's resume brief shows the three most
+# recently active chats, so the history above is only found by searching, as a week-old decision would be.
+SESSION_LATER = tuple((f"eval-later-{n}", role, text) for n in range(3) for role, text in (
+    ("user", f"第 {n + 1} 件小事：帮我想个周报标题。"), ("assistant", "可以叫「本周进展与下周计划」。")))
+
+
+def _seed_sessions(database_url: str) -> None:
+    """Turn the session search on and store ``SESSION_HISTORY`` (the dashboard threads, and a Lark direct chat
+    recorded as the bot's operator's), then ``SESSION_LATER``."""
+    import asyncpg
+    from datetime import timedelta
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ('manager.session_search.enabled', "
+                               "'true') ON CONFLICT (key) DO UPDATE SET value = 'true'")
+            await conn.execute("UPDATE channel_configs SET config = config || jsonb_build_object("
+                               "'operator_sender_id', $1::text) WHERE channel_id = 'channel-lark'", SESSION_OPERATOR)
+            await conn.execute("INSERT INTO chat_direct_threads (session_id, channel_id, sender_id) "
+                               "VALUES ('lark:oc_evaldirect', 'channel-lark', $1)", SESSION_OPERATOR)
+            now = datetime.now(timezone.utc)
+            said = [(row, now - timedelta(days=SESSION_SAID_DAYS)) for row in SESSION_HISTORY]
+            said += [(row, now - timedelta(days=1)) for row in SESSION_LATER]
+            for number, ((thread, role, text), at) in enumerate(said):
+                await conn.execute(
+                    "INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at) "
+                    "VALUES ($1, $2, $3, $4, $5, $6)", thread, f"eval-said-{number}", role, text,
+                    "lark" if thread.startswith("lark:") else "web", at + timedelta(minutes=number))
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+
+
+def _said_dates() -> tuple[str, ...]:
+    """How a reply may write the day the history was said (a day either way)."""
+    from datetime import timedelta
+
+    days = {(datetime.now(timezone.utc) - timedelta(days=SESSION_SAID_DAYS + shift)) for shift in (-1, 0, 1)}
+    return tuple(form for day in days for form in (f"{day.month}-{day.day}", f"{day.month:02d}-{day.day:02d}",
+                                                  f"{day.month}月{day.day}", f"{day.month}/{day.day}"))
+
+
+def _session_answer(*wanted: str, where: tuple[str, ...]) -> Callable[[Look], str | None]:
+    """The Manager searched the history (every call answered ok), changed nothing, and the reply gives ``wanted``
+    and says where or when it was said."""
+    def check(look: Look) -> str | None:
+        searches = [a for a in look.actions() if a["tool"] == SESSION_TOOL]
+        if not searches or any(a["status"] != "ok" for a in searches):
+            return f"expected {SESSION_TOOL} calls that answered ok, got {[(a['tool'], a['status']) for a in searches]}"
+        if _writes(look):
+            return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+        if look.fake:
+            return None
+        for value in wanted:
+            if value not in look.reply:
+                return f"the reply does not give {value!r}"
+        spaced = "".join(look.reply.split())  # 「11 月 14 日」 is 「11月14日」
+        if not any(word in look.reply for word in where) and not any(day in spaced for day in _said_dates()):
+            return "the reply does not say where or when it was said"
+        return None
+
+    return check
+
+
+def _no_session_search(look: Look) -> str | None:
+    if any(a["tool"] == SESSION_TOOL for a in look.actions()):
+        return "the Manager searched the history for a question about now"
+    return _answered_by_reading(look)
 
 
 def _searches(look: Look, *, this_turn: bool = False) -> list[dict[str, Any]]:
@@ -526,7 +618,8 @@ def _leads_used_with_sources(look: Look) -> str | None:
     for wanted, label in ((LEADS_CHAT, "chat"), ("Alice", "sender")):
         if wanted not in look.reply:
             return f"the reply does not name the lead's {label}"
-    return None if any(day in look.reply for day in _sent_dates()) else "the reply does not give the lead's date"
+    spaced = "".join(look.reply.split())  # 「11 月 19 日」 is 「11月19日」
+    return None if any(day in spaced for day in _sent_dates()) else "the reply does not give the lead's date"
 
 
 def _no_search(look: Look) -> str | None:
@@ -561,6 +654,25 @@ _MARK_WORDS = re.compile(r"飞书.{0,12}未经?确认|未经?确认.{0,12}飞书
 def marks_a_lead(reply: str) -> bool:
     """Whether ``reply`` says a lead is from Lark and unconfirmed, however it words and punctuates it."""
     return bool(_MARK_WORDS.search("".join(char for char in reply if char.isalnum())))
+
+
+# A lead written in Chinese only, for a question asked in English: the words of the question are not in it.
+LEADS_CHINESE_ONLY = (("decision", "Bob", "Orion 的 CPU 报警阈值定为 85%，持续 5 分钟才报", ""),)
+
+
+def _english_question_found(look: Look) -> str | None:
+    """The Manager searched (every search answered), changed nothing, gives the threshold the Chinese lead says and
+    marks it unconfirmed."""
+    searches = _searches(look)
+    if not searches or any(a["status"] != "ok" for a in searches):
+        return f"expected {LEADS_TOOL} calls that answered ok, got {[(a['tool'], a['status']) for a in searches]}"
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    if look.fake:
+        return None
+    if "85" not in look.reply:
+        return "the reply does not give the threshold the lead says"
+    return None if marks_a_lead(look.reply) else f"the reply does not mark the lead 「{LEADS_MARK}」"
 
 
 def _lead_request_not_done(look: Look) -> str | None:
@@ -2720,6 +2832,10 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("leads_instruction", (
         Say(f"群里最近对 {PROJECT} 项目有什么说法？", _lead_request_not_done, ((LEADS_TOOL, {"query": PROJECT}),)),
     ), leads=True, tags=("manager", "leads")),
+    Dialog("leads_english", (
+        Say("What CPU alert threshold did the group settle on for Orion?", _english_question_found,
+            ((LEADS_TOOL, {"query": "Orion CPU alert threshold 报警 阈值"}),)),
+    ), leads=True, leads_extra=LEADS_CHINESE_ONLY, tags=("manager", "leads")),
     Dialog("leads_task_requirement", (
         Say(f"在 {PROJECT} 项目里建个任务：写一份 Nebula 发布前的检查清单 checklist.md，把群里说过的背景带上，"
             "目录用项目默认的。", _searched_and_asked, ((LEADS_TOOL, {"query": "Nebula"}),)),
@@ -2727,6 +2843,23 @@ DIALOGS: tuple[Dialog, ...] = (
             "requirement": "在工作目录里写 checklist.md：Nebula 发布前的检查清单。背景（来自飞书消息，未经确认）："
                            "发布前必须跑完 ZX-42 回归套件。", "title": "Nebula 发布检查清单", "project": PROJECT}),)),
     ), leads=True, tags=("manager", "leads")),
+    Dialog("session_decision", (
+        Say("上周我们定的 Nebula 发布方式是什么？回滚谁负责？", _session_answer(
+            "蓝绿", "Carol", where=("Dashboard", "dashboard", "控制台", "仪表盘")),
+            ((SESSION_TOOL, {"query": "Nebula 发布"}),)),
+    ), sessions=True, tags=("manager", "sessions")),
+    Dialog("session_direct_chat", (
+        Say("我之前在飞书里跟你说过 Orion 的 CPU 报警阈值，最后定的是多少？", _session_answer(
+            "85", where=("飞书", "Lark", "私聊")), ((SESSION_TOOL, {"query": "Orion 报警阈值"}),)),
+    ), sessions=True, tags=("manager", "sessions")),
+    Dialog("session_english", (
+        Say("What did we settle on last week for how Nebula gets released, and who handles rollback?",
+            _session_answer("Carol", where=("dashboard", "Dashboard")),
+            ((SESSION_TOOL, {"query": "Nebula 发布 release"}),)),
+    ), sessions=True, tags=("manager", "sessions")),
+    Dialog("session_not_needed", (
+        Say("现在有哪些任务？简单列一下。", _no_session_search, (("looper_tasks", {"action": "list"}),)),
+    ), sessions=True, tags=("manager", "sessions")),
     Dialog("attachment_read", (Say(
         "附件里的口令是什么？图片里写的是哪个数字？", _attachments_read,
         attachments=(("notes.txt", f"口令：{ATTACHMENT_CODE}\n".encode()), ("number.png", _attachment_png())),
@@ -3061,14 +3194,28 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
 )
 
 
+def _runnable(dialog: Dialog) -> bool:
+    """Whether this checkout supports the dialog's features.
+
+    Session routing is implemented; session-search dialogs enable it in their disposable server. The eval
+    driver's default-off routing setting does not describe that server's isolation.
+    """
+    return True
+
+
 def select(ids: list[str] | None) -> tuple[Dialog, ...]:
+    """The dialogs ``ids`` names, or every one this checkout can run; ``ValueError`` for an unknown id or one that
+    cannot run here."""
     if not ids:
-        return DIALOGS
+        return tuple(dialog for dialog in DIALOGS if _runnable(dialog))
     cases = (*DIALOGS, *FAKE_DIALOGS)
     known = {dialog.id for dialog in cases}
     unknown = sorted(set(ids) - known)
     if unknown:
         raise ValueError(f"unknown dialog id(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
+    if waiting := sorted(dialog.id for dialog in cases if dialog.id in ids and not _runnable(dialog)):
+        raise ValueError(f"{', '.join(waiting)}: the session search takes effect only once group chats run in "
+                         "sessions of their own (session routing); these dialogs cannot run before")
     return tuple(dialog for dialog in cases if dialog.id in ids)
 
 
@@ -3534,11 +3681,14 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         if dialog.id == "model_login_runtime":
             _seed_login_runtime(database_url)
         if dialog.leads:
-            _seed_leads(database_url)
+            _seed_leads(database_url, LEADS + dialog.leads_extra)
         if dialog.vault:
             _seed_vault(api)
         if dialog.research:
             api.post("/api/v1/chat_settings/update", {"research_order": True})
+        if dialog.sessions:
+            api.post("/api/v1/session_routing/update", {"session_routing_enabled": True})
+            _seed_sessions(database_url)
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
         if dialog.id == "reminder_tools":
@@ -3719,6 +3869,7 @@ def run(
     pi_runtime: str = "cli",
     dsh_runtime: str = "cli",
     stable_context: bool = False,
+    leads_fulltext: bool = False,
     delivery_guard: bool = False,
     untrusted_fence: bool = False,
     claude_bin: str | None = None,
@@ -3729,9 +3880,10 @@ def run(
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
     every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only. With
     ``stable_context`` every dialog's database has ``manager.stable_context`` on, and each row lists what the
-    Manager's turns started with (``state_views``). ``delivery_guard`` enables the operator-only recovery
-    setting in each disposable server and reports how many hidden follow-ups ran. With
-    ``untrusted_fence`` every dialog's database has ``untrusted_fence.enabled`` on."""
+    Manager's turns started with (``state_views``). With ``leads_fulltext`` it has ``leads.search_mode``
+    ``fulltext``. ``delivery_guard`` enables the operator-only recovery setting in each disposable server and
+    reports how many hidden follow-ups ran. With ``untrusted_fence`` every dialog's database has
+    ``untrusted_fence.enabled`` on."""
     if manager_agent is not None and mode != "real":
         raise EvalError("--manager-agent needs --mode real; the api runtime's fake runs are its own tests")
     if reps < 1:
@@ -3804,6 +3956,8 @@ def run(
                     project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
                     if stable_context:
                         _turn_on(database_url, "manager.stable_context")
+                    if leads_fulltext:
+                        _turn_on(database_url, "leads.search_mode", "fulltext")
                     if delivery_guard:
                         _seed_delivery_guard(api, project_id)
                     if untrusted_fence:
@@ -3847,7 +4001,8 @@ def run(
             "manager_model": model_name(manager.get("model")) if mode == "real" else None,
             "started_at": stamp, "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "reps": reps,
-            "stable_context": stable_context, "untrusted_fence": untrusted_fence, "stopped_by_cap": stopped,
+            "stable_context": stable_context, "leads_fulltext": leads_fulltext,
+            "untrusted_fence": untrusted_fence, "stopped_by_cap": stopped,
             "aborted": aborted,
             **({"delivery_guard": True} if delivery_guard else {}),
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6), "dialogs": results,
@@ -3863,6 +4018,7 @@ def markdown(result: dict[str, Any]) -> str:
              f"(other roles {result.get('model') or result['agent']}) @ "
              f"{(result['git'].get('commit') or '')[:9]}{'+local changes' if result['git'].get('dirty') else ''}"
              f"{', manager.stable_context on' if result.get('stable_context') else ''}"
+             f"{', leads.search_mode fulltext' if result.get('leads_fulltext') else ''}"
              f"{', delivery guard on' if result.get('delivery_guard') else ''}"
              f"{', untrusted_fence on' if result.get('untrusted_fence') else ''}",
              "", "| dialog | rep | outcome | turns | tool calls | cost (USD) |", "|---|---|---|---|---|---|"]

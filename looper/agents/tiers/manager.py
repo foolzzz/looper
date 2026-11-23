@@ -108,6 +108,7 @@ from ..mid_turn_input import MidTurnInputs
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
 from ..ops.service import _operator_turn, tools_down_reply
+from ..ops import session_search as ops_sessions
 from ..task_notice import Notice, ends_task, web_end_text
 from ..ops.reminders import TOOL_NAMES as REMINDER_TOOLS
 from .. import task_notice_delivery
@@ -1595,6 +1596,7 @@ class ManagerAgent:
                             prepared = replace(prepared, run=RunState(persona_scope=prepared.run.persona_scope))
             finally:
                 self._running_token = None
+                turn_metrics.note_lock_end(self._session_now(), token, TurnOrigin.USER)
                 if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
                     self._lock_owner = None
                     self._turn_lock.release()
@@ -1745,6 +1747,9 @@ class ManagerAgent:
             stopped_note, self._stopped_notes = "\n".join(self._stopped_notes), []
             # Turns run one at a time; a stop while this one waits for its turn ends it.
             await token.step("turn_lock", self._turn_lock.acquire())
+            if token.times is not None:
+                token.times.queued_behind = turn_metrics.queued_behind(
+                    self._session_now(), token.times.received_at)
             self._lock_owner = token
             waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
                        if self.ops is not None else "")
@@ -1810,9 +1815,10 @@ class ManagerAgent:
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
+        has_sessions = any(t["name"] == ops_sessions.TOOL_NAME for t in tools)
         has_reminders = any(t["name"] in REMINDER_TOOLS for t in tools)
-        if self._has_templates or has_workflows or has_leads or has_ledger or has_reminders \
-                or self.agent_id != DEFAULT_MANAGER_ID:
+        if (self._has_templates or has_workflows or has_leads or has_ledger or has_sessions or has_reminders
+                or self.agent_id != DEFAULT_MANAGER_ID):
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
@@ -2479,6 +2485,7 @@ class ManagerAgent:
         self._late_turns.add(run)
         run.add_done_callback(self._late_turns.discard)
         if self._lock_owner is token:
+            turn_metrics.note_lock_end(self._session_now(), token, TurnOrigin.COMPLETION)
             self._lock_owner = None
             self._turn_lock.release()
         if self._running_token is token:
@@ -2536,6 +2543,7 @@ class ManagerAgent:
         finally:
             if self._running_token is token:  # (a turn let go of past its deadline: another may run by now)
                 self._running_token = None
+            turn_metrics.note_lock_end(self._session_now(), token, TurnOrigin.COMPLETION)
             if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
                 self._lock_owner = None
                 self._turn_lock.release()
@@ -3804,6 +3812,7 @@ class ManagerAgent:
                 session_id=key, message_id=message_id,
                 role=role, content=content, channel=channel, manager_id=self.agent_id,
             )
+            await ops_sessions.note_direct_thread(key, _message_origin(env))
         except Exception:
             logger.warning("%s: could not persist a %s chat turn", self._log, channel, exc_info=True)
 
