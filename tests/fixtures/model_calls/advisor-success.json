@@ -840,6 +840,7 @@
     "llm_records": [
       {
         "agent_id": "planner-task-golden",
+        "attempt_id": null,
         "cache_creation_tokens": null,
         "cache_read_tokens": null,
         "compactions": null,
@@ -870,6 +871,7 @@
       },
       {
         "agent_id": "advice_check-000000000001",
+        "attempt_id": null,
         "cache_creation_tokens": 0,
         "cache_read_tokens": 0,
         "compactions": [],
@@ -1000,6 +1002,7 @@
       },
       {
         "agent_id": "advisor-000000000002",
+        "attempt_id": null,
         "cache_creation_tokens": 0,
         "cache_read_tokens": 0,
         "compactions": [],

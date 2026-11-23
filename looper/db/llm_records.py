@@ -84,8 +84,8 @@ def normalize_record_metadata(metadata: Any) -> Any:
                 "error": library.get("error"), "project_error": project.get("error")}}}
 
 
-# The run tree's columns, which no record view shows yet.
-_UNVIEWED = ("parent_record_id", "run_kind")
+# Internal run attribution, which existing record views do not expose.
+_UNVIEWED = ("parent_record_id", "run_kind", "attempt_id")
 
 
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
@@ -589,13 +589,18 @@ async def list_records(
 async def get_record(
     record_id: int,
     *,
+    include_attempt_id: bool = False,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, Any] | None:
+    """Read an existing record view; only internal run recovery opts into attempt attribution."""
     pool = pool or get_pool()
     row = await pool.fetchrow("SELECT * FROM llm_records WHERE id = $1", record_id)
     if row is None:
         return None
-    return _row_to_dict(row)
+    record = _row_to_dict(row)
+    if include_attempt_id:
+        record["attempt_id"] = row["attempt_id"]
+    return record
 
 
 # A run with a runtime's own login (a subscription: Claude Code's, priced by Claude Code; Codex's, priced by Looper

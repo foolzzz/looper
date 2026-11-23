@@ -320,7 +320,8 @@ def test_task_terminal_paths_record_one_outcome(monkeypatch, tmp_path, path, sta
         router._tasks["task-result"] = Task.from_row("task-result", await tasks.get_task("task-result", pool=pool))
         envelope = MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.GOAL_STATUS,
-            payload={"task_id": "task-result", "status": status, "by": path,
+            metadata={"cancel_by": path} if path in ("user", "manager") else {},
+            payload={"task_id": "task-result", "status": status,
                      **({"fail_kind": "task_budget"} if path == "budget" else {}),
                      **({"outcome_failure_kind": failure} if path in ("steps", "error") else {}),
                      **({"outcome_failure_kind": "not-a-failure"} if path == "invalid" else {})})

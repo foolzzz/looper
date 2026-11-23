@@ -1192,12 +1192,11 @@ async def control_task(task_id: str, action: str, bus: MessageBus, source: Agent
     message_type = {"stop": MessageType.TASK_STOP, "cancel": MessageType.TASK_CANCEL,
                     "restart": MessageType.TASK_RESTART, "start_over": MessageType.TASK_RESTART}[action]
     payload: dict[str, Any] = {"task_id": task_id}
-    if action == "cancel":
-        payload["by"] = by.value
     if action in ("restart", "start_over"):
         payload["mode"] = (RestartMode.START_OVER if action == "start_over" else RestartMode.CONTINUE).value
     await bus.publish(MessageEnvelope.create(
         source=source, target=TASK_ROUTER_ADDRESS, message_type=message_type, payload=payload,
+        metadata={"cancel_by": by.value} if action == "cancel" else None,
     ))
 
 

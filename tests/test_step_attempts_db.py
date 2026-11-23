@@ -41,6 +41,9 @@ def test_attempts_number_retries_restarts_and_resume_without_replacing_history(m
             'timeout', 3, 'not_passed', 2)
         assert row['failure_kind'] == 'review_rejected'
         assert await pool.fetchval('SELECT count(*) FROM llm_records WHERE attempt_id=$1', first) == 4
+        assert 'attempt_id' not in await llm_records.get_record(review)
+        assert (await llm_records.get_record(review, include_attempt_id=True))['attempt_id'] == first
+        assert all('attempt_id' not in row for row in await llm_records.list_records())
         retry = await attempts.open_attempt('t', 's', 's1', 1, Trigger.RETRY)
         await attempts.close_attempts('t', failure_kind=FailureKind.STOPPED, step_key='s1')
         restart = await attempts.open_attempt('t', 's', 's1', 1, Trigger.RESTART)

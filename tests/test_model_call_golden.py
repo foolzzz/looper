@@ -3,8 +3,8 @@
 The stand-in is a real subprocess: argv, raw stdin, system prompt, complete
 database rows and caller results are compared as serialized bytes. Only clock
 values and test-owned paths are normalized; no prompt or record field is dropped.
-The failure-typing migration adds nullable columns even with typing off. Their
-NULL values were also read back with main's callers on that migrated schema;
+The failure-typing and attempt-attribution migrations add nullable columns. Their
+NULL values are included in these full-row snapshots on the migrated schema;
 no classification, prompt or launch difference is part of this baseline.
 Set UPDATE_MODEL_CALL_GOLDENS=1 only on the recorded baseline to regenerate.
 """

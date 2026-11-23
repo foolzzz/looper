@@ -620,7 +620,7 @@ class TaskRouter:
         await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
         await attempts.record_outcome(
             task_id, attempts.TaskOutcome.CANCELLED,
-            attempts.StopCause.MANAGER_CANCEL if envelope.payload.get("by") == CancelBy.MANAGER else
+            attempts.StopCause.MANAGER_CANCEL if envelope.metadata.get("cancel_by") == CancelBy.MANAGER else
             attempts.StopCause.USER_CANCEL)
         planner = self._planners.get(task_id)
         if planner:

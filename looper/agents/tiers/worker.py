@@ -1301,7 +1301,7 @@ class WorkerPool:
             task_role = TaskRole.from_payload(manifest.get("task_role"))
             if manifest.get("task_role") is not None and (task_role is None or task_role.kind.agent is not agent):
                 raise ValueError("invalid run task role")
-            record = await db_llm_records.get_record(record_id)
+            record = await db_llm_records.get_record(record_id, include_attempt_id=True)
             if record is None:
                 raise RecordNotResumable(f"record {record_id} does not exist")
             try:

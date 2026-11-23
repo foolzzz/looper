@@ -95,14 +95,14 @@ async def _shape(conn: Any) -> dict[str, Any]:
 
 async def _before_the_run_tree(conn: Any) -> None:
     """The database as it was before: no run tree, no spawn tables, no step difficulty, no markers for them; nor the
-    failure classes that came later (their columns follow the run tree's, so a fresh shape needs them re-added after)."""
+    failure classes and attempt attribution that came later (a fresh shape needs their columns re-added after)."""
     await conn.execute("DROP TABLE advisor_advice, agent_spawns")
     await conn.execute("ALTER TABLE llm_records DROP COLUMN parent_record_id, DROP COLUMN run_kind, "
-                       "DROP COLUMN failure_class, DROP COLUMN failure_cause")
+                       "DROP COLUMN failure_class, DROP COLUMN failure_cause, DROP COLUMN attempt_id")
     await conn.execute("ALTER TABLE task_steps DROP COLUMN difficulty")
     await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1)", [
         "run_tree", "agent_spawns", "step_difficulty", "run_tree_online", "step_difficulty_online",
-        "failure_typing", "failure_typing_online"])
+        "failure_typing", "failure_typing_online", "attempt_ids", "attempt_ids_online"])
 
 
 def test_a_database_from_before_the_run_tree_gets_it_without_a_row_rewritten_and_with_the_fresh_shape() -> None:

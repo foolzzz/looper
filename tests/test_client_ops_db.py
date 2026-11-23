@@ -175,6 +175,7 @@ def test_operator_cancel_control_has_explicit_user_origin(monkeypatch, tmp_path)
         assert done["status"] == "ok"
         envelope = ops._platform.bus.get_queue("task-router").get_nowait()
         assert envelope.message_type is MessageType.TASK_CANCEL
-        assert envelope.payload == {"task_id": "task-cancel", "by": "user"}
+        assert envelope.payload == {"task_id": "task-cancel"}
+        assert envelope.metadata == {"cancel_by": "user"}
 
     run_db(test, monkeypatch)
