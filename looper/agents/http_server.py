@@ -705,7 +705,10 @@ class AgentHTTPServer:
     async def _call_v1(self, principal: api_v1.Principal, session: str, name: str, data: Any,
                        **kwargs: Any) -> dict[str, Any]:
         # Opening chats or granting their Manager all tools also requires operator consent.
-        requires_consent = principal.kind == "client" or name in (
+        cost_consent = isinstance(data, Mapping) and (
+            (name == "cost_guard.update" and data.get("mode") == "enforce")
+            or (name == "cost_holds.decide" and data.get("new_limit_usd") is not None))
+        requires_consent = cost_consent or principal.kind == "client" or name in (
             "manager_chat_bindings.put", "managers.update", "memory.settings_put")
         return await self._client_ops.call(principal, session, name, data,
                                           require_confirmation=requires_consent, **kwargs)

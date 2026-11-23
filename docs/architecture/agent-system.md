@@ -4477,15 +4477,17 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
-### Cost guard observation
+### Cost guard admission
 
-`cost_guard.mode` defaults to `off`; this first stage accepts only `off` and `observe`.
+`cost_guard.mode` defaults to `off`; it accepts `off`, `observe` and opt-in `enforce`.
 Global and background-role daily caps have no default. Observe for a week before choosing limits;
-the read-only Settings → 花费 page then offers the last 30 days' daily P95 × 1.5 as advice, never an applied cap.
+the Settings → 花费 page then offers the last 30 days' daily P95 × 1.5 as advice, never an applied cap.
 The operator-only `cost_guard.get/update` operations expose this configuration and accounting; updates declare
 confirmation. They are separate from `chat_settings`, add no agent tool, and are available through the generated CLI.
 Configuration export/import includes explicit cost settings, never runtime observations; a client cannot import them.
-Lark and Telegram share the same observed Manager/model-run paths, with no new command, reply or notification.
+Lark and Telegram share the same Manager/model-run paths. Exact operator DM replies continue or stop a spend hold;
+the generated CLI and operator-only `cost_holds.list/decide` provide the same decisions. API requests record `api`
+as their source; they cannot claim `dashboard`.
 
 `agents/cost_guard.py` reserves before every model turn through `ClaudeRunRecorder.start`, including resident
 Manager/Planner turns, Worker/Reviewer runs, processor/leads checks, advisor/judge/outbound checks and room consults.
@@ -4503,8 +4505,27 @@ profile. Record presentation removes these fields. Off performs no admission I/O
 prompts, tools, commands and process signatures retain their previous inputs. A guard error preserves ordinary
 execution. Outbound reservation errors propagate to `review()`'s existing block-on-error path; a successful
 classifier verdict and successful audit write are both still required to allow an action.
-Enforcement, holds, quota deferrals, alerts, unanswered-push pauses and editable dashboard controls follow the
-[cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分). This stage needs no migration.
+Enforce checks task and global daily caps against spent amounts plus reservations. `ask` holds further starts,
+keeps running work and persists `awaiting_budget` across Planner status updates and restarts. `fail` counts
+reservations too, so it can fail the task earlier and stop running Workers; `wrap_up` uses its existing stop path.
+Planner closing turns in stopping/completed/failed states also use admission and are refused only by its verdict.
+Subscription-priced runs gain a reservation-based mid-run soft stop only when their scope chain has a cap;
+without caps the guard adds no soft stop. A configured run cap supplies the reservation; otherwise the estimate
+is the role's 30-day P95 with a floor ($0.50 for task/Manager roles, $0.05 for small background roles).
+The operator's Manager turns still pass a global cap with a daily code-only notice; other senders are refused.
+Spend refusals take precedence over usage-window holds. After spend admission, rejected windows and quota
+failures hold all runs, including operator-started work; 95% utilization holds only background roles and
+schedule firings. Holds end at the reset, or after a cooldown of at most five minutes from the signal when
+reset time is unknown. The operator Manager exception applies only to spend, not rejected windows.
+Background-role and schedule budget enforcement remains inactive.
+
+Existing holds keep their decisions, Needs you cost items, Settings list and 24-hour expiry in every mode,
+including after restart. Continuing wakes the Planner to dispatch the next saved step; stopping and expiry use
+the task stop path with a persisted reason. Startup reads whether hold recovery is needed; after a hold exists,
+recovery stays enabled until restart to avoid racing a new hold commit. Off installations without saved holds
+retain their no-I/O admission, reply-routing and scheduler paths. The `cost_holds` migration also adds the
+project `ask` action. Alerts and unanswered-push pauses follow the
+[cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分).
 
 ### Why a run failed (failure classes)
 

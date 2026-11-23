@@ -26,10 +26,12 @@ const TITLES: Record<AttentionKind, string> = {
   intents: "Intents 意图",
   ledger: "Ledger items waiting for you",
   deliveries: "Messages that may not have arrived",
+  cost: "花费等你决定",
 };
 
 /** What to do about a section, said once under its heading. */
 const HOW: Partial<Record<AttentionKind, string>> = {
+  cost: "在花费设置中提高上限并继续，或停下；也可在私聊回复「继续」或「停」。",
   gates: "Answer on the task's page, or with /gates in your chat.",
   confirmations: "Reply 确认 in the chat that asked, before it lapses; anything else drops it.",
   intents: "Build or reject each one on the Intents page, or reply 建 / 驳回 with its number in your chat.",
@@ -75,6 +77,9 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
     case "ledger":
       return { line: parts(ref, LEDGER_KINDS[text(facts.kind)] ?? text(facts.kind)),
         badges: facts.overdue === true ? ["overdue"] : [] };
+    case "cost":
+      return { line: parts(ref, context, facts.currency === "equivalent_usd" ? "等价花费" : "真钱",
+        `已花及预留 $${count(facts.spent_usd).toFixed(2)} / 上限 $${count(facts.limit_usd).toFixed(2)}`), badges: [] };
     case "deliveries":
       return { line: parts(DELIVERY_SOURCES[text(facts.source)] ?? text(facts.source), ref,
         text(facts.channel) && `${facts.source === "catchup" ? "from" : "to"} ${channelLabel(text(facts.channel))}`,
