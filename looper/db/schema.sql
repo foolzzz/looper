@@ -401,8 +401,6 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     provider_id TEXT,
     clean_start BOOLEAN NOT NULL DEFAULT false,
     pending_handoff TEXT,
-    context_tokens INTEGER,
-    last_turn_cost_usd DOUBLE PRECISION,
     selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
     CONSTRAINT agent_sessions_selected_profile_manager
         CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%')
