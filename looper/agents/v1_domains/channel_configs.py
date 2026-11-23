@@ -27,13 +27,14 @@ _VIEW_FIELDS = {
     "channel_id": _STR, "channel_type": _TYPE, "display_name": _STR, "enabled": _BOOL, "bound_chats_only": _BOOL,
     "config": CHANNEL_CONFIG_VALUES, "manager_id": _STR, "manager_name": _NULL_STR,
     "builtin": _BOOL, "start_problem": _NULL_STR, "created_at": _STR, "updated_at": _STR,
+}
+CHANNEL_CONFIG = {**_object({**_VIEW_FIELDS, "has_bot_token": _BOOL,
     "runtime": {"type": ["object", "null"], "readOnly": True,
                 "description": "Read channel startup state. Includes the last error and next attempt; null when disabled or not started here.",
                 "properties": {"state": {"enum": ["starting", "running", "retrying", "failed"]},
                                "last_error": _NULL_STR, "next_attempt_at": _NULL_STR},
                 "required": ["state", "last_error", "next_attempt_at"], "additionalProperties": False},
-}
-CHANNEL_CONFIG = {**_object({**_VIEW_FIELDS, "has_bot_token": _BOOL}, list(_VIEW_FIELDS), closed=True),
+    }, list(_VIEW_FIELDS), closed=True),
     "anyOf": [_object({"channel_type": {"const": kind}, "config": config})
               for kind, config in CONFIGS.items()]}
 SCHEMAS = {"ChannelConfigValues": CHANNEL_CONFIG_VALUES, "ChannelConfig": CHANNEL_CONFIG}
@@ -154,7 +155,7 @@ async def run(server, operation, arguments, principal, headers):
                                {"config": fields["config"]})
             _check_allowlist(row["channel_type"], fields["config"])
         row = await _save(bot_api.update_bot(arguments["channel_id"], fields))
-        if not row["enabled"] and server._channels is not None:
+        if server._channels is not None and not row["enabled"]:
             await server._channels.cancel_start(row["channel_id"])
         return _view(server, row)
     # A pending confirmation reserves nothing: re-read the target immediately before deletion.
