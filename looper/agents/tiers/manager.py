@@ -74,6 +74,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
+from .. import turn_admission
 from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from .. import delivery_guard_manager as delivery_guard
@@ -1194,11 +1195,11 @@ class ManagerAgent:
             if not chat_settings.stop_enabled():
                 await self._send_reply(envelope, chat_settings.STOP_DISABLED_REPLY, persist=False)
                 return
-            if not self.can_interrupt:
-                await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
-                return
             tokens = self.live_for_chat(origin["channel_id"] or channel, chat,
                 sender_id=origin["sender"] if not origin["group"] else None) if channel and chat else []
+            if not self.can_interrupt and not any(token.admission_waiting for token in tokens):
+                await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
+                return
             stopped = 0
             for token in tokens:
                 result = await self.stop_turn(token.message_id, via=channel)
@@ -2069,6 +2070,7 @@ class ManagerAgent:
         if self.ops is not None:
             self.ops.publish_binding(token.binding if token is not None else None, session_key=self._session_now().key)
 
+    @turn_admission.admitted_manager_turn
     @cost_manager.defer_maintenance
     async def _run_prepared(self, token: TurnToken, prepared: Prepared) -> str:
         """Start the prepared turn and run it; the turn's record ends however it ends."""
@@ -2124,7 +2126,7 @@ class ManagerAgent:
             return StopResult.NOT_RUNNING
         if token.phase is TurnPhase.STOPPING:
             return StopResult.ALREADY_STOPPING
-        if not self.can_interrupt:
+        if not self.can_interrupt and not token.admission_waiting:
             return StopResult.CANNOT_INTERRUPT
         # Before anything is awaited: the stop is for this turn, never for one that starts meanwhile.
         if not token.request_stop(via):

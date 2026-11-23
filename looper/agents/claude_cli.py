@@ -1686,6 +1686,7 @@ class ClaudeRunRecorder:
                     **(reservation.metadata() if reservation is not None else {}),
                 },
             )
+            admission.bind_record(self._record_id)
             from .llmrec import LlmrecRoute
             from .llmrec.control import bind
 

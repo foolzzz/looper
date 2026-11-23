@@ -121,6 +121,13 @@ class Grant:
     reported: bool = False
 
 
+@dataclass(frozen=True)
+class Frozen:
+    account: str
+    windows: tuple[str, ...]
+    resets_at: datetime | None
+
+
 @dataclass
 class Waiter:
     provider_id: str
@@ -132,6 +139,8 @@ class Waiter:
     draining: Callable[[], bool] | None = None
     on_wait: Callable[[str], Awaitable[None]] | None = None
     last_message: str | None = None
+    on_frozen: Callable[[Frozen], Awaitable[None]] | None = None
+    frozen_told: bool = False
 
 
 def effective_lane(lane: Lane, waited_seconds: float) -> Lane:
@@ -184,6 +193,7 @@ class Controller:
         self.lock = asyncio.Condition()
         self.states: dict[str, Account] = {}
         self.running: dict[str, Grant] = {}
+        self.record_owners: dict[int, str] = {}
         self.waiters: list[Waiter] = []
         self.sequence = 0
         self.warning_day: date | None = None
@@ -511,9 +521,23 @@ class Controller:
         limit = provider.get("max_concurrency")
         waiting = [w for w in self.waiters if w.provider_id == provider_id]
         for waiter in waiting:
-            if waiter not in self.waiters or waiter.on_wait is None:
+            if waiter not in self.waiters:
                 continue
             if account.state is AdmissionState.FROZEN:
+                if waiter.on_frozen is not None and not waiter.frozen_told:
+                    waiter.frozen_told = True
+                    try:
+                        windows = await provider_limits.windows(provider_id)
+                        await waiter.on_frozen(Frozen(
+                            provider["name"],
+                            tuple(w["window_name"] for w in windows if w["status"] == "rejected"),
+                            account.until - timedelta(seconds=60)
+                            if account.until_known and account.until is not None else None,
+                        ))
+                    except Exception:
+                        logger.exception("Could not send frozen account notice")
+                if waiter.on_wait is None:
+                    continue
                 reset = (
                     (account.until - timedelta(seconds=60))
                     .astimezone()
@@ -525,7 +549,7 @@ class Controller:
             else:
                 count = sum(g.provider_id == provider_id for g in self.running.values())
                 message = f"Waits for {provider['name']}'s slot ({count} running, limit {limit if limit is not None else 'unlimited'})"
-            if message != waiter.last_message:
+            if waiter.on_wait is not None and message != waiter.last_message:
                 waiter.last_message = message
                 await waiter.on_wait(message)
 
@@ -537,6 +561,7 @@ class Controller:
         *,
         parent: str | None = None,
         on_wait=None,
+        on_frozen: Callable[[Frozen], Awaitable[None]] | None = None,
         draining=None,
     ) -> Grant:
         if not self.active:
@@ -565,6 +590,7 @@ class Controller:
                     asyncio.get_running_loop().create_future(),
                     draining,
                     on_wait,
+                    on_frozen=on_frozen,
                 )
                 self.waiters.append(waiter)
                 while not waiter.ready.done():
@@ -574,7 +600,10 @@ class Controller:
                     if waiter.ready.done():
                         break
                     try:
-                        await asyncio.wait_for(self.lock.wait(), RECHECK_SECONDS)
+                        # Keep cancellation in this task: Python 3.11 wait_for can
+                        # swallow it when a condition notification wins the race.
+                        async with asyncio.timeout(RECHECK_SECONDS):
+                            await self.lock.wait()
                     except asyncio.TimeoutError:
                         pass
                 return waiter.ready.result()
@@ -598,13 +627,15 @@ class Controller:
         owner: str,
         parent: str | None = None,
         on_wait=None,
+        on_frozen: Callable[[Frozen], Awaitable[None]] | None = None,
         draining=None,
     ):
         if not self.active:
             yield Grant(provider_id, owner, lane)
             return
         grant = await self.acquire(
-            provider_id, lane, owner, parent=parent, on_wait=on_wait, draining=draining
+            provider_id, lane, owner, parent=parent, on_wait=on_wait,
+            on_frozen=on_frozen, draining=draining
         )
         token = _current_owner.set(owner)
         failed = False
@@ -614,7 +645,12 @@ class Controller:
             failed = True
             raise
         finally:
-            _current_owner.reset(token)
+            try:
+                _current_owner.reset(token)
+            except ValueError:
+                # Cancellable admission may enter in another task. The caller
+                # owns its context; that completed entry task needs no reset.
+                pass
             try:
                 if self.active and grant.probe and not grant.reported:
                     await self.transition(provider_id, ProbeEnded(False, failed))
@@ -629,6 +665,10 @@ class Controller:
                 self.lock.notify_all()
 
     async def release(self, owner: str) -> None:
+        self.record_owners = {
+            record_id: bound for record_id, bound in self.record_owners.items()
+            if bound != owner
+        }
         if not self.active:
             self.running.pop(owner, None)
             return
@@ -778,9 +818,21 @@ def record_metadata() -> dict[str, int]:
     return {"admission_lane": grant.lane.value} if grant is not None else {}
 
 
+def bind_record(record_id: int | None) -> None:
+    """Bind a resident turn's record to its session-specific slot owner."""
+    if not enabled() or record_id is None:
+        return
+    owner = _current_owner.get()
+    if owner is not None:
+        _controller.record_owners[record_id] = owner
+
+
 async def parent_for(record_id: int | None) -> tuple[str | None, Lane]:
     if not enabled():
         return None, Lane.BACKGROUND
+    bound = _controller.record_owners.get(record_id)
+    if bound in _controller.running:
+        return bound, _controller.running[bound].lane
     current = _current_owner.get()
     if current in _controller.running:
         return current, _controller.running[current].lane
