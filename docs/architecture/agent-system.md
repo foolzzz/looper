@@ -5684,7 +5684,9 @@ rejected Tuesday brief's digest is still in Wednesday's. Every section empty
 means nothing is sent. The switch, whether the channel is enabled and who the
 operator is are read again after the summary is collected and again
 immediately before the post. The switch is read again after the operator
-query returns; a claim that then fails that check is deleted. The switch
+query returns. A fresh claim that then fails that check is deleted; a claim
+that continued a refusal is put back as that refusal, with the attempt count
+it had. The switch
 `morning_brief.enabled` is off by default and operator-only
 (`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
@@ -5692,7 +5694,8 @@ makes a restart and a second server send it at most once. A send that stops
 mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
 decision and the channel receipt share one `proactive_deliveries` row. A later
 successful try replaces a rejected receipt on that row (`outcome`, `sent_at`,
-`external_id`). Design:
+`external_id`). A receipt already recorded as `sent` or `unknown` keeps those
+three fields. Design:
 [morning brief RFC](rfcs/morning-brief-v0.zh-CN.md).
 
 ### Card buttons

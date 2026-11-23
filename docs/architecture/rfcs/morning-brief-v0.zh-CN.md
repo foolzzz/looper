@@ -26,7 +26,7 @@
 
 晨报走 `deliver()`。`silent`（三节都空）是 `drop`，不发。有内容时 `source` 是 `morning_brief`：在静默规则之后、紧急类之前命中，结果是 `decision = send`、`reason = within_limits`、不计数，免打扰时段和每日上限都不能把它再推进摘要。
 
-`decide()` 只在 `delivery.enabled` 开着时把这次判断写进那条消息的 `proactive_deliveries` 行。去重键 `morning_brief:<本地日期>:<channel_id>:<chat>` 也是这次 `post` 的幂等键。发出后 `record_receipt()` 把渠道回执写回同一行（`outcome`、`sent_at`、`external_id`）。同一键上先前的 `rejected` 回执会被这次的结果替换。送达层关着时晨报照发，那张表不变。
+`decide()` 只在 `delivery.enabled` 开着时把这次判断写进那条消息的 `proactive_deliveries` 行。去重键 `morning_brief:<本地日期>:<channel_id>:<chat>` 也是这次 `post` 的幂等键。发出后 `record_receipt()` 把渠道回执写回同一行（`outcome`、`sent_at`、`external_id`）。同一键上先前的 `rejected` 回执会被这次的结果替换。已经记下的 `sent` 或 `unknown`，这三个字段保持不动。送达层关着时晨报照发，那张表不变。
 
 已经建过 `proactive_deliveries` 的库不会重放建表语句，所以另有一次迁移把 `source` 检查放宽到包含 `morning_brief`。
 
@@ -40,7 +40,7 @@
 - `uncertain`：发送方在记下结果前停了，或渠道的答复丢了。可能已经发出，不再发。
 - `failed`：渠道拒绝。`attempts` 小于 3 时下次检查再试；第 3 次仍拒绝就留下。
 
-检查间隔 30 秒。开关关闭时每次只读内存里的开关，不调用 `deliver`，不写库，不发消息。认领之后、发出之前再查一次开关和操作者；查询操作者返回后再读一次开关。这次等待期间关掉开关，删掉 `sending` 行，当天稍后重新打开仍会发。
+检查间隔 30 秒。开关关闭时每次只读内存里的开关，不调用 `deliver`，不写库，不发消息。认领之后、发出之前再查一次开关和操作者；查询操作者返回后再读一次开关。这次等待期间关掉开关：全新认领删掉 `sending` 行，当天稍后重新打开仍会发；接着一次拒绝的认领恢复成原来的失败行和尝试次数，下一天仍从首次尝试那天读摘要。
 
 ## 5. 动作级别
 
