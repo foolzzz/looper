@@ -9,25 +9,27 @@
 - MCP、HTTP 与进程内工具桥传递稳定调用 id；spawn 的幂等键持久化。spawn/cancel 为 write，wait 为 read；三个工具的 action level 都是 `inside`，理由是只影响本任务的只读派生及其结果。
 - 等待不依赖 HTTP 请求继续存活，最多 120 秒；超时后继续运行。room 开启时用类型化 `spawn_result` 交付，消息与首次交付时间在同一事务提交；room 关闭时通过 wait 拉取。
 - Worker 正常结束、失败或取消都先撤销令牌，再等待正在准入的调用完成并级联取消。服务恢复已有派生、排队工作及待交付结果；计划内 keeper 移交保留可接管的子运行。
-- 新逻辑集中在工具适配和交付模块，Worker、HTTP 和 serve 只接线。#1527 已在 main，room 消息类型扩展使用逐文件迁移 `subagent_room_delivery`，旧约束先替换为 NOT VALID 再在线校验。
+- 新逻辑集中在工具适配和交付模块，Worker、HTTP 和 serve 只接线。#1527 已在 main，room 消息类型扩展使用逐文件迁移 `subagent_room_delivery`，旧约束先替换为 NOT VALID 再在线校验；按实际约束识别已完成态，空库不写多余迁移标记，在线验证中断后原地续跑。
 
 没有新增设置或 v1 operation，`chat_settings` 与 operation-level 清单保持原样。Dashboard、Telegram、Lark、操作者 CLI 无新入口；这些渠道启动的任务共用 Worker 路径。项目设置界面、Planner 工具、运行树、账号准入与派生时机指引不在本次范围。
 
 ## 自动验证
 
-测试先于实现编写；初版代码完成后统一执行本次新增/修改测试，以及 `test_api_v1_document.py` 和 `test_tool_levels.py`，一次 pytest、`-n 2`，使用独立 disposable PostgreSQL 数据库，结束后删除。
+缺陷修复先写回归并确认修前失败：修前隔离组件探针退出码为 1，拒绝带过滤条件的列表推导；`serve` 的 off/on 两组均在监听前退出。修复将 room read 的历史枚举明确列在元组中，使用已有探针语法，不把 `spawn_result` 加进 Worker 可见 schema。当前探针和冻结的 v2.14.69 探针都验证退出码为 0，且输出等于实际 Worker/Reviewer 工具清单。
 
-通过的覆盖：并发同键去重、模型 key 优先、跨父运行拒绝、参数与等待边界、设置撤销、run grant 恢复、工具级别、正常/失败/取消的 Worker 收尾、tool/room 交付竞态及写失败回滚。真实替身进程验证了 inline wait、等待超时后的 room 交付与父结束回收。
+生命周期新增回归修前为 **4 failed、1 passed**：父结束后的 end 和存活扫描都不能完成 `finishing`，零等待幂等重试重复交付，普通停机取消原因为 `server`；父仍运行的扫描是通过的正向对照。修复后完整工具文件 **14 passed**：`finishing` 优先完成，不受父记录状态影响；瞬时写回失败由存活扫描重试；完成记账、释放预留并只交付一次。普通停机使用 `parent_ended`。
 
-关闭对照包含 Manager/Planner/Worker 的提示与工具列表、七种运行时的既有启动参数与配置、Manager/Planner 的进程签名构成，以及与最新 `origin/main` 同输入执行 Worker `_prepare` 后的提示、stdin、命令和 launch 记录。
+自动覆盖包含并发同键去重、模型 key 优先、跨父运行拒绝、参数与等待边界、设置撤销、run grant 恢复、工具级别、正常/失败/取消的 Worker 收尾、tool/room 交付竞态及写失败回滚。脚本替身进程验证 inline wait、等待超时后的 room 交付与父结束回收；隔离 `serve` 验证开关 off/on 启动及重启、启用时的排队启动与交付不重复，以及 keeper 恢复所有权。
 
-唯一一次测试结果：**523 passed、1 failed，47.16 秒，无跳过**。失败是新增 `serve` 用例的准备检查：复用的旧 helper 只接受旧本地端口和固定密码，与本轮独立测试库不匹配，服务尚未启动。已改为明确检查本任务的独立端口或 CI 端口，不把口令写死；遵守一次测试限制，修正后未重跑，`serve` 排队和重启交付仍未验证。独立数据库及 xdist 子库已删除。
+关闭对照按实际检查区分：冻结哈希覆盖 Manager/Planner/Worker 的常量提示和既有工具清单，运行时 fixture 覆盖七种运行时的参数与配置；`test_explorer_default_surfaces.py` 对 Manager/Planner 的进程签名只做 `signature` AST 对照。`test_worker_subagents.py` 的单独用例从 `origin/main` 提取 Worker `_prepare`，在相同测试依赖、项目 subagents/room 均关闭的输入下比较 system prompt、stdin prompt、command、launch record 和无 seat/grant；这不是完整 Worker 进程或真实模型对照。
 
-随后静态检查发现，既有 Worker keeper 扫描会清理 explorer 的目录，并把其未结束记录关掉。已按持久化 explorer 子记录把对应目录与记录交给 SpawnService 恢复，关闭路径仍传相同的 Worker 参数；补充的两项所有权回归未运行。该启动接线需要后续执行测试确认，不能视为通过。
+最终统一重跑当前 PR 相对 `origin/main` 的全部 36 个新增/修改测试文件（包含前置切片及 `test_api_v1_document.py`、`test_tool_levels.py`）：**930 passed，105.49 秒，无失败、无跳过**。命令使用 `uv run --system-certs --extra test python -m pytest -q -n 2`，使用独立 disposable PostgreSQL 数据库；结束后确认 xdist 子库已清理，删除测试主库，再查询确认本轮数据库残留为 0。
+
+合入最新主干后，Manager 导入了新增的常量；核对该模块源码与 `origin/main` 逐字节相同，仅刷新该项快照并记录来源，其余冻结哈希保持不变。卡片测试的 `source_ref` 断言遵循主干字符串类型。完整验证还发现 room 迁移误写空库标记并在标记缺失时重放 DDL，已修实现，保留原断言；补充在线验证中断恢复测试，要求约束 OID 不变。
 
 不把替身运行记作真实模型验证；没有触发或重跑 CI。
 
-本切片新增行数：生产代码 542 行、测试 791 行（不含 fixture），比例 1.46:1。
+本轮修复新增生产代码 34 行、测试 153 行（按修复 diff 的新增行统计，不含合并和 fixture），比例 4.50:1。测试较多是因为需要覆盖两版隔离探针、off/on 服务启动与重启、完成态和父运行状态交叉、写回失败重试及在线迁移恢复；没有新增测试基础设施。
 
 ## Pending real-model validation
 

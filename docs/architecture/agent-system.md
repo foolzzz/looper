@@ -5006,7 +5006,8 @@ when needed, and reuses it over HTTP retries. Spawn's durable per-parent key
 makes a lost response safe to retry. In-process Worker tools forward the same
 identity. Wait accepts up to eight owned ids or lists this run's explorers and
 remaining limits; waits last at most 120 seconds, subject to the runtime cap.
-Results returned by a wait get a tool receipt. Unawaited or timed-out results
+Completed results returned by spawn or wait get a tool receipt, including a
+zero-wait spawn retry. Unawaited or timed-out results
 go to the Worker's room when enabled: a bounded `spawn_result` message and the
 first-delivery receipt commit together. Without the room, wait remains the
 retrieval path. Delivery failures leave the result available for retry or pull.
@@ -5015,7 +5016,9 @@ The Worker instructions direct read-only research to these tools, file changes
 to Planner steps, and advise against native subagents editing files. This is
 guidance; native subagents keep their existing permissions. When the Worker
 ends, its token is revoked before outstanding admissions drain and its
-unfinished explorers are cancelled with `parent_ended`. A kept Worker that
+queued or running explorers are cancelled with `parent_ended`; explorers already
+`finishing` complete their result and accounting, with live writeback retries even
+after the parent record ends. A kept Worker that
 detaches keeps its children across the planned handover. The serve lifecycle
 recovers existing rows, retries queued work and pending room delivery, and
 cancels or hands over children on shutdown. With the switch off, existing
