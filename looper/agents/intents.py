@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..db import connection, intents as store
+from ..db import connection, intents as store, tasks as db_tasks
 from . import leads_model, projects, untrusted
 from .leads import source_view
 from .subscriptions import strip_mentions
@@ -251,6 +251,8 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
             data["workflow"] = workflow["key"]
         created = await projects.create_task_core(data, task_fields=fields, conn=conn)
         task_id = created["task_id"]
+        # The task's background came from messages: marked, for the outbound review (RFC section 6.3).
+        await db_tasks.mark_untrusted(task_id, "intent", pool=conn)
         await store.transition(conn, intent_id, "tasked", via=via, now=now, task_id=task_id)
     try:
         await projects.start_ready_task(task_id, platform.bus, AgentAddress("manager", fields["manager_id"]))
