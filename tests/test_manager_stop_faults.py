@@ -190,7 +190,10 @@ while not os.path.exists('spawn'):
     time.sleep(0.01)
 child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-open('child.pid', 'w').write(str(child.pid))
+# Renamed into place: the test reads the file as soon as it exists.
+with open('child.pid.tmp', 'w') as pending:
+    pending.write(str(child.pid))
+os.replace('child.pid.tmp', 'child.pid')
 sys.stdin.read()
 """)
 
