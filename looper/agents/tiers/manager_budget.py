@@ -128,11 +128,15 @@ async def reopen(manager: ManagerAgent, prepared: Prepared, token: TurnToken) ->
         return
     try:
         command = await asyncio.to_thread(manager._claude_command,
-                                         process.system_prompt.write_file(manager._runtime_root), process.launch)
-        await token.keep("bound_handoff_start", session.claude.start(
-            command, cwd=str(manager._config.work_dir), signature=process.signature,
-            env=process.launch.environment(), totals=session.session_totals, price=process.launch.price),
-            30, undo=lambda: session.claude.stop(kill=True))
+                                         process.system_prompt.write_file(manager._session_root()), process.launch)
+        try:
+            await token.step("resident_admission", manager._router.admit(session, prepared.envelope))
+            await token.keep("bound_handoff_start", session.claude.start(
+                command, cwd=str(manager._session_work_dir()), signature=process.signature,
+                env=manager._session_environment(process.launch), totals=session.session_totals, price=process.launch.price),
+                30, undo=lambda: session.claude.stop(kill=True))
+        finally:
+            await manager._router.release(session)
     except (OSError, TimeoutError):
         logger.warning("could not reopen the bounded Manager session for its handoff", exc_info=True)
 
@@ -181,6 +185,9 @@ async def bound(manager: ManagerAgent, session: ManagerSession) -> None:
         context, cost = row["context_tokens"], row["cost_usd"]
         if session.key == MAIN_SESSION:
             await agent_sessions.save_measurements(manager.agent_id, context_tokens=context, last_turn_cost_usd=cost)
+        else:
+            await pool.execute("UPDATE manager_sessions SET context_tokens=$3, last_turn_cost_usd=$4 "
+                               "WHERE manager_id=$1 AND session_key=$2", manager.agent_id, session.key, context, cost)
         if context is None:
             logger.debug("Manager %s session %s: this turn's context is unknown; keeping it", manager.agent_id, session.key)
             return
@@ -210,7 +217,7 @@ async def _compact(manager: ManagerAgent, session: ManagerSession, decision: pol
                    max_tokens: int) -> policy.Compaction:
     process = session.process
     recorder = ClaudeRunRecorder(agent_id=manager.agent_id, task_id=None, command=process.command,
-                                cwd=str(manager._config.work_dir), input_text="/compact", session_id=session.session_id,
+                                cwd=str(manager._session_work_dir()), input_text="/compact", session_id=session.session_id,
                                 system_prompt=process.system_prompt, launch=process.launch, pid_of=lambda: session.claude.pid)
     boundary = None
     finished = False
@@ -249,7 +256,7 @@ async def recent_results(manager: ManagerAgent, session: ManagerSession) -> list
     if pending(session) is None:
         return []
     try:
-        # Routing's persistent non-main slots are introduced separately; never copy main's task history there.
+        # Group and DM resume briefs use only their own chat excerpt; never copy main's task history there.
         if session.key != MAIN_SESSION:
             return []
         rows = await connection.get_pool().fetch(

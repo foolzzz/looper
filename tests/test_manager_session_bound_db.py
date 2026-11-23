@@ -84,3 +84,43 @@ def test_rotation_handoff_retrieves_only_latest_three_results(monkeypatch, tmp_p
             assert recent.index("result-3") < recent.index("result-2") < recent.index("result-1")
             assert "x" * 201 not in recent
     run_db(check, monkeypatch, timeout=45)
+
+
+@pytest.mark.parametrize("budget,compact", [(None, "missing"), (4, "success"), (4, "missing")])
+def test_routed_budget_keeps_measurements_and_maintenance_in_its_session(monkeypatch, tmp_path, budget, compact):
+    from looper.agents import session_routing
+    from looper.agents.session_routing import SessionKey, SessionKind
+    from looper.db import agent_sessions, manager_sessions
+    from tests.test_manager_session_routing_db import GROUP_A, LARK, OTHER, _lark
+
+    async def check(pool):
+        await session_budget.update({"turn_budget_usd": budget})
+        monkeypatch.setattr(session_routing, "_routing_enabled", True)
+        async with manager(pool, tmp_path, monkeypatch, compact=compact) as chat:
+            route = SessionKey(SessionKind.GROUP, LARK.agent_id, GROUP_A)
+            session = chat.manager._router.session(route)
+            context = chat.manager._current.set(session)
+            try:
+                await chat.manager._handle_user_message(_lark("hello", GROUP_A, OTHER, group=True))
+                saved = await manager_sessions.get("manager", session.key)
+                assert (saved["context_tokens"], saved["last_turn_cost_usd"]) == (
+                    (100_001, .1) if budget else (None, None))
+                assert await agent_sessions.get_session("manager") is None
+                if budget and compact == "missing":
+                    assert not session.claude.started
+                    await chat.manager._handle_user_message(_lark("continue", GROUP_A, OTHER, group=True))
+                    inputs = [json.loads(line) for line in
+                              (chat.manager._session_work_dir() / "inputs.jsonl").read_text().splitlines()]
+                    assert any(text.startswith("[HANDOFF]") for text in inputs)
+                    assert any(text.startswith("[RESUME]") and "GROUP SESSION" in text for text in inputs)
+                if budget:
+                    records = await pool.fetch("SELECT metadata FROM llm_records WHERE agent_id='manager'")
+                    assert all(json.loads(row["metadata"])["cwd"] == str(chat.manager._session_work_dir())
+                               for row in records)
+                assert not (tmp_path / "inputs.jsonl").exists()
+                assert not session.turn_lock.locked()
+                assert not chat.manager._sessions["main"].claude.started
+            finally:
+                chat.manager._current.reset(context)
+
+    run_db(check, monkeypatch, timeout=45)
