@@ -205,6 +205,7 @@ class _Edit:
 
 class _AppLimits:
     def __init__(self, settings, clock, sleep):
+        self.loop = asyncio.get_running_loop()
         self.settings, self.clock, self.sleep = settings, clock, sleep
         self._limits = {}
         self._in_flight = 0
@@ -232,8 +233,8 @@ class _AppLimits:
                 self._slots.notify_all()
 
 
-# Weak ownership releases allowances when an application's last gateway is released.
-_APP_LIMITS: WeakValueDictionary[str, _AppLimits] = WeakValueDictionary()
+# Share allowances only within their owning loop; release them with the last gateway.
+_APP_LIMITS: WeakValueDictionary[tuple[asyncio.AbstractEventLoop, str], _AppLimits] = WeakValueDictionary()
 
 
 class Gateway:
@@ -244,14 +245,25 @@ class Gateway:
             settings = outbound_limits
         self.settings = settings
         # Unknown identities remain private; real adapters pass their verified app_id.
-        self._app = _APP_LIMITS.get(app_id) if app_id else None
-        if self._app is None:
-            self._app = _AppLimits(settings, clock, sleep)
-            if app_id:
-                _APP_LIMITS[app_id] = self._app
+        self._app_id = app_id
+        self._app_limits: _AppLimits | None = None
         self.counters = Counters()
         self.breaker = Breaker(clock, on_transition=self._breaker_transition)
         self._edits: dict[str, _Edit] = {}
+
+    @property
+    def _app(self) -> _AppLimits:
+        # Adapters can be constructed before a loop starts or retained after it closes.
+        loop = asyncio.get_running_loop()
+        if self._app_limits is None or self._app_limits.loop is not loop:
+            key = (loop, self._app_id)
+            app = _APP_LIMITS.get(key) if self._app_id else None
+            if app is None:
+                app = _AppLimits(self.settings, self.clock, self.sleep)
+                if self._app_id:
+                    _APP_LIMITS[key] = app
+            self._app_limits = app
+        return self._app_limits
 
     def _breaker_transition(self, state: BreakerState):
         kind = {"open": EventKind.BREAKER_OPEN, "half_open": EventKind.BREAKER_HALF_OPEN,

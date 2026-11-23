@@ -79,8 +79,10 @@ def test_outbound_sums_window_and_channels(monkeypatch, tmp_path):
 def test_old_delivery_becomes_visible_when_it_reaches_a_terminal_state(
         monkeypatch, tmp_path, outcome, channel_id, keyed_window, attempted):
     async def check(pool):
+        from looper.agents.channels import outbound_metrics as metrics
         from looper.db import channel_outbox
 
+        monkeypatch.setattr(metrics, "events", metrics.EventBuffer())
         monkeypatch.setattr(chat_settings, "_outbound_enabled", True)
         now = datetime.now(timezone.utc)
         old = now - timedelta(hours=48)
