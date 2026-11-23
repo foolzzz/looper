@@ -631,16 +631,21 @@ def test_a_firing_sends_its_notice_once_after_its_commit(monkeypatch: pytest.Mon
             real_block = env.scheduler._usage_block
             real_notify = usage_windows.notify_hold
 
-            async def block(schedule, now, notices):
+            async def block(schedule, now, notices=None):
                 if schedule["id"] == b_id:
                     await asyncio.wait_for(a_queued.wait(), timeout=10)
-                held = await real_block(schedule, now, notices)
-                assert notices
+                if notices is None:
+                    held = await real_block(schedule, now)
+                    pending = getattr(env.scheduler, "_hold_notices", None)
+                else:
+                    held = await real_block(schedule, now, notices)
+                    pending = notices
+                assert pending, "the firing queued no hold notice"
                 if schedule["id"] == a_id:
                     a_queued.set()
                     await asyncio.wait_for(b_failed.wait(), timeout=10)
                 else:
-                    assert published == []
+                    assert published == [], "a hold notice went out before the firing committed"
                     raise RuntimeError("firing rolled back after its notice was queued")
                 return held
 
@@ -669,7 +674,8 @@ def test_a_firing_sends_its_notice_once_after_its_commit(monkeypatch: pytest.Mon
                     b_failed.set()
 
             await asyncio.gather(fire_a(), fire_b())
-            assert len(published) == 1 and published[0][0] == BUILTIN
+            assert len(published) == 1 and published[0][0] == BUILTIN, (
+                f"each firing publishes only its own notice after it commits, got {published!r}")
             assert await env.pool.fetchval(
                 "SELECT count(*) FROM schedule_runs WHERE schedule_id = ANY($1::text[])", [a_id, b_id]) == 0
             assert await env.pool.fetchval(
@@ -691,23 +697,62 @@ def test_a_rolled_back_firing_sends_no_notice(monkeypatch: pytest.MonkeyPatch, t
             await _window(env.pool, status="rejected", utilization=1,
                           resets_at=env.clock.now + timedelta(minutes=30), observed_at=env.clock.now)
             real_block = env.scheduler._usage_block
+            real_notify = usage_windows.notify_hold
+            from looper.db import schedules as db_schedules
 
-            async def block(schedule, now, notices):
-                await real_block(schedule, now, notices)
-                assert notices
+            real_lock = db_schedules.lock_schedule
+            original = await env.pool.fetchval("SELECT requirement FROM schedules WHERE id = $1", sid)
+            marker = f"{original} [committed]"
+
+            async def lock(conn, schedule_id):
+                row = await real_lock(conn, schedule_id)
+                if row is not None and schedule_id == sid:
+                    await conn.execute(
+                        "UPDATE schedules SET requirement = $2 WHERE id = $1", schedule_id, marker)
+                return row
+
+            async def block(schedule, now, notices=None):
+                if notices is None:
+                    await real_block(schedule, now)
+                    pending = getattr(env.scheduler, "_hold_notices", None)
+                else:
+                    await real_block(schedule, now, notices)
+                    pending = notices
+                assert pending, "the firing queued no hold notice"
                 raise RuntimeError("firing rolled back after its notice was queued")
 
-            async def notify(*_args, **_kwargs):
+            async def notify(*args, **kwargs):
+                try:
+                    async with env.pool.acquire() as conn:
+                        async with conn.transaction():
+                            await conn.execute("SET LOCAL lock_timeout = '500ms'")
+                            await conn.fetchrow("SELECT id FROM schedules WHERE id = $1 FOR UPDATE", sid)
+                except asyncpg.exceptions.LockNotAvailableError:
+                    published.append("while the firing still held its row")
+                    return
                 published.append("sent")
+                await real_notify(*args, **kwargs)
 
+            monkeypatch.setattr(db_schedules, "lock_schedule", lock)
             env.scheduler._usage_block = block
             monkeypatch.setattr(usage_windows, "notify_hold", notify)
             with pytest.raises(RuntimeError, match="firing rolled back after its notice was queued"):
                 await env.scheduler.run_now(sid)
-            assert published == []
+            assert published == [], f"a rolled-back firing sent a hold notice: {published!r}"
+            assert await env.pool.fetchval("SELECT requirement FROM schedules WHERE id = $1", sid) == original
             assert await env.pool.fetchval(
                 "SELECT count(*) FROM system_settings WHERE key LIKE 'cost_guard_hold:%'") == 0
             assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs WHERE schedule_id = $1", sid) == 0
+
+            usage_windows.clear_schedule(sid)
+            usage_windows.clear_cache()
+            env.scheduler._usage_block = real_block
+            with pytest.raises(usage_windows.ScheduleDeferred):
+                await env.scheduler.run_now(sid)
+            stored = await env.pool.fetchval("SELECT requirement FROM schedules WHERE id = $1", sid)
+            assert published == ["sent"] and stored == marker, (
+                "a hold notice is sent only after its firing commits "
+                f"(notice={published!r}, requirement={stored!r})")
         finally:
             await _quiet()
 
@@ -742,6 +787,50 @@ def test_subscription_run_now_under_a_rejected_window_is_refused(
             assert len(sent) == 1
             assert await env.pool.fetchval(
                 "SELECT count(*) FROM system_settings WHERE key LIKE 'cost_guard_hold:%'") == 1
+        finally:
+            await _quiet()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_stale_run_confirmation_sends_no_hold_notice(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import gate_service, schedules, usage_windows
+        from looper.agents.projects import HTTP_409, RequestError
+        from looper.db import schedules as db_schedules
+
+        sent: list[str] = []
+
+        async def sender(_channel, _chat, text, **_kwargs):
+            sent.append(text)
+            return True, None
+
+        try:
+            await _enforce(env.pool, clock=env.clock, day_start=env.scheduler.day_start)
+            usage_windows.configure(sender)
+            monkeypatch.setattr(gate_service, "dashboard_target", AsyncMockTarget())
+            await lark_targets(env.pool)
+            sid = await started(env)
+            before = await cursor(env, sid)
+            row = await db_schedules.get_schedule(sid)
+            project_dir = await env.pool.fetchval(
+                "SELECT work_dir FROM projects WHERE id = $1", row["project_id"])
+            confirmed = db_schedules.configuration_version(row, project_work_dir=project_dir)
+            await env.pool.execute(
+                "UPDATE schedules SET name = $2 WHERE id = $1", sid, f"renamed-{sid}")
+            resets = env.clock.now + timedelta(minutes=30)
+            await _window(env.pool, status="rejected", utilization=1, resets_at=resets, observed_at=env.clock.now)
+            with pytest.raises(RequestError) as caught:
+                await schedules.run_now(sid, env.scheduler, expected_version=confirmed)
+            assert caught.value.status == HTTP_409
+            assert str(caught.value) == (
+                "the schedule configuration changed; run the tool again to ask for confirmation")
+            assert sent == []
+            assert await cursor(env, sid) == before
+            assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs WHERE schedule_id = $1", sid) == 0
+            assert await env.pool.fetchval(
+                "SELECT count(*) FROM system_settings WHERE key LIKE 'cost_guard_hold:%'") == 0
         finally:
             await _quiet()
 
