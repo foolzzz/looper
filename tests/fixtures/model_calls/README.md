@@ -10,8 +10,11 @@ harnesses through the 2.15 release series; remove them in 2.16 after the caller
 migration has shipped. Ordinary domain and backend contract tests remain.
 
 The stand-in is a real CLI subprocess. Comparisons retain argv, raw stdin,
-system prompts, working directories, every column of the selected database
-rows, events, delivery calls and caller outcomes. Test-owned paths and clocks
+system prompts, working directories, every column the fixtures' database rows
+have, events, delivery calls and caller outcomes. A column a later migration
+adds to one of these tables is not in the fixtures and is not compared, so an
+additive migration needs no new snapshot; a missing fixture column, a changed
+value or an extra row still fails. Test-owned paths and clocks
 are normalized, and UUIDs are fixed. Ancestor-exclusion paths use a portable
 logical directory tree. No prompt or record field is dropped. The one explicit
 record difference is the newly assigned `leads_check` run kind; its original
