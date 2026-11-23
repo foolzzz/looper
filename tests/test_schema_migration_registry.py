@@ -78,3 +78,16 @@ def test_new_fresh_ddl_is_appended_without_changing_the_baseline_bytes():
                                        SimpleNamespace(name="added", fresh_ddl="CREATE TABLE added (id integer);")]) == (
         base + "\nCREATE TABLE added (id integer);"
     )
+
+
+def test_current_baseline_additions_have_upgrade_and_admission_migrations():
+    discovered = migrations.discover()
+    expected = {"mcp_tool_levels", "failure_typing", "memory_candidates", "channel_outbox"}
+    assert expected <= {migration.name for migration in discovered}
+    assert expected <= {migration.name for migration in migrations.pending_migrations(discovered)}
+    steps = migrations.online_steps(discovered)
+    failure = next(step for step in steps if step.migration == "failure_typing")
+    assert failure.marker == "failure_typing_online"
+    assert failure.validate == (("llm_records", "llm_records_failure_check"),)
+    assert failure.indexes == (("idx_llm_records_failures",
+                                "ON llm_records (created_at) WHERE failure_class IS NOT NULL"),)

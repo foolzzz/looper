@@ -1017,6 +1017,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审；关闭状态按 `main` 对照约定、prompt 和步骤行。下一阶段增加执行器、证据表与只读接口、私有检出及写保护、限制和重启恢复；本阶段不执行检查，不改变决策。
 - **助理人格接线**（本分支已实现，未设置即关闭，依赖 #1533）：默认 Manager 把名字、语气和补充说明放在 `_sections()` 第一段，沿用稳定块更新规则；不注入称呼、不增加工作时间，群和他人私聊共用 main 时不注入人格，独立会话只给名字；受限回合发去人格的完整稳定块且不覆盖 main 的已展示状态，场景管家和其他角色不继承。固定 main 哈希、下一轮更新/清空、稳定块及隔离服务重启由定向测试覆盖；真实模型语气和改名评测待批准，尚未执行（[RFC §5.2](../architecture/rfcs/assistant-layer-v0.zh-CN.md#52-12-人格与称呼)）。
 
 - **助理每轮上下文接线**（本分支已实现，默认关）：Manager 用户回合用现有渲染器替换 `Channel:` 行，并按渠道发送者设置 `Turn.speaker`，接通现有升级和确认的授权检查；收尾、自主回合不注入。新增 main 的关闭路径固定基准及渠道身份、确认劫持、稳定块、隔离 serve 测试；真实模型的时间/身份评测未执行，待维护者批准后用 `evals.assistant_experience --turn-context --categories time,identity` 对比基线（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。

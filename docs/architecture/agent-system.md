@@ -3177,6 +3177,20 @@ and `advisor_internal_domains` (at most 20 domains whose names, and the hosts
 under them, the code checks refuse in a request) ([Consults of the
 advisor](#consults-of-the-advisor)).
 
+Executable acceptance definitions are opt-in per project: `acceptance_checks`
+is `off` by default (stored as NULL), `local` or `network`. Only the operator
+can read or change this permission through `acceptance_checks.get/update`,
+including from Project → Settings. It is separate from agent-writable execution
+fields and chat settings. Configuration imports require operator identity to
+set it; omission preserves the target permission. With it enabled, Planner work steps may carry typed
+`command` or `artifact` checks bound to a criterion; definitions persist in
+`task_steps.checks` through plan edits and restarts. This stage stores definitions
+only: it executes no checks and adds no evidence or decision gate. Empty checks
+and the disabled permission are omitted from existing responses and exports;
+while off, Planner contracts and prompts remain byte-identical. See the
+[executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
+and 13, for the protocol and subsequent stages.
+
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
 (`get_task_project` reads it in its place). Continuing such a task at its cap
