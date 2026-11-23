@@ -1348,7 +1348,8 @@ class PlannerAgent:
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
             step.review = (spec.gate is None and spec.wait is None
-                           and (spec.review or (self._execution.review_all and not spec.checks and not self._is_verification(step)))
+                           and (spec.review or (self._execution.review_all and not any(c.required for c in spec.checks)
+                                                   and not self._is_verification(step)))
                            and not (self._panel_on and self._is_verification(step)))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             step.difficulty = spec.difficulty if spec.gate is None and spec.wait is None else None
@@ -3469,7 +3470,7 @@ class PlannerAgent:
             if step.accept_when is not None:
                 await self._reset_reviews(plan, step)
             step.retries += 1
-            step.feedback.append(reply.feedback)
+            step.feedback.append(acceptance_decisions.retry_feedback(step, context, reply.feedback))
             step.reviewer_id, step.review_stage, step.review_position = None, None, None
             await self._save(plan, step, entries=[retried])
             await self._dispatch_step(plan, step)
@@ -3559,7 +3560,7 @@ class PlannerAgent:
         project reviews every step."""
         if self._panel_on and self._is_verification(step):
             return False
-        if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+        if any(c.required for c in step.checks) and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
             return step.review
         return step.review or (self._execution.review_all and not self._is_verification(step))
 
@@ -5355,6 +5356,7 @@ class PlannerAgent:
                 task_id=self._task_id, requirement=plan.requirement, project_name=plan.project_name,
                 project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
                 template=self._template, workflow=self._workflow,
+                checks=self._execution.acceptance_checks is not AcceptanceChecksMode.OFF,
             ),
             contract_name="REPLY_CONTRACT",
             # With its platform tools, how to use them follows the reply contract.
@@ -5624,7 +5626,9 @@ class PlannerAgent:
                       "Any new verification step must depend on a new user gate added in the same reply."]
         lines += self._final_notes(step, context)
         separator = "; " if adjudicated_accept else ", "
-        lines += [*advice, "", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
+        # Without ADVISE on offer (a failed evidence gate removes it), a request-the-advisor hint would mislead.
+        offered = advice if context.evidence is None or Decision.ADVISE in choices else ()
+        lines += [*offered, "", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
         return "\n".join(lines)
 
     def _gate_message(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]],

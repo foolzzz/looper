@@ -12,6 +12,14 @@ from .acceptance_checks import Check
 Version = tuple[str | None, str | None]
 
 
+def same_version(measured: Version, current: Version) -> bool:
+    """Whether two measurements describe the same source. The content hash covers every tracked and untracked file,
+    so committing it (a review freeze) keeps the version; HEAD decides only without a content hash."""
+    if measured[1] is not None and current[1] is not None:
+        return measured[1] == current[1]
+    return measured == current
+
+
 @dataclass(frozen=True)
 class Gate:
     passed: bool
@@ -53,7 +61,7 @@ def gate(checks: Sequence[Check], current: Iterable[Mapping[str, Any]], head: Ve
             continue
         state = row["state"]
         measured = (row.get("head_sha"), row.get("content_sha"))
-        matches = measured == head
+        matches = same_version(measured, head)
         if state == CheckState.ERROR:
             errored.append(check.id)
         elif state == CheckState.STALE or not matches:

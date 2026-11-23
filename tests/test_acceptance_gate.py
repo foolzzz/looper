@@ -43,7 +43,7 @@ def test_latest_measurement_is_selected_per_step_and_check_without_mutating_hist
     ((CHECK,), (evidence("error", error_kind="timeout"),), False, (), ("c1",), ()),
     ((CHECK,), (evidence("error", error_kind="budget"),), False, (), ("c1",), ()),
     ((CHECK,), (evidence("stale"),), False, (), (), ("c1",)),
-    ((CHECK,), (evidence(head_sha="old"),), False, (), (), ("c1",)),
+    ((CHECK,), (evidence(head_sha="old"),), True, (), (), ()),  # committing the same content keeps the version
     ((CHECK,), (evidence(content_sha="old"),), False, (), (), ("c1",)),
     ((CHECK,), (evidence("running"),), False, ("c1",), (), ()),
     ((CHECK,), (evidence(protected_changed=["tests/verify.py"]),), False, ("c1",), (), ()),
@@ -113,3 +113,12 @@ def test_no_evidence_and_empty_checks_keep_fixed_baseline_decisions():
         for current in (context, replace(context, evidence=gate((), (), VERSION))):
             assert tuple(item.value for item in current.allowed()) == tuple(item.value for item in before.allowed())
             assert tuple(item.value for item in current.offered(True)) == tuple(item.value for item in before.offered(True))
+
+
+@pytest.mark.parametrize(("state", "kind", "offered"), [
+    ("error", "timeout", True), ("error", "budget", False),
+])
+def test_recheck_is_not_offered_for_a_spent_step_budget(state, kind, offered):
+    current = (evidence(state, error_kind=kind),)
+    context = DecisionContext("s1", ResultKind.WORK, True, False, 0, 3, evidence=gate((CHECK,), current, VERSION))
+    assert (Decision.RECHECK in context.allowed()) is offered

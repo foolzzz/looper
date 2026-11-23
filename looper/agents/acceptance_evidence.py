@@ -7,6 +7,7 @@ from typing import Any
 
 from looper.db.step_check_runs import CheckState
 from .acceptance_checks import Check
+from .acceptance_gate import same_version
 from .untrusted import Source, fence
 
 
@@ -38,7 +39,7 @@ def render_evidence(criteria: Sequence[str], checks: Sequence[Check], current: S
             row = rows.get(check.id)
             state = CheckState(row["state"]).value if row else "missing"
             if row is not None and state != CheckState.ERROR:
-                if head is not None and (row.get("head_sha"), row.get("content_sha")) != head:
+                if head is not None and not same_version((row.get("head_sha"), row.get("content_sha")), head):
                     state = CheckState.STALE.value
                 elif row.get("protected_changed"):
                     state = CheckState.FAILED.value

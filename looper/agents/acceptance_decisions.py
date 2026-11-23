@@ -10,7 +10,7 @@ from pathlib import Path
 from looper.db import step_check_runs
 from .acceptance_checks import AcceptanceChecksMode
 from .acceptance_context import AcceptanceBaseline
-from .acceptance_gate import current_evidence, gate
+from .acceptance_gate import current_evidence, gate, same_version
 from . import acceptance_runner
 from .attempts import FailureKind
 from .tiers.planner_protocol import Decision, DecisionContext, ResultKind
@@ -109,7 +109,7 @@ async def decision_context(agent, plan, step, context: DecisionContext) -> Decis
         if state.pending:
             state = replace(state, pending=None, after=None)
         outdated = any(row["state"] != "error" and (row["state"] == "stale"
-                       or (row.get("head_sha"), row.get("content_sha")) != head) for row in current)
+                       or not same_version((row.get("head_sha"), row.get("content_sha")), head)) for row in current)
         if outdated and enabled:
             # Append a stale record, never rewrite a completed measurement. Already stale rows are reused.
             if any(row["state"] != "stale" for row in current):
@@ -134,7 +134,8 @@ async def decision_context(agent, plan, step, context: DecisionContext) -> Decis
         logger.warning("Could not read acceptance evidence for %s", step.step_id, exc_info=True)
         await agent._activity("error", f"Acceptance evidence unavailable for step {step.label}")
         measured = replace(gate(step.checks, (), head), passed=False)
-    state = replace(state, blocked=not measured.passed)
+    # D22: blocked means a measured required check failed or errored, not merely that nothing was measured.
+    state = replace(state, blocked=(not enabled and state.blocked) or measured_failure(measured))
     state.store(step)
     await agent._save(plan, step)
     measured = replace(measured, rechecks_used=state.rechecks_used, stale_reruns_used=state.stale_reruns_used)
@@ -164,28 +165,34 @@ async def before_decision(agent, plan, step, context, reply):
         fresh = await decision_context(agent, plan, step, context)
         if fresh.evidence is None:
             return reply
-        if (not fresh.evidence.passed or fresh.evidence.head != context.evidence.head
+        if (not fresh.evidence.passed or not same_version(fresh.evidence.head, context.evidence.head)
                 or fresh.evidence.stale_reruns_used != context.evidence.stale_reruns_used):
             await agent._decide_again(plan, step)
             return None
-    if reply.decision is Decision.RETRY:
-        from .acceptance_evidence import failed_feedback
-        feedback = failed_feedback(step.acceptance_criteria, step.checks, context.evidence.current)
-        if feedback:
-            reply = replace(reply, feedback=reply.feedback + "\n\n" + feedback)
     if reply.decision is Decision.REPLAN and not context.evidence.passed:
         await agent._activity("acceptance_check", f"Replan replaces blocked checks for step {step.label}")
     return reply
+
+
+def measured_failure(gate) -> bool:
+    """Whether a required check was measured failed or errored (a required check with no row was not measured)."""
+    return bool({row["check_id"] for row in gate.current} & {*gate.failed, *gate.errored})
 
 
 def failure_kind(context: DecisionContext) -> FailureKind | None:
     """CHECK_FAILED when a required check was measured failed or errored on the version being decided, else the
     default mapping. A required check with no row (the Worker never reached collection) does not count."""
     gate = context.evidence
-    if gate is None:
-        return None
-    measured = {row["check_id"] for row in gate.current}
-    return FailureKind.CHECK_FAILED if measured & {*gate.failed, *gate.errored} else None
+    return FailureKind.CHECK_FAILED if gate is not None and measured_failure(gate) else None
+
+
+def retry_feedback(step, context, feedback: str) -> str:
+    """The Planner's retry note with the failed required checks appended, for the Worker only."""
+    from .acceptance_evidence import failed_feedback
+    if context.evidence is None:
+        return feedback
+    failed = failed_feedback(step.acceptance_criteria, step.checks, context.evidence.current)
+    return f"{feedback}\n\n{failed}" if failed else feedback
 
 
 async def reviewer_payload(agent, plan, step):
@@ -212,7 +219,7 @@ async def fallback_context(agent, plan, step, context):
         return fresh
     if not fresh.evidence.passed:
         return replace(fresh, succeeded=False)
-    if (fresh.evidence.head != context.evidence.head
+    if (not same_version(fresh.evidence.head, context.evidence.head)
             or fresh.evidence.stale_reruns_used != context.evidence.stale_reruns_used):
         await agent._decide_again(plan, step)
         return None

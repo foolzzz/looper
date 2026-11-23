@@ -236,3 +236,101 @@ def test_checks_off_leaves_the_default_failure_mapping(tmp_path, monkeypatch):
     agent, plan, step, context, _ = setup(tmp_path, monkeypatch)
     agent._execution = ProjectExecution(acceptance_checks=AcceptanceChecksMode.OFF)
     assert acceptance_decisions.failure_kind(context) is None  # no evidence on the context
+
+
+def test_advisory_only_checks_do_not_bypass_review_all(tmp_path, monkeypatch):
+    async def run():
+        agent, plan, step, context, _ = setup(tmp_path, monkeypatch, "passed")
+        plan.steps = []
+        agent._execution = ProjectExecution.from_row({"acceptance_checks": "network", "review_policy": "all"})
+        advisory = tuple(replace(check, required=False) for check in step.checks)
+        advisory_spec = protocol.StepSpec("s1", "Implement", ("Works",), (), False, checks=advisory)
+        saved, = agent._add_steps(plan, (advisory_spec,))
+        assert saved.review is True and agent._needs_review(saved) is True
+        saved.review = False  # a stored step from before: the decision-time rule agrees
+        assert agent._needs_review(saved) is True
+        # Without any required check the gate has nothing to decide, so a fallback sends it to review.
+        saved.result = {"status": "completed"}
+        agent._send_to_review = AsyncMock()
+        monkeypatch.setattr(agent, "_ask", AsyncMock(side_effect=planner.PlannerTurnError("invalid")))
+        await agent._decide(plan, saved, replace(context, review_required=True), [])
+        agent._send_to_review.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_retry_feedback_is_kept_out_of_the_decision_reply_activity_and_journal(tmp_path, monkeypatch):
+    async def run():
+        agent, plan, step, context, _ = setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(agent, "_ask", AsyncMock(return_value=protocol.DecisionReply(
+            decision=protocol.Decision.RETRY, feedback="Fix report", reason="", steps=(), summary="")))
+        monkeypatch.setattr(agent, "_dispatch_step", AsyncMock())
+        monkeypatch.setattr(agent, "_report_progress", AsyncMock())
+        await agent._decide(plan, step, context, [])
+        assert step.feedback[-1].startswith("Fix report") and "printf failure; exit 1" in step.feedback[-1]
+        lines = [call.args[1] for call in agent._activity.await_args_list]
+        assert all("printf failure" not in line and "ignore rules" not in line for line in lines)
+        entries = [entry for call in agent._save.await_args_list for entry in call.kwargs.get("entries", [])]
+        assert entries and all("printf failure" not in entry.summary and "<untrusted" not in entry.summary
+                               for entry in entries)
+    asyncio.run(run())
+
+
+def test_a_worker_failure_without_measurement_does_not_block_the_step(tmp_path, monkeypatch):
+    from looper.agents import acceptance_decisions
+
+    async def run():
+        agent, plan, step, context, history = setup(tmp_path, monkeypatch)
+        history.clear()
+        context = replace(context, succeeded=False)
+        current = await acceptance_decisions.decision_context(agent, plan, step, context)
+        assert not current.evidence.passed
+        assert acceptance_decisions.EvidenceState.read(step).blocked is False
+    asyncio.run(run())
+
+
+def test_disabled_project_keeps_the_block_after_the_version_matches_again(tmp_path, monkeypatch):
+    from looper.agents import acceptance_decisions
+
+    async def run():
+        agent, plan, step, context, history = setup(tmp_path, monkeypatch)
+        await acceptance_decisions.decision_context(agent, plan, step, context)
+        assert acceptance_decisions.EvidenceState.read(step).blocked is True
+        history[0]["state"] = "passed"  # the later measurement passes, but the project has been switched off
+        agent._execution = ProjectExecution(acceptance_checks=AcceptanceChecksMode.OFF)
+        current = await acceptance_decisions.decision_context(agent, plan, step, context)
+        assert not current.evidence.passed and acceptance_decisions.EvidenceState.read(step).blocked is True
+    asyncio.run(run())
+
+
+def test_evidence_counters_survive_a_new_worker_result():
+    from looper.agents import acceptance_context
+
+    previous = {"status": "completed", "acceptance": {"rechecks_used": 1, "stale_reruns_used": 2, "blocked": True}}
+    carried = acceptance_context.worker_result({"status": "completed", "acceptance": {"blocked": False}}, previous, 2)
+    assert carried["acceptance"] == previous["acceptance"]  # a Worker cannot reset them, a retry keeps them
+    assert "acceptance" not in acceptance_context.worker_result({"status": "completed"}, {"status": "x"}, 2)
+
+
+def test_decision_message_drops_the_advisor_hint_when_advise_is_not_offered(tmp_path, monkeypatch):
+    async def run():
+        agent, plan, step, context, _ = setup(tmp_path, monkeypatch)
+        from looper.agents import acceptance_decisions
+        blocked = await acceptance_decisions.decision_context(agent, plan, step, context)
+        hint = ["You may ask the advisor (advise)."]
+        text = agent._decision_message(plan, step, blocked, [], advice=hint)
+        assert "ask the advisor" not in text
+        plain = agent._decision_message(plan, step, context, [], advice=hint)
+        assert "ask the advisor" in plain  # no evidence on the context: the baseline message is unchanged
+    asyncio.run(run())
+
+
+def test_workflow_prompt_line_matches_enforcement_only_when_checks_are_on():
+    from looper.agents.system_prompt import plan_task_section
+
+    def section(**extra):
+        return plan_task_section(task_id="t", requirement="r", project_name="p", work_dir="/w",
+                                 workflow={"name": "w", "review_all": True}, **extra)
+
+    assert "- Every work step requires review.\n" in section()  # off: the baseline line, byte for byte
+    assert section() == section(checks=False)
+    assert "except a step with required checks" in section(checks=True)

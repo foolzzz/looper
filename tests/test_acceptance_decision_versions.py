@@ -215,3 +215,35 @@ def test_interrupted_unfrozen_merge_cannot_adopt_new_unmeasured_source(tmp_path,
         assert step.status == "deciding"
         assert decisions.EvidenceState.read(step).stale_reruns_used == 1
     asyncio.run(run())
+
+
+def test_committing_unchanged_content_keeps_the_measured_version(tmp_path, monkeypatch):
+    """A review freeze commits the Worker's output: HEAD moves, the content does not, so no stale rerun."""
+    async def run():
+        agent, plan, step, context, work = setup(tmp_path, monkeypatch)
+        history, _ = memory_measurements(agent, plan, step, monkeypatch)
+        (work / "code.txt").write_text("worker output\n")
+        before = await decisions.decision_context(agent, plan, step, context)
+        commit(work)
+        after = await decisions.decision_context(agent, plan, step, context)
+        assert after.evidence.head[0] != before.evidence.head[0] and after.evidence.head[1] == before.evidence.head[1]
+        assert after.evidence.passed and after.evidence.stale_reruns_used == 0
+        assert [row["state"] for row in history] == ["passed"]
+        assert runner.mark_stale.await_count == 0
+    asyncio.run(run())
+
+
+def test_panel_dispatch_after_the_freeze_commit_sends_the_seats_without_a_stale_rerun(tmp_path, monkeypatch):
+    async def run():
+        agent, plan, step, context, work = setup(tmp_path, monkeypatch)
+        history, _ = memory_measurements(agent, plan, step, monkeypatch)
+        (work / "code.txt").write_text("worker output\n")
+        await decisions.decision_context(agent, plan, step, context)
+        commit(work)  # what freeze_review does before the seats are dispatched
+        monkeypatch.setattr(agent, "_decide_again", AsyncMock())
+        payload = await decisions.reviewer_payload(agent, plan, step)
+        assert payload is not None and "evidence" in payload
+        agent._decide_again.assert_not_awaited()
+        assert decisions.EvidenceState.read(step).stale_reruns_used == 0
+        assert [row["state"] for row in history] == ["passed"]
+    asyncio.run(run())
