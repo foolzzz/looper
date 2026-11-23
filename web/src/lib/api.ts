@@ -2029,6 +2029,8 @@ export interface ProjectSkill {
   size_bytes: number;
   created_at: string;
   updated_at: string;
+  /** active: new runs load it. deprecated: new runs skip it. The install switch is separate. */
+  lifecycle: "active" | "deprecated";
 }
 
 export interface SkillCaps {
@@ -2158,6 +2160,47 @@ export async function rollbackProjectSkill(
 ): Promise<ProjectSkillRollback> {
   const result = await callV1<ProjectSkillRollback>(
     "/api/v1/project_skills/rollback", { project_id: projectId, skill_id: skillId, version });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export interface SkillLifecycleChange extends ProjectInstalls {
+  skill: ProjectSkill;
+  affected_projects: SkillVersions["affected_projects"];
+}
+
+/** Mark a project skill deprecated. New runs skip it; installs, versions and files stay. The reason is not stored. */
+export async function deprecateProjectSkill(
+  projectId: string,
+  skillId: string,
+  reason?: string,
+): Promise<SkillLifecycleChange> {
+  const result = await callV1<SkillLifecycleChange>("/api/v1/project_skills/deprecate", {
+    project_id: projectId, skill_id: skillId, ...(reason ? { reason } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Mark a deprecated project skill active so new runs load it again. */
+export async function restoreProjectSkill(projectId: string, skillId: string): Promise<SkillLifecycleChange> {
+  const result = await callV1<SkillLifecycleChange>("/api/v1/project_skills/restore", {
+    project_id: projectId, skill_id: skillId,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Characters of skill name plus description a new run of each role would list. A display threshold, not a cap. */
+export interface ContextBudget {
+  limit: number;
+  roles: Record<"planner" | "worker" | "reviewer", { chars: number; skills: number; over: boolean }>;
+  /** Plugin-bundled skills are left out of v0. */
+  counts_plugin_skills: false;
+}
+
+export async function fetchContextBudget(projectId: string): Promise<ContextBudget> {
+  const result = await callV1<ContextBudget>("/api/v1/project_skills/context_budget", { project_id: projectId });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
@@ -4477,6 +4520,8 @@ export interface CatalogItem {
   modified: boolean;
   imported_at: string;
   updated_at: string;
+  /** Missing means active. deprecated: a new run skips the skill. Not the install's enabled switch. */
+  lifecycle?: "active" | "deprecated";
   /** An MCP server's configuration, its env and header values masked; null for a plugin or a skill. */
   mcp: McpConfig | null;
   /** Global and project installs. */

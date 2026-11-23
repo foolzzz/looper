@@ -1,6 +1,6 @@
 """Project-owned skills; installation switches belong to the catalog domain."""
 
-from .. import catalog, project_skills, skill_versions
+from .. import catalog, project_skills, skill_lifecycle, skill_versions
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
@@ -12,7 +12,8 @@ ORDER = 6
 
 PROJECT_SKILL = _object({
     "skill_id": _STR, "name": _STR, "qualified_name": _STR, "description": _STR,
-    "created_at": _STR, "updated_at": _STR, "size_bytes": _INT})
+    "created_at": _STR, "updated_at": _STR, "size_bytes": _INT,
+    "lifecycle": {"type": "string", "enum": ["active", "deprecated"]}})
 _FIELDS = dict.fromkeys(("name", "description", "content"), _STR)
 _IDS = {"project_id": _STR, "skill_id": _STR}
 _CHANGE = _object({**PROJECT_INSTALLS["properties"], "skill": PROJECT_SKILL})
@@ -29,6 +30,9 @@ def _op(action, request, result, risk):
 
 _VERSIONS_SUMMARY = "List one project skill's versions, and the difference between two of them."
 _ROLLBACK_SUMMARY = "Write a new version of a project skill from an older version's content."
+_DEPRECATE_SUMMARY = "Mark a project skill deprecated so new runs skip it."
+_RESTORE_SUMMARY = "Mark a deprecated project skill active so new runs load it again."
+_BUDGET_SUMMARY = "Count the skill name and description characters a run of each role would list."
 _AUTHOR = {"type": "string", "enum": ["operator", "proposal", "rollback"]}
 _VERSION = _object({
     "version": _INT, "name": _STR, "description": _STR, "sha256": _STR, "author_kind": _AUTHOR,
@@ -46,6 +50,13 @@ _VERSIONS = _object({
     "affected_projects": _array(_AFFECTED), "diff": {**_DIFF, "type": ["object", "null"]},
 })
 _ROLLBACK = _object({**_CHANGE["properties"], "version": _INT, "affected_projects": _array(_AFFECTED)})
+_LIFECYCLE = _object({**_CHANGE["properties"], "affected_projects": _array(_AFFECTED)})
+_BUDGET_ROLE = _object({"chars": _INT, "skills": _INT, "over": _BOOL})
+_BUDGET = _object({
+    "limit": _INT,
+    "roles": _object({"planner": _BUDGET_ROLE, "worker": _BUDGET_ROLE, "reviewer": _BUDGET_ROLE}),
+    "counts_plugin_skills": _BOOL,
+})
 
 
 OPERATIONS = (
@@ -68,6 +79,23 @@ OPERATIONS = (
         _VERSIONS_SUMMARY + " Each version records the content hash, author kind, reason and time.",
         _object({**_IDS, "from_version": _INT, "to_version": _INT}, ["project_id", "skill_id"], closed=True),
         _VERSIONS, risk="read", level=ActionLevel.INSIDE, operator_only=True,
+    ),
+    Operation(
+        "project_skills.deprecate", "POST", "/api/v1/project_skills/deprecate", _DEPRECATE_SUMMARY,
+        _DEPRECATE_SUMMARY + " Installs, versions and files stay. An optional reason is accepted and not stored.",
+        _object({**_IDS, "reason": _STR}, ["project_id", "skill_id"], closed=True),
+        _LIFECYCLE, risk="write", level=ActionLevel.INSIDE, operator_only=True,
+    ),
+    Operation(
+        "project_skills.restore", "POST", "/api/v1/project_skills/restore", _RESTORE_SUMMARY,
+        _RESTORE_SUMMARY + " Installs, versions and files stay.",
+        _object(_IDS, closed=True), _LIFECYCLE, risk="write", level=ActionLevel.INSIDE, operator_only=True,
+    ),
+    Operation(
+        "project_skills.context_budget", "POST", "/api/v1/project_skills/context_budget", _BUDGET_SUMMARY,
+        _BUDGET_SUMMARY + " The 8000-character line is a display threshold. Plugin-bundled skills are not counted.",
+        _object({"project_id": _STR}, closed=True), _BUDGET, risk="read", level=ActionLevel.INSIDE,
+        operator_only=True,
     ),
 )
 RESULTS = {}
@@ -104,6 +132,8 @@ async def run(server, operation, arguments, principal, headers):
     project_id = arguments["project_id"]
     if name == "project_skills.add":
         return await _answer(project_skills.add_skill(project_id, arguments["skill"]))
+    if name == "project_skills.context_budget":
+        return await _answer(skill_lifecycle.context_budget(project_id))
     skill_id = arguments["skill_id"]
     if name == "project_skills.get":
         return await _answer(project_skills.get_skill(project_id, skill_id))
@@ -115,6 +145,10 @@ async def run(server, operation, arguments, principal, headers):
             to_version=arguments.get("to_version")))
     if name == "project_skills.rollback":
         return await _answer(skill_versions.rollback(project_id, skill_id, arguments["version"]))
+    if name == "project_skills.deprecate":
+        return await _answer(skill_lifecycle.deprecate(project_id, skill_id, reason=arguments.get("reason", "")))
+    if name == "project_skills.restore":
+        return await _answer(skill_lifecycle.restore(project_id, skill_id))
     # A pending confirmation reserves nothing: read current references and ownership again.
     # The core deletes the item and all current installations in one transaction.
     await _references(arguments)

@@ -2213,6 +2213,9 @@ class WorkerPool:
         if (in_project := [item for item in library.items if item.scope == "project"]) and parent_task_id:
             await self._activity(parent_task_id, worker_id, "phase",
                                  f"Project installs applied ({items_label(in_project)})")
+        if library.skipped_deprecated and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "phase",
+                                 f"Deprecated skills skipped ({', '.join(library.skipped_deprecated)})")
         if library.error and parent_task_id:
             await self._activity(parent_task_id, worker_id, "error",
                                  f"Warning: {library.error}; this run goes without them"[:500])
