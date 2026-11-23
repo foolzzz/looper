@@ -1,6 +1,7 @@
 """Completion events: a task's end is recorded where its code notice is made, and nothing sent changes."""
 
 import asyncio
+import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ from looper.agents.task_notice import (Notice, NotifyChannel, NotifyTarget, Targ
                                        web_end_text)
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.db import connection, manager_events as store, projects, schedules as db_schedules, tasks
-from tests.db_support import DSN, run_db, v1_api
+from tests.db_support import DSN, dropped_tables, run_db, v1_api
 from tests.schedule_support import TELEGRAM_CHAT, ScheduleEnv, allow_telegram, run_scheduled, with_sender
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -340,14 +341,16 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
         await pool.execute("ALTER TABLE schedule_notifications DROP COLUMN manager_event_id; "
                            "DELETE FROM schema_migrations WHERE name IN ('schedule_notification_events', "
                            "'schedule_notification_events_online')")
-        if before == "no_table":  # older than completion events
-            # Later derived tables must go too when reconstructing a database from before completion events.
-            await pool.execute("DROP TABLE triage_event_sources, triage_events, manager_events; "
-                               "DELETE FROM schema_migrations WHERE name IN "
-                               "('manager_events', 'event_triage', 'event_triage_online')")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
+        # Older than completion events: later derived tables must go too when reconstructing such a database.
+        older = before == "no_table"
+        async with (dropped_tables(pool, "triage_event_sources", "triage_events", "manager_events") if older
+                    else contextlib.nullcontext()):
+            if older:
+                await pool.execute("DELETE FROM schema_migrations WHERE name IN "
+                                   "('manager_events', 'event_triage', 'event_triage_online')")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")

@@ -87,6 +87,11 @@ SUBSCRIPTION_RUN = _object({
     **dict.fromkeys(("output_text", "notification_id", "skip_reason"), _NULL_STR)})
 SUBSCRIPTION_RUN["properties"]["deliveries"] = _array(_object({"segment": _INT, "state": _STR, "attempts": _INT,
                                                                "error": _NULL_STR}))
+# Optional, and only present on a triage run: adding it after construction keeps it out of ``required``.
+SUBSCRIPTION_RUN["properties"]["extract_counts"] = {"anyOf": [
+    _object({"important": _INT, "digest": _INT, "ignore": _INT, "uncited": _INT, "raised": _INT, "none": _BOOL,
+             "dropped": {"type": "object", "additionalProperties": _INT}}, [], closed=True),
+    {"type": "null"}]}
 RUN["properties"]["subscription"] = SUBSCRIPTION_RUN  # a subscription's runs only
 RUN["required"] = [name for name in RUN["required"] if name != "subscription"]
 _SCHEDULE_FIELDS["subscription"] = SUBSCRIPTION  # a subscription's only

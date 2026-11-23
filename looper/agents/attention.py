@@ -150,7 +150,7 @@ def _schedule_items(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         since = min((row[column] for _, column in _SCHEDULE_ALERTS if row[column] is not None), default=None)
         items.append(_item(f"schedule:{row['id']}", row["name"], context=row["project_name"], since=since,
                            href=f"#schedules/{row['id']}", failures=row["consecutive_failures"], alerts=alerts,
-                           last_status=row["last_status"]))
+                           last_status=row["last_status"], last_ok_at=row.get("last_ok_at")))
     return items
 
 
