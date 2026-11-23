@@ -7,6 +7,7 @@
 ## 行为与边界
 
 - explorer 先只读检查任务的 `subagent` 并发类别，再在父运行的车道等待账号，最后在任务锁中复查并认领。账号等待不持有任务锁；槽位持续到子进程结束。
+- 账号到期探测时，若任务并发复查已满、启动前被取消或建记录前被预算拒绝，释放槽位但不把尚未启动的运行当作成功探测；账号保留 `PROBING`，交由下一个运行验证。
 - 阻塞的 spawn/wait 只向同账号准入队列中最靠前的一个 explorer 转借父槽位，沿用车道优先级、老化和同车道到达顺序。子运行先结束时直接归还；等待先返回时，子运行保留普通槽位，父运行按原到达顺序重新准入后才返回工具结果。
 - 新派生的身份异步生成，等待循环先等当前正在准备的派生都有身份或退出，再登记借位，仍使用原截止时间。零等待、已在运行的 explorer、冻结账号不借位。Planner 通过当前回合寻找槽位，可以等待前一回合派出的 explorer；Planner 回合准入本身另行交付。
 - 冻结的 queued 结果增加 `held: quota`、`resets_at`（供应商重置时间，未知为 null）。按调用缓存 Profile 与账号查询，开放或关闭准入时没有新增结果键。
@@ -21,7 +22,18 @@ Dashboard 沿用任务活动、账号等待数及运行树。现有 `runs.tree` 
 
 定向检查包含 `tests/test_admission*.py tests/test_subagent*.py tests/test_explorer*.py tests/test_api_v1_document.py tests/test_tool_levels.py`，使用 Python 3.11、两个测试进程和一次性 PostgreSQL。另用固定基线的三个原始模块重新执行关闭路径观测，12 项均与录制 fixture 匹配；重启扫描器读回冻结状态后，验证 explorer 保持原车道排队、到期探测并完成。
 
+最终结果：**717 项通过，87.08 秒，无跳过**。真实路径通过协议替身验证 cap=1 的借位与排队、429 冻结后的 `held: quota`、操作者清除冻结后继续运行直至任务完成。没有执行真实模型调用。
+
 新增服务测试使用独立 `looper serve`、空闲端口、临时 runtime root 和协议替身：Worker 通过运行令牌调用真实 HTTP 工具，派两个 explorer，cap=1 时一个借位运行、一个排队；429 后等待返回额度挂起，清除冻结后继续。可设置 `LOOPER_ADMISSION_SCREENSHOT_DIR` 保存 1280/390 的运行树和活动截图。未调用真实模型或外部消息账号。
+
+公开截图在导出前仅将临时工作目录替换为 `/workspace`、临时运行目录替换为 `/validation`；任务阶段、状态、等待活动和时间线保持原样。排队节点尚无运行记录，借位阶段的运行树只显示已经启动的一个 explorer；冻结阶段该运行已结束，另一个仍由工具结果确认是 `queued`、`held: quota`。
+
+| 场景 | 1280 | 390 |
+|---|---|---|
+| 借位时的运行树 | [桌面](explorer-admission/explorer-admission-lent-1280.png) | [手机](explorer-admission/explorer-admission-lent-390.png) |
+| 借位时的活动 | [桌面](explorer-admission/explorer-activity-lent-1280.png) | [手机](explorer-admission/explorer-activity-lent-390.png) |
+| 冻结后的运行树 | [桌面](explorer-admission/explorer-admission-frozen-1280.png) | [手机](explorer-admission/explorer-admission-frozen-390.png) |
+| 冻结后的活动 | [桌面](explorer-admission/explorer-activity-frozen-1280.png) | [手机](explorer-admission/explorer-activity-frozen-390.png) |
 
 ## Pending real-model validation
 
