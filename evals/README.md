@@ -1211,7 +1211,8 @@ and no `--cases`, only the file's cases run.
 
 ## Assistant experience (`evals/assistant_experience.py`)
 
-Twenty conversations exercise the Manager through the Lark CLI stand-in, with a fresh
+Twenty-seven conversations (37 user turns: 20 original conversations and 7 additions)
+exercise the Manager through the Lark CLI stand-in, with a fresh
 PostgreSQL database, `looper serve`, runtime root and empty `eval-asst` project for each
 case and repetition. No real chat is contacted. The operator and a second allowlisted
 sender have synthetic names. Checks use replies, the Manager action trail and database
@@ -1231,6 +1232,40 @@ readback, without a model judge:
 - `tone`: short, plain replies, no filler, the assistant's name, the configured
   user address, and a bounded explanation. `address_user` records
   `setting_unsupported` when `manager_persona.update` is unavailable.
+- `memory` (2): recall a random operator fact from a synthetic read-only vault, citing
+  `operator.md`; or return only “没有记录” for an absent fact. Successful search actions,
+  their recorded queries re-run against the unchanged vault, and the reply must agree.
+  The absent case first searches a known control note, so an empty or broken search
+  cannot establish absence. This covers the vault retrieval path; session search is
+  not required when that source answers the question.
+- `proactivity` (3): surface a due reminder or a failing schedule (a needs-you source)
+  once across two turns; surface neither when both sources are empty. Checks combine
+  all replies, read actions, reminder settlement / failing-schedule readback and
+  proactive delivery receipts. Fake mode scripts both the replies and delivery rows;
+  it does not claim the product has a proactive needs-you sender.
+- `latency` (2): receipt and first reply read from #1488's
+  `llm_records.metadata.turn_metrics`, never the harness wall clock. Defaults are
+  `--ack-max-ms 2000` and `--first-reply-max-ms 15000` (inclusive evaluation limits,
+  not RFC service objectives). Missing, invalid, replayed, completion or empty turns
+  fail; the recorded top-level tool count must match the action trail. Fake mode
+  overrides the stored latencies at the limit / one millisecond above it.
+
+The additions opt into metrics in their disposable server only. Each exports
+`online_metrics` from `manager_metrics.get` (7-day window), preserving null samples
+and the API's percentiles. The four groups, defined in
+`evals/prompt_regression/assistant_metrics.py`, follow the assistant-layer RFC §4.1:
+
+| group | definition |
+|---|---|
+| `receipt_latency` | ack P50/P95 overall and by chat; non-replayed user model turns with non-null `ack_ms` |
+| `first_reply_latency` | first-reply P50/P95, same eligibility; channel handoff rather than platform delivery time |
+| `empty_delivery` | empty count and fraction among eligible user model turns |
+| `proactivity` | daily volume by source in the server timezone; reply rate overall and by source among successfully sent messages at least 30 minutes old, with a reply within 30 minutes |
+
+Definitions and values are separate from category scores. Off yields no values;
+no mature proactive sample yields a null reply rate, not zero. The API's delivery
+counts accompany these groups through its empty-delivery denominator. Fake output
+labels synthetic delivery/latency readback with `fake_observations: true`.
 
 Start with the zero-cost scripted check (the dedicated disposable PostgreSQL server
 must be on localhost port 54331):
@@ -1246,7 +1281,8 @@ persona setting is explicitly stubbed in fake mode; this does not assert product
 The JSON records checker validation, but category pass rates are null: scripted scores
 are never assistant measurements. Fake costs are stand-in accounting values, not
 charges. Checker regression tests cover positive and negative examples without starting
-a server or calling a model.
+a server or calling a model. `tests/test_assistant_experience_completion.py` also
+runs all seven additions' positive and negative scripts through disposable servers.
 
 Real runs cost money. The approved baseline is sonnet (three repetitions) and an opus
 xhigh Manager (two repetitions), capped at $6 each and $12 total. Run these commands
@@ -1254,11 +1290,13 @@ only when assigned the baseline run:
 
 ```bash
 uv run --extra test python -m evals.assistant_experience --model sonnet --reps 3 \
+  --categories time,identity,crosstalk,tone \
   --jobs 3 --case-budget-usd 1 --total-cap-usd 6 \
   --claude ~/.local/bin/claude --pg-url "$LOOPER_EVAL_DATABASE_URL"
 
 uv run --extra test python -m evals.assistant_experience --model sonnet \
   --manager-model opus --manager-effort xhigh --reps 2 \
+  --categories time,identity,crosstalk,tone \
   --jobs 3 --case-budget-usd 1 --total-cap-usd 6 \
   --claude ~/.local/bin/claude --pg-url "$LOOPER_EVAL_DATABASE_URL"
 ```
@@ -1266,6 +1304,23 @@ uv run --extra test python -m evals.assistant_experience --model sonnet \
 Use `--claude ~/.local/bin/claude` explicitly: the PATH shim hangs inside serve.
 
 Use `--categories time,identity` or `--cases time_now,short_answer` for a subset.
+The completion subset is `--categories memory,proactivity,latency`: 7 conversations,
+10 user turns per repetition. No paid completion run is included in this change.
+Run the new subset in fake mode with:
+
+```bash
+uv run --extra test python -m evals.assistant_experience --fake \
+  --categories memory,proactivity,latency --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
+Needed baseline extension: sonnet `--reps 3` (30 turns, estimated $0.99, cap $2),
+then opus xhigh Manager `--reps 2` (20 turns, estimated $1.30, cap $3), each with
+`--jobs 2 --case-budget-usd 1` and the same disposable-server/Claude arguments above.
+These are extrapolations using the RFC §4.3.1 per-turn estimates ($0.033 / $0.065),
+not measured charges. Total estimated $2.29, proposed cap $5; separate authorization
+is required. Existing assistant baselines contain the original 20 conversations
+only. Merge a measured subset into the corresponding baseline or refresh the full
+27-conversation baseline; do not overwrite the 20-case baseline with a subset.
 Add `--turn-context` to enable per-turn context through `turn_context_settings.update`
 on each disposable server and read its timezone through `turn_context_settings.get`;
 the default leaves that switch off. The result records the selected switch.
@@ -1286,7 +1341,8 @@ cp evals/runs/<opus-stamp>-assistant-real.json evals/prompt_regression/baselines
 ```
 
 Pass `--baseline PATH` to print category and case comparisons. Fake runs cannot
-be used as baselines. No real baseline is supplied until an approved real run is made.
+be used as baselines. The committed real baselines cover the original 20 conversations;
+the seven additions remain unmeasured until their approved paid runs.
 
 This adds an opt-in evaluation command only. Dashboard, Telegram, Lark runtime behavior,
 production prompts, tool lists and agent command lines are unchanged.
