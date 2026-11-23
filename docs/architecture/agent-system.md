@@ -6130,8 +6130,18 @@ here pushes: the intent push service polls `intents`.
   every person's message in every chat kind, the user's own too; intents read a
   person's message in a direct chat, one that @-mentions the user or one the
   user sent (`event_sources.user_open_id`), and the alert bots listed in
-  `intent_alert_senders`.
-- **The window is oldest first and drops nothing**
+  `intent_alert_senders`. With `intents.group_read.enabled` on (default off), intents
+  also read live human messages in up to ten operator-named groups, with both
+  sent and ingest time at or after each group's `read_from`; at most 200 such
+  messages per run and 500 per group per server-local day. The run cap waits
+  for catch-up; the day cap skips and counts messages as the cursor passes.
+  Turning the switch on requires the delivery layer and resets every group's
+  start time; revoking a group also drops its uncommitted intents, preserving
+  existing intents. Group-derived intents carry `via = followed_group`, only
+  accept `dev_task` or `bug_triage`, and use nonurgent delivery limits and digests;
+  they stay on the intents page while delivery is off. The list and switch do
+  not change the subscription's confirmation version.
+- **The window is oldest first**
   (`db.subscriptions.extraction_window`): at most `max_events`, and the cursor
   moves only to the last event read. A full window ends the run with `more`, and
   the scheduler fires it again at once, at most six times in a row, and only
@@ -6364,6 +6374,17 @@ The operator-only v1 operations (all POST) are:
   bind source chats to projects. `intent_alert_senders.list`, `put`, `delete`,
   under `/api/v1/intent_alert_senders/`, maintain the alert app allowlist;
   candidates exclude Looper's own apps.
+- `intent_group_reads.list`, `preview`, `put`, `delete`, `settings_put`, under
+  `/api/v1/intent_group_reads/`, maintain the followed groups while intents are
+  off or on. Preview is read-only; the dashboard confirms its message count,
+  estimated cost, scope and quotas before adding a group. The list shows each
+  group's start time, readability, today's read/skipped counts and recent
+  message/intent counts. These operator-only operations are also available in
+  the generated CLI; Lark and Telegram need no new control because group
+  management is on the dashboard, and existing private intent delivery is reused.
+  `looper leads eval-export --chat CHAT --days N --intents --out FILE` writes
+  anonymous human-message windows and all sourced lead labels to an ignored or
+  external file of mode 600, for local review and count-only intent evaluation.
 
 Only build and reject require intents to be enabled, so the operator can
 prepare configuration while it is off. Disabling also disables intents
