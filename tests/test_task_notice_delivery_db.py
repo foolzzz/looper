@@ -35,7 +35,7 @@ async def prepare(pool, tmp_path, monkeypatch, channel="lark", group=False, stat
     await tasks.create_task(task_id="task-notice", requirement="Synthetic task", project_id=project["id"],
                             work_dir=str(tmp_path), origin_channel_id=channel_id, **target.columns(),
                             origin_reply_route={"chat_id": "oc_direct"}, pool=pool)
-    await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'UTC')")
+    monkeypatch.setattr(chat_settings, "_timezone", "UTC")
     real_decide = delivery.decide
     monkeypatch.setattr(delivery, "decide", lambda *a, **kw: real_decide(*a, **kw, now=now))
     text = ("✅ 任务完成" if status == "completed" else "❌ 任务失败") + " · example\n原文 *code*\n/#tasks/task-notice"
@@ -90,10 +90,10 @@ def test_on_sends_same_notice_and_records_normal_urgency(tmp_path, monkeypatch, 
         assert (await adapter.deliver(queued)).success
         assert sender.await_args.args == (int(notice.target.id) if channel == "telegram" else notice.target, notice.text)
         row = await pool.fetchrow("SELECT * FROM proactive_deliveries")
-        assert (row["kind"], row["urgency"], row["chat_kind"], row["channel_id"], row["chat"],
-                row["task_id"], row["outcome"], row["counted"], row["sent_at"] is not None) == (
+        assert (row["source"], row["urgency"], row["chat_kind"], row["channel_id"], row["chat"],
+                row["task_id"], row["decision"], row["counted"], row["outcome"], row["sent_at"] is not None) == (
             "task_notice", "normal", "group" if group else "direct", notice.channel_id, notice.target.id,
-            "task-notice", "send", not group, True)
+            "task-notice", "send", not group, "sent", True)
     run_db(check, monkeypatch)
 
 
@@ -110,7 +110,7 @@ def test_on_defers_without_channel_calls_at_night_or_cap(tmp_path, monkeypatch, 
         await adapter.deliver(queued)
         sender.assert_not_awaited()
         row = await pool.fetchrow("SELECT * FROM proactive_deliveries WHERE task_id = 'task-notice'")
-        assert (row["outcome"], row["reason"], row["digest_date"], row["sent_at"]) == (
+        assert (row["decision"], row["reason"], row["digest_date"], row["sent_at"]) == (
             "digest", "daily_cap" if over_cap else "quiet_hours", (NIGHT + timedelta(days=1)).date(), None)
     run_db(check, monkeypatch)
 
@@ -194,10 +194,11 @@ def test_drop_never_calls_channel_and_failed_receipt_record_does_not_resend(tmp_
                                                                                 delivery.Reason.SILENT))
         await adapter.deliver(queued)
         sender.assert_not_awaited()
-        assert await pool.fetchval("SELECT outcome FROM proactive_deliveries") == "drop"
+        assert await pool.fetchval("SELECT decision FROM proactive_deliveries") == "drop"
         await pool.execute("DELETE FROM proactive_deliveries")
         monkeypatch.setattr(delivery, "deliver", real_deliver)
-        monkeypatch.setattr(proactive_deliveries, "mark_sent", AsyncMock(side_effect=RuntimeError("synthetic outage")))
+        monkeypatch.setattr(proactive_deliveries, "record_receipt",
+                            AsyncMock(side_effect=RuntimeError("synthetic outage")))
         assert (await adapter.deliver(queued)).success
         sender.assert_awaited_once()
     run_db(check, monkeypatch)

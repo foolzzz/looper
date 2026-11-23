@@ -3,7 +3,6 @@
 from .. import chat_settings
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _BOOL, _object
-from ..proactive_delivery import ENABLED_KEY
 
 VIEW = _object({"enabled": _BOOL}, closed=True)
 RESULTS = {}
@@ -27,7 +26,7 @@ async def impact(server, operation, arguments, principal, headers):
         return None
     value = arguments["enabled"]
     enabled = chat_settings.DEFAULT_DELIVERY_ENABLED if value is None else value
-    return (f"Set {ENABLED_KEY} to {str(enabled).lower()}{' (built-in default)' if value is None else ''}? "
+    return (f"Set {chat_settings.DELIVERY_ENABLED_KEY} to {str(enabled).lower()}{' (built-in default)' if value is None else ''}? "
             + ("From the next one, each proactive message wired to the delivery layer is decided on before it goes "
                "out (sent, into the digest, or dropped, and why), and the decision is recorded." if enabled else
                "From the next one, proactive messages go out without a delivery decision."))

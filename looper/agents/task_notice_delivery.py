@@ -53,7 +53,7 @@ async def send(envelope: MessageEnvelope, post: Callable[[MessageEnvelope], Awai
     receipt = await post(envelope)
     if decided is not None and receipt.success:
         try:
-            await db_deliveries.mark_sent(key)
+            await db_deliveries.record_receipt(key, "sent", receipt.external_id)
         except Exception:
             logger.exception("task notice %s: could not record the channel's receipt", key)
     return receipt

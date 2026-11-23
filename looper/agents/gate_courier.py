@@ -14,14 +14,16 @@ end notice; a Planner's reply goes as it wrote it. In a Lark group a reply
 reaches the bot only when it @-mentions it, so what waits for an answer there
 says so.
 
-With the system setting ``delivery.enabled`` on, notices that a gate needs the user (opened, updated or resumed)
-and its reminders pass the delivery layer (``proactive_delivery``) before posting. A waiting gate holds back the
-steps after it, so these are ``blocking`` and always sent, at night and over the daily cap too. A decision that
-cannot be made (the database refused it) is logged and the notice posted as with the layer off.
-
 With card buttons on (``card_actions``), a message that asks for an answer goes, in a channel with buttons, as a
 card: its text with a button per option of the gate's open questions and one that ends the discussion
 (``post_card``).
+
+With the system setting ``delivery.enabled`` on, notices that a gate needs the user (opened, updated or resumed)
+and its reminders pass the delivery layer (``proactive_delivery``) before posting: the decision goes into the
+message's ``proactive_deliveries`` row, under the key its post and its receipt use (``gate-<message id>``), and the
+receipt follows the post. A waiting gate holds back the steps after it, so these are ``blocking`` and always sent,
+at night and over the daily cap too. A decision that cannot be made (the database refused it) is logged and the
+notice posted as with the layer off: the layer never holds a blocking message back.
 
 A post that sent nothing is tried again, after ``POST_RETRY_SEC``, up to
 ``POST_ATTEMPTS`` in all, and the gate's later messages wait behind it; only
@@ -42,8 +44,7 @@ from typing import Any
 
 from ..db import activity as db_activity, proactive_deliveries as db_deliveries, tasks as db_tasks
 from ..db import user_gates as db_user_gates
-from . import chat_settings, proactive_delivery as delivery
-from . import card_actions
+from . import card_actions, chat_settings, proactive_delivery as delivery, turn_metrics
 from .channels.base import PostReceipt
 from .gate_service import GateChat, _offered, dashboard_target, gate_chat
 from .task_notice import NAME_CHARS, task_link_line
@@ -237,14 +238,17 @@ class GateCourier:
             await db_user_gates.record_post(row["id"], row["task_id"], "none")
             return True
         reply_to = await self._reply_to(row, chat)
-        key = f"gate-{row['id']}"
+        key = _key(row)
+        proactive = turn_metrics.proactive_kwargs(
+            turn_metrics.ProactiveSource.GATE_REMINDER if MessageKind(row["kind"]) is MessageKind.REMINDER
+            else turn_metrics.ProactiveSource.GATE, row["step_id"], row.get("manager_id"), dedupe_key=key)
         card = await self._card(row, chat, text)
         post = self._post if card is None else self._post_card
         body: Any = text if card is None else card
-        receipt = await post(chat.channel_id, chat.target, body, reply_to=reply_to, idempotency_key=key)
+        receipt = await post(chat.channel_id, chat.target, body, reply_to=reply_to, idempotency_key=key, **proactive)
         if receipt.parent_gone:
             # The message it replies to was recalled (or deleted, which Lark counts as recalled): post it on its own.
-            receipt = await post(chat.channel_id, chat.target, body, reply_to=None, idempotency_key=f"{key}-own")
+            receipt = await post(chat.channel_id, chat.target, body, reply_to=None, idempotency_key=f"{key}-own", **proactive)
         attempt = int(row.get("post_attempts") or 0) + 1
         if not receipt.success and not receipt.external_ids and attempt < POST_ATTEMPTS:
             await db_user_gates.record_retry(row["id"], receipt.error or "not sent", datetime.now(timezone.utc)
@@ -254,8 +258,9 @@ class GateCourier:
                                         error=None if receipt.success else receipt.error or "not sent",
                                         channel=chat.channel.value, channel_id=chat.channel_id, chat=chat.target.id,
                                         external_ids=receipt.external_ids)
-        if decided is not None and receipt.success:
-            await db_deliveries.mark_sent(_delivery_key(row))
+        if decided is not None:
+            await db_deliveries.record_receipt(key, "sent" if receipt.success else "rejected",
+                                               receipt.external_ids[0] if receipt.external_ids else None)
         if not receipt.success:
             await db_activity.insert_activity(
                 task_id=row["task_id"], worker="planner", kind="error",
@@ -286,9 +291,9 @@ class GateCourier:
             # Blocking: neither the cap nor the grace after the user wrote applies, so no last message is looked up.
             return await delivery.decide(
                 delivery.Delivery(source, delivery.Urgency.BLOCKING, kind),
-                dedupe_key=_delivery_key(row), channel_id=chat.channel_id, chat=chat.target.id,
-                last_user_message_at=None, task_id=row["task_id"], step_id=row["step_id"],
-                schedule_id=row.get("schedule_id"))
+                dedupe_key=_key(row), channel_id=chat.channel_id, chat=chat.target.id,
+                last_user_message_at=None, source_ref=row["step_id"], manager_id=row.get("manager_id"),
+                task_id=row["task_id"], step_id=row["step_id"], schedule_id=row.get("schedule_id"))
         except Exception:
             logger.exception("no delivery decision on gate message %s; posting it as with the layer off", row["id"])
             return None
@@ -307,9 +312,9 @@ class GateCourier:
         return await db_user_gates.first_post(row["step_id"], chat.channel_id, chat.target.id)
 
 
-def _delivery_key(row: Mapping[str, Any]) -> str:
-    """The message's key in ``proactive_deliveries``: one decision however often it is tried."""
-    return f"gate_message:{row['id']}"
+def _key(row: Mapping[str, Any]) -> str:
+    """A message's key: its posts' idempotency key, and its ``proactive_deliveries`` row's (decision and receipt)."""
+    return f"gate-{row['id']}"
 
 
 def _same_chat(message: Mapping[str, Any], chat: GateChat) -> bool:
