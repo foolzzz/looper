@@ -725,6 +725,31 @@ class TestWorkerSystemPrompt:
         agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Use uv.\nPython 3.12.",
                                                   "updated_at": "2026-10-13T12:00:00+00:00"}
 
+    @pytest.mark.parametrize("verify", [False, True], ids=["worker", "reviewer"])
+    def test_attempt_observations_preserve_model_input_hashes(self, tmp_path, monkeypatch, verify):
+        from looper.agents import attempts
+
+        monkeypatch.setattr(attempts, "worker_started", AsyncMock())
+        monkeypatch.setattr(attempts, "worker_finished", AsyncMock())
+        monkeypatch.setattr(attempts, "link_record", AsyncMock())
+
+        async def run():
+            executable = _fake_claude(tmp_path, _RECORD_RUN + (_VERDICT if verify else _SUCCESS))
+            pool = WorkerPool(config=WorkerConfig(claude_bin=executable), runtime_root=tmp_path)
+            seen = []
+            for metadata in ({}, {"attempt_id": 41, "run_no": 3, "contract_rejections": {"PLAN": 2}}):
+                result = await pool._execute(_step_envelope(tmp_path, verify=verify, **metadata), is_verify=verify)
+                assert result.get("passed") if verify else result["status"] == "completed"
+                seen.append(json.loads((tmp_path / "run.json").read_text()))
+            return seen
+
+        before, after = asyncio.run(run())
+        for key in ("argv", "prompt", "stdin"):
+            assert _sha(json.dumps(before[key], sort_keys=True)) == _sha(json.dumps(after[key], sort_keys=True))
+        # Tool flags and MCP/plugin bindings are part of the exact argv comparison.
+        for field in ("attempt_id", "run_no", "contract_rejections", "reopen_late_review", "reopen_verification"):
+            assert field not in after["prompt"] + after["stdin"] + json.dumps(after["argv"])
+
     def test_worker_gets_the_harness_role_project_task_and_work_contract(self, agent_db: Any) -> None:
         deps = [{"step": "core", "summary": "added the core module", "changed_files": ["core.py"]}]
         result, seen = _run_step(feedback=["import calc from the package", "add sub()"], attempt=3, dependencies=deps)

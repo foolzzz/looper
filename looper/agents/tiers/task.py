@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .. import step_workspaces, task_workspaces
+from .. import attempts, step_workspaces, task_workspaces
 from ..room import remove_run_sessions
 from ..kept_run import AdoptResult, RunHold
 from ..broadcast import Broadcaster
@@ -40,6 +40,7 @@ from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
     AgentAddress,
+    CancelBy,
     MessageEnvelope,
     MessageType,
     RestartMode,
@@ -462,7 +463,8 @@ class TaskRouter:
         await self._handle_planner_status(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.GOAL_STATUS,
             payload={"task_id": task.task_id, "goal_id": task.goal_id, "status": "failed",
-                     "summary": f"The task could not start: {problem}"},
+                     "summary": f"The task could not start: {problem}",
+                     "outcome_failure_kind": attempts.TaskFailure.ERROR.value},
             correlation_id=envelope.correlation_id, metadata=envelope.metadata,
         ))
 
@@ -552,6 +554,20 @@ class TaskRouter:
         ))
 
         if ends_task(status):
+            budget = fail_kind == db_tasks.FailKind.TASK_BUDGET.value
+            await attempts.close_attempts(
+                task_id, failure_kind=attempts.FailureKind.TASK_BUDGET if budget else
+                attempts.FailureKind.STOPPED if status in ("stopped", "cancelled") else None)
+            outcome_failure = None
+            if status == "failed":
+                try:
+                    outcome_failure = attempts.TaskFailure(envelope.payload.get("outcome_failure_kind"))
+                except (TypeError, ValueError):
+                    outcome_failure = attempts.TaskFailure.PLANNER_FAILED
+            await attempts.record_outcome(
+                task_id, attempts.TaskOutcome(status),
+                attempts.StopCause.TASK_BUDGET if budget else attempts.StopCause.PLANNER_END,
+                attempts.TaskFailure.TASK_BUDGET if budget else outcome_failure)
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
 
@@ -601,6 +617,11 @@ class TaskRouter:
             return
 
         task.status = "cancelled"
+        await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
+        await attempts.record_outcome(
+            task_id, attempts.TaskOutcome.CANCELLED,
+            attempts.StopCause.MANAGER_CANCEL if envelope.metadata.get("cancel_by") == CancelBy.MANAGER else
+            attempts.StopCause.USER_CANCEL)
         planner = self._planners.get(task_id)
         if planner:
             await self._bus.publish(MessageEnvelope.create(
@@ -616,6 +637,8 @@ class TaskRouter:
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
         task = self._tasks.get(task_id)
+        await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
+        await attempts.record_outcome(task_id, attempts.TaskOutcome.STOPPED, attempts.StopCause.USER_STOP)
         if not task:
             try:
                 await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id))
@@ -717,6 +740,7 @@ class TaskRouter:
                     logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
                 # And the sessions its runs kept for the room (its room goes with the steps).
                 await asyncio.to_thread(remove_run_sessions, self._runtime_root, task_id)
+            await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
             try:
                 if not await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over):
                     return
@@ -757,6 +781,9 @@ class TaskRouter:
             task.status = "completed"
 
         if task:
+            await attempts.close_attempts(
+                task_id, failure_kind=attempts.FailureKind.STOPPED if task.status in ("stopped", "cancelled") else None)
+            await attempts.record_outcome(task_id, attempts.TaskOutcome(task.status), attempts.StopCause.TEARDOWN)
             try:
                 await db_tasks.update_task_status(task_id, task.status)
             except Exception:
