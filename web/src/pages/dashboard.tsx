@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { DashboardGates } from "@/components/dashboard-gates";
 import { StatusCard } from "@/components/status-card";
 import { ManagerSessions } from "@/components/manager-sessions";
+import { TaskQualitySection } from "@/components/task-quality-section";
 import { RunStatusBadge, ScheduleTime } from "@/components/project-schedules";
 import {
   fetchOverview,
@@ -710,6 +711,7 @@ export function DashboardPage() {
       <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
       <Agents overview={overview} />
       <ManagerMetricsSection />
+      <TaskQualitySection />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
       {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}
       <Spend spend={overview.spend_today} />

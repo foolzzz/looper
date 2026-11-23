@@ -64,9 +64,10 @@ BASELINES_DIR = Path(__file__).resolve().with_name("baselines")
 DEFAULT_OUT_DIR = REPO_ROOT / "evals" / "runs"
 RESERVED_PORT = 8767  # the operator's own server
 RESERVED_DATABASE = "loopx"  # the operator's own database
-# v2: every row has rep and outcome (and error_class and error when it is an error); the run has reps and
-# aborted.
-SCHEMA = "looper-prompt-eval/v2"
+# v3: a task row also carries attempt counts, the cost split and record-backed contract violations.
+# v2 rows still compare; their new cells are absent and render as an en dash, never as 0.
+SCHEMA = "looper-prompt-eval/v3"
+ACCEPTED_TASK_SCHEMAS = frozenset({"looper-prompt-eval/v2", SCHEMA})
 ERROR_TEXT_LIMIT = 300  # characters of an error row's message (and of the reason a run was aborted)
 
 # The server, started the way ``looper serve`` starts it, without depending on the CLI module.
@@ -266,6 +267,18 @@ def planned_runtime_types(*, register: dict[str, Any] | None = None, agent: str 
         types.add(CLAUDE_CODE)
     types.discard(None)
     return types
+
+
+def claude_version(claude: str | None) -> str | None:
+    """The first line of ``claude --version``, for a real baseline; None when that binary is not used."""
+    if not claude:
+        return None
+    try:
+        done = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    line = (done.stdout or done.stderr).strip().splitlines()
+    return line[0][:200] if line else None
 
 
 def require_claude(mode: str, claude: str | None, runtime_types: Iterable[str]) -> None:
@@ -747,6 +760,13 @@ def run_task(
         records = [api.post("/api/v1/runs/get", {"record_id": int(r["id"])})["result"]["record"]
                    for r in sorted(records, key=lambda r: int(r["id"]))]
         events = {int(r["id"]): _all_events(api, int(r["id"])) for r in records if metrics.role(r) != "other"}
+        # One read, bounded by this client's timeout. A failure leaves the attempt fields off the row.
+        try:
+            attempts_view = api.post("/api/v1/metrics/step_attempts", {"task_id": task_id})["result"]
+        except Exception:
+            attempts_view = None
+        if not isinstance(attempts_view, dict):
+            attempts_view = None
         result = metrics.task_metrics(
             detail=detail,
             activity=_all_activity(api, task_id),
@@ -766,7 +786,9 @@ def run_task(
             vault_dir=vault_dir,
             vault_log=_git_in(vault_dir, "log", "--format=%H%x00%s", "--name-only") if vault_dir else "",
             vault_check=task.vault_check,
+            attempts_view=attempts_view,
         )
+        result.update(metrics.attempt_fields(attempts_view))
         if step_workspaces:
             result["looper_commits"] = looper_commits(work_dir, task_id)
     except Exception as exc:
@@ -878,6 +900,8 @@ def effective_user_gates(task: EvalTask, user_gates: str | None) -> str:
 
 
 TASK_SETS: dict[str, tuple[str, ...]] = {
+    # Cases that are likely to fail on the first attempt (task-metrics RFC, section 9.4).
+    "hard": ("hidden_precondition", "rethink_bug", "misleading_error"),
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
@@ -1110,6 +1134,7 @@ def run(
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
     require_claude(mode, real_claude, planned_runtime_types(register=register, agent=agent, model=model))
+    version = claude_version(real_claude)
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1219,6 +1244,7 @@ def run(
             "agent": chosen.get("name"),
             "provider_preset": provider.preset if provider is not None else None,
             "started_at": stamp,
+            "runtime_version": version,
             "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
             "step_workspaces": step_workspaces,
@@ -1414,9 +1440,17 @@ def validate_report(data: Any, *, dialogs: bool | None = None) -> dict[str, Any]
     if not isinstance(data, dict):
         raise EvalError("unsupported report schema: expected a JSON object")
     is_dialogs = "dialogs" in data
-    expected = "looper-manager-dialogs/v2" if (is_dialogs if dialogs is None else dialogs) else SCHEMA
-    if data.get("schema") != expected or (dialogs is not None and is_dialogs != dialogs):
+    if dialogs is not None and is_dialogs != dialogs:
+        expected = "looper-manager-dialogs/v2" if dialogs else SCHEMA
         raise EvalError(f"unsupported report schema {data.get('schema')!r}; expected {expected}")
+    if is_dialogs:
+        if data.get("schema") != "looper-manager-dialogs/v2":
+            raise EvalError(f"unsupported report schema {data.get('schema')!r}; expected looper-manager-dialogs/v2")
+    else:
+        schema = data.get("schema")
+        if not isinstance(schema, str) or schema not in ACCEPTED_TASK_SCHEMAS:
+            accepted = ", ".join(sorted(ACCEPTED_TASK_SCHEMAS))
+            raise EvalError(f"unsupported report schema {schema!r}; expected one of {accepted}")
     return data
 
 
