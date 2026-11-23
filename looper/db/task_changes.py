@@ -120,6 +120,15 @@ async def pending(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | Non
               for row in rows), requirement)
 
 
+async def supplements(task_id: str, *, limit: int, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The task's latest ``limit`` supplements, delivered or not, oldest first: ``summary`` and ``via``."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT summary, via FROM (SELECT id, summary, via FROM task_journal WHERE task_id = $1 AND kind = $2 "
+        "ORDER BY id DESC LIMIT $3) latest ORDER BY id", task_id, SUPPLEMENT, limit)
+    return [dict(row) for row in rows]
+
+
 async def versions(task_id: str, *, pool: asyncpg.Pool | None = None) -> tuple[int, int]:
     """What changes when the user changes the task: its latest requirement version (0 before any edit) and its
     latest supplement's journal id (0 for none)."""
