@@ -213,6 +213,13 @@ def test_context_budget_counts_only_the_skills_a_run_would_list(monkeypatch: pyt
             "INSERT INTO library_installs (id, item_id, scope, project_id, roles) "
             "VALUES ('inst-plugin', 'plugin-big', 'project', $1, ARRAY['planner', 'worker', 'reviewer'])",
             project["id"])
+        extra = await project_skills.add_skill(project["id"], _skill("role-extra"))
+        await pool.execute(
+            "UPDATE library_installs SET roles = ARRAY['task_role'] WHERE item_id = $1",
+            extra["skill"]["skill_id"])
+        await pool.execute(
+            "UPDATE library_items SET description = $2 WHERE id = $1",
+            extra["skill"]["skill_id"], "z" * 4000)
         description = "d" * (8000 - len("deploy-check"))
         await pool.execute("UPDATE library_items SET description = $2 WHERE id = $1", skill_id, description)
         exact = await context_budget(project["id"])
@@ -230,6 +237,34 @@ def test_context_budget_counts_only_the_skills_a_run_would_list(monkeypatch: pyt
         assert empty["roles"]["planner"] == {"chars": 0, "skills": 0, "over": False}
         with pytest.raises(ProjectSkillNotFound):
             await context_budget("project-missing")
+
+
+def test_a_deprecated_skill_is_not_a_task_role_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Planner's choices omit a deprecated skill. D13 does not add task-role items to the role budget."""
+    from looper.agents import project_skills
+    from looper.agents.skill_lifecycle import deprecate
+    from looper.agents.task_roles import RoleForbidden, check_items, role_items
+    from looper.db import projects
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="calc", pool=pool)
+        kept = await project_skills.add_skill(project["id"], _skill("kept"))
+        old = await project_skills.add_skill(project["id"], _skill("old"))
+        kept_id = kept["skill"]["skill_id"]
+        old_id = old["skill"]["skill_id"]
+        await pool.execute(
+            "UPDATE library_installs SET roles = ARRAY['task_role'] WHERE item_id = ANY($1::text[])",
+            [kept_id, old_id])
+        await deprecate(project["id"], old_id, reason="retired")
+        listed = await role_items(project["id"])
+        assert [item["name"] for item in listed] == ["kept"]
+        assert await check_items(project["id"], ["kept"]) == (kept_id,)
+        with pytest.raises(RoleForbidden):
+            await check_items(project["id"], ["old"])
+        with pytest.raises(RoleForbidden):
+            await check_items(project["id"], [old_id])
+
+    run_db(_test, monkeypatch)
 
     run_db(_test, monkeypatch)
 

@@ -5,7 +5,7 @@ from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
-from .catalog import PROJECT_INSTALLS, _answer as catalog_answer
+from .catalog import PROJECT_INSTALLS, _answer as catalog_answer, _enum
 
 ORDER = 6
 
@@ -13,7 +13,7 @@ ORDER = 6
 PROJECT_SKILL = _object({
     "skill_id": _STR, "name": _STR, "qualified_name": _STR, "description": _STR,
     "created_at": _STR, "updated_at": _STR, "size_bytes": _INT,
-    "lifecycle": {"type": "string", "enum": ["active", "deprecated"]}})
+    "lifecycle": _enum(*(member.value for member in skill_lifecycle.Lifecycle))})
 _FIELDS = dict.fromkeys(("name", "description", "content"), _STR)
 _IDS = {"project_id": _STR, "skill_id": _STR}
 _CHANGE = _object({**PROJECT_INSTALLS["properties"], "skill": PROJECT_SKILL})
@@ -82,7 +82,7 @@ OPERATIONS = (
     ),
     Operation(
         "project_skills.deprecate", "POST", "/api/v1/project_skills/deprecate", _DEPRECATE_SUMMARY,
-        _DEPRECATE_SUMMARY + " Installs, versions and files stay. An optional reason is accepted and not stored.",
+        _DEPRECATE_SUMMARY + " Installs, versions and files stay. An optional reason is not stored on the skill; it is kept only in the operator action record.",
         _object({**_IDS, "reason": _STR}, ["project_id", "skill_id"], closed=True),
         _LIFECYCLE, risk="write", level=ActionLevel.INSIDE, operator_only=True,
     ),

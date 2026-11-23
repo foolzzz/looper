@@ -142,7 +142,7 @@ def item_view(row: Mapping[str, Any], installs: Sequence[Mapping[str, Any]] = ()
         "modified": bool(row["modified"]),
         "imported_at": row["imported_at"],
         "updated_at": row["updated_at"],
-        "lifecycle": row.get("lifecycle") or "active",
+        "lifecycle": row["lifecycle"],
         "mcp": public_view(row) if row["kind"] == "mcp" else None,
         "installs": [install_view(install) for install in installs],
         "manager_install_count": manager_install_count,

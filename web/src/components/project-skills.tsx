@@ -116,23 +116,33 @@ export function SkillFields({
   );
 }
 
+const BUDGET_ROLES = ["planner", "worker", "reviewer"] as const;
+
+function isDeprecated(item: CatalogItem): boolean {
+  return item.kind === "skill" && item.lifecycle === "deprecated";
+}
+
 /** Active, disabled in this project, or deprecated. Words, and only on a skill. Deprecated wins over the install switch. */
 function skillState(item: CatalogItem, enabled: boolean): string | null {
   if (item.kind !== "skill") return null;
-  if ((item.lifecycle ?? "active") === "deprecated") return "Deprecated";
+  if (item.lifecycle === "deprecated") return "Deprecated";
+  if (item.lifecycle !== "active") return null;
   return enabled ? "Active" : "Disabled in this project";
 }
 
 function budgetText(budget: ContextBudget): string {
-  const order = ["planner", "worker", "reviewer"] as const;
-  const counts = order.map((role) => budget.roles[role].chars).join(" / ");
-  const over = order.filter((role) => budget.roles[role].over);
+  const counts = BUDGET_ROLES.map((role) => budget.roles[role].chars).join(" / ");
+  const over = BUDGET_ROLES.filter((role) => budget.roles[role].over);
   const flag = over.length === 0
     ? ""
     : over.length === 1
-      ? ` ${over[0]} is over 8000 characters.`
-      : ` ${over.slice(0, -1).join(", ")} and ${over[over.length - 1]} are over 8000 characters.`;
+      ? ` ${over[0]} is over ${budget.limit} characters.`
+      : ` ${over.slice(0, -1).join(", ")} and ${over[over.length - 1]} are over ${budget.limit} characters.`;
   return `Each run lists ${counts} characters of skill descriptions (planner / worker / reviewer).${flag} Plugin-bundled skills are not counted.`;
+}
+
+function budgetIsOver(budget: ContextBudget): boolean {
+  return BUDGET_ROLES.some((role) => budget.roles[role].over);
 }
 
 /** An item's name, kind, origin, size and description. */
@@ -143,7 +153,11 @@ function ItemHeading({ item, projectId, enabled }: { item: CatalogItem; projectI
       <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-xs">
         <span className="break-all font-medium">{item.qualified_name}</span>
         <span className="font-sans text-[11px] text-muted-foreground">{item.kind}</span>
-        {state && <span className="break-words font-sans text-[11px] text-muted-foreground">{state}</span>}
+        {state && (
+          <Badge variant={state === "Deprecated" ? "warning" : "outline"} className="py-0 font-sans text-[11px]">
+            {state}
+          </Badge>
+        )}
         <OriginTag item={item} projectId={projectId} />
         <span className="text-[11px] tabular-nums text-muted-foreground">{formatBytes(item.size_bytes)}</span>
       </span>
@@ -157,7 +171,10 @@ function ItemHeading({ item, projectId, enabled }: { item: CatalogItem; projectI
 function InheritedRow({ entry, projectId, taskRoles }: { entry: ProjectInstall; projectId: string; taskRoles: InstallRole[] }) {
   const roles = entry.roles.filter((role) => taskRoles.includes(role));
   return (
-    <li className={cn("space-y-1 border-t border-border py-2 first:border-t-0", !entry.enabled && "opacity-60")}>
+    <li className={cn(
+      "space-y-1 border-t border-border py-2 first:border-t-0",
+      (!entry.enabled || isDeprecated(entry.item)) && "opacity-60",
+    )}>
       <ItemHeading item={entry.item} projectId={projectId} enabled={entry.enabled} />
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
         <Badge variant="outline" className="py-0 text-[10px]">Global</Badge>
@@ -195,6 +212,7 @@ function InstallRow({
   const id = useId();
   const { item } = entry;
   const writtenHere = item.origin === "project" && item.owner_project_id === projectId;
+  const deprecated = isDeprecated(item);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState<"uninstall" | "delete" | "deprecate" | "restore" | null>(null);
@@ -285,7 +303,7 @@ function InstallRow({
   }
 
   return (
-    <li className="space-y-2 border-t border-border py-2 first:border-t-0">
+    <li className={cn("space-y-2 border-t border-border py-2 first:border-t-0", deprecated && "opacity-60")}>
       {writtenHere ? (
         <button
           type="button"
@@ -294,7 +312,7 @@ function InstallRow({
           aria-controls={`${id}-body`}
           className={cn(
             "flex w-full min-w-0 items-start gap-1.5 rounded-md text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-            !entry.enabled && "opacity-60",
+            !entry.enabled && !deprecated && "opacity-60",
           )}
         >
           <ChevronRight
@@ -307,7 +325,7 @@ function InstallRow({
           <ItemHeading item={item} projectId={projectId} enabled={entry.enabled} />
         </button>
       ) : (
-        <div className={cn("flex min-w-0", !entry.enabled && "opacity-60")}>
+        <div className={cn("flex min-w-0", !entry.enabled && !deprecated && "opacity-60")}>
           <ItemHeading item={item} projectId={projectId} enabled={entry.enabled} />
         </div>
       )}
@@ -321,21 +339,25 @@ function InstallRow({
           lastHint="An install needs a role: uninstall it instead"
           onChange={(roles) => changeInstall({ roles })}
         />
-        {!entry.enabled && <span className="text-[11px] text-muted-foreground">Off</span>}
+        {!entry.enabled && !deprecated && <span className="text-[11px] text-muted-foreground">Off</span>}
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
-          <Switch
-            checked={entry.enabled}
-            disabled={busy}
-            onChange={(enabled) => changeInstall({ enabled })}
-            label={`Load ${item.qualified_name}`}
-          />
-          {writtenHere && item.kind === "skill" && (item.lifecycle ?? "active") !== "deprecated" && (
+          {deprecated ? (
+            <span className="text-[11px] text-muted-foreground">Load: not applicable</span>
+          ) : (
+            <Switch
+              checked={entry.enabled}
+              disabled={busy}
+              onChange={(enabled) => changeInstall({ enabled })}
+              label={`Load ${item.qualified_name}`}
+            />
+          )}
+          {writtenHere && item.kind === "skill" && !deprecated && (
             <Button type="button" variant="ghost" size="sm" aria-label={`Deprecate ${item.name}`}
               onClick={() => void askDeprecate()}>
               Deprecate
             </Button>
           )}
-          {writtenHere && item.kind === "skill" && (item.lifecycle ?? "active") === "deprecated" && (
+          {writtenHere && deprecated && (
             <Button type="button" variant="ghost" size="sm" aria-label={`Restore ${item.name}`}
               onClick={() => { setLifecycleError(""); setConfirming("restore"); }}>
               Restore
@@ -703,7 +725,13 @@ export function ProjectSkillsSection({ projectId }: { projectId: string }) {
       {budgetError ? (
         <p role="alert" className="break-words text-xs text-destructive">{budgetError}</p>
       ) : budget ? (
-        <p className="break-words text-xs text-muted-foreground">{budgetText(budget)}</p>
+        <p
+          className={cn("break-words text-xs", budgetIsOver(budget) ? "text-foreground" : "text-muted-foreground")}
+          role={budgetIsOver(budget) ? "status" : undefined}
+        >
+          {budgetIsOver(budget) && <Badge variant="warning" className="mr-2 align-middle">Over budget</Badge>}
+          {budgetText(budget)}
+        </p>
       ) : null}
       {loadError && <p role="alert" className="text-xs text-destructive">{loadError}</p>}
       {!data && !loadError && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Loading" />}

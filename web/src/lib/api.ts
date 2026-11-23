@@ -2169,7 +2169,7 @@ export interface SkillLifecycleChange extends ProjectInstalls {
   affected_projects: SkillVersions["affected_projects"];
 }
 
-/** Mark a project skill deprecated. New runs skip it; installs, versions and files stay. The reason is not stored. */
+/** Mark a project skill deprecated. New runs skip it; installs, versions and files stay. The reason is not stored on the skill; it is kept only in the operator action record. */
 export async function deprecateProjectSkill(
   projectId: string,
   skillId: string,
