@@ -204,6 +204,17 @@ def _reads(log: Path) -> list[list[str]]:
     return [argv for argv in _calls(log) if argv[:2] == ["api", "GET"] or "+messages-mget" in argv]
 
 
+def _read_rows_by_start(log: Path) -> list[dict[str, Any]]:
+    """Message reads in the order their processes were created, not the order the argv log appended them.
+
+    The stand-in records that start (``.started``, taken before any sleep) because a raw read killed at its
+    first-try timeout can append its argv only after the rendered fallback has already logged."""
+    path = Path(str(log) + ".started")
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    rows.sort(key=lambda row: (row["start"], row["pid"]))
+    return [row for row in rows if row["argv"][:2] == ["api", "GET"] or "+messages-mget" in row["argv"]]
+
+
 class _Launch:
     """One lark-cli call as Looper started it: its arguments, its process, and whether every call started before it
     was still running then."""
@@ -384,10 +395,14 @@ def test_a_raw_read_that_times_out_falls_back_to_the_rendered_read_once(
     (quote,) = read.quotes
     assert quote.sender == "Alan Turing" and quote.message_type == "merge_forward"
     assert "Bob: the plan" in quote.lines[0] and "[image 1]" in quote.lines[0]
-    # A stand-in killed at its first try may not have logged it yet; the rendered read comes once, last.
-    reads = [argv[2] if argv[0] == "api" else argv[1] for argv in _reads(lark_cli_stand_in)]
+    # Append order is not call order: the killed raw read can log after the fallback. The rendered read
+    # (+messages-mget) still happens once, and its process is started strictly after every raw read that logged.
+    rows = _read_rows_by_start(lark_cli_stand_in)
+    reads = [row["argv"][2] if row["argv"][0] == "api" else row["argv"][1] for row in rows]
     assert reads[-1] == "+messages-mget" and reads.count("+messages-mget") == 1
     assert set(reads[:-1]) <= {f"/open-apis/im/v1/messages/{parent}", "/open-apis/im/v1/messages/mget"}
+    started = (rows[-1]["start"], rows[-1]["pid"])
+    assert all((row["start"], row["pid"]) < started for row in rows[:-1])
     downloads = [argv for argv in _calls(lark_cli_stand_in) if "+messages-resources-download" in argv]
     assert downloads[0][downloads[0].index("--message-id") + 1] == parent  # the rendering shows the forward's copies
 

@@ -26,6 +26,46 @@ _STAND_IN = """\
 import base64, fcntl, json, os, re, sys, time
 world = json.load(open({world!r}))
 args = sys.argv[1:]
+def _process_start():
+    # The kernel's start of this process, taken before any sleep. The argv line below can still be appended
+    # after a later call: a try killed at its timeout keeps running until the signal lands, and on a loaded
+    # machine that write is not the call order. Callers that care about order read ".started" and sort by this.
+    pid = os.getpid()
+    try:
+        if os.path.exists("/proc/self/stat"):
+            text = open("/proc/self/stat").read()
+            # field 22 is starttime in clock ticks; field 3 (state) is the first token after comm.
+            ticks = int(text[text.rfind(")") + 2:].split()[19])
+            return (ticks / float(os.sysconf("SC_CLK_TCK")), pid)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import ctypes
+        import ctypes.util
+        class _Info(ctypes.Structure):
+            _fields_ = [("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
+                        ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
+                        ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+                        ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
+                        ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
+                        ("pbi_svgid", ctypes.c_uint32), ("rfu_1", ctypes.c_uint32),
+                        ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+                        ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+                        ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+                        ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+                        ("pbi_start_tvsec", ctypes.c_uint64), ("pbi_start_tvusec", ctypes.c_uint64)]
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.dylib")
+        info = _Info()
+        size = ctypes.sizeof(info)
+        if libc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) == size and info.pbi_pid == pid:
+            return (info.pbi_start_tvsec + info.pbi_start_tvusec / 1e6, pid)
+    except (AttributeError, OSError, ValueError):
+        pass
+    return (time.time(), pid)
+_start = _process_start()
+with open({log!r} + ".started", "a") as started:
+    fcntl.flock(started, fcntl.LOCK_EX)
+    started.write(json.dumps({{"start": _start[0], "pid": _start[1], "argv": args}}) + "\\n")
 with open({log!r}, "a") as log:
     log.write(json.dumps(args) + "\\n")
 def refuse(message, code=2, api_code=None):
