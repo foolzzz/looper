@@ -864,6 +864,11 @@ class ManagerAgent:
     _agent_settings = session_field("agent_settings")
     _last_activity = session_field("last_activity")
 
+    @property
+    def current_session_id(self) -> str | None:
+        """The session the Manager's turns run in now (None before its first)."""
+        return self._session_now().session_id
+
     def __init__(
         self,
         *,
