@@ -3687,6 +3687,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         if dialog.research:
             api.post("/api/v1/chat_settings/update", {"research_order": True})
         if dialog.sessions:
+            api.post("/api/v1/session_routing/update", {"session_routing_enabled": True})
             _seed_sessions(database_url)
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
