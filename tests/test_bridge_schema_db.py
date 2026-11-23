@@ -124,23 +124,10 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     assert after[table] == [{**r, "purpose": "discussion"} for r in before[table]]
                 elif table == "sequence_state":
                     # New audit tables add unused sequences; historical values must survive.
-                    assert after[table] == sorted(
-                        [*before[table], {"sequencename": "project_activity_seq_seq", "last_value": None},
-                         {"sequencename": "llm_requests_id_seq", "last_value": None},
-                         {"sequencename": "source_events_seq_seq", "last_value": None},
-                         {"sequencename": "source_deletions_id_seq", "last_value": None},
-                         {"sequencename": "source_runs_id_seq", "last_value": None},
-                         {"sequencename": "ledger_events_id_seq", "last_value": None},
-                         {"sequencename": "ledger_items_id_seq", "last_value": None},
-                         {"sequencename": "manager_events_id_seq", "last_value": None},
-                         {"sequencename": "agent_spawns_id_seq", "last_value": None},
-                         {"sequencename": "decision_snapshots_id_seq", "last_value": None},
-                         {"sequencename": "message_leads_id_seq", "last_value": None},
-                         {"sequencename": "intents_id_seq", "last_value": None},
-                         {"sequencename": "intent_posts_id_seq", "last_value": None},
-                         {"sequencename": "outbound_reviews_id_seq", "last_value": None},
-                         {"sequencename": "reminders_id_seq", "last_value": None}],
-                        key=lambda row: row["sequencename"])
+                    historical = {row["sequencename"] for row in before[table]}
+                    added = [row for row in fresh_rows[table] if row["sequencename"] not in historical]
+                    assert all(row["last_value"] is None for row in added)
+                    assert after[table] == sorted([*before[table], *added], key=lambda row: row["sequencename"])
                 elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
                     # New builtins and additive defaults must leave every historical field intact.
                     key = "id" if table == "llm_providers" else "provider_id"
@@ -188,7 +175,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
-            assert {"schedule_user_gates", "command_schedules", "runtime_launcher"} <= {
+            assert {"schedule_user_gates", "command_schedules", "runtime_launcher", "proactive_deliveries",
+                    "channel_outbox"} <= {
                 r["name"] for r in after["schema_migrations"]}
             assert await conn.fetchval("SELECT planner_session_runtime FROM schedules") == "claude-code"
             # Added snapshot and command metadata preserve every historical run field.
@@ -476,8 +464,10 @@ def test_unusual_rows_warn_and_keep_bridge_reading(bridge_source, caplog, damage
             if table == "tasks":
                 assert json.loads(after[0]["config"]) == {}
             elif table == "llm_records":
-                # The run tree's columns are added and no row is rewritten: older rows have no kind and no parent.
-                assert after == [{**r, "parent_record_id": None, "run_kind": None} for r in before]
+                # The run tree's and the failure classes' columns are added and no row is rewritten: older rows have
+                # no kind, no parent and no failure class.
+                assert after == [{**r, "parent_record_id": None, "run_kind": None, "failure_class": None,
+                                  "failure_cause": None} for r in before]
             else:
                 assert after == before
             assert any(r.levelname == "WARNING" and identity in r.message for r in caplog.records)

@@ -36,19 +36,21 @@ def tool_outcome(answer: dict[str, Any]) -> ToolOutcome:
 
 
 class ManagerTurnTools:
-    def __init__(self, ops: ManagerOps, binding: str | None) -> None:
+    def __init__(self, ops: ManagerOps, binding: str | None, *, session_key: str | None = None) -> None:
         self._ops = ops
         self._binding = binding
+        self._session_key = session_key
 
     async def specs(self) -> list[ToolSpec]:
         return [ToolSpec(tool["name"], tool["description"], tool["inputSchema"])
-                for tool in await self._ops.current_listing()]
+                for tool in await self._ops.current_listing(session_key=self._session_key)]
 
     async def call(self, call: ToolCall) -> ToolOutcome:
         arguments = object_arguments(call.arguments)
         if arguments is None:
             return invalid_arguments()
-        answer = await self._ops.call(call.name, arguments, binding=self._binding, call_id=call.call_id)
+        answer = await self._ops.call(call.name, arguments, binding=self._binding, call_id=call.call_id,
+                                      session_key=self._session_key)
         return tool_outcome(answer)
 
 

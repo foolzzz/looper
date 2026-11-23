@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from ..db import connection, schedules as db_schedules, subscriptions as db_subs
-from . import intent_cards, leads_model, subscriptions
+from . import intent_cards, leads_model, subscriptions, turn_metrics
 from .channels.base import PostOutcome
 from .message import builtin_channel_id, parse_channel_id
 from .operator_identity import operator_sender_id
@@ -271,7 +271,8 @@ class IntentPushService:
             card = (await intent_cards.make(intent, post["channel_id"], post["chat"], post["text"], conn=conn)
                     if post["kind"] == "push" else None)
             target = push_target(post["channel_id"], post["chat"])
-            kwargs = {"reply_to": reply, "idempotency_key": f"intent-{intent['id']}-{post['id']}"}
+            kwargs = {"reply_to": reply, "idempotency_key": f"intent-{intent['id']}-{post['id']}",
+                      **turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.INTENT, intent["id"])}
             receipt = (await self._registry.post_card(post["channel_id"], target, card, **kwargs) if card is not None
                        else await self._registry.post(post["channel_id"], target, post["text"], **kwargs))
             state = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "failed", PostOutcome.UNKNOWN: "uncertain"}[receipt.result]
