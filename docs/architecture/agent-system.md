@@ -2303,7 +2303,8 @@ Manager tools.
   startup.
 - **Providers** (`llm_providers`) are accounts: `name`, typed `vendor_type`,
   `auth`, `oauth_runtime_type`, `env`, `max_concurrency` (`null` = no limit,
-  stored and checked only), and a separate API key in `llm_provider_secrets`.
+  enforced when `engine.admission.enabled` is on), and a separate API key in
+  `llm_provider_secrets`.
   The API returns the key as `***` or `null`; sending `***` keeps it and
   `null` removes it. The launch path and a model listing load it. Login accounts use their
   runtime's own login and never copy OAuth tokens. Vendor templates suggest
@@ -2855,8 +2856,16 @@ narrowed constraint, so its project page cannot store a project's limit.
 What bounds the load is now each task's limits and how many tasks start.
 Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
 Reviewers at once whatever its tasks; now N running tasks run N Planners and
-up to 16N Workers and 8N Reviewers, and nothing caps the total (an LLM
-provider's `max_concurrency` is stored, not enforced). The converted alarm-like
+up to 16N Workers and 8N Reviewers. By default nothing caps the total.
+With `engine.admission.enabled`, each account's `max_concurrency` also bounds
+Workers, Reviewers, consults, processors and nested runs; `null` is unlimited.
+The account queue uses the shared `Lane` enum, aging and quota freezes, with
+durable state and an operator-only `providers.limits_clear` override. Nested
+runs borrow a running parent's slot. Planner and Manager turns and platform
+explorers are not admitted yet. The switch defaults off and refuses activation
+while failure typing is off. The independent cost guard can still hold runs
+for spending; admission's 95% background pause does not change that policy.
+The converted alarm-like
 project (Planner 3, Worker 8, Reviewer 3) moves from at most 8 Workers and 3
 Reviewers across the project to its parallel schedule's 3 runs × (8, 3): 24
 Workers and 9 Reviewers. Bursts come from several schedules firing in the same

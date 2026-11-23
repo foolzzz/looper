@@ -1,0 +1,19 @@
+# 账号准入核心验证
+
+`engine.admission.enabled` 默认关闭，需先开启失败分型。启用后，Worker、Reviewer、consult、processor、advisor / judge / outbound 子运行在 recorder 和预算预留之前申请账号槽位；备用 Profile 换账号时重新准入。Planner / Manager 回合和平台 Explorer 留待后续接线。
+
+账号上限使用 `llm_providers.max_concurrency`，NULL 不限；同账号按共享 `Lane`、等待老化及先来顺序放行。任何有效窗口达到 95% 时暂停后台车道；额度失败冻结账号，到期只放行最长等待者探测。运行中的任务不被打断。子运行继承父车道并借用运行中父槽，保留运行接管时重新登记，排空期间不放行。
+
+## 验证路径
+
+- 固定基线 `6e1ff9cb86d2975c8b4ef34ca3a3504d91004fc4` 的关闭路径记录在 `tests/fixtures/admission_off.json`；覆盖四类启动命令、提示词、记录写入和 `providers.limits`。关闭路径测试还检查任务槽位等待/唤醒与零准入存储读取。
+- 调度器测试覆盖优先级、5 分钟老化、2 分钟交互保护、NULL 上限、借槽、排空、接管登记、冻结状态转换、5→60 分钟退避、恢复持久状态、开关热关闭、95% 边界、内部错误放行与旧运行信号不能解冻。
+- PostgreSQL 测试覆盖迁移对象修复、事务事件/状态写入、空库 baseline marker、清理、操作权限和失败分型关闭时的配置拒绝。
+- `tests/test_admission_serve_db.py` 启动一次性服务及新数据库，仅用合成 CLI 和通知替身：一个 429 冻结账号，三个 Worker 排队；加速时钟越过 `until`，只运行一个探测，成功后继续串行放行；下一次冻结由 `providers.limits_clear` 清除。通知经过真实注册路径，发往替身聊天，任务活动和 API 状态由存储读回。
+- 前端测试覆盖开关独立确认、冻结状态、等待/运行/上限、未知重置、检查确认与失败状态。浏览器截图仅含合成账号。
+
+## 尚未验证
+
+真实额度耗尽/重置不能安全制造，未测试；未调用真实模型。Codex 的只读 `account/rateLimits/read` 仍是未验证能力：准入使用小型类型化探测钩子，默认 `Unavailable`，然后放行最长等待者。单测覆盖 `Allowed`、`StillLimited`、`Unavailable` 三种结果。
+
+成本守卫和账号准入使用独立开关。成本守卫的用量窗口模块尚不在本分支基线，95% 常量暂在准入模块定义；后续合入该模块时共用常量。交互超额放行的日计数是进程内诊断值，重启后重新计数。

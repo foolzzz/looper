@@ -1026,7 +1026,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 - **助理每轮上下文接线**（本分支已实现，默认关）：Manager 用户回合用现有渲染器替换 `Channel:` 行，并按渠道发送者设置 `Turn.speaker`，接通现有升级和确认的授权检查；收尾、自主回合不注入。新增 main 的关闭路径固定基准及渠道身份、确认劫持、稳定块、隔离 serve 测试；真实模型的时间/身份评测未执行，待维护者批准后用 `evals.assistant_experience --turn-context --categories time,identity` 对比基线（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
 
-- **引擎可靠性：用量和限流信号**（[RFC](../architecture/rfcs/engine-reliability-v0.zh-CN.md)）：本分支实现默认关闭的 Claude Code / Codex app-server 窗口采集、账号七天用量、只读 `providers.limits`、额度块和自检；独立服务用替身事件验证，真实额度耗尽与重置未测。准入、冻结、失败处理和降级仍待后续实现。
+- **引擎可靠性：用量和限流信号**（[RFC](../architecture/rfcs/engine-reliability-v0.zh-CN.md)）：本分支实现默认关闭的 Claude Code / Codex app-server 窗口采集、账号七天用量、只读 `providers.limits`、额度块和自检；独立服务用替身事件验证，真实额度耗尽与重置未测。账号准入核心在本分支实现：默认关闭，Worker/Reviewer、consult、processor 和嵌套运行支持车道、并发、冻结/探测、独立设置及账号行检查。Planner/Manager 回合接线、Explorer 准入、失败处理和降级仍待后续实现；Codex 真实只读探测与真实额度耗尽未验证。
 
 - **助理层第 3 期：空闲检查、车道与插话、动作类别与回执、状态卡**（[RFC](../architecture/rfcs/assistant-phase3-v0.zh-CN.md)，决定已定；维护者 2026-11-22 的答复是 D24–D35）：本分支已实现 3.6a 的 `ActionCategory`、`ActionKind`、`TOOL_ACTIONS` 和写动作完整性测试，只有声明，不改变运行行为；运行时回执、开关和存储仍归 3.6b。车道与插话已在本分支实现，默认关闭：会话内交互/后台双队列、收尾抢占（包括读取任务事实期间）及原代码通知兜底、按事件记录时间到期、进程清理、独立操作者开关与状态卡双计数；真实 Claude 抢占、`system/init` 后进程检查点对冷启动 stdio MCP 工具的保留及并发评测尚未运行，待批准。后续待办：1.3e 的 `router.queued()` 仍把后台批次视为队列阻塞，影响插话并入资格，本 PR 不改条件；抢占兜底逐条发送代码通知后才运行用户回合，需评测并降低额外渠道请求带来的首答延迟。其余按 RFC 第 12 节推进，空闲检查要在车道之后才能打开。
 
