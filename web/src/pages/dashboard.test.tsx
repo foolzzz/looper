@@ -21,6 +21,7 @@ vi.mock("@/lib/status-card", async (original) => ({
   ...await original<typeof import("@/lib/status-card")>(), fetchStatusCard: vi.fn(),
 }));
 vi.mock("@/components/manager-sessions", () => ({ ManagerSessions: () => null }));
+vi.mock("@/components/task-quality-section", () => ({ TaskQualitySection: () => null }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

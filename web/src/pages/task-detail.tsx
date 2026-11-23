@@ -52,6 +52,7 @@ import { TaskWaits, WaitBadge } from "@/components/task-waits";
 import { WAIT_STATES, waitAnchor } from "@/lib/waits";
 import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { TaskRoomTab } from "@/components/task-room";
+import { TaskMetricsCard } from "@/components/task-metrics-card";
 import { TabStrip } from "@/components/tab-strip";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
 import { useEventWindow } from "@/lib/use-event-window";
@@ -916,6 +917,13 @@ function OverviewTab({
       <TaskProgress task={task} />
 
       <TaskProcessRecord task={task} />
+
+      <TaskMetricsCard
+        taskId={task.task_id}
+        status={task.status}
+        active={isActive}
+        revision={`${task.status}|${task.cost?.runs ?? 0}|${steps.map((s) => `${s.status}${s.retries}`).join(",")}`}
+      />
 
       {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
 
