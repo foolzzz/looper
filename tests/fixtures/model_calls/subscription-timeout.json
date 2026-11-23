@@ -243,6 +243,7 @@
     ],
     "schedules": [
       {
+        "active_hours": null,
         "alert_failures_after": null,
         "alert_overlap_after": null,
         "alert_stale_after_seconds": null,
@@ -263,6 +264,7 @@
         "gate_command": null,
         "gate_timeout_seconds": null,
         "id": "schedule-golden",
+        "idle_only": false,
         "kind": "subscription",
         "last_fired_at": null,
         "last_ok_at": null,
