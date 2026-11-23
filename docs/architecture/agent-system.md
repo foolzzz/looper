@@ -6547,7 +6547,16 @@ ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
 that stops before the record is `uncertain` on restart, and that recovery
 consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
 insert had not committed is therefore still read once, on the next brief.
-`consumed_until` is the check time, not a watermark. Every section empty means
+`consumed_until` is the check time, not a watermark. With
+`subscriptions.triage.enabled` on, only the brief for `operator_dm_target()`
+adds “进摘要的事件”: up to ten newest owned digest or settled important fallback
+events, plus the remaining count. It uses the same first digest date's local
+midnight as its lower bound. `triage_ids` stores the exact read with the claim;
+`morning_brief_triage` consumes it in the sent/uncertain transaction or recovery.
+Refusals and released claims consume nothing. While triage is enabled, deferred
+`source = triage` rows are excluded from the ordinary deferred-message section.
+Event titles, chat names and summaries lose mention markup and escape Markdown;
+these fields are operator-visible text, never model input. Every section empty means
 nothing is sent. The switch, whether the
 channel is enabled and who the operator is are read again after the summary is
 collected and again immediately before the post. The switch is read again after

@@ -1,0 +1,39 @@
+{
+  "commit": "b4ebf13f938ddc357a9ccc7c90963f40eca53316",
+  "observation": {
+    "text": "晨报 · 11-23（周一）\n\n推迟到这份晨报的消息\n- 任务通知（免打扰，11-23 09:15）",
+    "claimed": {
+      "local_date": "2026-11-23",
+      "channel_id": "channel-lark",
+      "chat": "ou_operatorsynthetic",
+      "status": "sending",
+      "attempts": 1,
+      "detail": null,
+      "consumed_until": null,
+      "read_ids": [
+        9001
+      ],
+      "created_at": "2026-11-23 17:15:00+00:00",
+      "updated_at": "2026-11-23 17:15:00+00:00"
+    },
+    "settled": {
+      "local_date": "2026-11-23",
+      "channel_id": "channel-lark",
+      "chat": "ou_operatorsynthetic",
+      "status": "sent",
+      "attempts": 1,
+      "detail": null,
+      "consumed_until": "2026-11-23 17:15:00+00:00",
+      "read_ids": [
+        9001
+      ],
+      "created_at": "2026-11-23 17:15:00+00:00",
+      "updated_at": "2026-11-23 17:15:00+00:00"
+    },
+    "consumed": [
+      {
+        "delivery_id": 9001
+      }
+    ]
+  }
+}

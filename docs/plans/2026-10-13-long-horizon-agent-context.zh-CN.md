@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；M9g Pi 运行时的适配器、界面和假 provider 闭环已在本分支实现，真实 Responses、DeepSeek 与 Claude 对照未验证；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付。v2.13.165 是固定桥（2026-10-27）：更早的安装先升到 v2.13.165 并启动一次；规划时的 v2.13.166 不移动边界；移除之后的第一版是 v2.14.0，版本号由发布工具写入。其余见第 5 节待办。
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；M9g Pi 运行时的适配器、界面和假 provider 闭环已在本分支实现，真实 Responses、DeepSeek 与 Claude 对照未验证；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付。v2.13.165 是固定桥（2026-10-27）：更早的安装先升到 v2.13.165 并启动一次；规划时的 v2.13.166 不移动边界；移除之后的第一版是 v2.14.0，版本号由发布工具写入。事件分流的晨报事件段已实现（默认关闭）：操作者 DM 的最新 10 条摘要/重要兜底事件，认领、结算与恢复均按实际读取的事件 id 去重；消息流 why 的「进了晨报」展示留作后续。其余见第 5 节待办。
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
