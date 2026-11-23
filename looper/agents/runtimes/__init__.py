@@ -469,6 +469,9 @@ class RuntimeAdapter(ABC):
     # ``Capability``: those are stored with each runtime row (``agent_runtimes.capabilities``, whose CHECK lists them)
     # and stand for a run's stream, as Grok's COMPACTION_EVENTS does while its ACP resident session reports none.
     resident_compaction_events: ClassVar[bool] = False
+    # It runs a hook Looper gives it before each tool call and does not run a call the hook denies
+    # (``Launch.tool_hook``, the outbound review). Not a ``Capability``, like the flag above.
+    tool_hook: ClassVar[bool] = False
     protocols: ClassVar[frozenset[ApiProtocol]]
     # Reachable only through Looper's local translating gateway.
     translated_protocols: ClassVar[frozenset[ApiProtocol]] = frozenset()

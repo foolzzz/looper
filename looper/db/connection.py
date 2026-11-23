@@ -182,6 +182,7 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
 _REMINDERS = "reminders"
+_MCP_TOOL_LEVELS = "mcp_tool_levels"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -307,6 +308,19 @@ def _decision_snapshots_ddl() -> str:
     if found is None:
         raise RuntimeError("schema.sql lost its decision snapshots block")
     return found.group(1)
+
+
+_MCP_TOOL_LEVELS_BLOCK = re.compile(r"-- mcp tool levels begin\n(.*?)-- mcp tool levels end", re.S)
+
+
+def _mcp_tool_levels_ddl() -> str:
+    """The MCP tool declarations as schema.sql defines them, so a database that predates them gets the same text."""
+    found = _MCP_TOOL_LEVELS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its mcp tool levels block")
+    return found.group(1)
+
+
 _OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
 
 
@@ -954,6 +968,12 @@ async def _decision_snapshots_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _DECISION_SNAPSHOTS):
         return False
     return not await conn.fetchval("SELECT to_regclass('decision_snapshots') IS NOT NULL")
+
+
+async def _mcp_tool_levels_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MCP_TOOL_LEVELS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('mcp_tool_levels') IS NOT NULL")
 
 
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
@@ -1755,6 +1775,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _proactive_deliveries_pending(conn):
             await conn.execute(_proactive_deliveries_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
+        if await _mcp_tool_levels_pending(conn):
+            await conn.execute(_mcp_tool_levels_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MCP_TOOL_LEVELS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1809,7 +1832,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn)
-            or await _uncertain_deliveries_pending(conn)
+            or await _uncertain_deliveries_pending(conn) or await _mcp_tool_levels_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _decision_snapshots_pending(conn)
