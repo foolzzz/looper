@@ -142,6 +142,16 @@ async def has_messages(session_id: str, *, pool: asyncpg.Pool | asyncpg.Connecti
     return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM chat_messages WHERE session_id = $1)", session_id))
 
 
+async def recent_messages(session_id: str, limit: int, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The last ``limit`` stored messages of chat ``session_id``, oldest first:
+    ``[{"role", "content", "created_at", "delivery_failure"}]``."""
+    rows = await (pool or get_pool()).fetch(
+        "SELECT role, content, created_at, delivery_failure FROM ("
+        "SELECT id, role, content, created_at, delivery_failure FROM chat_messages WHERE session_id = $1 "
+        "ORDER BY id DESC LIMIT $2) m ORDER BY id ASC", session_id, limit)
+    return [dict(row) for row in rows]
+
+
 async def recent_conversations(
     *,
     sessions: int,
