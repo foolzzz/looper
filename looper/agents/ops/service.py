@@ -68,7 +68,7 @@ from .. import session_routing
 from ..reminders import reminders_on
 from ..tiers.manager_session import MAIN_SESSION
 from ..turn_context import SpeakerKind
-from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
+from . import API_CHANNEL, Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from . import reminders as reminder_tools
@@ -533,12 +533,14 @@ class ManagerOps:
                 _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
                 if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
-                    self._pending.pop(turn.chat_key, None)
+                    self._lapse(self._pending.pop(turn.chat_key, None))
                     raise _OperatorOnly(turn)
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
                 raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn that answers a user's "
                                                          "message; tell the user what you would do instead")
+            if risk is not Risk.READ and (blocked := await self._outbound_check(tool, arguments, turn, risk)):
+                return blocked
             call = Call(arguments, turn, self._platform, scope=scope)
             impact = await tool.escalate(call) if tool.escalate is not None else None
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
@@ -1016,6 +1018,10 @@ class ManagerOps:
             del self._pending[turn.chat_key]
             self._lapse(pending)
 
+    def has_confirmation(self, chat_key: tuple[str | None, str | None, str | None]) -> bool:
+        """A chat with pending confirmation needs its own user turn, including while it answers one."""
+        return chat_key in self._pending
+
     def asks_in(self, message_id: str) -> bool:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())
@@ -1066,7 +1072,6 @@ class ManagerOps:
         the one whose stream showed its tool_use, never the turn that runs when it comes; anything that goes wrong
         blocks the call."""
         from .. import outbound_hook
-        from ..outbound import Who
 
         data = payload if isinstance(payload, Mapping) else {}
         turn: Turn | None = None
@@ -1078,12 +1083,8 @@ class ManagerOps:
             if turn is None or turn.autonomous or self._binding_sessions.get(binding) != session_key:
                 turn = None
                 return outbound_hook.NO_ONES
-            if await _operator_turn(turn):
-                who = Who.OPERATOR
-            else:
-                who = Who.GROUP_MEMBER if turn.group else Who.ALLOWLISTED_PERSON
-            message = str((turn.envelope.payload.get("text") if turn.envelope else "") or "")
-            return outbound_hook.Placed(who, message, turn.channel or "", turn.chat, tuple(turn.outside))
+            return outbound_hook.Placed(await _who(turn), _message(turn), turn.channel or "", turn.chat,
+                                        tuple(turn.outside))
 
         writes = self._writes.setdefault(session_key, deque(maxlen=outbound_hook.CONTENT_TOOLS_KEPT))
         trusted = self._trusted.get(session_key, outbound_hook.Trusted.of(None, ()))
@@ -1100,17 +1101,54 @@ class ManagerOps:
             if (write := outbound_hook.write_of(payload)) is not None:
                 writes.append(write)
         elif review is not None:
-            key = (turn.channel, turn.chat, turn.message_id) if turn is not None else (None, None, None)
-            if key not in self._notified:  # once a turn
-                self._notified[key] = None
-                while len(self._notified) > BINDINGS_KEPT:
-                    self._notified.popitem(last=False)
-                tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
-                await outbound_hook.notify_blocked(
-                    self._scope.manager_id, str(data.get("tool_name") or ""),
-                    str(tool_input.get("command") or tool_input.get("file_path") or ""), review.reason,
-                    review.review_id)
+            tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), Mapping) else {}
+            await self._notify_once(turn, str(data.get("tool_name") or ""),
+                                    str(tool_input.get("command") or tool_input.get("file_path") or ""), review)
         return answer
+
+    async def _notify_once(self, turn: Turn | None, tool: str, target: str, review: Any) -> None:
+        """Tell the operator a call was blocked, once a turn (``outbound_hook.notify_blocked``)."""
+        from .. import outbound_hook
+
+        key = (turn.channel, turn.chat, turn.message_id) if turn is not None else (None, None, None)
+        if key in self._notified:
+            return
+        self._notified[key] = None
+        while len(self._notified) > BINDINGS_KEPT:
+            self._notified.popitem(last=False)
+        await outbound_hook.notify_blocked(self._scope.manager_id, tool, target, review.reason, review.review_id)
+
+    async def _outbound_check(self, tool: Tool, arguments: Mapping[str, Any], turn: Turn,
+                              risk: Risk) -> dict[str, Any] | None:
+        """The ``blocked`` answer when the outbound review stops this call of Looper's own tool (``ops.review``);
+        None when it may go on: the review is off, the call is not ``external``, or the review allowed it."""
+        from .. import outbound, outbound_hook
+        from ...db import outbound_reviews
+        from . import levels, review as layer_one
+
+        if not outbound_hook.known_enabled():  # read at startup and by each turn, set by its switch
+            return None
+        level = await levels.level_of(tool, arguments, turn)
+        if level not in outbound.REVIEWED:
+            return None
+        action = await layer_one.action_of(tool.name, arguments, level)
+        checked = await outbound.review(
+            action, outbound.Asker(await _who(turn), turn.channel or "", _message(turn)),
+            outbound.Origin(self._scope.manager_id, outbound.Source.TOOL, channel=turn.channel, chat=turn.chat),
+            context=list(turn.outside), runtime_root=self._review_root or self._platform.runtime_root or Path.cwd(),
+            claude_bin=self._review_bin)
+        if checked.allowed:
+            return None
+        message = outbound_hook.BLOCKED_MESSAGE.format(reason=checked.reason.rstrip("."))
+        action_id = await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.BLOCKED.value,
+                                       result={"message": message})
+        if action_id is not None and checked.review_id is not None:
+            try:
+                await outbound_reviews.link_action(checked.review_id, action_id)
+            except Exception:
+                logger.warning("cannot link outbound review %s to its call", checked.review_id, exc_info=True)
+        await self._notify_once(turn, tool.name, action.target, checked)
+        return _error(ErrorCode.BLOCKED, message)
 
     # --- The Manager's MCP entry ---
 
@@ -1185,6 +1223,29 @@ class _OperatorOnly(OpError):
 
 def _audience(tool: Tool) -> Audience:
     return tool.audience if isinstance(tool, RestrictedTool) else Audience.ANY
+
+
+async def _who(turn: Turn) -> Any:
+    """Whose turn it is, as the outbound review reads it (``outbound.Who``): by code, never by what the model says."""
+    from ..outbound import Who
+
+    if turn.autonomous:
+        return Who.AUTONOMOUS
+    if await _operator_turn(turn):
+        return Who.OPERATOR
+    return Who.GROUP_MEMBER if turn.group else Who.ALLOWLISTED_PERSON
+
+
+def _message(turn: Turn) -> str:
+    return str((turn.envelope.payload.get("text") if turn.envelope is not None else "") or "")
+
+
+async def operator_call(turn: Turn) -> bool:
+    """Whether a call is the operator's own: in their own turn (``_operator_turn``), or through the API with the
+    operator's token (no client)."""
+    if turn.channel == API_CHANNEL:
+        return turn.client_id is None
+    return await _operator_turn(turn)
 
 
 async def _operator_turn(turn: Turn) -> bool:
