@@ -217,3 +217,28 @@ def test_advisor_consults_retain_the_typed_attempt_link(monkeypatch):
         assert (await advisor_advice.get(checkpoint))['attempt_id'] == attempt
 
     run_db(test, monkeypatch, setup=seed)
+
+
+def test_check_failed_override_applies_to_failing_decisions_and_never_to_accept(monkeypatch):
+    async def test(pool):
+        for decision, override, expected in [
+                (Decision.RETRY, FailureKind.CHECK_FAILED, 'check_failed'),
+                (Decision.REPLAN, FailureKind.CHECK_FAILED, 'check_failed'),
+                (Decision.FAIL, FailureKind.CHECK_FAILED, 'check_failed'),
+                (Decision.ACCEPT, FailureKind.CHECK_FAILED, None),
+                (Decision.RETRY, None, 'review_rejected'), (Decision.FAIL, None, 'timeout')]:
+            attempt = await attempts.open_attempt('t', 's', 's1', 1, Trigger.RETRY)
+            if expected == 'review_rejected':
+                await attempts.review_finished(attempt, False, 1)
+            if expected == 'timeout':
+                await attempts.worker_finished(attempt, RunOutcome.RUN_FAILED, RunFailure.TIMEOUT)
+            await attempts.decide_attempt(attempt, decision, failure_kind=override)
+            assert await pool.fetchval('SELECT failure_kind FROM step_attempts WHERE id=$1', attempt) == expected
+        # The override beats a rejected review and a failed run.
+        attempt = await attempts.open_attempt('t', 's', 's1', 1, Trigger.RETRY)
+        await attempts.worker_finished(attempt, RunOutcome.RUN_FAILED, RunFailure.CRASH)
+        await attempts.review_finished(attempt, False, 1)
+        await attempts.decide_attempt(attempt, Decision.RETRY, failure_kind=FailureKind.CHECK_FAILED)
+        assert await pool.fetchval('SELECT failure_kind FROM step_attempts WHERE id=$1', attempt) == 'check_failed'
+
+    run_db(test, monkeypatch, setup=seed)

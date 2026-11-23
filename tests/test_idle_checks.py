@@ -101,8 +101,9 @@ def schedule(key="schedule:nightly", *, since=NOW - timedelta(hours=2), last_ok_
 def test_the_section_table_names_every_summary_section_and_keeps_gates_and_confirmations_out():
     assert tuple(ic.RULES) == attention.KINDS
     assert ic.RULES["gates"] is None and ic.RULES["confirmations"] is None
-    found = ic.select(summary(gates=[item("gate:1", since=NOW - timedelta(hours=30))],
-                              confirmations=[item("confirmation:c", since=NOW - timedelta(hours=1))]), now=NOW)
+    excluded = {kind: [item(f"{kind}:1", since=NOW - timedelta(hours=30))]
+                for kind, rule in ic.RULES.items() if rule is None}
+    found = ic.select(summary(**excluded), now=NOW)
     assert found == []
 
 

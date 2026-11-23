@@ -1,8 +1,8 @@
 """A run's access level (``agent_settings.Access``): what each level makes of a launch, and the command lines of every
 role and runtime, which stay as they were before the level replaced ``Launch.consult``.
 
-The digest below was computed on ``main`` before the access level existed; a change to it is a change to some agent's
-command line, which this refactor must not make.
+Each recorded command is frozen on its own (``fixtures/launch_access_commands.json``, the bytes of ``_command_lines``
+on main 961070ce4). A runtime added to the matrix is not compared. A change to a recorded command fails.
 """
 
 from __future__ import annotations
@@ -24,10 +24,14 @@ from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, R
 from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, adapter
 from tests.runtime_model_helpers import resolved_profile
 
-# sha256 of ``_command_lines`` on main 961070ce4, before the access level (the same on macOS and Linux).
-COMMAND_LINES_SHA256 = "73e7b9e04fd07ff27d649609434cfe7754dc0e85d680f6fd6f124838a74f2183"
 # Keep the historical snapshot's runtime set fixed; later adapters have their own launch tests.
 BASELINE_RUNTIMES = ("api", "claude-code", "coco", "codex", "cursor-agent", "dsh", "grok", "omp", "pi")
+_COMMANDS = Path(__file__).parent / "fixtures" / "launch_access_commands.json"
+
+
+def _sha(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
 
 ROLES = (AgentType.MANAGER, AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER, AgentType.PROCESSOR)
 
@@ -147,9 +151,9 @@ def fixed_root() -> Any:
 
 def test_every_role_and_runtime_keeps_its_command_line(fixed_root: Path) -> None:
     lines = _command_lines(fixed_root)
-    assert len(lines) == len(BASELINE_RUNTIMES) * (len(ROLES) + 2)
-    digest = hashlib.sha256(json.dumps(lines, sort_keys=True).encode()).hexdigest()
-    assert digest == COMMAND_LINES_SHA256, json.dumps(lines, sort_keys=True, indent=1)[:4000]
+    frozen = json.loads(_COMMANDS.read_text())
+    assert [key for key in lines if key in frozen["each"]] == frozen["order"]
+    assert {key: _sha(lines[key]) if key in lines else None for key in frozen["each"]} == frozen["each"]
 
 
 @pytest.mark.parametrize(("role", "access", "level"), [

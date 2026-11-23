@@ -117,6 +117,7 @@ const STATUS_VARIANT: Record<string, "default" | "success" | "warning" | "destru
   pending: "warning",
   stopped: "warning",
   waiting_user: "warning",
+  awaiting_budget: "warning",
   waiting: "outline",
   completed: "success",
   failed: "destructive",
@@ -153,9 +154,9 @@ function TasksCard({ project }: { project: Project }) {
                 {/* A status is one word, shown capitalized; "Waiting for you" is shown as written. */}
                 <Badge
                   variant={STATUS_VARIANT[task.status] ?? "outline"}
-                  className={task.status === "waiting_user" ? "shrink-0" : "shrink-0 capitalize"}
+                  className={["waiting_user", "awaiting_budget"].includes(task.status) ? "shrink-0" : "shrink-0 capitalize"}
                 >
-                  {task.status === READY_STATUS ? "ready" : task.status === "waiting_user" ? "Waiting for you" : task.status === "waiting" ? "Waiting" : task.status}
+                  {task.status === READY_STATUS ? "ready" : task.status === "awaiting_budget" ? "等你决定花费" : task.status === "waiting_user" ? "Waiting for you" : task.status === "waiting" ? "Waiting" : task.status}
                 </Badge>
                 <span className="min-w-0 flex-1 truncate">{task.name || task.requirement}</span>
                 {task.cost && task.cost.runs > 0 && (
@@ -261,7 +262,8 @@ function executionRows(project: Project): [string, string][] {
   if (project.task_budget_action)
     rows.push([
       "At the task cap",
-      project.task_budget_action === "wrap_up" ? "The Planner wraps up, then the task fails" : "The task fails at once",
+      project.task_budget_action === "ask" ? "先问你继续还是停（花费守卫 enforce）"
+        : project.task_budget_action === "wrap_up" ? "The Planner wraps up, then the task fails" : "The task fails at once",
     ]);
   if (project.supervise_interval_seconds != null)
     rows.push([

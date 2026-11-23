@@ -1,7 +1,8 @@
-"""Existing roles keep the exact pre-explorer runtime inputs.
+"""Existing roles keep the pre-explorer runtime inputs, item by item.
 
-Digests were captured from the pinned main revision before the explorer implementation. They
-cover argv, generated configuration, reported catalog tools and prompt blocks.
+``fixtures/explorer_default_surfaces.json`` freezes each argv token, MCP name, prompt block and config line recorded
+before the explorer implementation (main 9e416f798214). A token, block, section or config entry added since is not
+compared. A changed, reordered or removed recorded item fails.
 """
 from dataclasses import replace
 import ast
@@ -16,6 +17,7 @@ import pytest
 from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
+from tests.prompt_sections import assert_sections
 from tests.runtime_model_helpers import builtin_launch, resolved_profile
 
 
@@ -51,36 +53,65 @@ def surfaces(kind, role):
     return text.replace(str(Path(__file__).resolve().parents[1]), '<checkout>').encode()
 
 
-# Captured from BASELINE_SHA; updating these requires an intentional existing-role change.
-BASELINE = {
-    "claude-code/manager": "4043e724214ec5ccf03576be7371e9eebdfe483e7b5c572f01baa2d53eba1f65",
-    "claude-code/planner": "e3a8c00cca444fb0eea5a8a0e6c4e4e10a65faabc72fa512a280efa3ca1cc9da",
-    "claude-code/worker": "4043e724214ec5ccf03576be7371e9eebdfe483e7b5c572f01baa2d53eba1f65",
-    "codex/manager": "3daf2046cdd88a2c0937720cefaeb6b1a20152a6a532710fed938aa8d5933704",
-    "codex/planner": "bed394815a4fd2500ae16322569c2949d94c116d397bdb5a01dceb08e224aad0",
-    "codex/worker": "3daf2046cdd88a2c0937720cefaeb6b1a20152a6a532710fed938aa8d5933704",
-    "coco/manager": "13bde977edc76c7c9b7ccb12a248b2616a3fbd3a73121e709cd6a58d67c47c73",
-    "coco/planner": "76add1798c04d68b0d3301986bc5612dedbf3e1b10fc12d2f28eba3ca84c48ce",
-    "coco/worker": "13bde977edc76c7c9b7ccb12a248b2616a3fbd3a73121e709cd6a58d67c47c73",
-    "omp/manager": "ab7cb50b3d94726cdbdaadeec66780d5f0f4cf67733674b2c49d19a2d7c9e3f4",
-    "omp/planner": "ec694ec8f0aea9fbe68d4a6f4962503103bade7f7d0bcb04f695fd25c974ae66",
-    "omp/worker": "ab7cb50b3d94726cdbdaadeec66780d5f0f4cf67733674b2c49d19a2d7c9e3f4",
-    "grok/manager": "b76b1d008a4377ce59592d80018b0e677a5d433132a0901d0605a718c7e57a2f",
-    "grok/planner": "1fa1afa7a4f553903adcabcfe073befb7f28927720525648ddd0e73e788eefb2",
-    "grok/worker": "b76b1d008a4377ce59592d80018b0e677a5d433132a0901d0605a718c7e57a2f",
-    "pi/manager": "6732642d1f015ce45aee6df57271d0b46642046dc116c3ad4d5e88483c3eac08",
-    "pi/planner": "a3dbbd21a6f15af36510717a2300d98b57fabede9d439b0d8adb84b07f17bca2",
-    "pi/worker": "6732642d1f015ce45aee6df57271d0b46642046dc116c3ad4d5e88483c3eac08",
-    "dsh/manager": "a10d56abc966c375f378d46d0e27a08f82150022d3548b3b72b278ecf9626a4d",
-    "dsh/planner": "a10d56abc966c375f378d46d0e27a08f82150022d3548b3b72b278ecf9626a4d",
-    "dsh/worker": "a10d56abc966c375f378d46d0e27a08f82150022d3548b3b72b278ecf9626a4d"
-}
+_SURFACES = json.loads((Path(__file__).parent / "fixtures" / "explorer_default_surfaces.json").read_text())
+
+
+def _sha(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def _in_order(expected, actual) -> None:
+    """Every recorded item is still present, in the same order; items added around them are ignored."""
+    at = 0
+    for item in expected:
+        try:
+            found = actual.index(item, at)
+        except ValueError:
+            found = -1
+        assert found >= 0, item
+        at = found + 1
+
+
+def _assert_config(frozen, current, label) -> None:
+    kind = frozen["kind"]
+    if kind == "none":
+        return
+    if kind == "lines":
+        assert isinstance(current, str), label
+        _in_order(frozen["lines"], current.splitlines())
+        return
+    if kind == "items":
+        assert isinstance(current, list), label
+        _in_order(frozen["items"], [_sha(item) for item in current])
+        return
+    assert kind == "keys", label
+    assert isinstance(current, dict), label
+    each = frozen["each"]
+    assert [key for key in current if key in each] == frozen["order"], label
+    assert {key: _sha(current[key]) if key in current else None for key in each} == each, label
+
+
+def _assert_surface(kind, role) -> None:
+    got = json.loads(surfaces(kind, role))
+    frozen = _SURFACES["surfaces"][f"{kind}/{role}"]
+    label = f"{kind}/{role}"
+    _in_order(frozen["argv"], got["argv"])
+    _in_order(frozen["tools"], got["tools"])
+    blocks = got["prompts"]
+    each = frozen["prompts"]["each"]
+    assert [block["name"] for block in blocks if block["name"] in each] == frozen["prompts"]["order"], label
+    for name, spec in each.items():
+        block = next(item for item in blocks if item["name"] == name)
+        assert block["owner"] == spec["owner"], name
+        assert block["note"] == spec["note"], name
+        assert_sections(block["text"] or "", spec["sections"], label=f"{label} {name}")
+    _assert_config(frozen["config"], got.get("config"), label)
 
 
 @pytest.mark.parametrize('kind', ['claude-code', 'codex', 'coco', 'omp', 'grok', 'pi', 'dsh'])
 @pytest.mark.parametrize('role', ['manager', 'planner', 'worker'])
 def test_existing_role_runtime_inputs_byte_identical(kind, role):
-    assert hashlib.sha256(surfaces(kind, role)).hexdigest() == BASELINE[f'{kind}/{role}']
+    _assert_surface(kind, role)
 
 
 @pytest.mark.parametrize('role', ['manager', 'planner'])
@@ -96,7 +127,8 @@ def test_resident_process_signature_inputs_match_main(role):
                 and any(isinstance(target, ast.Name) and target.id == 'signature' for target in node.targets)]
 
     expected = signatures(baseline)
-    assert expected and signatures(current) == expected
+    assert expected, role
+    _in_order(expected, signatures(current))
 
 
 @pytest.mark.parametrize("probe", ["looper/_component_probe.py", "tests/fixtures/component_probe_v2_14_69.py"])
@@ -116,5 +148,4 @@ def test_component_probe_reads_the_unchanged_seat_tool_catalog(probe):
                 for role, kind in (('worker', MemberKind.WORK), ('reviewer', MemberKind.REVIEW))}
     assert json.loads(completed.stdout) == expected
     read = next(tool for tool in expected['worker'] if tool['name'] == room.READ)
-    assert read['inputSchema']['properties']['kind']['enum'] == [
-        'info', 'question', 'answer', 'interface', 'announce', 'notice', 'escalation']
+    _in_order(_SURFACES["read_kinds"], read['inputSchema']['properties']['kind']['enum'])

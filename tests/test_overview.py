@@ -19,7 +19,7 @@ def test_running_filter_covers_planner_phases_and_other_filters_cover_themselves
     }
     assert {name: statuses for name, statuses in STATUS_FILTERS.items() if name != "running"} == {
         name: (name,) for name in (
-            "init", "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+            "init", "waiting", "waiting_user", "awaiting_budget", "pending", "completed", "failed", "cancelled", "stopped",
         )
     }
 
@@ -28,6 +28,7 @@ def test_running_filter_covers_planner_phases_and_other_filters_cover_themselves
     # "pending": started, its Planner starting (nothing waits for room under a project's limit any more).
     *[(status, TaskGroup.IN_PROGRESS) for status in ("pending", "assigned", "running", "planning", "executing",
                                                       "verifying", "stopping")],
+    ("awaiting_budget", TaskGroup.NEEDS_YOU),
     ("init", TaskGroup.READY),
     ("failed", TaskGroup.ATTENTION),
     ("stopped", TaskGroup.ATTENTION),

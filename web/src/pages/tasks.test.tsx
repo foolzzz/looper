@@ -28,6 +28,14 @@ const boundary = task("boundary", 23);
 const oldest = task("oldest", 22);
 
 describe("task list polling and pagination", () => {
+  it("keeps a spend hold in the unfinished list and labels it in words", async () => {
+    await showNavigating();
+    const held = { ...task("held", 25), status: "awaiting_budget", group: "needs_you" as const };
+    await finish(0, { ...page([held]), counts: { awaiting_budget: 1 } });
+    expect(container.textContent).toContain("等你决定花费");
+    expect(container.textContent).not.toContain("awaiting_budget");
+  });
+
   let container: HTMLDivElement;
   let root: Root;
   let requests: {
@@ -161,7 +169,7 @@ describe("task list polling and pagination", () => {
 
   describe("several status filters", () => {
     it("selects every unfinished status when the address has no status, group or schedule", async () => {
-      expect([...DEFAULT_STATUS_FILTERS]).toEqual(["init", "running", "waiting", "waiting_user", "pending"]);
+      expect([...DEFAULT_STATUS_FILTERS]).toEqual(["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending"]);
       await showNavigating();
       expect(requests[0].filters?.statuses).toEqual([...DEFAULT_STATUS_FILTERS]);
       expect(requests[0].filters?.status).toBeUndefined();
@@ -180,9 +188,9 @@ describe("task list polling and pagination", () => {
     it("toggles a chip on and off the current selection", async () => {
       await showNavigating();
       await click("Failed");
-      expect(requests[1].filters?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending", "failed"]);
+      expect(requests[1].filters?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending", "failed"]);
       await click("Ready");
-      expect(requests[2].filters?.statuses).toEqual(["running", "waiting", "waiting_user", "pending", "failed"]);
+      expect(requests[2].filters?.statuses).toEqual(["running", "waiting", "waiting_user", "awaiting_budget", "pending", "failed"]);
       expect(requests[2].filters?.status).toBeUndefined();
     });
 
@@ -220,7 +228,7 @@ describe("task list polling and pagination", () => {
       expect(requests[0].filters?.statuses).toContain("waiting_user");
       expect(button("Waiting for you")).toBeUndefined();
       await click("Failed");
-      expect(requests[1].filters?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "pending", "failed"]);
+      expect(requests[1].filters?.statuses).toEqual(["init", "running", "waiting", "waiting_user", "awaiting_budget", "pending", "failed"]);
       expect(button("Waiting for you")).toBeUndefined();
       await finish(1, { ...page([]), counts: { waiting_user: 0, failed: 1, init: 1 } });
       expect(button("Waiting for you")).toBeUndefined();
