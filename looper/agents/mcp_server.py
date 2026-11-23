@@ -29,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from copy import deepcopy
 from typing import Any, BinaryIO, Protocol
 
@@ -42,6 +43,8 @@ DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 REQUEST_TIMEOUT_SECONDS = 120.0
 # A call that waits on Looper's side (the agent room's inbox, ``wait_seconds``) gets that long more than the rest.
 WAITING_TOOL = "looper_room_inbox"
+SUBAGENT_TOOLS = frozenset(("looper_agent_spawn", "looper_agent_wait", "looper_agent_cancel"))
+WAITING_TOOLS = frozenset((WAITING_TOOL, "looper_agent_spawn", "looper_agent_wait"))
 MAX_WAIT_ENV = "LOOPER_MCP_MAX_WAIT_SECONDS"
 WAIT_MARGIN_SECONDS = 20.0
 RETRY_WAIT_MARGIN_SECONDS = 2.0
@@ -103,7 +106,7 @@ class AgentClient:
         if self._max_wait_seconds is not None:
             tools = deepcopy(tools)
             for tool in tools:
-                if isinstance(tool, dict) and tool.get("name") == WAITING_TOOL:
+                if isinstance(tool, dict) and tool.get("name") in WAITING_TOOLS:
                     tool["description"] = (tool.get("description", "") +
                                            f" This runtime caps wait_seconds at {self._max_wait_seconds} seconds.")
                     wait_schema = tool.get("inputSchema", {}).get("properties", {}).get("wait_seconds")
@@ -127,14 +130,16 @@ class AgentClient:
                 if isinstance(call_id, str) and call_id:
                     extra["X-Looper-Call"] = call_id
                     break
-        # The room inbox is currently the only platform tool with a long-poll argument.
+        if name in SUBAGENT_TOOLS and "X-Looper-Call" not in extra:
+            # Generate once per tool invocation, outside the HTTP retry loop.
+            extra["X-Looper-Call"] = uuid.uuid4().hex
         # Clamp before forwarding (including retries), not just in the advertised schema.
-        if name == WAITING_TOOL and self._max_wait_seconds is not None:
+        if name in WAITING_TOOLS and self._max_wait_seconds is not None:
             wait = arguments.get("wait_seconds")
             if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > self._max_wait_seconds:
                 arguments = {**arguments, "wait_seconds": self._max_wait_seconds}
         timeout = self._timeout
-        wait = arguments.get("wait_seconds") if name == WAITING_TOOL else None
+        wait = arguments.get("wait_seconds") if name in WAITING_TOOLS else None
         if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
             timeout = max(timeout, float(wait) + WAIT_MARGIN_SECONDS)
         return self._request(f"/api/agent/v1/ops/{urllib.parse.quote(name, safe='')}", body=arguments, timeout=timeout,
@@ -164,6 +169,7 @@ class AgentClient:
         safety = self._retry_safety.get(name, RetrySafety.NOT_RETRYABLE)
         safe_to_repeat = (body is None and path == "/api/agent/v1/tools") or (
             body is not None and (safety is RetrySafety.READ_ONLY or (
+                safety is RetrySafety.IDEMPOTENT and bool(headers.get("X-Looper-Call"))) or (
                 safety is RetrySafety.READ_ONLY_IF_PEEK and body.get("peek") is True)))
         started, attempts, backoff, outcome = None, 0, 0.5, "failed"
         attempt_timeout = timeout
@@ -201,7 +207,7 @@ class AgentClient:
                     if remaining <= 0:
                         raise
                     attempt_timeout = min(timeout, remaining)
-                    wait = body.get("wait_seconds") if name == WAITING_TOOL else None
+                    wait = body.get("wait_seconds") if name in WAITING_TOOLS else None
                     if isinstance(wait, int) and not isinstance(wait, bool) and wait > 0:
                         # Keep the original arguments intact; each retry must fit the reconnect time still left.
                         retry_wait = min(wait, max(0, int(remaining - RETRY_WAIT_MARGIN_SECONDS)))

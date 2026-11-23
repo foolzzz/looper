@@ -16,7 +16,7 @@
 
 | 输入 | 字段 |
 |---|---|
-| `Delivery`（这条消息） | `kind`（发送点：`gate_reminder`、`task_notice`、`subscription`、`intent`、`completion`（收尾回合）、`user_reminder`）；`urgency`（`normal`、`digest`：订阅摘要，沿用普通节制规则，`blocking`：关卡在等用户、卡着它的任务，`user_set`：用户自己设的提醒）；`chat`（`direct` 私聊和控制台聊天，`group` 群）；`source`（来自定时任务或订阅时，它的节制字段：生效时段和它的时区）；`silent`（来源说这次没什么要说） |
+| `Delivery`（这条消息） | `kind`（发送点：`gate_reminder`、`task_notice`、`subscription`、`intent`、`completion`（收尾回合）、`user_reminder`、`morning_brief`（晨报，见晨报 RFC））；`urgency`（`normal`、`digest`：订阅摘要，沿用普通节制规则，`blocking`：关卡在等用户、卡着它的任务，`user_set`：用户自己设的提醒）；`chat`（`direct` 私聊和控制台聊天，`group` 群）；`source`（来自定时任务或订阅时，它的节制字段：生效时段和它的时区）；`silent`（来源说这次没什么要说） |
 | `DeliveryPolicy`（操作者的规则） | `timezone`（`user.timezone`）、`quiet_hours`（`DailyWindow`，可为空）、`dm_daily_cap`、`recent_reply` |
 | `DeliveryState`（这个会话此刻） | `now`、`sent_today`（今天按本地日期已计数的条数）、`last_user_message_at` |
 
@@ -27,12 +27,13 @@
 | # | 条件 | 结果 | `reason` | 计数 |
 |---|---|---|---|---|
 | 1 | 来源说没什么要说 | 不发 | `silent` | 否 |
-| 2 | `urgency` 是 `blocking` 或 `user_set` | 发 | `urgent` | 否 |
-| 3 | 不在来源自己的生效时段（按来源的时区） | 进摘要 | `outside_active_hours` | 否 |
-| 4 | 用户 `recent_reply` 内在这个会话说过话 | 发 | `recent_reply` | 否 |
-| 5 | 在免打扰时段（按 `policy.timezone`，含开始、不含结束） | 进摘要 | `quiet_hours` | 否 |
-| 6 | 私聊，且今天已计数 `dm_daily_cap` 条 | 进摘要 | `daily_cap` | 否 |
-| 7 | 其余 | 发 | `within_limits` | 私聊计数，群不计数 |
+| 2 | `kind` 是 `morning_brief`（晨报本身，见晨报 RFC） | 发 | `within_limits` | 否 |
+| 3 | `urgency` 是 `blocking` 或 `user_set` | 发 | `urgent` | 否 |
+| 4 | 不在来源自己的生效时段（按来源的时区） | 进摘要 | `outside_active_hours` | 否 |
+| 5 | 用户 `recent_reply` 内在这个会话说过话 | 发 | `recent_reply` | 否 |
+| 6 | 在免打扰时段（按 `policy.timezone`，含开始、不含结束） | 进摘要 | `quiet_hours` | 否 |
+| 7 | 私聊，且今天已计数 `dm_daily_cap` 条 | 进摘要 | `daily_cap` | 否 |
+| 8 | 其余 | 发 | `within_limits` | 私聊计数，群不计数 |
 
 - 紧急类排在生效时段和免打扰之前：卡住任务的关卡和用户自己的提醒不受任何节制。
 - 来源的生效时段排在「刚说过话」之前：生效时段是这个来源自己声明的，用户在聊天不代表想在那个时段收到它。
@@ -53,7 +54,7 @@
 
 ## 2. 开关；关闭时什么不变
 
-- 系统设置 `delivery.enabled`（默认 `false`）：只有操作者能读写，经 `proactive_delivery.get` 和 `proactive_delivery.update`（`loopercli proactive-delivery update --enabled true`，高风险，要确认），和投递守卫（`delivery_guard`）一样不放进客户端看得到的 `chat_settings`。关闭时没有任何发送点调用 `deliver`，发出的每条消息和现在一样，也不写 `proactive_deliveries`（测试比对）。
+- 系统设置 `delivery.enabled`（默认 `false`）：只有操作者能读写，经 `proactive_delivery.get` 和 `proactive_delivery.update`（`loopercli proactive-delivery update --enabled true`，高风险，要确认），和投递守卫（`delivery_guard`）一样不放进客户端看得到的 `chat_settings`。关闭时，由这个开关控制的发送点不调用 `deliver`，也不写 `proactive_deliveries`（测试比对）。晨报有自己的开关：它调用纯函数 `deliver`，只有送达层开着时才记一行（见晨报 RFC）。
 - 时区是用户的 `user.timezone`，由每轮上下文的设置保管和编辑（`turn_context.zone()`：存的时区，没有或不认识时用服务器时区）；送达层只读它。
 - 免打扰时段、上限和时区在 v0 不开放修改：第一个发送点（关卡提醒）都是紧急类，不受它们影响；接入第一个会产生「进摘要」的发送点时，再加它们的设置。
 
@@ -83,7 +84,7 @@
 | `source`、`source_ref`、`manager_id`、`channel_id`、`chat`、`chat_kind` | 先写的一方 | `source` 是度量的来源枚举（`ProactiveSource`，送达层的 `DeliveryKind` 就是它） |
 | `urgency`、`task_id`、`step_id`、`schedule_id` | 送达层 | 第 1.1 节的输入和关联对象 |
 | `decision`、`reason`、`counted`、`local_date`、`digest_date`、`decided_at` | 送达层 | 判断结果；`local_date` 是判断时在 `policy.timezone` 的本地日期，每日上限按它计；`decided_at` 由送达层填（清理按 `COALESCE(sent_at, decided_at)`，进摘要和不发的行也能删） |
-| `outcome`（`sent`、`rejected`、`unknown`）、`sent_at`、`external_id` | 度量或发送点 | 渠道回执；两者成对。度量开着时它在发送后按 `dedupe_key` 只更新这三列，不碰判断；度量关着时发送点自己记 |
+| `outcome`（`sent`、`rejected`、`unknown`）、`sent_at`、`external_id` | 度量或发送点 | 渠道回执；两者成对。度量开着时它在发送后按 `dedupe_key` 只更新这三列，不碰判断；度量关着时发送点自己记。已经记下的 `sent` 或 `unknown` 保持不动，`rejected` 会被同键的下一次尝试替换 |
 | `replied_at`、`reply_match` | 度量 | 发出后用户的回复 |
 
 - **一次一个：** `decide` 在一个事务里对这个会话加咨询锁，读当天计数、判断、写入，所以两个发送点不会同时拿到当天最后一个额度。

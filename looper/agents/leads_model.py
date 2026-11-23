@@ -15,6 +15,7 @@ from typing import Any
 LEADS_ENABLED_KEY = "leads.enabled"
 LEADS_VALID_DAYS_KEY = "leads.valid_days"
 INTENTS_ENABLED_KEY = "intents.enabled"
+LEADS_SEARCH_MODE_KEY = "leads.search_mode"
 DEFAULT_VALID_DAYS = 90
 VALID_DAYS_RANGE = (1, 365)
 
@@ -28,6 +29,16 @@ class OutputKind(StrEnum):
     PUSH = "push"
     LEADS = "leads"
     INTENTS = "intents"
+    TRIAGE = "triage"
+
+
+class SearchMode(StrEnum):
+    """How a search matches its words (``leads.search_mode``; assistant search RFC, section 4): every word as written
+    (``words``, the default), or any word by its Chinese character pairs, its English word starts and, with pg_trgm,
+    its likeness, the leads that match more of the words first (``fulltext``)."""
+
+    WORDS = "words"
+    FULLTEXT = "fulltext"
 
 
 class LeadKind(StrEnum):
@@ -133,6 +144,15 @@ async def leads_enabled(db: Any = None) -> bool:
 async def intents_enabled(db: Any = None) -> bool:
     """Whether intents are on (``intents.enabled`` is ``true``; no row is off)."""
     return await _setting(INTENTS_ENABLED_KEY, db) == "true"
+
+
+async def search_mode(db: Any = None) -> SearchMode:
+    """How searches match (``leads.search_mode``; no row, or a value it does not know, is ``words``)."""
+    raw = await _setting(LEADS_SEARCH_MODE_KEY, db)
+    try:
+        return SearchMode(raw) if raw is not None else SearchMode.WORDS
+    except ValueError:
+        return SearchMode.WORDS
 
 
 async def valid_days(db: Any = None) -> int:

@@ -23,7 +23,7 @@ import {
 
 /** The task's runs by role, as `runs.list` answers for each (the Planner's without its consults' runs), and its
  * consults' runs (the advisor's and its judge's), each with the Planner run that started it. */
-export type TaskRuns = Record<TaskRole, LlmRecord[]> & { consults?: ConsultRun[] };
+export type TaskRuns = Record<TaskRole, LlmRecord[]> & { consults?: ConsultRun[]; explorers?: { record: LlmRecord; parentId: number | null }[] };
 
 /** The runtime, model and effort of the latest of `records` (of one step, when `stepId` is given), or undefined
  * when none ran. */
@@ -242,6 +242,7 @@ export function stepCard(
   step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces, room, runs }: StepCardContext,
 ): NodeCard {
   const span = stepSpan(step, active);
+  const explorers = runs?.explorers?.filter((run) => run.record.metadata?.step_id === step.id).length ?? 0;
   // completed_at is the last time the step went to review or ended; a step running again still has it.
   const finished = step.completed_at && !["pending", "dispatched", "deciding"].includes(step.status) &&
     (step.status === "skipped" ? "Dropped" : "Finished");
@@ -266,6 +267,7 @@ export function stepCard(
           value: `Waiting for ${reviewingRole(step) ? `review: ${reviewingRole(step)?.role}` : "the built-in review"}`,
         },
       ]),
+      ...facts("Sub-agents", [explorers > 0 && { label: "Explorers", value: String(explorers) }]),
       ...stepWorktree(workspaces),
       ...facts("Room", [
         room && { label: "Messages", value: `${room.sent} sent, ${room.received} received` },

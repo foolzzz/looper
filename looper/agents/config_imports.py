@@ -78,6 +78,13 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
     """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
         return data
+    if "cost_guard" in data.get("settings", {}):
+        raise OpError(ErrorCode.FORBIDDEN, "Cost guard settings require operator identity; "
+                      "upload this configuration with an operator token")
+    if any(isinstance(project, dict) and isinstance(project.get("execution"), dict)
+           and "acceptance_checks" in project["execution"] for project in data.get("projects", [])):
+        raise OpError(ErrorCode.FORBIDDEN, "Acceptance check permissions require operator identity; "
+                      "upload this configuration with an operator token")
     if data.get("settings", {}).get("chat"):
         raise OpError(ErrorCode.FORBIDDEN, "Chat settings require operator identity; "
                       "upload this configuration with an operator token")
@@ -123,6 +130,10 @@ async def _run(data: dict[str, Any], *, apply: bool) -> config_transfer.Plan:
         await scheduler_settings.load()  # a minimum interval in the file applies at once
         await persona.load()  # the default Manager's persona applies at once
         await chat_settings.load()
+        if "cost_guard" in data.get("settings", {}):
+            from . import cost_guard
+
+            await cost_guard.refresh()
     return plan
 
 

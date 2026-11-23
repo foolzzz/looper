@@ -73,9 +73,10 @@ from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from . import reminders as reminder_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
-from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_on
+from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_tool
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
 from .schedules import TOOLS as SCHEDULE_TOOLS
+from .session_search import TOOL as SESSION_SEARCH, enabled as session_search_on
 from .settings import TOOLS as SETTINGS_TOOLS
 from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool, task_workflow_tool
 
@@ -160,12 +161,12 @@ TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if
                                     *SCHEDULE_TOOLS, CONFIRM)
 READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Every tool a Manager may have had: a call of one it no longer has is told so. The leads search is the default
-# Manager's while leads are on, the vault's reads while it lets the Manager read it, the reminder tools while
-# reminders are on (``ManagerOps._with_operator_tools``).
-_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS,
+# Manager's while leads are on, the vault's reads while it lets the Manager read it, session search while it is on,
+# and the reminder tools while reminders are on (``ManagerOps._with_operator_tools``).
+_MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH,
                                                     *reminder_tools.TOOLS)}
 # The default Manager's tools that only the user's own turns run, each behind its own switch.
-_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, *reminder_tools.TOOLS)}
+_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH, *reminder_tools.TOOLS)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
 
 
@@ -382,15 +383,20 @@ class ManagerOps:
 
     async def _with_operator_tools(self, scope: OpsScope) -> OpsScope:
         """``scope`` with the default Manager's operator-only tools exactly while their switches are on:
-        ``looper_leads_search`` while ``leads.enabled`` is, the vault's reads while the vault setting holds and says
-        ``manager_read``, the reminder tools while ``reminders.enabled`` is. Any other Manager's as it is; off, the
+        ``looper_leads_search`` while ``leads.enabled`` is, as ``leads.search_mode`` describes it
+        (``ops.leads.leads_tool``), the vault's reads while the vault setting holds and says ``manager_read``,
+        ``looper_session_search`` while ``manager.session_search.enabled`` is; the reminder tools while ``reminders.enabled`` is.
+        Any other Manager's as it is; off, the
         default Manager's is what it was before them."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
             return scope
-        wanted = [*((LEADS_SEARCH,) if await leads_on() else ()),
+        leads = await leads_tool()
+        wanted = [*((leads,) if leads is not None else ()),
                   *(VAULT_READ_TOOLS if await manager_vault() is not None else ()),
+                  *((SESSION_SEARCH,) if await session_search_on() else ()),
                   *(reminder_tools.TOOLS if await reminders_on() else ())]
-        if [tool.name for tool in wanted] == [name for name in scope.tools if name in _OPERATOR_TOOLS]:
+        current = [tool for tool in scope.tools.values() if tool.name in _OPERATOR_TOOLS]
+        if len(wanted) == len(current) and all(new is old for new, old in zip(wanted, current)):
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name not in _OPERATOR_TOOLS]
         adjusted = replace(scope, tools=_tool_map([*kept, *wanted]))
@@ -1034,12 +1040,13 @@ class ManagerOps:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())
 
-    def waiting_confirmations(self) -> list[dict[str, Any]]:
+    def waiting_confirmations(self, *, unpersisted_only: bool = False) -> list[dict[str, Any]]:
         """The operations that wait for the user's word now, oldest first: asked, no turn answering them yet, and
         within ``CONFIRMATION_SECONDS``. Read only (the "needs you" summary, ``agents.attention``)."""
         now = self._clock()
         waiting = sorted(((key, pending) for key, pending in self._pending.items()
-                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS),
+                          if pending.answer_turn is None and now - pending.at <= CONFIRMATION_SECONDS
+                          and (not unpersisted_only or pending.card is None)),
                          key=lambda item: item[1].at)
         return [{"confirmation_id": pending.id, "tool": pending.tool.name, "impact": pending.impact,
                  "channel": channel, "channel_id": channel_id, "chat": chat, "waited_seconds": int(now - pending.at),

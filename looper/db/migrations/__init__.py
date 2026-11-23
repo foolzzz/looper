@@ -24,6 +24,7 @@ class OnlineStep:
     indexes: tuple[
         tuple[str, str], ...
     ] = ()  # (name, what follows the name in CREATE INDEX)
+    unique_indexes: tuple[tuple[str, str], ...] = ()
 
 
 def discover() -> tuple[ModuleType, ...]:
