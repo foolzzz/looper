@@ -23,10 +23,14 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from .. import mid_turn_input, session_routing
+from .. import lanes_settings, mid_turn_input, session_routing
+from ..lanes import Lane
 from ..message import MessageEnvelope, MessageType
 from ..runtimes import CLAUDE_CODE
 from ..session_routing import SessionKey, SessionKind
@@ -45,11 +49,71 @@ class IdentityUnavailable(Exception):
     """The identity store failed: retain the message instead of choosing main."""
 
 
-@dataclass(frozen=True)
+class CompletionState(StrEnum):
+    QUEUED = "queued"
+    STARTED = "started"
+    EXPIRED = "expired"
+
+
+@dataclass(eq=False)
 class _Completion:
     envelope: MessageEnvelope
     rows: list[dict[str, Any]]
     batch: uuid.UUID
+    state: CompletionState = CompletionState.QUEUED
+    deadline: asyncio.TimerHandle | None = None
+
+
+class _Queues:
+    """Two FIFO lanes; sequence numbers preserve the original FIFO while lanes are off."""
+
+    def __init__(self) -> None:
+        self.interactive: deque[tuple[int, MessageEnvelope | _Completion]] = deque()
+        self.background: deque[tuple[int, MessageEnvelope | _Completion]] = deque()
+        self.ready = asyncio.Event()
+        self.sequence = 0
+
+    def put_nowait(self, item: MessageEnvelope | _Completion) -> None:
+        background = isinstance(item, _Completion) or item.message_type is MessageType.IDLE_CHECK_DUE
+        queue = self.background if background else self.interactive
+        queue.append((self.sequence, item))
+        self.sequence += 1
+        self.ready.set()
+
+    def qsize(self, lane: Lane | None = None) -> int:
+        if lane is Lane.INTERACTIVE:
+            return len(self.interactive)
+        if lane is Lane.BACKGROUND:
+            return len(self.background)
+        return len(self.interactive) + len(self.background)
+
+    def empty(self) -> bool:
+        return not (self.interactive or self.background)
+
+    async def get(self) -> MessageEnvelope | _Completion:
+        while self.empty():
+            self.ready.clear()
+            await self.ready.wait()
+        queue = self.interactive
+        if not queue or (self.background and not lanes_settings.enabled()
+                         and self.background[0][0] < queue[0][0]):
+            queue = self.background
+        return queue.popleft()[1]
+
+    def remove(self, item: _Completion) -> None:
+        for entry in self.background:
+            if entry[1] is item:
+                self.background.remove(entry)
+                break
+
+    def take_idle_checks(self) -> list[MessageEnvelope]:
+        """Atomically remove unstarted checks before any asynchronous state writes."""
+        checks = [item for _, item in self.background if isinstance(item, MessageEnvelope)
+                  and item.message_type is MessageType.IDLE_CHECK_DUE]
+        self.background = deque((sequence, item) for sequence, item in self.background
+                                if not (isinstance(item, MessageEnvelope)
+                                        and item.message_type is MessageType.IDLE_CHECK_DUE))
+        return checks
 
 
 class SessionRouter:
@@ -57,7 +121,9 @@ class SessionRouter:
 
     def __init__(self, agent: ManagerAgent) -> None:
         self._agent = agent
-        self._queues: dict[str, asyncio.Queue[MessageEnvelope | _Completion]] = {}
+        self._queues: dict[str, _Queues] = {}
+        self._expiring: set[asyncio.Task[None]] = set()
+        self._deadlines: set[asyncio.TimerHandle] = set()
         self._workers: dict[str, asyncio.Task[None]] = {}
         self._handling: dict[str, MessageEnvelope] = {}
         self._operator_ids: dict[str, tuple[float, str | None]] = {}
@@ -71,12 +137,17 @@ class SessionRouter:
         """The session whose worker takes ``envelope``; None when the message loop handles it itself: one that runs
         no model turn, or any message while routing is off and main's worker holds none."""
         kind = envelope.message_type
+        main = self._agent._sessions[MAIN_SESSION]
+        if kind is MessageType.IDLE_CHECK_DUE:
+            return main if (lanes_settings.enabled() or session_routing.routes(self._agent.agent_id)
+                            or self.holds(main)) else None
         if kind not in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE):
             return None
-        main = self._agent._sessions[MAIN_SESSION]
+        if kind is MessageType.COMPLETION_DUE and lanes_settings.enabled():
+            return None  # claim in the loop; only the claimed batch joins the background lane
         if not session_routing.routes(self._agent.agent_id):
             return main if self.holds(main) or (kind is MessageType.USER_MESSAGE
-                and mid_turn_input.enabled(self._agent.agent_id)) else None
+                and (mid_turn_input.enabled(self._agent.agent_id) or lanes_settings.enabled())) else None
         if kind is MessageType.COMPLETION_DUE:
             return None  # claim first in the handler; only that event can name the session
         from .. import completion_events
@@ -92,8 +163,25 @@ class SessionRouter:
         """Queue ``envelope`` for ``session``'s worker, started on first use."""
         self._enqueue(session, envelope)
 
+    async def void_idle_checks(self, session: ManagerSession) -> None:
+        """A user returned to main: checks still queued no longer have an idle period to inspect."""
+        if session.key != MAIN_SESSION or (queue := self._queues.get(session.key)) is None:
+            return
+        from ...db import idle_checks
+
+        for wake in queue.take_idle_checks():
+            # A failed write leaves the wake unacknowledged; restart marks its running row failed.
+            try:
+                await idle_checks.settle(wake.payload["check_id"], "preempted")
+            except Exception as exc:
+                logger.warning("could not void idle check %s; restart will recover it: %s",
+                               wake.payload["check_id"], exc, exc_info=True)
+                continue
+            if self._agent._bus is not None:
+                self._agent._bus.settle_handled(wake)
+
     def _enqueue(self, session: ManagerSession, item: MessageEnvelope | _Completion) -> None:
-        queue = self._queues.setdefault(session.key, asyncio.Queue())
+        queue = self._queues.setdefault(session.key, _Queues())
         queue.put_nowait(item)
         worker = self._workers.get(session.key)
         if worker is None or worker.done():
@@ -134,8 +222,49 @@ class SessionRouter:
             key = SessionKey(SessionKind.DM, origin["channel_id"], origin["chat"])
         else:
             key = session_routing.session_key_for(origin, client_id=None, operator_id=operator)
+        session = (self.session(key) if session_routing.routes(self._agent.agent_id)
+                   else self._agent._sessions[MAIN_SESSION])
+        item = _Completion(envelope, rows, batch)
         self._completion_ids.add(envelope.message_id)
-        self._enqueue(self.session(key), _Completion(envelope, rows, batch))
+        self._enqueue(session, item)
+        if lanes_settings.enabled():
+            from ...db.manager_events import QUEUE_SECONDS
+
+            remaining = (min(row["created_at"] for row in rows) - datetime.now(timezone.utc)).total_seconds()
+            remaining += QUEUE_SECONDS
+            if remaining <= 0:
+                self._expire_completion(session, item)
+            else:
+                item.deadline = asyncio.get_running_loop().call_later(remaining, self._expire_completion, session, item)
+                self._deadlines.add(item.deadline)
+
+    def _expire_completion(self, session: ManagerSession, item: _Completion) -> None:
+        # No await between check and transition: either this callback or the worker owns the batch.
+        if item.state is not CompletionState.QUEUED:
+            return
+        item.state = CompletionState.EXPIRED
+        self._cancel_deadline(item)
+        self._queues[session.key].remove(item)
+        task = asyncio.create_task(self._finish_expired(session, item), name="manager-completion-deadline")
+        self._expiring.add(task)
+        task.add_done_callback(self._expiring.discard)
+
+    def _cancel_deadline(self, item: _Completion) -> None:
+        if item.deadline is not None:
+            item.deadline.cancel()
+            self._deadlines.discard(item.deadline)
+            item.deadline = None
+
+    async def _finish_expired(self, session: ManagerSession, item: _Completion) -> None:
+        self._agent._current.set(session)
+        try:
+            await self._agent._fall_back_completion(item.batch, "queue_deadline", {})
+        except Exception:
+            logger.exception("could not expire completion batch %s; restart will recover it", item.batch)
+            return
+        if self._agent._running and self._agent._bus is not None:
+            self._agent._bus.settle_handled(item.envelope)
+            self._completion_ids.discard(item.envelope.message_id)
 
     def holds_completion(self, envelope: MessageEnvelope) -> bool:
         """A claimed wake-up is settled by its session worker when its turn ends."""
@@ -173,6 +302,11 @@ class SessionRouter:
                 if queue.empty() and not session_routing.routes(agent.agent_id):
                     break  # switched off: nothing left to keep in order here
                 item = await queue.get()
+                if isinstance(item, _Completion):
+                    if item.state is not CompletionState.QUEUED:
+                        continue
+                    item.state = CompletionState.STARTED
+                    self._cancel_deadline(item)
                 envelope = item.envelope if isinstance(item, _Completion) else item
                 self._handling[session.key] = envelope
                 try:
@@ -185,6 +319,7 @@ class SessionRouter:
                 finally:
                     self._handling.pop(session.key, None)
                     session.last_activity = agent._clock()
+                    session.turn_ended_at = session.last_activity
                 if not agent._running:
                     break  # left unsettled: a restart replays it
                 if isinstance(item, _Completion) or not self.holds_completion(envelope):
@@ -203,10 +338,10 @@ class SessionRouter:
         queue = self._queues.get(session.key)
         return queue is not None and not queue.empty()
 
-    def queued_count(self, session: ManagerSession) -> int:
+    def queued_count(self, session: ManagerSession, lane: Lane | None = None) -> int:
         """How many messages wait in ``session``'s queue. The one a worker has already taken is not in it."""
         queue = self._queues.get(session.key)
-        return 0 if queue is None else queue.qsize()
+        return 0 if queue is None else (queue.qsize() if lane is None else queue.qsize(lane))
 
     def holds(self, session: ManagerSession) -> bool:
         """Whether ``session``'s worker has a message: queued, or being handled."""
@@ -229,11 +364,15 @@ class SessionRouter:
 
     async def stop(self) -> None:
         """Cancel every worker; what one was handling stays unsettled (a restart replays it)."""
-        workers = list(self._workers.values())
+        for handle in self._deadlines:
+            handle.cancel()
+        self._deadlines.clear()
+        workers = [*self._workers.values(), *self._expiring]
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
         self._workers.clear()
+        self._expiring.clear()
         self._reservations.clear()
         self._completion_ids.clear()
 

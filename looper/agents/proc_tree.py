@@ -645,6 +645,77 @@ class TurnTree:
                     self.seen[pid] = starts[pid]
             self._refreshed = time.monotonic()
 
+    async def checkpoint(self) -> frozenset[int] | None:
+        """The resident's processes before one turn; None when their ownership cannot be established."""
+        await self.refresh(force=True)
+        table = await asyncio.to_thread(_snapshot)
+        if table is None:
+            return None
+        excluded = await self._reused(table)
+        current = _tree(self.process, table, self._groups, skip=excluded)
+        if self.process.pid not in current or any(self.seen.get(pid) is None for pid in current):
+            return None
+        if any(pid in table and pid in excluded and pid not in self._excluded for pid in self.seen):
+            return None
+        return frozenset(self.seen)
+
+    async def end_since(self, checkpoint: frozenset[int] | None) -> bool:
+        """End only processes first observed after a turn's checkpoint, preserving the resident and old tools.
+
+        Signal individual, identity-checked pids: signalling a new process group could also reach an old tool
+        that joined it. False asks the caller to kill the whole resident when precision cannot be proved.
+        """
+        if checkpoint is None:
+            return False
+
+        async def survivors() -> set[int] | None:
+            await self.refresh(force=True)
+            table = await asyncio.to_thread(_snapshot)
+            if table is None:
+                return None
+            excluded = await self._reused(table)
+            if self.process.pid in excluded or self.process.pid not in table:
+                return None
+            if _tree(self.process, table, {}).keys() & excluded:
+                return None  # a reused identity is in the resident's current tree: precision is lost
+            fresh = self.seen.keys() - checkpoint
+            if any(pid in table and pid in excluded and pid not in self._excluded for pid in fresh):
+                return None  # an observed, detached child is alive but its identity cannot be read
+            fresh -= excluded
+            alive = {pid for pid in fresh if pid in table}
+            if any(self.seen[pid] is None for pid in alive):
+                return None
+            current = await asyncio.to_thread(_start_times, alive)
+            if current is None:
+                return None
+            return {pid for pid in alive if current.get(pid) == self.seen[pid]}
+
+        signalled: set[int] = set()
+        deadline = time.monotonic() + TERM_GRACE_SEC
+        while True:
+            alive = await survivors()
+            if alive is None:
+                return False
+            if not alive:
+                return True
+            for pid in alive - signalled:
+                _send(os.kill, pid, signal.SIGTERM)
+            signalled.update(alive)
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(_POLL_SEC)
+        deadline = time.monotonic() + REAP_SEC
+        while alive:
+            for pid in alive:
+                _send(os.kill, pid, signal.SIGKILL)
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(_POLL_SEC)
+            alive = await survivors()
+            if alive is None:
+                return False
+        return True
+
     def start_ticker(self, interval: float = 0.5) -> None:
         if self._ticker is None or self._ticker.done():
             self._ticker = asyncio.get_running_loop().create_task(self._tick(interval))
