@@ -27,6 +27,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _post: Callable[..., Awaitable[PostReceipt]] | None = None
+
+
+class _NothingToTell(Exception):
+    """None of the batch's events is left to tell."""
+
+
 _INTERRUPTED = ("[Looper] Before this message, your triage report was interrupted so you could answer. Nothing was "
                 "sent from it; its events will be in the morning brief.")
 
@@ -98,9 +104,14 @@ async def tell(agent: ManagerAgent, rows: list[dict[str, Any]], batch: uuid.UUID
     try:
         if not await triage_turn.admit(batch):
             return
-        message = await triage_turn.prepare(rows)
-        if message is None:
-            return
+
+        async def message(token: TurnToken, context: MessageEnvelope) -> str:
+            # Loaded under the turn's token: a user message that arrives meanwhile stops the turn before any model call.
+            items = await token.step("triage_events", triage_turn.load(rows))
+            if not items:  # nothing left to tell: settled once, outside the stoppable read
+                await store.skip_batch(rows[0]["batch"], reason=store.Reason.MANAGER_SILENT.value)
+                raise _NothingToTell()
+            return triage_turn.render(items)
 
         async def fallback(reason: str) -> None:  # the deadline passed: the late turn is ended after this
             await triage_turn.finish(rows, end=triage_turn.TurnEnd.TIMEOUT, send=send)
@@ -120,6 +131,8 @@ async def tell(agent: ManagerAgent, rows: list[dict[str, Any]], batch: uuid.UUID
                 session = agent._session_now()
                 session.stopped_notes = [*session.stopped_notes, _INTERRUPTED][-3:]
                 token.preemption_noted = True
+        except _NothingToTell:
+            end = None
         except _CompletionNotTaken:
             await store.fall_back(reason="manager_off", batch=batch, record_id=_record_id(state))
             end = None
