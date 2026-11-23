@@ -3424,9 +3424,21 @@ Empty checks
 and the disabled permission are omitted from existing responses and exports;
 while off, Planner contracts and prompts remain byte-identical, including plan
 views of previously enabled projects with saved checks. Definitions remain in
-the database for operator evidence reads. See the
-[executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
-and 13, for the protocol and remaining result or channel evidence summaries.
+the database for operator evidence reads. Once a task has current evidence rows,
+its completed or failed result includes a code-written `## Evidence` section:
+one line per check with its criterion, state and measured version's short hash,
+plus the number of criteria without a check. Missing results say `not run`;
+advisory failures remain labeled advisory. Existing evidence stays visible after
+checks are disabled. With no current evidence rows, results and notices are unchanged.
+Lark and Telegram end notices include one check-count line without commands,
+output or artifact names; group notices omit the full evidence section.
+Manager completion-turn replies do not yet include that count line. A summary
+read failure while checks are enabled adds an unavailable-evidence section,
+without counts, and logs a warning and activity. A completed result keeps its
+process record last; a failed result appends evidence after its closing note.
+The dashboard and CLI task reads show the stored result, including evidence.
+See the [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md),
+sections 6 and 13, for the protocol and remaining work.
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
