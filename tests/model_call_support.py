@@ -136,6 +136,35 @@ def read_golden(fixture: Path) -> str:
     return json.dumps(expected, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+# Where a snapshot holds database rows: every table's rows, and the row a caller returns or a spawn operation wrote.
+_ROWS = (("tables", "*", "*"), ("outcome", "row"), ("spawn_operations", "*", "result"))
+
+
+def frozen_columns(expected: Any, actual: Any) -> Any:
+    """``actual`` with each database row cut to the columns its fixture row has.
+
+    A later migration may add a column the baseline never had, and no caller here wrote it. Every column, row and
+    other value the fixture has is still compared; a row missing a fixture column, or an extra row, still differs.
+    """
+    def cut(expected: Any, actual: Any, path: tuple[str, ...]) -> Any:
+        if not path:
+            if isinstance(expected, dict) and isinstance(actual, dict):
+                return {key: value for key, value in actual.items() if key in expected}
+            return actual
+        step, rest = path[0], path[1:]
+        if step == "*" and isinstance(expected, list) and isinstance(actual, list):
+            return [cut(old, new, rest) for old, new in zip(expected, actual)] + actual[len(expected):]
+        if step == "*" and isinstance(expected, dict) and isinstance(actual, dict):
+            return {key: cut(expected[key], value, rest) if key in expected else value for key, value in actual.items()}
+        if isinstance(expected, dict) and isinstance(actual, dict) and step in expected and step in actual:
+            return {**actual, step: cut(expected[step], actual[step], rest)}
+        return actual
+
+    for path in _ROWS:
+        actual = cut(expected, actual, path)
+    return actual
+
+
 def assert_golden(name: str, payload: Any, root: Path) -> None:
     def convert(item: Any) -> Any:
         if isinstance(item, Enum):
@@ -157,5 +186,7 @@ def assert_golden(name: str, payload: Any, root: Path) -> None:
         _FIXTURES.mkdir(parents=True, exist_ok=True)
         fixture.write_text(actual)
     expected = read_golden(fixture)
+    actual = json.dumps(frozen_columns(json.loads(expected), json.loads(actual)), ensure_ascii=False,
+                        indent=2, sort_keys=True) + "\n"
     assert actual == expected, "\n".join(difflib.unified_diff(expected.splitlines(), actual.splitlines(),
                                                            fromfile="main", tofile="caller"))
